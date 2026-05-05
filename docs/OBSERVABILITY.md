@@ -720,6 +720,33 @@ modifying the agent traffic plane unless the connector explicitly supports it.
    `[a-z0-9._-]{1,64}`; the schema treats this as a curated dynamic
    suffix family (see `schemas/audit-event.json`).
 
+4. **Agent discovery** — `defenseclaw agent discover` runs the cached
+   local discovery probes on demand, prints the same table used by
+   first-run init, and best-effort POSTs a sanitized report to
+   `/api/v1/agents/discovery`. The POST body includes booleans,
+   basenames, version probe classes, and SHA-256 path hashes only;
+   raw local filesystem paths are never sent to the sidecar telemetry
+   endpoint.
+
+5. **Continuous AI visibility** — when `ai_discovery.enabled` is on, the
+   sidecar runs an enhanced-artifacts scan at startup, on a periodic
+   interval, and whenever `defenseclaw agent usage --refresh` calls
+   `POST /api/v1/ai-usage/scan`. The detector registry looks for
+   supported connectors plus broader AI signals such as AI CLIs,
+   active processes, installed desktop apps, editor extensions, MCP
+   files, skills, rules, plugins, package dependencies, provider env
+   var names, shell-history signature matches, provider-domain
+   references, and loopback-only local AI endpoints. Process monitoring
+   matches executable names only, not argv. Endpoint probes only target
+   cataloged `localhost` / `127.0.0.1` URLs, send no credentials, and
+   discard response bodies after a small bounded read. Results are
+   available from `GET /api/v1/ai-usage` and emitted as sanitized
+   `event_type=ai_discovery` gateway events, OTel logs, metrics, and
+   spans. Outbound telemetry includes low-cardinality product/category
+   metadata, basenames, and `sha256:` hashes only; raw paths, shell
+   commands, process arguments, prompt text, file contents, local
+   endpoint URLs, and env var values are not emitted.
+
 ### 9.2 SIEM consumer guidance
 
 Audit events emitted from the new ingest paths carry the same envelope
@@ -737,6 +764,13 @@ add an `agent_telemetry` payload block (`event_type=agent_telemetry`)
 with `channel`, `source`, `result`, `records`, `bytes`, and notify
 fields. SIEM rules should join on `agent_telemetry.source` to break
 down telemetry rate per connector.
+
+Continuous AI visibility uses the same envelope family with an
+`ai_discovery` payload block (`event_type=ai_discovery`). Index
+`ai_discovery.category`, `ai_discovery.vendor`, `ai_discovery.product`,
+`ai_discovery.state`, and `ai_discovery.evidence_types` for shadow-AI
+inventory reporting. Treat `path_hashes`, `basenames`, and
+`workspace_hash` as correlation hints, not user-readable local paths.
 
 ### 9.3 Connector dashboard + alerts
 
@@ -807,22 +841,29 @@ defenseclaw setup codex --yes
 # Claude Code: hooks + native OTel exporter
 defenseclaw setup claude-code --yes
 
+# Hook-first connectors: hooks, plus native OTel where documented
+defenseclaw setup hermes --yes
+defenseclaw setup cursor --yes
+defenseclaw setup windsurf --yes
+defenseclaw setup geminicli --yes
+defenseclaw setup copilot --yes
+
 # Optionally bring up the bundled Prom/Loki/Tempo/Grafana stack in
 # the same step:
-defenseclaw setup codex --yes --with-local-stack
+defenseclaw setup copilot --yes --with-local-stack
 ```
 
 Both aliases persist:
 
 | Field                                         | Value             | Why                                                                    |
 |-----------------------------------------------|-------------------|------------------------------------------------------------------------|
-| `claw.mode`                                   | `codex` / `claudecode` | TUI / scanners read from `~/.codex/` or `~/.claude/` instead of the OpenClaw layout. |
-| `guardrail.connector`                         | `codex` / `claudecode` | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
+| `claw.mode`                                   | selected connector | TUI / scanners read from the connector's documented local surfaces instead of the OpenClaw layout. |
+| `guardrail.connector`                         | selected connector | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
 | `guardrail.codex_enforcement_enabled`         | `false`           | Keeps the proxy out of the data path even though `guardrail.enabled=true`. |
 | `guardrail.claudecode_enforcement_enabled`    | `false`           | Same as above for Claude Code.                                         |
 | `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
 | `guardrail.mode`                              | `observe`         | Sensible if-flipped-on-later default.                                  |
-| `<data_dir>/picked_connector`                 | `codex` / `claudecode` | So `defenseclaw setup guardrail` and `defenseclaw quickstart` default to the same connector on subsequent runs. |
+| `<data_dir>/picked_connector`                 | selected connector | So `defenseclaw setup guardrail`, `init`, and quickstart default to the same connector on subsequent runs. |
 
 After both aliases run, the gateway is restarted (unless `--no-restart`
 is passed) so its connector setup hook scripts, OTel block, and

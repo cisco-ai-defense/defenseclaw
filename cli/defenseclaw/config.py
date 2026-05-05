@@ -943,6 +943,23 @@ class PrivacyConfig:
 
 
 @dataclass
+class AIDiscoveryConfig:
+    enabled: bool = False
+    mode: str = "enhanced"
+    scan_interval_min: int = 5
+    process_interval_s: int = 60
+    scan_roots: list[str] = field(default_factory=lambda: ["~"])
+    include_shell_history: bool = True
+    include_package_manifests: bool = True
+    include_env_var_names: bool = True
+    include_network_domains: bool = True
+    max_files_per_scan: int = 1000
+    max_file_bytes: int = 512 * 1024
+    emit_otel: bool = True
+    store_raw_local_paths: bool = False
+
+
+@dataclass
 class Config:
     data_dir: str = ""
     # Unified v5 LLM configuration. Every LLM-using component resolves
@@ -979,6 +996,7 @@ class Config:
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
+    ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
@@ -1224,6 +1242,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     privacy = d.get("privacy")
     if isinstance(privacy, dict) and not any(privacy.values()):
         d.pop("privacy", None)
+    if d.get("ai_discovery") == _disabled_ai_discovery_dict():
+        d.pop("ai_discovery", None)
     if d.get("asset_policy") == _default_asset_policy_dict():
         d.pop("asset_policy", None)
     return d
@@ -1232,6 +1252,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
 def _default_asset_policy_dict() -> dict[str, Any]:
     from dataclasses import asdict
     return asdict(AssetPolicyConfig())
+
+
+def _disabled_ai_discovery_dict() -> dict[str, Any]:
+    from dataclasses import asdict
+    return asdict(AIDiscoveryConfig(enabled=False))
 
 
 def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
@@ -1926,6 +1951,7 @@ def load() -> Config:
         asset_policy=_merge_asset_policy(raw.get("asset_policy")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
         privacy=_merge_privacy(raw.get("privacy")),
+        ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
     )
     _migrate_llm_fields(cfg)
     _warn_disable_redaction_config(cfg)
@@ -1944,6 +1970,26 @@ def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
         return PrivacyConfig()
     return PrivacyConfig(
         disable_redaction=bool(raw.get("disable_redaction", False)),
+    )
+
+
+def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
+    if not isinstance(raw, dict):
+        return AIDiscoveryConfig(enabled=False)
+    return AIDiscoveryConfig(
+        enabled=bool(raw.get("enabled", True)),
+        mode=str(raw.get("mode", "enhanced") or "enhanced"),
+        scan_interval_min=int(raw.get("scan_interval_min", 5) or 5),
+        process_interval_s=int(raw.get("process_interval_s", 60) or 60),
+        scan_roots=list(raw.get("scan_roots", ["~"]) or ["~"]),
+        include_shell_history=bool(raw.get("include_shell_history", True)),
+        include_package_manifests=bool(raw.get("include_package_manifests", True)),
+        include_env_var_names=bool(raw.get("include_env_var_names", True)),
+        include_network_domains=bool(raw.get("include_network_domains", True)),
+        max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
+        max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
+        emit_otel=bool(raw.get("emit_otel", True)),
+        store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
     )
 
 
@@ -1966,6 +2012,7 @@ def default_config() -> Config:
             rules_file=os.path.join(data_dir, "firewall.pf.conf"),
         ),
         guardrail=GuardrailConfig(),
+        ai_discovery=AIDiscoveryConfig(enabled=True),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),
         ),

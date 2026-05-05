@@ -2327,6 +2327,27 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantIntercept:    true,
 			wantTelemetryAll: []string{"hooks"},
 		},
+		{
+			name:             "hermes_observability_hooks_only",
+			connector:        "hermes",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks"},
+		},
+		{
+			name:             "geminicli_observability_hooks_and_otel",
+			connector:        "geminicli",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "copilot_observability_hooks_and_otel",
+			connector:        "copilot",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks", "otel"},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

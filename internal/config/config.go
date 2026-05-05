@@ -188,9 +188,10 @@ type Config struct {
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
-	AuditSinks []AuditSink     `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks   []WebhookConfig `mapstructure:"webhooks"         yaml:"webhooks"`
-	Privacy    PrivacyConfig   `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AuditSinks  []AuditSink       `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks    []WebhookConfig   `mapstructure:"webhooks"         yaml:"webhooks"`
+	Privacy     PrivacyConfig     `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AIDiscovery AIDiscoveryConfig `mapstructure:"ai_discovery"    yaml:"ai_discovery,omitempty"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries
@@ -219,6 +220,26 @@ type PrivacyConfig struct {
 	// a once-per-process warning when they observe the setting so the
 	// runtime state stays auditable without spamming reload loops.
 	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
+}
+
+// AIDiscoveryConfig controls continuous, sidecar-native visibility for
+// supported connectors and broader "shadow AI" usage signals. Outbound
+// telemetry is sanitized by the inventory service; this config only controls
+// which local metadata sources are inspected.
+type AIDiscoveryConfig struct {
+	Enabled                 bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode                    string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin         int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec      int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots               []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	IncludeShellHistory     bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames      bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains   bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	MaxFilesPerScan         int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes            int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths      bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -2022,6 +2043,20 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("asset_policy.mcp.runtime_detection.enabled", true)
 	viper.SetDefault("asset_policy.mcp.runtime_detection.terminal_commands", true)
 	viper.SetDefault("asset_policy.mcp.runtime_detection.unknown_terminal_mcp", AssetPolicyModeObserve)
+
+	viper.SetDefault("ai_discovery.enabled", false)
+	viper.SetDefault("ai_discovery.mode", "enhanced")
+	viper.SetDefault("ai_discovery.scan_interval_min", 5)
+	viper.SetDefault("ai_discovery.process_interval_s", 60)
+	viper.SetDefault("ai_discovery.scan_roots", []string{"~"})
+	viper.SetDefault("ai_discovery.include_shell_history", true)
+	viper.SetDefault("ai_discovery.include_package_manifests", true)
+	viper.SetDefault("ai_discovery.include_env_var_names", true)
+	viper.SetDefault("ai_discovery.include_network_domains", true)
+	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
+	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
+	viper.SetDefault("ai_discovery.emit_otel", true)
+	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")

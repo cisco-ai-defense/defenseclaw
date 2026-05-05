@@ -128,6 +128,31 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def emit_agent_discovery(self, report: dict[str, Any]) -> dict[str, Any]:
+        """Emit a sanitized agent-discovery report through the sidecar.
+
+        The caller owns sanitizing local filesystem paths before invoking this
+        method. The sidecar endpoint is token-authenticated and fans the report
+        into gateway lifecycle telemetry plus OTel metrics/logs.
+        """
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/agents/discovery",
+            json=report,
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage(self) -> dict[str, Any]:
+        resp = self._session.get(f"{self.base_url}/api/v1/ai-usage", timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def scan_ai_usage(self) -> dict[str, Any]:
+        resp = self._session.post(f"{self.base_url}/api/v1/ai-usage/scan", json={}, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+
     def is_running(self) -> bool:
         try:
             self.health()

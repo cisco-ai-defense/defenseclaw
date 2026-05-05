@@ -30,7 +30,17 @@ Use `<binary> --help` for any command.
 | `setup mcp-scanner` | Configure MCP scanner analyzers |
 | `setup gateway` | Configure gateway connection settings |
 | `setup guardrail` | Configure LLM guardrail (mode, model, port, API key) |
+| `setup codex` / `setup claude-code` | Configure observability-only connector aliases |
+| `setup hermes` / `setup cursor` / `setup windsurf` | Configure hook-first observability aliases |
+| `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
+
+### agent
+
+| Command | Description |
+|---------|-------------|
+| `agent discover [--refresh] [--json]` | Run local agent discovery and best-effort emit sanitized discovery telemetry |
+| `agent usage [--refresh] [--json]` | Show continuous AI visibility inventory from the sidecar, optionally triggering a scan |
 
 ### skill
 

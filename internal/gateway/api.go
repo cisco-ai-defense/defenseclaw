@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -54,14 +55,15 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health     *SidecarHealth
-	client     *Client
-	store      *audit.Store
-	logger     *audit.Logger
-	addr       string
-	scannerCfg *config.Config
-	otel       *telemetry.Provider
-	hilt       *HILTApprovalManager
+	health      *SidecarHealth
+	client      *Client
+	store       *audit.Store
+	logger      *audit.Logger
+	addr        string
+	scannerCfg  *config.Config
+	otel        *telemetry.Provider
+	hilt        *HILTApprovalManager
+	aiDiscovery *inventory.ContinuousDiscoveryService
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -93,6 +95,10 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 	a.hilt = m
+}
+
+func (a *APIServer) SetAIDiscoveryService(svc *inventory.ContinuousDiscoveryService) {
+	a.aiDiscovery = svc
 }
 
 func (a *APIServer) connectorName() string {
@@ -265,6 +271,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/metrics", a.handleOTLPMetrics)
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
 	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
+	mux.HandleFunc("/api/v1/agents/discovery", a.handleAgentDiscovery)
+	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
+	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
+	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	// Codex agent-turn-complete notifier. The notify-bridge.sh shim
 	// installed by the codex connector POSTs codex's JSON arg here
 	// after every turn (see https://developers.openai.com/codex/
@@ -476,6 +486,9 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 		mode = "observability"
 		intercept = false
 		telemetry = []string{"hooks"}
+		if name == "geminicli" || name == "copilot" {
+			telemetry = append(telemetry, "otel")
+		}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;

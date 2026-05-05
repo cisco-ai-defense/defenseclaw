@@ -150,6 +150,11 @@ const (
 	// call and its result share ToolCallID/ToolID so SIEM consumers
 	// can join input and output without scraping free-form details.
 	EventToolInvocation EventType = "tool_invocation"
+
+	// EventAIDiscovery records sanitized continuous AI usage discovery
+	// deltas. It is metadata-only: no raw paths, commands, prompt text,
+	// file contents, or secret values.
+	EventAIDiscovery EventType = "ai_discovery"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
@@ -354,6 +359,7 @@ type Event struct {
 	LLMPrompt   *LLMPromptPayload   `json:"llm_prompt,omitempty"`
 	LLMResponse *LLMResponsePayload `json:"llm_response,omitempty"`
 	Tool        *ToolPayload        `json:"tool_invocation,omitempty"`
+	AIDiscovery *AIDiscoveryPayload `json:"ai_discovery,omitempty"`
 }
 
 // StampPayloadHMAC fills the PayloadHMAC field with HMAC-SHA256 over
@@ -390,6 +396,8 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.LLMResponse)
 	case e.Tool != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.Tool)
+	case e.AIDiscovery != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.AIDiscovery)
 	}
 }
 
@@ -650,4 +658,21 @@ type ToolPayload struct {
 	ExitCode        *int   `json:"exit_code,omitempty"`
 	ReplyToPromptID string `json:"reply_to_prompt_id,omitempty"`
 	Source          string `json:"source,omitempty"`
+}
+
+// AIDiscoveryPayload records one sanitized "new / changed / gone" AI usage
+// signal from the sidecar-native continuous discovery service.
+type AIDiscoveryPayload struct {
+	ScanID        string   `json:"scan_id"`
+	SignalID      string   `json:"signal_id"`
+	Category      string   `json:"category"`
+	Vendor        string   `json:"vendor,omitempty"`
+	Product       string   `json:"product,omitempty"`
+	Confidence    float64  `json:"confidence,omitempty"`
+	State         string   `json:"state"` // new | changed | gone
+	EvidenceTypes []string `json:"evidence_types,omitempty"`
+	PathHashes    []string `json:"path_hashes,omitempty"`
+	Basenames     []string `json:"basenames,omitempty"`
+	WorkspaceHash string   `json:"workspace_hash,omitempty"`
+	LastSeen      string   `json:"last_seen,omitempty"`
 }

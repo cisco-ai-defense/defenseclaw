@@ -973,6 +973,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     click.echo(f"  Token:         {token_status}")
     click.echo(f"  API port:      {cfg.gateway.api_port}")
     click.echo(f"  Watcher:       enabled={cfg.gateway.watcher.enabled}")
+    click.echo(f"  AI discovery:  enabled={cfg.ai_discovery.enabled}, mode={cfg.ai_discovery.mode}")
     click.echo(f"  Skill watch:   enabled={cfg.gateway.watcher.skill.enabled}, "
                f"take_action={cfg.gateway.watcher.skill.take_action}")
     plugin_dirs = cfg.gateway.watcher.plugin.dirs or cfg.plugin_dirs()

@@ -9,7 +9,7 @@
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "ai_discovery"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -57,7 +57,8 @@
     "egress":          { "$ref": "#/$defs/EgressPayload" },
     "llm_prompt":      { "$ref": "#/$defs/LLMPromptPayload" },
     "llm_response":    { "$ref": "#/$defs/LLMResponsePayload" },
-    "tool_invocation": { "$ref": "#/$defs/ToolPayload" }
+    "tool_invocation": { "$ref": "#/$defs/ToolPayload" },
+    "ai_discovery":    { "$ref": "#/$defs/AIDiscoveryPayload" }
   },
   "oneOf": [
     { "required": ["verdict"] },
@@ -71,7 +72,8 @@
     { "required": ["egress"] },
     { "required": ["llm_prompt"] },
     { "required": ["llm_response"] },
-    { "required": ["tool_invocation"] }
+    { "required": ["tool_invocation"] },
+    { "required": ["ai_discovery"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -180,6 +182,24 @@
         "exit_code":          { "type": ["integer", "null"] },
         "reply_to_prompt_id": { "type": ["string", "null"] },
         "source":             { "type": ["string", "null"] }
+      }
+    },
+    "AIDiscoveryPayload": {
+      "type": "object",
+      "required": ["scan_id", "signal_id", "category", "state"],
+      "properties": {
+        "scan_id":        { "type": "string", "maxLength": 128 },
+        "signal_id":      { "type": "string", "maxLength": 128 },
+        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint"] },
+        "vendor":         { "type": ["string", "null"], "maxLength": 128 },
+        "product":        { "type": ["string", "null"], "maxLength": 128 },
+        "confidence":     { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "state":          { "type": "string", "enum": ["new", "changed", "gone"] },
+        "evidence_types": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16 },
+        "path_hashes":    { "type": ["array", "null"], "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "maxItems": 16 },
+        "basenames":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+$" }, "maxItems": 16 },
+        "workspace_hash": { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "last_seen":      { "type": ["string", "null"], "format": "date-time" }
       }
     }
   }

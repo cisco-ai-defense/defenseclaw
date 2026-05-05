@@ -656,6 +656,40 @@ func (p *SetupPanel) loadSections() {
 				Hint: "Command for the CodeGuard skill (code-review). See 'codeguard' wizard."},
 		}...)
 	p.sections = append(p.sections, []configSection{
+		{
+			Name:    "AI Visibility",
+			Summary: "Continuous local discovery for supported and shadow AI usage.",
+			Help: "Enhanced mode scans metadata, package manifests, env var names, and shell history patterns. " +
+				"Outbound telemetry uses only hashes, basenames, categories, and bounded metadata.",
+			Fields: []configField{
+				{Label: "Enabled", Key: "ai_discovery.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.Enabled),
+					Hint: "Run the sidecar-native AI discovery service."},
+				{Label: "Mode", Key: "ai_discovery.mode", Kind: "string", Value: c.AIDiscovery.Mode,
+					Hint: "passive or enhanced. Enhanced is metadata-only but includes local artifact scanning."},
+				{Label: "Scan Interval (min)", Key: "ai_discovery.scan_interval_min", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.ScanIntervalMin),
+					Hint: "Minutes between full scans."},
+				{Label: "Process Interval (s)", Key: "ai_discovery.process_interval_s", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.ProcessIntervalSec),
+					Hint: "Seconds between lightweight process scans."},
+				{Label: "Scan Roots", Key: "ai_discovery.scan_roots", Kind: "string", Value: strings.Join(c.AIDiscovery.ScanRoots, ","),
+					Hint: "CSV roots for package/workspace artifact scans."},
+				{Label: "Shell History", Key: "ai_discovery.include_shell_history", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludeShellHistory),
+					Hint: "Match known AI command patterns; raw commands are never emitted."},
+				{Label: "Package Manifests", Key: "ai_discovery.include_package_manifests", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludePackageManifests),
+					Hint: "Detect AI SDK dependencies in bounded manifest files."},
+				{Label: "Env Var Names", Key: "ai_discovery.include_env_var_names", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludeEnvVarNames),
+					Hint: "Detect AI-related environment variable names only; values are never read."},
+				{Label: "Provider Domains", Key: "ai_discovery.include_network_domains", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludeNetworkDomains),
+					Hint: "Detect known provider domains from metadata sources only."},
+				{Label: "Max Files", Key: "ai_discovery.max_files_per_scan", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.MaxFilesPerScan),
+					Hint: "Upper bound for artifact files inspected per scan."},
+				{Label: "Max File Bytes", Key: "ai_discovery.max_file_bytes", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.MaxFileBytes),
+					Hint: "Skip larger files to avoid broad content capture."},
+				{Label: "Emit OTel", Key: "ai_discovery.emit_otel", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.EmitOTel),
+					Hint: "Emit sanitized AI visibility logs, metrics, and spans."},
+				{Label: "Store Raw Local Paths", Key: "ai_discovery.store_raw_local_paths", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.StoreRawLocalPaths),
+					Hint: "Store raw paths only in the local 0600 state file; never emit them."},
+			},
+		},
 		// P2-#9: Gateway inline watcher/watchdog live alongside the
 		// gateway address settings — they're part of the same
 		// process but logically distinct sub-concerns. Kept as a

@@ -60,6 +60,7 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
     "_data/scripts/*.sh",
+    "inventory/ai_signatures.json",
     "_data/policies/openshell/*.rego",
     "_data/policies/openshell/*.yaml",
     "_data/policies/guardrail/default/*.yaml",

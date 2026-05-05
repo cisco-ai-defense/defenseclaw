@@ -73,15 +73,16 @@ type spinTickMsg struct{}
 
 // HealthSnapshot mirrors the gateway /health JSON structure.
 type HealthSnapshot struct {
-	StartedAt string           `json:"started_at"`
-	UptimeMS  int64            `json:"uptime_ms"`
-	Gateway   SubsystemHealth  `json:"gateway"`
-	Watcher   SubsystemHealth  `json:"watcher"`
-	API       SubsystemHealth  `json:"api"`
-	Guardrail SubsystemHealth  `json:"guardrail"`
-	Telemetry SubsystemHealth  `json:"telemetry"`
-	Sinks     SubsystemHealth  `json:"sinks"`
-	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
+	StartedAt   string           `json:"started_at"`
+	UptimeMS    int64            `json:"uptime_ms"`
+	Gateway     SubsystemHealth  `json:"gateway"`
+	Watcher     SubsystemHealth  `json:"watcher"`
+	API         SubsystemHealth  `json:"api"`
+	Guardrail   SubsystemHealth  `json:"guardrail"`
+	Telemetry   SubsystemHealth  `json:"telemetry"`
+	AIDiscovery SubsystemHealth  `json:"ai_discovery"`
+	Sinks       SubsystemHealth  `json:"sinks"`
+	Sandbox     *SubsystemHealth `json:"sandbox,omitempty"`
 	// Connector mirrors gateway.ConnectorHealth: which agent framework is
 	// currently active in the sidecar, plus the live counters.
 	// Nil when no connector has been initialised yet — the TUI

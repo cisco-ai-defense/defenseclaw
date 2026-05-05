@@ -182,6 +182,25 @@ type metricsSet struct {
 	otelIngestMalformed metric.Int64Counter
 	otelIngestLastSeen  metric.Float64Gauge
 
+	// On-demand local agent discovery. Emitted by the CLI via
+	// POST /api/v1/agents/discovery after it has stripped raw local paths.
+	agentDiscoveryRuns      metric.Int64Counter
+	agentDiscoveryDuration  metric.Float64Histogram
+	agentDiscoverySignals   metric.Int64Counter
+	agentDiscoveryInstalled metric.Int64Gauge
+	agentDiscoveryErrors    metric.Int64Counter
+
+	// Continuous AI discovery / shadow AI visibility.
+	aiDiscoveryRuns             metric.Int64Counter
+	aiDiscoveryDuration         metric.Float64Histogram
+	aiDiscoverySignals          metric.Int64Counter
+	aiDiscoveryNewSignals       metric.Int64Counter
+	aiDiscoveryActiveSignals    metric.Int64Gauge
+	aiDiscoveryGoneSignals      metric.Int64Counter
+	aiDiscoveryErrors           metric.Int64Counter
+	aiDiscoveryFilesScanned     metric.Int64Counter
+	aiDiscoveryDedupeSuppressed metric.Int64Counter
+
 	// Codex notify webhook (agent-turn-complete et al.). type is
 	// the sanitized notify type ("agent-turn-complete", "unknown",
 	// "malformed"); status is the codex-supplied status string when
@@ -840,6 +859,106 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.otelIngestLastSeen, err = m.Float64Gauge("defenseclaw.otel.ingest.last_seen_ts",
 		metric.WithUnit("s"),
 		metric.WithDescription("Unix-seconds timestamp of the most recent OTLP-HTTP batch accepted from a given source/signal. Used by the ConnectorTelemetrySilent alert."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.agentDiscoveryRuns, err = m.Int64Counter("defenseclaw.agent.discovery.runs",
+		metric.WithUnit("{run}"),
+		metric.WithDescription("On-demand local agent discovery reports accepted by the sidecar, by source/cache/result."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoveryDuration, err = m.Float64Histogram("defenseclaw.agent.discovery.duration",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Wall-clock duration of the CLI local agent discovery scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoverySignals, err = m.Int64Counter("defenseclaw.agent.discovery.signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("Per-connector install signals reported by agent discovery."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoveryInstalled, err = m.Int64Gauge("defenseclaw.agent.discovery.installed",
+		metric.WithUnit("1"),
+		metric.WithDescription("Latest discovered installed state for each connector (1 installed, 0 not installed)."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoveryErrors, err = m.Int64Counter("defenseclaw.agent.discovery.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Version probe or discovery errors by connector and bounded reason."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.aiDiscoveryRuns, err = m.Int64Counter("defenseclaw.ai.discovery.runs",
+		metric.WithUnit("{run}"),
+		metric.WithDescription("Continuous AI discovery scans completed by the sidecar."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryDuration, err = m.Float64Histogram("defenseclaw.ai.discovery.duration",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Wall-clock duration of continuous AI discovery scans."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoverySignals, err = m.Int64Counter("defenseclaw.ai.discovery.signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("AI usage signals observed by category/vendor/product/state."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryNewSignals, err = m.Int64Counter("defenseclaw.ai.discovery.new_signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("New or changed AI usage signals discovered."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryActiveSignals, err = m.Int64Gauge("defenseclaw.ai.discovery.active_signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("Latest active AI usage signal count."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryGoneSignals, err = m.Int64Counter("defenseclaw.ai.discovery.gone_signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("AI usage signals that disappeared from a full scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryErrors, err = m.Int64Counter("defenseclaw.ai.discovery.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Continuous AI discovery detector errors by bounded detector/reason."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryFilesScanned, err = m.Int64Counter("defenseclaw.ai.discovery.files_scanned",
+		metric.WithUnit("{file}"),
+		metric.WithDescription("Package manifest and shell history files inspected by continuous AI discovery."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryDedupeSuppressed, err = m.Int64Counter("defenseclaw.ai.discovery.dedupe_suppressed",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("Duplicate AI discovery signals suppressed within a scan."),
 	)
 	if err != nil {
 		return nil, err
@@ -1964,6 +2083,274 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 	// timestamp on every batch lets the ConnectorTelemetrySilent
 	// alert page when a connector goes silent for >10m.
 	p.metrics.otelIngestLastSeen.Record(ctx, float64(time.Now().Unix()), volumeAttrs)
+}
+
+// RecordAgentDiscovery records one on-demand agent discovery report accepted
+// by the sidecar. The CLI sends only sanitized path booleans, basenames, and
+// hashes; this method keeps labels low-cardinality so the metric can be safely
+// enabled on developer workstations and CI.
+func (p *Provider) RecordAgentDiscovery(ctx context.Context, source string, cacheHit bool, result string, durationMs float64, agentsTotal, installedTotal int) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "unknown")
+	result = normalizeTelemetryLabel(result, "ok")
+	attrs := metric.WithAttributes(
+		attribute.String("source", source),
+		attribute.Bool("cache_hit", cacheHit),
+		attribute.String("result", result),
+	)
+	p.metrics.agentDiscoveryRuns.Add(ctx, 1, attrs)
+	if durationMs >= 0 {
+		p.metrics.agentDiscoveryDuration.Record(ctx, durationMs, attrs)
+	}
+}
+
+// RecordAgentDiscoverySignal records a single connector signal within an
+// accepted discovery report.
+func (p *Provider) RecordAgentDiscoverySignal(ctx context.Context, connector string, installed, hasConfig, hasBinary bool, probeStatus string) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = normalizeTelemetryLabel(connector, "unknown")
+	probeStatus = normalizeTelemetryLabel(probeStatus, "unknown")
+	attrs := metric.WithAttributes(
+		attribute.String("connector", connector),
+		attribute.Bool("installed", installed),
+		attribute.Bool("has_config", hasConfig),
+		attribute.Bool("has_binary", hasBinary),
+		attribute.String("probe_status", probeStatus),
+	)
+	p.metrics.agentDiscoverySignals.Add(ctx, 1, attrs)
+	installedValue := int64(0)
+	if installed {
+		installedValue = 1
+	}
+	p.metrics.agentDiscoveryInstalled.Record(ctx, installedValue, metric.WithAttributes(
+		attribute.String("connector", connector),
+	))
+}
+
+// RecordAgentDiscoveryError records a bounded version-probe or parse error
+// class for a connector. The error reason is a class, not raw stderr.
+func (p *Provider) RecordAgentDiscoveryError(ctx context.Context, connector, reason string) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = normalizeTelemetryLabel(connector, "unknown")
+	reason = normalizeTelemetryLabel(reason, "other")
+	p.metrics.agentDiscoveryErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("connector", connector),
+		attribute.String("reason", reason),
+	))
+}
+
+// EmitAgentDiscoverySummaryLog emits one structured OTel log record per
+// on-demand discovery run. It intentionally excludes local filesystem paths.
+func (p *Provider) EmitAgentDiscoverySummaryLog(ctx context.Context, source string, cacheHit bool, result string, durationMs float64, agentsTotal, installedTotal int) {
+	if !p.LogsEnabled() {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "unknown")
+	result = normalizeTelemetryLabel(result, "ok")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if result == "ok" {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	} else {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	}
+	rec.SetBody(otellog.StringValue("agent discovery"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.agent.discovery"),
+		otellog.String("event.domain", "defenseclaw.agent"),
+		otellog.String("defenseclaw.agent.discovery.source", source),
+		otellog.Bool("defenseclaw.agent.discovery.cache_hit", cacheHit),
+		otellog.String("defenseclaw.agent.discovery.result", result),
+		otellog.Int64("defenseclaw.agent.discovery.duration_ms", int64(durationMs)),
+		otellog.Int64("defenseclaw.agent.discovery.agents_total", int64(agentsTotal)),
+		otellog.Int64("defenseclaw.agent.discovery.installed_total", int64(installedTotal)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// EmitAgentDiscoverySignalLog emits one low-cardinality per-connector log
+// record. It carries booleans and probe classes only; no raw local paths.
+func (p *Provider) EmitAgentDiscoverySignalLog(ctx context.Context, connector string, installed, hasConfig, hasBinary bool, probeStatus string) {
+	if !p.LogsEnabled() {
+		return
+	}
+	connector = normalizeTelemetryLabel(connector, "unknown")
+	probeStatus = normalizeTelemetryLabel(probeStatus, "unknown")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetSeverityText("INFO")
+	rec.SetBody(otellog.StringValue("agent discovery signal"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.agent.discovery.signal"),
+		otellog.String("event.domain", "defenseclaw.agent"),
+		otellog.String("defenseclaw.agent.discovery.connector", connector),
+		otellog.Bool("defenseclaw.agent.discovery.installed", installed),
+		otellog.Bool("defenseclaw.agent.discovery.has_config", hasConfig),
+		otellog.Bool("defenseclaw.agent.discovery.has_binary", hasBinary),
+		otellog.String("defenseclaw.agent.discovery.probe_status", probeStatus),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// RecordAIDiscoveryRun records one continuous AI visibility scan. Labels are
+// bounded to avoid turning device inventory into a high-cardinality metric.
+func (p *Provider) RecordAIDiscoveryRun(ctx context.Context, source, privacyMode, result string, durationMs float64, signalsTotal, activeTotal, newTotal, goneTotal, filesScanned, dedupeSuppressed int) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "sidecar")
+	privacyMode = normalizeTelemetryLabel(privacyMode, "enhanced")
+	result = normalizeTelemetryLabel(result, "ok")
+	attrs := metric.WithAttributes(
+		attribute.String("source", source),
+		attribute.String("privacy_mode", privacyMode),
+		attribute.String("result", result),
+	)
+	p.metrics.aiDiscoveryRuns.Add(ctx, 1, attrs)
+	p.metrics.aiDiscoveryDuration.Record(ctx, durationMs, attrs)
+	p.metrics.aiDiscoveryActiveSignals.Record(ctx, int64(activeTotal), metric.WithAttributes(
+		attribute.String("source", source),
+		attribute.String("privacy_mode", privacyMode),
+	))
+	if filesScanned > 0 {
+		p.metrics.aiDiscoveryFilesScanned.Add(ctx, int64(filesScanned), attrs)
+	}
+	if dedupeSuppressed > 0 {
+		p.metrics.aiDiscoveryDedupeSuppressed.Add(ctx, int64(dedupeSuppressed), attrs)
+	}
+	if newTotal > 0 {
+		p.metrics.aiDiscoveryNewSignals.Add(ctx, int64(newTotal), attrs)
+	}
+	if goneTotal > 0 {
+		p.metrics.aiDiscoveryGoneSignals.Add(ctx, int64(goneTotal), attrs)
+	}
+	_ = signalsTotal // summary count is carried in logs; signal counter is per-signal below.
+}
+
+// RecordAIDiscoverySignal records one sanitized AI usage signal.
+func (p *Provider) RecordAIDiscoverySignal(ctx context.Context, category, vendor, product, state, detector string, confidence float64) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("signal.category", normalizeTelemetryLabel(category, "unknown")),
+		attribute.String("ai.vendor", normalizeTelemetryLabel(vendor, "unknown")),
+		attribute.String("ai.product", normalizeTelemetryLabel(product, "unknown")),
+		attribute.String("state", normalizeTelemetryLabel(state, "seen")),
+		attribute.String("detector", normalizeTelemetryLabel(detector, "unknown")),
+		attribute.String("confidence", confidenceBucket(confidence)),
+	)
+	p.metrics.aiDiscoverySignals.Add(ctx, 1, attrs)
+	if state == "new" || state == "changed" {
+		p.metrics.aiDiscoveryNewSignals.Add(ctx, 1, attrs)
+	}
+	if state == "gone" {
+		p.metrics.aiDiscoveryGoneSignals.Add(ctx, 1, attrs)
+	}
+}
+
+func (p *Provider) RecordAIDiscoveryError(ctx context.Context, detector, reason string) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.aiDiscoveryErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("detector", normalizeTelemetryLabel(detector, "unknown")),
+		attribute.String("reason", normalizeTelemetryLabel(reason, "other")),
+	))
+}
+
+func (p *Provider) EmitAIDiscoverySummaryLog(ctx context.Context, source, privacyMode, result string, durationMs float64, signalsTotal, activeTotal, newTotal, goneTotal, filesScanned int) {
+	if !p.LogsEnabled() {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "sidecar")
+	privacyMode = normalizeTelemetryLabel(privacyMode, "enhanced")
+	result = normalizeTelemetryLabel(result, "ok")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if result == "ok" {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	} else {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	}
+	rec.SetBody(otellog.StringValue("continuous AI discovery"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.ai.discovery"),
+		otellog.String("event.domain", "defenseclaw.ai_visibility"),
+		otellog.String("defenseclaw.ai.discovery.source", source),
+		otellog.String("defenseclaw.ai.discovery.privacy_mode", privacyMode),
+		otellog.String("defenseclaw.ai.discovery.result", result),
+		otellog.Int64("defenseclaw.ai.discovery.duration_ms", int64(durationMs)),
+		otellog.Int64("defenseclaw.ai.discovery.signals_total", int64(signalsTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.active_total", int64(activeTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.new_total", int64(newTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.gone_total", int64(goneTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.files_scanned", int64(filesScanned)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+func (p *Provider) EmitAIDiscoverySignalLog(ctx context.Context, category, vendor, product, state, detector string, confidence float64) {
+	if !p.LogsEnabled() {
+		return
+	}
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetSeverityText("INFO")
+	rec.SetBody(otellog.StringValue("AI usage signal"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.ai.discovery.signal"),
+		otellog.String("event.domain", "defenseclaw.ai_visibility"),
+		otellog.String("signal.category", normalizeTelemetryLabel(category, "unknown")),
+		otellog.String("ai.vendor", normalizeTelemetryLabel(vendor, "unknown")),
+		otellog.String("ai.product", normalizeTelemetryLabel(product, "unknown")),
+		otellog.String("state", normalizeTelemetryLabel(state, "seen")),
+		otellog.String("detector", normalizeTelemetryLabel(detector, "unknown")),
+		otellog.String("confidence", confidenceBucket(confidence)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+func confidenceBucket(confidence float64) string {
+	switch {
+	case confidence >= 0.9:
+		return "high"
+	case confidence >= 0.7:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func normalizeTelemetryLabel(value, fallback string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		value = fallback
+	}
+	if len(value) > 80 {
+		value = value[:80]
+	}
+	return value
 }
 
 // RecordCodexNotify records a single codex notify webhook event.

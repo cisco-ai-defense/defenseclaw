@@ -129,6 +129,62 @@ func TestRecordCodexNotify_FansOutCounter(t *testing.T) {
 	}
 }
 
+func TestRecordAgentDiscovery_FansOutMetrics(t *testing.T) {
+	t.Parallel()
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	p.RecordAgentDiscovery(ctx, "cli", false, "ok", 37, 2, 1)
+	p.RecordAgentDiscoverySignal(ctx, "codex", true, true, true, "ok")
+	p.RecordAgentDiscoveryError(ctx, "codex", "timeout")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+
+	if c := findCounter(rm, "defenseclaw.agent.discovery.runs"); c == nil {
+		t.Errorf("agent.discovery.runs counter missing")
+	}
+	if h := findHistogram(rm, "defenseclaw.agent.discovery.duration"); h == nil {
+		t.Errorf("agent.discovery.duration histogram missing")
+	}
+	if c := findCounter(rm, "defenseclaw.agent.discovery.signals"); c == nil {
+		t.Errorf("agent.discovery.signals counter missing")
+	}
+	if g := findGauge(rm, "defenseclaw.agent.discovery.installed"); g == nil {
+		t.Errorf("agent.discovery.installed gauge missing")
+	}
+	if c := findCounter(rm, "defenseclaw.agent.discovery.errors"); c == nil {
+		t.Errorf("agent.discovery.errors counter missing")
+	}
+}
+
+func TestEmitAgentDiscoveryLogs_StructuredAndSanitized(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+
+	p.EmitAgentDiscoverySummaryLog(context.Background(), "cli", true, "ok", 12, 9, 2)
+	p.EmitAgentDiscoverySignalLog(context.Background(), "codex", true, true, true, "ok")
+
+	recs := exp.snapshot()
+	if len(recs) != 2 {
+		t.Fatalf("got %d log records, want 2", len(recs))
+	}
+	if got := attrValue(recs[0], "event.name"); got != "defenseclaw.agent.discovery" {
+		t.Fatalf("summary event.name=%q", got)
+	}
+	if got := attrValue(recs[1], "event.name"); got != "defenseclaw.agent.discovery.signal" {
+		t.Fatalf("signal event.name=%q", got)
+	}
+	if got := attrValue(recs[1], "defenseclaw.agent.discovery.connector"); got != "codex" {
+		t.Fatalf("connector attr=%q want codex", got)
+	}
+}
+
 // TestRecordOTelIngest_NilReceiver_NoPanic guards the gateway hot
 // path. When telemetry is disabled (Provider == nil) the handler
 // still calls a.otel.RecordOTelIngest; the method must short-circuit
@@ -145,4 +201,9 @@ func TestRecordOTelIngest_NilReceiver_NoPanic(t *testing.T) {
 	p.RecordCodexNotify(context.Background(), "agent-turn-complete", "success", "ok")
 	p.EmitConnectorTelemetryLog(context.Background(), "logs", "codex", "ok", 1, 100, "summary")
 	p.EmitCodexNotifyLog(context.Background(), "agent-turn-complete", "success", "ok", "turn-1", "gpt-5")
+	p.RecordAgentDiscovery(context.Background(), "cli", false, "ok", 1, 1, 1)
+	p.RecordAgentDiscoverySignal(context.Background(), "codex", true, true, false, "ok")
+	p.RecordAgentDiscoveryError(context.Background(), "codex", "timeout")
+	p.EmitAgentDiscoverySummaryLog(context.Background(), "cli", false, "ok", 1, 1, 1)
+	p.EmitAgentDiscoverySignalLog(context.Background(), "codex", true, true, false, "ok")
 }

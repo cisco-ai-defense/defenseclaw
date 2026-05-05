@@ -105,5 +105,13 @@ func writePretty(w io.Writer, e Event) {
 		t := e.Tool
 		fmt.Fprintf(w, "%s [tool:%s] phase=%s call_id=%s session=%s\n",
 			ts, t.Tool, t.Phase, t.ToolCallID, e.SessionID)
+
+	case EventAIDiscovery:
+		if e.AIDiscovery == nil {
+			return
+		}
+		a := e.AIDiscovery
+		fmt.Fprintf(w, "%s [ai_discovery:%s] %s %s confidence=%.2f\n",
+			ts, a.Category, a.State, a.Product, a.Confidence)
 	}
 }

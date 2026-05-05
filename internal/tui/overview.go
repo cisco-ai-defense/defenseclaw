@@ -420,6 +420,7 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 		{"API", "api"},
 		{"Sinks", "sinks"},
 		{"Telemetry", "telemetry"},
+		{"AI Visibility", "ai_discovery"},
 		{"Sandbox", "sandbox"},
 	}
 
@@ -442,6 +443,8 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 			detail = p.guardrailDetail()
 		case "api":
 			detail = p.apiDetail()
+		case "ai_discovery":
+			detail = p.aiDiscoveryDetail()
 		}
 		if detail != "" {
 			detail = dim.Render(" " + detail)
@@ -1077,6 +1080,8 @@ func (p *OverviewPanel) subsystemState(h *HealthSnapshot, name string) string {
 		return h.Sinks.State
 	case "telemetry":
 		return h.Telemetry.State
+	case "ai_discovery":
+		return h.AIDiscovery.State
 	case "api":
 		return h.API.State
 	case "sandbox":
@@ -1105,6 +1110,8 @@ func (p *OverviewPanel) subsystemHealth(name string) *SubsystemHealth {
 		return &h.Sinks
 	case "telemetry":
 		return &h.Telemetry
+	case "ai_discovery":
+		return &h.AIDiscovery
 	case "api":
 		return &h.API
 	case "sandbox":
@@ -1274,6 +1281,24 @@ func (p *OverviewPanel) apiDetail() string {
 		return fmt.Sprintf("%v", addr)
 	}
 	return ""
+}
+
+func (p *OverviewPanel) aiDiscoveryDetail() string {
+	if p.health == nil || p.health.AIDiscovery.Details == nil {
+		return ""
+	}
+	d := p.health.AIDiscovery.Details
+	parts := []string{}
+	if active, ok := d["active_signals"]; ok {
+		parts = append(parts, fmt.Sprintf("%v active", active))
+	}
+	if newSignals, ok := d["new_signals"]; ok {
+		parts = append(parts, fmt.Sprintf("%v new", newSignals))
+	}
+	if mode, ok := d["mode"]; ok {
+		parts = append(parts, fmt.Sprintf("%v", mode))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func formatDuration(d time.Duration) string {

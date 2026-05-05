@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -43,18 +44,19 @@ import (
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
-	cfg      *config.Config
-	client   *Client
-	router   *EventRouter
-	store    *audit.Store
-	logger   *audit.Logger
-	health   *SidecarHealth
-	shell    *sandbox.OpenShell
-	otel     *telemetry.Provider
-	notify   *NotificationQueue
-	opa      *policy.Engine
-	hilt     *HILTApprovalManager
-	webhooks *WebhookDispatcher
+	cfg         *config.Config
+	client      *Client
+	router      *EventRouter
+	store       *audit.Store
+	logger      *audit.Logger
+	health      *SidecarHealth
+	shell       *sandbox.OpenShell
+	otel        *telemetry.Provider
+	notify      *NotificationQueue
+	opa         *policy.Engine
+	hilt        *HILTApprovalManager
+	webhooks    *WebhookDispatcher
+	aiDiscovery *inventory.ContinuousDiscoveryService
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -370,6 +372,12 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		"auto_approve": fmt.Sprintf("%v", cfg.Gateway.AutoApprove),
 	})
 
+	aiDiscovery, err := inventory.NewContinuousDiscoveryService(cfg, otel, events)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] ai discovery init failed: %v\n", err)
+		emitError(context.Background(), "ai_discovery", "init-failed", "continuous AI discovery disabled", err)
+	}
+
 	return &Sidecar{
 		cfg:         cfg,
 		client:      client,
@@ -382,6 +390,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		notify:      notify,
 		webhooks:    webhooks,
 		hilt:        hilt,
+		aiDiscovery: aiDiscovery,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 		events:      events,
@@ -434,7 +443,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 
 	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
 	// fleet is configured (see gatewayShouldConnectForConfiguredConnector).
@@ -478,6 +487,16 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		defer wg.Done()
 		if err := s.runGuardrail(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
+			errCh <- err
+		}
+	}()
+
+	// Goroutine 5: continuous AI discovery (opt-in via config)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.runAIDiscovery(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] ai discovery exited with error: %v\n", err)
 			errCh <- err
 		}
 	}()
@@ -1565,6 +1584,57 @@ func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connec
 	fmt.Fprintf(os.Stderr, "[guardrail] partial %s setup rolled back cleanly\n", conn.Name())
 }
 
+// runAIDiscovery starts continuous shadow-AI visibility when enabled.
+func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
+	if s.aiDiscovery == nil {
+		s.health.SetAIDiscovery(StateDisabled, "", nil)
+		return nil
+	}
+	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
+		"mode":                      s.cfg.AIDiscovery.Mode,
+		"scan_interval_min":         s.cfg.AIDiscovery.ScanIntervalMin,
+		"process_interval_s":        s.cfg.AIDiscovery.ProcessIntervalSec,
+		"include_shell_history":     s.cfg.AIDiscovery.IncludeShellHistory,
+		"include_package_manifests": s.cfg.AIDiscovery.IncludePackageManifests,
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.aiDiscovery.Run(ctx)
+	}()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-errCh:
+			if ctx.Err() != nil {
+				s.health.SetAIDiscovery(StateStopped, "", nil)
+				return ctx.Err()
+			}
+			if err != nil {
+				s.health.SetAIDiscovery(StateError, err.Error(), nil)
+				return err
+			}
+			s.health.SetAIDiscovery(StateStopped, "", nil)
+			return nil
+		case <-ticker.C:
+			report := s.aiDiscovery.Snapshot()
+			s.health.SetAIDiscovery(StateRunning, "", map[string]interface{}{
+				"mode":            report.Summary.PrivacyMode,
+				"last_scan":       report.Summary.ScannedAt.Format(time.RFC3339),
+				"active_signals":  report.Summary.ActiveSignals,
+				"new_signals":     report.Summary.NewSignals,
+				"changed_signals": report.Summary.ChangedSignals,
+				"gone_signals":    report.Summary.GoneSignals,
+				"files_scanned":   report.Summary.FilesScanned,
+				"result":          report.Summary.Result,
+			})
+		case <-ctx.Done():
+			s.health.SetAIDiscovery(StateStopped, "", nil)
+			return ctx.Err()
+		}
+	}
+}
+
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	bind := "127.0.0.1"
@@ -1577,6 +1647,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
 	api.SetHILTApprovalManager(s.hilt)
+	api.SetAIDiscoveryService(s.aiDiscovery)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}
