@@ -142,17 +142,27 @@ func (p *Provider) RecordGatewayEvent(e gatewaylog.Event) {
 // query the flat attributes for filtering and drill into body JSON
 // for details.
 func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
+	p.EmitGatewayEventWithContext(context.Background(), e)
+}
+
+// EmitGatewayEventWithContext maps a structured gatewaylog.Event onto an OTel
+// LogRecord while preserving the caller context so request-bound gateway logs
+// inherit native trace/span correlation from the active OTel span.
+func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog.Event) {
 	// v7 envelope: stamp provenance + sidecar_instance_id before
 	// any downstream tier observes the event. This is the Provider-
 	// side analogue of Writer.Emit's choke-point stamping; callers
 	// that bypass Writer.Emit (watcher, policy, capacity telemetry)
 	// still land on a fully-populated record.
 	stampEnvelope(&e)
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Volume counter fires unconditionally (one observation per Emit)
 	// so dashboards can compare emission rate against sink throughput.
 	// This is the single production wiring of RecordGatewayEventEmitted
 	// — see gatewaylog.Writer.WithFanout in sidecar.go.
-	p.RecordGatewayEventEmitted(context.Background(), string(e.EventType), string(e.Severity))
+	p.RecordGatewayEventEmitted(ctx, string(e.EventType), string(e.Severity))
 
 	if !p.Enabled() {
 		// Still record metrics even when log export is off — the meter
@@ -374,7 +384,7 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 	}
 
 	rec.AddAttributes(attrs...)
-	p.logger.Emit(context.Background(), rec)
+	p.logger.Emit(ctx, rec)
 }
 
 // gatewaySeverityToOTel maps the gatewaylog severity enum onto the

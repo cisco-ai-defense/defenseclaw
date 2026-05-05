@@ -246,7 +246,7 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		}
 		e.Tool = &cp
 	}
-	w.Emit(e)
+	w.EmitContext(ctx, e)
 }
 
 // emitVerdict records a single guardrail-pipeline stage decision.

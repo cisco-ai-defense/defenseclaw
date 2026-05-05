@@ -259,7 +259,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// verdicts / judge latency / errors for free — no extra
 	// config required when telemetry.enabled is true.
 	if otel != nil && otel.Enabled() {
-		events.WithFanout(otel.EmitGatewayEvent)
+		events.WithFanoutContext(otel.EmitGatewayEventWithContext)
 		// Route schema-violation drops into the Prometheus counter
 		// so operators can alert on the metric directly without
 		// scraping gateway.jsonl for EventError rows.

@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	metricdata "go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/trace"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
@@ -217,6 +218,45 @@ func TestEmitGatewayEvent_LifecycleAttributes(t *testing.T) {
 	}
 	if got := attrValue(rec, "defenseclaw.lifecycle.transition"); got != "init" {
 		t.Fatalf("lifecycle.transition=%q", got)
+	}
+}
+
+func TestEmitGatewayEventWithContext_PropagatesTraceContext(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("TraceIDFromHex: %v", err)
+	}
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	if err != nil {
+		t.Fatalf("SpanIDFromHex: %v", err)
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	p.EmitGatewayEventWithContext(ctx, gatewaylog.Event{
+		EventType: gatewaylog.EventLifecycle,
+		Severity:  gatewaylog.SeverityInfo,
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem: "gateway", Transition: "trace-linked",
+		},
+	})
+
+	rec := exp.snapshot()[0]
+	if got := rec.TraceID(); got != traceID {
+		t.Fatalf("record trace id=%s want %s", got.String(), traceID.String())
+	}
+	if got := rec.SpanID(); got != spanID {
+		t.Fatalf("record span id=%s want %s", got.String(), spanID.String())
+	}
+	if got := rec.TraceFlags(); got != trace.FlagsSampled {
+		t.Fatalf("record trace flags=%v want %v", got, trace.FlagsSampled)
 	}
 }
 
