@@ -29,15 +29,15 @@ import subprocess
 
 import click
 
-from defenseclaw.commands.redaction_status import print_redaction_status_hint
-from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
-from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 # Tasteful TTY-aware color helpers. Imported as a module rather than
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
 from defenseclaw import ux
+from defenseclaw.commands.redaction_status import print_redaction_status_hint
+from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
+from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
 # context so the post-invocation hook can tell whether a `setup`
@@ -2938,7 +2938,10 @@ def _interactive_guardrail_setup(
     gc.enabled = True
 
     ux.section("Enforcement mode")
-    click.echo("    " + ux.bold("[1] observe") + " — log and alert only, never block " + ux.dim("(recommended to start)"))
+    click.echo(
+        "    " + ux.bold("[1] observe") + " — log and alert only, never block "
+        + ux.dim("(recommended to start)")
+    )
     click.echo("    " + ux.bold("[2] action ") + " — block requests that match security policies")
     current_mode = gc.mode or "observe"
     mode_default = "1" if current_mode == "observe" else "2"
@@ -2992,8 +2995,14 @@ def _interactive_guardrail_setup(
         _configure_hilt_interactive(gc)
 
     ux.section("Scanner engine")
-    click.echo("    " + ux.bold("[1] local ") + "  — built-in pattern matching, no network calls " + ux.dim("(fastest)"))
-    click.echo("    " + ux.bold("[2] remote") + "  — Cisco AI Defense cloud API " + ux.dim("(higher accuracy, requires API key)"))
+    click.echo(
+        "    " + ux.bold("[1] local ") + "  — built-in pattern matching, no network calls "
+        + ux.dim("(fastest)")
+    )
+    click.echo(
+        "    " + ux.bold("[2] remote") + "  — Cisco AI Defense cloud API "
+        + ux.dim("(higher accuracy, requires API key)")
+    )
     sm_current = gc.scanner_mode or "local"
     if sm_current == "both":
         sm_current = "local"
@@ -3046,9 +3055,18 @@ def _interactive_guardrail_setup(
 
     if enable_judge:
         ux.section("Detection strategy")
-        click.echo("    " + ux.bold("[1] regex_only ") + " — regex patterns only, no LLM calls " + ux.dim("(fastest)"))
-        click.echo("    " + ux.bold("[2] regex_judge") + " — regex triages, LLM verifies ambiguous matches " + ux.dim("(recommended)"))
-        click.echo("    " + ux.bold("[3] judge_first") + " — LLM runs primary detection, regex as safety net " + ux.dim("(most accurate)"))
+        click.echo(
+            "    " + ux.bold("[1] regex_only ") + " — regex patterns only, no LLM calls "
+            + ux.dim("(fastest)")
+        )
+        click.echo(
+            "    " + ux.bold("[2] regex_judge") + " — regex triages, LLM verifies ambiguous matches "
+            + ux.dim("(recommended)")
+        )
+        click.echo(
+            "    " + ux.bold("[3] judge_first") + " — LLM runs primary detection, regex as safety net "
+            + ux.dim("(most accurate)")
+        )
         strategy_map = {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}
         current_strat = gc.detection_strategy or "regex_judge"
         strat_default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current_strat, "2")

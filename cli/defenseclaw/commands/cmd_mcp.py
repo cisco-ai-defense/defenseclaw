@@ -28,8 +28,7 @@ import subprocess
 
 import click
 
-from defenseclaw import connector_paths
-from defenseclaw import ux
+from defenseclaw import connector_paths, ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx

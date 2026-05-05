@@ -28,7 +28,6 @@ import click
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 
-
 # ---------------------------------------------------------------------------
 # Color conventions for `defenseclaw status`
 # ---------------------------------------------------------------------------

@@ -75,28 +75,28 @@ func (e *Engine) SetOTelProvider(p *telemetry.Provider) {
 }
 
 // resolveRegoDir picks the directory the OPA store should load from when
-// the caller passes a parent like ``~/.defenseclaw/policies``. The canonical
-// install layout writes Rego modules under ``<dir>/rego/``; older releases
-// (≤0.3.x) wrote them flat at ``<dir>/``. A buggy upgrade path could leave
+// the caller passes a parent like “~/.defenseclaw/policies“. The canonical
+// install layout writes Rego modules under “<dir>/rego/“; older releases
+// (≤0.3.x) wrote them flat at “<dir>/“. A buggy upgrade path could leave
 // BOTH copies on disk — and the loader would silently pick the wrong one
 // because the previous ordering preferred the parent first.
 //
 // The bug surfaced as: HILT confirmation never triggered for prompt-side
 // findings. With both layouts present, the loader picked the stale flat
-// ``guardrail.rego`` (no ``confirm`` branch, no ``_hilt_*`` rules) while
-// reading the up-to-date ``data.guardrail.hilt`` from ``<dir>/rego/data.json``
-// via the fallback path in ``readDataJSON``. Net effect: every HIGH-severity
-// prompt finding came back as ``alert`` instead of ``confirm``, and the
+// “guardrail.rego“ (no “confirm“ branch, no “_hilt_*“ rules) while
+// reading the up-to-date “data.guardrail.hilt“ from “<dir>/rego/data.json“
+// via the fallback path in “readDataJSON“. Net effect: every HIGH-severity
+// prompt finding came back as “alert“ instead of “confirm“, and the
 // HILT dialog only appeared on tool calls (which run through a separate,
-// non-Rego decision tree in ``internal/gateway/decision.go``).
+// non-Rego decision tree in “internal/gateway/decision.go“).
 //
-// Fix: always prefer ``<dir>/rego/`` when it has .rego files. The flat
-// layout is honored only when no nested ``rego/`` directory exists, so
+// Fix: always prefer “<dir>/rego/“ when it has .rego files. The flat
+// layout is honored only when no nested “rego/“ directory exists, so
 // existing single-layout installs (and unit tests that drop .rego files
-// directly into ``t.TempDir()``) keep working unchanged.
+// directly into “t.TempDir()“) keep working unchanged.
 //
-// A complementary Python migration (``_migrate_0_5_0`` in
-// ``cli/defenseclaw/migrations.py``) deletes the stale flat copies on
+// A complementary Python migration (“_migrate_0_5_0“ in
+// “cli/defenseclaw/migrations.py“) deletes the stale flat copies on
 // upgrade so operators don't carry the residue forever.
 func resolveRegoDir(dir string) string {
 	sub := filepath.Join(dir, "rego")

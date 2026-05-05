@@ -342,7 +342,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     `defenseclaw guardrail fail-mode <value>`); silently
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
-//     ``GuardrailConfig.HookFailMode``.
+//     “GuardrailConfig.HookFailMode“.
 //  2. EMPTY/unset opts.HookFailMode falls back to per-connector
 //     enforcement: enabling proxy-redirect enforcement
 //     (CodexEnforcement / ClaudeCodeEnforcement) implies a strict

@@ -12,8 +12,8 @@ from pathlib import Path
 
 import click
 
-from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE, is_known_action
 from defenseclaw import ux
+from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE, is_known_action
 from defenseclaw.context import AppContext, pass_context
 
 
