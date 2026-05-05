@@ -396,7 +396,29 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                             )
                             stale_hint_printed = True
                     else:
-                        _emit("skip", f"  └─ {sub}", "disabled (reported by sidecar)", r=r)
+                        # When the sidecar published a `details.summary`
+                        # (today: gateway standalone-mode short-circuit
+                        # in runGatewayLoop), surface it instead of the
+                        # generic "disabled (reported by sidecar)".
+                        # Otherwise an operator reading doctor output
+                        # has no way to tell apart "intentionally
+                        # disabled" from "broken but the sidecar
+                        # quietly gave up". Falls back to the generic
+                        # message when no summary is published, so
+                        # other subsystems (telemetry / sandbox / …)
+                        # are unaffected.
+                        details_obj = info.get("details") or {}
+                        summary = ""
+                        if isinstance(details_obj, dict):
+                            raw = details_obj.get("summary")
+                            if isinstance(raw, str):
+                                summary = raw.strip()
+                        detail_msg = (
+                            f"disabled — {summary}"
+                            if summary
+                            else "disabled (reported by sidecar)"
+                        )
+                        _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
         except (json.JSONDecodeError, TypeError):

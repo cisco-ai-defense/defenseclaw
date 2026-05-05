@@ -1155,24 +1155,45 @@ func (g *GuardrailConfig) EffectiveHost() string {
 }
 
 type GatewayConfig struct {
-	Host            string               `mapstructure:"host"              yaml:"host"`
-	Port            int                  `mapstructure:"port"              yaml:"port"`
-	Token           string               `mapstructure:"token"             yaml:"token,omitempty"`
-	TokenEnv        string               `mapstructure:"token_env"         yaml:"token_env"`
-	TLS             bool                 `mapstructure:"tls"               yaml:"tls"`
-	TLSSkipVerify   bool                 `mapstructure:"tls_skip_verify"   yaml:"tls_skip_verify"`
-	NoTLS           bool                 `mapstructure:"-"                 yaml:"-"`
-	DeviceKeyFile   string               `mapstructure:"device_key_file"   yaml:"device_key_file"`
-	AutoApprove     bool                 `mapstructure:"auto_approve_safe" yaml:"auto_approve_safe"`
-	ReconnectMs     int                  `mapstructure:"reconnect_ms"      yaml:"reconnect_ms"`
-	MaxReconnectMs  int                  `mapstructure:"max_reconnect_ms"  yaml:"max_reconnect_ms"`
-	ApprovalTimeout int                  `mapstructure:"approval_timeout_s" yaml:"approval_timeout_s"`
-	APIPort         int                  `mapstructure:"api_port"           yaml:"api_port"`
-	APIBind         string               `mapstructure:"api_bind"           yaml:"api_bind"`
-	Watcher         GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
-	Watchdog        WatchdogConfig       `mapstructure:"watchdog"           yaml:"watchdog"`
-	SandboxHome     string               `mapstructure:"-"                  yaml:"-"`
-	ClawHome        string               `mapstructure:"-"                  yaml:"-"`
+	Host            string `mapstructure:"host"              yaml:"host"`
+	Port            int    `mapstructure:"port"              yaml:"port"`
+	Token           string `mapstructure:"token"             yaml:"token,omitempty"`
+	TokenEnv        string `mapstructure:"token_env"         yaml:"token_env"`
+	TLS             bool   `mapstructure:"tls"               yaml:"tls"`
+	TLSSkipVerify   bool   `mapstructure:"tls_skip_verify"   yaml:"tls_skip_verify"`
+	NoTLS           bool   `mapstructure:"-"                 yaml:"-"`
+	DeviceKeyFile   string `mapstructure:"device_key_file"   yaml:"device_key_file"`
+	AutoApprove     bool   `mapstructure:"auto_approve_safe" yaml:"auto_approve_safe"`
+	ReconnectMs     int    `mapstructure:"reconnect_ms"      yaml:"reconnect_ms"`
+	MaxReconnectMs  int    `mapstructure:"max_reconnect_ms"  yaml:"max_reconnect_ms"`
+	ApprovalTimeout int    `mapstructure:"approval_timeout_s" yaml:"approval_timeout_s"`
+	APIPort         int    `mapstructure:"api_port"           yaml:"api_port"`
+	APIBind         string `mapstructure:"api_bind"           yaml:"api_bind"`
+	// FleetMode forces or disables the OpenClaw upstream WebSocket
+	// dial loop, overriding the connector + host derivation in
+	// gatewayShouldConnectForConfiguredConnector. Three values:
+	//
+	//   "" / "auto"   — derive from connector + host. openclaw/zeptoclaw
+	//                   always dial; codex/claudecode dial only if
+	//                   gateway.host is non-loopback.
+	//   "enabled"     — always dial regardless of connector/host. Use
+	//                   when running a local OpenClaw daemon on
+	//                   127.0.0.1 alongside a codex/claudecode connector
+	//                   (the only case the auto heuristic gets wrong).
+	//   "disabled"    — never dial regardless of connector/host. Lets
+	//                   operators run an OpenClaw connector in a
+	//                   pure-local mode, or silence the loop while
+	//                   debugging.
+	//
+	// Default is "" (treated as "auto"). Validated case-insensitively
+	// in gatewayShouldConnectForConfiguredConnector — unknown values
+	// fall through to "auto" so a typo doesn't accidentally disable
+	// fleet integration on production.
+	FleetMode   string               `mapstructure:"fleet_mode"        yaml:"fleet_mode,omitempty"`
+	Watcher     GatewayWatcherConfig `mapstructure:"watcher"            yaml:"watcher"`
+	Watchdog    WatchdogConfig       `mapstructure:"watchdog"           yaml:"watchdog"`
+	SandboxHome string               `mapstructure:"-"                  yaml:"-"`
+	ClawHome    string               `mapstructure:"-"                  yaml:"-"`
 }
 
 // WatchdogConfig controls the health watchdog that notifies users when the
@@ -2054,6 +2075,11 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)
 	viper.SetDefault("gateway.token_env", "DEFENSECLAW_GATEWAY_TOKEN")
+	// fleet_mode defaults to "auto" so existing installs (which never
+	// set this field) keep getting the connector + host derivation
+	// in gatewayShouldConnectForConfiguredConnector. See the field
+	// doc on GatewayConfig.FleetMode for the override semantics.
+	viper.SetDefault("gateway.fleet_mode", "auto")
 	viper.SetDefault("gateway.device_key_file", filepath.Join(dataDir, "device.key"))
 	viper.SetDefault("gateway.auto_approve_safe", false)
 	viper.SetDefault("gateway.reconnect_ms", 800)

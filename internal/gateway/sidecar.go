@@ -436,7 +436,13 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 4)
 
-	// Goroutine 1: Gateway connection loop (always runs)
+	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
+	// fleet is configured (see gatewayShouldConnectForConfiguredConnector).
+	// In standalone codex/claudecode mode (no fleet, loopback gateway.host)
+	// runGatewayLoop short-circuits to StateDisabled and parks on ctx.Done()
+	// instead of spinning ConnectWithRetry against a port nothing is bound
+	// to. The goroutine is still spawned in both cases so shutdown / wg
+	// accounting / health snapshots stay symmetric across modes.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -528,8 +534,42 @@ func (s *Sidecar) Run(ctx context.Context) error {
 }
 
 // runGatewayLoop connects to the gateway and reconnects on disconnect,
-// running indefinitely until ctx is cancelled.
+// running until ctx is cancelled.
+//
+// Standalone short-circuit: when the active connector + host pair
+// indicates no OpenClaw fleet is configured (codex/claudecode +
+// loopback gateway.host, or unknown connector), we publish
+// StateDisabled with an explanatory hint and park on ctx.Done()
+// instead of looping ConnectWithRetry. This mirrors the
+// observability-only branch in runGuardrail (sidecar.go::1283-1294)
+// and closes the historical "Gateway: RECONNECTING forever" symptom
+// on codex-only dev boxes where nothing is listening on
+// 127.0.0.1:18789. Operators who actually want fleet integration
+// either pick connector=openclaw/zeptoclaw or point gateway.host at
+// a real upstream — both cases fall through to the dial loop below.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
+	if !gatewayShouldConnectForConfiguredConnector(s.cfg) {
+		connName := configuredConnectorName(s.cfg)
+		s.health.SetGateway(StateDisabled, "", map[string]interface{}{
+			"summary":   "no OpenClaw fleet configured (standalone mode)",
+			"connector": connName,
+			"host":      s.cfg.Gateway.Host,
+			"port":      s.cfg.Gateway.Port,
+			"hint":      "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
+		})
+		fmt.Fprintf(os.Stderr,
+			"[sidecar] gateway client disabled: connector=%q + loopback gateway.host=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
+			connName, s.cfg.Gateway.Host)
+		emitLifecycle(ctx, "gateway", "disabled", map[string]string{
+			"connector": connName,
+			"host":      s.cfg.Gateway.Host,
+			"port":      fmt.Sprintf("%d", s.cfg.Gateway.Port),
+			"reason":    "no-fleet-configured",
+		})
+		<-ctx.Done()
+		s.health.SetGateway(StateStopped, "", nil)
+		return nil
+	}
 	// Initial connect is the process-boot path, not a reconnect. Only
 	// subsequent successful connects should increment the reconnection
 	// counter so `defenseclaw.watcher.restarts` reflects true recoveries
@@ -799,7 +839,7 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		actions = append(actions, "blocked")
 	}
 
-	if shouldDisableAtGateway(r) && s.client != nil {
+	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -938,7 +978,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		actions = append(actions, "blocked")
 	}
 
-	if shouldDisableAtGateway(r) && s.client != nil {
+	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -978,7 +1018,7 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 		actions = append(actions, "blocked")
 	}
 
-	if shouldDisableAtGateway(r) && s.client != nil {
+	if shouldDisableAtGateway(r) && s.client != nil && s.fleetRPCsEnabled() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -1005,6 +1045,26 @@ func shouldDisableAtGateway(r watcher.AdmissionResult) bool {
 		return true
 	}
 	return r.RuntimeAction == "block"
+}
+
+// fleetRPCsEnabled reports whether the sidecar should attempt fleet-side
+// RPCs (DisableSkill / DisablePlugin / BlockMCPServer / SessionsSend)
+// against the OpenClaw upstream. Mirrors gatewayShouldConnectForConfiguredConnector
+// — the predicate the gateway dial loop itself uses — so a sidecar
+// running with `Gateway: DISABLED` doesn't flood stderr with
+// "...failed: gateway: not connected" once per blocked admission.
+//
+// Local enforcement (file quarantine, runtime block, the
+// SecurityNotification queue, webhook dispatch) all run BEFORE this
+// predicate is checked, so skipping the fleet RPC here only removes
+// dead weight — every per-host action that can be taken locally has
+// already happened.
+//
+// Returns true when fleet integration is active; false in standalone
+// mode (codex/claudecode + loopback host, or `gateway.fleet_mode:
+// disabled`).
+func (s *Sidecar) fleetRPCsEnabled() bool {
+	return gatewayShouldConnectForConfiguredConnector(s.cfg)
 }
 
 func (s *Sidecar) activeSessionKeys() []string {
@@ -1355,6 +1415,103 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	default:
 		return true
 	}
+}
+
+// gatewayShouldConnectForConfiguredConnector decides whether the sidecar
+// should run its WebSocket gateway dial loop against gateway.host:port.
+// This is the OpenClaw fleet client (skill admission / exec approval /
+// fleet event forwarding) — NOT the local guardrail proxy listener,
+// which proxyShouldBindForConfiguredConnector gates separately.
+//
+// Heuristic (intentionally connector- + host-derived, no new config
+// field):
+//
+//	openclaw / zeptoclaw       → always dial. The WS upstream is the
+//	                             whole point of these connectors;
+//	                             skipping it would break every
+//	                             existing OpenClaw install.
+//	codex / claudecode + loopback host
+//	                           → SKIP. Codex/ClaudeCode in either
+//	                             observe or action mode emit telemetry
+//	                             through hooks + the local guardrail
+//	                             proxy + local audit. The loopback
+//	                             default (127.0.0.1:18789) means the
+//	                             operator never wired in an OpenClaw
+//	                             daemon — nothing is listening there
+//	                             and ConnectWithRetry would spin
+//	                             forever, pinning health on
+//	                             RECONNECTING and spamming gateway.log.
+//	codex / claudecode + non-loopback host
+//	                           → dial. The operator pointed
+//	                             gateway.host at a real upstream
+//	                             (LAN IP, FQDN, etc.); they want
+//	                             fleet integration alongside hooks.
+//	empty / unknown            → SKIP. Surfacing DISABLED is safer
+//	                             than reconnect-loop noise against
+//	                             an unconfigured upstream.
+//
+// Closes the "Gateway: RECONNECTING forever on a codex-only dev box"
+// issue without breaking codex+OpenClaw operators who explicitly
+// pointed gateway.host at their fleet. The codex+local-OpenClaw
+// edge case (rare: OpenClaw daemon on 127.0.0.1 alongside codex)
+// has an explicit `gateway.fleet_mode: enabled` override below.
+func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	// Explicit operator override wins over the heuristic. We
+	// intentionally fall THROUGH for any unrecognized value (incl.
+	// typos) instead of returning a default, so a config typo can't
+	// silently flip fleet integration on or off in production.
+	switch strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode)) {
+	case "enabled", "on", "true":
+		return true
+	case "disabled", "off", "false":
+		return false
+	}
+	switch configuredConnectorName(cfg) {
+	case "openclaw", "zeptoclaw":
+		return true
+	case "codex", "claudecode":
+		return !isLoopbackGatewayHost(cfg.Gateway.Host)
+	default:
+		// Empty / unknown connector: prefer DISABLED over reconnect
+		// spam. An operator who genuinely wants fleet dial will set
+		// connector=openclaw or wire a non-loopback host.
+		return false
+	}
+}
+
+// isLoopbackGatewayHost reports whether host points at the local
+// machine. Treats empty / "localhost" / any 127.0.0.0/8 IPv4 / ::1
+// IPv6 as loopback. 0.0.0.0 (bind-all) is intentionally NOT loopback
+// — operators using it usually mean "any iface", which implies a
+// real listener somewhere.
+//
+// We do NOT do DNS resolution: the heuristic only reads what's in
+// the config string. Resolving would slow down sidecar startup,
+// add a network failure mode to a pure decision function, and
+// could be racy if /etc/hosts changes between Run() and the dial.
+// FQDNs are therefore treated as non-loopback — the right answer
+// for the only case where they matter (operator pointing at a
+// real fleet hostname).
+func isLoopbackGatewayHost(host string) bool {
+	h := strings.TrimSpace(strings.ToLower(host))
+	if h == "" {
+		// Empty falls back to viper default 127.0.0.1.
+		return true
+	}
+	if h == "localhost" {
+		return true
+	}
+	// Strip surrounding brackets from IPv6 literals (e.g. "[::1]").
+	if len(h) >= 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		h = h[1 : len(h)-1]
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // teardownPreviousConnector checks if a different connector was previously
