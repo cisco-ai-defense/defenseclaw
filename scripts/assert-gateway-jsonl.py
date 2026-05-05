@@ -85,6 +85,10 @@ REQUIRED_EVENT_FIELDS = {
     "llm_prompt":      {"prompt_id"},
     "llm_response":    {"response_id"},
     "tool_invocation": {"phase", "tool"},
+    # v7.2 continuous AI visibility inventory deltas. The payload is
+    # intentionally sanitized: raw paths, commands, prompt text, and
+    # env values are not part of the required shape.
+    "ai_discovery":    {"scan_id", "signal_id", "category", "state"},
 }
 
 VALID_EVENT_TYPES = set(REQUIRED_EVENT_FIELDS.keys())
