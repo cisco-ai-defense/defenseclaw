@@ -1092,6 +1092,69 @@ class TestResolvePluginDir(unittest.TestCase):
         result = _resolve_plugin_dir("orphan", self.plugin_dir)
         self.assertIsNone(result)
 
+    @patch("defenseclaw.commands.cmd_plugin._get_openclaw_plugin_info")
+    def test_bare_name_ignores_cwd_relative_directory(self, mock_info):
+        """Regression: a bare plugin name MUST NOT be resolved as a
+        cwd-relative path even when a directory of the same name
+        happens to exist in the current working directory.
+
+        The pre-fix behavior was: ``os.path.isdir("defenseclaw")``
+        returns True from any cwd that contains a ``defenseclaw/``
+        folder (e.g. running pytest from the workspace's ``cli/``
+        which has ``cli/defenseclaw/``). The literal-path branch
+        leaked that relative path back, skipping plugin lookup
+        entirely. Operationally that meant ``defenseclaw plugin
+        install foo`` from a workspace with a ``./foo`` folder would
+        silently install whatever was in that folder rather than the
+        published plugin — a real-world correctness/security bug,
+        not just a test artifact.
+        """
+        cwd = os.getcwd()
+        cwd_collision = os.path.join(cwd, "defenseclaw-bare-name-collision")
+        os.makedirs(cwd_collision, exist_ok=True)
+        try:
+            # The mocked plugin info points at a real, distinct
+            # plugin root in /tmp. The bare-name lookup must use that
+            # path, not the same-named folder we just planted in cwd.
+            real_root = self._make_plugin_root("defenseclaw-bare-name-collision")
+            source = os.path.join(real_root, "index.ts")
+            open(source, "w").close()
+            mock_info.return_value = self._mock_info(source)
+
+            result = _resolve_plugin_dir(
+                "defenseclaw-bare-name-collision", self.plugin_dir
+            )
+            self.assertEqual(
+                result, real_root,
+                "Bare names must resolve via plugin lookup, not cwd",
+            )
+            self.assertNotEqual(
+                result, "defenseclaw-bare-name-collision",
+                "MUST NOT echo back the bare name as a relative path",
+            )
+        finally:
+            shutil.rmtree(cwd_collision, ignore_errors=True)
+
+    def test_explicit_relative_path_still_honored(self):
+        """A relative path the operator typed deliberately
+        (``./my-plugin``) MUST still be honored — the cwd-coincidence
+        guard only fires for *bare* names without a separator. We
+        change cwd into the tmp tree so the relative path resolves
+        unambiguously."""
+        plugin_root = self._make_plugin_root("explicit-rel-plugin")
+        prev = os.getcwd()
+        try:
+            os.chdir(self.tmp)
+            result = _resolve_plugin_dir(
+                "./explicit-rel-plugin", self.plugin_dir
+            )
+            self.assertEqual(
+                os.path.realpath(result),
+                os.path.realpath(plugin_root),
+            )
+        finally:
+            os.chdir(prev)
+
     # ------------------------------------------------------------------
     # Case-insensitive fallback
     # ------------------------------------------------------------------

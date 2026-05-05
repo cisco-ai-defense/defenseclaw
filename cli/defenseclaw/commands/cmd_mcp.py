@@ -29,6 +29,7 @@ import subprocess
 import click
 
 from defenseclaw import connector_paths
+from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.context import AppContext, pass_ctx
@@ -95,7 +96,7 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
 
     connector = app.cfg.active_connector()
     if not servers:
-        click.echo(
+        ux.warn(
             f"No MCP servers configured for connector={connector!r} "
             "(checked the connector-specific source: openclaw.json / "
             ".claude/settings.json / .mcp.json / "
@@ -321,15 +322,15 @@ def _print_scan_result(result: ScanResult, as_json: bool) -> None:
         return
     for f in result.findings:
         sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
-        click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
+        click.echo(f"    {ux._style(f'[{f.severity}]', fg=sev_color, bold=True)}", nl=False)
         click.echo(f" {f.title}")
         if f.location:
-            click.echo(f"      Location: {f.location}")
+            click.echo(f"      {ux.dim('Location:')} {f.location}")
         if f.description:
             desc = f.description[:120] + "..." if len(f.description) > 120 else f.description
             click.echo(f"      {desc}")
         if f.remediation:
-            click.echo(f"      Fix: {f.remediation}")
+            click.echo(f"      {ux.dim('Fix:')} {f.remediation}")
 
 
 @mcp.command()

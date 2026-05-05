@@ -49,6 +49,7 @@ from urllib.parse import urlparse
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability import (
@@ -228,10 +229,11 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         click.echo(_json.dumps([_dest_to_dict(d) for d in dests], indent=2))
         return
     if not dests:
-        click.echo("  No destinations configured.")
-        click.echo("  Add one with: defenseclaw setup observability add <preset>")
+        ux.subhead("No destinations configured.")
+        ux.subhead("Add one with: defenseclaw setup observability add <preset>")
         return
     click.echo()
+    ux.section("Observability destinations")
     click.echo(f"  {'NAME':<40} {'KIND':<12} {'ENABLED':<8} {'PRESET':<18} ENDPOINT")
     click.echo(f"  {'-' * 40} {'-' * 12} {'-' * 8} {'-' * 18} {'-' * 40}")
     for d in dests:
@@ -239,7 +241,7 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         if len(endpoint) > 60:
             endpoint = endpoint[:57] + "..."
         click.echo(
-            f"  {d.name:<40} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
+            f"  {ux.bold(f'{d.name:<40}')} {d.kind:<12} {('yes' if d.enabled else 'no'):<8} "
             f"{(d.preset_id or '-'):<18} {endpoint}",
         )
     click.echo()
@@ -322,11 +324,14 @@ def test_cmd(app: AppContext, name: str, timeout: float) -> None:
             click.echo(f"    - {k}", err=True)
         raise SystemExit(2)
     if not d.enabled:
-        click.echo(f"  Warning: destination {name!r} is currently disabled.")
+        ux.warn(f"destination {name!r} is currently disabled.")
 
     click.echo()
     label = "Splunk Enterprise (HEC)" if d.preset_id == "splunk-enterprise" else d.kind
-    click.echo(f"  Testing {name} [{label}]: {d.endpoint or '(no endpoint)'}")
+    click.echo(
+        f"  {ux.bold('Testing')} {ux.bold(name)} "
+        f"{ux.dim('[' + label + ']')}: {d.endpoint or '(no endpoint)'}"
+    )
     if d.target == "otel":
         _test_otel(app.cfg.data_dir, timeout=timeout)
     elif d.kind == "splunk_hec":
@@ -410,14 +415,14 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
             return
 
     click.echo()
-    click.echo("  Migration preview:")
-    click.echo("    audit_sinks += ")
+    ux.section("Migration preview")
+    click.echo(f"    {ux.dim('audit_sinks +=')} ")
     click.echo("      " + yaml.safe_dump(new_entry, sort_keys=False).replace("\n", "\n      ").rstrip())
-    click.echo("    splunk: (removed)")
+    click.echo(f"    {ux.dim('splunk: (removed)')}")
     click.echo()
 
     if not do_apply:
-        click.echo("  Dry-run — re-run with --apply to write.")
+        ux.subhead("Dry-run — re-run with --apply to write.")
         return
 
     sinks.append(new_entry)
@@ -440,10 +445,8 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
 def _prompt_missing(
     preset, raw_inputs: dict[str, str | None],
 ) -> dict[str, str | None]:
-    click.echo()
-    click.echo(f"  {preset.display_name} Setup")
-    click.echo(f"  {'─' * (len(preset.display_name) + 6)}")
-    click.echo(f"  {preset.description}")
+    ux.section(f"{preset.display_name} Setup")
+    ux.subhead(preset.description)
     click.echo()
 
     resolved = dict(raw_inputs)
@@ -697,16 +700,20 @@ def _tcp_probe(endpoint: str, protocol: str, *, timeout: float) -> tuple[bool, s
 
 def _print_write_result(result: WriteResult, *, dry_run: bool) -> None:
     click.echo()
-    prefix = "  [dry-run]" if dry_run else "  "
-    click.echo(f"{prefix}{result.target}:{result.name} (preset={result.preset_id})")
+    mode_tag = f"{ux.dim('[dry-run]')} " if dry_run else ""
+    click.echo(
+        f"  {mode_tag}{ux.bold(result.target)}:{ux.bold(result.name)} "
+        f"(preset={result.preset_id})"
+    )
+    line_indent = "      " if dry_run else "    "
     for line in result.yaml_changes:
-        click.echo(f"{prefix}  yaml: {line}")
+        click.echo(f"{line_indent}{ux.dim('yaml:')} {line}")
     for line in result.dotenv_changes:
-        click.echo(f"{prefix}  env:  {line}")
+        click.echo(f"{line_indent}{ux.dim('env:')}  {line}")
     for line in result.warnings:
-        click.echo(f"{prefix}  ⚠ {line}")
+        ux.warn(line, indent=line_indent)
     if not dry_run:
-        click.echo("  Next: defenseclaw-gateway restart (to reload config)")
+        ux.subhead("Next: defenseclaw-gateway restart (to reload config)")
     click.echo()
 
 

@@ -28,6 +28,7 @@ import subprocess
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import (
     bundled_guardrail_profiles_dir,
@@ -63,6 +64,39 @@ from defenseclaw.paths import (
     help="Scanner backend to configure.",
 )
 @click.option("--with-judge/--no-judge", default=False, help="Enable or disable the LLM judge.")
+@click.option(
+    "--fail-mode",
+    type=click.Choice(["open", "closed"], case_sensitive=False),
+    default=None,
+    help=(
+        "Hook fail-mode for response-layer failures (gateway returns 4xx, malformed JSON, "
+        "or missing action). 'open' = allow + log (recommended); 'closed' = block. "
+        "Transport failures (gateway unreachable / 5xx) ALWAYS allow unless "
+        "DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."
+    ),
+)
+@click.option(
+    "--human-approval/--no-human-approval",
+    "human_approval",
+    default=None,
+    help=(
+        "Human-In-the-Loop (HITL): require operator approval before risky tool "
+        "actions execute. Only fires in action mode — observe mode logs without "
+        "blocking, regardless of this flag. Omitting the flag preserves the "
+        "current setting; you can still flip it later via "
+        "`defenseclaw setup guardrail`."
+    ),
+)
+@click.option(
+    "--hilt-min-severity",
+    type=click.Choice(["HIGH", "MEDIUM", "LOW", "CRITICAL"], case_sensitive=False),
+    default=None,
+    help=(
+        "Lowest finding severity that triggers a HITL approval prompt. Defaults "
+        "to HIGH on first install. CRITICAL findings always block regardless of "
+        "this setting."
+    ),
+)
 @click.option("--llm-provider", default="", help="Unified LLM provider (openai, anthropic, ollama, etc.).")
 @click.option("--llm-model", default="", help="Unified LLM model, preferably provider/model.")
 @click.option("--llm-api-key", default="", help="LLM API key to save into .env (config stores only the env name).")
@@ -97,6 +131,9 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     profile: str | None,
     scanner_mode: str,
     with_judge: bool,
+    fail_mode: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
     llm_provider: str,
     llm_model: str,
     llm_api_key: str,
@@ -126,6 +163,9 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         connector=connector,
         profile=profile,
         with_judge=with_judge,
+        fail_mode=fail_mode,
+        human_approval=human_approval,
+        hilt_min_severity=hilt_min_severity,
         llm_provider=llm_provider,
         llm_model=llm_model,
         llm_api_key=llm_api_key,
@@ -146,6 +186,9 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             profile=profile,
             scanner_mode=scanner_mode,
             with_judge=with_judge,
+            fail_mode=fail_mode,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
             llm_provider=llm_provider,
             llm_model=llm_model,
             llm_api_key=llm_api_key,
@@ -166,35 +209,33 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.logger import Logger
 
     if sandbox and platform.system() != "Linux":
-        click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
+        ux.err("Sandbox mode requires Linux.", indent="  ")
         raise SystemExit(1)
 
-    click.echo()
-    click.echo("  ── Environment ───────────────────────────────────────")
-    click.echo()
+    ux.banner("Environment")
 
     from defenseclaw import __version__
-    click.echo(f"  DefenseClaw:   v{__version__}")
+    click.echo(f"  DefenseClaw:   {ux.bold('v' + __version__)}")
     gw_version = _get_gateway_version()
     if gw_version:
-        click.echo(f"  Gateway:       {gw_version}")
+        click.echo(f"  Gateway:       {ux.bold(gw_version)}")
     else:
-        click.echo("  Gateway:       not found")
+        click.echo("  Gateway:       " + ux._style("not found", fg="yellow"))
 
     env = detect_environment()
-    click.echo(f"  Platform:      {env}")
+    click.echo(f"  Platform:      {ux.bold(env)}")
 
     cfg_file = config_path()
     is_new_config = not os.path.exists(cfg_file)
     if is_new_config:
         cfg = default_config()
-        click.echo("  Config:        created new defaults")
+        click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
     else:
         cfg = load()
-        click.echo("  Config:        preserved existing")
+        click.echo("  Config:        " + ux.dim("preserved existing"))
 
     cfg.environment = env
-    click.echo(f"  Claw mode:     {cfg.claw.mode}")
+    click.echo(f"  Claw mode:     {ux.bold(cfg.claw.mode)}")
     click.echo(f"  Claw home:     {cfg.claw_home_dir()}")
 
     dirs = [
@@ -211,7 +252,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         d_real = os.path.realpath(d)
         if d_real.startswith(data_dir_real + os.sep):
             os.makedirs(d, exist_ok=True)
-    click.echo("  Directories:   created")
+    click.echo("  Directories:   " + ux._style("created", fg="green"))
 
     _seed_rego_policies(cfg.policy_dir)
     _seed_guardrail_profiles(cfg.policy_dir)
@@ -228,20 +269,14 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     logger = Logger(store, cfg.splunk)
     logger.log_action("init", cfg.data_dir, f"environment={env}")
 
-    click.echo()
-    click.echo("  ── Scanners ──────────────────────────────────────────")
-    click.echo()
+    ux.banner("Scanners")
     _install_scanners(cfg, logger, skip_install)
     _show_scanner_defaults(cfg)
 
-    click.echo()
-    click.echo("  ── Gateway ───────────────────────────────────────────")
-    click.echo()
+    ux.banner("Gateway")
     _setup_gateway_defaults(cfg, logger, is_new_config=is_new_config)
 
-    click.echo()
-    click.echo("  ── Guardrail ─────────────────────────────────────────")
-    click.echo()
+    ux.banner("Guardrail")
     guardrail_ok = False
     if enable_guardrail:
         guardrail_ok = _setup_guardrail_inline(app, cfg, logger)
@@ -251,11 +286,9 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         click.echo("  Run 'defenseclaw init --enable-guardrail' or")
         click.echo("  'defenseclaw setup guardrail' to enable the guardrail proxy.")
 
-    click.echo()
-    click.echo("  ── Skills ────────────────────────────────────────────")
-    click.echo()
+    ux.banner("Skills")
     if cfg.openshell.is_standalone():
-        click.echo("  CodeGuard:     deferred (installed during sandbox setup)")
+        click.echo("  CodeGuard:     " + ux.dim("deferred (installed during sandbox setup)"))
     else:
         _install_codeguard_skill(cfg, logger)
 
@@ -265,21 +298,19 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     if sandbox:
         already_configured = cfg.openshell.is_standalone()
         if already_configured:
-            click.echo()
-            click.echo("  ── Sandbox ───────────────────────────────────────────")
-            click.echo()
-            click.echo("  Sandbox:       already configured (openshell.mode=standalone)")
+            ux.banner("Sandbox")
+            click.echo(
+                "  Sandbox:       "
+                + ux._style("already configured", fg="green")
+                + ux.dim(" (openshell.mode=standalone)")
+            )
         else:
-            click.echo()
-            click.echo("  ── Sandbox ───────────────────────────────────────────")
-            click.echo()
+            ux.banner("Sandbox")
             from defenseclaw.commands.cmd_init_sandbox import _init_sandbox
             sandbox_ok = _init_sandbox(cfg, logger)
 
             if sandbox_ok:
-                click.echo()
-                click.echo("  ── Sandbox Networking ────────────────────────────────")
-                click.echo()
+                ux.banner("Sandbox Networking")
                 from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
                 app.cfg = cfg
                 ctx = click.Context(setup_sandbox, parent=click.get_current_context())
@@ -290,32 +321,54 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     sidecar_started = False
     if not sandbox:
-        click.echo()
-        click.echo("  ── Sidecar ───────────────────────────────────────────")
-        click.echo()
+        ux.banner("Sidecar")
         _start_gateway(cfg, logger)
         sidecar_started = True
 
         if guardrail_ok and sidecar_started:
-            click.echo("  Restarting sidecar to apply guardrail config...")
+            click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
             _restart_gateway_quiet()
 
+    # Final completion banner. We render it as a plain divider with
+    # bold success text so the eye lands here when the operator
+    # scrolls back up after a long init.
     click.echo()
-    click.echo("  ──────────────────────────────────────────────────────")
+    click.echo("  " + ux.dim("─" * 54))
     click.echo()
-    click.echo("  DefenseClaw initialized.")
+    ux.ok("DefenseClaw initialized.", indent="  ")
     click.echo()
-    click.echo("  Next steps:")
+    click.echo("  " + ux.bold("Next steps:"))
     if sandbox and not guardrail_ok:
-        click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")
+        click.echo(
+            f"    {ux.accent('defenseclaw setup guardrail')}   "
+            + ux.dim("Enable LLM traffic inspection")
+        )
     elif not guardrail_ok:
-        click.echo("    defenseclaw setup guardrail   Enable LLM traffic inspection")
+        click.echo(
+            f"    {ux.accent('defenseclaw setup guardrail')}   "
+            + ux.dim("Enable LLM traffic inspection")
+        )
     if not sidecar_started and not sandbox:
-        click.echo("    defenseclaw-gateway start     Start the sidecar")
-    click.echo("    defenseclaw setup            Customize scanners and policies")
-    click.echo("    defenseclaw doctor           Verify connectivity and credentials")
-    click.echo("    defenseclaw skill scan all   Scan installed OpenClaw skills")
-    click.echo("    defenseclaw mcp scan --all   Scan configured MCP servers")
+        click.echo(
+            f"    {ux.accent('defenseclaw-gateway start')}     "
+            + ux.dim("Start the sidecar")
+        )
+    click.echo(
+        f"    {ux.accent('defenseclaw setup')}            "
+        + ux.dim("Customize scanners and policies")
+    )
+    click.echo(
+        f"    {ux.accent('defenseclaw doctor')}           "
+        + ux.dim("Verify connectivity and credentials")
+    )
+    click.echo(
+        f"    {ux.accent('defenseclaw skill scan all')}   "
+        + ux.dim("Scan installed OpenClaw skills")
+    )
+    click.echo(
+        f"    {ux.accent('defenseclaw mcp scan --all')}   "
+        + ux.dim("Scan configured MCP servers")
+    )
 
     store.close()
 
@@ -335,6 +388,18 @@ def _use_guided_first_run(**kwargs) -> bool:
     if kwargs.get("connector") or kwargs.get("profile"):
         return True
     if kwargs.get("with_judge"):
+        return True
+    # Explicit --fail-mode means the operator opted into the
+    # guided flow even if no other flags were passed.
+    if kwargs.get("fail_mode"):
+        return True
+    # Explicit HITL flags imply intent to use the guided flow:
+    # ``--human-approval`` is a tri-state, so check ``is not None``
+    # rather than truthiness — ``--no-human-approval`` is a real
+    # signal too.
+    if kwargs.get("human_approval") is not None:
+        return True
+    if kwargs.get("hilt_min_severity"):
         return True
     if kwargs.get("start_gateway") is not None or kwargs.get("verify") is not None:
         return True
@@ -362,6 +427,9 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     profile: str | None,
     scanner_mode: str,
     with_judge: bool,
+    fail_mode: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
     llm_provider: str,
     llm_model: str,
     llm_api_key: str,
@@ -379,11 +447,24 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     from defenseclaw.ux import CLIRenderer
 
     if not non_interactive and not yes and not json_summary and _stdin_is_tty():
-        connector, profile, scanner_mode, with_judge, start_gateway, verify = _prompt_first_run(
+        (
+            connector,
+            profile,
+            scanner_mode,
+            with_judge,
+            fail_mode,
+            human_approval,
+            hilt_min_severity,
+            start_gateway,
+            verify,
+        ) = _prompt_first_run(
             connector=connector,
             profile=profile,
             scanner_mode=scanner_mode,
             with_judge=with_judge,
+            fail_mode=fail_mode,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
             start_gateway=start_gateway,
             verify=verify,
         )
@@ -414,6 +495,17 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         cisco_endpoint=cisco_endpoint,
         cisco_api_key=cisco_api_key,
         cisco_api_key_env=cisco_api_key_env,
+        # Empty string means "leave the existing value alone" — the
+        # bootstrap layer treats "" as a no-op so first-run flows
+        # that don't surface this option don't accidentally reset
+        # an operator's earlier choice.
+        hook_fail_mode=(fail_mode or "").lower(),
+        # HITL: ``None`` is "leave alone", ``True``/``False`` set
+        # the toggle. Empty severity preserves the existing floor;
+        # bootstrap normalizes case and falls back to ``HIGH`` on
+        # invalid values.
+        human_approval=human_approval,
+        hilt_min_severity=hilt_min_severity or "",
     )
     report = run_first_run(opts)
     if json_summary:
@@ -430,37 +522,108 @@ def _prompt_first_run(
     profile: str | None,
     scanner_mode: str,
     with_judge: bool,
+    fail_mode: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
     start_gateway: bool | None,
     verify: bool | None,
-) -> tuple[str, str, str, bool, bool, bool]:
-    click.echo()
-    click.echo(click.style("  DefenseClaw First-Run Setup", fg="cyan", bold=True))
-    click.echo("  " + click.style("This wizard writes config.yaml, then runs targeted readiness checks.", dim=True))
+) -> tuple[str, str, str, bool, str, bool | None, str | None, bool, bool]:
+    ux.section("DefenseClaw First-Run Setup")
+    ux.subhead(
+        "This wizard writes config.yaml, then runs targeted readiness checks.",
+    )
     click.echo()
     connector_choices = ["codex", "claudecode", "zeptoclaw", "openclaw"]
     connector = _normalize_connector_arg(connector) if connector else click.prompt(
-        "  Connector",
+        "  " + ux.bold("Connector"),
         type=click.Choice(connector_choices, case_sensitive=False),
         default="codex",
         show_choices=True,
     )
     if profile is None:
         profile = click.prompt(
-            "  Protection profile",
+            "  " + ux.bold("Protection profile"),
             type=click.Choice(["observe", "action"], case_sensitive=False),
             default="observe",
             show_choices=True,
         )
     scanner_mode = click.prompt(
-        "  Scanner mode",
+        "  " + ux.bold("Scanner mode"),
         type=click.Choice(["local", "remote", "both"], case_sensitive=False),
         default=scanner_mode or "local",
         show_choices=True,
     )
-    with_judge = click.confirm("  Enable LLM judge now?", default=with_judge)
-    start_gateway = click.confirm("  Start gateway after setup?", default=bool(start_gateway))
-    verify = click.confirm("  Run targeted readiness checks?", default=True if verify is None else bool(verify))
-    return connector, profile, scanner_mode, with_judge, start_gateway, verify
+    with_judge = click.confirm("  " + ux.bold("Enable LLM judge now?"), default=with_judge)
+    # Hook fail-mode: surface the choice so first-run operators
+    # don't have to discover `defenseclaw guardrail fail-mode` to
+    # change it later. We only ask when the operator hasn't already
+    # supplied --fail-mode explicitly. Default is "open" because
+    # silently bricking the agent on a transient gateway response
+    # error is worse than leaking a single tool call.
+    if fail_mode is None:
+        ux.section("Hook fail-mode (response-layer failures)")
+        ux.subhead(
+            "What hooks do when the gateway returns 4xx, malformed JSON, or no action.",
+        )
+        ux.subhead(
+            "Transport failures (gateway down / 5xx) ALWAYS allow unless "
+            "DEFENSECLAW_STRICT_AVAILABILITY=1.",
+        )
+        fail_mode = click.prompt(
+            "  " + ux.bold("Fail mode"),
+            type=click.Choice(["open", "closed"], case_sensitive=False),
+            default="open",
+            show_choices=True,
+        )
+    # Human-In-the-Loop (HITL). HITL only fires in action mode —
+    # the gateway short-circuits in observe mode regardless of
+    # the toggle, so prompting for it in observe mode is just
+    # noise that misleads operators about what their answer
+    # does. We still honor an explicit --human-approval flag in
+    # observe mode (handled by the caller) so an operator who
+    # plans to flip to action later doesn't lose their setting.
+    if (profile or "observe").lower() == "action" and human_approval is None:
+        ux.section("Human-In-the-Loop approvals (HITL)")
+        ux.subhead(
+            "Action mode can pause risky tool calls and ask you to approve them.",
+        )
+        ux.subhead(
+            "CRITICAL findings always block — HITL covers the lower severities you "
+            "want to review first.",
+        )
+        human_approval = click.confirm(
+            "  " + ux.bold("Require human approval for risky actions?"),
+            default=False,
+        )
+        if human_approval and hilt_min_severity is None:
+            hilt_min_severity = click.prompt(
+                "  " + ux.bold("Minimum severity that triggers approval"),
+                type=click.Choice(
+                    ["HIGH", "MEDIUM", "LOW", "CRITICAL"],
+                    case_sensitive=False,
+                ),
+                default="HIGH",
+                show_choices=True,
+            ).upper()
+    start_gateway = click.confirm(
+        "  " + ux.bold("Start gateway after setup?"),
+        default=bool(start_gateway),
+    )
+    verify = click.confirm(
+        "  " + ux.bold("Run targeted readiness checks?"),
+        default=True if verify is None else bool(verify),
+    )
+    return (
+        connector,
+        profile,
+        scanner_mode,
+        with_judge,
+        fail_mode,
+        human_approval,
+        hilt_min_severity,
+        start_gateway,
+        verify,
+    )
 
 
 def _normalize_connector_arg(connector: str | None) -> str:
@@ -602,15 +765,15 @@ def _verify_scanner_sdk(name: str, import_name: str, min_python: tuple[int, ...]
 
     if min_python and sys.version_info < min_python:
         ver = ".".join(str(v) for v in min_python)
-        click.echo(f"  {label}requires Python >={ver} (skipped)")
+        click.echo(f"  {label}{ux._style(f'requires Python >={ver}', fg='yellow')} {ux.dim('(skipped)')}")
         return
 
     try:
         importlib.import_module(import_name)
-        click.echo(f"  {label}available")
+        click.echo(f"  {label}{ux._style('available', fg='green')}")
     except ImportError:
-        click.echo(f"  {label}not installed")
-        click.echo("                 install with: pip install defenseclaw")
+        click.echo(f"  {label}{ux._style('not installed', fg='yellow')}")
+        click.echo("                 " + ux.dim("install with: pip install defenseclaw"))
 
 
 def _show_scanner_defaults(cfg) -> None:
@@ -848,9 +1011,20 @@ def _install_codeguard_skill(cfg, logger) -> None:
     """Install the CodeGuard proactive skill into the OpenClaw skills directory."""
     from defenseclaw.codeguard_skill import install_codeguard_skill
 
-    click.echo("  CodeGuard:     installing...", nl=False)
+    click.echo("  CodeGuard:     " + ux.dim("installing..."), nl=False)
     status = install_codeguard_skill(cfg)
-    click.echo(f" {status}")
+    # ``status`` is a free-form string from the installer; color-code
+    # the well-known signals (installed/already/skipped/failed) and
+    # leave anything unfamiliar in the default fg.
+    lower = status.lower()
+    if "fail" in lower or "error" in lower:
+        click.echo(" " + ux._style(status, fg="red", bold=True))
+    elif "already" in lower or "preserved" in lower or "skip" in lower:
+        click.echo(" " + ux.dim(status))
+    elif lower:
+        click.echo(" " + ux._style(status, fg="green"))
+    else:
+        click.echo(f" {status}")
     logger.log_action("install-skill", "codeguard", f"status={status}")
 
 
@@ -881,15 +1055,20 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
     ok, warnings = execute_guardrail_setup(app, save_config=False)
 
     if warnings:
-        click.echo()
-        click.echo("  ── Warnings ──────────────────────────────────────────")
+        ux.banner("Warnings")
         for w in warnings:
-            click.echo(f"  ⚠ {w}")
+            ux.warn(w, indent="  ")
 
     if ok:
         click.echo()
-        click.echo(f"  Guardrail:     mode={gc.mode}, model={gc.model_name}")
-        click.echo("  To disable:    defenseclaw setup guardrail --disable")
+        click.echo(
+            "  Guardrail:     "
+            + ux._style("mode=", fg="bright_black")
+            + ux._style(gc.mode, fg="green", bold=True)
+            + ux._style(", model=", fg="bright_black")
+            + ux.bold(gc.model_name)
+        )
+        click.echo("  To disable:    " + ux.accent("defenseclaw setup guardrail --disable"))
         logger.log_action(
             "init-guardrail", "config",
             f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} model={gc.model}",
@@ -913,31 +1092,31 @@ def _start_gateway(cfg, logger) -> None:
         return
 
     started = False
-    click.echo("  Sidecar:       starting...", nl=False)
+    click.echo("  Sidecar:       " + ux.dim("starting..."), nl=False)
     try:
         result = subprocess.run(
             ["defenseclaw-gateway", "start"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
-            click.echo(" ✓")
+            click.echo(" " + ux._style("✓", fg="green", bold=True))
             pid = _read_pid(pid_file)
             if pid:
-                click.echo(f"  PID:           {pid}")
+                click.echo(f"  PID:           {ux.bold(str(pid))}")
             logger.log_action("init-sidecar", "start", f"pid={pid or 'unknown'}")
             started = True
         else:
-            click.echo(" ✗")
+            click.echo(" " + ux._style("✗", fg="red", bold=True))
             err = (result.stderr or result.stdout or "").strip()
             if err:
                 for line in err.splitlines()[:3]:
-                    click.echo(f"                 {line}")
-            click.echo("                 check: defenseclaw-gateway status")
+                    click.echo(f"                 {ux.dim(line)}")
+            click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
     except FileNotFoundError:
-        click.echo(" ✗ (binary not found)")
+        click.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (binary not found)"))
     except subprocess.TimeoutExpired:
-        click.echo(" ✗ (timed out)")
-        click.echo("                 check: defenseclaw-gateway status")
+        click.echo(" " + ux._style("✗", fg="red", bold=True) + ux.dim(" (timed out)"))
+        click.echo("                 " + ux.dim("check: defenseclaw-gateway status"))
 
     if started:
         bind = "127.0.0.1"

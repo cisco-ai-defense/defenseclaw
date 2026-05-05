@@ -233,6 +233,40 @@ class TestPolicyDelete(PolicyCommandTestBase):
 
 
 class TestSyncOpaDataFirstParty(PolicyCommandTestBase):
+    def test_sync_writes_guardrail_hilt(self):
+        from defenseclaw.commands.cmd_policy import _sync_opa_data
+
+        rego_dir = os.path.join(self.app.cfg.policy_dir, "rego")
+        os.makedirs(rego_dir, exist_ok=True)
+        data_json_path = os.path.join(rego_dir, "data.json")
+        with open(data_json_path, "w") as f:
+            json.dump({
+                "config": {},
+                "actions": {},
+                "guardrail": {
+                    "block_threshold": 4,
+                    "alert_threshold": 2,
+                    "hilt": {"enabled": False, "min_severity": "HIGH"},
+                },
+            }, f)
+
+        policy_data = {
+            "name": "test-sync",
+            "guardrail": {
+                "block_threshold": 4,
+                "alert_threshold": 2,
+                "hilt": {"enabled": True, "min_severity": "MEDIUM"},
+            },
+        }
+
+        _sync_opa_data(self.app, policy_data)
+
+        with open(data_json_path) as f:
+            result = json.load(f)
+
+        self.assertTrue(result["guardrail"]["hilt"]["enabled"])
+        self.assertEqual(result["guardrail"]["hilt"]["min_severity"], "MEDIUM")
+
     def test_sync_writes_first_party_allow_list_with_provenance(self):
         from defenseclaw.commands.cmd_policy import _sync_opa_data
 

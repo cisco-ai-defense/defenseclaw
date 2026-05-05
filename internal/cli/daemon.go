@@ -83,7 +83,7 @@ func runStart(cmd *cobra.Command, _ []string) error {
 	d := daemon.New(config.DefaultDataPath())
 
 	if running, pid := d.IsRunning(); running {
-		fmt.Printf("Gateway sidecar is already running (PID %d)\n", pid)
+		Warn(fmt.Sprintf("Gateway sidecar is already running (PID %d)", pid))
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
 		return nil
 	}
@@ -95,11 +95,11 @@ func runStart(cmd *cobra.Command, _ []string) error {
 
 	pid, err := d.Start(args)
 	if err != nil {
-		fmt.Println("FAILED")
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	fmt.Printf("OK (PID %d)\n", pid)
+	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Printf("  PID file: %s\n", d.PIDFile())
@@ -131,18 +131,18 @@ func runStop(_ *cobra.Command, _ []string) error {
 
 	running, pid := d.IsRunning()
 	if !running {
-		fmt.Println("Gateway sidecar is not running")
+		fmt.Println(Dim("Gateway sidecar is not running"))
 		return nil
 	}
 
 	fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 
 	if err := d.Stop(defaultStopTimeout); err != nil {
-		fmt.Println("FAILED")
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("stop daemon: %w", err)
 	}
 
-	fmt.Println("OK")
+	fmt.Println(Style("OK", "fg=green", "bold"))
 	printHint("Start again:  defenseclaw-gateway start")
 	return nil
 }
@@ -156,10 +156,10 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	if running, pid := d.IsRunning(); running {
 		fmt.Printf("Stopping gateway sidecar (PID %d)... ", pid)
 		if err := d.Stop(defaultStopTimeout); err != nil {
-			fmt.Println("FAILED")
+			fmt.Println(Style("FAILED", "fg=red", "bold"))
 			return fmt.Errorf("stop for restart: %w", err)
 		}
-		fmt.Println("OK")
+		fmt.Println(Style("OK", "fg=green", "bold"))
 	}
 
 	fmt.Print("Starting gateway sidecar daemon... ")
@@ -167,11 +167,11 @@ func runRestart(cmd *cobra.Command, _ []string) error {
 	args := collectDaemonArgs(cmd)
 	pid, err := d.Start(args)
 	if err != nil {
-		fmt.Println("FAILED")
+		fmt.Println(Style("FAILED", "fg=red", "bold"))
 		return fmt.Errorf("start daemon: %w", err)
 	}
 
-	fmt.Printf("OK (PID %d)\n", pid)
+	fmt.Printf("%s (PID %d)\n", Style("OK", "fg=green", "bold"), pid)
 	fmt.Println()
 	fmt.Printf("  Log file: %s\n", d.LogFile())
 	fmt.Println()
@@ -198,11 +198,10 @@ func printSplunkLocalHint() {
 	bridgeEnvPath := filepath.Join(dataDir, "splunk-bridge", "env", ".env")
 	bridgeEnv := readDotEnv(bridgeEnvPath)
 	if pw := bridgeEnv["SPLUNK_PASSWORD"]; pw != "" {
-		fmt.Println()
-		fmt.Println("Splunk Local Mode:")
-		fmt.Printf("  Web UI:   http://127.0.0.1:8000\n")
-		fmt.Printf("  Username: admin\n")
-		fmt.Printf("  Password: (stored in %s)\n", bridgeEnvPath)
+		Section("Splunk Local Mode")
+		fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
+		fmt.Printf("  %s admin\n", Style("Username:", "fg=bright_black", "bold"))
+		fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), bridgeEnvPath)
 		return
 	}
 
@@ -214,11 +213,10 @@ func printSplunkLocalHint() {
 	if user == "" || pass == "" {
 		return
 	}
-	fmt.Println()
-	fmt.Println("Splunk Local Mode:")
-	fmt.Printf("  Web UI:   http://127.0.0.1:8000\n")
-	fmt.Printf("  Username: %s\n", user)
-	fmt.Printf("  Password: (stored in %s)\n", dotenvPath)
+	Section("Splunk Local Mode")
+	fmt.Printf("  %s http://127.0.0.1:8000\n", Style("Web UI:", "fg=bright_black", "bold"))
+	fmt.Printf("  %s %s\n", Style("Username:", "fg=bright_black", "bold"), user)
+	fmt.Printf("  %s (stored in %s)\n", Style("Password:", "fg=bright_black", "bold"), dotenvPath)
 }
 
 // readDotEnv reads KEY=VALUE pairs from a .env file.

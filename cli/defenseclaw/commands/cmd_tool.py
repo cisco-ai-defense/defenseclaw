@@ -29,6 +29,7 @@ import json
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 
 
@@ -95,7 +96,10 @@ def block(app: AppContext, name: str, source: str, reason: str) -> None:
         app.logger.log_action("tool-block", target, f"reason={reason}")
 
     scope_note = f" (scoped to {source!r})" if source else " (global)"
-    click.secho(f"[tool] {name!r}{scope_note} added to block list", fg="red")
+    click.echo(
+        f"{ux._style('[tool]', fg='red', bold=True)} {name!r}{scope_note} "
+        f"{ux._style('added to block list', fg='red')}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +135,10 @@ def allow(app: AppContext, name: str, source: str, reason: str) -> None:
         app.logger.log_action("tool-allow", target, f"reason={reason}")
 
     scope_note = f" (scoped to {source!r})" if source else " (global)"
-    click.secho(f"[tool] {name!r}{scope_note} added to allow list", fg="green")
+    click.echo(
+        f"{ux._style('[tool]', fg='green', bold=True)} {name!r}{scope_note} "
+        f"{ux._style('added to allow list', fg='green')}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +170,9 @@ def unblock(app: AppContext, name: str, source: str) -> None:
         app.logger.log_action("tool-unblock", target, "removed from block/allow list")
 
     scope_note = f" (scoped to {source!r})" if source else " (global)"
-    click.echo(f"[tool] {name!r}{scope_note} removed from block/allow list")
+    click.echo(
+        f"{ux.dim('[tool]')} {name!r}{scope_note} removed from block/allow list"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +229,14 @@ def list_tools(app: AppContext, filter_blocked: bool, filter_allowed: bool, as_j
     name_w = max(name_w, 4)  # min header width
     status_w = 7  # "blocked" / "allowed"
 
-    header = f"{'TOOL':<{name_w}}  {'STATUS':<{status_w}}  {'REASON':<40}  UPDATED"
+    header = (
+        f"{ux.bold('TOOL'.ljust(name_w))}  "
+        f"{ux.bold('STATUS'.ljust(status_w))}  "
+        f"{ux.bold('REASON'.ljust(40))}  "
+        f"{ux.bold('UPDATED')}"
+    )
     click.echo(header)
-    click.echo("-" * len(header))
+    click.echo(ux.dim("-" * len(header)))
 
     for e in entries:
         status = e.actions.install or "none"
@@ -230,11 +244,11 @@ def list_tools(app: AppContext, filter_blocked: bool, filter_allowed: bool, as_j
         updated = e.updated_at.strftime("%Y-%m-%d %H:%M") if e.updated_at else "-"
 
         color = "red" if status == "block" else "green" if status == "allow" else None
-        line = f"{e.target_name:<{name_w}}  {status:<{status_w}}  {reason:<40}  {updated}"
+        line_core = f"{e.target_name:<{name_w}}  {status:<{status_w}}  {reason:<40}  {updated}"
         if color:
-            click.secho(line, fg=color)
+            click.echo(ux._style(line_core, fg=color))
         else:
-            click.echo(line)
+            click.echo(line_core)
 
 
 # ---------------------------------------------------------------------------
@@ -287,9 +301,9 @@ def status(app: AppContext, name: str, source: str, as_json: bool) -> None:
         click.echo(json.dumps(result, indent=2, default=str))
         return
 
-    click.echo(f"Tool: {name}")
+    click.echo(f"{ux.bold('Tool:')} {name}")
     if source:
-        click.echo(f"Source: {source}")
+        click.echo(f"{ux.bold('Source:')} {source}")
 
     if scoped_entry and not scoped_entry.actions.is_empty():
         s = scoped_entry.actions.install or "none"
@@ -297,9 +311,9 @@ def status(app: AppContext, name: str, source: str, as_json: bool) -> None:
         msg = f"  Scoped status:  {s}"
         if scoped_entry.reason:
             msg += f"  ({scoped_entry.reason})"
-        click.secho(msg, fg=color) if color else click.echo(msg)
+        click.echo(ux._style(msg, fg=color) if color else msg)
     elif source:
-        click.echo("  Scoped status:  none")
+        click.echo(f"  {ux.dim('Scoped status:')}  none")
 
     if global_entry and not global_entry.actions.is_empty():
         s = global_entry.actions.install or "none"
@@ -307,16 +321,16 @@ def status(app: AppContext, name: str, source: str, as_json: bool) -> None:
         msg = f"  Global status:  {s}"
         if global_entry.reason:
             msg += f"  ({global_entry.reason})"
-        click.secho(msg, fg=color) if color else click.echo(msg)
+        click.echo(ux._style(msg, fg=color) if color else msg)
     else:
-        click.echo("  Global status:  none")
+        click.echo(f"  {ux.dim('Global status:')}  none")
 
     # Effective status: scoped wins over global
     effective = _effective_status(scoped_entry, global_entry)
     color = "red" if effective == "block" else "green" if effective == "allow" else None
     msg = f"  Effective:      {effective}"
     if color:
-        click.secho(msg, fg=color)
+        click.echo(ux._style(msg, fg=color))
     else:
         click.echo(msg)
 

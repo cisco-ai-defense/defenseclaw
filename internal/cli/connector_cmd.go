@@ -118,7 +118,8 @@ These backups are created by Connector.Setup() before the gateway patches
 the agent framework's config. They are the rollback point that
 'connector teardown' uses, so listing them is the safest way to check
 whether 'defenseclaw uninstall' will be able to restore the user's
-original configuration.
+original configuration. Both legacy flat backups and managed backups
+under connector_backups/<connector>/ are shown.
 
 The default output is a human-readable table:
 
@@ -246,7 +247,7 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		}
 		return json.NewEncoder(cmd.OutOrStdout()).Encode(payload)
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "[ok] %s teardown complete\n", name)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s teardown complete\n", Style("✓", "fg=green", "bold"), name)
 	return nil
 }
 
@@ -289,11 +290,11 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 	}
 
 	if verifyErr != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "[dirty] %s: %v\n", name, verifyErr)
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %v\n", Style("✗", "fg=red", "bold"), name, verifyErr)
 		connectorExit(1)
 		return nil
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "[clean] %s: no residual DefenseClaw state detected\n", name)
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s: no residual DefenseClaw state detected\n", Style("✓", "fg=green", "bold"), name)
 	return nil
 }
 
@@ -358,12 +359,21 @@ func runConnectorListBackups(cmd *cobra.Command, _ []string) error {
 		})
 	}
 
+	managed, err := discoverManagedConnectorBackups(dataDir)
+	if err != nil {
+		return err
+	}
+	backups = append(backups, managed...)
+
 	if oc := discoverOpenClawBackup(); oc != nil {
 		backups = append(backups, *oc)
 	}
 
 	sort.Slice(backups, func(i, j int) bool {
-		return backups[i].Connector < backups[j].Connector
+		if backups[i].Connector != backups[j].Connector {
+			return backups[i].Connector < backups[j].Connector
+		}
+		return backups[i].Path < backups[j].Path
 	})
 
 	if connectorFlagJSON {
@@ -380,9 +390,58 @@ func runConnectorListBackups(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(out, "no connector backups found under %s\n", dataDir)
 		return nil
 	}
-	fmt.Fprintf(out, "%-12s  %-60s  %s\n", "CONNECTOR", "PATH", "SIZE")
+	hdr := fmt.Sprintf("%-12s  %-60s  %s", "CONNECTOR", "PATH", "SIZE")
+	fmt.Fprintln(out, Bold(hdr))
 	for _, b := range backups {
 		fmt.Fprintf(out, "%-12s  %-60s  %d\n", b.Connector, b.Path, b.SizeBytes)
 	}
 	return nil
+}
+
+func discoverManagedConnectorBackups(dataDir string) ([]connectorBackup, error) {
+	root := filepath.Join(dataDir, "connector_backups")
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("connector list-backups: stat managed backup dir: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, nil
+	}
+
+	var backups []connectorBackup
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, statErr := d.Info()
+		if statErr != nil {
+			return statErr
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = filepath.Base(path)
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		connectorName := "unknown"
+		if len(parts) > 1 && strings.TrimSpace(parts[0]) != "" {
+			connectorName = parts[0]
+		}
+		backups = append(backups, connectorBackup{
+			Connector: connectorName,
+			Path:      path,
+			Filename:  filepath.Join("connector_backups", rel),
+			SizeBytes: info.Size(),
+		})
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("connector list-backups: walk managed backup dir: %w", err)
+	}
+	return backups, nil
 }

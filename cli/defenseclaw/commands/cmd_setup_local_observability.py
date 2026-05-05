@@ -39,6 +39,7 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import local_observability_bridge_bin
@@ -170,7 +171,7 @@ def up_cmd(
 
     bridge = _resolve_bridge(app.cfg.data_dir)
 
-    click.echo("  Starting local observability stack (this takes ~30s)...")
+    click.echo(f"  {ux.dim('→')} Starting local observability stack (this takes ~30s)...")
     contract = _run_bridge_up(bridge, timeout=timeout, no_wait=no_wait)
     if contract is None:
         raise SystemExit(1)
@@ -187,7 +188,9 @@ def up_cmd(
             signals=_parse_signals(signals),
             service_name=service_name,
         )
-        click.echo(f"  Config updated: otel.enabled=true, endpoint={otlp_endpoint}")
+        click.echo(
+            f"  {ux.bold('Config updated:')} otel.enabled=true, endpoint={otlp_endpoint}"
+        )
 
         if with_audit_sink:
             try:
@@ -198,7 +201,7 @@ def up_cmd(
                 )
                 sink_applied = True
                 click.echo(
-                    "  Config updated: "
+                    f"  {ux.bold('Config updated:')} "
                     f"audit_sinks[{_AUDIT_SINK_NAME}].enabled=true, kind=otlp_logs"
                 )
             except ValueError as exc:
@@ -208,10 +211,7 @@ def up_cmd(
                 # name and a conflicting kind). Surface a warning so
                 # the operator can fix it without losing the otel:
                 # exporter wiring we just established.
-                click.echo(
-                    f"  warning: skipped audit_sinks[{_AUDIT_SINK_NAME}] write — {exc}",
-                    err=True,
-                )
+                ux.warn(f"skipped audit_sinks[{_AUDIT_SINK_NAME}] write — {exc}")
 
     _print_stack_summary(contract, audit_sink_enabled=sink_applied, cfg=app.cfg)
 
@@ -249,7 +249,7 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
 
         try:
             set_destination_enabled("otel", False, app.cfg.data_dir)
-            click.echo("  Config updated: otel.enabled=false")
+            click.echo(f"  {ux.bold('Config updated:')} otel.enabled=false")
         except ValueError as exc:
             click.echo(f"  warning: could not disable otel block: {exc}")
 
@@ -260,7 +260,8 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
         try:
             set_destination_enabled(_AUDIT_SINK_NAME, False, app.cfg.data_dir)
             click.echo(
-                f"  Config updated: audit_sinks[{_AUDIT_SINK_NAME}].enabled=false"
+                f"  {ux.bold('Config updated:')} "
+                f"audit_sinks[{_AUDIT_SINK_NAME}].enabled=false"
             )
             sink_disabled = True
         except ValueError:
@@ -523,13 +524,13 @@ def _reload_cfg_from_data_dir(app: AppContext) -> None:
 
 def _preflight_docker() -> bool:
     """Confirm Docker is installed + running and the stack's ports are free."""
-    click.echo("  Pre-flight checks:")
+    ux.section("Pre-flight checks")
     docker = shutil.which("docker")
     if not docker:
-        click.echo("    Docker installed... NOT FOUND")
-        click.echo("    Install Docker: https://docs.docker.com/get-docker/")
+        ux.err("Docker installed... NOT FOUND")
+        ux.subhead("Install Docker: https://docs.docker.com/get-docker/")
         return False
-    click.echo("    Docker installed... ok")
+    ux.ok("Docker installed... ok")
 
     try:
         result = subprocess.run(
@@ -539,26 +540,26 @@ def _preflight_docker() -> bool:
             timeout=10,
         )
         if result.returncode != 0:
-            click.echo("    Docker daemon running... NOT RUNNING")
-            click.echo("    Start Docker Desktop / the engine and try again.")
+            ux.err("Docker daemon running... NOT RUNNING")
+            ux.subhead("Start Docker Desktop / the engine and try again.")
             return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        click.echo("    Docker daemon running... NOT RUNNING")
+        ux.err("Docker daemon running... NOT RUNNING")
         return False
-    click.echo("    Docker daemon running... ok")
+    ux.ok("Docker daemon running... ok")
 
     # Port conflicts are advisory — compose will already own the ports
     # on a re-up so "in use by defenseclaw-*" should not block us.
     for port, label in _STACK_PORTS:
         if _port_in_use(port) and not _port_owned_by_stack(port):
-            click.echo(
-                f"    Port {port} ({label})... IN USE (by a non-stack process)",
+            ux.warn(
+                f"Port {port} ({label})... IN USE (by a non-stack process)",
             )
-            click.echo(
-                f"    Free port {port} or stop the conflicting service before retrying.",
+            ux.subhead(
+                f"Free port {port} or stop the conflicting service before retrying.",
             )
             return False
-        click.echo(f"    Port {port} ({label})... available")
+        ux.ok(f"Port {port} ({label})... available")
 
     return True
 
@@ -615,28 +616,28 @@ def _print_stack_summary(
     contract: dict[str, Any], *, audit_sink_enabled: bool = False, cfg: Any = None,
 ) -> None:
     click.echo()
-    click.echo("  Local observability stack is up:")
-    click.echo(f"    Grafana:    {contract.get('grafana_url', 'http://localhost:3000')}  (admin / admin)")
-    click.echo(f"    Prometheus: {contract.get('prometheus_url', 'http://localhost:9090')}")
-    click.echo(f"    Tempo API:  {contract.get('tempo_url', 'http://localhost:3200')}")
-    click.echo(f"    Loki API:   {contract.get('loki_url', 'http://localhost:3100')}")
-    click.echo(f"    OTLP gRPC:  {contract.get('otlp_endpoint', '127.0.0.1:4317')}")
-    click.echo(f"    OTLP HTTP:  {contract.get('otlp_http_endpoint', '127.0.0.1:4318')}")
+    ux.section("Local observability stack is up")
+    click.echo(f"    {ux.bold('Grafana:')}    {contract.get('grafana_url', 'http://localhost:3000')}  (admin / admin)")
+    click.echo(f"    {ux.bold('Prometheus:')} {contract.get('prometheus_url', 'http://localhost:9090')}")
+    click.echo(f"    {ux.bold('Tempo API:')}  {contract.get('tempo_url', 'http://localhost:3200')}")
+    click.echo(f"    {ux.bold('Loki API:')}   {contract.get('loki_url', 'http://localhost:3100')}")
+    click.echo(f"    {ux.bold('OTLP gRPC:')}  {contract.get('otlp_endpoint', '127.0.0.1:4317')}")
+    click.echo(f"    {ux.bold('OTLP HTTP:')}  {contract.get('otlp_http_endpoint', '127.0.0.1:4318')}")
     click.echo()
     if audit_sink_enabled:
-        click.echo(
-            f"  Audit sink:  {_AUDIT_SINK_NAME} (otlp_logs) "
+        ux.ok(
+            f"Audit sink:  {_AUDIT_SINK_NAME} (otlp_logs) "
             "→ same OTLP endpoint, gateway 'Sinks' row will report RUNNING."
         )
     else:
-        click.echo(
-            "  Audit sink:  not configured (--no-audit-sink / --no-config). "
+        ux.subhead(
+            "Audit sink:  not configured (--no-audit-sink / --no-config). "
             "The gateway 'Sinks' row stays DISABLED until an audit sink is added."
         )
     click.echo()
     print_redaction_status_hint(cfg)
     click.echo()
-    click.echo("  Next steps:")
+    ux.section("Next steps")
     click.echo("    defenseclaw-gateway restart         # pick up the new config")
     click.echo("    defenseclaw setup local-observability status")
     click.echo("    defenseclaw setup local-observability down   # stop (keeps data)")

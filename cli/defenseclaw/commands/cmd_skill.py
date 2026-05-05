@@ -30,6 +30,7 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -383,11 +384,11 @@ def list_skills(app: AppContext, as_json: bool) -> None:
             app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
         )
         if connector == "openclaw":
-            click.echo("No skills found. Is openclaw installed?")
+            click.echo(ux.dim("No skills found. Is openclaw installed?"))
         else:
             click.echo(
                 f"No skills found for connector={connector!r} "
-                f"(checked the connector-specific skill directories).",
+                f"{ux.dim('(checked the connector-specific skill directories).')}",
             )
         return
 
@@ -650,7 +651,7 @@ def scan(
         raise SystemExit(2)
 
     if pe.is_allowed("skill", name):
-        click.echo(f"ALLOWED (skip scan): {name}")
+        click.echo(ux._style(f"ALLOWED (skip scan): {name}", fg="green"))
         return
 
     from defenseclaw.commands import _scan_ui
@@ -952,7 +953,7 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
     client = _sidecar_client(app)
 
     if not as_json:
-        click.echo(f"[scan] remote skill-scanner via sidecar -> {target}")
+        click.echo(ux.dim(f"[scan] remote skill-scanner via sidecar -> {target}"))
 
     try:
         data = client.scan_skill(target=target, name=name)
@@ -966,12 +967,12 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
 
     findings = data.get("findings") or data.get("Findings") or []
     max_sev = data.get("max_severity", "INFO")
-    click.echo(f"  Skill:    {name}")
-    click.echo(f"  Target:   {target} (remote)")
-    click.echo(f"  Findings: {len(findings)}")
+    click.echo(f"  {ux._style('Skill:', fg='bright_black', bold=True)}    {name}")
+    click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {target} {ux.dim('(remote)')}")
+    click.echo(f"  {ux._style('Findings:', fg='bright_black', bold=True)} {len(findings)}")
 
     if not findings:
-        click.secho("  Verdict:  CLEAN", fg="green")
+        ux.ok("Verdict:  CLEAN", indent="  ")
     else:
         color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(max_sev, "white")
         sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
@@ -982,13 +983,14 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
         breakdown = ", ".join(
             f"{counts[s]} {s.lower()}" for s in sev_order if s in counts
         )
-        click.secho(f"  Verdict:  {max_sev} ({breakdown})", fg=color)
+        verdict_txt = f"Verdict:  {max_sev} ({breakdown})"
+        click.echo(f"  {ux._style(verdict_txt, fg=color, bold=True)}")
         click.echo()
         for f in findings:
             sev = f.get("severity") or f.get("Severity") or "INFO"
             title = f.get("title") or f.get("Title") or ""
             sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(sev, "white")
-            click.secho(f"    [{sev}]", fg=sev_color, nl=False)
+            click.echo(f"    {ux._style(f'[{sev}]', fg=sev_color, bold=True)}", nl=False)
             click.echo(f" {title}")
 
 
@@ -1292,13 +1294,13 @@ def _safe_tar_extract(
 
 
 def _print_result(name: str, result) -> None:
-    click.echo(f"  Skill:    {name}")
-    click.echo(f"  Target:   {result.target}")
-    click.echo(f"  Duration: {result.duration.total_seconds():.2f}s")
-    click.echo(f"  Findings: {len(result.findings)}")
+    click.echo(f"  {ux._style('Skill:', fg='bright_black', bold=True)}    {name}")
+    click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {result.target}")
+    click.echo(f"  {ux._style('Duration:', fg='bright_black', bold=True)} {result.duration.total_seconds():.2f}s")
+    click.echo(f"  {ux._style('Findings:', fg='bright_black', bold=True)} {len(result.findings)}")
 
     if result.is_clean():
-        click.secho("  Verdict:  CLEAN", fg="green")
+        ux.ok("Verdict:  CLEAN", indent="  ")
     else:
         sev = result.max_severity()
         color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(sev, "white")
@@ -1309,19 +1311,20 @@ def _print_result(name: str, result) -> None:
         breakdown = ", ".join(
             f"{counts[s]} {s.lower()}" for s in sev_order if s in counts
         )
-        click.secho(f"  Verdict:  {sev} ({breakdown})", fg=color)
+        verdict_txt = f"Verdict:  {sev} ({breakdown})"
+        click.echo(f"  {ux._style(verdict_txt, fg=color, bold=True)}")
         click.echo()
         for f in result.findings:
             sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
-            click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
+            click.echo(f"    {ux._style(f'[{f.severity}]', fg=sev_color, bold=True)}", nl=False)
             click.echo(f" {f.title}")
             if f.location:
-                click.echo(f"      Location: {f.location}")
+                click.echo(f"      {ux.dim('Location:')} {f.location}")
             if f.description:
                 desc = f.description[:120] + "..." if len(f.description) > 120 else f.description
                 click.echo(f"      {desc}")
             if f.remediation:
-                click.echo(f"      Fix: {f.remediation}")
+                click.echo(f"      {ux.dim('Fix:')} {f.remediation}")
 
 
 # ---------------------------------------------------------------------------
@@ -1703,31 +1706,33 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
         return
 
     # Text output
-    click.echo(f"Skill:       {info_map.get('name', skill_name)}")
+    click.echo(f"{ux.bold('Skill:')}       {info_map.get('name', skill_name)}")
     if info_map.get("description"):
-        click.echo(f"Description: {info_map['description']}")
+        click.echo(f"{ux.bold('Description:')} {info_map['description']}")
     if info_map.get("source"):
-        click.echo(f"Source:      {info_map['source']}")
+        click.echo(f"{ux.bold('Source:')}      {info_map['source']}")
     if info_map.get("baseDir"):
-        click.echo(f"Path:        {info_map['baseDir']}")
+        click.echo(f"{ux.bold('Path:')}        {info_map['baseDir']}")
     if info_map.get("filePath"):
-        click.echo(f"File:        {info_map['filePath']}")
-    click.echo(f"Eligible:    {info_map.get('eligible', False)}")
-    click.echo(f"Bundled:     {info_map.get('bundled', False)}")
+        click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
+    click.echo(f"{ux.bold('Eligible:')}    {info_map.get('eligible', False)}")
+    click.echo(f"{ux.bold('Bundled:')}     {info_map.get('bundled', False)}")
     if info_map.get("homepage"):
-        click.echo(f"Homepage:    {info_map['homepage']}")
+        click.echo(f"{ux.bold('Homepage:')}    {info_map['homepage']}")
 
     scan_data = info_map.get("scan")
     if scan_data:
         click.echo()
-        click.echo("Last Scan:")
+        click.echo(ux.bold("Last Scan:"))
         if scan_data.get("clean"):
-            click.secho("  Verdict:  CLEAN", fg="green")
+            ux.ok("Verdict:  CLEAN", indent="  ")
         else:
             n = scan_data.get("total_findings", 0)
             sev = scan_data.get("max_severity", "INFO")
-            click.echo(f"  Verdict:  {n} {sev} findings")
-        click.echo(f"  Target:   {scan_data.get('target', '')}")
+            click.echo(
+                f"  {ux.bold('Verdict:')}  {n} {ux._style(sev, fg='yellow', bold=True)} findings"
+            )
+        click.echo(f"  {ux.bold('Target:')}   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")
     if actions_data:
@@ -1735,7 +1740,7 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
         state = ActionState.from_dict(actions_data)
         if not state.is_empty():
             click.echo()
-            click.echo(f"Actions:     {state.summary()}")
+            click.echo(f"{ux.bold('Actions:')}     {state.summary()}")
 
 
 # ---------------------------------------------------------------------------

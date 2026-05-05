@@ -64,6 +64,23 @@ class CheckConnectorResidueTests(unittest.TestCase):
         self.assertIn("codex", check["detail"])
         self.assertIn("doctor --fix", check["detail"])
 
+    def test_warns_when_managed_codex_backup_present_with_openclaw_active(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            managed = os.path.join(
+                data_dir,
+                "connector_backups",
+                "codex",
+                "config.toml.json",
+            )
+            os.makedirs(os.path.dirname(managed), exist_ok=True)
+            with open(managed, "w") as fh:
+                fh.write("{}")
+            r = _DoctorResult()
+            _check_connector_residue(_cfg(data_dir), "openclaw", r)
+        self.assertEqual(r.warned, 1)
+        self.assertIn("codex", r.checks[0]["detail"])
+        self.assertIn("connector_backups", r.checks[0]["detail"])
+
     def test_does_not_flag_active_connectors_own_artifacts(self):
         """If codex IS the active connector, codex_backup.json is not residue."""
         with tempfile.TemporaryDirectory() as data_dir:
@@ -100,6 +117,22 @@ class CheckConnectorResidueTests(unittest.TestCase):
             _check_connector_residue(
                 _cfg(data_dir, openclaw_config_file=oc_path), "codex", r,
             )
+        self.assertEqual(r.warned, 1)
+        self.assertIn("openclaw", r.checks[0]["detail"])
+
+    def test_flags_openclaw_managed_backup_when_codex_is_active(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            managed = os.path.join(
+                data_dir,
+                "connector_backups",
+                "openclaw",
+                "openclaw.json.json",
+            )
+            os.makedirs(os.path.dirname(managed), exist_ok=True)
+            with open(managed, "w") as fh:
+                fh.write("{}")
+            r = _DoctorResult()
+            _check_connector_residue(_cfg(data_dir), "codex", r)
         self.assertEqual(r.warned, 1)
         self.assertIn("openclaw", r.checks[0]["detail"])
 
@@ -157,6 +190,29 @@ class FixConnectorResidueTests(unittest.TestCase):
         connectors = [args[args.index("--connector") + 1] for args in called_args]
         self.assertEqual(set(connectors), {"codex", "claudecode"})
 
+    def test_calls_gateway_teardown_for_managed_residual(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            managed = os.path.join(
+                data_dir,
+                "connector_backups",
+                "codex",
+                "config.toml.json",
+            )
+            os.makedirs(os.path.dirname(managed), exist_ok=True)
+            with open(managed, "w") as fh:
+                fh.write("{}")
+            cfg = self._cfg_with_residue(data_dir)
+            with patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
+                 patch("subprocess.run") as run_mock:
+                run_mock.return_value.returncode = 0
+                run_mock.return_value.stdout = ""
+                run_mock.return_value.stderr = ""
+                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
+        self.assertEqual(tag, "pass", msg=detail)
+        run_mock.assert_called_once()
+        args = run_mock.call_args.args[0]
+        self.assertEqual(args[args.index("--connector") + 1], "codex")
+
     def test_warns_when_gateway_binary_missing(self):
         with tempfile.TemporaryDirectory() as data_dir:
             cfg = self._cfg_with_residue(data_dir, "codex_backup.json")
@@ -206,15 +262,25 @@ class ResidueArtifactsContractTests(unittest.TestCase):
             self.assertIn(name, _CONNECTOR_RESIDUE_ARTIFACTS)
 
     def test_artifact_filenames_match_connector_state(self):
-        """Filenames must be the *_backup.json names that the Go
-        connectors actually write under data_dir. Drift here would
+        """Filenames must cover both legacy and managed backup names that
+        the Go connectors write under data_dir. Drift here would
         cause silent false-negatives in residue detection."""
-        self.assertEqual(_CONNECTOR_RESIDUE_ARTIFACTS["claudecode"],
-                         ("claudecode_backup.json",))
-        self.assertEqual(_CONNECTOR_RESIDUE_ARTIFACTS["codex"],
-                         ("codex_backup.json",))
-        self.assertEqual(_CONNECTOR_RESIDUE_ARTIFACTS["zeptoclaw"],
-                         ("zeptoclaw_backup.json",))
+        self.assertIn("claudecode_backup.json", _CONNECTOR_RESIDUE_ARTIFACTS["claudecode"])
+        self.assertIn(
+            os.path.join("connector_backups", "claudecode", "settings.json.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["claudecode"],
+        )
+        self.assertIn("codex_backup.json", _CONNECTOR_RESIDUE_ARTIFACTS["codex"])
+        self.assertIn("codex_config_backup.json", _CONNECTOR_RESIDUE_ARTIFACTS["codex"])
+        self.assertIn(
+            os.path.join("connector_backups", "codex", "config.toml.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["codex"],
+        )
+        self.assertIn("zeptoclaw_backup.json", _CONNECTOR_RESIDUE_ARTIFACTS["zeptoclaw"])
+        self.assertIn(
+            os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["zeptoclaw"],
+        )
 
 
 if __name__ == "__main__":
