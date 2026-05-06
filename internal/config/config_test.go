@@ -323,6 +323,35 @@ func TestValidate_InvalidInstall(t *testing.T) {
 	}
 }
 
+func TestValidateDeploymentMode_EmptyAllowed(t *testing.T) {
+	if err := validateDeploymentMode(""); err != nil {
+		t.Fatalf("validateDeploymentMode(empty) returned unexpected error: %v", err)
+	}
+}
+
+func TestValidateDeploymentMode_Valid(t *testing.T) {
+	for _, mode := range []string{
+		string(DeploymentModeManagedEnterprise),
+		string(DeploymentModeUnmanagedBYOD),
+		string(DeploymentModeCICD),
+		string(DeploymentModeSandboxed),
+		string(DeploymentModeServer),
+		string(DeploymentModeSaaS),
+	} {
+		t.Run(mode, func(t *testing.T) {
+			if err := validateDeploymentMode(mode); err != nil {
+				t.Fatalf("validateDeploymentMode(%q) returned unexpected error: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestValidateDeploymentMode_Invalid(t *testing.T) {
+	if err := validateDeploymentMode("managed"); err == nil {
+		t.Fatal("expected validateDeploymentMode to reject free-form value")
+	}
+}
+
 func TestExpandPath(t *testing.T) {
 	home, _ := os.UserHomeDir()
 
