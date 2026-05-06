@@ -1010,7 +1010,8 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
     if http_code == 400:
         if hec_code == 7:
             index_hint = f" (configured index: {d.index!r})" if getattr(d, "index", None) else ""
-            _emit("fail", label, f"incorrect index{index_hint} — create the index in Splunk or update splunk_hec.index", r=r)
+            msg = f"incorrect index{index_hint} — create the index in Splunk or update splunk_hec.index"
+            _emit("fail", label, msg, r=r)
         else:
             _emit("fail", label, f"bad request: {hec_msg}", r=r)
         return
@@ -1042,8 +1043,8 @@ def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
     doctor so operators are nudged toward token_env before it becomes a
     security finding.
     """
-    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
     import os
+    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
     try:
         doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
     except Exception:
