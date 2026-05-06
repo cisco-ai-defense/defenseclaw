@@ -68,6 +68,14 @@ _privacy_disable_redaction_warned = False
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
+VALID_DEPLOYMENT_MODES = {
+    "managed_enterprise",
+    "unmanaged_byod",
+    "ci_cd",
+    "sandboxed",
+    "server",
+    "saas",
+}
 
 
 def _home() -> Path:
@@ -127,6 +135,17 @@ def detect_environment() -> str:
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
     return "linux"
+
+
+def _validate_deployment_mode(mode: str) -> str:
+    mode = (mode or "").strip()
+    if not mode:
+        return ""
+    if mode not in VALID_DEPLOYMENT_MODES:
+        raise ValueError(
+            "config: deployment_mode={!r} is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)".format(mode)
+        )
+    return mode
 
 
 _sandbox_mode_cache: bool | None = None
@@ -1849,7 +1868,7 @@ def load() -> Config:
         environment=raw.get("environment", detect_environment()),
         tenant_id=raw.get("tenant_id", ""),
         workspace_id=raw.get("workspace_id", ""),
-        deployment_mode=raw.get("deployment_mode", ""),
+        deployment_mode=_validate_deployment_mode(raw.get("deployment_mode", "")),
         discovery_source=raw.get("discovery_source", ""),
         claw=ClawConfig(
             mode=raw.get("claw", {}).get("mode", "openclaw"),

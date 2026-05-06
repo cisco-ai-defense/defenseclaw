@@ -1413,6 +1413,13 @@ func Load() (*Config, error) {
 	migrateConfig(&cfg)
 	warnDisableRedactionConfig(&cfg)
 
+	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
+
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
 			if ReportConfigLoadError != nil {
@@ -1848,6 +1855,17 @@ func warnPlaintextSecrets(cfg *Config) {
 				"prefer bearer_env to keep secrets out of config.yaml", s.Name)
 		}
 	}
+}
+
+func validateDeploymentMode(mode string) error {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		return nil
+	}
+	if _, ok := validDeploymentModes[mode]; ok {
+		return nil
+	}
+	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)", mode)
 }
 
 func (c *Config) Save() error {
