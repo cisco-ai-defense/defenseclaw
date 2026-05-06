@@ -30,6 +30,34 @@ import (
 	"time"
 )
 
+// circuitState represents the three states of the HEC circuit breaker.
+type circuitState int
+
+const (
+	// circuitClosed is the normal operating state — sends are attempted.
+	circuitClosed circuitState = iota
+	// circuitOpen means consecutive failures have exceeded the threshold.
+	// All sends are skipped until the cooldown period elapses.
+	circuitOpen
+	// circuitHalfOpen means the cooldown has elapsed and a single probe
+	// send is allowed through to test recovery. Success closes the circuit;
+	// failure re-opens it and resets the cooldown timer.
+	circuitHalfOpen
+)
+
+func (c circuitState) String() string {
+	switch c {
+	case circuitClosed:
+		return "closed"
+	case circuitOpen:
+		return "open"
+	case circuitHalfOpen:
+		return "half-open"
+	default:
+		return "unknown"
+	}
+}
+
 // SplunkHECConfig holds Splunk HTTP Event Collector wiring for one sink.
 // All fields are operator-supplied; nothing is sourced from environment
 // hardcoding (token comes from cfg.Token via env-resolution at the
@@ -46,6 +74,22 @@ type SplunkHECConfig struct {
 	FlushIntervalS int
 	TimeoutS       int
 	Filter         SinkFilter
+
+	// Retry configuration. MaxRetries is the number of additional
+	// attempts after the first failure (0 = no retries, matches
+	// previous behaviour). RetryBaseDelayS is the initial backoff
+	// delay in seconds; each retry doubles it (exponential backoff).
+	// Defaults: MaxRetries=3, RetryBaseDelayS=1.
+	MaxRetries      int
+	RetryBaseDelayS int
+
+	// Circuit breaker configuration. CircuitBreakerThreshold is the
+	// number of consecutive send failures before the circuit opens.
+	// CircuitBreakerCooldownS is how long (in seconds) the circuit
+	// stays open before moving to half-open for a probe attempt.
+	// Defaults: CircuitBreakerThreshold=5, CircuitBreakerCooldownS=60.
+	CircuitBreakerThreshold  int
+	CircuitBreakerCooldownS  int
 
 	// SourceTypeOverrides maps a canonical audit action (e.g.
 	// "llm-judge-response") to a dedicated Splunk sourcetype
@@ -84,14 +128,26 @@ func DefaultSourceTypeOverrides() map[string]string {
 // SplunkHECSink is the refactored Splunk HEC client extracted from the
 // legacy internal/audit/splunk.go. Behaviour is intentionally identical
 // (HEC event format, batching, sync flush) so existing Splunk dashboards
-// keep working — the only change is config plumbing.
+// keep working — the only change is config plumbing and the addition of
+// exponential-backoff retries and a circuit breaker.
 type SplunkHECSink struct {
 	cfg    SplunkHECConfig
 	client *http.Client
-	mu     sync.Mutex
-	batch  []splunkEvent
+
+	// batch state
+	mu    sync.Mutex
+	batch []splunkEvent
+
+	// flush loop
 	ticker *time.Ticker
 	done   chan struct{}
+
+	// circuit breaker state — protected by cbMu so it never
+	// contends with the batch mutex on the hot path.
+	cbMu            sync.Mutex
+	cbState         circuitState
+	cbFailures      int       // consecutive failures since last success
+	cbOpenedAt      time.Time // when the circuit last opened
 }
 
 type splunkEvent struct {
@@ -166,6 +222,26 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		cfg.SourceType = "_json"
 	}
 
+	// Retry defaults: 3 retries with 1 s base delay gives a worst-case
+	// per-flush delay of 1+2+4 = 7 s before giving up and re-queuing,
+	// which fits comfortably inside a 10 s HTTP timeout.
+	if cfg.MaxRetries <= 0 {
+		cfg.MaxRetries = 3
+	}
+	if cfg.RetryBaseDelayS <= 0 {
+		cfg.RetryBaseDelayS = 1
+	}
+
+	// Circuit breaker defaults: open after 5 consecutive failures,
+	// probe again after 60 s. This prevents hammering a down HEC
+	// endpoint on every flush tick.
+	if cfg.CircuitBreakerThreshold <= 0 {
+		cfg.CircuitBreakerThreshold = 5
+	}
+	if cfg.CircuitBreakerCooldownS <= 0 {
+		cfg.CircuitBreakerCooldownS = 60
+	}
+
 	// Phase 3: every sink gets the canonical per-event
 	// sourcetype split unless the operator has already supplied
 	// their own map (which wins so customer Splunk naming
@@ -199,7 +275,8 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 			Transport: transport,
 			Timeout:   time.Duration(cfg.TimeoutS) * time.Second,
 		},
-		done: make(chan struct{}),
+		done:    make(chan struct{}),
+		cbState: circuitClosed,
 	}
 
 	if cfg.FlushIntervalS > 0 {
@@ -225,6 +302,69 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 
 func (s *SplunkHECSink) Name() string { return s.cfg.Name }
 func (s *SplunkHECSink) Kind() string { return "splunk_hec" }
+
+// CircuitState returns the current circuit breaker state. Exposed for
+// use by defenseclaw doctor and status reporting — callers must not
+// rely on the value remaining stable after the call returns.
+func (s *SplunkHECSink) CircuitState() string {
+	s.cbMu.Lock()
+	defer s.cbMu.Unlock()
+	return s.cbState.String()
+}
+
+// cbAllow checks the circuit breaker and returns true if the caller
+// should attempt a send. It transitions open→half-open when the
+// cooldown has elapsed. Must be called with cbMu held.
+func (s *SplunkHECSink) cbAllow() bool {
+	switch s.cbState {
+	case circuitClosed:
+		return true
+	case circuitHalfOpen:
+		// Only one probe is allowed at a time; the caller that gets
+		// true is responsible for calling cbRecord with the outcome.
+		return true
+	case circuitOpen:
+		cooldown := time.Duration(s.cfg.CircuitBreakerCooldownS) * time.Second
+		if time.Since(s.cbOpenedAt) >= cooldown {
+			s.cbState = circuitHalfOpen
+			fmt.Fprintf(os.Stderr,
+				"info: audit sink %q (splunk_hec): circuit half-open — probing HEC after cooldown\n",
+				s.cfg.Name)
+			return true
+		}
+		return false
+	default:
+		return false
+	}
+}
+
+// cbRecord updates circuit breaker state after a send attempt.
+// success=true closes or keeps-closed the circuit; success=false
+// increments the failure counter and may open the circuit.
+// Must be called with cbMu held.
+func (s *SplunkHECSink) cbRecord(success bool) {
+	if success {
+		if s.cbState != circuitClosed {
+			fmt.Fprintf(os.Stderr,
+				"info: audit sink %q (splunk_hec): circuit closed — HEC recovered\n",
+				s.cfg.Name)
+		}
+		s.cbState = circuitClosed
+		s.cbFailures = 0
+		return
+	}
+
+	s.cbFailures++
+	if s.cbState == circuitHalfOpen || s.cbFailures >= s.cfg.CircuitBreakerThreshold {
+		if s.cbState != circuitOpen {
+			fmt.Fprintf(os.Stderr,
+				"warning: audit sink %q (splunk_hec): circuit opened after %d consecutive failures — suppressing sends for %ds\n",
+				s.cfg.Name, s.cbFailures, s.cfg.CircuitBreakerCooldownS)
+		}
+		s.cbState = circuitOpen
+		s.cbOpenedAt = time.Now()
+	}
+}
 
 // sourceTypeFor picks the wire sourcetype for an event. Per-action
 // overrides win over the sink-wide default so operators can keep a
@@ -323,11 +463,11 @@ func (s *SplunkHECSink) Flush(ctx context.Context) error {
 		}
 	}
 
-	if err := s.sendHEC(ctx, buf.Bytes()); err != nil {
-		// Bounded retry. Re-queue the failed batch so the next
-		// flush retries delivery, but cap the queue so an offline
-		// HEC collector cannot grow unbounded RSS. Without this
-		// cap a weekend outage ends in OOM-kill.
+	if err := s.sendWithRetry(ctx, buf.Bytes()); err != nil {
+		// Re-queue the failed batch so the next flush retries
+		// delivery, but cap the queue so an offline HEC collector
+		// cannot grow unbounded RSS. Without this cap a weekend
+		// outage ends in OOM-kill.
 		s.mu.Lock()
 		maxQueue := maxHECQueue(s.cfg.BatchSize)
 		combined := append(pending, s.batch...)
@@ -345,6 +485,63 @@ func (s *SplunkHECSink) Flush(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+// sendWithRetry wraps sendHEC with exponential backoff and circuit
+// breaker logic. It will attempt up to 1+MaxRetries sends, doubling
+// the delay between each attempt starting at RetryBaseDelayS seconds.
+//
+// Circuit breaker: if the circuit is open (too many consecutive
+// failures) the payload is not sent and an error is returned
+// immediately so the batch is re-queued for the next flush. The
+// circuit moves to half-open after CircuitBreakerCooldownS seconds
+// and allows a single probe through to test recovery.
+func (s *SplunkHECSink) sendWithRetry(ctx context.Context, payload []byte) error {
+	s.cbMu.Lock()
+	allowed := s.cbAllow()
+	s.cbMu.Unlock()
+
+	if !allowed {
+		return fmt.Errorf("splunk_hec: circuit open — skipping send, HEC endpoint unreachable")
+	}
+
+	var lastErr error
+	delay := time.Duration(s.cfg.RetryBaseDelayS) * time.Second
+
+	for attempt := 0; attempt <= s.cfg.MaxRetries; attempt++ {
+		if attempt > 0 {
+			// Respect context cancellation during backoff sleep.
+			select {
+			case <-ctx.Done():
+				s.cbMu.Lock()
+				s.cbRecord(false)
+				s.cbMu.Unlock()
+				return fmt.Errorf("splunk_hec: context cancelled during retry backoff: %w", ctx.Err())
+			case <-time.After(delay):
+			}
+			delay *= 2
+		}
+
+		lastErr = s.sendHEC(ctx, payload)
+		if lastErr == nil {
+			s.cbMu.Lock()
+			s.cbRecord(true)
+			s.cbMu.Unlock()
+			return nil
+		}
+
+		fmt.Fprintf(os.Stderr,
+			"warning: audit sink %q (splunk_hec): send attempt %d/%d failed: %v\n",
+			s.cfg.Name, attempt+1, s.cfg.MaxRetries+1, lastErr)
+	}
+
+	// All attempts exhausted — record the failure with the circuit breaker.
+	s.cbMu.Lock()
+	s.cbRecord(false)
+	s.cbMu.Unlock()
+
+	return fmt.Errorf("splunk_hec: all %d send attempts failed, last error: %w",
+		s.cfg.MaxRetries+1, lastErr)
 }
 
 // maxHECQueue returns the upper bound on the in-memory retry
