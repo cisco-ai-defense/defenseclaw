@@ -272,6 +272,42 @@ func TestStartApprovalSpan_RawCommandOnlyWhenRedactionDisabled(t *testing.T) {
 	}
 }
 
+func TestStartAgentSpan_EmitsRunID(t *testing.T) {
+	gatewaylog.SetProcessRunID("run-agent-123")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+	p.EndAgentSpan(span, "")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	got, ok := attrByKey(spans[0].Attributes, "defenseclaw.run.id")
+	if !ok || got.AsString() != "run-agent-123" {
+		t.Fatalf("defenseclaw.run.id=%q ok=%v want run-agent-123", got.AsString(), ok)
+	}
+}
+
+func TestStartLLMSpan_EmitsRunID(t *testing.T) {
+	gatewaylog.SetProcessRunID("run-llm-123")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 1024, 0.2)
+	p.EndLLMSpan(span, "gpt-5.5", 12, 34, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	got, ok := attrByKey(spans[0].Attributes, "defenseclaw.run.id")
+	if !ok || got.AsString() != "run-llm-123" {
+		t.Fatalf("defenseclaw.run.id=%q ok=%v want run-llm-123", got.AsString(), ok)
+	}
+}
+
 func TestDisabledProvider_Metrics_NoPanic(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")
 	ctx := context.Background()
