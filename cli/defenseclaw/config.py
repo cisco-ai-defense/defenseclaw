@@ -143,7 +143,9 @@ def _validate_deployment_mode(mode: str) -> str:
         return ""
     if mode not in VALID_DEPLOYMENT_MODES:
         raise ValueError(
-            "config: deployment_mode={!r} is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)".format(mode)
+            f"config: deployment_mode={mode!r} is invalid "
+            "(allowed: managed_enterprise, unmanaged_byod, "
+            "ci_cd, sandboxed, server, saas)"
         )
     return mode
 
