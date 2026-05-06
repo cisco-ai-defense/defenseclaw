@@ -1044,6 +1044,7 @@ def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
     security finding.
     """
     import os
+
     from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
     try:
         doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
