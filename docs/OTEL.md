@@ -53,7 +53,7 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `deployment.environment` | string | `macos` | `config.Environment` |
 | `defenseclaw.tenant.id` | string | `tenant-a` | `config.tenant_id` when set |
 | `defenseclaw.workspace.id` | string | `workspace-1` | `config.workspace_id` when set |
-| `defenseclaw.deployment.mode` | string | `standalone` | `config.deployment_mode` when set |
+| `defenseclaw.deployment.mode` | string | `managed_enterprise` | `config.deployment_mode` when set. Allowed values: `managed_enterprise`, `unmanaged_byod`, `ci_cd`, `sandboxed`, `server`, `saas` |
 | `defenseclaw.discovery.source` | string | `registry` | `config.discovery_source` when set |
 | `host.name` | string | `dgx-spark-01` | `os.Hostname()` |
 | `host.arch` | string | `arm64` | `runtime.GOARCH` |
