@@ -1592,14 +1592,16 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 		return nil
 	}
 
+	// Fetch-intercepted requests carry the original upstream origin in
+	// X-DC-Target-URL. Use it as the provider base URL so self-hosted
+	// OpenAI-compatible endpoints, such as vLLM, are not routed to the
+	// provider's public default endpoint.
+	//
 	// Azure requires the specific resource endpoint as baseURL.
 	// Bedrock (ZeptoClaw / OpenClaw) uses regional bedrock-runtime URLs with
-	// ABSK bearer keys — Bifrost handles that path; pin BaseURL to the snapshot
-	// origin so the tenant routes to the correct region.
-	baseURL := ""
-	if prefix == "azure" {
-		baseURL = req.TargetURL
-	}
+	// ABSK bearer keys; keep the baseURL pinned to the snapshot origin so the
+	// tenant routes to the correct region.
+	baseURL := req.TargetURL
 	if prefix == "bedrock" {
 		baseURL = strings.TrimRight(req.TargetURL, "/")
 	}
