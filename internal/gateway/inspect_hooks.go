@@ -166,7 +166,7 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
 		tool := a.connectorName() + ":pre-request"
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity, "")
 		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
@@ -232,7 +232,7 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
 		tool := a.connectorName() + ":post-response"
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity, "")
 		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
@@ -299,7 +299,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
 		tool := a.connectorName() + ":post-tool-" + req.Tool
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity, "")
 		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 	}
 
