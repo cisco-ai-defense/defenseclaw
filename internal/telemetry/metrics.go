@@ -312,6 +312,11 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.hookLatency, err = m.Float64Histogram("defenseclaw.connector.hook.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("Connector hook handler latency."),
+		// Connector hooks run on the agent's critical path (every
+		// pre-tool / pre-prompt callback). Buckets bias hard towards
+		// sub-100ms so dashboards can spot regressions long before
+		// they're user-visible; the long tail still captures stalls.
+		metric.WithExplicitBucketBoundaries(1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
 	)
 	if err != nil {
 		return nil, err
@@ -604,6 +609,15 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 
 	sloMsBuckets := []float64{50, 100, 250, 500, 1000, 2000, 5000, 10000}
 
+	// genericMsBuckets covers the broad latency range used by most
+	// histograms in this package (handler latency, scan duration,
+	// discovery scan duration, etc.). It biases towards sub-second
+	// but extends out to a minute so a hung scanner is still visible
+	// on dashboards before falling off the right edge.
+	genericMsBuckets := []float64{
+		1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000,
+	}
+
 	// v7 instruments — Track 9 capacity/SLO + Track 7 (gauges = absolute snapshots).
 	ms.goroutines, err = m.Int64Gauge("defenseclaw.runtime.goroutines",
 		metric.WithUnit("{goroutine}"),
@@ -888,6 +902,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.agentDiscoveryDuration, err = m.Float64Histogram("defenseclaw.agent.discovery.duration",
 		metric.WithUnit("ms"),
 		metric.WithDescription("Wall-clock duration of the CLI local agent discovery scan."),
+		metric.WithExplicitBucketBoundaries(genericMsBuckets...),
 	)
 	if err != nil {
 		return nil, err
@@ -924,6 +939,7 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.aiDiscoveryDuration, err = m.Float64Histogram("defenseclaw.ai.discovery.duration",
 		metric.WithUnit("ms"),
 		metric.WithDescription("Wall-clock duration of continuous AI discovery scans."),
+		metric.WithExplicitBucketBoundaries(genericMsBuckets...),
 	)
 	if err != nil {
 		return nil, err
@@ -1728,14 +1744,58 @@ func (p *Provider) RecordLLMBridgeLatency(ctx context.Context, model, status str
 }
 
 // RecordOpenShellExit records an OpenShell subprocess exit (non-zero typically).
+//
+// `command` is the program (NOT the full argv) that was launched; the
+// caller MUST pass only the binary name or a stable identifier — the
+// label is bounded here as a defense-in-depth via boundOpenShellCommand
+// so a future caller passing the full user-supplied command line can't
+// blow up Prometheus cardinality. Anything outside [a-z0-9._-] (case
+// folded) is collapsed to "other".
 func (p *Provider) RecordOpenShellExit(ctx context.Context, command string, exitCode int) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
 	p.metrics.openShellExit.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("command", command),
+		attribute.String("command", boundOpenShellCommand(command)),
 		attribute.Int("exit_code", exitCode),
 	))
+}
+
+// boundOpenShellCommand returns a low-cardinality label for a shell
+// command. Only the first whitespace-separated token is considered
+// (so `rm -rf /tmp/foo` collapses to `rm`), the value is lowercased,
+// and any character outside the safe alphabet is replaced with `-`.
+// Empty input becomes "unknown"; anything longer than 32 bytes after
+// normalisation becomes "other" so a hostile / pathological binary
+// name can't introduce thousands of new series.
+func boundOpenShellCommand(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "unknown"
+	}
+	if i := strings.IndexAny(s, " \t\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.ToLower(s)
+	if len(s) > 32 {
+		return "other"
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= '0' && c <= '9',
+			c == '-' || c == '_' || c == '.':
+			out = append(out, c)
+		default:
+			out = append(out, '-')
+		}
+	}
+	if len(out) == 0 {
+		return "unknown"
+	}
+	return string(out)
 }
 
 // RecordCiscoError increments Cisco inspect errors by stable code.

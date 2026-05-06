@@ -425,11 +425,12 @@ func (p *AIVisibilityPanel) applyFilter() {
 }
 
 // View renders the panel. Layout, top to bottom:
-//   * Header with summary counts + "(updated Ns ago)" freshness
-//   * Filter line, present only when /-search is active
-//   * Table of rows (state, product, component(eco), version,
+//   - Header with summary counts + "(updated Ns ago)" freshness
+//   - Filter line, present only when /-search is active
+//   - Table of rows (state, product, component(eco), version,
 //     vendor, detector, count, identity, presence, last active)
-//   * Footer hint with key bindings
+//   - Footer hint with key bindings
+//
 // When the detail overlay is open we replace the table with the
 // per-signal drill-down -- handleAIVisibilityKey sends Esc to
 // ToggleDetail, restoring the table.

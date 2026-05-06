@@ -318,7 +318,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 62, "w": 24, "h": 12},
       "timeFrom": "15m",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | (action=~\"otel.ingest.*|codex.notify.*|codex-hook|claude-code-hook\" or defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\")", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | (action=~\"otel.ingest.*|codex.notify.*|codex-hook|claude-code-hook\" or defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\")", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

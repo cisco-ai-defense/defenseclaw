@@ -81,7 +81,7 @@
       "description": "Approval requests that haven't yet resolved (approved / denied / timed out) over the last 5 minutes. Sustained > 0 means a user has stalled out — investigate in HITL.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "clamp_min(sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", verdict_action=\"approval_requested\"}[5m])) - sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", verdict_action=~\"approval_approved|approval_denied|approval_timeout\"}[5m])), 0)", "refId": "A"}],
+      "targets": [{"expr": "clamp_min(sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_requested\"}[5m])) - sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])), 0)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 5}]}, "links": [{"title": "Open HITL dashboard", "url": "/d/defenseclaw-hitl?${__url_time_range}"}]}}
     },
@@ -103,7 +103,7 @@
       "gridPos": {"x": 0, "y": 5, "w": 6, "h": 4},
       "targets": [{"expr": "topk(1, sum by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{severity=~\"high|critical|HIGH|CRITICAL\"}[1h])))", "refId": "A", "instant": true}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"], "fields": "/^rule_id$/"}, "colorMode": "background", "textMode": "value"},
-      "fieldConfig": {"defaults": {"links": [{"title": "Open Findings dashboard", "url": "/d/defenseclaw-findings?${__url_time_range}&var-severity=high&var-severity=critical"}]}}
+      "fieldConfig": {"defaults": {"links": [{"title": "Open Findings dashboard", "url": "/d/defenseclaw-findings?${__url_time_range}&var-severity=HIGH&var-severity=CRITICAL"}]}}
     },
     {
       "type": "stat",
@@ -248,7 +248,7 @@
       "title": "All gateway events",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 42, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | line_format \"{{.defenseclaw_gateway_event_type}} | {{.defenseclaw_verdict_action}}{{.defenseclaw_judge_action}}{{.defenseclaw_error_code}} | {{__line__}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | line_format \"{{.defenseclaw_gateway_event_type}} | {{.defenseclaw_verdict_action}}{{.defenseclaw_judge_action}}{{.defenseclaw_error_code}} | {{__line__}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
 
@@ -277,7 +277,7 @@
       "description": "Open a row's log details to inspect prompt, response, tool input, and tool output fields. When redaction is enabled those fields remain sanitized.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 63, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\" | line_format \"{{.defenseclaw_gateway_event_type}} | user={{.defenseclaw_user_id}} name={{.defenseclaw_user_name}} | agent={{.defenseclaw_agent_type}}/{{.defenseclaw_agent_name}} | model={{.defenseclaw_llm_model}} | session={{.defenseclaw_session_id}} | prompt={{.defenseclaw_llm_prompt_id}} response={{.defenseclaw_llm_response_id}} tool={{.defenseclaw_tool_call_id}} | {{__line__}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\" | line_format \"{{.defenseclaw_gateway_event_type}} | user={{.defenseclaw_user_id}} name={{.defenseclaw_user_name}} | agent={{.defenseclaw_agent_type}}/{{.defenseclaw_agent_name}} | model={{.defenseclaw_llm_model}} | session={{.defenseclaw_session_id}} | prompt={{.defenseclaw_llm_prompt_id}} response={{.defenseclaw_llm_response_id}} tool={{.defenseclaw_tool_call_id}} | {{__line__}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

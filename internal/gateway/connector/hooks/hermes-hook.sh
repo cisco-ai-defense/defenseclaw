@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v3
 # DefenseClaw Hermes hook — forwards Hermes shell-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
@@ -34,11 +34,18 @@ FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 # logged to hook-failures.jsonl AND honors strict availability — the
 # previous v1 behaviour silently `exit 0`'d, which hid the bypass and
 # defeated DEFENSECLAW_STRICT_AVAILABILITY.
+DEFENSECLAW_HOOK_CONNECTOR="hermes"
+DEFENSECLAW_HOOK_NAME="hermes-hook"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+
 if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token hermes hermes-hook "hermes tool"
 fi
 
-PAYLOAD=$(cat)
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: hermes hook refusing oversized payload" >&2
+  exit 0
+}
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked

@@ -18,8 +18,9 @@
   "properties": {
     "service.name": {
       "type": "string",
-      "const": "defenseclaw",
-      "description": "Always 'defenseclaw'."
+      "minLength": 1,
+      "default": "defenseclaw",
+      "description": "Service name attached to every OTLP export. Defaults to 'defenseclaw' but can be overridden via OTEL_SERVICE_NAME or otel.resource.attributes for fleet identification (e.g. 'defenseclaw-prod-eu-west-1'). Operators MUST keep the value short and stable — downstream Splunk APM dashboards group by this attribute."
     },
     "service.version": {
       "type": "string",
@@ -33,8 +34,8 @@
     },
     "deployment.environment": {
       "type": "string",
-      "enum": ["macos", "dgx-spark", "linux"],
-      "description": "Detected runtime environment."
+      "minLength": 1,
+      "description": "Detected runtime environment. Recommended values are 'macos', 'dgx-spark', and 'linux' for the in-tree probes; operators with bespoke deployments can override via configuration (e.g. 'prod-us-east-1', 'staging'). Downstream dashboards must treat unknown values as opaque rather than enforce an allow-list."
     },
     "tenant.id": {
       "type": "string",

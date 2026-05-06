@@ -40,7 +40,7 @@ groups:
 
       - alert: DefenseClawPanic
         expr: increase(defenseclaw_panics_total[5m]) > 0
-        for: 0m
+        for: 1m
         labels:
           severity: critical
         annotations:
@@ -259,7 +259,7 @@ groups:
 
       - alert: DefenseClawConfigLoadErrors
         expr: increase(defenseclaw_config_load_errors_total[5m]) > 0
-        for: 0m
+        for: 2m
         labels:
           severity: warning
         annotations:

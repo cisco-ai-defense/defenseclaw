@@ -347,4 +347,3 @@ func TestClampPercent_Bounds(t *testing.T) {
 		}
 	}
 }
-

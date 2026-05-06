@@ -37,9 +37,9 @@ import (
 // internal/inventory/ai_discovery.go (AISignal/AIDiscoverySummary)
 // or the TUI will silently drop signals on parse.
 type AIUsageSnapshot struct {
-	Enabled bool             `json:"enabled"`
-	Summary AIUsageSummary   `json:"summary"`
-	Signals []AIUsageSignal  `json:"signals"`
+	Enabled bool            `json:"enabled"`
+	Summary AIUsageSummary  `json:"summary"`
+	Signals []AIUsageSignal `json:"signals"`
 	// FetchedAt records when the TUI last refreshed this snapshot.
 	// Used for the "(updated 12s ago)" hint and for tests; not part
 	// of the wire format.
@@ -130,23 +130,23 @@ type AIUsageSignal struct {
 // confidence. The TUI's "Components" tab renders one box per row,
 // and the CLI's `agent components` subcommand uses the same struct.
 type AIUsageComponentRollup struct {
-	Ecosystem       string                       `json:"ecosystem"`
-	Name            string                       `json:"name"`
-	Framework       string                       `json:"framework,omitempty"`
-	Vendor          string                       `json:"vendor,omitempty"`
-	Versions        []string                     `json:"versions,omitempty"`
-	InstallCount    int                          `json:"install_count"`
-	WorkspaceCount  int                          `json:"workspace_count"`
-	Detectors       []string                     `json:"detectors,omitempty"`
-	IdentityScore   float64                      `json:"identity_score"`
-	IdentityBand    string                       `json:"identity_band,omitempty"`
-	PresenceScore   float64                      `json:"presence_score"`
-	PresenceBand    string                       `json:"presence_band,omitempty"`
-	IdentityFactors []AIUsageConfidenceFactor    `json:"identity_factors,omitempty"`
-	PresenceFactors []AIUsageConfidenceFactor    `json:"presence_factors,omitempty"`
-	Locations       []AIUsageComponentLocation   `json:"locations,omitempty"`
-	LastSeen        string                       `json:"last_seen,omitempty"`
-	LastActiveAt    string                       `json:"last_active_at,omitempty"`
+	Ecosystem       string                     `json:"ecosystem"`
+	Name            string                     `json:"name"`
+	Framework       string                     `json:"framework,omitempty"`
+	Vendor          string                     `json:"vendor,omitempty"`
+	Versions        []string                   `json:"versions,omitempty"`
+	InstallCount    int                        `json:"install_count"`
+	WorkspaceCount  int                        `json:"workspace_count"`
+	Detectors       []string                   `json:"detectors,omitempty"`
+	IdentityScore   float64                    `json:"identity_score"`
+	IdentityBand    string                     `json:"identity_band,omitempty"`
+	PresenceScore   float64                    `json:"presence_score"`
+	PresenceBand    string                     `json:"presence_band,omitempty"`
+	IdentityFactors []AIUsageConfidenceFactor  `json:"identity_factors,omitempty"`
+	PresenceFactors []AIUsageConfidenceFactor  `json:"presence_factors,omitempty"`
+	Locations       []AIUsageComponentLocation `json:"locations,omitempty"`
+	LastSeen        string                     `json:"last_seen,omitempty"`
+	LastActiveAt    string                     `json:"last_active_at,omitempty"`
 }
 
 // AIUsageConfidenceFactor mirrors inventory.ConfidenceFactor.

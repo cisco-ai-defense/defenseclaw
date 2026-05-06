@@ -115,13 +115,11 @@ penalties:
   version_conflict:
     axis: identity
     logit: -1.5
-  stale_binary:
-    axis: presence
-    logit: -2.0
-  signature_collision:
-    axis: identity
-    logit: -0.5
-    scale_with_count: true
+  # signature_collision is reserved but not yet calibrated -- see the
+  # explanation in confidence.go. Operators MAY declare it in an
+  # override policy when they have a correct dedupe rule, but the
+  # default policy intentionally omits it to avoid penalising genuine
+  # independent evidence (e.g. ten distinct shell-history commands).
   weak_evidence_only:
     axis: presence
     logit: -1.0

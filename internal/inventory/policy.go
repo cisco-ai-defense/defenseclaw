@@ -81,13 +81,24 @@ var validDetectorKeys = map[string]bool{
 
 // validPenaltyKeys mirrors validDetectorKeys for negative signals.
 // The engine looks up these names by string when applying penalties
-// during scoring (see confidence.go).
+// during scoring (see confidence.go). Keep this list in lockstep with
+// the LookupPenalty call sites in confidence.go::ComputeComponentConfidence
+// — keys here that have no matching call are dead policy that mislead
+// operators into believing they can tune behaviour they cannot.
+//
+// Dropped:
+//   - "stale_binary" (was never applied; detection of a stale binary
+//     requires liveness data the engine does not currently surface —
+//     re-add the key only when the detector lands).
+//   - "signature_collision" (the prototype implementation conflated
+//     genuine independent evidence with overfitting; see the
+//     explanatory comment in confidence.go::ComputeComponentConfidence).
+//     Re-add when a correct dedupe-by-evidence-fingerprint
+//     implementation lands AND an updated calibration test exists.
 var validPenaltyKeys = map[string]bool{
-	"version_conflict":    true,
-	"stale_binary":        true,
-	"signature_collision": true,
-	"weak_evidence_only":  true,
-	"heuristic_only":      true,
+	"version_conflict":   true,
+	"weak_evidence_only": true,
+	"heuristic_only":     true,
 }
 
 // ConfidencePolicy is the parsed, validated form of

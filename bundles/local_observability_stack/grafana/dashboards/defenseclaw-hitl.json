@@ -238,7 +238,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 40, "w": 24, "h": 10},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | action=~\"approval_requested|approval_approved|approval_denied|approval_timeout|hilt_unsupported\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | action=~\"approval_requested|approval_approved|approval_denied|approval_timeout|hilt_unsupported\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
     {
@@ -247,7 +247,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 50, "w": 24, "h": 10},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | action=~\"gateway-approval-requested|gateway-approval-approved|gateway-approval-granted|gateway-approval-denied|gateway-approval-pending\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | action=~\"gateway-approval-requested|gateway-approval-approved|gateway-approval-granted|gateway-approval-denied|gateway-approval-pending\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

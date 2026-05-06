@@ -338,6 +338,9 @@ func parsePnpmLock(r io.Reader) ([]Component, error) {
 			Version:   version,
 		})
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -383,6 +386,9 @@ func parseYarnLock(r io.Reader) ([]Component, error) {
 			Version:   v,
 		})
 		currentName = ""
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -447,6 +453,9 @@ func parseRequirementsTxt(r io.Reader) ([]Component, error) {
 			Name:      normalizePypiName(name),
 			Version:   version,
 		})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -549,6 +558,9 @@ func parsePyprojectToml(r io.Reader) ([]Component, error) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -649,6 +661,9 @@ func parsePoetryStyleLock(r io.Reader, ecosystem string) ([]Component, error) {
 			out[i].Name = strings.ToLower(strings.TrimSpace(out[i].Name))
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -716,6 +731,9 @@ func parseCargoToml(r io.Reader) ([]Component, error) {
 		}
 		out = append(out, Component{Ecosystem: "cargo", Name: strings.ToLower(name), Version: version})
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -754,6 +772,9 @@ func parseGoMod(r io.Reader) ([]Component, error) {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -775,6 +796,9 @@ func parseGoSum(r io.Reader) ([]Component, error) {
 	out := make([]Component, 0, len(seen))
 	for name, version := range seen {
 		out = append(out, Component{Ecosystem: "go", Name: name, Version: version})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -814,6 +838,9 @@ func parseGemfileLock(r io.Reader) ([]Component, error) {
 			version = strings.Trim(fields[1], "()")
 		}
 		out = append(out, Component{Ecosystem: "rubygems", Name: name, Version: version})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

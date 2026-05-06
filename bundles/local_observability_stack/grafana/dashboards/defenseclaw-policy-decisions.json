@@ -188,7 +188,7 @@
       "description": "EventVerdict records have defenseclaw.verdict.categories — this panel ranks them for the block-list and multi-turn stages.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 40, "w": 24, "h": 8},
-      "targets": [{"expr": "topk(20, sum by (defenseclaw_verdict_categories, defenseclaw_verdict_stage) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"verdict\" | defenseclaw_verdict_stage=~\"block_list|multi_turn\" [1h])))", "instant": true, "refId": "A"}]
+      "targets": [{"expr": "topk(20, sum by (defenseclaw_verdict_categories, defenseclaw_verdict_stage) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"verdict\" | defenseclaw_verdict_stage=~\"block_list|multi_turn\" [1h])))", "instant": true, "refId": "A"}]
     },
 
     {"type": "row", "title": "Schema violations + recent OPA logs", "gridPos": {"x": 0, "y": 48, "w": 24, "h": 1}, "collapsed": false},
@@ -208,7 +208,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 12, "y": 49, "w": 12, "h": 12},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | (defenseclaw_gateway_event_type=~\"opa|egress\" or action=~\"opa-.*|egress-.*\")", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | (defenseclaw_gateway_event_type=~\"opa|egress\" or action=~\"opa-.*|egress-.*\")", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

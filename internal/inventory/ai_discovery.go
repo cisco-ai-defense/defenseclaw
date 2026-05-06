@@ -38,6 +38,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -405,8 +406,36 @@ func NewContinuousDiscoveryServiceWithOptions(opts AIDiscoveryOptions, catalog [
 			fmt.Fprintf(os.Stderr, "[ai-discovery] embedded confidence policy failed to load: %v\n", fallbackErr)
 		}
 	}
-	svc.confidenceParams = ConfidenceParams{Policy: policy}
+	svc.confidenceParams = ConfidenceParams{
+		Policy:               policy,
+		SignatureSpecificity: buildSignatureSpecificityIndex(catalog),
+	}
 	return svc
+}
+
+// buildSignatureSpecificityIndex projects the SignatureID ->
+// Specificity mapping out of a loaded catalog so the confidence
+// engine can honour curator-tuned per-signature specificity. We
+// build it once at constructor time (catalogs are immutable after
+// load) so the hot path doesn't re-scan O(N) signatures per signal.
+// Returns nil when the catalog is empty so resolveSpecificity falls
+// straight through to the heuristic.
+func buildSignatureSpecificityIndex(catalog []AISignature) map[string]float64 {
+	if len(catalog) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(catalog))
+	for _, sig := range catalog {
+		id := strings.TrimSpace(sig.ID)
+		if id == "" || sig.Specificity <= 0 {
+			continue
+		}
+		out[id] = sig.Specificity
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func AIDiscoveryOptionsFromConfig(cfg *config.Config) AIDiscoveryOptions {
@@ -578,8 +607,23 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 	)
 	defer span.End()
 
-	prev, _ := s.store.Load()
+	prev, prevErr := s.store.Load()
+	if prevErr != nil {
+		// Loading the previous-scan snapshot is best-effort — a
+		// missing file is the cold-start case (handled inside
+		// Load), an unsupported version (e.g. a forward-rolled
+		// state file) returns an error here and we MUST log it
+		// instead of silently treating the world as new. The
+		// downstream scanSignals call will start with stats.Errors
+		// at zero; we bump it AFTER the scan returns so the regression
+		// is visible on dashboards.
+		fmt.Fprintf(os.Stderr, "[ai-discovery] previous-scan load failed (treating workspace as new): %v\n", prevErr)
+		prev = aiStateFile{}
+	}
 	signals, stats := s.scanSignals(ctx, full)
+	if prevErr != nil {
+		stats.Errors++
+	}
 	report := s.classifyAndPersist(scanID, source, start, signals, stats, prev, full)
 	if stats.Errors > 0 {
 		span.SetStatus(codes.Error, "one or more detectors failed")
@@ -688,7 +732,7 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 		measure("env", func() ([]AISignal, int, error) { return s.detectEnvVars(), 0, nil })
 	}
 	if s.opts.IncludePackageManifests {
-		measure("package_manifest", func() ([]AISignal, int, error) { return s.detectPackageManifests() })
+		measure("package_manifest", func() ([]AISignal, int, error) { return s.detectPackageManifests(ctx) })
 	}
 	if s.opts.IncludeShellHistory {
 		measure("shell_history", func() ([]AISignal, int, error) { return s.detectShellHistory() })
@@ -1223,20 +1267,42 @@ type pkgManifestEntry struct {
 	parsedComponents map[string]map[string]string
 }
 
-func (s *ContinuousDiscoveryService) detectPackageManifests() ([]AISignal, int, error) {
+func (s *ContinuousDiscoveryService) detectPackageManifests(ctx context.Context) ([]AISignal, int, error) {
 	var out []AISignal
 	files := 0
+	walkErrs := 0
 	// Walk each scan root; collect entries grouped by dir so we can
 	// compute lockfile-based version indexes once per dir.
 	for _, root := range s.scanRoots() {
+		if err := ctx.Err(); err != nil {
+			// Caller cancelled (sidecar shutdown / scan timeout).
+			// Stop honestly rather than continue queuing work.
+			break
+		}
 		if files >= s.opts.MaxFilesPerScan {
 			break
 		}
 		// dirEntries: dir path -> manifest entries inside that dir.
 		dirEntries := map[string][]pkgManifestEntry{}
-		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil || files >= s.opts.MaxFilesPerScan {
+		walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			// Cancellation check on every entry — large monorepo
+			// walks otherwise block shutdown for tens of seconds.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			if err != nil {
+				// Permission errors / vanished entries are
+				// expected in long-running scans; record one bump
+				// per error so dashboards see the regression but
+				// keep going. Walking is best-effort.
+				walkErrs++
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
 				return nil
+			}
+			if files >= s.opts.MaxFilesPerScan {
+				return filepath.SkipAll
 			}
 			if d.IsDir() {
 				if shouldSkipDiscoveryDir(d.Name()) && path != root {
@@ -1275,6 +1341,13 @@ func (s *ContinuousDiscoveryService) detectPackageManifests() ([]AISignal, int, 
 			dirEntries[dir] = append(dirEntries[dir], entry)
 			return nil
 		})
+		// WalkDir returns the first error returned by the visit
+		// callback (other than ErrSkipDir / ErrSkipAll). Cancellation
+		// surfaces as ctx.Err(); anything else is the visit-fn's
+		// per-entry diagnostic which we already counted in walkErrs.
+		if walkErr != nil && ctx.Err() != nil {
+			return out, files, ctx.Err()
+		}
 		// Per-dir: build version index from any parseable lockfile,
 		// then emit one signal per (manifest entry, matched component).
 		// We collect emissions into `raw` first and then aggregate
@@ -1303,6 +1376,13 @@ func (s *ContinuousDiscoveryService) detectPackageManifests() ([]AISignal, int, 
 			}
 		}
 		out = append(out, aggregateManifestSignalsByProjectRoot(raw)...)
+	}
+	if walkErrs > 0 {
+		// Surface the count via the (signal-count, file-count, error)
+		// tuple so scanStats can record it; fmt.Errorf is intentionally
+		// terse — operators don't need the per-file detail, just the
+		// fact that something went wrong during walking.
+		return out, files, fmt.Errorf("manifest walk encountered %d errors (permission / vanished entries)", walkErrs)
 	}
 	return out, files, nil
 }
@@ -1738,14 +1818,14 @@ func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISigna
 	fp := hashValue(strings.Join(fpInputs, "|"))
 	product := sig.Name
 	vendor := sig.Vendor
-	if component != nil {
-		if component.Framework != "" {
-			product = component.Framework
-		}
-		// Component-level vendor overrides only when explicitly set:
-		// keeps backward compatibility with the catch-all "Multiple"
-		// signature when a component declaration omits it.
+	if component != nil && component.Framework != "" {
+		product = component.Framework
 	}
+	// Component-level vendor override is applied by the *caller*
+	// (detectPackageManifests) on a copy of `sig` before invoking
+	// this helper, since the runtime AIComponent view does not
+	// carry the catalog Vendor field. See signalFromEvidenceWithComponent
+	// callers in detectPackageManifests for the exact pattern.
 	out := AISignal{
 		Fingerprint:        fp,
 		SignatureID:        sig.ID,
@@ -2630,8 +2710,13 @@ func (s *AIStateStore) Load() (aiStateFile, error) {
 	// EvidenceHash, and `classifyAndPersist` skips the hash comparison
 	// when the stored side is empty so the upgrade does not flood the
 	// operator with spurious "changed" rows.
+	//
+	// Future / unknown versions are surfaced as errors so a forward-
+	// version state file (e.g. written by a newer gateway and then
+	// read by an older one) doesn't silently look like an empty
+	// inventory and produce spurious "all new" change events.
 	if out.Version != 1 && out.Version != aiDiscoveryStateVersion {
-		return aiStateFile{}, nil
+		return aiStateFile{}, fmt.Errorf("ai-discovery state file at %s has unsupported version %d (expected 1 or %d)", s.path, out.Version, aiDiscoveryStateVersion)
 	}
 	if out.Signals == nil {
 		out.Signals = map[string]aiStoredSignal{}
@@ -3108,10 +3193,26 @@ func stableSignalID(fp string) string {
 	return "ai-" + hex.EncodeToString(sum[:])[:16]
 }
 
+// scanIDCounter is a process-local monotonic counter used as a
+// uniqueness fallback when crypto/rand fails. Even if two scans
+// collide on time.Now().UnixNano() (rare; doable on virtualized
+// clocks) and rand.Read returns an error, the counter guarantees
+// every newScanID() call produces a different ID inside a single
+// process. atomic so concurrent callers don't trample each other.
+var scanIDCounter atomic.Uint64
+
 func newScanID() string {
 	var b [8]byte
+	pid := os.Getpid()
+	count := scanIDCounter.Add(1)
 	if _, err := rand.Read(b[:]); err != nil {
-		return fmt.Sprintf("scan-%d", time.Now().UnixNano())
+		// rand.Read failure is exceptional; mix the PID and a
+		// monotonic counter into the fallback so collisions
+		// across two processes (or two scans inside one) remain
+		// impossible. Logging the underlying error helps operators
+		// catch entropy starvation.
+		fmt.Fprintf(os.Stderr, "[ai-discovery] rand.Read failed; using deterministic fallback scan ID: %v\n", err)
+		return fmt.Sprintf("scan-%d-%d-%d", time.Now().UnixNano(), pid, count)
 	}
 	return fmt.Sprintf("scan-%d-%s", time.Now().UnixNano(), hex.EncodeToString(b[:]))
 }

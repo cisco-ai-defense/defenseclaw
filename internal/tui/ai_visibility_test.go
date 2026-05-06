@@ -295,11 +295,11 @@ func TestAIVisibility_Header_CollapsesZeroChurn(t *testing.T) {
 	p.SetSnapshot(&AIUsageSnapshot{
 		Enabled: true,
 		Summary: AIUsageSummary{
-			ActiveSignals: 755,
-			NewSignals:    0,
+			ActiveSignals:  755,
+			NewSignals:     0,
 			ChangedSignals: 0,
-			GoneSignals:   0,
-			FilesScanned:  2103,
+			GoneSignals:    0,
+			FilesScanned:   2103,
 		},
 		FetchedAt: now,
 	})
@@ -364,9 +364,9 @@ func TestAIVisibility_Table_RowsAlignedWithHeader(t *testing.T) {
 		mk("new", "ai_cli", "X", "Y", "binary", "", ""),
 	}
 	p.SetSnapshot(&AIUsageSnapshot{
-		Enabled: true,
-		Summary: AIUsageSummary{ActiveSignals: len(signals)},
-		Signals: signals,
+		Enabled:   true,
+		Summary:   AIUsageSummary{ActiveSignals: len(signals)},
+		Signals:   signals,
 		FetchedAt: now,
 	})
 

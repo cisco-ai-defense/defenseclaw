@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v3
 # DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
@@ -20,12 +20,23 @@ defenseclaw_harden_resources
 defenseclaw_harden_env
 
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+DEFENSECLAW_HOOK_CONNECTOR="cursor"
+DEFENSECLAW_HOOK_NAME="cursor-hook"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
 if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token cursor cursor-hook "cursor tool"
 fi
 
-PAYLOAD=$(cat)
+# Read stdin under a 1MB cap so a hostile / runaway agent can't OOM
+# the hook process before the gateway sees the payload.
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: cursor hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
+  fi
+  exit 0
+}
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
   # shellcheck source=/dev/null

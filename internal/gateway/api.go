@@ -158,21 +158,35 @@ func registerHookHandler(name string, factory func(*APIServer) http.HandlerFunc)
 // way an out-of-tree connector can ship without forcing a gateway
 // rebuild, and a misnamed factory fails loud (logged) rather than
 // silent (a 404 at request time).
-func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
+//
+// The optional wrap argument lets callers wrap each registered handler
+// in middleware (e.g. perIPRateLimiter) so a compromised remote caller
+// can't blast the connector hook surface. Loopback is exempt inside
+// perIPRateLimiter, so legitimate local agent traffic is unaffected.
+func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func(http.Handler) http.Handler) {
+	register := func(path string, h http.Handler) {
+		for _, mw := range wrap {
+			if mw != nil {
+				h = mw(h)
+			}
+		}
+		mux.Handle(path, h)
+	}
+
 	if a.connectorRegistry == nil {
 		// No registry plumbed (legacy boot path, tests). Fall back
 		// to the previous hardcoded routes so existing flows keep
 		// working — we never unconditionally register a route the
 		// connector didn't ask for.
 		if f, ok := connectorHookHandlerByName["claudecode"]; ok {
-			mux.HandleFunc("/api/v1/claude-code/hook", f(a))
+			register("/api/v1/claude-code/hook", http.HandlerFunc(f(a)))
 		}
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
-			mux.HandleFunc("/api/v1/codex/hook", f(a))
+			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
 		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
-				mux.HandleFunc("/api/v1/"+name+"/hook", f(a))
+				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
 		}
 		return
@@ -195,7 +209,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
 			continue
 		}
 		path := he.HookAPIPath()
-		mux.HandleFunc(path, factory(a))
+		register(path, http.HandlerFunc(factory(a)))
 		fmt.Fprintf(os.Stderr, "[api] registered hook endpoint: %s → %s\n", name, path)
 	}
 }
@@ -247,20 +261,23 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
-	// /api/v1/inspect/* is in the agent's critical path: every hook
-	// callback (claude-code-hook, codex-hook, inspect-tool) hits one of
-	// these. Wrap them in a per-IP token bucket so a misbehaving or
-	// compromised local agent can never blast the path. Loopback callers
-	// (the gateway's own hooks) are exempt inside perIPRateLimiter.
+	// /api/v1/inspect/* and /api/v1/{connector}/hook are both in the
+	// agent's critical path: every connector hook (claude-code-hook,
+	// codex-hook, cursor-hook, ...) hits one of them. Wrap them in a
+	// shared per-IP token bucket so a misbehaving or compromised
+	// REMOTE caller can never blast the path. Loopback callers
+	// (the gateway's own hooks) are exempt inside perIPRateLimiter,
+	// so a legitimate local agent doesn't self-throttle.
+	hookLimiter := perIPRateLimiter(20, 40)
 	inspectMux := http.NewServeMux()
 	inspectMux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	inspectMux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
 	inspectMux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
-	mux.Handle("/api/v1/inspect/", perIPRateLimiter(20, 40)(inspectMux))
+	mux.Handle("/api/v1/inspect/", hookLimiter(inspectMux))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
-	a.registerConnectorHookRoutes(mux)
+	a.registerConnectorHookRoutes(mux, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
 	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is

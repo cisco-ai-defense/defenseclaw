@@ -56,7 +56,7 @@
       "description": "Distinct defenseclaw_agent_instance_id values seen on gateway events in the last 5 minutes. agent_instance_id lives on log attributes (not on metric labels — keeps Prometheus cardinality bounded) so we read it from Loki. A single connector running multiple shells will show >1 here.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "count(sum by (defenseclaw_agent_instance_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_agent_instance_id != \"\" [5m])))", "refId": "A", "instant": true}]
+      "targets": [{"expr": "count(sum by (defenseclaw_agent_instance_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_agent_instance_id != \"\" [5m])))", "refId": "A", "instant": true}]
     },
     {
       "type": "stat",
@@ -64,7 +64,7 @@
       "description": "Distinct sidecar.instance_id values seen on gateway events. Should be exactly 1 unless you are running multiple sidecars on the same host.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "count(sum by (defenseclaw_sidecar_instance_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_sidecar_instance_id != \"\" [5m])))", "refId": "A", "instant": true}]
+      "targets": [{"expr": "count(sum by (defenseclaw_sidecar_instance_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_sidecar_instance_id != \"\" [5m])))", "refId": "A", "instant": true}]
     },
     {
       "type": "stat",
@@ -122,7 +122,7 @@
       "description": "Loki-derived count of distinct `gen_ai_agent_id` values per connector observed in event logs. Populates only when LLM events flow through the sidecar. Sustained growth on the same `gen_ai_agent_name` = the connector is rotating its agent.id (instability — should be stable per install).",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 15, "w": 12, "h": 7},
-      "targets": [{"expr": "count by (gen_ai_agent_name) (sum by (gen_ai_agent_name, gen_ai_agent_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | gen_ai_agent_id != \"\" [$__interval])))", "legendFormat": "{{gen_ai_agent_name}}", "refId": "A"}],
+      "targets": [{"expr": "count by (gen_ai_agent_name) (sum by (gen_ai_agent_name, gen_ai_agent_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | gen_ai_agent_id != \"\" [$__interval])))", "legendFormat": "{{gen_ai_agent_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"noValue": "no LLM traffic yet"}}
     },
     {
@@ -131,7 +131,7 @@
       "description": "Loki-derived: fraction of gateway log events (per connector via `gen_ai_agent_name`) that also carry `gen_ai_agent_id` (i.e. the `X-DefenseClaw-Agent-Id` header was honored end-to-end). 1.0 = healthy, below 1.0 = the connector is dropping identity on some calls.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 12, "y": 15, "w": 12, "h": 7},
-      "targets": [{"expr": "sum by (gen_ai_agent_name) (rate({service_namespace=~\"defenseclaw|ai-governance\"} | json | gen_ai_agent_id != \"\" [$__interval])) / sum by (gen_ai_agent_name) (rate({service_namespace=~\"defenseclaw|ai-governance\"} | json | gen_ai_agent_name != \"\" [$__interval]))", "legendFormat": "{{gen_ai_agent_name}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (gen_ai_agent_name) (rate({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | gen_ai_agent_id != \"\" [$__interval])) / sum by (gen_ai_agent_name) (rate({service_namespace=~\"defenseclaw|ai-governance\"} | json | gen_ai_agent_name != \"\" [$__interval]))", "legendFormat": "{{gen_ai_agent_name}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "noValue": "no LLM traffic yet", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.5}, {"color": "green", "value": 0.95}]}}}
     },
 
@@ -230,7 +230,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 59, "w": 24, "h": 14},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | (event_name=~\"defenseclaw.agent.discovery.*|defenseclaw.ai.discovery.*|defenseclaw.ai.confidence.*\")", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | (event_name=~\"defenseclaw.agent.discovery.*|defenseclaw.ai.discovery.*|defenseclaw.ai.confidence.*\")", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

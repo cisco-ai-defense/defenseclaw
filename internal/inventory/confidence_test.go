@@ -72,8 +72,8 @@ func TestComputeConfidenceTable(t *testing.T) {
 			signals: []AISignal{
 				shellHistorySignal("openai", "openai-cli", now, MatchKindHeuristic),
 			},
-			wantIdentityBand: "medium",
-			wantPresenceBand: "very_low",
+			wantIdentityBand:  "medium",
+			wantPresenceBand:  "very_low",
 			identityFloorScor: 0.6,
 			identityCeilScor:  0.95,
 			presenceCeilScor:  0.2,
@@ -170,7 +170,7 @@ func TestComputeConfidenceTable(t *testing.T) {
 			signals: []AISignal{
 				binarySignal("openai-cli", "openai", now),
 			},
-			wantIdentityBand: "very_high",
+			wantIdentityBand:  "very_high",
 			identityFloorScor: 0.9,
 		},
 		{

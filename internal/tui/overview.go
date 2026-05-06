@@ -63,6 +63,13 @@ type OverviewPanel struct {
 	// internal/tui/app.go and SetAIUsage below.
 	aiUsage *AIUsageSnapshot
 
+	// aiUsageSorted is a precomputed, sort-by-priority view of
+	// aiUsage.Signals so the View() path does not pay an O(n log n)
+	// (or worse, a per-frame O(n^2)) sort cost every time the
+	// dashboard repaints. SetAIUsage rebuilds this slice when the
+	// snapshot changes; View() walks it in O(min(n, maxRows)).
+	aiUsageSorted []AIUsageSignal
+
 	// doctor is a cached copy of the most recent `defenseclaw
 	// doctor --json-output` run, loaded by the owning Model from
 	// data_dir on startup and refreshed in the background after
@@ -147,6 +154,14 @@ func (p *OverviewPanel) SilentBypassCount() int { return p.silentBypass }
 // transient fetch errors.
 func (p *OverviewPanel) SetAIUsage(s *AIUsageSnapshot) {
 	p.aiUsage = s
+	if s == nil {
+		p.aiUsageSorted = nil
+		return
+	}
+	// Precompute the sorted view here so View() can skip the work
+	// on every repaint. This was a measurable hot path for
+	// workspaces with hundreds of detected signals.
+	p.aiUsageSorted = sortAIDiscoverySignalsForOverview(s.Signals)
 }
 
 // AIUsage returns the currently rendered AI discovery snapshot,
@@ -1097,7 +1112,12 @@ func (p *OverviewPanel) renderAIDiscoveryBox(w int) string {
 		return box.Render(content.String())
 	}
 
-	rows := sortAIDiscoverySignalsForOverview(p.aiUsage.Signals)
+	rows := p.aiUsageSorted
+	if rows == nil {
+		// Defensive fallback when SetAIUsage was not called (legacy
+		// callers / tests that mutate p.aiUsage directly).
+		rows = sortAIDiscoverySignalsForOverview(p.aiUsage.Signals)
+	}
 	limit := maxAIDiscoveryRows
 	overflow := 0
 	if len(rows) > limit {

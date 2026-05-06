@@ -426,7 +426,7 @@
       "description": "OTel log records emitted by `EmitAIDiscoverySummaryLog` once per scan (`event.name=defenseclaw.ai.discovery`). Severity is INFO when result=ok, WARN when result≠ok. Body fields: source, privacy_mode, result, duration_ms, signals_total, active_total, new_total, gone_total, files_scanned. Loki flattens the dotted attribute keys to underscores (e.g. `event.name` → `event_name`).",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 109, "w": 24, "h": 10},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | event_name=\"defenseclaw.ai.discovery\" | line_format \"{{.severity}} | source={{.defenseclaw_ai_discovery_source}} mode={{.defenseclaw_ai_discovery_privacy_mode}} result={{.defenseclaw_ai_discovery_result}} | active={{.defenseclaw_ai_discovery_active_total}} new={{.defenseclaw_ai_discovery_new_total}} gone={{.defenseclaw_ai_discovery_gone_total}} files={{.defenseclaw_ai_discovery_files_scanned}} duration_ms={{.defenseclaw_ai_discovery_duration_ms}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_name=\"defenseclaw.ai.discovery\" | line_format \"{{.severity}} | source={{.defenseclaw_ai_discovery_source}} mode={{.defenseclaw_ai_discovery_privacy_mode}} result={{.defenseclaw_ai_discovery_result}} | active={{.defenseclaw_ai_discovery_active_total}} new={{.defenseclaw_ai_discovery_new_total}} gone={{.defenseclaw_ai_discovery_gone_total}} files={{.defenseclaw_ai_discovery_files_scanned}} duration_ms={{.defenseclaw_ai_discovery_duration_ms}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
     {
@@ -435,7 +435,7 @@
       "description": "Per-signal OTel log records emitted by `EmitAIDiscoverySignalLog` (`event.name=defenseclaw.ai.discovery.signal`). One record per signal per scan; bounded labels keep cardinality safe. Use the search bar to grep for a specific vendor/product or detector.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 119, "w": 24, "h": 10},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | event_name=\"defenseclaw.ai.discovery.signal\" | line_format \"{{.state}} | {{.signal_category}} · {{.ai_vendor}}/{{.ai_product}} · detector={{.detector}} · confidence={{.confidence}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_name=\"defenseclaw.ai.discovery.signal\" | line_format \"{{.state}} | {{.signal_category}} · {{.ai_vendor}}/{{.ai_product}} · detector={{.detector}} · confidence={{.confidence}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
     {
@@ -444,7 +444,7 @@
       "description": "Sanitized gateway envelope events with `event_type=ai_discovery` (`gatewaylog.EventAIDiscovery`). These carry the audit-trail payload (signal_id, scan_id, evidence_types, path_hashes) and are HMAC-stamped for integrity. Loki's `| json` parser flattens nested keys with `_`, so the AIDiscoveryPayload fields (`ai_discovery.scan_id`, `.signal_id`, `.state`, `.category`, `.vendor`, `.product`) show up here as `ai_discovery_*` (no `defenseclaw_` prefix — that prefix is reserved for envelope-level OTel attributes set by `EmitGatewayEventLog`).",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 129, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"ai_discovery\" | line_format \"{{.severity}} | scan={{.ai_discovery_scan_id}} signal={{.ai_discovery_signal_id}} state={{.ai_discovery_state}} category={{.ai_discovery_category}} vendor={{.ai_discovery_vendor}} product={{.ai_discovery_product}} | {{__line__}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"ai_discovery\" | line_format \"{{.severity}} | scan={{.ai_discovery_scan_id}} signal={{.ai_discovery_signal_id}} state={{.ai_discovery_state}} category={{.ai_discovery_category}} vendor={{.ai_discovery_vendor}} product={{.ai_discovery_product}} | {{__line__}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

@@ -582,14 +582,14 @@ func (s *InventoryStore) ListComponentLocations(ctx context.Context, ecosystem, 
 // ComponentHistoryRow is a single point in the score history
 // returned to `agent components history`.
 type ComponentHistoryRow struct {
-	ScanID         string    `json:"scan_id"`
-	ScannedAt      time.Time `json:"scanned_at"`
-	IdentityScore  float64   `json:"identity_score"`
-	IdentityBand   string    `json:"identity_band"`
-	PresenceScore  float64   `json:"presence_score"`
-	PresenceBand   string    `json:"presence_band"`
-	Detectors      string    `json:"detectors,omitempty"`
-	PolicyVersion  int       `json:"policy_version"`
+	ScanID        string    `json:"scan_id"`
+	ScannedAt     time.Time `json:"scanned_at"`
+	IdentityScore float64   `json:"identity_score"`
+	IdentityBand  string    `json:"identity_band"`
+	PresenceScore float64   `json:"presence_score"`
+	PresenceBand  string    `json:"presence_band"`
+	Detectors     string    `json:"detectors,omitempty"`
+	PolicyVersion int       `json:"policy_version"`
 }
 
 // ComponentHistory returns up to `limit` (most-recent first)

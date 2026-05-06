@@ -385,7 +385,7 @@
       "description": "Extracted from defenseclaw.verdict.categories on EventVerdict log records. Keys are the upstream categorizer's labels (e.g. pii.email, prompt.injection).",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 12, "y": 83, "w": 12, "h": 8},
-      "targets": [{"expr": "topk(20, sum by (defenseclaw_verdict_categories) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"verdict\" | defenseclaw_verdict_action=\"block\" [1h])))", "instant": true, "refId": "A"}],
+      "targets": [{"expr": "topk(20, sum by (defenseclaw_verdict_categories) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"verdict\" | defenseclaw_verdict_action=\"block\" [1h])))", "instant": true, "refId": "A"}],
       "options": {"showHeader": true}
     },
 
@@ -398,7 +398,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 92, "w": 24, "h": 10},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"verdict\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"verdict\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
     {
@@ -407,7 +407,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 102, "w": 24, "h": 10},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"judge\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"judge\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

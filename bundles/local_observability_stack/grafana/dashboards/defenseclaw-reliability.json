@@ -196,7 +196,7 @@
       "title": "event_type=error (Loki)",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 74, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} |= \"\\\"event_type\\\":\\\"error\\\"\" | json | line_format \"[{{.defenseclaw_error_subsystem}}/{{.defenseclaw_error_code}}] {{.body}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} |= \"\\\"event_type\\\":\\\"error\\\"\" | json | __error__=\"\" | line_format \"[{{.defenseclaw_error_subsystem}}/{{.defenseclaw_error_code}}] {{.body}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true}
     }
   ],

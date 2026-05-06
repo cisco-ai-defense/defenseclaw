@@ -1484,12 +1484,17 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	// Surface the same event as a Prometheus counter and an OTel log
 	// record so the local-stack dashboards see codex turn-completes
 	// without configuring an audit OTLP sink. Cardinality is bounded
-	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]).
+	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]) for both kind
+	// and status — the wire format calls status a free-form string
+	// but the only legitimate values are short, ASCII tokens; without
+	// sanitization a hostile / verbose client could blow up the
+	// `codex_notify_status` series.
+	statusLabel := sanitizeNotifyType(p.Status)
 	ctx := ContextWithSessionID(r.Context(), sessionID)
 	enrichHTTPSpanFromContext(ctx)
 	enrichCodexNotifySpan(ctx, p, kind, result)
-	a.otel.RecordCodexNotify(ctx, kind, p.Status, result)
-	a.otel.EmitCodexNotifyLog(ctx, kind, p.Status, result, p.TurnID, p.Model)
+	a.otel.RecordCodexNotify(ctx, kind, statusLabel, result)
+	a.otel.EmitCodexNotifyLog(ctx, kind, statusLabel, result, p.TurnID, p.Model)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

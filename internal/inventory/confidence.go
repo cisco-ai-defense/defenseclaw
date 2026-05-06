@@ -19,6 +19,7 @@ package inventory
 import (
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -55,19 +56,26 @@ func ComputeComponentConfidence(signals []AISignal, now time.Time, params Confid
 		// policy, load the embedded default. Returning a
 		// confidence with the wrong policy would silently produce
 		// uncalibrated scores, which is much worse than the small
-		// overhead of one YAML parse per call.
+		// overhead of one YAML parse per call. If the embedded
+		// load also fails (rare; would mean the binary itself is
+		// corrupt) surface the error to stderr — the engine still
+		// produces a result with the zero-value policy because
+		// downgrading to "no scoring" would break all callers,
+		// but operators see the regression in logs.
 		if def, err := LoadDefaultConfidencePolicy(); err == nil {
 			params.Policy = def
+		} else {
+			fmt.Fprintf(os.Stderr, "[ai-discovery] embedded confidence policy unloadable: %v\n", err)
 		}
 	}
 	policy := params.Policy
 	res := ConfidenceResult{
-		ComputedAt:        now.UTC(),
-		PolicyVersion:     policy.Version,
-		HalfLifeHours:     policy.HalfLifeHours,
-		IdentityFactors:   []ConfidenceFactor{},
-		PresenceFactors:   []ConfidenceFactor{},
-		Detectors:         []string{},
+		ComputedAt:      now.UTC(),
+		PolicyVersion:   policy.Version,
+		HalfLifeHours:   policy.HalfLifeHours,
+		IdentityFactors: []ConfidenceFactor{},
+		PresenceFactors: []ConfidenceFactor{},
+		Detectors:       []string{},
 	}
 	// Collect the per-component identity prior. When the policy
 	// uses per-signature curator confidence (the default), pick the
@@ -110,7 +118,7 @@ func ComputeComponentConfidence(signals []AISignal, now time.Time, params Confid
 		detectorSet[det] = true
 		detectorCounts[det]++
 		detPolicy := policy.LookupDetector(det)
-		specificity := signalSpecificity(sig)
+		specificity := resolveSpecificity(sig, params)
 		// A signal may carry zero, one, or many evidence rows.
 		// When zero (legacy detectors that never populated
 		// AISignal.Evidence), use one synthetic row so the
@@ -178,6 +186,15 @@ func ComputeComponentConfidence(signals []AISignal, now time.Time, params Confid
 			applyPenalty(&identityLogit, &presenceLogit, pen, n, &res, "version_conflict")
 		}
 	}
+	// signature_collision was prototyped here but removed: counting
+	// "same detector fires N times for one component" conflates
+	// genuine independent evidence (10 distinct shell-history
+	// commands → stronger identity) with overfitting (50 process
+	// rows from one lsof). A correct implementation would dedupe by
+	// evidence fingerprint; until that lands the penalty is not
+	// declared in the default policy and the engine ignores
+	// `signature_collision` keys to keep calibration stable.
+	_ = detectorCounts // kept for future use by the corrected impl
 
 	res.Detectors = sortedKeys(detectorSet)
 	res.IdentityScore = sigmoid(identityLogit)
@@ -189,9 +206,14 @@ func ComputeComponentConfidence(signals []AISignal, now time.Time, params Confid
 
 // ConfidenceParams is the call-site-supplied configuration for the
 // engine. `Policy` carries the loaded YAML, defaulting to the
-// embedded policy if the caller forgot to set it.
+// embedded policy if the caller forgot to set it. `SignatureSpecificity`
+// is an optional lookup table from SignatureID -> Specificity loaded
+// from the catalog; when present the engine uses curator-tuned
+// per-signature specificity values instead of the heuristic fallback,
+// honouring the contract documented on AISignature.Specificity.
 type ConfidenceParams struct {
-	Policy ConfidencePolicy
+	Policy               ConfidencePolicy
+	SignatureSpecificity map[string]float64
 }
 
 // ConfidenceResult is the output of one invocation. Both scores are
@@ -273,11 +295,46 @@ func identityPriorForSignals(signals []AISignal, policy ConfidencePolicy) float6
 	return best
 }
 
-// signalSpecificity returns the catalog-supplied Specificity for
-// this signal. We do not have the AISignature here (the engine takes
-// AISignal), so we use a stable per-signature heuristic: signals
-// with a resolved Component are highly specific (matched a declared
-// package), heuristic detectors get a slight discount.
+// resolveSpecificity returns the per-signal specificity exponent
+// applied to the detector likelihood-ratio. Resolution order:
+//
+//  1. The curator-tuned `signatures[].specificity` from the catalog
+//     when params.SignatureSpecificity carries an entry for this
+//     signal's SignatureID. This is the contract documented on
+//     AISignature.Specificity and the only path that lets operators
+//     tune individual signatures.
+//  2. signalSpecificity heuristic fallback (no catalog binding):
+//     signals with a resolved Component are highly specific (1.0),
+//     loose detectors (shell_history, env) get a discount, and
+//     everything else lands at 0.7 to match the legacy default.
+//
+// The result is clamped to (0, 1] so a misconfigured 0/negative
+// value can't zero-out a detector's contribution and a >1 value
+// can't push log-odds towards positive infinity.
+func resolveSpecificity(sig AISignal, params ConfidenceParams) float64 {
+	if id := strings.TrimSpace(sig.SignatureID); id != "" {
+		if v, ok := params.SignatureSpecificity[id]; ok {
+			return clampSpecificity(v)
+		}
+	}
+	return clampSpecificity(signalSpecificity(sig))
+}
+
+func clampSpecificity(v float64) float64 {
+	if v <= 0 || math.IsNaN(v) {
+		return 0.05 // floor — never zero out a detector entirely
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+// signalSpecificity returns the heuristic specificity used when the
+// catalog has not been plumbed through. Kept exported-private so
+// tests that pre-date the SignatureSpecificity hook keep working
+// against a stable behaviour. Prefer resolveSpecificity for new
+// call sites.
 func signalSpecificity(sig AISignal) float64 {
 	if sig.Component != nil && strings.TrimSpace(sig.Component.Name) != "" {
 		return 1.0

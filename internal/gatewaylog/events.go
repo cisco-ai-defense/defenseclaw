@@ -160,11 +160,19 @@ const (
 // Severity is the shared severity vocabulary — keep in lockstep with
 // audit.Event severities and OPA policy inputs so downstream filters
 // don't need a translation table.
+//
+// SeverityWarn ("WARN") is intentionally listed even though it doesn't
+// fit the LOW/MEDIUM/HIGH/CRITICAL ordering: codex/OTLP ingest paths
+// use it for "this thing was malformed, dashboards should notice but
+// it isn't a security event". Downstream consumers MUST map unknown
+// severities to MEDIUM so a future schema-only severity doesn't drop
+// off the on-call radar.
 type Severity string
 
 const (
 	SeverityInfo     Severity = "INFO"
 	SeverityLow      Severity = "LOW"
+	SeverityWarn     Severity = "WARN"
 	SeverityMedium   Severity = "MEDIUM"
 	SeverityHigh     Severity = "HIGH"
 	SeverityCritical Severity = "CRITICAL"
@@ -696,18 +704,18 @@ type AIDiscoveryPayload struct {
 	// The shipping helper (BuildAIDiscoveryPayload) reads the flag
 	// from the gateway config; raw call sites that build their own
 	// payload must check the same flag.
-	Detector        string                  `json:"detector,omitempty"`
-	Component       *AIDiscoveryComponent   `json:"component,omitempty"`
-	Runtime         *AIDiscoveryRuntime     `json:"runtime,omitempty"`
-	LastActiveAt    string                  `json:"last_active_at,omitempty"`
-	IdentityScore   float64                 `json:"identity_score,omitempty"`
-	IdentityBand    string                  `json:"identity_band,omitempty"`
-	PresenceScore   float64                 `json:"presence_score,omitempty"`
-	PresenceBand    string                  `json:"presence_band,omitempty"`
-	IdentityFactors []AIDiscoveryFactor     `json:"identity_factors,omitempty"`
-	PresenceFactors []AIDiscoveryFactor     `json:"presence_factors,omitempty"`
-	Detectors       []string                `json:"detectors,omitempty"`
-	Evidence        []AIDiscoveryEvidence   `json:"evidence,omitempty"`
+	Detector        string                `json:"detector,omitempty"`
+	Component       *AIDiscoveryComponent `json:"component,omitempty"`
+	Runtime         *AIDiscoveryRuntime   `json:"runtime,omitempty"`
+	LastActiveAt    string                `json:"last_active_at,omitempty"`
+	IdentityScore   float64               `json:"identity_score,omitempty"`
+	IdentityBand    string                `json:"identity_band,omitempty"`
+	PresenceScore   float64               `json:"presence_score,omitempty"`
+	PresenceBand    string                `json:"presence_band,omitempty"`
+	IdentityFactors []AIDiscoveryFactor   `json:"identity_factors,omitempty"`
+	PresenceFactors []AIDiscoveryFactor   `json:"presence_factors,omitempty"`
+	Detectors       []string              `json:"detectors,omitempty"`
+	Evidence        []AIDiscoveryEvidence `json:"evidence,omitempty"`
 	// RawPaths additionally requires ai_discovery.store_raw_local_paths.
 	RawPaths []string `json:"raw_paths,omitempty"`
 }

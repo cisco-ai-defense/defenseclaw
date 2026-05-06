@@ -1146,7 +1146,7 @@ mainly_for_demo = "0.1"
 		MaxFileBytes:    1 << 20,
 		EmitOTel:        false,
 	}, catalog, nil, nil)
-	signals, _, err := svc.detectPackageManifests()
+	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
 	}
@@ -1225,7 +1225,7 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 		MaxFileBytes:    1 << 20,
 		EmitOTel:        false,
 	}, catalog, nil, nil)
-	signals, _, err := svc.detectPackageManifests()
+	signals, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests: %v", err)
 	}
@@ -1252,7 +1252,7 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 	// Fingerprint MUST be deterministic across reruns -- otherwise
 	// the inventory store treats each scan as a brand-new signal
 	// and lifecycle (`new` / `seen` / `gone`) tracking breaks.
-	signals2, _, err := svc.detectPackageManifests()
+	signals2, _, err := svc.detectPackageManifests(context.Background())
 	if err != nil {
 		t.Fatalf("detectPackageManifests rerun: %v", err)
 	}

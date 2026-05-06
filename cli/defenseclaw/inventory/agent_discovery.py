@@ -238,9 +238,21 @@ def _trusted_bin_prefixes() -> tuple[str, ...]:
     expanded: list[str] = []
     for prefix in (*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras):
         try:
-            expanded.append(os.path.abspath(_expand(prefix)))
+            absolute = os.path.abspath(_expand(prefix))
         except Exception:
             continue
+        # Refuse degenerate prefixes that would defeat the allow-list:
+        # `/` matches every absolute path, and `""` would normalize to
+        # the current working directory which an attacker can pivot via
+        # `cd`. The allow-list must name a real installation root.
+        normalized = absolute.rstrip(os.sep)
+        if normalized in ("", os.sep.rstrip(os.sep)):
+            continue
+        # Require at least one path component below the filesystem
+        # root — `/usr` is fine, `/` is not.
+        if absolute.count(os.sep) < 1 or normalized == "":
+            continue
+        expanded.append(absolute)
     return tuple(expanded)
 
 
