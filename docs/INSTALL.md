@@ -337,9 +337,9 @@ support `--non-interactive` for scripted use and `--verify` /
 ### `defenseclaw init`
 
 One-time initialization. Creates `~/.defenseclaw/`, installs scanner
-dependencies, seeds config and audit database, copies Rego policies
-and the CodeGuard skill, and starts the sidecar if the gateway binary
-is on PATH.
+dependencies, seeds config and audit database, copies Rego policies,
+and starts the sidecar if the gateway binary is on PATH. CodeGuard
+native skill/rule installation is explicit and opt-in.
 
 ```bash
 defenseclaw init
@@ -362,7 +362,7 @@ What init does, step by step:
 7. Reads gateway defaults from OpenClaw config + generates device key
 8. If `--enable-guardrail`: runs the full guardrail setup flow
    (guardrail proxy + OpenClaw plugin)
-9. Installs the CodeGuard skill to `~/.openclaw/skills/codeguard/`
+9. Skips native CodeGuard skill/rule installation unless requested separately
 10. Starts `defenseclaw-gateway` if the binary exists on PATH
 
 ```bash
@@ -817,7 +817,7 @@ DefenseClaw supports multiple agent frameworks. Set the active mode in `~/.defen
 
 ```yaml
 claw:
-  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex
+  mode: openclaw        # openclaw | zeptoclaw | claudecode | codex | hermes | cursor | windsurf | geminicli | copilot
   home_dir: ""          # auto-detected; override to use a custom path
 ```
 

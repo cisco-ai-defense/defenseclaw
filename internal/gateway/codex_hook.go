@@ -292,10 +292,7 @@ func (a *APIServer) codexMode() string {
 			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
 		}
 	}
-	if mode != "action" {
-		return "observe"
-	}
-	return mode
+	return normalizeAgentHookMode(mode)
 }
 
 func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) codexHookResponse {

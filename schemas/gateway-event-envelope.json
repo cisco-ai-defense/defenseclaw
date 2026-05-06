@@ -9,7 +9,7 @@
     "ts":         { "type": "string", "format": "date-time" },
     "event_type": {
       "type": "string",
-      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation"]
+      "enum": ["verdict", "judge", "lifecycle", "error", "diagnostic", "scan", "scan_finding", "activity", "egress", "llm_prompt", "llm_response", "tool_invocation", "ai_discovery"]
     },
     "severity":   { "type": "string", "enum": ["INFO", "LOW", "MEDIUM", "HIGH", "CRITICAL", "WARN"] },
 
@@ -63,7 +63,8 @@
     "egress":          { "$ref": "#/$defs/EgressPayload" },
     "llm_prompt":      { "$ref": "#/$defs/LLMPromptPayload" },
     "llm_response":    { "$ref": "#/$defs/LLMResponsePayload" },
-    "tool_invocation": { "$ref": "#/$defs/ToolPayload" }
+    "tool_invocation": { "$ref": "#/$defs/ToolPayload" },
+    "ai_discovery":    { "$ref": "#/$defs/AIDiscoveryPayload" }
   },
   "oneOf": [
     { "required": ["verdict"] },
@@ -77,7 +78,8 @@
     { "required": ["egress"] },
     { "required": ["llm_prompt"] },
     { "required": ["llm_response"] },
-    { "required": ["tool_invocation"] }
+    { "required": ["tool_invocation"] },
+    { "required": ["ai_discovery"] }
   ],
   "$defs": {
     "VerdictPayload": {
@@ -186,6 +188,102 @@
         "exit_code":          { "type": ["integer", "null"] },
         "reply_to_prompt_id": { "type": ["string", "null"] },
         "source":             { "type": ["string", "null"] }
+      }
+    },
+    "AIDiscoveryPayload": {
+      "type": "object",
+      "required": ["scan_id", "signal_id", "category", "state"],
+      "properties": {
+        "scan_id":        { "type": "string", "maxLength": 128 },
+        "signal_id":      { "type": "string", "maxLength": 128 },
+        "category":       { "type": "string", "enum": ["supported_connector", "ai_cli", "active_process", "editor_extension", "mcp_server", "skill", "rule", "plugin", "package_dependency", "env_var_name", "shell_history_match", "provider_domain", "workspace_artifact", "desktop_app", "local_ai_endpoint"] },
+        "vendor":         { "type": ["string", "null"], "maxLength": 128 },
+        "product":        { "type": ["string", "null"], "maxLength": 128 },
+        "confidence":     { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "state":          { "type": "string", "enum": ["new", "changed", "gone"] },
+        "evidence_types": { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16 },
+        "path_hashes":    { "type": ["array", "null"], "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }, "maxItems": 16 },
+        "basenames":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 128, "pattern": "^[^/\\\\]+$" }, "maxItems": 16 },
+        "workspace_hash": { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "last_seen":      { "type": ["string", "null"], "format": "date-time" },
+        "detector":       { "type": ["string", "null"], "maxLength": 64,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "component":      { "type": ["object", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "properties": {
+            "ecosystem": { "type": ["string", "null"], "maxLength": 64 },
+            "name":      { "type": ["string", "null"], "maxLength": 256 },
+            "version":   { "type": ["string", "null"], "maxLength": 64 },
+            "framework": { "type": ["string", "null"], "maxLength": 256 }
+          }
+        },
+        "runtime":        { "type": ["object", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "properties": {
+            "pid":        { "type": ["integer", "null"], "minimum": 0 },
+            "ppid":       { "type": ["integer", "null"], "minimum": 0 },
+            "started_at": { "type": ["string", "null"], "format": "date-time" },
+            "uptime_sec": { "type": ["integer", "null"] },
+            "user":       { "type": ["string", "null"], "maxLength": 64 },
+            "comm":       { "type": ["string", "null"], "maxLength": 256 }
+          }
+        },
+        "last_active_at": { "type": ["string", "null"], "format": "date-time",
+          "description": "populated only when privacy.disable_redaction=true" },
+        "identity_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "identity_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
+          "description": "populated only when privacy.disable_redaction=true" },
+        "presence_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "presence_band":  { "type": ["string", "null"], "enum": [null, "very_high", "high", "medium", "low", "very_low"],
+          "description": "populated only when privacy.disable_redaction=true" },
+        "identity_factors": { "type": ["array", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
+        },
+        "presence_factors": { "type": ["array", "null"],
+          "description": "populated only when privacy.disable_redaction=true",
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/AIDiscoveryFactor" }
+        },
+        "detectors":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 64 }, "maxItems": 16,
+          "description": "populated only when privacy.disable_redaction=true" },
+        "evidence":       { "type": ["array", "null"], "maxItems": 32,
+          "description": "populated only when privacy.disable_redaction=true",
+          "items": { "$ref": "#/$defs/AIDiscoveryEvidence" }
+        },
+        "raw_paths":      { "type": ["array", "null"], "items": { "type": "string", "maxLength": 4096 }, "maxItems": 32,
+          "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" }
+      }
+    },
+    "AIDiscoveryFactor": {
+      "type": "object",
+      "required": ["detector", "logit_delta"],
+      "properties": {
+        "detector":   { "type": "string", "maxLength": 64 },
+        "evidence_id": { "type": ["string", "null"], "maxLength": 256 },
+        "match_kind": { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] },
+        "quality":    { "type": ["number", "null"] },
+        "specificity": { "type": ["number", "null"] },
+        "lr":         { "type": ["number", "null"] },
+        "logit_delta": { "type": "number" }
+      }
+    },
+    "AIDiscoveryEvidence": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type":          { "type": "string", "maxLength": 64 },
+        "basename":      { "type": ["string", "null"], "maxLength": 128, "pattern": "^[^/\\\\]*$" },
+        "path_hash":     { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "value_hash":    { "type": ["string", "null"], "maxLength": 256 },
+        "workspace_hash": { "type": ["string", "null"], "pattern": "^(sha256:[0-9a-f]{64})?$" },
+        "raw_path":      { "type": ["string", "null"], "maxLength": 4096,
+          "description": "populated only when privacy.disable_redaction=true AND ai_discovery.store_raw_local_paths=true" },
+        "quality":       { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+        "match_kind":    { "type": ["string", "null"], "enum": [null, "exact", "substring", "heuristic"] }
       }
     }
   }

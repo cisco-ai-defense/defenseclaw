@@ -34,7 +34,7 @@ Public surface
 --------------
 
 * :data:`KNOWN_CONNECTORS` — tuple of every name the dispatchers
-  recognize. Adding a fifth connector is a one-line change here plus
+  recognize. Adding a connector is a one-line change here plus
   a matching dispatch arm in each ``*_for_connector`` function below
   and a Go-side ``connector.NewDefaultRegistry`` registration.
 * :func:`normalize` — canonicalize an operator-supplied connector name
@@ -50,10 +50,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -64,6 +67,11 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "codex",
     "claudecode",
     "zeptoclaw",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -72,6 +80,20 @@ OpenClaw". Keeping the list explicit (rather than discovering at
 import time) means a typo in ``guardrail.connector`` surfaces in
 :func:`is_known` and in setup-time validation, instead of silently
 producing wrong paths.
+"""
+
+HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset({
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+})
+"""Connectors added through lifecycle hook surfaces.
+
+Kept as a compatibility constant for older tests/importers. These connectors
+now expose connector-specific MCP/skill/rule/plugin path discovery instead of
+falling back to OpenClaw or returning hook-only empty paths.
 """
 
 
@@ -171,6 +193,16 @@ def skill_dirs(
         return _codex_skill_dirs()
     if name == "zeptoclaw":
         return _zeptoclaw_skill_dirs()
+    if name == "hermes":
+        return _hermes_skill_dirs()
+    if name == "cursor":
+        return _cursor_skill_dirs()
+    if name == "windsurf":
+        return _windsurf_skill_dirs()
+    if name == "geminicli":
+        return _gemini_skill_dirs()
+    if name == "copilot":
+        return _copilot_skill_dirs()
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -195,6 +227,16 @@ def plugin_dirs(
         return _codex_plugin_dirs()
     if name == "zeptoclaw":
         return _zeptoclaw_plugin_dirs()
+    if name == "hermes":
+        return _hermes_plugin_dirs()
+    if name == "cursor":
+        return []
+    if name == "windsurf":
+        return []
+    if name == "geminicli":
+        return _gemini_plugin_dirs()
+    if name == "copilot":
+        return []
     return _openclaw_plugin_dirs(openclaw_home)
 
 
@@ -227,6 +269,16 @@ def mcp_servers(
         return _codex_mcp_servers()
     if name == "zeptoclaw":
         return _zeptoclaw_mcp_servers()
+    if name == "hermes":
+        return _hermes_mcp_servers()
+    if name == "cursor":
+        return _cursor_mcp_servers()
+    if name == "windsurf":
+        return _windsurf_mcp_servers()
+    if name == "geminicli":
+        return _gemini_mcp_servers()
+    if name == "copilot":
+        return _copilot_mcp_servers()
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -262,6 +314,43 @@ def _zeptoclaw_skill_dirs() -> list[str]:
     return _dedup([
         os.path.join(home, ".zeptoclaw", "skills"),
         os.path.join(cwd, ".zeptoclaw", "skills"),
+    ])
+
+
+def _hermes_skill_dirs() -> list[str]:
+    return [os.path.join(str(Path.home()), ".hermes", "skills")]
+
+
+def _cursor_skill_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".cursor", "skills"),
+        os.path.join(cwd, ".agents", "skills"),
+        os.path.join(home, ".cursor", "skills"),
+        os.path.join(home, ".agents", "skills"),
+    ])
+
+
+def _windsurf_skill_dirs() -> list[str]:
+    return []
+
+
+def _gemini_skill_dirs() -> list[str]:
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".gemini", "skills"),
+        os.path.join(cwd, ".agents", "skills"),
+    ])
+
+
+def _copilot_skill_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".github", "skills"),
+        os.path.join(cwd, ".agents", "skills"),
+        os.path.join(home, ".copilot", "skills"),
     ])
 
 
@@ -311,6 +400,24 @@ def _zeptoclaw_plugin_dirs() -> list[str]:
     return _dedup([
         base,
         os.path.join(base, "cache"),
+    ])
+
+
+def _hermes_plugin_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(home, ".hermes", "plugins"),
+        os.path.join(cwd, ".hermes", "plugins"),
+    ])
+
+
+def _gemini_plugin_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".gemini", "extensions"),
+        os.path.join(home, ".gemini", "extensions"),
     ])
 
 
@@ -433,6 +540,47 @@ def _openclaw_mcp_servers(
     )
 
 
+def _hermes_mcp_servers() -> list[MCPServerEntry]:
+    return _read_yaml_mcp_servers(
+        os.path.join(str(Path.home()), ".hermes", "config.yaml"),
+        key_paths=(("mcp", "servers"), ("mcpServers",)),
+    )
+
+
+def _cursor_mcp_servers() -> list[MCPServerEntry]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    entries: list[MCPServerEntry] = []
+    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".cursor", "mcp.json")))
+    entries.extend(_read_dotmcp_json(os.path.join(home, ".cursor", "mcp.json")))
+    return _dedup_mcp_entries(entries)
+
+
+def _windsurf_mcp_servers() -> list[MCPServerEntry]:
+    home = str(Path.home())
+    entries: list[MCPServerEntry] = []
+    for path in _windsurf_mcp_paths(home):
+        entries.extend(_read_dotmcp_json(path))
+    return _dedup_mcp_entries(entries)
+
+
+def _gemini_mcp_servers() -> list[MCPServerEntry]:
+    return _read_mcp_settings_block(
+        os.path.join(str(Path.home()), ".gemini", "settings.json"),
+        keys=("mcpServers",),
+    )
+
+
+def _copilot_mcp_servers() -> list[MCPServerEntry]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    entries: list[MCPServerEntry] = []
+    entries.extend(_read_dotmcp_json(os.path.join(home, ".copilot", "mcp-config.json")))
+    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".github", "mcp.json")))
+    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".mcp.json")))
+    return _dedup_mcp_entries(entries)
+
+
 # --- Low-level file/CLI helpers --------------------------------------------
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
@@ -473,6 +621,31 @@ def _read_mcp_settings_block(
     return _parse_mcp_servers_value(cursor)
 
 
+def _read_yaml_mcp_servers(
+    path: str,
+    *,
+    key_paths: tuple[tuple[str, ...], ...],
+) -> list[MCPServerEntry]:
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    entries: list[MCPServerEntry] = []
+    for keys in key_paths:
+        cursor: Any = data
+        for k in keys:
+            if not isinstance(cursor, dict):
+                cursor = None
+                break
+            cursor = cursor.get(k)
+        if cursor is not None:
+            entries.extend(_parse_mcp_servers_value(cursor))
+    return _dedup_mcp_entries(entries)
+
+
 def _read_dotmcp_json(path: str) -> list[MCPServerEntry]:
     """Parse a project-local ``.mcp.json``.
 
@@ -495,6 +668,14 @@ def _read_dotmcp_json(path: str) -> list[MCPServerEntry]:
 
 def _read_zepto_config(path: str) -> list[MCPServerEntry]:
     return _read_mcp_settings_block(path, keys=("mcp", "servers"))
+
+
+def _windsurf_mcp_paths(home: str | None = None) -> list[str]:
+    home = home or str(Path.home())
+    return [
+        os.path.join(home, ".codeium", "windsurf", "mcp_config.json"),
+        os.path.join(home, ".codeium", "windsurf", "mcp.json"),
+    ]
 
 
 def _read_mcp_servers_via_openclaw_cli(
@@ -659,6 +840,7 @@ def set_mcp_server(
     * Codex        — ``./.mcp.json[mcpServers][name]``
                      via :func:`_atomic_json_merge`.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
+    * Hook-only    — :class:`MCPWriteUnsupportedError`.
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -685,6 +867,32 @@ def set_mcp_server(
         # server should edit ``~/.codex/config.toml`` directly — the
         # read path now picks it up automatically.
         path = os.path.join(os.getcwd(), ".mcp.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "hermes":
+        path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
+        _atomic_yaml_merge(path, ("mcp", "servers", name), entry)
+        return
+    if name_n == "cursor":
+        path = os.path.join(os.getcwd(), ".cursor", "mcp.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "windsurf":
+        path = _windsurf_existing_mcp_write_path()
+        if not path:
+            raise MCPWriteUnsupportedError(
+                "windsurf MCP writes are disabled until an existing documented "
+                "Windsurf MCP config file is present; DefenseClaw will not "
+                "create guessed Windsurf config paths.",
+            )
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "geminicli":
+        path = os.path.join(str(Path.home()), ".gemini", "settings.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "copilot":
+        path = os.path.join(os.getcwd(), ".github", "mcp.json")
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "zeptoclaw":
@@ -732,6 +940,31 @@ def unset_mcp_server(
         path = os.path.join(os.getcwd(), ".mcp.json")
         _atomic_json_delete(path, ("mcpServers", name))
         return
+    if name_n == "hermes":
+        path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
+        _atomic_yaml_delete(path, ("mcp", "servers", name))
+        return
+    if name_n == "cursor":
+        path = os.path.join(os.getcwd(), ".cursor", "mcp.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "windsurf":
+        path = _windsurf_existing_mcp_write_path()
+        if not path:
+            raise MCPWriteUnsupportedError(
+                "windsurf MCP writes are disabled until an existing documented "
+                "Windsurf MCP config file is present.",
+            )
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "geminicli":
+        path = os.path.join(str(Path.home()), ".gemini", "settings.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "copilot":
+        path = os.path.join(os.getcwd(), ".github", "mcp.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -768,6 +1001,7 @@ def _atomic_json_merge(
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
+    _capture_managed_mcp_backup(path)
     data: dict[str, Any]
     try:
         with open(path) as f:
@@ -810,8 +1044,112 @@ def _atomic_json_delete(
     if not isinstance(cursor, dict) or keys[-1] not in cursor:
         return False
     del cursor[keys[-1]]
+    _capture_managed_mcp_backup(path)
     _atomic_write_json(path, loaded)
     return True
+
+
+def _atomic_yaml_merge(
+    path: str,
+    keys: tuple[str, ...],
+    value: dict[str, Any],
+) -> None:
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    _capture_managed_mcp_backup(path)
+    try:
+        with open(path) as f:
+            loaded = yaml.safe_load(f) or {}
+        data = loaded if isinstance(loaded, dict) else {}
+    except (FileNotFoundError, yaml.YAMLError):
+        data = {}
+    cursor = data
+    for k in keys[:-1]:
+        node = cursor.get(k)
+        if not isinstance(node, dict):
+            node = {}
+            cursor[k] = node
+        cursor = node
+    cursor[keys[-1]] = value
+    _atomic_write_yaml(path, data)
+
+
+def _atomic_yaml_delete(
+    path: str,
+    keys: tuple[str, ...],
+) -> bool:
+    try:
+        with open(path) as f:
+            loaded = yaml.safe_load(f) or {}
+    except (FileNotFoundError, yaml.YAMLError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    cursor: Any = loaded
+    for k in keys[:-1]:
+        if not isinstance(cursor, dict) or k not in cursor:
+            return False
+        cursor = cursor[k]
+    if not isinstance(cursor, dict) or keys[-1] not in cursor:
+        return False
+    del cursor[keys[-1]]
+    _capture_managed_mcp_backup(path)
+    _atomic_write_yaml(path, loaded)
+    return True
+
+
+def restore_managed_mcp_backup(path: str) -> bool:
+    """Restore the one-shot DefenseClaw backup for *path* if present."""
+    backup = _managed_mcp_backup_path(path)
+    if not os.path.isfile(backup):
+        return False
+    os.replace(backup, path)
+    return True
+
+
+def _capture_managed_mcp_backup(path: str) -> None:
+    if not os.path.isfile(path):
+        return
+    backup = _managed_mcp_backup_path(path)
+    if os.path.exists(backup):
+        return
+    shutil.copy2(path, backup)
+    os.chmod(backup, 0o600)
+
+
+def _managed_mcp_backup_path(path: str) -> str:
+    parent = os.path.dirname(path) or "."
+    basename = os.path.basename(path).lstrip(".") or "config"
+    return os.path.join(parent, f".defenseclaw-{basename}.bak")
+
+
+def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:
+    import tempfile
+
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".defenseclaw-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _windsurf_existing_mcp_write_path() -> str | None:
+    for path in _windsurf_mcp_paths():
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def _atomic_write_json(path: str, data: dict[str, Any]) -> None:

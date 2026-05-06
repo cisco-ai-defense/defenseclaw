@@ -169,10 +169,10 @@ type metricsSet struct {
 	guardrailCacheHits    metric.Int64Counter
 	guardrailCacheMisses  metric.Int64Counter
 
-	// Connector OTLP ingest receivers (codex / claudecode native
-	// telemetry posted to /v1/logs, /v1/metrics, /v1/traces). Kept
+	// Connector OTLP ingest receivers (native connector telemetry
+	// posted to /v1/logs, /v1/metrics, /v1/traces). Kept
 	// low-cardinality on purpose — labels are signal (logs|metrics|
-	// traces) and source (codex|claudecode|unknown). Records counts
+	// traces) and source (registered connector name|unknown). Records counts
 	// the per-batch leaf records (logRecords / dataPoints / spans)
 	// the summarizer extracted; used by the connector dashboard to
 	// show "telemetry volume per connector".
@@ -181,6 +181,39 @@ type metricsSet struct {
 	otelIngestBytes     metric.Int64Counter
 	otelIngestMalformed metric.Int64Counter
 	otelIngestLastSeen  metric.Float64Gauge
+
+	// On-demand local agent discovery. Emitted by the CLI via
+	// POST /api/v1/agents/discovery after it has stripped raw local paths.
+	agentDiscoveryRuns      metric.Int64Counter
+	agentDiscoveryDuration  metric.Float64Histogram
+	agentDiscoverySignals   metric.Int64Counter
+	agentDiscoveryInstalled metric.Int64Gauge
+	agentDiscoveryErrors    metric.Int64Counter
+
+	// Continuous AI discovery / shadow AI visibility.
+	aiDiscoveryRuns             metric.Int64Counter
+	aiDiscoveryDuration         metric.Float64Histogram
+	aiDiscoverySignals          metric.Int64Counter
+	aiDiscoveryNewSignals       metric.Int64Counter
+	aiDiscoveryActiveSignals    metric.Int64Gauge
+	aiDiscoveryGoneSignals      metric.Int64Counter
+	aiDiscoveryErrors           metric.Int64Counter
+	aiDiscoveryFilesScanned     metric.Int64Counter
+	aiDiscoveryDedupeSuppressed metric.Int64Counter
+
+	// Component-level confidence emissions, derived from the
+	// two-axis Bayesian engine. These are scoped per (ecosystem,
+	// name) and are deliberately separate from the per-signal
+	// counters above so dashboards can show "what does the
+	// gateway think it observed?" alongside "how raw signals
+	// fanned in?". Cardinality is bounded by the discovered
+	// component set (typically tens to low hundreds per host),
+	// not by signal volume.
+	aiComponentObservations metric.Int64Counter
+	aiComponentInstalls     metric.Int64Gauge
+	aiComponentWorkspaces   metric.Int64Gauge
+	aiConfidenceIdentity    metric.Float64Histogram
+	aiConfidencePresence    metric.Float64Histogram
 
 	// Codex notify webhook (agent-turn-complete et al.). type is
 	// the sanitized notify type ("agent-turn-complete", "unknown",
@@ -279,6 +312,11 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.hookLatency, err = m.Float64Histogram("defenseclaw.connector.hook.latency",
 		metric.WithUnit("ms"),
 		metric.WithDescription("Connector hook handler latency."),
+		// Connector hooks run on the agent's critical path (every
+		// pre-tool / pre-prompt callback). Buckets bias hard towards
+		// sub-100ms so dashboards can spot regressions long before
+		// they're user-visible; the long tail still captures stalls.
+		metric.WithExplicitBucketBoundaries(1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
 	)
 	if err != nil {
 		return nil, err
@@ -571,6 +609,15 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 
 	sloMsBuckets := []float64{50, 100, 250, 500, 1000, 2000, 5000, 10000}
 
+	// genericMsBuckets covers the broad latency range used by most
+	// histograms in this package (handler latency, scan duration,
+	// discovery scan duration, etc.). It biases towards sub-second
+	// but extends out to a minute so a hung scanner is still visible
+	// on dashboards before falling off the right edge.
+	genericMsBuckets := []float64{
+		1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000,
+	}
+
 	// v7 instruments — Track 9 capacity/SLO + Track 7 (gauges = absolute snapshots).
 	ms.goroutines, err = m.Int64Gauge("defenseclaw.runtime.goroutines",
 		metric.WithUnit("{goroutine}"),
@@ -840,6 +887,162 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.otelIngestLastSeen, err = m.Float64Gauge("defenseclaw.otel.ingest.last_seen_ts",
 		metric.WithUnit("s"),
 		metric.WithDescription("Unix-seconds timestamp of the most recent OTLP-HTTP batch accepted from a given source/signal. Used by the ConnectorTelemetrySilent alert."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.agentDiscoveryRuns, err = m.Int64Counter("defenseclaw.agent.discovery.runs",
+		metric.WithUnit("{run}"),
+		metric.WithDescription("On-demand local agent discovery reports accepted by the sidecar, by source/cache/result."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoveryDuration, err = m.Float64Histogram("defenseclaw.agent.discovery.duration",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Wall-clock duration of the CLI local agent discovery scan."),
+		metric.WithExplicitBucketBoundaries(genericMsBuckets...),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoverySignals, err = m.Int64Counter("defenseclaw.agent.discovery.signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("Per-connector install signals reported by agent discovery."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoveryInstalled, err = m.Int64Gauge("defenseclaw.agent.discovery.installed",
+		metric.WithUnit("1"),
+		metric.WithDescription("Latest discovered installed state for each connector (1 installed, 0 not installed)."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.agentDiscoveryErrors, err = m.Int64Counter("defenseclaw.agent.discovery.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Version probe or discovery errors by connector and bounded reason."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.aiDiscoveryRuns, err = m.Int64Counter("defenseclaw.ai.discovery.runs",
+		metric.WithUnit("{run}"),
+		metric.WithDescription("Continuous AI discovery scans completed by the sidecar."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryDuration, err = m.Float64Histogram("defenseclaw.ai.discovery.duration",
+		metric.WithUnit("ms"),
+		metric.WithDescription("Wall-clock duration of continuous AI discovery scans."),
+		metric.WithExplicitBucketBoundaries(genericMsBuckets...),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoverySignals, err = m.Int64Counter("defenseclaw.ai.discovery.signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("AI usage signals observed by category/vendor/product/state."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryNewSignals, err = m.Int64Counter("defenseclaw.ai.discovery.new_signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("New or changed AI usage signals discovered."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryActiveSignals, err = m.Int64Gauge("defenseclaw.ai.discovery.active_signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("Latest active AI usage signal count."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryGoneSignals, err = m.Int64Counter("defenseclaw.ai.discovery.gone_signals",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("AI usage signals that disappeared from a full scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryErrors, err = m.Int64Counter("defenseclaw.ai.discovery.errors",
+		metric.WithUnit("{error}"),
+		metric.WithDescription("Continuous AI discovery detector errors by bounded detector/reason."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryFilesScanned, err = m.Int64Counter("defenseclaw.ai.discovery.files_scanned",
+		metric.WithUnit("{file}"),
+		metric.WithDescription("Package manifest and shell history files inspected by continuous AI discovery."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiDiscoveryDedupeSuppressed, err = m.Int64Counter("defenseclaw.ai.discovery.dedupe_suppressed",
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("Duplicate AI discovery signals suppressed within a scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Component-level instruments. We use bounded labels
+	// (ecosystem, name, identity_band, presence_band) so the
+	// cardinality stays proportional to the discovered component
+	// set, not to scan or signal volume. Score histograms expose
+	// the calibrated confidence so operators can alert on drift
+	// (e.g. "presence_band==very_low for >24h means the SDK was
+	// removed without a redeploy").
+	ms.aiComponentObservations, err = m.Int64Counter("defenseclaw.ai.components.observations",
+		metric.WithUnit("{observation}"),
+		metric.WithDescription("Per-(ecosystem,name) confidence emissions; one increment per scan that produced a component rollup."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiComponentInstalls, err = m.Int64Gauge("defenseclaw.ai.components.installs",
+		metric.WithUnit("{install}"),
+		metric.WithDescription("Distinct install evidences per component as of the last scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiComponentWorkspaces, err = m.Int64Gauge("defenseclaw.ai.components.workspaces",
+		metric.WithUnit("{workspace}"),
+		metric.WithDescription("Distinct workspaces a component appears in as of the last scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	// Bucket boundaries explicitly tuned for [0,1] confidence scores.
+	// Without this override, the OTel SDK falls back to the default
+	// latency-shaped boundaries (0, 5, 10, 25, …, 10000, +Inf), which
+	// puts every confidence sample in the le=5.0 bucket and makes
+	// `histogram_quantile(...)` flat-line at zero on dashboards. The
+	// granularity below mirrors the bands the engine itself surfaces
+	// (very_low / low / medium / high / very_high) so band thresholds
+	// stay queryable directly off the bucket counts.
+	confidenceBuckets := []float64{0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0}
+	ms.aiConfidenceIdentity, err = m.Float64Histogram("defenseclaw.ai.confidence.identity_score",
+		metric.WithUnit("1"),
+		metric.WithDescription("Two-axis Bayesian engine identity score in [0,1] per component, per scan."),
+		metric.WithExplicitBucketBoundaries(confidenceBuckets...),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiConfidencePresence, err = m.Float64Histogram("defenseclaw.ai.confidence.presence_score",
+		metric.WithUnit("1"),
+		metric.WithDescription("Two-axis Bayesian engine presence score in [0,1] per component, per scan."),
+		metric.WithExplicitBucketBoundaries(confidenceBuckets...),
 	)
 	if err != nil {
 		return nil, err
@@ -1541,14 +1744,58 @@ func (p *Provider) RecordLLMBridgeLatency(ctx context.Context, model, status str
 }
 
 // RecordOpenShellExit records an OpenShell subprocess exit (non-zero typically).
+//
+// `command` is the program (NOT the full argv) that was launched; the
+// caller MUST pass only the binary name or a stable identifier — the
+// label is bounded here as a defense-in-depth via boundOpenShellCommand
+// so a future caller passing the full user-supplied command line can't
+// blow up Prometheus cardinality. Anything outside [a-z0-9._-] (case
+// folded) is collapsed to "other".
 func (p *Provider) RecordOpenShellExit(ctx context.Context, command string, exitCode int) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
 	p.metrics.openShellExit.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("command", command),
+		attribute.String("command", boundOpenShellCommand(command)),
 		attribute.Int("exit_code", exitCode),
 	))
+}
+
+// boundOpenShellCommand returns a low-cardinality label for a shell
+// command. Only the first whitespace-separated token is considered
+// (so `rm -rf /tmp/foo` collapses to `rm`), the value is lowercased,
+// and any character outside the safe alphabet is replaced with `-`.
+// Empty input becomes "unknown"; anything longer than 32 bytes after
+// normalisation becomes "other" so a hostile / pathological binary
+// name can't introduce thousands of new series.
+func boundOpenShellCommand(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "unknown"
+	}
+	if i := strings.IndexAny(s, " \t\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.ToLower(s)
+	if len(s) > 32 {
+		return "other"
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z',
+			c >= '0' && c <= '9',
+			c == '-' || c == '_' || c == '.':
+			out = append(out, c)
+		default:
+			out = append(out, '-')
+		}
+	}
+	if len(out) == 0 {
+		return "unknown"
+	}
+	return string(out)
 }
 
 // RecordCiscoError increments Cisco inspect errors by stable code.
@@ -1908,7 +2155,7 @@ func (p *Provider) RecordGuardrailCacheMiss(ctx context.Context, scanner, verdic
 }
 
 // RecordOTelIngest records a single OTLP-HTTP batch the gateway
-// accepted from a connector (codex / claudecode). Emits four
+// accepted from a connector. Emits four
 // time series per call:
 //
 //   - defenseclaw.otel.ingest.requests{signal,source,result} += 1
@@ -1920,8 +2167,8 @@ func (p *Provider) RecordGuardrailCacheMiss(ctx context.Context, scanner, verdic
 // failed to parse (records/bytes are still recorded so volume
 // dashboards stay accurate even during schema drift). Cardinality
 // is bounded: signal ∈ {logs,metrics,traces}, source is the
-// sanitized x-defenseclaw-source header (codex|claudecode|unknown),
-// result ∈ {ok,malformed}.
+// sanitized x-defenseclaw-source header or path-token source, result ∈
+// {ok,malformed}.
 func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result string, records, bodyBytes int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
@@ -1966,6 +2213,403 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 	p.metrics.otelIngestLastSeen.Record(ctx, float64(time.Now().Unix()), volumeAttrs)
 }
 
+// RecordAgentDiscovery records one on-demand agent discovery report accepted
+// by the sidecar. The CLI sends only sanitized path booleans, basenames, and
+// hashes; this method keeps labels low-cardinality so the metric can be safely
+// enabled on developer workstations and CI.
+func (p *Provider) RecordAgentDiscovery(ctx context.Context, source string, cacheHit bool, result string, durationMs float64, agentsTotal, installedTotal int) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "unknown")
+	result = normalizeTelemetryLabel(result, "ok")
+	attrs := metric.WithAttributes(
+		attribute.String("source", source),
+		attribute.Bool("cache_hit", cacheHit),
+		attribute.String("result", result),
+	)
+	p.metrics.agentDiscoveryRuns.Add(ctx, 1, attrs)
+	if durationMs >= 0 {
+		p.metrics.agentDiscoveryDuration.Record(ctx, durationMs, attrs)
+	}
+}
+
+// RecordAgentDiscoverySignal records a single connector signal within an
+// accepted discovery report.
+func (p *Provider) RecordAgentDiscoverySignal(ctx context.Context, connector string, installed, hasConfig, hasBinary bool, probeStatus string) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = normalizeTelemetryLabel(connector, "unknown")
+	probeStatus = normalizeTelemetryLabel(probeStatus, "unknown")
+	attrs := metric.WithAttributes(
+		attribute.String("connector", connector),
+		attribute.Bool("installed", installed),
+		attribute.Bool("has_config", hasConfig),
+		attribute.Bool("has_binary", hasBinary),
+		attribute.String("probe_status", probeStatus),
+	)
+	p.metrics.agentDiscoverySignals.Add(ctx, 1, attrs)
+	installedValue := int64(0)
+	if installed {
+		installedValue = 1
+	}
+	p.metrics.agentDiscoveryInstalled.Record(ctx, installedValue, metric.WithAttributes(
+		attribute.String("connector", connector),
+	))
+}
+
+// RecordAgentDiscoveryError records a bounded version-probe or parse error
+// class for a connector. The error reason is a class, not raw stderr.
+func (p *Provider) RecordAgentDiscoveryError(ctx context.Context, connector, reason string) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = normalizeTelemetryLabel(connector, "unknown")
+	reason = normalizeTelemetryLabel(reason, "other")
+	p.metrics.agentDiscoveryErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("connector", connector),
+		attribute.String("reason", reason),
+	))
+}
+
+// EmitAgentDiscoverySummaryLog emits one structured OTel log record per
+// on-demand discovery run. It intentionally excludes local filesystem paths.
+func (p *Provider) EmitAgentDiscoverySummaryLog(ctx context.Context, source string, cacheHit bool, result string, durationMs float64, agentsTotal, installedTotal int) {
+	if !p.LogsEnabled() {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "unknown")
+	result = normalizeTelemetryLabel(result, "ok")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if result == "ok" {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	} else {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	}
+	rec.SetBody(otellog.StringValue("agent discovery"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.agent.discovery"),
+		otellog.String("event.domain", "defenseclaw.agent"),
+		otellog.String("defenseclaw.agent.discovery.source", source),
+		otellog.Bool("defenseclaw.agent.discovery.cache_hit", cacheHit),
+		otellog.String("defenseclaw.agent.discovery.result", result),
+		otellog.Int64("defenseclaw.agent.discovery.duration_ms", int64(durationMs)),
+		otellog.Int64("defenseclaw.agent.discovery.agents_total", int64(agentsTotal)),
+		otellog.Int64("defenseclaw.agent.discovery.installed_total", int64(installedTotal)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// EmitAgentDiscoverySignalLog emits one low-cardinality per-connector log
+// record. It carries booleans and probe classes only; no raw local paths.
+func (p *Provider) EmitAgentDiscoverySignalLog(ctx context.Context, connector string, installed, hasConfig, hasBinary bool, probeStatus string) {
+	if !p.LogsEnabled() {
+		return
+	}
+	connector = normalizeTelemetryLabel(connector, "unknown")
+	probeStatus = normalizeTelemetryLabel(probeStatus, "unknown")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetSeverityText("INFO")
+	rec.SetBody(otellog.StringValue("agent discovery signal"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.agent.discovery.signal"),
+		otellog.String("event.domain", "defenseclaw.agent"),
+		otellog.String("defenseclaw.agent.discovery.connector", connector),
+		otellog.Bool("defenseclaw.agent.discovery.installed", installed),
+		otellog.Bool("defenseclaw.agent.discovery.has_config", hasConfig),
+		otellog.Bool("defenseclaw.agent.discovery.has_binary", hasBinary),
+		otellog.String("defenseclaw.agent.discovery.probe_status", probeStatus),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// RecordAIDiscoveryRun records one continuous AI visibility scan. Labels are
+// bounded to avoid turning device inventory into a high-cardinality metric.
+func (p *Provider) RecordAIDiscoveryRun(ctx context.Context, source, privacyMode, result string, durationMs float64, signalsTotal, activeTotal, newTotal, goneTotal, filesScanned, dedupeSuppressed int) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "sidecar")
+	privacyMode = normalizeTelemetryLabel(privacyMode, "enhanced")
+	result = normalizeTelemetryLabel(result, "ok")
+	attrs := metric.WithAttributes(
+		attribute.String("source", source),
+		attribute.String("privacy_mode", privacyMode),
+		attribute.String("result", result),
+	)
+	p.metrics.aiDiscoveryRuns.Add(ctx, 1, attrs)
+	p.metrics.aiDiscoveryDuration.Record(ctx, durationMs, attrs)
+	p.metrics.aiDiscoveryActiveSignals.Record(ctx, int64(activeTotal), metric.WithAttributes(
+		attribute.String("source", source),
+		attribute.String("privacy_mode", privacyMode),
+	))
+	if filesScanned > 0 {
+		p.metrics.aiDiscoveryFilesScanned.Add(ctx, int64(filesScanned), attrs)
+	}
+	if dedupeSuppressed > 0 {
+		p.metrics.aiDiscoveryDedupeSuppressed.Add(ctx, int64(dedupeSuppressed), attrs)
+	}
+	if newTotal > 0 {
+		p.metrics.aiDiscoveryNewSignals.Add(ctx, int64(newTotal), attrs)
+	}
+	if goneTotal > 0 {
+		p.metrics.aiDiscoveryGoneSignals.Add(ctx, int64(goneTotal), attrs)
+	}
+	_ = signalsTotal // summary count is carried in logs; signal counter is per-signal below.
+}
+
+// RecordAIDiscoverySignal records one sanitized AI usage signal.
+func (p *Provider) RecordAIDiscoverySignal(ctx context.Context, category, vendor, product, state, detector string, confidence float64) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	attrs := metric.WithAttributes(
+		attribute.String("signal.category", normalizeTelemetryLabel(category, "unknown")),
+		attribute.String("ai.vendor", normalizeTelemetryLabel(vendor, "unknown")),
+		attribute.String("ai.product", normalizeTelemetryLabel(product, "unknown")),
+		attribute.String("state", normalizeTelemetryLabel(state, "seen")),
+		attribute.String("detector", normalizeTelemetryLabel(detector, "unknown")),
+		attribute.String("confidence", confidenceBucket(confidence)),
+	)
+	p.metrics.aiDiscoverySignals.Add(ctx, 1, attrs)
+	if state == "new" || state == "changed" {
+		p.metrics.aiDiscoveryNewSignals.Add(ctx, 1, attrs)
+	}
+	if state == "gone" {
+		p.metrics.aiDiscoveryGoneSignals.Add(ctx, 1, attrs)
+	}
+}
+
+func (p *Provider) RecordAIDiscoveryError(ctx context.Context, detector, reason string) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.aiDiscoveryErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("detector", normalizeTelemetryLabel(detector, "unknown")),
+		attribute.String("reason", normalizeTelemetryLabel(reason, "other")),
+	))
+}
+
+func (p *Provider) EmitAIDiscoverySummaryLog(ctx context.Context, source, privacyMode, result string, durationMs float64, signalsTotal, activeTotal, newTotal, goneTotal, filesScanned int) {
+	if !p.LogsEnabled() {
+		return
+	}
+	source = normalizeTelemetryLabel(source, "sidecar")
+	privacyMode = normalizeTelemetryLabel(privacyMode, "enhanced")
+	result = normalizeTelemetryLabel(result, "ok")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if result == "ok" {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	} else {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	}
+	rec.SetBody(otellog.StringValue("continuous AI discovery"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.ai.discovery"),
+		otellog.String("event.domain", "defenseclaw.ai_visibility"),
+		otellog.String("defenseclaw.ai.discovery.source", source),
+		otellog.String("defenseclaw.ai.discovery.privacy_mode", privacyMode),
+		otellog.String("defenseclaw.ai.discovery.result", result),
+		otellog.Int64("defenseclaw.ai.discovery.duration_ms", int64(durationMs)),
+		otellog.Int64("defenseclaw.ai.discovery.signals_total", int64(signalsTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.active_total", int64(activeTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.new_total", int64(newTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.gone_total", int64(goneTotal)),
+		otellog.Int64("defenseclaw.ai.discovery.files_scanned", int64(filesScanned)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+func (p *Provider) EmitAIDiscoverySignalLog(ctx context.Context, category, vendor, product, state, detector string, confidence float64) {
+	if !p.LogsEnabled() {
+		return
+	}
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	rec.SetSeverity(otellog.SeverityInfo)
+	rec.SetSeverityText("INFO")
+	rec.SetBody(otellog.StringValue("AI usage signal"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.ai.discovery.signal"),
+		otellog.String("event.domain", "defenseclaw.ai_visibility"),
+		otellog.String("signal.category", normalizeTelemetryLabel(category, "unknown")),
+		otellog.String("ai.vendor", normalizeTelemetryLabel(vendor, "unknown")),
+		otellog.String("ai.product", normalizeTelemetryLabel(product, "unknown")),
+		otellog.String("state", normalizeTelemetryLabel(state, "seen")),
+		otellog.String("detector", normalizeTelemetryLabel(detector, "unknown")),
+		otellog.String("confidence", confidenceBucket(confidence)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// AIComponentConfidenceAttrs is the bounded-label payload for one
+// component-level confidence emission. We pass it as a struct so
+// adding fields (e.g. policy_version) doesn't break call sites or
+// silently swap argument order. Identity / presence bands are the
+// operator-facing labels (very_high|high|medium|low|very_low) the
+// engine produced; ecosystem and name are the dedupe key the
+// /components endpoint groups on.
+type AIComponentConfidenceAttrs struct {
+	Ecosystem      string
+	Name           string
+	Framework      string
+	IdentityScore  float64
+	IdentityBand   string
+	PresenceScore  float64
+	PresenceBand   string
+	InstallCount   int
+	WorkspaceCount int
+	PolicyVersion  int
+	DetectorCount  int
+}
+
+// RecordAIComponentConfidence emits one bounded metric burst per
+// component the gateway scored in the latest scan: a counter so
+// "how many scans saw openai?" is queryable, two gauges for
+// install / workspace fan-out, and two histograms for the
+// identity/presence score distribution. Cardinality is bounded
+// by the discovered component set (ecosystem + name only — bands
+// are sub-attributes), which is independent of signal volume.
+func (p *Provider) RecordAIComponentConfidence(ctx context.Context, attrs AIComponentConfidenceAttrs) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	ecosystem := normalizeTelemetryLabel(attrs.Ecosystem, "unknown")
+	name := normalizeTelemetryLabel(attrs.Name, "unknown")
+	framework := normalizeTelemetryLabel(attrs.Framework, "unknown")
+	identityBand := normalizeTelemetryLabel(attrs.IdentityBand, "unknown")
+	presenceBand := normalizeTelemetryLabel(attrs.PresenceBand, "unknown")
+	identity := clampUnitInterval(attrs.IdentityScore)
+	presence := clampUnitInterval(attrs.PresenceScore)
+
+	// Counter labels carry the bands so an operator can graph
+	// "components in very_low presence band over time" without
+	// pulling histogram percentiles. The gauge labels deliberately
+	// drop the band so the value reflects the latest scan even
+	// when the band changes between scans.
+	counterAttrs := metric.WithAttributes(
+		attribute.String("ecosystem", ecosystem),
+		attribute.String("name", name),
+		attribute.String("identity_band", identityBand),
+		attribute.String("presence_band", presenceBand),
+	)
+	gaugeAttrs := metric.WithAttributes(
+		attribute.String("ecosystem", ecosystem),
+		attribute.String("name", name),
+	)
+	histogramAttrs := metric.WithAttributes(
+		attribute.String("ecosystem", ecosystem),
+		attribute.String("name", name),
+		attribute.String("framework", framework),
+	)
+
+	p.metrics.aiComponentObservations.Add(ctx, 1, counterAttrs)
+	p.metrics.aiComponentInstalls.Record(ctx, int64(attrs.InstallCount), gaugeAttrs)
+	p.metrics.aiComponentWorkspaces.Record(ctx, int64(attrs.WorkspaceCount), gaugeAttrs)
+	p.metrics.aiConfidenceIdentity.Record(ctx, identity, histogramAttrs)
+	p.metrics.aiConfidencePresence.Record(ctx, presence, histogramAttrs)
+}
+
+// EmitAIComponentConfidenceLog records one structured log per
+// scored component so SIEMs that only ingest the OTel logs stream
+// (no metrics pipeline) still get the full identity/presence
+// breakdown. Severity escalates to WARN when identity is high but
+// presence dropped to very_low — the signature operators alert on
+// for "the SDK was removed but the manifest is still around".
+func (p *Provider) EmitAIComponentConfidenceLog(ctx context.Context, attrs AIComponentConfidenceAttrs) {
+	if p == nil || !p.LogsEnabled() {
+		return
+	}
+	identity := clampUnitInterval(attrs.IdentityScore)
+	presence := clampUnitInterval(attrs.PresenceScore)
+	identityBand := normalizeTelemetryLabel(attrs.IdentityBand, "unknown")
+	presenceBand := normalizeTelemetryLabel(attrs.PresenceBand, "unknown")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if identity >= 0.7 && presence <= 0.2 {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	} else {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	}
+	rec.SetBody(otellog.StringValue("AI component confidence"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.ai.confidence.component"),
+		otellog.String("event.domain", "defenseclaw.ai_visibility"),
+		otellog.String("ai.component.ecosystem", normalizeTelemetryLabel(attrs.Ecosystem, "unknown")),
+		otellog.String("ai.component.name", normalizeTelemetryLabel(attrs.Name, "unknown")),
+		otellog.String("ai.component.framework", normalizeTelemetryLabel(attrs.Framework, "unknown")),
+		otellog.Float64("ai.confidence.identity_score", identity),
+		otellog.String("ai.confidence.identity_band", identityBand),
+		otellog.Float64("ai.confidence.presence_score", presence),
+		otellog.String("ai.confidence.presence_band", presenceBand),
+		otellog.Int64("ai.component.install_count", int64(attrs.InstallCount)),
+		otellog.Int64("ai.component.workspace_count", int64(attrs.WorkspaceCount)),
+		otellog.Int64("ai.component.detector_count", int64(attrs.DetectorCount)),
+		otellog.Int64("ai.confidence.policy_version", int64(attrs.PolicyVersion)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// clampUnitInterval normalizes the score histogram inputs so a
+// rounding error in the engine (e.g. 1.0000000002) doesn't slip
+// past the OTel histogram and skew the +Inf bucket. The engine
+// already targets [0,1] but defense in depth here is cheap.
+func clampUnitInterval(v float64) float64 {
+	if v != v { // NaN — engine never produces this but guard anyway.
+		return 0
+	}
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+func confidenceBucket(confidence float64) string {
+	switch {
+	case confidence >= 0.9:
+		return "high"
+	case confidence >= 0.7:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func normalizeTelemetryLabel(value, fallback string) string {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		value = fallback
+	}
+	if len(value) > 80 {
+		value = value[:80]
+	}
+	return value
+}
+
 // RecordCodexNotify records a single codex notify webhook event.
 // `kind` is the sanitized notify type the action key uses
 // ("agent-turn-complete", "unknown", "malformed"); `status` is
@@ -2001,7 +2645,7 @@ func (p *Provider) RecordCodexNotify(ctx context.Context, kind, status, result s
 // internal/telemetry/provider.go::loggerProvider) and therefore
 // lands in whatever OTel collector the operator has configured —
 // in the local-observability-stack that's the bundled collector
-// → Loki, giving operators direct visibility into codex/claudecode
+// → Loki, giving operators direct visibility into connector
 // telemetry without configuring an additional audit OTLP sink.
 //
 // The log body is short ("connector ingest …") because the
@@ -2009,7 +2653,7 @@ func (p *Provider) RecordCodexNotify(ctx context.Context, kind, status, result s
 // body and labels separately and we don't want to balloon the
 // chunk store with verbose summaries.
 //
-// signal: logs|metrics|traces. source: codex|claudecode|unknown.
+// signal: logs|metrics|traces. source: registered connector name|unknown.
 // result: ok|malformed. records is the leaf-record count the
 // summarizer produced; bodyBytes is the request size; summary
 // is the human-readable summary line the audit row also stores.
@@ -2028,9 +2672,15 @@ func (p *Provider) EmitConnectorTelemetryLog(ctx context.Context, signal, source
 		rec.SetSeverity(otellog.SeverityInfo)
 		rec.SetSeverityText("INFO")
 	}
-	rec.SetBody(otellog.StringValue("connector telemetry ingest"))
+	eventName := "defenseclaw.otel.ingest"
+	body := "connector telemetry ingest"
+	if signal == "hook" {
+		eventName = "defenseclaw.hook.invocation"
+		body = "connector hook invocation"
+	}
+	rec.SetBody(otellog.StringValue(body))
 	rec.AddAttributes(
-		otellog.String("event.name", "defenseclaw.otel.ingest"),
+		otellog.String("event.name", eventName),
 		otellog.String("event.domain", "defenseclaw.connector"),
 		otellog.String("defenseclaw.otel.ingest.signal", signal),
 		otellog.String("defenseclaw.otel.ingest.source", source),

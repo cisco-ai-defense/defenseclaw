@@ -45,14 +45,21 @@ and a `Prometheus-Alerts` Alertmanager-shim that surfaces the rules in
 `prometheus/rules/alerts.yml`) and a tagged dashboard pack under
 **Dashboards → Browse → `defenseclaw`**:
 
-| Dashboard                       | Audience            | What to watch for |
-|---------------------------------|---------------------|-------------------|
-| **Overview**                    | on-call landing     | `ALERTS` table, SLO gauges, health stats, Loki tail |
-| **Security**                    | security eng / IR   | verdict mix, judge latency + errors, redactions, GenAI tokens |
-| **Scanners**                    | platform / scanner devs | scan rate + p95 latency per scanner, findings by severity/rule, quarantine, queue |
-| **Reliability**                 | SRE / reliability   | gateway errors by code, sink health + circuit state, webhooks, panics, config errors |
-| **Runtime & SLO**               | SRE                 | goroutines, heap, GC, SQLite size/WAL/busy, block-<2s + TUI-<5s SLO compliance, exporter freshness |
-| **Traffic & Traces**            | perf / integration  | HTTP RPS + 5xx ratio per route, SSE lifecycle, tool calls, LLM bridge / Cisco Inspect latency, Tempo search |
+| Dashboard                            | Audience              | What to watch for |
+|--------------------------------------|-----------------------|-------------------|
+| **Overview**                         | on-call landing       | `ALERTS` table, SLO gauges, health stats, Loki tail |
+| **Security**                         | security eng / IR     | verdict mix, judge latency + errors, redactions, GenAI tokens |
+| **Scanners**                         | platform / scanner devs | scan rate + p95 latency per scanner, findings by severity/rule, quarantine, queue |
+| **Findings detail**                  | security eng / IR     | per-rule incidence, top blocked rules, CVSS distribution, latest finding logs |
+| **HITL (Human-in-the-loop)**         | security / governance | approval queue depth, approval latency p50/p95, deny-rate by user, judge fallback events |
+| **Policy decisions**                 | governance            | OPA decision counters, policy_id/version mix, deny / allow / warn split, log tail |
+| **Connectors (overview)**            | platform              | per-connector RPS, hook invocations, agent-id stickiness, blocked actions |
+| **Connectors (detail)**              | platform / connector dev | drill-down into one connector: latency, hook outcomes, OTLP ingest health |
+| **Agent identity**                   | governance / IR       | agent registry size, sticky `gen_ai.agent.id`, mismatch + churn ratios |
+| **AI Discovery & Confidence engine** | security / governance | active AI signals, scan throughput + latency, signals by category/state/vendor, two-axis Bayesian identity & presence quantiles, component fan-out, detector errors, scan traces (Tempo) and per-signal logs (Loki) |
+| **Reliability**                      | SRE / reliability     | gateway errors by code, sink health + circuit state, webhooks, panics, config errors |
+| **Runtime & SLO**                    | SRE                   | goroutines, heap, GC, SQLite size/WAL/busy, block-<2s + TUI-<5s SLO compliance, exporter freshness |
+| **Traffic & Traces**                 | perf / integration    | HTTP RPS + 5xx ratio per route, SSE lifecycle, tool calls, LLM bridge / Cisco Inspect latency, Tempo search |
 
 All dashboards cross-link via the "Dashboards" dropdown on the Overview,
 and the `ALERTS{alertstate="firing"}` annotation overlay is enabled on
@@ -80,11 +87,14 @@ open, and where relevant a `runbook` pointer under
 | Group                       | Example alerts | Severity |
 |-----------------------------|----------------|----------|
 | `defenseclaw.correctness`   | `DefenseClawSchemaViolations`, `DefenseClawGatewayErrorsSpike`, `DefenseClawPanic` | critical / warning |
-| `defenseclaw.slo`           | `DefenseClawBlockSLOBreach`, `DefenseClawTUIRefreshSLOBreach` | critical / warning |
+| `defenseclaw.slo.alerts`    | `DefenseClawBlockSLOBreach`, `DefenseClawTUIRefreshSLOBreach` | critical / warning |
 | `defenseclaw.pipeline`      | `DefenseClawOTLPExporterStalled`, `DefenseClawAuditSinkFailures`, `DefenseClawAuditSinkCircuitOpen` | critical / warning |
 | `defenseclaw.security`      | `DefenseClawBlockRateSpike`, `DefenseClawJudgeErrorRate`, `DefenseClawWebhookFailuresSustained` | warning |
 | `defenseclaw.traffic`       | `DefenseClawHTTP5xxSpike`, `DefenseClawHTTPAuthFailuresSurge`, `DefenseClawRateLimitSurge` | warning |
 | `defenseclaw.runtime`       | `DefenseClawGoroutineLeak`, `DefenseClawSQLiteBusyRetries`, `DefenseClawConfigLoadErrors` | warning |
+| `defenseclaw.connectors`    | `DefenseClawConnectorHookErrorRate`, `DefenseClawConnectorAgentIdChurn` | warning |
+| `defenseclaw.ai_discovery`  | `DefenseClawAIDiscoveryStalled`, `DefenseClawAIDiscoveryDetectorErrors` | warning |
+| `defenseclaw.observability_pipeline` | `DefenseClawLokiIngestOverflow` | warning |
 
 Rules are owned by Prometheus (so they keep firing even if Grafana is
 down). Grafana reads them through the `Prometheus-Alerts` Alertmanager
@@ -122,13 +132,13 @@ sidecar.
 
 ## Services
 
-| Service          | Port       | Notes                                           |
-|------------------|------------|-------------------------------------------------|
-| `otel-collector` | 4317/4318  | OTLP gRPC + HTTP receivers                      |
-| `prometheus`     | 9090       | Scrapes collector, receives remote-write        |
-| `loki`           | 3100       | Receives logs via OTLP HTTP                     |
-| `tempo`          | 3200/4317  | Receives traces via OTLP                        |
-| `grafana`        | 3000       | admin / admin; anon Viewer role enabled         |
+| Service          | Host port(s)       | Notes                                                       |
+|------------------|--------------------|-------------------------------------------------------------|
+| `otel-collector` | 4317, 4318, 8888, 8889 | OTLP gRPC (4317), OTLP HTTP (4318), self-telemetry (8888), Prometheus scrape (8889) |
+| `prometheus`     | 9090               | Scrapes collector, receives remote-write                    |
+| `loki`           | 3100               | Receives logs via OTLP HTTP                                 |
+| `tempo`          | 3200, 9095         | HTTP query (3200), gRPC (9095). Traces enter via the collector on 4317 |
+| `grafana`        | 3000               | admin / admin; anon Viewer role enabled (loopback only)     |
 
 ## Teardown
 
@@ -147,8 +157,11 @@ Equivalent raw invocations (same container outcome):
 ## Notes
 
 - All services are bound to loopback only — safe on multi-tenant dev
-  boxes but won't be reachable from another host. Replace `127.0.0.1`
-  with `0.0.0.0` in `docker-compose.yml` if you need remote access.
+  boxes but won't be reachable from another host. Override `HOST_BIND`
+  in your environment (e.g. `HOST_BIND=0.0.0.0 ./run.sh up`) if you
+  need remote access. Before doing so, change Grafana's default
+  `admin / admin` password and disable the anonymous Viewer role —
+  loopback is the only thing keeping those credentials safe.
 - The collector's `debug` exporter is on for every pipeline. Tail
   `./run.sh logs otel-collector` to watch raw OTLP frames while
   iterating on the sidecar contract.

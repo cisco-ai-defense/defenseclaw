@@ -32,6 +32,7 @@ import defenseclaw.config as config_mod
 from defenseclaw.config import (
     DEFAULT_OPENSHELL_VERSION,
     DEFAULT_SANDBOX_HOME,
+    AIDiscoveryConfig,
     AssetPolicyConfig,
     AssetPolicyRule,
     CiscoAIDefenseConfig,
@@ -166,6 +167,29 @@ class TestSkillActionsConfig(unittest.TestCase):
         cfg = SkillActionsConfig()
         self.assertFalse(cfg.should_install_block("HIGH"))
         self.assertFalse(cfg.should_install_block("INFO"))
+
+
+class TestAIDiscoveryConfig(unittest.TestCase):
+    def test_default_config_enables_ai_discovery_for_new_installs(self):
+        cfg = default_config()
+        self.assertTrue(cfg.ai_discovery.enabled)
+        self.assertEqual(cfg.ai_discovery.mode, "enhanced")
+        self.assertTrue(cfg.ai_discovery.include_shell_history)
+        self.assertEqual(
+            cfg.ai_discovery.confidence_policy_path,
+            os.path.join(cfg.data_dir, "confidence.yaml"),
+        )
+
+    def test_disabled_default_is_omitted_on_save_round_trip(self):
+        cfg = Config(data_dir=tempfile.mkdtemp(), ai_discovery=AIDiscoveryConfig(enabled=False))
+        data = config_mod._config_to_dict(cfg)
+        self.assertNotIn("ai_discovery", data)
+
+    def test_merge_preserves_confidence_policy_path(self):
+        cfg = config_mod._merge_ai_discovery(
+            {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
+        )
+        self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
 
 
 class TestMergeFunctions(unittest.TestCase):

@@ -57,13 +57,14 @@ type ConnectorHealth struct {
 }
 
 type HealthSnapshot struct {
-	StartedAt time.Time       `json:"started_at"`
-	UptimeMs  int64           `json:"uptime_ms"`
-	Gateway   SubsystemHealth `json:"gateway"`
-	Watcher   SubsystemHealth `json:"watcher"`
-	API       SubsystemHealth `json:"api"`
-	Guardrail SubsystemHealth `json:"guardrail"`
-	Telemetry SubsystemHealth `json:"telemetry"`
+	StartedAt   time.Time       `json:"started_at"`
+	UptimeMs    int64           `json:"uptime_ms"`
+	Gateway     SubsystemHealth `json:"gateway"`
+	Watcher     SubsystemHealth `json:"watcher"`
+	API         SubsystemHealth `json:"api"`
+	Guardrail   SubsystemHealth `json:"guardrail"`
+	Telemetry   SubsystemHealth `json:"telemetry"`
+	AIDiscovery SubsystemHealth `json:"ai_discovery"`
 	// Sinks reports the aggregate health of all configured audit sinks
 	// (splunk_hec, otlp_logs, http_jsonl, …). Details["sinks"] holds
 	// per-sink state for the TUI/CLI to render individual rows.
@@ -73,16 +74,17 @@ type HealthSnapshot struct {
 }
 
 type SidecarHealth struct {
-	mu        sync.RWMutex
-	gateway   SubsystemHealth
-	watcher   SubsystemHealth
-	api       SubsystemHealth
-	guardrail SubsystemHealth
-	telemetry SubsystemHealth
-	sinks     SubsystemHealth
-	sandbox   *SubsystemHealth
-	conn      *ConnectorHealth
-	startedAt time.Time
+	mu          sync.RWMutex
+	gateway     SubsystemHealth
+	watcher     SubsystemHealth
+	api         SubsystemHealth
+	guardrail   SubsystemHealth
+	telemetry   SubsystemHealth
+	aiDiscovery SubsystemHealth
+	sinks       SubsystemHealth
+	sandbox     *SubsystemHealth
+	conn        *ConnectorHealth
+	startedAt   time.Time
 
 	// Atomic counters for connector stats (lock-free hot path).
 	connRequests         atomic.Int64
@@ -97,13 +99,14 @@ func NewSidecarHealth() *SidecarHealth {
 	initial := SubsystemHealth{State: StateStarting, Since: now}
 	disabled := SubsystemHealth{State: StateDisabled, Since: now}
 	return &SidecarHealth{
-		gateway:   initial,
-		watcher:   initial,
-		api:       initial,
-		guardrail: disabled,
-		telemetry: disabled,
-		sinks:     disabled,
-		startedAt: now,
+		gateway:     initial,
+		watcher:     initial,
+		api:         initial,
+		guardrail:   disabled,
+		telemetry:   disabled,
+		aiDiscovery: disabled,
+		sinks:       disabled,
+		startedAt:   now,
 	}
 }
 
@@ -155,6 +158,17 @@ func (h *SidecarHealth) SetTelemetry(state SubsystemState, lastErr string, detai
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.telemetry = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+}
+
+func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.aiDiscovery = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
@@ -220,15 +234,16 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	defer h.mu.RUnlock()
 
 	snap := HealthSnapshot{
-		StartedAt: h.startedAt,
-		UptimeMs:  time.Since(h.startedAt).Milliseconds(),
-		Gateway:   h.gateway,
-		Watcher:   h.watcher,
-		API:       h.api,
-		Guardrail: h.guardrail,
-		Telemetry: h.telemetry,
-		Sinks:     h.sinks,
-		Sandbox:   h.sandbox,
+		StartedAt:   h.startedAt,
+		UptimeMs:    time.Since(h.startedAt).Milliseconds(),
+		Gateway:     h.gateway,
+		Watcher:     h.watcher,
+		API:         h.api,
+		Guardrail:   h.guardrail,
+		Telemetry:   h.telemetry,
+		AIDiscovery: h.aiDiscovery,
+		Sinks:       h.sinks,
+		Sandbox:     h.sandbox,
 	}
 
 	if h.conn != nil {

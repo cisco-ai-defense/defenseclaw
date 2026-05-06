@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
@@ -263,7 +264,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -2032,11 +2033,12 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	// `otel.exporter`" at codex startup — a regression that would block
 	// the entire CLI from launching, not just OTel export. The value
 	// must match the kebab-case serde tag for OtelHttpProtocol::Json,
-	// and "json" specifically is required because the gateway's OTLP-HTTP
-	// receiver only accepts application/json bodies (415s protobuf).
+	// and "json" specifically keeps Codex telemetry on the gateway's
+	// stable receive path. The receiver can normalize protobuf too, but
+	// Codex requires this explicit field either way.
 	protocol, _ := otlphttp["protocol"].(string)
 	if protocol != "json" {
-		t.Errorf("otlp-http protocol = %q, want %q (codex requires this field; gateway only accepts application/json)",
+		t.Errorf("otlp-http protocol = %q, want %q (codex requires this explicit field)",
 			protocol, "json")
 	}
 	headers, _ := otlphttp["headers"].(map[string]interface{})
@@ -3579,8 +3581,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 6 {
-		t.Errorf("HookScripts() returned %d scripts, want 6", len(scripts))
+	if len(scripts) != 11 {
+		t.Errorf("HookScripts() returned %d scripts, want 11", len(scripts))
 	}
 }
 
@@ -3935,8 +3937,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 4 {
-		t.Errorf("expected 4 built-in connectors, got %d", r.Len())
+	if r.Len() != 9 {
+		t.Errorf("expected 9 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -5501,6 +5503,11 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 		{"openclaw", func() Connector { return NewOpenClawConnector() }},
 		{"codex", func() Connector { return NewCodexConnector() }},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }},
+		{"hermes", func() Connector { return NewHermesConnector() }},
+		{"cursor", func() Connector { return NewCursorConnector() }},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }},
+		{"copilot", func() Connector { return NewCopilotConnector() }},
 	}
 
 	for _, c := range cases {
@@ -5551,6 +5558,11 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		ap, ok := conn.(AgentPathProvider)
@@ -5581,6 +5593,11 @@ func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		hsp, ok := conn.(HookScriptProvider)
@@ -5621,6 +5638,11 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		// settings.json hooks are sufficient for guardrail
 		// enforcement, so the var is recommended-not-required.
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []EnvScope{EnvScopeProcess}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []EnvScope{EnvScopeNone}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []EnvScope{EnvScopeNone}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []EnvScope{EnvScopeNone}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []EnvScope{EnvScopeNone}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
 	for _, c := range cases {
@@ -5675,6 +5697,11 @@ func TestConnector_ProviderProbe_AllBuiltinsImplement(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		if _, ok := conn.(ProviderProbe); !ok {
@@ -5813,6 +5840,11 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 	}{
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
 		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
 		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
 	}
@@ -5926,6 +5958,96 @@ func TestWriteHookScriptsForConnectorObject_HonoursInterface(t *testing.T) {
 		mustExist(t, filepath.Join(dir, "claude-code-hook.sh"))
 		mustNotExist(t, filepath.Join(dir, "codex-hook.sh"))
 	})
+}
+
+// TestHardening_SweepStaleHookDirs pins the L-3 fix: the v4
+// _hardening.sh helper sweeps orphaned hook-tmp.* directories under
+// DEFENSECLAW_HOME that the EXIT-trap cleanup couldn't remove (SIGKILL,
+// OOM, system reboot mid-hook, etc.). Without this sweep, every
+// fallback-path hook invocation (mktemp absent → uses
+// ${DEFENSECLAW_HOME}/hook-tmp.<PID>) on a long-running host
+// accumulates orphans forever.
+func TestHardening_SweepStaleHookDirs(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find not available")
+	}
+
+	// Materialize the embedded helper to disk so we can source it.
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	dcHome := filepath.Join(tmp, "dchome")
+	if err := os.MkdirAll(dcHome, 0o700); err != nil {
+		t.Fatalf("mkdir dchome: %v", err)
+	}
+
+	// Stale orphans (older than 60 minutes) — must be swept.
+	stale1 := filepath.Join(dcHome, "hook-tmp.11111")
+	stale2 := filepath.Join(dcHome, "hook-tmp.22222")
+	for _, p := range []string{stale1, stale2} {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		// Drop a tracer file so we can verify the directory is
+		// recursively removed, not just emptied.
+		if err := os.WriteFile(filepath.Join(p, "tracer.txt"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write tracer in %s: %v", p, err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	// Fresh hook-tmp dir (younger than 60 minutes) — must be preserved
+	// because the active hook could still be using it.
+	fresh := filepath.Join(dcHome, "hook-tmp.33333")
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatalf("mkdir fresh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fresh, "tracer.txt"), []byte("y"), 0o600); err != nil {
+		t.Fatalf("write fresh tracer: %v", err)
+	}
+
+	// Unrelated sibling (not matching hook-tmp.*) — must be preserved
+	// regardless of mtime, so that the sweep is conservative about
+	// clobbering operator state.
+	unrelated := filepath.Join(dcHome, "audit-snapshot")
+	if err := os.MkdirAll(unrelated, 0o700); err != nil {
+		t.Fatalf("mkdir unrelated: %v", err)
+	}
+	old := time.Now().Add(-7 * 24 * time.Hour)
+	if err := os.Chtimes(unrelated, old, old); err != nil {
+		t.Fatalf("chtimes unrelated: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", "set -e; source \"$0\"; _defenseclaw_sweep_stale_hook_dirs", helperPath)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+dcHome)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sweep failed: %v\n%s", err, out)
+	}
+
+	for _, p := range []string{stale1, stale2} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale dir %s still exists after sweep (err=%v) — orphans accumulate forever in the fallback path", p, err)
+		}
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh dir %s was swept but should have been preserved: %v", fresh, err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Errorf("unrelated dir %s was swept; the sweep must only touch hook-tmp.*: %v", unrelated, err)
+	}
 }
 
 // TestParseHookSchemaVersion pins the digit-extraction contract used

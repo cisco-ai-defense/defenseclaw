@@ -1,0 +1,807 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Rule-level findings detail. Driven by $rule_id, $scanner, $severity. Combines the Prometheus per-rule counter (defenseclaw_scan_findings_by_rule_total) with the Loki scan_finding event stream so operators can rank rules, map first/last-seen, and pivot into target attribution and finding\u2192verdict correlation.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "links": [
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Scanners",
+      "type": "link",
+      "url": "/d/defenseclaw-scanners?${__url_time_range}&${scanner:queryparam}&${severity:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Verdicts",
+      "type": "link",
+      "url": "/d/defenseclaw-security?${__url_time_range}&${severity:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Connector detail",
+      "type": "link",
+      "url": "/d/defenseclaw-connector-detail?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "scanner",
+        "label": "Scanner",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_scan_findings_by_rule_total, scanner)",
+        "query": {
+          "query": "label_values(defenseclaw_scan_findings_by_rule_total, scanner)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "severity",
+        "label": "Severity",
+        "type": "custom",
+        "query": "CRITICAL,HIGH,MEDIUM,LOW,INFO",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "CRITICAL",
+            "value": "CRITICAL",
+            "selected": false
+          },
+          {
+            "text": "HIGH",
+            "value": "HIGH",
+            "selected": false
+          },
+          {
+            "text": "MEDIUM",
+            "value": "MEDIUM",
+            "selected": false
+          },
+          {
+            "text": "LOW",
+            "value": "LOW",
+            "selected": false
+          },
+          {
+            "text": "INFO",
+            "value": "INFO",
+            "selected": false
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "rule_id",
+        "label": "Rule",
+        "description": "Pick a specific rule_id to focus all detail panels (heatmap, severity, target attribution, correlation). All = top-N ranking only.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}, rule_id)",
+        "query": {
+          "query": "label_values(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}, rule_id)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Rule-level KPIs",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Findings (1h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[1h])) or vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Distinct rules firing (1h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "count(group by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h]) > 0)) or vector(0)",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Critical findings (1h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"critical|CRITICAL\"}[1h])) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "High findings (1h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"high|critical|HIGH|CRITICAL\"}[1h])) or vector(0)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Top rule (1h)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "topk(1, sum by (rule_id) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h])))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^rule_id$/"
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Top target (1h, Loki)",
+      "description": "Most frequent target field on EventScanFinding records in the last hour.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "topk(1, sum by (target) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"scan_finding\" [1h])))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^target$/"
+        },
+        "colorMode": "value",
+        "textMode": "value"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Top rules ranked",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Top 20 rules with sparklines (1h)",
+      "description": "Ranked by total findings in the last hour. Click a rule_id to pin the rest of the dashboard to it.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 12
+      },
+      "targets": [
+        {
+          "refId": "TOTAL",
+          "instant": true,
+          "format": "table",
+          "expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h]))))"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "service_namespace": true
+            },
+            "renameByName": {
+              "Value": "findings/1h"
+            },
+            "indexByName": {
+              "rule_id": 0,
+              "scanner": 1,
+              "severity": 2,
+              "findings/1h": 3
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rule_id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Pin rule on this dashboard",
+                    "url": "/d/defenseclaw-findings?${__url_time_range}&var-rule_id=${__value.text}&${scanner:queryparam}&${severity:queryparam}",
+                    "targetBlank": false
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "findings/1h"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 5
+                    },
+                    {
+                      "color": "red",
+                      "value": 25
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "Selected rule trends + heatmap",
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Findings rate for $rule_id by severity",
+      "description": "Time-series of findings/sec for the selected rule_id(s), split by severity. With rule_id=All this becomes the top-N stack.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (rule_id, severity) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[$__rate_interval]))",
+          "legendFormat": "{{rule_id}} \u00b7 {{severity}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps"
+        }
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Heatmap \u2014 rule_id (rows) \u00d7 time (cols)",
+      "description": "Density grid of findings per (rule_id, time-bucket). Clusters of dark cells = a rule firing in tight bursts.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (rule_id) (rate(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[$__rate_interval]))",
+          "format": "time_series",
+          "legendFormat": "{{rule_id}}",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "calculate": false
+      }
+    },
+    {
+      "type": "row",
+      "title": "First / last seen",
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Last-seen per rule_id (24h)",
+      "description": "Approximation: scrape timestamp of the latest sample for each rule_id series. A rule that hasn't fired in 24h shows as no-data.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(20, max by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[24h]) > 0)))",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "service_namespace": true
+            },
+            "renameByName": {
+              "Value": "last seen (epoch)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last seen (epoch)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "First-seen per rule_id (24h)",
+      "description": "First-sample-with-increase timestamp per rule_id series in the window. Brand-new rules show their first appearance time.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "topk(20, min by (rule_id, scanner, severity) (timestamp(increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", rule_id=~\"$rule_id\", severity=~\"$severity\"}[24h]) > 0)))",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "service_namespace": true
+            },
+            "renameByName": {
+              "Value": "first seen (epoch)"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "first seen (epoch)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "row",
+      "title": "Target attribution + verdict correlation (Loki)",
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "table",
+      "title": "Top targets for $rule_id (1h)",
+      "description": "EventScanFinding records carry a target field (file path, MCP server name, skill name, \u2026). This panel ranks the top targets that triggered the rule in the last hour. With rule_id=All it ranks across all rules.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "topk(20, sum by (target, rule_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"scan_finding\" | rule_id=~\"$rule_id\" [1h])))",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "type": "table",
+      "title": "Finding \u2192 verdict correlation (1h)",
+      "description": "When this $rule_id (or any rule with rule_id=All) fires, what verdict_action does the surrounding traffic see in the same 1h window? Coarse correlation \u2014 joins on time only, not on scan_id.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "defenseclaw-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 37,
+        "w": 12,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "sort_desc(sum by (verdict_stage, verdict_action) (increase(defenseclaw_gateway_verdicts_total[1h]))) and on() (sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id=~\"$rule_id\"}[1h])) > 0)",
+          "instant": true,
+          "format": "table",
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "job": true,
+              "instance": true,
+              "service_namespace": true
+            },
+            "renameByName": {
+              "Value": "verdicts/1h"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Recent scan_finding events (Loki)",
+      "gridPos": {
+        "x": 0,
+        "y": 47,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "logs",
+      "title": "scan_finding stream",
+      "description": "EventScanFinding records \u2014 body carries the (already redacted) description; target / location.line_number live in JSON attributes.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 14
+      },
+      "timeFrom": "1h",
+      "targets": [
+        {
+          "expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"scan_finding\" | rule_id=~\"$rule_id\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true
+      }
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": [
+    "defenseclaw",
+    "findings",
+    "scanners",
+    "rules"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw \u2014 Findings (Rule detail)",
+  "uid": "defenseclaw-findings",
+  "version": 1,
+  "weekStart": ""
+}

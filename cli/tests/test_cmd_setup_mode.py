@@ -19,12 +19,12 @@ behavior when switching connectors. The four invariants under test:
    Mode != action mode, scanner_mode != local, judge enabled, custom
    port — all must survive the switch unchanged.
 
-2. **Switching INTO codex/claudecode forces observability-only**.
+2. **Switching INTO hook/observability connectors forces observability-only**.
    ``*_enforcement_enabled`` becomes False even if it was True;
    ``gc.enabled`` stays True (so the Go gateway wires hooks + OTel)
    but ``gc.mode`` is pinned to ``observe``.
 
-3. **Switching OUT of codex/claudecode into openclaw/zeptoclaw lands
+3. **Switching OUT of hook/observability connectors into openclaw/zeptoclaw lands
    in observe mode**. We never auto-promote to enforcing — that
    requires a separate ``defenseclaw setup guardrail`` run.
 
@@ -139,7 +139,7 @@ class TestSetupMode_OpenClawZeptoClawInheritance(_ModeBase):
 
 
 class TestSetupMode_IntoObservabilityOnly(_ModeBase):
-    """Switching → codex / claudecode forces observability-only."""
+    """Switching → hook/observability connectors forces observability-only."""
 
     def test_openclaw_to_codex_disables_codex_enforcement(self):
         gc = self.app.cfg.guardrail
@@ -179,9 +179,23 @@ class TestSetupMode_IntoObservabilityOnly(_ModeBase):
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
         self.assertFalse(gc.claudecode_enforcement_enabled)
 
+    def test_openclaw_to_cursor_sets_hook_observability_mode(self):
+        gc = self.app.cfg.guardrail
+        self.app.cfg.claw.mode = "openclaw"
+        gc.connector = "openclaw"
+        gc.mode = "action"
+
+        result = self._run("cursor")
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.claw.mode, "cursor")
+        self.assertEqual(gc.connector, "cursor")
+        self.assertEqual(gc.mode, "observe")
+        self.assertTrue(gc.enabled)
+
 
 class TestSetupMode_OutOfObservabilityOnly(_ModeBase):
-    """codex / claudecode → openclaw / zeptoclaw lands in observe mode."""
+    """hook/observability connectors → openclaw / zeptoclaw lands in observe mode."""
 
     def test_codex_to_openclaw_pins_observe_mode(self):
         gc = self.app.cfg.guardrail
@@ -224,6 +238,21 @@ class TestSetupMode_OutOfObservabilityOnly(_ModeBase):
         # The transition path explicitly forces observe — the user
         # must run `setup guardrail` to enforce.
         self.assertEqual(gc.mode, "observe")
+
+    def test_geminicli_to_openclaw_pins_observe_mode(self):
+        gc = self.app.cfg.guardrail
+        self.app.cfg.claw.mode = "geminicli"
+        gc.connector = "geminicli"
+        gc.enabled = True
+        gc.mode = "action"
+        gc.port = 0
+
+        result = self._run("openclaw")
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(gc.connector, "openclaw")
+        self.assertEqual(gc.mode, "observe")
+        self.assertEqual(gc.port, 4000)
 
 
 class TestSetupMode_NoOp(_ModeBase):

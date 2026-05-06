@@ -77,7 +77,17 @@ func TestModePickerModal_HotkeysCoverEveryConnector(t *testing.T) {
 		}
 		keys[ch.hotkey] = ch.wire
 	}
-	want := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	want := []string{
+		"openclaw",
+		"zeptoclaw",
+		"claudecode",
+		"codex",
+		"hermes",
+		"cursor",
+		"windsurf",
+		"geminicli",
+		"copilot",
+	}
 	for _, w := range want {
 		if !wires[w] {
 			t.Fatalf("missing modePickerChoices entry for %q", w)
@@ -127,8 +137,8 @@ func TestModePickerModal_CursorBoundsClamp(t *testing.T) {
 // TestModePickerModal_PreviewMatchesInheritanceRules covers the
 // contract that the preview line correctly describes what the
 // matching `defenseclaw setup mode` invocation will do — so the TUI
-// doesn't lie about a switch's effects. We exercise all four
-// transition kinds.
+// doesn't lie about a switch's effects. We exercise each transition
+// kind rather than every connector pair.
 func TestModePickerModal_PreviewMatchesInheritanceRules(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -138,14 +148,17 @@ func TestModePickerModal_PreviewMatchesInheritanceRules(t *testing.T) {
 		// openclaw ↔ zeptoclaw → inheritance
 		{"openclaw", "zeptoclaw", "Inherits current guardrail config"},
 		{"zeptoclaw", "openclaw", "Inherits current guardrail config"},
-		// → codex/claudecode → observability-only
+		// → hook/observability connectors
 		{"openclaw", "codex", "observability-only"},
 		{"zeptoclaw", "claudecode", "observability-only"},
 		{"codex", "claudecode", "observability-only"},
 		{"claudecode", "codex", "observability-only"},
-		// codex/claudecode → openclaw/zeptoclaw → observe mode (no auto-enforce)
+		{"openclaw", "cursor", "observability-only"},
+		{"hermes", "copilot", "observability-only"},
+		// hook/observability connectors → openclaw/zeptoclaw → observe mode (no auto-enforce)
 		{"codex", "openclaw", "observe mode (no auto-enforcement)"},
 		{"claudecode", "zeptoclaw", "observe mode (no auto-enforcement)"},
+		{"geminicli", "openclaw", "observe mode (no auto-enforcement)"},
 		// no-op
 		{"openclaw", "openclaw", "Already active"},
 	}

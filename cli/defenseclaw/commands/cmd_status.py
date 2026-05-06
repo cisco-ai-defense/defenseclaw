@@ -180,6 +180,11 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "zeptoclaw": "ZeptoClaw",
     "claudecode": "Claude Code",
     "codex": "Codex",
+    "hermes": "Hermes",
+    "cursor": "Cursor",
+    "windsurf": "Windsurf",
+    "geminicli": "Gemini CLI",
+    "copilot": "GitHub Copilot CLI",
 }
 
 

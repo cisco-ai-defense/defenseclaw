@@ -24,8 +24,8 @@ import (
 // “fx.Apply(t)“ to seat the per-connector overrides.
 //
 // Plan E3 / S3.4 — every test that hardcoded "openclaw" today should
-// adopt this helper so a regression in zeptoclaw / claudecode / codex
-// is loud at the same level OpenClaw is.
+// adopt this helper so regressions in other connectors are loud at the
+// same level OpenClaw is.
 type ConnectorFixture struct {
 	// Name is the canonical connector name (matches Connector.Name()).
 	Name string
@@ -44,13 +44,9 @@ type ConnectorFixture struct {
 	Apply func(t *testing.T) (homeDir string, dataDir string)
 }
 
-// connectorMatrix returns the canonical fixture set for the four
-// built-in connectors. Tests should pass this through “t.Run“ to
+// connectorMatrix returns the canonical fixture set for built-in connectors.
+// Tests should pass this through “t.Run“ to
 // drive subtests; failing one subtest does not skip the others.
-//
-// IMPORTANT: when a fifth connector ships, this is the single place
-// to extend — every test that adopted the matrix gains coverage for
-// free. Avoid making one-off fixture lists per test.
 func connectorMatrix(t *testing.T) []ConnectorFixture {
 	t.Helper()
 	return []ConnectorFixture{
@@ -107,5 +103,65 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 				return home, t.TempDir()
 			},
 		},
+		{
+			Name:           "hermes",
+			DestinationApp: "hermes",
+			ClawMode:       "hermes",
+			Apply:          hookOnlyFixtureApply("hermes"),
+		},
+		{
+			Name:           "cursor",
+			DestinationApp: "cursor",
+			ClawMode:       "cursor",
+			Apply:          hookOnlyFixtureApply("cursor"),
+		},
+		{
+			Name:           "windsurf",
+			DestinationApp: "windsurf",
+			ClawMode:       "windsurf",
+			Apply:          hookOnlyFixtureApply("windsurf"),
+		},
+		{
+			Name:           "geminicli",
+			DestinationApp: "geminicli",
+			ClawMode:       "geminicli",
+			Apply:          hookOnlyFixtureApply("geminicli"),
+		},
+		{
+			Name:           "copilot",
+			DestinationApp: "copilot",
+			ClawMode:       "copilot",
+			Apply:          hookOnlyFixtureApply("copilot"),
+		},
+	}
+}
+
+func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
+	return func(t *testing.T) (string, string) {
+		t.Helper()
+		home := t.TempDir()
+		switch name {
+		case "hermes":
+			prev := connector.HermesConfigPathOverride
+			connector.HermesConfigPathOverride = filepath.Join(home, ".hermes", "config.yaml")
+			t.Cleanup(func() { connector.HermesConfigPathOverride = prev })
+		case "cursor":
+			prev := connector.CursorHooksPathOverride
+			connector.CursorHooksPathOverride = filepath.Join(home, ".cursor", "hooks.json")
+			t.Cleanup(func() { connector.CursorHooksPathOverride = prev })
+		case "windsurf":
+			prev := connector.WindsurfHooksPathOverride
+			connector.WindsurfHooksPathOverride = filepath.Join(home, ".codeium", "windsurf", "hooks.json")
+			t.Cleanup(func() { connector.WindsurfHooksPathOverride = prev })
+		case "geminicli":
+			prev := connector.GeminiSettingsPathOverride
+			connector.GeminiSettingsPathOverride = filepath.Join(home, ".gemini", "settings.json")
+			t.Cleanup(func() { connector.GeminiSettingsPathOverride = prev })
+		case "copilot":
+			prev := connector.CopilotHooksPathOverride
+			connector.CopilotHooksPathOverride = filepath.Join(home, "workspace", ".github", "hooks", "defenseclaw.json")
+			t.Cleanup(func() { connector.CopilotHooksPathOverride = prev })
+		}
+		return home, t.TempDir()
 	}
 }

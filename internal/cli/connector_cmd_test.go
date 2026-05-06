@@ -193,20 +193,31 @@ func TestConnectorListBackups_FindsManagedBackups(t *testing.T) {
 	dir := t.TempDir()
 	defer withConnectorState(t, dir, "openclaw")()
 
-	managed := filepath.Join(dir, "connector_backups", "codex", "config.toml.json")
-	if err := os.MkdirAll(filepath.Dir(managed), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(managed, []byte(`{"version":1}`), 0o600); err != nil {
-		t.Fatal(err)
+	for rel, body := range map[string]string{
+		filepath.Join("codex", "config.toml.json"):     `{"version":1}`,
+		filepath.Join("geminicli", "settings.json"):    `{"connector":"geminicli"}`,
+		filepath.Join("copilot", "defenseclaw.json"):   `{"connector":"copilot"}`,
+		filepath.Join("cursor", "hooks.json.backup"):   `{"connector":"cursor"}`,
+		filepath.Join("windsurf", "hooks.json.backup"): `{"connector":"windsurf"}`,
+		filepath.Join("hermes", "config.yaml.managed"): `{"connector":"hermes"}`,
+	} {
+		path := filepath.Join(dir, "connector_backups", rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	stdout, _, exitCode := runConnectorCmd(t, "list-backups")
 	if exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d", exitCode)
 	}
-	if !strings.Contains(stdout, "codex") || !strings.Contains(stdout, "connector_backups") {
-		t.Fatalf("expected managed codex backup in output, got: %s", stdout)
+	for _, want := range []string{"codex", "geminicli", "copilot", "cursor", "windsurf", "hermes", "connector_backups"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("expected %s in managed backup output, got: %s", want, stdout)
+		}
 	}
 }
 

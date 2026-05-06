@@ -85,13 +85,21 @@ REQUIRED_EVENT_FIELDS = {
     "llm_prompt":      {"prompt_id"},
     "llm_response":    {"response_id"},
     "tool_invocation": {"phase", "tool"},
+    # v7.2 continuous AI visibility inventory deltas. The payload is
+    # intentionally sanitized: raw paths, commands, prompt text, and
+    # env values are not part of the required shape.
+    "ai_discovery":    {"scan_id", "signal_id", "category", "state"},
 }
 
 VALID_EVENT_TYPES = set(REQUIRED_EVENT_FIELDS.keys())
 # The Go emitter serializes Severity as uppercase (CRITICAL, HIGH,
-# MEDIUM, LOW, INFO). Accept either case so the validator works
+# MEDIUM, WARN, LOW, INFO). WARN is used by codex/OTLP ingest paths
+# for "malformed payload" events that aren't security incidents but
+# should still hit dashboards; keep this set in lockstep with
+# internal/gatewaylog/events.go (Severity consts) and
+# internal/gatewaylog/schemas/gateway-event-envelope.json.
 # equally well against golden fixtures and live-captured JSONL.
-VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}
+VALID_SEVERITIES = {"CRITICAL", "HIGH", "MEDIUM", "WARN", "LOW", "INFO"}
 
 
 def _parse_rfc3339_nano(ts: str) -> datetime | None:

@@ -52,7 +52,7 @@ type SystemState struct {
 var rotatingTips = []string{
 	"Press Ctrl+K to open the command palette from anywhere. You can run any DefenseClaw command.",
 	"The Audit panel (8) shows every action DefenseClaw has ever taken — blocks, scans, config changes.",
-	"Use \"scan aibom\" to generate a full component inventory of the active connector (OpenClaw / ZeptoClaw / Claude Code / Codex).",
+	"Use \"scan aibom\" to generate a full component inventory of the active connector.",
 	"Skills with policy verdict \"warning\" are installed but have medium/low findings. Review in Skills (3).",
 	"The guardrail proxy can run in \"observe\" mode to log LLM traffic without blocking. Try \"setup guardrail\".",
 	"Press / on any list to filter. Works in Alerts, Skills, MCPs, Plugins, Logs, and Audit.",
@@ -83,9 +83,22 @@ func (h *HintEngine) HintForPanel(panel int, state SystemState) string {
 		return h.activityHint(state)
 	case PanelTools:
 		return h.toolsHint(state)
+	case PanelAIVisibility:
+		return h.aiVisibilityHint(state)
 	default:
 		return "Press : or Ctrl+K to open the command palette. Press ? for help."
 	}
+}
+
+// aiVisibilityHint surfaces the most useful next action for the
+// AI Visibility panel. We special-case the filter-active branch
+// because operators frequently leave a filter applied and forget,
+// then wonder why the row count looks wrong.
+func (h *HintEngine) aiVisibilityHint(state SystemState) string {
+	if state.FilterActive != "" {
+		return fmt.Sprintf("Filtered to: %s. Esc clears the filter, / changes it.", state.FilterActive)
+	}
+	return "j/k navigate · Enter detail · / search vendor/product/component · r refresh"
 }
 
 func (h *HintEngine) overviewHint(state SystemState) string {

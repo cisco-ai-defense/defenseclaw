@@ -1,0 +1,307 @@
+{
+  "annotations": {"list": []},
+  "description": "Per-connector deep-dive driven by the $connector variable. Open from the Connectors overview by clicking any connector name. All panels are scoped to the chosen connector via the source / connector / destination_app / gen_ai_agent_name labels (whichever the underlying counter exposes).",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "links": [
+    {"title": "Connectors overview", "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}",                                                                                       "icon": "external link", "targetBlank": false},
+    {"title": "Verdicts",            "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}&${connector:queryparam}&${stage:queryparam}&${action:queryparam}&${severity:queryparam}", "icon": "external link", "targetBlank": false},
+    {"title": "HITL",                "type": "link", "url": "/d/defenseclaw-hitl?${__url_time_range}&${connector:queryparam}",                                                                     "icon": "external link", "targetBlank": false},
+    {"title": "Findings",            "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}",                                                                                          "icon": "external link", "targetBlank": false},
+    {"title": "Agent identity",      "type": "link", "url": "/d/defenseclaw-agent-identity?${__url_time_range}&${connector:queryparam}",                                                            "icon": "external link", "targetBlank": false},
+    {"title": "Overview",            "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                                          "icon": "external link", "targetBlank": false}
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "description": "Connector to deep-dive on. Defaults to all known first-party connectors so the board renders even with no traffic. Single-select for a focused detail view.",
+        "type": "custom",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot",
+        "multi": false,
+        "includeAll": false,
+        "current": {"text": "openclaw", "value": "openclaw", "selected": true},
+        "options": [
+          {"text": "openclaw", "value": "openclaw", "selected": true},
+          {"text": "codex", "value": "codex"},
+          {"text": "claudecode", "value": "claudecode"},
+          {"text": "zeptoclaw", "value": "zeptoclaw"},
+          {"text": "hermes", "value": "hermes"},
+          {"text": "cursor", "value": "cursor"},
+          {"text": "windsurf", "value": "windsurf"},
+          {"text": "geminicli", "value": "geminicli"},
+          {"text": "copilot", "value": "copilot"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "surface",
+        "label": "Surface (direction)",
+        "description": "prompt | completion | tool_call. Filters verdict / tool panels by direction.",
+        "type": "custom",
+        "query": "prompt,completion,tool_call",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "prompt", "value": "prompt"},
+          {"text": "completion", "value": "completion"},
+          {"text": "tool_call", "value": "tool_call"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {"type": "row", "title": "Connector $connector — at a glance", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "stat",
+      "title": "Records / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_otel_ingest_records_total{source=\"$connector\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Hooks / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_connector_hook_invocations_total{connector=\"$connector\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Blocks / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"block\", destination_app=\"$connector\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 10}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Confirms / min",
+      "description": "verdict_action=confirm — DefenseClaw asked this connector to step up to a HITL approval.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\", destination_app=\"$connector\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Tokens / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=\"$connector\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Silence (s)",
+      "description": "Seconds since the last accepted OTel batch from $connector. >600s triggers DefenseClawConnectorTelemetrySilent.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "time() - max(defenseclaw_otel_ingest_last_seen_ts_seconds{source=\"$connector\"}) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "s", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 60}, {"color": "red", "value": 600}]}}}
+    },
+
+    {"type": "row", "title": "Identity (v7 correlation)", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Distinct agent.instance_id seen / 5m",
+      "description": "Counted from gen_ai.client.token.usage series labeled with gen_ai_agent_id (the deployment-scoped agent identifier). Sustained churn means the connector is generating a new agent_instance_id per process / shell — operators should pin a stable id via X-DefenseClaw-Agent-Instance-Id.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "count(group by (gen_ai_agent_id) (rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=\"$connector\"}[5m]) > 0)) or vector(0)", "legendFormat": "distinct ids", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "OTLP malformed-payload share",
+      "description": "Fraction of inbound OTLP-HTTP bodies the receiver could not parse. Sustained >5% almost always means the connector's exporter version drifted vs the gateway's schemas.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "sum(rate(defenseclaw_otel_ingest_malformed_total{source=\"$connector\"}[$__rate_interval])) / clamp_min(sum(rate(defenseclaw_otel_ingest_requests_total{source=\"$connector\"}[$__rate_interval])), 0.0001) or vector(0)", "legendFormat": "malformed/req", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.05}, {"color": "red", "value": 0.10}]}}}
+    },
+
+    {"type": "row", "title": "OTLP ingest", "gridPos": {"x": 0, "y": 14, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Records / sec by signal",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 15, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (signal) (rate(defenseclaw_otel_ingest_records_total{source=\"$connector\"}[$__rate_interval]))", "legendFormat": "{{signal}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Bytes / sec by signal",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 15, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (signal) (rate(defenseclaw_otel_ingest_bytes_total{source=\"$connector\"}[$__rate_interval]))", "legendFormat": "{{signal}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "Bps"}}
+    },
+
+    {"type": "row", "title": "Hooks", "gridPos": {"x": 0, "y": 23, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Hook invocations / sec by event_type × result",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (event_type, result) (rate(defenseclaw_connector_hook_invocations_total{connector=\"$connector\"}[$__rate_interval]))", "legendFormat": "{{event_type}} · {{result}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Hook latency p95 by event_type",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, event_type) (rate(defenseclaw_connector_hook_latency_milliseconds_bucket{connector=\"$connector\"}[$__rate_interval])))", "legendFormat": "{{event_type}} p95", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+
+    {"type": "row", "title": "Verdicts (this connector)", "gridPos": {"x": 0, "y": 32, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Verdicts by action (stacked)",
+      "description": "Verdict action mix scoped to destination_app=$connector. allow / warn / alert / confirm / block.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 33, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total{destination_app=\"$connector\"}[$__rate_interval]))", "legendFormat": "{{verdict_action}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Verdicts by stage",
+      "description": "Which enforcement stage produced each verdict for $connector. regex / judge / cisco_ai_defense / opa / final / approval / block_list / multi_turn / session_message.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 33, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_stage) (rate(defenseclaw_gateway_verdicts_total{destination_app=\"$connector\"}[$__rate_interval]))", "legendFormat": "{{verdict_stage}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+    },
+    {
+      "type": "table",
+      "title": "Top blocked policies (1h)",
+      "description": "Policy IDs that produced the most blocks for $connector in the last hour.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 41, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(20, sort_desc(sum by (policy_id, verdict_stage) (increase(defenseclaw_gateway_verdicts_total{verdict_action=\"block\", destination_app=\"$connector\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "blocks/1h"}}}]
+    },
+
+    {"type": "row", "title": "LLM judge + cache (this connector)", "gridPos": {"x": 0, "y": 49, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Judge invocations by kind",
+      "description": "Judge calls for traffic from $connector (uses gen_ai.request.model labels promoted from connector OTel telemetry).",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 50, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (judge_kind) (rate(defenseclaw_gateway_judge_invocations_total[$__rate_interval]))", "legendFormat": "{{judge_kind}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Judge latency p95 by model",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 50, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, gen_ai_request_model) (rate(defenseclaw_guardrail_judge_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{gen_ai_request_model}} p95", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+
+    {"type": "row", "title": "GenAI tokens + LLM duration", "gridPos": {"x": 0, "y": 58, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Tokens / sec by direction × model",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 59, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=\"$connector\"}[$__rate_interval]))", "legendFormat": "{{gen_ai_request_model}} · {{gen_ai_token_type}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ops"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "LLM duration p50/p95/p99 (s)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 59, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(gen_ai_client_operation_duration_seconds_bucket{gen_ai_agent_name=\"$connector\"}[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(gen_ai_client_operation_duration_seconds_bucket{gen_ai_agent_name=\"$connector\"}[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(gen_ai_client_operation_duration_seconds_bucket{gen_ai_agent_name=\"$connector\"}[$__rate_interval])) by (le))", "legendFormat": "p99", "refId": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+
+    {"type": "row", "title": "Tools + SSE streams", "gridPos": {"x": 0, "y": 67, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "table",
+      "title": "Top tools (1h)",
+      "description": "Most-invoked tools for $connector in the last hour. dangerous=true rows correlate with exec-approval prompts.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 68, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(15, sort_desc(sum by (gen_ai_tool_name, dangerous) (increase(defenseclaw_tool_calls_total[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true, "tool_provider": true}, "renameByName": {"Value": "calls/1h"}}}]
+    },
+    {
+      "type": "timeseries",
+      "title": "SSE stream lifecycle",
+      "description": "Open / close transitions per route — useful for catching sticky sessions or premature closes.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 68, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (transition, outcome) (rate(defenseclaw_stream_lifecycle_total[$__rate_interval]))", "legendFormat": "{{transition}} · {{outcome}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+
+    {"type": "row", "title": "Findings produced through this connector", "gridPos": {"x": 0, "y": 76, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "table",
+      "title": "Top rules (24h)",
+      "description": "Findings emitted across all scanners while traffic from $connector was active. Per-rule attribution to a specific connector requires tracing scan_id → run_id → destination_app; this is the closest aggregate that does not lose accuracy.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 77, "w": 24, "h": 8},
+      "targets": [{"expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total[24h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "findings/24h"}}}],
+      "fieldConfig": {"overrides": [{"matcher": {"id": "byName", "options": "rule_id"}, "properties": [{"id": "links", "value": [{"title": "Drill into rule on Findings board", "url": "/d/defenseclaw-findings?${__url_time_range}&var-rule_id=${__value.text}", "targetBlank": false}]}]}]}
+    },
+
+    {"type": "row", "title": "Recent connector events (Loki)", "gridPos": {"x": 0, "y": 85, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "logs",
+      "title": "$connector — verdicts, judge, llm_*, tools, hooks",
+      "description": "All gateway events scoped to destination_app=$connector OR gen_ai_agent_name=$connector.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 86, "w": 24, "h": 14},
+      "timeFrom": "1h",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | (defenseclaw_destination_app=\"$connector\" or gen_ai_agent_name=\"$connector\")", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "observability", "connectors", "detail"],
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Connector Detail",
+  "uid": "defenseclaw-connector-detail",
+  "version": 1,
+  "weekStart": ""
+}

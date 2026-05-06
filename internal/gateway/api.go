@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -54,14 +55,15 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health     *SidecarHealth
-	client     *Client
-	store      *audit.Store
-	logger     *audit.Logger
-	addr       string
-	scannerCfg *config.Config
-	otel       *telemetry.Provider
-	hilt       *HILTApprovalManager
+	health      *SidecarHealth
+	client      *Client
+	store       *audit.Store
+	logger      *audit.Logger
+	addr        string
+	scannerCfg  *config.Config
+	otel        *telemetry.Provider
+	hilt        *HILTApprovalManager
+	aiDiscovery *inventory.ContinuousDiscoveryService
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -93,6 +95,10 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 	a.hilt = m
+}
+
+func (a *APIServer) SetAIDiscoveryService(svc *inventory.ContinuousDiscoveryService) {
+	a.aiDiscovery = svc
 }
 
 func (a *APIServer) connectorName() string {
@@ -152,17 +158,36 @@ func registerHookHandler(name string, factory func(*APIServer) http.HandlerFunc)
 // way an out-of-tree connector can ship without forcing a gateway
 // rebuild, and a misnamed factory fails loud (logged) rather than
 // silent (a 404 at request time).
-func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
+//
+// The optional wrap argument lets callers wrap each registered handler
+// in middleware (e.g. perIPRateLimiter) so a compromised remote caller
+// can't blast the connector hook surface. Loopback is exempt inside
+// perIPRateLimiter, so legitimate local agent traffic is unaffected.
+func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func(http.Handler) http.Handler) {
+	register := func(path string, h http.Handler) {
+		for _, mw := range wrap {
+			if mw != nil {
+				h = mw(h)
+			}
+		}
+		mux.Handle(path, h)
+	}
+
 	if a.connectorRegistry == nil {
 		// No registry plumbed (legacy boot path, tests). Fall back
 		// to the previous hardcoded routes so existing flows keep
 		// working — we never unconditionally register a route the
 		// connector didn't ask for.
 		if f, ok := connectorHookHandlerByName["claudecode"]; ok {
-			mux.HandleFunc("/api/v1/claude-code/hook", f(a))
+			register("/api/v1/claude-code/hook", http.HandlerFunc(f(a)))
 		}
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
-			mux.HandleFunc("/api/v1/codex/hook", f(a))
+			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
+		}
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot"} {
+			if f, ok := connectorHookHandlerByName[name]; ok {
+				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
+			}
 		}
 		return
 	}
@@ -184,7 +209,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
 			continue
 		}
 		path := he.HookAPIPath()
-		mux.HandleFunc(path, factory(a))
+		register(path, http.HandlerFunc(factory(a)))
 		fmt.Fprintf(os.Stderr, "[api] registered hook endpoint: %s → %s\n", name, path)
 	}
 }
@@ -236,20 +261,23 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
-	// /api/v1/inspect/* is in the agent's critical path: every hook
-	// callback (claude-code-hook, codex-hook, inspect-tool) hits one of
-	// these. Wrap them in a per-IP token bucket so a misbehaving or
-	// compromised local agent can never blast the path. Loopback callers
-	// (the gateway's own hooks) are exempt inside perIPRateLimiter.
+	// /api/v1/inspect/* and /api/v1/{connector}/hook are both in the
+	// agent's critical path: every connector hook (claude-code-hook,
+	// codex-hook, cursor-hook, ...) hits one of them. Wrap them in a
+	// shared per-IP token bucket so a misbehaving or compromised
+	// REMOTE caller can never blast the path. Loopback callers
+	// (the gateway's own hooks) are exempt inside perIPRateLimiter,
+	// so a legitimate local agent doesn't self-throttle.
+	hookLimiter := perIPRateLimiter(20, 40)
 	inspectMux := http.NewServeMux()
 	inspectMux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	inspectMux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
 	inspectMux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
 	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
-	mux.Handle("/api/v1/inspect/", perIPRateLimiter(20, 40)(inspectMux))
+	mux.Handle("/api/v1/inspect/", hookLimiter(inspectMux))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
-	a.registerConnectorHookRoutes(mux)
+	a.registerConnectorHookRoutes(mux, hookLimiter)
 	// OTLP-HTTP receiver for the three signal types codex
 	// (via [otel.exporter.otlp-http]) and Claude Code (via
 	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is
@@ -259,6 +287,32 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/logs", a.handleOTLPLogs)
 	mux.HandleFunc("/v1/metrics", a.handleOTLPMetrics)
 	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
+	mux.HandleFunc("/otlp/", a.handleOTLPPathToken)
+	mux.HandleFunc("/api/v1/agents/discovery", a.handleAgentDiscovery)
+	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
+	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
+	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
+	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	// Locations + history endpoints share the /api/v1/ai-usage/components/
+	// prefix; the handlers parse {ecosystem}/{name}/{leaf} themselves.
+	// Net/http's mux uses longest-prefix routing, so registering
+	// /api/v1/ai-usage/components/ catches the deeper paths without
+	// shadowing the bare /components endpoint above.
+	mux.HandleFunc("/api/v1/ai-usage/components/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/locations"):
+			a.handleAIUsageComponentLocations(w, r)
+		case strings.HasSuffix(r.URL.Path, "/history"):
+			a.handleAIUsageComponentHistory(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	// Confidence policy inspection + dry-run validate. Lets the
+	// CLI ship `agent confidence policy {show, default, validate}`
+	// without shelling into the sidecar host.
+	mux.HandleFunc("/api/v1/ai-usage/confidence/policy", a.handleAIUsageConfidencePolicy)
+	mux.HandleFunc("/api/v1/ai-usage/confidence/policy/validate", a.handleAIUsageConfidencePolicyValidate)
 	// Codex agent-turn-complete notifier. The notify-bridge.sh shim
 	// installed by the codex connector POSTs codex's JSON arg here
 	// after every turn (see https://developers.openai.com/codex/
@@ -343,22 +397,43 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		reg = connector.NewDefaultRegistry()
 	}
 	type connectorEntry struct {
-		Name               string `json:"name"`
-		Description        string `json:"description"`
-		Source             string `json:"source"`
-		ToolInspectionMode string `json:"tool_inspection_mode"`
-		SubprocessPolicy   string `json:"subprocess_policy"`
+		Name               string                           `json:"name"`
+		Description        string                           `json:"description"`
+		Source             string                           `json:"source"`
+		ToolInspectionMode string                           `json:"tool_inspection_mode"`
+		SubprocessPolicy   string                           `json:"subprocess_policy"`
+		HookCapabilities   *connector.HookCapability        `json:"hook_capabilities,omitempty"`
+		Capabilities       *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
 	}
 	avail := reg.Available()
 	entries := make([]connectorEntry, len(avail))
 	for i, info := range avail {
-		entries[i] = connectorEntry{
+		entry := connectorEntry{
 			Name:               info.Name,
 			Description:        info.Description,
 			Source:             info.Source,
 			ToolInspectionMode: string(info.ToolInspectionMode),
 			SubprocessPolicy:   string(info.SubprocessPolicy),
 		}
+		if conn, ok := reg.Get(info.Name); ok {
+			opts := connector.SetupOpts{
+				DataDir:      a.configDataDir(),
+				APIAddr:      a.apiAddrForCapabilities(),
+				WorkspaceDir: currentWorkingDir(),
+			}
+			if cp, ok := conn.(connector.ConnectorCapabilityProvider); ok {
+				caps := cp.Capabilities(opts)
+				entry.Capabilities = &caps
+				entry.HookCapabilities = &caps.Hooks
+			}
+			if hp, ok := conn.(connector.HookCapabilityProvider); ok {
+				if entry.HookCapabilities == nil {
+					caps := hp.HookCapabilities(opts)
+					entry.HookCapabilities = &caps
+				}
+			}
+		}
+		entries[i] = entry
 	}
 	resp := map[string]interface{}{
 		"active":     a.connectorName(),
@@ -445,6 +520,13 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		mode = "observability"
+		intercept = false
+		telemetry = []string{"hooks"}
+		if name == "geminicli" || name == "copilot" {
+			telemetry = append(telemetry, "otel")
+		}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;
@@ -1874,6 +1956,12 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 }
 
 // metricsMiddleware records HTTP request count and duration via OTel.
+//
+// SECURITY (Plan B5): the path-token OTLP endpoint encodes the master gateway
+// bearer token as a URL segment, so we MUST sanitize r.URL.Path before any
+// telemetry sink sees it — otherwise the token would leak to any backend the
+// gateway exports OTel metrics to. We also prefer r.Pattern when set so
+// parametric routes don't blow up label cardinality.
 func (a *APIServer) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.otel == nil {
@@ -1884,7 +1972,11 @@ func (a *APIServer) metricsMiddleware(next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		durationMs := float64(time.Since(t0).Milliseconds())
-		a.otel.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, sw.status, durationMs)
+		route := r.Pattern
+		if route == "" {
+			route = sanitizeRouteForTelemetry(r.URL.Path)
+		}
+		a.otel.RecordHTTPRequest(r.Context(), r.Method, route, sw.status, durationMs)
 	})
 }
 
@@ -1913,9 +2005,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		route := r.URL.Path
-		if r.Pattern != "" {
-			route = r.Pattern
+		route := r.Pattern
+		if route == "" {
+			// SECURITY (Plan B5): sanitize so the OTLP path-token is never
+			// recorded as a route attribute on auth-failure telemetry.
+			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
 
@@ -1940,6 +2034,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
 			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
+		}
+		if token == "" {
+			if pathToken, _, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) &&
+				subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		if token == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "missing_token")
@@ -1984,9 +2085,10 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		route := r.URL.Path
-		if r.Pattern != "" {
-			route = r.Pattern
+		route := r.Pattern
+		if route == "" {
+			// SECURITY (Plan B5): never let the path-token reach a metric label.
+			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
 
@@ -1999,6 +2101,33 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
 				return
 			}
+		}
+		if _, _, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
+			// SECURITY (Plan B5 follow-up): the X-DefenseClaw-Client header
+			// CANNOT be enforced here because OTLP exporters (Gemini CLI's
+			// settings.json, etc.) cannot set arbitrary HTTP headers — only
+			// path / Content-Type / body. We do however enforce:
+			//   1. Loopback (the conditional above; a non-loopback request
+			//      bypasses this branch entirely and falls into the standard
+			//      CSRF gate).
+			//   2. localhost Origin if the browser supplied one (prevents
+			//      non-loopback DNS rebinding from sneaking through).
+			//   3. An OTLP Content-Type, mirroring the unparameterized
+			//      /v1/logs|metrics|traces gate below, so a browser cannot
+			//      smuggle a CSRF POST with default text/plain or
+			//      application/x-www-form-urlencoded.
+			if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostOrigin(origin) {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
+				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				return
+			}
+			if !isOTLPContentType(r.Header.Get("Content-Type")) {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
+				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
 		}
 
 		// CORS preflights legitimately have no body / Content-Type but
@@ -2022,7 +2151,13 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 		}
 
 		ct := r.Header.Get("Content-Type")
-		if !strings.Contains(ct, "application/json") {
+		if isOTLPEndpointPath(r.URL.Path) {
+			if !isOTLPContentType(ct) {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
+				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
+				return
+			}
+		} else if !strings.Contains(ct, "application/json") {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
 			http.Error(w, `{"error":"Content-Type must be application/json"}`, http.StatusUnsupportedMediaType)
 			return

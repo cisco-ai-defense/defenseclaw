@@ -14,8 +14,16 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Inventory helpers — OpenClaw environment indexing for AIBOM."""
+"""Inventory helpers — agent discovery and OpenClaw AIBOM indexing."""
 
+from defenseclaw.inventory.agent_discovery import (
+    AgentDiscovery,
+    AgentSignal,
+    discover_agents,
+    first_installed,
+    render_discovery_table,
+)
+from defenseclaw.inventory.ai_signatures import AISignature, load_ai_signatures
 from defenseclaw.inventory.claw_inventory import (
     build_claw_aibom,
     claw_aibom_to_scan_result,
@@ -23,7 +31,14 @@ from defenseclaw.inventory.claw_inventory import (
 )
 
 __all__ = [
+    "AgentDiscovery",
+    "AgentSignal",
+    "AISignature",
     "build_claw_aibom",
     "claw_aibom_to_scan_result",
+    "discover_agents",
     "format_claw_aibom_human",
+    "first_installed",
+    "load_ai_signatures",
+    "render_discovery_table",
 ]

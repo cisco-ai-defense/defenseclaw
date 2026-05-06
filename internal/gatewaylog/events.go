@@ -150,16 +150,29 @@ const (
 	// call and its result share ToolCallID/ToolID so SIEM consumers
 	// can join input and output without scraping free-form details.
 	EventToolInvocation EventType = "tool_invocation"
+
+	// EventAIDiscovery records sanitized continuous AI usage discovery
+	// deltas. It is metadata-only: no raw paths, commands, prompt text,
+	// file contents, or secret values.
+	EventAIDiscovery EventType = "ai_discovery"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
 // audit.Event severities and OPA policy inputs so downstream filters
 // don't need a translation table.
+//
+// SeverityWarn ("WARN") is intentionally listed even though it doesn't
+// fit the LOW/MEDIUM/HIGH/CRITICAL ordering: codex/OTLP ingest paths
+// use it for "this thing was malformed, dashboards should notice but
+// it isn't a security event". Downstream consumers MUST map unknown
+// severities to MEDIUM so a future schema-only severity doesn't drop
+// off the on-call radar.
 type Severity string
 
 const (
 	SeverityInfo     Severity = "INFO"
 	SeverityLow      Severity = "LOW"
+	SeverityWarn     Severity = "WARN"
 	SeverityMedium   Severity = "MEDIUM"
 	SeverityHigh     Severity = "HIGH"
 	SeverityCritical Severity = "CRITICAL"
@@ -354,6 +367,7 @@ type Event struct {
 	LLMPrompt   *LLMPromptPayload   `json:"llm_prompt,omitempty"`
 	LLMResponse *LLMResponsePayload `json:"llm_response,omitempty"`
 	Tool        *ToolPayload        `json:"tool_invocation,omitempty"`
+	AIDiscovery *AIDiscoveryPayload `json:"ai_discovery,omitempty"`
 }
 
 // StampPayloadHMAC fills the PayloadHMAC field with HMAC-SHA256 over
@@ -390,6 +404,8 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.LLMResponse)
 	case e.Tool != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.Tool)
+	case e.AIDiscovery != nil:
+		e.PayloadHMAC = ComputePayloadHMAC(e.AIDiscovery)
 	}
 }
 
@@ -650,4 +666,102 @@ type ToolPayload struct {
 	ExitCode        *int   `json:"exit_code,omitempty"`
 	ReplyToPromptID string `json:"reply_to_prompt_id,omitempty"`
 	Source          string `json:"source,omitempty"`
+}
+
+// AIDiscoveryPayload records one sanitized "new / changed / gone" AI usage
+// signal from the sidecar-native continuous discovery service.
+//
+// Privacy contract:
+//   - The "minimal" set of fields (ScanID through LastSeen) is always
+//     populated -- they carry no raw paths or unhashed values, only
+//     sha256:* digests and category/vendor/product strings drawn from
+//     the operator-curated catalog.
+//   - The "extended" set (Component, Runtime, Detector, IdentityScore,
+//     PresenceScore, IdentityFactors, PresenceFactors, Evidence,
+//     RawPaths) is populated *only* when the gateway sees
+//     `privacy.disable_redaction = true`. RawPath inside each
+//     evidence row additionally requires
+//     `ai_discovery.store_raw_local_paths = true` (the two flags
+//     compose: setting one without the other still scrubs raw paths).
+//   - Every extended field is `omitempty` so receivers cannot tell
+//     from the wire whether the operator opted out or never had a
+//     value for that signal.
+type AIDiscoveryPayload struct {
+	ScanID        string   `json:"scan_id"`
+	SignalID      string   `json:"signal_id"`
+	Category      string   `json:"category"`
+	Vendor        string   `json:"vendor,omitempty"`
+	Product       string   `json:"product,omitempty"`
+	Confidence    float64  `json:"confidence,omitempty"`
+	State         string   `json:"state"` // new | changed | gone
+	EvidenceTypes []string `json:"evidence_types,omitempty"`
+	PathHashes    []string `json:"path_hashes,omitempty"`
+	Basenames     []string `json:"basenames,omitempty"`
+	WorkspaceHash string   `json:"workspace_hash,omitempty"`
+	LastSeen      string   `json:"last_seen,omitempty"`
+
+	// Extended fields below are gated by privacy.disable_redaction.
+	// The shipping helper (BuildAIDiscoveryPayload) reads the flag
+	// from the gateway config; raw call sites that build their own
+	// payload must check the same flag.
+	Detector        string                `json:"detector,omitempty"`
+	Component       *AIDiscoveryComponent `json:"component,omitempty"`
+	Runtime         *AIDiscoveryRuntime   `json:"runtime,omitempty"`
+	LastActiveAt    string                `json:"last_active_at,omitempty"`
+	IdentityScore   float64               `json:"identity_score,omitempty"`
+	IdentityBand    string                `json:"identity_band,omitempty"`
+	PresenceScore   float64               `json:"presence_score,omitempty"`
+	PresenceBand    string                `json:"presence_band,omitempty"`
+	IdentityFactors []AIDiscoveryFactor   `json:"identity_factors,omitempty"`
+	PresenceFactors []AIDiscoveryFactor   `json:"presence_factors,omitempty"`
+	Detectors       []string              `json:"detectors,omitempty"`
+	Evidence        []AIDiscoveryEvidence `json:"evidence,omitempty"`
+	// RawPaths additionally requires ai_discovery.store_raw_local_paths.
+	RawPaths []string `json:"raw_paths,omitempty"`
+}
+
+// AIDiscoveryComponent mirrors inventory.AIComponent.
+type AIDiscoveryComponent struct {
+	Ecosystem string `json:"ecosystem,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Framework string `json:"framework,omitempty"`
+}
+
+// AIDiscoveryRuntime mirrors inventory.ProcessRuntime.
+type AIDiscoveryRuntime struct {
+	PID       int    `json:"pid,omitempty"`
+	PPID      int    `json:"ppid,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	UptimeSec int64  `json:"uptime_sec,omitempty"`
+	User      string `json:"user,omitempty"`
+	Comm      string `json:"comm,omitempty"`
+}
+
+// AIDiscoveryFactor mirrors inventory.ConfidenceFactor for the wire.
+// LogitDelta is the additive contribution this evidence made to the
+// per-axis log-odds; receivers can convert via P*(1-P) to get a
+// percentage-point shift.
+type AIDiscoveryFactor struct {
+	Detector    string  `json:"detector"`
+	EvidenceID  string  `json:"evidence_id,omitempty"`
+	MatchKind   string  `json:"match_kind,omitempty"`
+	Quality     float64 `json:"quality"`
+	Specificity float64 `json:"specificity"`
+	LR          float64 `json:"lr"`
+	LogitDelta  float64 `json:"logit_delta"`
+}
+
+// AIDiscoveryEvidence mirrors inventory.AIEvidence for the wire.
+// RawPath is populated only when both privacy.disable_redaction and
+// ai_discovery.store_raw_local_paths are true.
+type AIDiscoveryEvidence struct {
+	Type          string  `json:"type"`
+	Basename      string  `json:"basename,omitempty"`
+	PathHash      string  `json:"path_hash,omitempty"`
+	ValueHash     string  `json:"value_hash,omitempty"`
+	WorkspaceHash string  `json:"workspace_hash,omitempty"`
+	RawPath       string  `json:"raw_path,omitempty"`
+	Quality       float64 `json:"quality,omitempty"`
+	MatchKind     string  `json:"match_kind,omitempty"`
 }

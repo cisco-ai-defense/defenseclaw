@@ -25,7 +25,10 @@ import tempfile
 from typing import Any, Iterator
 from unittest.mock import patch
 
-CONNECTORS = ("openclaw", "zeptoclaw", "claudecode", "codex")
+CONNECTORS = (
+    "openclaw", "zeptoclaw", "claudecode", "codex",
+    "hermes", "cursor", "windsurf", "geminicli", "copilot",
+)
 
 
 def make_zeptoclaw_config(

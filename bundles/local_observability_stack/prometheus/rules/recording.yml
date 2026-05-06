@@ -127,6 +127,32 @@ groups:
       - record: exporter:defenseclaw_otlp_freshness:seconds
         expr: time() - max by (exporter) (defenseclaw_telemetry_exporter_last_export_ts_seconds)
 
+  # Observability-pipeline self-monitoring. Loki silently drops log
+  # entries that exceed `max_line_size` or `max_structured_metadata_size`,
+  # which manifests as missing audit events on dashboards rather than
+  # an obvious failure. We pre-aggregate the per-reason discard rate
+  # plus a ratio against accepted lines so the
+  # DefenseClawLokiIngestOverflow alert (alerts.yml::
+  # defenseclaw.observability_pipeline) can fire on either an absolute
+  # rate threshold or a fraction-of-traffic threshold.
+  - name: defenseclaw.observability_pipeline
+    interval: 30s
+    rules:
+      - record: pipeline:loki_ingest_overflow:rate5m
+        expr: |
+          sum by (reason) (
+            rate(loki_discarded_samples_total{reason=~"line_too_long|structured_metadata_too_big"}[5m])
+          )
+      - record: pipeline:loki_ingest_overflow:ratio5m
+        expr: |
+          (
+            sum(rate(loki_discarded_samples_total{reason=~"line_too_long|structured_metadata_too_big"}[5m]))
+            /
+            clamp_min(sum(rate(loki_distributor_lines_received_total[5m])), 0.0001)
+          )
+          and
+          sum(rate(loki_distributor_lines_received_total[5m])) > 0
+
   # Connector ingest (codex / claudecode native telemetry posted to
   # /v1/logs, /v1/metrics, /v1/traces, /api/v1/codex/notify).
   # Pre-aggregated so the connector dashboard stays snappy even when

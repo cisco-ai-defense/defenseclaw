@@ -16,14 +16,13 @@
 // authenticate the originating CLI process the same way the hook
 // scripts do.
 //
-// This receiver is intentionally minimal: we accept the body, attach
-// the connector source and gateway tokens (already validated by
-// tokenAuth middleware), summarize the payload into an audit event,
-// and persist via persistAuditEvent. We do NOT decode the full
-// OTLP protobuf shape — operators who want raw OTel pipelines run
-// the gateway's downstream OTLP forwarder (separate, see
-// internal/audit/sinks/otlp_logs.go). The audit summary is enough
-// for the SIEM rollup and the TUI status panel.
+// This receiver is intentionally summary-oriented: we accept the body,
+// attach the connector source and gateway tokens (already validated by
+// tokenAuth middleware), normalize OTLP JSON/protobuf into the same
+// summary shape, promote known GenAI session/token/duration fields,
+// and persist via persistAuditEvent. Operators who want full raw OTel
+// pipelines still run the gateway's downstream OTLP forwarder
+// (separate, see internal/audit/sinks/otlp_logs.go).
 //
 // Threat model:
 //   - All three endpoints are gated by tokenAuth + apiCSRFProtect
@@ -32,10 +31,9 @@
 //   - Body size is capped by maxBodyMiddleware (1 MiB). The OTLP
 //     spec recommends batching; one MiB covers roughly 50-100 log
 //     records or 500-1000 metric data points per batch.
-//   - JSON parsing failures degrade to a 400 — we don't try to be
-//     clever with partial parsing because that's a footgun: the
-//     caller will retry, and a structured error gives us a clean
-//     audit trail.
+//   - Payload parsing failures are audited as malformed and still
+//     return OTLP success; retrying the same bad batch would only
+//     create gateway load and noisier telemetry.
 package gateway
 
 import (
@@ -47,6 +45,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -54,6 +53,11 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	collectorlogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
+	collectormetricspb "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -100,11 +104,9 @@ const otelSourceHeader = "x-defenseclaw-source"
 const otelIngestMaxBatchSummary = 5
 
 // handleOTLPLogs accepts OTLP-HTTP /v1/logs POSTs from CLI processes.
-// Body is OTLP-JSON (Content-Type: application/json) — the protobuf
-// variant is not yet supported because Codex and Claude Code default
-// to JSON over HTTP per their docs. We surface a 415 if the caller
-// sends application/x-protobuf so they get an actionable error
-// rather than a silent parse failure.
+// Body may be OTLP-JSON (application/json) or OTLP protobuf
+// (application/x-protobuf). Both forms are summarized structurally after
+// protobuf is normalized to the OTLP-JSON field shape.
 func (a *APIServer) handleOTLPLogs(w http.ResponseWriter, r *http.Request) {
 	a.handleOTLPSignal(w, r, otelSignalLogs)
 }
@@ -123,6 +125,27 @@ func (a *APIServer) handleOTLPTraces(w http.ResponseWriter, r *http.Request) {
 	a.handleOTLPSignal(w, r, otelSignalTraces)
 }
 
+func (a *APIServer) handleOTLPPathToken(w http.ResponseWriter, r *http.Request) {
+	_, source, ok := parseOTLPPathToken(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if strings.TrimSpace(r.Header.Get(otelSourceHeader)) == "" {
+		r.Header.Set(otelSourceHeader, source)
+	}
+	switch {
+	case strings.HasSuffix(r.URL.Path, "/v1/logs"):
+		a.handleOTLPSignal(w, r, otelSignalLogs)
+	case strings.HasSuffix(r.URL.Path, "/v1/metrics"):
+		a.handleOTLPSignal(w, r, otelSignalMetrics)
+	case strings.HasSuffix(r.URL.Path, "/v1/traces"):
+		a.handleOTLPSignal(w, r, otelSignalTraces)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 // handleOTLPSignal is the shared body for all three signal types.
 // It validates the request shape, classifies the source, summarizes
 // the payload into an audit event, and returns 200 with the
@@ -138,13 +161,12 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	}
 
 	contentType := r.Header.Get("Content-Type")
-	if !isOTLPJSONContentType(contentType) {
+	if !isOTLPContentType(contentType) {
 		// Be explicit about why we rejected so the exporter logs
-		// surface the right error. application/x-protobuf is the
-		// other valid OTLP shape; we don't accept it yet.
-		w.Header().Set("Accept", "application/json")
+		// surface the right error.
+		w.Header().Set("Accept", "application/json, application/x-protobuf")
 		http.Error(w,
-			fmt.Sprintf("unsupported content-type %q (defenseclaw OTLP receiver accepts application/json only)", contentType),
+			fmt.Sprintf("unsupported content-type %q (defenseclaw OTLP receiver accepts application/json or application/x-protobuf)", contentType),
 			http.StatusUnsupportedMediaType)
 		return
 	}
@@ -168,21 +190,42 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	if id := agentIdentityForOTLPSource(source); id != (AgentIdentity{}) {
 		ctx = ContextWithAgentIdentity(ctx, id)
 	}
-	sessionID := extractOTLPSessionID(body, signal)
+
+	bodyBytes := int64(len(body))
+	summaryBody, payloadFormat, normalizeErr := normalizeOTLPIngestBody(body, signal, contentType)
+	if normalizeErr != nil {
+		details := fmt.Sprintf("malformed OTLP-%s payload: %v (size=%d bytes)", payloadFormat, normalizeErr, len(body))
+		details = a.appendRawOTLPDetails(details, source, signal, body)
+		ev := audit.Event{
+			Timestamp: time.Now().UTC(),
+			Action:    string(audit.ActionOTelIngestMalformed),
+			Target:    fmt.Sprintf("otlp:%s", signal),
+			Actor:     source,
+			Details:   details,
+			Severity:  "WARN",
+			AgentName: source,
+		}
+		_ = persistAuditEvent(a.logger, a.store, ev)
+		a.otel.RecordOTelIngest(ctx, string(signal), source, "malformed", 0, bodyBytes)
+		a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "malformed", 0, bodyBytes, details)
+		writeOTLPSuccess(w)
+		return
+	}
+
+	sessionID := extractOTLPSessionID(summaryBody, signal)
 	if sessionID != "" {
 		ctx = ContextWithSessionID(ctx, sessionID)
 		enrichHTTPSpanFromContext(ctx)
 		enrichOTLPIngestSpan(ctx, sessionID)
 	}
-	bodyBytes := int64(len(body))
-	summary, stats, parseErr := summarizeOTLPPayload(body, signal)
+	summary, stats, parseErr := summarizeOTLPPayload(summaryBody, signal)
 	if parseErr != nil {
 		// We log the parse failure but still 200 — the exporter
 		// already paid the network round-trip and retrying won't
 		// help (the body is malformed). Audit + meter + emit a
 		// WARN log so dashboards / alerts surface the drift
 		// without the exporter retrying.
-		details := fmt.Sprintf("malformed OTLP-JSON payload: %v (size=%d bytes)", parseErr, len(body))
+		details := fmt.Sprintf("malformed OTLP-%s normalized payload: %v (size=%d bytes)", payloadFormat, parseErr, len(body))
 		details = a.appendRawOTLPDetails(details, source, signal, body)
 		ev := audit.Event{
 			Timestamp: time.Now().UTC(),
@@ -200,10 +243,11 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		// bodyBytes so volume dashboards still see the request.
 		a.otel.RecordOTelIngest(ctx, string(signal), source, "malformed", 0, bodyBytes)
 		a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "malformed", 0, bodyBytes,
-			a.appendRawOTLPDetails(fmt.Sprintf("malformed OTLP-JSON payload: %v", parseErr), source, signal, body))
+			a.appendRawOTLPDetails(fmt.Sprintf("malformed OTLP-%s normalized payload: %v", payloadFormat, parseErr), source, signal, body))
 		writeOTLPSuccess(w)
 		return
 	}
+	summary = decorateOTLPIngestSummary(summary, payloadFormat, len(body), len(summaryBody))
 	summary = a.appendRawOTLPDetails(summary, source, signal, body)
 
 	ev := audit.Event{
@@ -229,15 +273,51 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	// local-observability-stack's Loki receives codex/claudecode
 	// telemetry directly — no extra audit OTLP sink needed.
 	a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", stats.Records, bodyBytes)
-	for _, usage := range extractOTLPTokenUsage(body, signal, source) {
+	for _, usage := range extractOTLPTokenUsage(summaryBody, signal, source) {
 		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, usage.agentName, SharedAgentRegistry().AgentID(), usage.tokenType, usage.tokens)
 	}
-	for _, duration := range extractOTLPOperationDurations(body, signal, source) {
+	for _, duration := range extractOTLPOperationDurations(summaryBody, signal, source) {
 		a.otel.RecordLLMDuration(ctx, duration.operationName, duration.providerName, duration.model, duration.agentName, SharedAgentRegistry().AgentID(), duration.durationSeconds)
 	}
 	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
 
 	writeOTLPSuccess(w)
+}
+
+func normalizeOTLPIngestBody(body []byte, signal otelIngestSignal, contentType string) ([]byte, string, error) {
+	if !isOTLPProtobufContentType(contentType) {
+		return body, "json", nil
+	}
+
+	var msg proto.Message
+	switch signal {
+	case otelSignalLogs:
+		msg = &collectorlogspb.ExportLogsServiceRequest{}
+	case otelSignalMetrics:
+		msg = &collectormetricspb.ExportMetricsServiceRequest{}
+	case otelSignalTraces:
+		msg = &collectortracepb.ExportTraceServiceRequest{}
+	default:
+		return nil, "protobuf", fmt.Errorf("unknown OTLP signal %q", signal)
+	}
+	if err := proto.Unmarshal(body, msg); err != nil {
+		return nil, "protobuf", err
+	}
+	normalized, err := protojson.MarshalOptions{
+		EmitUnpopulated: false,
+		UseProtoNames:   false,
+	}.Marshal(msg)
+	if err != nil {
+		return nil, "protobuf", err
+	}
+	return normalized, "protobuf", nil
+}
+
+func decorateOTLPIngestSummary(summary, payloadFormat string, wireBytes, normalizedBytes int) string {
+	if payloadFormat != "protobuf" {
+		return summary
+	}
+	return fmt.Sprintf("format=protobuf wire_size=%d bytes normalized_json_size=%d bytes %s", wireBytes, normalizedBytes, summary)
 }
 
 func agentIdentityForOTLPSource(source string) AgentIdentity {
@@ -1095,15 +1175,81 @@ func otelIngestActionForSignal(signal otelIngestSignal) string {
 // indicates OTLP-JSON. Accepts application/json with optional
 // charset / "; encoding=otlp-json" parameters.
 func isOTLPJSONContentType(ct string) bool {
+	return normalizedContentType(ct) == "application/json"
+}
+
+func isOTLPProtobufContentType(ct string) bool {
+	return normalizedContentType(ct) == "application/x-protobuf"
+}
+
+func isOTLPContentType(ct string) bool {
+	ct = normalizedContentType(ct)
+	return ct == "application/json" || ct == "application/x-protobuf"
+}
+
+func normalizedContentType(ct string) string {
 	ct = strings.ToLower(strings.TrimSpace(ct))
 	if ct == "" {
-		return false
+		return ""
 	}
 	// Strip parameters (anything after ;).
 	if i := strings.Index(ct, ";"); i >= 0 {
 		ct = strings.TrimSpace(ct[:i])
 	}
-	return ct == "application/json"
+	return ct
+}
+
+func parseOTLPPathToken(path string) (token string, source string, ok bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 5 || parts[0] != "otlp" || parts[3] != "v1" {
+		return "", "", false
+	}
+	switch parts[4] {
+	case "logs", "metrics", "traces":
+	default:
+		return "", "", false
+	}
+	source = strings.ToLower(strings.TrimSpace(parts[1]))
+	token = strings.TrimSpace(parts[2])
+	if decoded, err := url.PathUnescape(token); err == nil {
+		token = decoded
+	}
+	if source == "" || token == "" {
+		return "", "", false
+	}
+	return token, source, true
+}
+
+func isOTLPEndpointPath(path string) bool {
+	switch path {
+	case "/v1/logs", "/v1/metrics", "/v1/traces":
+		return true
+	default:
+		_, _, ok := parseOTLPPathToken(path)
+		return ok
+	}
+}
+
+// sanitizeRouteForTelemetry returns a fixed-cardinality route label safe for
+// OTel metrics / span attributes. The path-token OTLP endpoint embeds the
+// gateway bearer token as a URL segment, so we MUST never let that segment
+// reach an exporter (it would leak the master credential to whatever
+// observability backend is configured). For path-token URLs we collapse the
+// token segment to "_token_"; everything else is passed through unchanged.
+//
+// SECURITY: do not bypass this for any route that participates in the OTel
+// pipeline. See parseOTLPPathToken for the URL shape and tokenAuth for the
+// auth contract that justifies allowing the token in the URL at all.
+func sanitizeRouteForTelemetry(path string) string {
+	_, source, ok := parseOTLPPathToken(path)
+	if !ok {
+		return path
+	}
+	// Recover the trailing signal segment (logs|metrics|traces). parseOTLPPathToken
+	// has already validated the shape so the split is safe.
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	signal := parts[len(parts)-1]
+	return "/otlp/" + source + "/_token_/v1/" + signal
 }
 
 // writeOTLPSuccess writes the canonical empty-success OTLP-HTTP
@@ -1338,12 +1484,17 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	// Surface the same event as a Prometheus counter and an OTel log
 	// record so the local-stack dashboards see codex turn-completes
 	// without configuring an audit OTLP sink. Cardinality is bounded
-	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]).
+	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]) for both kind
+	// and status — the wire format calls status a free-form string
+	// but the only legitimate values are short, ASCII tokens; without
+	// sanitization a hostile / verbose client could blow up the
+	// `codex_notify_status` series.
+	statusLabel := sanitizeNotifyType(p.Status)
 	ctx := ContextWithSessionID(r.Context(), sessionID)
 	enrichHTTPSpanFromContext(ctx)
 	enrichCodexNotifySpan(ctx, p, kind, result)
-	a.otel.RecordCodexNotify(ctx, kind, p.Status, result)
-	a.otel.EmitCodexNotifyLog(ctx, kind, p.Status, result, p.TurnID, p.Model)
+	a.otel.RecordCodexNotify(ctx, kind, statusLabel, result)
+	a.otel.EmitCodexNotifyLog(ctx, kind, statusLabel, result, p.TurnID, p.Model)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

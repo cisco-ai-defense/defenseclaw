@@ -195,6 +195,34 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.passed, 1)
         self.assertIn("intentionally closed", result.checks[0]["detail"])
 
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_hook_only_connector_skips_proxy_port_probe(self, mock_probe):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                model="",
+                port=4000,
+                connector="geminicli",
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "geminicli"
+        result = _DoctorResult()
+
+        _check_guardrail_proxy(cfg, result)
+
+        mock_probe.assert_not_called()
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.warned, 0)
+        self.assertEqual(result.passed, 1)
+        self.assertIn("observability-only for geminicli", result.checks[0]["detail"])
+
     def test_hilt_disabled_is_pass(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
@@ -227,7 +255,35 @@ class DoctorGuardrailTests(unittest.TestCase):
         _check_hilt_support(cfg, "codex", result)
         self.assertEqual(result.failed, 0)
         self.assertEqual(result.warned, 1)
-        self.assertIn("PreToolUse ask is unsupported", result.checks[0]["detail"])
+        self.assertIn("no native ask surface", result.checks[0]["detail"])
+
+    def test_hilt_new_connector_support_matrix(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="copilot"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.guardrail.hilt.enabled = True
+
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "copilot", result)
+        self.assertEqual(result.passed, 1)
+        self.assertIn("preToolUse ask supported", result.checks[0]["detail"])
+
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "cursor", result)
+        self.assertEqual(result.warned, 1)
+        self.assertIn("documented ask-capable", result.checks[0]["detail"])
+
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "geminicli", result)
+        self.assertEqual(result.warned, 1)
+        self.assertIn("no native human approval surface", result.checks[0]["detail"])
 
 
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):

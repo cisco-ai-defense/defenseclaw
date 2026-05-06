@@ -533,7 +533,7 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup mcp-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "mcp-scanner"}, Description: "Configure MCP scanner (interactive)", Category: "setup"},
 		{TUIName: "setup codex", CLIBinary: dc, CLIArgs: []string{"setup", "codex", "--yes"}, Description: "Configure Codex observability hooks", Category: "setup"},
 		{TUIName: "setup claude-code", CLIBinary: dc, CLIArgs: []string{"setup", "claude-code", "--yes"}, Description: "Configure Claude Code observability hooks", Category: "setup"},
-		{TUIName: "setup mode", CLIBinary: dc, CLIArgs: []string{"setup", "mode"}, Description: "Switch active connector", Category: "setup", NeedsArg: true, ArgHint: "<openclaw|codex|claudecode|zeptoclaw>"},
+		{TUIName: "setup mode", CLIBinary: dc, CLIArgs: []string{"setup", "mode"}, Description: "Switch active connector", Category: "setup", NeedsArg: true, ArgHint: "<openclaw|codex|claudecode|zeptoclaw|hermes|cursor|windsurf|geminicli|copilot>"},
 		{TUIName: "setup rotate-token", CLIBinary: dc, CLIArgs: []string{"setup", "rotate-token", "--yes"}, Description: "Rotate the gateway token", Category: "setup"},
 		{TUIName: "setup gateway", CLIBinary: dc, CLIArgs: []string{"setup", "gateway"}, Description: "Configure gateway connection (interactive)", Category: "setup"},
 		{TUIName: "setup guardrail", CLIBinary: dc, CLIArgs: []string{"setup", "guardrail"}, Description: "Configure LLM guardrail", Category: "setup"},
@@ -563,6 +563,23 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup provider remove", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "remove"}, Description: "Remove a custom LLM provider from the overlay", Category: "setup"},
 		{TUIName: "setup provider list", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "list"}, Description: "List overlay provider entries", Category: "setup"},
 		{TUIName: "setup provider show", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "show"}, Description: "Show merged provider registry", Category: "setup"},
+
+		// Agent / AI discovery
+		// One-shot toggles for the sidecar's continuous AI-discovery
+		// service. The CLI commands save config + restart the gateway
+		// + (optionally) trigger an immediate scan, so palette users
+		// don't have to remember the three-step "edit YAML, bounce
+		// gateway, --refresh" dance that the previous workflow
+		// required.
+		{TUIName: "agent discover", CLIBinary: dc, CLIArgs: []string{"agent", "discover"}, Description: "Discover installed agents and emit sanitized telemetry", Category: "info"},
+		{TUIName: "agent usage", CLIBinary: dc, CLIArgs: []string{"agent", "usage"}, Description: "Show continuous AI visibility from the sidecar", Category: "info"},
+		{TUIName: "agent usage --refresh", CLIBinary: dc, CLIArgs: []string{"agent", "usage", "--refresh"}, Description: "Trigger an AI-usage scan and render results", Category: "scan"},
+		{TUIName: "agent discovery setup", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "setup"}, Description: "Interactive AI discovery wizard (mode, intervals, sources)", Category: "setup"},
+		{TUIName: "agent discovery enable", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "enable", "--yes"}, Description: "Enable AI discovery, save config, restart, and scan", Category: "setup"},
+		{TUIName: "agent discovery disable", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "disable", "--yes"}, Description: "Disable AI discovery and restart the gateway", Category: "setup"},
+		{TUIName: "agent discovery status", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "status"}, Description: "Show on-disk vs live AI discovery state", Category: "info"},
+		{TUIName: "agent discovery scan", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "scan"}, Description: "Trigger one immediate AI discovery scan", Category: "scan"},
+		{TUIName: "agent signatures list", CLIBinary: dc, CLIArgs: []string{"agent", "signatures", "list"}, Description: "List the merged AI discovery signature catalog", Category: "info"},
 
 		// Scan
 		{TUIName: "scan skill", CLIBinary: dc, CLIArgs: []string{"skill", "scan"}, Description: "Scan a skill", Category: "scan", NeedsArg: true, ArgHint: "<skill-name>"},

@@ -18,13 +18,13 @@ jobs:
     name: Go Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
@@ -34,13 +34,13 @@ jobs:
     name: Go Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
@@ -58,13 +58,13 @@ jobs:
         goos: [linux, darwin]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
@@ -78,8 +78,8 @@ jobs:
     name: Python Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.1.0
       - run: uv sync
       - run: make py-lint
       - run: make cli-test-cov
@@ -88,12 +88,30 @@ jobs:
           name: python-coverage
           path: coverage-py.xml
 
+  connector-matrix:
+    name: Connector Matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: make plugin
+      - run: make dev-pycli
+      - run: make connector-matrix-test
+
   python-audit:
     name: Python Dependency Audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v4
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v8.1.0
       - run: uv sync
       - run: uv pip install pip pip-audit
       # TODO: Remove --ignore-vuln CVE-2026-4539 once pygments >= 2.19.3 is released
@@ -117,10 +135,10 @@ jobs:
     name: TypeScript Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
@@ -133,10 +151,10 @@ jobs:
       run:
         working-directory: extensions/defenseclaw
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: npm ci
@@ -146,26 +164,44 @@ jobs:
     name: Rego Policy Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: open-policy-agent/setup-opa@v2
         with:
           version: latest
       - run: make rego-test
 
+  schema-parity:
+    name: Schema & Parity Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: make plugin
+      - run: make dev-pycli
+      - run: make check
+
   make-test:
     name: make test (unified)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "24"
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v8.1.0
       - run: make plugin
       # dev-pycli installs the [dev] group (pytest, jsonschema, ruff)
       # which `make test → cli-test` indirectly needs at import time:

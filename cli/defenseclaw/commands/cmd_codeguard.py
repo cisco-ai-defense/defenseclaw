@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw codeguard — CodeGuard skill management."""
+"""defenseclaw codeguard — opt-in Project CodeGuard asset management."""
 
 from __future__ import annotations
 
@@ -26,25 +26,53 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group()
 def codeguard() -> None:
-    """CodeGuard static-analysis skill management."""
+    """CodeGuard native skill/rule asset management."""
+
+
+@codeguard.command("status")
+@click.option("--connector", default="", help="Connector to inspect (default: active connector).")
+@click.option("--target", type=click.Choice(["skill", "rule"]), default="skill", show_default=True)
+@pass_ctx
+def status_cmd(app: AppContext, connector: str, target: str) -> None:
+    """Show whether a native CodeGuard asset is installed."""
+    from defenseclaw.codeguard_skill import codeguard_status
+
+    status = codeguard_status(app.cfg, connector=connector or None, target=target)
+    click.echo(f"CodeGuard {target} [{status.connector}]: {status.format()}")
+
+
+@codeguard.command("install")
+@click.option("--connector", default="", help="Connector to install into (default: active connector).")
+@click.option("--target", type=click.Choice(["skill", "rule"]), default="skill", show_default=True)
+@click.option("--replace", is_flag=True, help="Replace an existing non-CodeGuard asset at the target path.")
+@pass_ctx
+def install_cmd(app: AppContext, connector: str, target: str, replace: bool) -> None:
+    """Install a native CodeGuard skill or rule asset explicitly."""
+    from defenseclaw.codeguard_skill import install_codeguard_asset
+
+    status = install_codeguard_asset(app.cfg, connector=connector or None, target=target, replace=replace)
+    _raise_install_error_if_needed(target, status)
+    click.echo(f"CodeGuard {target}: {status}")
+
+    from defenseclaw.commands import hint
+    hint("Scan code now:  defenseclaw scan code <path>")
 
 
 @codeguard.command("install-skill")
 @pass_ctx
 def install_skill_cmd(app: AppContext) -> None:
-    """Install the CodeGuard skill into the OpenClaw workspace skills directory.
-
-    Copies the bundled CodeGuard skill into the highest-priority OpenClaw
-    skills directory (workspace skills dir when configured, otherwise the
-    global skills dir) and enables it in openclaw.json.
-
-    Equivalent to the auto-install that runs during ``defenseclaw init``.
-    """
+    """Backward-compatible alias for ``codeguard install --target skill``."""
     from defenseclaw.codeguard_skill import install_codeguard_skill
 
     click.echo(f"{ux.bold('CodeGuard skill:')} installing...", nl=False)
     status = install_codeguard_skill(app.cfg)
+    _raise_install_error_if_needed("skill", status)
     click.echo(f" {status}")
 
     from defenseclaw.commands import hint
     hint("Scan code now:  defenseclaw scan code <path>")
+
+
+def _raise_install_error_if_needed(target: str, status: str) -> None:
+    if status.startswith("conflict at ") or status.startswith("unsupported"):
+        raise click.ClickException(f"CodeGuard {target}: {status}")

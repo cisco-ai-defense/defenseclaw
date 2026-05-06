@@ -39,6 +39,16 @@ func FriendlyConnectorName(name string) string {
 		return "Claude Code"
 	case "codex":
 		return "Codex"
+	case "hermes":
+		return "Hermes"
+	case "cursor":
+		return "Cursor"
+	case "windsurf":
+		return "Windsurf"
+	case "geminicli":
+		return "Gemini CLI"
+	case "copilot":
+		return "GitHub Copilot CLI"
 	default:
 		// Capitalise the first rune for an unknown plugin connector
 		// so we still show "Foo" rather than "foo" — but never
@@ -114,6 +124,28 @@ func skillSources(connector string) []string {
 			tildePath(filepath.Join(home, ".zeptoclaw", "skills")),
 			cwdRel(".zeptoclaw/skills"),
 		}
+	case "hermes":
+		return []string{tildePath(filepath.Join(home, ".hermes", "skills"))}
+	case "cursor":
+		return []string{
+			cwdRel(".cursor/skills"),
+			cwdRel(".agents/skills"),
+			tildePath(filepath.Join(home, ".cursor", "skills")),
+			tildePath(filepath.Join(home, ".agents", "skills")),
+		}
+	case "windsurf":
+		return []string{"unsupported/documented paths only"}
+	case "geminicli":
+		return []string{
+			cwdRel(".gemini/skills"),
+			cwdRel(".agents/skills"),
+		}
+	case "copilot":
+		return []string{
+			cwdRel(".github/skills"),
+			cwdRel(".agents/skills"),
+			tildePath(filepath.Join(home, ".copilot", "skills")),
+		}
 	default:
 		return []string{
 			cwdRel("skills"),
@@ -140,6 +172,29 @@ func mcpSources(connector string) []string {
 			tildePath(filepath.Join(home, ".zeptoclaw", "config.json")) + " (mcp.servers)",
 			cwdRel(".mcp.json"),
 		}
+	case "hermes":
+		return []string{tildePath(filepath.Join(home, ".hermes", "config.yaml")) + " (mcp.servers)"}
+	case "cursor":
+		return []string{
+			cwdRel(".cursor/mcp.json"),
+			tildePath(filepath.Join(home, ".cursor", "mcp.json")),
+		}
+	case "windsurf":
+		return []string{
+			tildePath(filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")),
+			tildePath(filepath.Join(home, ".codeium", "windsurf", "mcp.json")),
+		}
+	case "geminicli":
+		return []string{
+			tildePath(filepath.Join(home, ".gemini", "settings.json")) + " (mcpServers)",
+			cwdRel(".mcp.json"),
+		}
+	case "copilot":
+		return []string{
+			tildePath(filepath.Join(home, ".copilot", "mcp-config.json")),
+			cwdRel(".github/mcp.json"),
+			cwdRel(".mcp.json"),
+		}
 	default:
 		return []string{"openclaw config get mcp.servers", "openclaw.json (mcp.servers)"}
 	}
@@ -154,6 +209,17 @@ func pluginSources(connector string) []string {
 		return []string{tildePath(filepath.Join(home, ".codex", "plugins"))}
 	case "zeptoclaw":
 		return []string{tildePath(filepath.Join(home, ".zeptoclaw", "plugins"))}
+	case "hermes":
+		return []string{
+			tildePath(filepath.Join(home, ".hermes", "plugins")),
+			cwdRel(".hermes/plugins") + " (discovery-only)",
+		}
+	case "geminicli":
+		return []string{cwdRel(".gemini/extensions")}
+	case "copilot":
+		return []string{"copilot plugin list"}
+	case "cursor", "windsurf":
+		return []string{"unsupported"}
 	default:
 		return []string{tildePath(filepath.Join(home, ".openclaw", "extensions"))}
 	}
@@ -168,6 +234,16 @@ func configSources(connector string) []string {
 		return []string{tildePath(filepath.Join(home, ".codex", "config.toml"))}
 	case "zeptoclaw":
 		return []string{tildePath(filepath.Join(home, ".zeptoclaw", "config.json"))}
+	case "hermes":
+		return []string{tildePath(filepath.Join(home, ".hermes", "config.yaml"))}
+	case "cursor":
+		return []string{tildePath(filepath.Join(home, ".cursor", "hooks.json"))}
+	case "windsurf":
+		return []string{tildePath(filepath.Join(home, ".codeium", "windsurf", "hooks.json"))}
+	case "geminicli":
+		return []string{tildePath(filepath.Join(home, ".gemini", "settings.json"))}
+	case "copilot":
+		return []string{cwdRel(".github/hooks/*.json")}
 	default:
 		return []string{tildePath(filepath.Join(home, ".openclaw", "openclaw.json"))}
 	}

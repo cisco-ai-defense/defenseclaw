@@ -47,6 +47,14 @@ func managedFileBackupPath(dataDir, connectorName, logicalName string) string {
 	return filepath.Join(dataDir, "connector_backups", connectorName, name+".json")
 }
 
+func managedFileBackupTargetPath(dataDir, connectorName, logicalName, fallback string) string {
+	b, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, connectorName, logicalName))
+	if err == nil && strings.TrimSpace(b.Path) != "" {
+		return b.Path
+	}
+	return fallback
+}
+
 func captureManagedFileBackup(dataDir, connectorName, logicalName, targetPath string) error {
 	backupPath := managedFileBackupPath(dataDir, connectorName, logicalName)
 	if _, err := os.Stat(backupPath); err == nil {

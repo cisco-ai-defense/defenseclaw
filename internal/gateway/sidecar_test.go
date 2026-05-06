@@ -69,15 +69,15 @@ func TestConfiguredConnectorNameFallsBackToClawMode(t *testing.T) {
 }
 
 // TestResolveActiveConnector_KnownNameReturnsConnector covers the
-// happy path for each of the four built-in connectors. We don't
-// just spot-check one — the registry contract for S1.4 is "every
-// name DefaultRegistry advertises must resolve cleanly", so we
-// drive the assertion off the same list the registry exposes.
+// happy path for every built-in connector. We don't just spot-check
+// one — the registry contract for S1.4 is "every name DefaultRegistry
+// advertises must resolve cleanly", so we drive the assertion off the
+// same list the registry exposes.
 func TestResolveActiveConnector_KnownNameReturnsConnector(t *testing.T) {
 	t.Parallel()
 	reg := connector.NewDefaultRegistry()
 
-	for _, name := range []string{"openclaw", "codex", "claudecode", "zeptoclaw"} {
+	for _, name := range reg.Names() {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -130,6 +130,23 @@ func TestResolveActiveConnector_UnknownNameReturnsError(t *testing.T) {
 				t.Errorf("error message should mention the openclaw default, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestHILTApprovalManagerSharedSidecarBroker(t *testing.T) {
+	t.Parallel()
+	hilt := NewHILTApprovalManager(nil, nil, nil)
+
+	router := NewEventRouter(nil, nil, nil, false, nil)
+	router.SetHILTApprovalManager(hilt)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
+	api.SetHILTApprovalManager(hilt)
+
+	if router.hilt != hilt {
+		t.Fatal("router should receive the shared sidecar-level HILT approval manager")
+	}
+	if api.hilt != hilt {
+		t.Fatal("API should receive the same shared sidecar-level HILT approval manager")
 	}
 }
 

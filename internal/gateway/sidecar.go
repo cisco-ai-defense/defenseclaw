@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
@@ -43,18 +44,19 @@ import (
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
-	cfg      *config.Config
-	client   *Client
-	router   *EventRouter
-	store    *audit.Store
-	logger   *audit.Logger
-	health   *SidecarHealth
-	shell    *sandbox.OpenShell
-	otel     *telemetry.Provider
-	notify   *NotificationQueue
-	opa      *policy.Engine
-	hilt     *HILTApprovalManager
-	webhooks *WebhookDispatcher
+	cfg         *config.Config
+	client      *Client
+	router      *EventRouter
+	store       *audit.Store
+	logger      *audit.Logger
+	health      *SidecarHealth
+	shell       *sandbox.OpenShell
+	otel        *telemetry.Provider
+	notify      *NotificationQueue
+	opa         *policy.Engine
+	hilt        *HILTApprovalManager
+	webhooks    *WebhookDispatcher
+	aiDiscovery *inventory.ContinuousDiscoveryService
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -370,6 +372,12 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		"auto_approve": fmt.Sprintf("%v", cfg.Gateway.AutoApprove),
 	})
 
+	aiDiscovery, err := inventory.NewContinuousDiscoveryService(cfg, otel, events)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] ai discovery init failed: %v\n", err)
+		emitError(context.Background(), "ai_discovery", "init-failed", "continuous AI discovery disabled", err)
+	}
+
 	return &Sidecar{
 		cfg:         cfg,
 		client:      client,
@@ -382,6 +390,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		notify:      notify,
 		webhooks:    webhooks,
 		hilt:        hilt,
+		aiDiscovery: aiDiscovery,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 		events:      events,
@@ -434,11 +443,11 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	}
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 4)
+	errCh := make(chan error, 5)
 
 	// Goroutine 1: Gateway connection loop. Runs only when an OpenClaw
 	// fleet is configured (see gatewayShouldConnectForConfiguredConnector).
-	// In standalone codex/claudecode mode (no fleet, loopback gateway.host)
+	// In standalone hook-connector mode (no fleet, local hooks/native OTLP)
 	// runGatewayLoop short-circuits to StateDisabled and parks on ctx.Done()
 	// instead of spinning ConnectWithRetry against a port nothing is bound
 	// to. The goroutine is still spawned in both cases so shutdown / wg
@@ -478,6 +487,16 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		defer wg.Done()
 		if err := s.runGuardrail(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
+			errCh <- err
+		}
+	}()
+
+	// Goroutine 5: continuous AI discovery (opt-in via config)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.runAIDiscovery(ctx); err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] ai discovery exited with error: %v\n", err)
 			errCh <- err
 		}
 	}()
@@ -537,16 +556,17 @@ func (s *Sidecar) Run(ctx context.Context) error {
 // running until ctx is cancelled.
 //
 // Standalone short-circuit: when the active connector + host pair
-// indicates no OpenClaw fleet is configured (codex/claudecode +
-// loopback gateway.host, or unknown connector), we publish
+// indicates no OpenClaw fleet is configured (hook-only connector,
+// codex/claudecode + loopback gateway.host, or unknown connector), we publish
 // StateDisabled with an explanatory hint and park on ctx.Done()
 // instead of looping ConnectWithRetry. This mirrors the
 // observability-only branch in runGuardrail (sidecar.go::1283-1294)
 // and closes the historical "Gateway: RECONNECTING forever" symptom
-// on codex-only dev boxes where nothing is listening on
+// on hook-only dev boxes where nothing is listening on
 // 127.0.0.1:18789. Operators who actually want fleet integration
-// either pick connector=openclaw/zeptoclaw or point gateway.host at
-// a real upstream — both cases fall through to the dial loop below.
+// either pick connector=openclaw/zeptoclaw, point codex/claudecode at
+// a real upstream, or set gateway.fleet_mode=enabled — those cases fall
+// through to the dial loop below.
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 	if !gatewayShouldConnectForConfiguredConnector(s.cfg) {
 		connName := configuredConnectorName(s.cfg)
@@ -1061,8 +1081,8 @@ func shouldDisableAtGateway(r watcher.AdmissionResult) bool {
 // already happened.
 //
 // Returns true when fleet integration is active; false in standalone
-// mode (codex/claudecode + loopback host, or `gateway.fleet_mode:
-// disabled`).
+// mode (hook-only connectors, codex/claudecode + loopback host, or
+// `gateway.fleet_mode: disabled`).
 func (s *Sidecar) fleetRPCsEnabled() bool {
 	return gatewayShouldConnectForConfiguredConnector(s.cfg)
 }
@@ -1108,7 +1128,7 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 	}
 	conn, ok := reg.Get(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw) or remove the field to default to openclaw", surface, trimmed)
+		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot) or remove the field to default to openclaw", surface, trimmed)
 	}
 	return conn, nil
 }
@@ -1194,6 +1214,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	masterKey := deriveMasterKey(s.cfg.DataDir)
 	conn.SetCredentials(apiToken, masterKey)
 
+	workspaceDir, _ := os.Getwd()
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.cfg.DataDir,
 		ProxyAddr: proxyAddr,
@@ -1204,7 +1225,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// config — same source the proxy uses for credential wiring
 		// below, so the baked value and the value accepted by the API
 		// middleware stay in lockstep.
-		APIToken: apiToken,
+		APIToken:     apiToken,
+		WorkspaceDir: workspaceDir,
 		// Per-connector enforcement gates: when false (the default),
 		// the connector's Setup() installs hooks + native OTel
 		// exporters but skips the proxy-redirect path. See
@@ -1223,7 +1245,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// avoids a partial install accidentally going fail-closed.
 		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailMode(),
 		HILTEnabled:      s.cfg.Guardrail.HILT.Enabled,
-		InstallCodeGuard: true,
+		InstallCodeGuard: false,
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the
@@ -1358,17 +1380,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 // proxyShouldBindForConnector returns true when the active connector
 // requires the proxy listener to be bound — i.e. the agent's data
 // path goes through DefenseClaw. For the observability-default
-// connectors (codex, claudecode) this returns false when their
-// enforcement flag is disabled, so the proxy port stays unbound and
-// the agent talks directly to its native upstream. OpenClaw and
-// ZeptoClaw always return true: those connectors were designed
-// around the fetch-interceptor / api_base redirect from day one and
-// have no observability-only path.
+// connectors this returns false in observability mode, so the proxy
+// port stays unbound and the agent talks directly to its native upstream.
+// OpenClaw and ZeptoClaw always return true: those connectors were
+// designed around the fetch-interceptor / api_base redirect from day one
+// and have no observability-only path.
 //
 // Adding a new connector? Default-on (return true) is the
 // conservative choice for guardrail-style adapters; only return
-// false when the connector ships native telemetry comparable to
-// the codex [hooks] table + native OTel exporter.
+// false when the connector ships local hook/native telemetry that keeps
+// DefenseClaw visible without a proxy listener.
 func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailConfig) bool {
 	if conn == nil {
 		return true
@@ -1378,6 +1399,8 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 		return gc.CodexEnforcementEnabled
 	case "claudecode":
 		return gc.ClaudeCodeEnforcementEnabled
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return false
 	default:
 		return true
 	}
@@ -1412,6 +1435,8 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 		return cfg.Guardrail.CodexEnforcementEnabled
 	case "claudecode":
 		return cfg.Guardrail.ClaudeCodeEnforcementEnabled
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return false
 	default:
 		return true
 	}
@@ -1431,10 +1456,12 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             skipping it would break every
 //	                             existing OpenClaw install.
 //	codex / claudecode + loopback host
-//	                           → SKIP. Codex/ClaudeCode in either
+//	                           → SKIP. Codex/Claude Code in either
 //	                             observe or action mode emit telemetry
-//	                             through hooks + the local guardrail
-//	                             proxy + local audit. The loopback
+//	                             through hooks/native telemetry +
+//	                             local API/audit; action mode can
+//	                             additionally bind the proxy when
+//	                             enforcement is enabled. The loopback
 //	                             default (127.0.0.1:18789) means the
 //	                             operator never wired in an OpenClaw
 //	                             daemon — nothing is listening there
@@ -1446,6 +1473,12 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
+//	hermes / cursor / windsurf / geminicli / copilot
+//	                           → SKIP. These connectors are local
+//	                             hook/native-telemetry surfaces in
+//	                             this PR and do not use the OpenClaw
+//	                             fleet WebSocket unless the operator
+//	                             explicitly sets fleet_mode=enabled.
 //	empty / unknown            → SKIP. Surfacing DISABLED is safer
 //	                             than reconnect-loop noise against
 //	                             an unconfigured upstream.
@@ -1474,6 +1507,8 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return false
 	default:
 		// Empty / unknown connector: prefer DISABLED over reconnect
 		// spam. An operator who genuinely wants fleet dial will set
@@ -1561,6 +1596,57 @@ func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connec
 	fmt.Fprintf(os.Stderr, "[guardrail] partial %s setup rolled back cleanly\n", conn.Name())
 }
 
+// runAIDiscovery starts continuous shadow-AI visibility when enabled.
+func (s *Sidecar) runAIDiscovery(ctx context.Context) error {
+	if s.aiDiscovery == nil {
+		s.health.SetAIDiscovery(StateDisabled, "", nil)
+		return nil
+	}
+	s.health.SetAIDiscovery(StateStarting, "", map[string]interface{}{
+		"mode":                      s.cfg.AIDiscovery.Mode,
+		"scan_interval_min":         s.cfg.AIDiscovery.ScanIntervalMin,
+		"process_interval_s":        s.cfg.AIDiscovery.ProcessIntervalSec,
+		"include_shell_history":     s.cfg.AIDiscovery.IncludeShellHistory,
+		"include_package_manifests": s.cfg.AIDiscovery.IncludePackageManifests,
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- s.aiDiscovery.Run(ctx)
+	}()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-errCh:
+			if ctx.Err() != nil {
+				s.health.SetAIDiscovery(StateStopped, "", nil)
+				return ctx.Err()
+			}
+			if err != nil {
+				s.health.SetAIDiscovery(StateError, err.Error(), nil)
+				return err
+			}
+			s.health.SetAIDiscovery(StateStopped, "", nil)
+			return nil
+		case <-ticker.C:
+			report := s.aiDiscovery.Snapshot()
+			s.health.SetAIDiscovery(StateRunning, "", map[string]interface{}{
+				"mode":            report.Summary.PrivacyMode,
+				"last_scan":       report.Summary.ScannedAt.Format(time.RFC3339),
+				"active_signals":  report.Summary.ActiveSignals,
+				"new_signals":     report.Summary.NewSignals,
+				"changed_signals": report.Summary.ChangedSignals,
+				"gone_signals":    report.Summary.GoneSignals,
+				"files_scanned":   report.Summary.FilesScanned,
+				"result":          report.Summary.Result,
+			})
+		case <-ctx.Done():
+			s.health.SetAIDiscovery(StateStopped, "", nil)
+			return ctx.Err()
+		}
+	}
+}
+
 // runAPI starts the REST API server.
 func (s *Sidecar) runAPI(ctx context.Context) error {
 	bind := "127.0.0.1"
@@ -1573,6 +1659,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
 	api.SetHILTApprovalManager(s.hilt)
+	api.SetAIDiscoveryService(s.aiDiscovery)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}

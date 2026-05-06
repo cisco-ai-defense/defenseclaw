@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v5
 # Plan B4 / S0.4: shell-side hook hardening helpers.
 #
 # Schema versions:
@@ -16,6 +16,25 @@
 #        compares it against the on-disk file and refuses to downgrade
 #        so an older `defenseclaw-gateway restart` can't silently
 #        clobber a newer install.
+#   v4 — defenseclaw_harden_env now calls
+#        _defenseclaw_sweep_stale_hook_dirs at the end so the legacy
+#        fallback path (DEFENSECLAW_HOME/hook-tmp.$$, used when mktemp
+#        is missing) doesn't accumulate orphaned directories from
+#        crashed / SIGKILLed hooks where the EXIT trap never fires.
+#        The sweep is best-effort; the EXIT-trap cleanup is still the
+#        primary mechanism. Behaviour is otherwise identical to v3
+#        (no helper signatures changed), so a downgrade to v3 only
+#        loses the stale-dir sweep — older hook scripts that source
+#        either version keep working unmodified.
+#   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
+#        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
+#        the entire agent payload into a shell variable BEFORE the
+#        gateway's MaxBytesReader could trim it; a 100MB hostile body
+#        could OOM the agent process. v5 caps the read at
+#        ${DEFENSECLAW_HOOK_MAX_BODY:-1048576} bytes (1MB by default,
+#        well above the largest legitimate prompt) using `head -c` and
+#        emits a transport-category log line + fail-closed error when
+#        the cap is exceeded so we don't silently truncate JSON.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
 # codex-hook.sh, inspect-*.sh) BEFORE any agent-supplied data is touched.
@@ -86,6 +105,42 @@ defenseclaw_harden_env() {
   # don't shift under the agent's locale.
   export LC_ALL=C
   export LANG=C
+
+  # L-3 (v4): best-effort sweep of stale fallback hook-tmp.* dirs
+  # under DEFENSECLAW_HOME. The EXIT-trap cleanup above is still the
+  # primary mechanism, but it's bypassed by SIGKILL / OOM / `kill -9`,
+  # and on systems without mktemp every hook invocation creates
+  # hook-tmp.<PID>. Without this sweep those orphans accumulate
+  # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
+  # planted `find`.
+  _defenseclaw_sweep_stale_hook_dirs
+}
+
+# _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*
+# directories under DEFENSECLAW_HOME that haven't been touched in 60+
+# minutes. The 60-minute floor is the longest the hook itself can run
+# (see VERSION_TIMEOUT_SECONDS / curl --max-time bounds: every hook
+# completes within seconds, so any hook-tmp dir older than an hour is
+# unambiguously orphaned). Best-effort; logs nothing because cleanup
+# runs on a hot path and any noise here would race with the agent's
+# own stdout/stderr. The find invocation is bounded:
+#   - -maxdepth 1: never descend into the dirs we're removing
+#   - -mindepth 1: don't accidentally rm DEFENSECLAW_HOME itself
+#   - -name "hook-tmp.*": only the fallback-prefix pattern
+#   - -mmin +60: older than 60 minutes
+# Failure to find/rm is silently swallowed so a hardened FS (read-only
+# DEFENSECLAW_HOME, missing find binary) can't break the hook.
+_defenseclaw_sweep_stale_hook_dirs() {
+  local root="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ ! -d "$root" ]; then
+    return 0
+  fi
+  if ! command -v find >/dev/null 2>&1; then
+    return 0
+  fi
+  find "$root" -mindepth 1 -maxdepth 1 -name "hook-tmp.*" -type d -mmin +60 \
+    -exec rm -rf -- {} + 2>/dev/null || true
+  return 0
 }
 
 _defenseclaw_hook_cleanup() {
@@ -255,4 +310,61 @@ defenseclaw_handle_missing_token() {
     exit 2
   fi
   exit 0
+}
+
+# defenseclaw_read_stdin_capped reads stdin into a shell variable but
+# refuses bodies larger than ${DEFENSECLAW_HOOK_MAX_BODY} (default 1MB).
+# It writes the captured body to stdout so callers consume it via
+# command substitution. On overflow it emits a transport-category log
+# line, prints "" to stdout, and returns 1 — the hook should treat
+# that as a fail-closed misconfiguration (a 1MB+ prompt is well
+# outside any legitimate connector payload, and silently truncating
+# JSON would yield a parse error downstream that's much harder to
+# diagnose than a clear "body too large" error).
+#
+# Why `head -c` and not `dd`/`read`:
+#   - `head -c N` is portable across coreutils + busybox, supported in
+#     POSIX since 2024, and reads exactly N bytes then closes the pipe.
+#   - It does NOT consume more than the cap+1 byte on the input fd,
+#     so a hostile producer streaming 1GB of zeros gets cut off after
+#     the first 1MB+1 — no OOM, no kernel pipe buffer abuse.
+#   - The trailing "1 byte over" is detected by re-reading via
+#     `head -c 1` from the same stdin; if anything remains we know
+#     the cap was breached.
+#
+# Usage:
+#   PAYLOAD="$(defenseclaw_read_stdin_capped)" || exit $?
+#
+# Returns 0 with the body on stdout. Returns 1 (overflow) with an
+# empty stdout. Returns 2 if `head` is missing on the system; in that
+# case we fall back to the legacy unbounded read so the hook still
+# functions on minimal containers, but we log the unbounded read as a
+# transport-category event so operators can spot it.
+defenseclaw_read_stdin_capped() {
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
+  local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
+  local cap="${DEFENSECLAW_HOOK_MAX_BODY:-1048576}"
+  case "$cap" in
+    ''|*[!0-9]*) cap=1048576 ;;
+  esac
+  if ! command -v head >/dev/null 2>&1; then
+    defenseclaw_log_hook_failure "$connector" "$hook_name" \
+      "head(1) missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
+      transport "${FAIL_MODE:-open}"
+    cat
+    return 0
+  fi
+  local body
+  body="$(head -c "$cap")"
+  local overflow
+  overflow="$(head -c 1 2>/dev/null || true)"
+  if [ -n "$overflow" ]; then
+    defenseclaw_log_hook_failure "$connector" "$hook_name" \
+      "stdin body exceeded ${cap} byte cap" \
+      transport "${FAIL_MODE:-open}"
+    echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
+    return 1
+  fi
+  printf '%s' "$body"
+  return 0
 }

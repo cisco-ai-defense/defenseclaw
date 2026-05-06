@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v3
 # DefenseClaw Codex hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/codex/hook endpoint. Codex pipes the
 # structured JSON event to stdin and reads the response from stdout.
@@ -38,11 +38,18 @@ FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 # operator who set DEFENSECLAW_STRICT_AVAILABILITY=1 fail-closed on a
 # missing-token misconfiguration; either way, the bypass is recorded
 # in hook-failures.jsonl.
+DEFENSECLAW_HOOK_CONNECTOR="codex"
+DEFENSECLAW_HOOK_NAME="codex-hook"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+
 if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token codex codex-hook "codex tool"
 fi
 
-PAYLOAD=$(cat)
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: codex hook refusing oversized payload" >&2
+  exit 0
+}
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked

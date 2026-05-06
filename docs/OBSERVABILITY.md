@@ -636,10 +636,58 @@ go run ./cmd/defenseclaw gateway
 ./bin/openclaw-observability-bridge down
 ```
 
-The provisioned dashboard pulls straight from the live Prometheus
+The provisioned dashboards pull straight from the live Prometheus
 metric names the sidecar already emits: `defenseclaw_gateway_verdicts`,
 `defenseclaw_scanner_errors`, `defenseclaw_guardrail_latency`, plus
 the v7 addition `defenseclaw_schema_violations_total` (see below).
+
+### 8.0 Dashboard catalog
+
+Every JSON file under
+`bundles/local_observability_stack/grafana/dashboards/` is auto-loaded
+by Grafana via the file provisioner
+(`grafana/provisioning/dashboards/dashboards.yml`). The catalog is:
+
+| Dashboard | UID | Purpose |
+| --- | --- | --- |
+| **Overview** | `defenseclaw-overview` | KPI strip (verdicts, blocks, confirm-rate, HITL pending, top blocked rule, exporter freshness, panics), firing alerts, SLO gauges. Top-of-funnel landing — every other board is one click away. |
+| **Connectors (Overview)** | `defenseclaw-connectors` | Cross-connector compare board: per-connector traffic, blocks, redactions, errors, hooks-vs-OTel drift, identity assignment rate. The connector table cell drills into Connector Detail. |
+| **Connector Detail** | `defenseclaw-connector-detail` | Single-connector deep dive driven by `$connector`: identity, ingest, hooks, verdicts, judge, findings, HITL, SSE, tools, scoped Loki streams. |
+| **Security (Verdicts)** | `defenseclaw-security` | Verdict funnel by stage × action, action mix over time, prompt/completion/tool_call split, confirm-rate handoff to HITL, judge + cache + redactions, top blocked categories and rules. |
+| **HITL (Human-in-the-Loop)** | `defenseclaw-hitl` | Two stacked sections: chat HILT (`openclaw:hilt` status mix, approval / denial / timeout rates, pending gauge, mean-time-to-decision) and exec approvals (`RecordApproval` result mix, auto-approval ratio, dangerous share, latency, top denied commands). |
+| **Findings (Rule detail)** | `defenseclaw-findings` | Top rules with sparklines, rule_id × time heatmap, last-seen / first-seen tables, top targets, finding-to-verdict correlation, scoped Loki `scan_finding` stream. |
+| **Policy decisions** | `defenseclaw-policy-decisions` | OPA verdicts by `policy_domain` × `policy_verdict`, egress branch / decision split, block-list hits, multi-turn injection trips, schema violation panel. |
+| **Agent identity** | `defenseclaw-agent-identity` | v7 correlation: agent.id × agent.instance_id × sidecar.instance_id counts, identity churn, on-demand discovery latency / errors, continuous AI confidence histograms, per-connector header presence. |
+| **Scanners (Ops)** | `defenseclaw-scanners` | Scanner ops focus: throughput, queue depth, scan duration p95 + heatmap, errors by `error_type`, quarantine actions, top rules with drill into Findings. |
+| **AI Agent Usage & Detection** | `defenseclaw-ai-discovery` | Continuous AI inventory loop: active signals, scan completions, new / gone signals, detector errors, per-vendor / per-product tables, two-axis Bayesian confidence, scoped traces and logs. |
+| **Reliability** | `defenseclaw-reliability` | Schema violations, gateway errors by subsystem / code, sink health, panics, config errors. |
+| **Runtime & SLO** | `defenseclaw-runtime` | Process health, runtime metrics, SLO histograms (block <2s, TUI refresh <5s). |
+| **Traffic & Traces** | `defenseclaw-traffic` | HTTP surface latency / status, OTel ingest rates, trace samples. |
+
+### 8.0.1 Shared template-variable contract
+
+To keep URL-state reusable across boards, every dashboard exposes the
+relevant subset of these template variables. The dashboard navbar then
+propagates the active selections via `${var:queryparam}` so a click on
+`Connector detail` from anywhere preserves the chosen connector,
+severity, action, etc.
+
+| Variable | Source | Used on |
+| --- | --- | --- |
+| `connector` | `defenseclaw_connector_hook_invocations_total{connector}` ∪ `defenseclaw_otel_ingest_records_total{source}` | Connectors, Connector Detail (single-select), Security, HITL, Agent identity. |
+| `surface` | `defenseclaw_direction` (`prompt` / `completion` / `tool_call`) | Connector Detail, Security. |
+| `stage` | `defenseclaw_gateway_verdicts_total{verdict_stage}` | Security, Connector Detail. |
+| `action` | `defenseclaw_gateway_verdicts_total{verdict_action}` | Security, Connector Detail. |
+| `severity` | `defenseclaw_scan_findings_total{severity}` | Security, Findings, Scanners. |
+| `scanner` | `defenseclaw_scan_findings_total{scanner}` | Findings, Scanners. |
+| `rule_id` | `defenseclaw_scan_findings_by_rule_total{rule_id}` | Findings. |
+| `policy_id` | `defenseclaw_gateway_verdicts_total{policy_id}` | Security. |
+| `policy_domain` / `egress_branch` | `defenseclaw_opa_evaluations_total{policy_domain}`, `defenseclaw_egress_decisions_total{branch}` | Policy decisions. |
+
+Panel-level data links carry the same convention: a click on a
+`connector` cell opens Connector Detail with `var-connector=...`, a
+click on a `rule_id` cell opens Findings with `var-rule_id=...`, a
+click on a `verdict_action=confirm` series opens HITL, etc.
 
 ### 8.1 Runtime JSON-schema validation
 
@@ -683,32 +731,34 @@ Operational controls:
   ```
   before shipping.
 
-## 9. Connector observability (codex / claudecode)
+## 9. Connector observability
 
-DefenseClaw runs codex and Claude Code in **observability mode** by
-default: enforcement is gated off, and three telemetry channels feed
-audit events + Prometheus counters + Grafana panels without modifying
-either tool's traffic plane.
+DefenseClaw runs Codex, Claude Code, and the hook-first agent connectors in
+**observability mode** by default: enforcement is gated off, and connector
+telemetry feeds audit events + Prometheus counters + Grafana panels without
+modifying the agent traffic plane unless the connector explicitly supports it.
 
 ### 9.1 Channels
 
-1. **Hooks** — codex `notify-bridge.sh` and Claude Code `~/.claude/
-   settings.json` `hooks` post structured JSON to
-   `/api/v1/codex/hook` and `/api/v1/claude-code/hook`. The gateway
-   persists each event under audit `action=tool-call` /
-   `action=tool-result`.
+1. **Hooks** — connector hook scripts post structured JSON to their
+   `/api/v1/<connector>/hook` endpoints. The gateway normalizes connector,
+   source, session/turn IDs, hook event, tool, workspace, decision,
+   `raw_action`, `would_block`, fail mode, and duration into audit, logs,
+   spans, and counters.
 
-2. **Native OTel** — both connectors emit OTLP-JSON over HTTP. The
-   gateway's local OTLP receiver accepts:
+2. **Native OTel/OTLP** — Codex and Claude Code use header-token OTLP;
+   Gemini CLI uses settings.json with a loopback path token because custom
+   OTLP headers are not documented; Copilot CLI can be pointed at the gateway
+   with documented process environment variables. The gateway's local OTLP
+   receiver accepts OTLP/HTTP JSON and protobuf on:
    - `POST /v1/logs`     → `audit.action=otel.ingest.logs`
    - `POST /v1/metrics`  → `audit.action=otel.ingest.metrics`
    - `POST /v1/traces`   → `audit.action=otel.ingest.traces`
    - Malformed body      → `audit.action=otel.ingest.malformed` (WARN)
 
-   The receiver also re-emits one OTel log record per accepted batch
-   via the gateway's own OTel pipeline so Loki / Tempo see
-   codex / claudecode telemetry directly — no audit OTLP sink
-   configuration required.
+   The receiver also re-emits one OTel log record per accepted batch via the
+   gateway's own OTel pipeline so Loki / Tempo see connector telemetry
+   directly — no audit OTLP sink configuration required.
 
 3. **Codex notify** — codex calls `notify-bridge.sh` after every
    agent turn. The bridge POSTs codex's raw JSON arg to
@@ -717,6 +767,51 @@ either tool's traffic plane.
    (e.g. `codex.notify.agent-turn-complete`). Sanitization is
    `[a-z0-9._-]{1,64}`; the schema treats this as a curated dynamic
    suffix family (see `schemas/audit-event.json`).
+
+4. **Agent discovery** — `defenseclaw agent discover` runs the cached
+   local discovery probes on demand, prints the same table used by
+   first-run init, and best-effort POSTs a sanitized report to
+   `/api/v1/agents/discovery`. The POST body includes booleans,
+   basenames, version probe classes, and SHA-256 path hashes only;
+   raw local filesystem paths are never sent to the sidecar telemetry
+   endpoint.
+
+5. **Continuous AI visibility** — when `ai_discovery.enabled` is on, the
+   sidecar runs an enhanced-artifacts scan at startup, on a periodic
+   interval, and whenever `defenseclaw agent usage --refresh` calls
+   `POST /api/v1/ai-usage/scan`. The detector registry looks for
+   supported connectors plus broader AI signals such as AI CLIs,
+   active processes, installed desktop apps, editor extensions, MCP
+   files, skills, rules, plugins, package dependencies, provider env
+   var names, shell-history signature matches, provider-domain
+   references, and loopback-only local AI endpoints. Process monitoring
+   matches executable names only, not argv. Endpoint probes only target
+   cataloged `localhost` / `127.0.0.1` URLs, send no credentials, and
+   discard response bodies after a small bounded read. Results are
+   available from `GET /api/v1/ai-usage` and emitted as sanitized
+   `event_type=ai_discovery` gateway events, OTel logs, metrics, and
+   spans. Outbound telemetry includes low-cardinality product/category
+   metadata, basenames, and `sha256:` hashes only; raw paths, shell
+   commands, process arguments, prompt text, file contents, local
+   endpoint URLs, and env var values are not emitted.
+
+   The AI signature catalog is extensible. DefenseClaw always loads the
+   built-in catalog first, then merges operator-managed packs from
+   `<data-dir>/signature-packs/*.json`, explicit files/directories/globs
+   listed in `ai_discovery.signature_packs`, and workspace-local
+   `.defenseclaw/ai-signatures.json` files only when
+   `ai_discovery.allow_workspace_signatures=true`. Duplicate signature
+   IDs fail closed at catalog load time, and
+   `ai_discovery.disabled_signature_ids` suppresses individual built-in or
+   custom signatures without editing the pack. Operators can manage packs
+   with `defenseclaw agent signatures list|validate|install|disable|enable`.
+   Pack JSON uses the same schema as `internal/inventory/ai_signatures.json`:
+   `version: 1` plus a `signatures` array with `id`, `name`, `vendor`,
+   `category`, `confidence`, and optional evidence fields such as
+   `binary_names`, `process_names`, `application_names`, `config_paths`,
+   `extension_ids`, `mcp_paths`, `package_names`, `env_var_names`,
+   `domain_patterns`, `history_patterns`, and loopback-only
+   `local_endpoints`.
 
 ### 9.2 SIEM consumer guidance
 
@@ -727,7 +822,7 @@ attributes worth indexing in your SIEM:
 | Field           | Type   | Meaning                                                                 |
 |-----------------|--------|-------------------------------------------------------------------------|
 | `action`        | enum   | One of `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
-| `actor`         | string | Self-asserted `x-defenseclaw-source` header (validated by tokenAuth before reaching the receiver). One of `codex`, `claudecode`, `unknown`. |
+| `actor`         | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
 | `details`       | string | Structured one-line summary: `signal=logs size=4096 bytes resources=2 logRecords=14 services=[codex=1,claudecode=1]`. |
 
 The matching gateway envelope events (`gateway-event-envelope.json`)
@@ -736,16 +831,34 @@ with `channel`, `source`, `result`, `records`, `bytes`, and notify
 fields. SIEM rules should join on `agent_telemetry.source` to break
 down telemetry rate per connector.
 
+Continuous AI visibility uses the same envelope family with an
+`ai_discovery` payload block (`event_type=ai_discovery`). Index
+`ai_discovery.category`, `ai_discovery.vendor`, `ai_discovery.product`,
+`ai_discovery.state`, and `ai_discovery.evidence_types` for shadow-AI
+inventory reporting. Treat `path_hashes`, `basenames`, and
+`workspace_hash` as correlation hints, not user-readable local paths.
+
 ### 9.3 Connector dashboard + alerts
 
 Provisioned in `bundles/local_observability_stack/`:
 
-- **DefenseClaw — Connectors** dashboard
+- **DefenseClaw — Connectors (Overview)** dashboard
   (`bundles/local_observability_stack/grafana/dashboards/
   defenseclaw-connectors.json`, uid `defenseclaw-connectors`):
-  per-connector OTLP request rate, leaf-record volume, byte rate,
-  malformed ratio, hook-vs-OTel drift, GenAI tokens / latency, and
-  the live ingest log stream.
+  cross-connector compare board — per-connector OTLP request rate,
+  leaf-record volume, byte rate, malformed ratio, hook-vs-OTel drift,
+  GenAI tokens / latency, identity assignment rate, and the live
+  ingest log stream. The connector table cell deep-links into
+  Connector Detail with `var-connector=...` preserved.
+
+- **DefenseClaw — Connector Detail** dashboard
+  (`defenseclaw-connector-detail.json`, uid
+  `defenseclaw-connector-detail`): driven by the `$connector`
+  template variable. Drills into one connector's identity (agent.id /
+  agent.instance_id stability), OTLP ingest, hook results, verdicts,
+  judge invocations, findings, HITL, SSE lifecycle, top tools, and
+  Loki streams scoped to `defenseclaw_destination_app="$connector"`
+  and `gen_ai_agent_name="$connector"`.
 
 - **Recording rules** (`prometheus/rules/recording.yml` →
   `defenseclaw.connectors` group):
@@ -770,9 +883,10 @@ Provisioned in `bundles/local_observability_stack/`:
 
 ### 9.4 Toggling enforcement
 
-Observability mode keeps codex/claudecode enforcement code intact —
-the proxy simply doesn't bind. To re-enable enforcement once the
-guardrail policy is ready:
+Observability mode keeps connector enforcement code intact but inactive
+unless explicitly requested. For Codex and Claude Code, the proxy
+simply doesn't bind until the connector-specific enforcement switch is
+enabled:
 
 ```yaml
 # ~/.defenseclaw/config.yaml
@@ -792,10 +906,10 @@ for the full backup/restore contract.
 ### 9.5 One-shot setup aliases
 
 For operators who only want telemetry (no enforcement, no proxy
-listener), DefenseClaw exposes two dedicated CLI aliases that wrap the
+listener), DefenseClaw exposes dedicated setup paths that wrap the
 observability-only branch of `setup guardrail` and additionally pin
 `claw.mode` so the rest of the CLI/TUI surfaces the matching
-connector's source-of-truth files (`~/.codex/` or `~/.claude/`):
+connector's source-of-truth files.
 
 ```bash
 # Codex: hooks + native OTel + notify-bridge.sh
@@ -804,22 +918,29 @@ defenseclaw setup codex --yes
 # Claude Code: hooks + native OTel exporter
 defenseclaw setup claude-code --yes
 
+# Hook-first connectors: hooks, plus native OTel where documented
+defenseclaw setup hermes --yes
+defenseclaw setup cursor --yes
+defenseclaw setup windsurf --yes
+defenseclaw setup geminicli --yes
+defenseclaw setup copilot --yes
+
 # Optionally bring up the bundled Prom/Loki/Tempo/Grafana stack in
 # the same step:
-defenseclaw setup codex --yes --with-local-stack
+defenseclaw setup copilot --yes --with-local-stack
 ```
 
 Both aliases persist:
 
 | Field                                         | Value             | Why                                                                    |
 |-----------------------------------------------|-------------------|------------------------------------------------------------------------|
-| `claw.mode`                                   | `codex` / `claudecode` | TUI / scanners read from `~/.codex/` or `~/.claude/` instead of the OpenClaw layout. |
-| `guardrail.connector`                         | `codex` / `claudecode` | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
+| `claw.mode`                                   | selected connector | TUI / scanners read from the connector's documented local surfaces instead of the OpenClaw layout. |
+| `guardrail.connector`                         | selected connector | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
 | `guardrail.codex_enforcement_enabled`         | `false`           | Keeps the proxy out of the data path even though `guardrail.enabled=true`. |
 | `guardrail.claudecode_enforcement_enabled`    | `false`           | Same as above for Claude Code.                                         |
 | `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
 | `guardrail.mode`                              | `observe`         | Sensible if-flipped-on-later default.                                  |
-| `<data_dir>/picked_connector`                 | `codex` / `claudecode` | So `defenseclaw setup guardrail` and `defenseclaw quickstart` default to the same connector on subsequent runs. |
+| `<data_dir>/picked_connector`                 | selected connector | So `defenseclaw setup guardrail`, `init`, and quickstart default to the same connector on subsequent runs. |
 
 After both aliases run, the gateway is restarted (unless `--no-restart`
 is passed) so its connector setup hook scripts, OTel block, and

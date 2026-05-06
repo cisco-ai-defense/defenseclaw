@@ -29,7 +29,9 @@ import subprocess
 import click
 
 from defenseclaw import ux
+from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import (
     bundled_guardrail_profiles_dir,
     bundled_local_observability_dir,
@@ -44,9 +46,13 @@ from defenseclaw.paths import (
 @click.option("--sandbox", is_flag=True, help="Set up sandbox mode (Linux only: creates sandbox user and directories)")
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
+@click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
 @click.option(
     "--connector",
-    type=click.Choice(["codex", "claudecode", "claude-code", "zeptoclaw", "openclaw"], case_sensitive=False),
+    type=click.Choice([
+        "codex", "claudecode", "claude-code", "zeptoclaw", "openclaw",
+        "hermes", "cursor", "windsurf", "geminicli", "copilot",
+    ], case_sensitive=False),
     default=None,
     help="Agent connector to configure.",
 )
@@ -127,6 +133,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     sandbox: bool,
     non_interactive: bool,
     yes: bool,
+    rescan_agents: bool,
     connector: str | None,
     profile: str | None,
     scanner_mode: str,
@@ -182,6 +189,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             sandbox=sandbox,
             non_interactive=non_interactive,
             yes=yes,
+            rescan_agents=rescan_agents,
             connector=connector,
             profile=profile,
             scanner_mode=scanner_mode,
@@ -287,10 +295,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         click.echo("  'defenseclaw setup guardrail' to enable the guardrail proxy.")
 
     ux.banner("Skills")
-    if cfg.openshell.is_standalone():
-        click.echo("  CodeGuard:     " + ux.dim("deferred (installed during sandbox setup)"))
-    else:
-        _install_codeguard_skill(cfg, logger)
+    click.echo("  CodeGuard:     skipped (opt in with 'defenseclaw codeguard install --target skill')")
 
     cfg.save()
 
@@ -363,7 +368,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     )
     click.echo(
         f"    {ux.accent('defenseclaw skill scan all')}   "
-        + ux.dim("Scan installed OpenClaw skills")
+        + ux.dim("Scan installed agent skills")
     )
     click.echo(
         f"    {ux.accent('defenseclaw mcp scan --all')}   "
@@ -423,6 +428,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     sandbox: bool,
     non_interactive: bool,
     yes: bool,
+    rescan_agents: bool,
     connector: str | None,
     profile: str | None,
     scanner_mode: str,
@@ -467,9 +473,14 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             hilt_min_severity=hilt_min_severity,
             start_gateway=start_gateway,
             verify=verify,
+            rescan_agents=rescan_agents,
         )
 
-    connector = _normalize_connector_arg(connector)
+    connector = _normalize_connector_arg(
+        connector,
+        discover_default=True,
+        refresh_agents=rescan_agents,
+    )
     if profile is None:
         profile = "observe"
     if start_gateway is None:
@@ -527,19 +538,28 @@ def _prompt_first_run(
     hilt_min_severity: str | None,
     start_gateway: bool | None,
     verify: bool | None,
+    rescan_agents: bool,
 ) -> tuple[str, str, str, bool, str, bool | None, str | None, bool, bool]:
     ux.section("DefenseClaw First-Run Setup")
     ux.subhead(
         "This wizard writes config.yaml, then runs targeted readiness checks.",
     )
     click.echo()
-    connector_choices = ["codex", "claudecode", "zeptoclaw", "openclaw"]
-    connector = _normalize_connector_arg(connector) if connector else click.prompt(
-        "  " + ux.bold("Connector"),
-        type=click.Choice(connector_choices, case_sensitive=False),
-        default="codex",
-        show_choices=True,
-    )
+    connector_choices = list(KNOWN_CONNECTORS)
+    if connector:
+        connector = _normalize_connector_arg(connector)
+    else:
+        disc = agent_discovery.discover_agents(refresh=rescan_agents)
+        table = agent_discovery.render_discovery_table(disc).rstrip()
+        if table:
+            click.echo(table)
+            click.echo()
+        connector = click.prompt(
+            "  Connector",
+            type=click.Choice(connector_choices, case_sensitive=False),
+            default=agent_discovery.first_installed(disc, "codex"),
+            show_choices=True,
+        )
     if profile is None:
         profile = click.prompt(
             "  " + ux.bold("Protection profile"),
@@ -626,7 +646,18 @@ def _prompt_first_run(
     )
 
 
-def _normalize_connector_arg(connector: str | None) -> str:
+def _normalize_connector_arg(
+    connector: str | None,
+    *,
+    discover_default: bool = False,
+    refresh_agents: bool = False,
+) -> str:
+    if connector is None and discover_default:
+        try:
+            disc = agent_discovery.discover_agents(refresh=refresh_agents)
+            connector = agent_discovery.first_installed(disc, "codex")
+        except Exception:
+            connector = "codex"
     value = (connector or "codex").strip().lower()
     if value in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
@@ -718,32 +749,97 @@ def _resolve_splunk_bridge_bundle():
     return bundled_splunk_bridge_dir()
 
 
+_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = ("bin", "run.sh")
+
+
 def _seed_local_observability_stack(data_dir: str) -> None:
     """Copy bundled Prom/Loki/Tempo/Grafana stack into ~/.defenseclaw/observability-stack/.
 
     Mirrors _seed_splunk_bridge so ``defenseclaw setup
     local-observability`` can drive a user-editable copy of the stack
     (dashboards, alert rules, prom config) without requiring the
-    operator to unpack the wheel. Preserves an existing seeded copy so
-    operator edits survive subsequent ``init`` runs.
+    operator to unpack the wheel.
+
+    On a fresh data dir we copy the entire bundle. On a re-init, we
+    *preserve* operator-editable config (dashboards, prom rules,
+    compose overrides, OTel collector config) but *refresh* the
+    maintainer-owned bridge entry points (``bin/`` and ``run.sh``) so
+    bug fixes shipped in the wheel actually reach previously-seeded
+    installs. Without this, a stale seeded bridge (e.g. one missing
+    the bash 3.2 ``set -u`` empty-array guard on macOS) would keep
+    crashing even after ``pip install --upgrade``.
     """
     bundled = bundled_local_observability_dir()
     if not bundled.is_dir():
         return
 
     dest = os.path.join(data_dir, "observability-stack")
-    if os.path.isdir(dest):
-        click.echo(f"  Observability stack: preserved existing ({dest})")
+    if not os.path.isdir(dest):
+        shutil.copytree(str(bundled), dest)
+        _ensure_observability_stack_executables(dest)
+        click.echo(f"  Observability stack: seeded in {dest}")
         return
 
-    shutil.copytree(str(bundled), dest)
-    bridge_bin = os.path.join(dest, "bin", "openclaw-observability-bridge")
-    if os.path.isfile(bridge_bin):
-        os.chmod(bridge_bin, 0o755)
-    shim = os.path.join(dest, "run.sh")
-    if os.path.isfile(shim):
-        os.chmod(shim, 0o755)
-    click.echo(f"  Observability stack: seeded in {dest}")
+    refreshed = _refresh_observability_stack_scripts(bundled, dest)
+    _ensure_observability_stack_executables(dest)
+    if refreshed:
+        joined = ", ".join(sorted(refreshed))
+        click.echo(
+            f"  Observability stack: preserved existing ({dest}); refreshed {joined}"
+        )
+    else:
+        click.echo(f"  Observability stack: preserved existing ({dest})")
+
+
+def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
+    """Overwrite maintainer-owned scripts in ``dest`` from ``bundled``.
+
+    Only files under :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
+    refreshed — these are pure code (the ``openclaw-observability-bridge``
+    bash entry point and its ``run.sh`` shim) and have no operator
+    config baked in, so unconditional overwrite is safe.
+
+    Returns the list of relative paths that were actually rewritten so
+    the caller can surface a clear status line. Best-effort: missing
+    sources are skipped silently and copy failures are surfaced as
+    warnings rather than failing ``init`` outright.
+    """
+    refreshed: list[str] = []
+    for rel in _OBSERVABILITY_STACK_REFRESH_PATHS:
+        src = bundled / rel
+        if not src.exists():
+            continue
+        target = os.path.join(dest, rel)
+        try:
+            if src.is_dir():
+                if os.path.isdir(target):
+                    shutil.rmtree(target)
+                shutil.copytree(str(src), target)
+            else:
+                os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+                shutil.copy2(str(src), target)
+        except OSError as exc:
+            click.echo(
+                f"  warning: could not refresh observability stack {rel}: {exc}",
+                err=True,
+            )
+            continue
+        refreshed.append(rel)
+    return refreshed
+
+
+def _ensure_observability_stack_executables(dest: str) -> None:
+    """Make sure the bridge entry points are executable after a copy."""
+    for rel in (
+        os.path.join("bin", "openclaw-observability-bridge"),
+        "run.sh",
+    ):
+        path = os.path.join(dest, rel)
+        if os.path.isfile(path):
+            try:
+                os.chmod(path, 0o755)
+            except OSError:
+                pass
 
 
 def _install_scanners(cfg, logger, skip: bool) -> None:
@@ -942,6 +1038,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     click.echo(f"  Token:         {token_status}")
     click.echo(f"  API port:      {cfg.gateway.api_port}")
     click.echo(f"  Watcher:       enabled={cfg.gateway.watcher.enabled}")
+    click.echo(f"  AI discovery:  enabled={cfg.ai_discovery.enabled}, mode={cfg.ai_discovery.mode}")
     click.echo(f"  Skill watch:   enabled={cfg.gateway.watcher.skill.enabled}, "
                f"take_action={cfg.gateway.watcher.skill.take_action}")
     plugin_dirs = cfg.gateway.watcher.plugin.dirs or cfg.plugin_dirs()
@@ -1008,24 +1105,10 @@ def _install_with_uv(pkg: str) -> bool:
 
 
 def _install_codeguard_skill(cfg, logger) -> None:
-    """Install the CodeGuard proactive skill into the OpenClaw skills directory."""
-    from defenseclaw.codeguard_skill import install_codeguard_skill
-
-    click.echo("  CodeGuard:     " + ux.dim("installing..."), nl=False)
-    status = install_codeguard_skill(cfg)
-    # ``status`` is a free-form string from the installer; color-code
-    # the well-known signals (installed/already/skipped/failed) and
-    # leave anything unfamiliar in the default fg.
-    lower = status.lower()
-    if "fail" in lower or "error" in lower:
-        click.echo(" " + ux._style(status, fg="red", bold=True))
-    elif "already" in lower or "preserved" in lower or "skip" in lower:
-        click.echo(" " + ux.dim(status))
-    elif lower:
-        click.echo(" " + ux._style(status, fg="green"))
-    else:
-        click.echo(f" {status}")
-    logger.log_action("install-skill", "codeguard", f"status={status}")
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = cfg
+    _ = logger
+    click.echo("  CodeGuard:     skipped (explicit opt-in required)")
 
 
 def _setup_guardrail_inline(app, cfg, logger) -> bool:

@@ -1,0 +1,226 @@
+{
+  "annotations": {"list": []},
+  "description": "Policy + egress decisions surface. OPA evaluations by domain, egress shape branch decisions (Layer 1 silent-bypass observability), block-list stage hits, multi-turn injection trips, and schema violations.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "links": [
+    {"title": "Overview",   "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                "icon": "external link", "targetBlank": false},
+    {"title": "Verdicts",   "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}&var-stage=opa&var-stage=block_list&var-stage=multi_turn",         "icon": "external link", "targetBlank": false},
+    {"title": "Findings",   "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}",                                                                 "icon": "external link", "targetBlank": false},
+    {"title": "Reliability","type": "link", "url": "/d/defenseclaw-reliability?${__url_time_range}",                                                              "icon": "external link", "targetBlank": false}
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "policy_domain",
+        "label": "Policy domain",
+        "description": "Filter OPA panels by policy_domain (e.g. session.message, tool.invocation, mcp.allow, …). Defaults to All.",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "definition": "label_values(defenseclaw_policy_evaluations_total, policy_domain)",
+        "query": {"query": "label_values(defenseclaw_policy_evaluations_total, policy_domain)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "egress_branch",
+        "label": "Egress branch",
+        "description": "Layer-1 shape detection branch. known = explicit destination match; shape = inferred by request shape; passthrough = no match.",
+        "type": "custom",
+        "query": "known,shape,passthrough",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "known", "value": "known"},
+          {"text": "shape", "value": "shape"},
+          {"text": "passthrough", "value": "passthrough"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {"type": "row", "title": "Policy + egress KPIs", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "stat",
+      "title": "OPA evaluations / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_policy_evaluations_total{policy_domain=~\"$policy_domain\"}[5m])) * 60 or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "OPA deny rate (1h)",
+      "description": "Verdict deny / total across policy_domain. Sustained spikes mean a policy hardened or upstream traffic shifted.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_policy_evaluations_total{policy_verdict=\"deny\", policy_domain=~\"$policy_domain\"}[1h])) / clamp_min(sum(rate(defenseclaw_policy_evaluations_total{policy_domain=~\"$policy_domain\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "type": "stat",
+      "title": "Egress events / min",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[5m])) * 60 or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Egress block share (1h)",
+      "description": "decision=block / total egress events. Layer 1 silent-bypass detector — if this dives to zero on a connector that previously emitted blocks, traffic is bypassing the shape filter.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_egress_events_total{decision=\"block\", branch=~\"$egress_branch\"}[1h])) / clamp_min(sum(rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "type": "stat",
+      "title": "Block-list hits / min",
+      "description": "verdict_stage=block_list — the static block-list pipeline that runs ahead of the LLM judge.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_stage=\"block_list\"}[5m])) * 60 or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Schema violations / min",
+      "description": "Events dropped by the strict JSON-schema gate. ANY non-zero rate is a contract regression — open a ticket.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_schema_violations_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.01}]}}}
+    },
+
+    {"type": "row", "title": "OPA verdicts", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "OPA evaluations by domain × verdict",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (policy_domain, policy_verdict) (rate(defenseclaw_policy_evaluations_total{policy_domain=~\"$policy_domain\"}[$__rate_interval]))", "legendFormat": "{{policy_domain}} · {{policy_verdict}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "OPA latency p95 by domain",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, policy_domain) (rate(defenseclaw_policy_latency_milliseconds_bucket{policy_domain=~\"$policy_domain\"}[$__rate_interval])))", "legendFormat": "{{policy_domain}} p95", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "OPA reloads by status",
+      "description": "Spikes here while the system is otherwise stable mean the watcher is restarting OPA on noisy filesystem events.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (policy_status) (rate(defenseclaw_policy_reloads_total[$__rate_interval]))", "legendFormat": "{{policy_status}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "table",
+      "title": "Top denying domains (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(15, sort_desc(sum by (policy_domain, policy_verdict) (increase(defenseclaw_policy_evaluations_total{policy_verdict=~\"deny|warn\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "denies/1h"}}}]
+    },
+
+    {"type": "row", "title": "Egress (Layer 1 shape detection)", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Egress events by branch × decision",
+      "description": "branch ∈ {known, shape, passthrough}; decision ∈ {allow, block}. passthrough+allow indicates a destination DefenseClaw cannot classify — review for silent bypass.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (branch, decision) (rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[$__rate_interval]))", "legendFormat": "{{branch}} · {{decision}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Egress events by source",
+      "description": "source ∈ {go, ts}: which tier of the gateway emitted the egress decision.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (source, branch) (rate(defenseclaw_egress_events_total{branch=~\"$egress_branch\"}[$__rate_interval]))", "legendFormat": "{{source}} · {{branch}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+
+    {"type": "row", "title": "Block-list + multi-turn injection", "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Block-list verdicts over time",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total{verdict_stage=\"block_list\"}[$__rate_interval]))", "legendFormat": "{{verdict_action}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Multi-turn injection trips over time",
+      "description": "verdict_stage=multi_turn — the multi-turn injection detector tripping on a session. Severity escalation here usually means an adversarial session is unfolding.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_action, verdict_severity) (rate(defenseclaw_gateway_verdicts_total{verdict_stage=\"multi_turn\"}[$__rate_interval]))", "legendFormat": "{{verdict_action}} · {{verdict_severity}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "table",
+      "title": "Top blocked categories on block-list / multi-turn (Loki, 1h)",
+      "description": "EventVerdict records have defenseclaw.verdict.categories — this panel ranks them for the block-list and multi-turn stages.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 40, "w": 24, "h": 8},
+      "targets": [{"expr": "topk(20, sum by (defenseclaw_verdict_categories, defenseclaw_verdict_stage) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"verdict\" | defenseclaw_verdict_stage=~\"block_list|multi_turn\" [1h])))", "instant": true, "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Schema violations + recent OPA logs", "gridPos": {"x": 0, "y": 48, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Schema violations by event_type × code",
+      "description": "Each (event_type, code) is a stable enum so no cardinality blow-up.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 49, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (event_type, code) (rate(defenseclaw_schema_violations_total[$__rate_interval]))", "legendFormat": "{{event_type}} · {{code}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "logs",
+      "title": "Recent OPA + egress events",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 12, "y": 49, "w": 12, "h": 12},
+      "timeFrom": "1h",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | (defenseclaw_gateway_event_type=~\"opa|egress\" or action=~\"opa-.*|egress-.*\")", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "policy", "opa", "egress"],
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Policy decisions",
+  "uid": "defenseclaw-policy-decisions",
+  "version": 1,
+  "weekStart": ""
+}

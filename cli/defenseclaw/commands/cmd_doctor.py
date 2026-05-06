@@ -282,16 +282,26 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("pass", "Human approval", f"OpenClaw prompts supported at {min_sev}+", r=r)
     elif connector == "claudecode":
         _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
+    elif connector == "copilot":
+        _emit("pass", "Human approval", f"Copilot CLI preToolUse ask supported at {min_sev}+", r=r)
+    elif connector == "cursor":
+        _emit("warn", "Human approval", "Cursor ask is supported only on documented ask-capable hook events", r=r)
     elif connector == "codex":
         _emit(
             "warn", "Human approval",
-            "Codex uses native PermissionRequest prompts only; PreToolUse ask is unsupported",
+            "Codex has no native ask surface here; confirm verdicts alert with raw_action preserved",
             r=r,
         )
     elif connector == "zeptoclaw":
         _emit(
             "warn", "Human approval",
-            "ZeptoClaw has no native before-tool hook; unsupported confirmations alert only",
+            "ZeptoClaw has no native ask surface; confirm verdicts alert with raw_action preserved",
+            r=r,
+        )
+    elif connector in {"hermes", "windsurf", "geminicli"}:
+        _emit(
+            "warn", "Human approval",
+            f"{connector} can block supported hook events but has no native human approval surface",
             r=r,
         )
     else:
@@ -530,10 +540,10 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """Return a detail string when the proxy port is expected to be closed.
 
-    Codex and Claude Code default to observability-only mode: hooks and
-    native OTel feed DefenseClaw, but the agent talks directly to its
-    upstream provider. In that mode port 4000 is deliberately unbound, so
-    doctor must not report a hard proxy failure.
+    Observability-only connectors feed DefenseClaw through hooks/native
+    telemetry while the agent talks directly to its upstream provider. In
+    that mode port 4000 is deliberately unbound, so doctor must not report
+    a hard proxy failure.
     """
     connector = _active_connector(cfg)
     gc = cfg.guardrail
@@ -541,6 +551,8 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
         return "observability-only for Codex — proxy port intentionally closed"
     if connector == "claudecode" and not getattr(gc, "claudecode_enforcement_enabled", False):
         return "observability-only for Claude Code — proxy port intentionally closed"
+    if connector in {"hermes", "cursor", "windsurf", "geminicli", "copilot"}:
+        return f"observability-only for {connector} — proxy port intentionally closed"
     return ""
 
 
@@ -1362,6 +1374,11 @@ _CONNECTOR_LABELS = {
     "claudecode": "Claude Code",
     "codex": "Codex",
     "zeptoclaw": "ZeptoClaw",
+    "hermes": "Hermes",
+    "cursor": "Cursor",
+    "windsurf": "Windsurf",
+    "geminicli": "Gemini CLI",
+    "copilot": "GitHub Copilot CLI",
 }
 
 

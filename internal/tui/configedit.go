@@ -377,6 +377,40 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "scanners.codeguard":
 		c.Scanners.CodeGuard = val
 
+	// Continuous AI visibility.
+	case "ai_discovery.enabled":
+		c.AIDiscovery.Enabled = boolVal
+	case "ai_discovery.mode":
+		c.AIDiscovery.Mode = val
+	case "ai_discovery.scan_interval_min":
+		c.AIDiscovery.ScanIntervalMin = intVal
+	case "ai_discovery.process_interval_s":
+		c.AIDiscovery.ProcessIntervalSec = intVal
+	case "ai_discovery.scan_roots":
+		c.AIDiscovery.ScanRoots = splitCSV(val)
+	case "ai_discovery.signature_packs":
+		c.AIDiscovery.SignaturePacks = splitCSV(val)
+	case "ai_discovery.allow_workspace_signatures":
+		c.AIDiscovery.AllowWorkspaceSignatures = boolVal
+	case "ai_discovery.disabled_signature_ids":
+		c.AIDiscovery.DisabledSignatureIDs = splitCSV(val)
+	case "ai_discovery.include_shell_history":
+		c.AIDiscovery.IncludeShellHistory = boolVal
+	case "ai_discovery.include_package_manifests":
+		c.AIDiscovery.IncludePackageManifests = boolVal
+	case "ai_discovery.include_env_var_names":
+		c.AIDiscovery.IncludeEnvVarNames = boolVal
+	case "ai_discovery.include_network_domains":
+		c.AIDiscovery.IncludeNetworkDomains = boolVal
+	case "ai_discovery.max_files_per_scan":
+		c.AIDiscovery.MaxFilesPerScan = intVal
+	case "ai_discovery.max_file_bytes":
+		c.AIDiscovery.MaxFileBytes = intVal
+	case "ai_discovery.emit_otel":
+		c.AIDiscovery.EmitOTel = boolVal
+	case "ai_discovery.store_raw_local_paths":
+		c.AIDiscovery.StoreRawLocalPaths = boolVal
+
 	// Gateway inline watcher (P2-#9). The watcher runs inside the
 	// gateway process; its config governs directory watch / auto-
 	// quarantine behaviour per resource type. Dirs are CSV on the

@@ -1,0 +1,1464 @@
+{
+  "version": 1,
+  "signatures": [
+    {
+      "id": "codex",
+      "name": "Codex",
+      "vendor": "OpenAI",
+      "category": "supported_connector",
+      "confidence": 0.98,
+      "supported_connector": "codex",
+      "binary_names": [
+        "codex"
+      ],
+      "process_names": [
+        "codex"
+      ],
+      "config_paths": [
+        "~/.codex/config.toml",
+        "~/.codex/skills",
+        "~/.codex/plugins",
+        ".codex/skills",
+        ".mcp.json",
+        "AGENTS.md"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.codex/config.toml",
+        ".mcp.json"
+      ],
+      "package_names": [
+        "@openai/codex"
+      ],
+      "env_var_names": [
+        "OPENAI_API_KEY",
+        "OTEL_EXPORTER_OTLP_ENDPOINT"
+      ],
+      "domain_patterns": [
+        "api.openai.com",
+        "chatgpt.com"
+      ],
+      "history_patterns": [
+        "codex",
+        "openai"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "claudecode",
+      "name": "Claude Code",
+      "vendor": "Anthropic",
+      "category": "supported_connector",
+      "confidence": 0.98,
+      "supported_connector": "claudecode",
+      "binary_names": [
+        "claude"
+      ],
+      "process_names": [
+        "claude"
+      ],
+      "config_paths": [
+        "~/.claude/settings.json",
+        "~/.claude",
+        "~/.claude/settings.local.json",
+        "~/.claude.json",
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".mcp.json",
+        "CLAUDE.md",
+        ".claude/CLAUDE.md",
+        ".claude/skills",
+        ".claude/plugins"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.claude/settings.json",
+        ".mcp.json"
+      ],
+      "package_names": [
+        "@anthropic-ai/claude-code"
+      ],
+      "env_var_names": [
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_ENABLE_TELEMETRY"
+      ],
+      "domain_patterns": [
+        "api.anthropic.com",
+        "claude.ai"
+      ],
+      "history_patterns": [
+        "claude",
+        "anthropic"
+      ],
+      "application_names": [
+        "Claude.app"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "openclaw",
+      "name": "OpenClaw",
+      "vendor": "DefenseClaw",
+      "category": "supported_connector",
+      "confidence": 0.98,
+      "supported_connector": "openclaw",
+      "binary_names": [
+        "openclaw"
+      ],
+      "process_names": [
+        "openclaw"
+      ],
+      "config_paths": [
+        "~/.openclaw/openclaw.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.openclaw/openclaw.json"
+      ],
+      "package_names": [],
+      "env_var_names": [
+        "OPENCLAW_GATEWAY_TOKEN"
+      ],
+      "domain_patterns": [],
+      "history_patterns": [
+        "openclaw"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "zeptoclaw",
+      "name": "ZeptoClaw",
+      "vendor": "DefenseClaw",
+      "category": "supported_connector",
+      "confidence": 0.98,
+      "supported_connector": "zeptoclaw",
+      "binary_names": [
+        "zeptoclaw"
+      ],
+      "process_names": [
+        "zeptoclaw"
+      ],
+      "config_paths": [
+        "~/.zeptoclaw/config.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.zeptoclaw/config.json"
+      ],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [],
+      "history_patterns": [
+        "zeptoclaw"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "hermes",
+      "name": "Hermes Agent",
+      "vendor": "Nous Research",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "hermes",
+      "binary_names": [
+        "hermes"
+      ],
+      "process_names": [
+        "hermes"
+      ],
+      "config_paths": [
+        "~/.hermes/config.yaml",
+        "~/.hermes/skills",
+        "~/.hermes/plugins",
+        ".hermes/plugins"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.hermes/config.yaml"
+      ],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "hermes-agent.nousresearch.com"
+      ],
+      "history_patterns": [
+        "hermes-agent",
+        "hermes agent"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "cursor",
+      "name": "Cursor",
+      "vendor": "Anysphere",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "cursor",
+      "binary_names": [
+        "cursor"
+      ],
+      "process_names": [
+        "cursor",
+        "Cursor"
+      ],
+      "config_paths": [
+        "~/.cursor/hooks.json",
+        "~/.cursor/mcp.json",
+        ".cursor/mcp.json",
+        ".cursor/rules",
+        ".cursor/skills",
+        ".agents/skills",
+        "~/.cursor/skills",
+        "~/.agents/skills",
+        ".cursorrules",
+        "AGENTS.md"
+      ],
+      "extension_ids": [
+        "anysphere.cursorpyright",
+        "cursor"
+      ],
+      "mcp_paths": [
+        "~/.cursor/mcp.json",
+        ".cursor/mcp.json"
+      ],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "cursor.com"
+      ],
+      "history_patterns": [
+        "cursor"
+      ],
+      "application_names": [
+        "Cursor.app",
+        "Cursor"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "windsurf",
+      "name": "Windsurf",
+      "vendor": "Codeium",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "windsurf",
+      "binary_names": [
+        "windsurf"
+      ],
+      "process_names": [
+        "windsurf",
+        "Windsurf"
+      ],
+      "config_paths": [
+        "~/.codeium/windsurf/hooks.json",
+        "~/.codeium/windsurf/mcp_config.json",
+        "~/.codeium/windsurf/mcp.json",
+        ".windsurf/rules",
+        ".codeium/windsurf/rules",
+        ".windsurfrules"
+      ],
+      "extension_ids": [
+        "codeium.codeium",
+        "windsurf"
+      ],
+      "mcp_paths": [
+        "~/.codeium/windsurf/mcp_config.json",
+        "~/.codeium/windsurf/mcp.json"
+      ],
+      "package_names": [],
+      "env_var_names": [
+        "CODEIUM_API_KEY"
+      ],
+      "domain_patterns": [
+        "codeium.com",
+        "windsurf.com"
+      ],
+      "history_patterns": [
+        "windsurf",
+        "codeium"
+      ],
+      "application_names": [
+        "Windsurf.app",
+        "Windsurf"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "geminicli",
+      "name": "Gemini CLI",
+      "vendor": "Google",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "geminicli",
+      "binary_names": [
+        "gemini"
+      ],
+      "process_names": [
+        "gemini"
+      ],
+      "config_paths": [
+        "~/.gemini/settings.json",
+        ".gemini/settings.json",
+        ".gemini/skills",
+        ".agents/skills",
+        ".gemini/extensions",
+        "GEMINI.md",
+        ".gemini/GEMINI.md"
+      ],
+      "extension_ids": [
+        "google.geminicodeassist"
+      ],
+      "mcp_paths": [
+        "~/.gemini/settings.json",
+        ".gemini/settings.json"
+      ],
+      "package_names": [
+        "@google/gemini-cli",
+        "@google/genai",
+        "google-generativeai",
+        "google-genai"
+      ],
+      "env_var_names": [
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS"
+      ],
+      "domain_patterns": [
+        "generativelanguage.googleapis.com",
+        "aiplatform.googleapis.com"
+      ],
+      "history_patterns": [
+        "gemini",
+        "google-generativeai"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "copilot",
+      "name": "GitHub Copilot",
+      "vendor": "GitHub",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "copilot",
+      "binary_names": [
+        "gh"
+      ],
+      "process_names": [
+        "copilot",
+        "GitHub Copilot"
+      ],
+      "config_paths": [
+        "~/.copilot/mcp-config.json",
+        ".github/hooks/defenseclaw.json",
+        ".github/mcp.json",
+        ".github/instructions",
+        ".mcp.json",
+        ".github/copilot-instructions.md",
+        ".github/skills",
+        ".agents/skills",
+        "~/.copilot/skills",
+        ".github/agents",
+        "~/.copilot/agents"
+      ],
+      "extension_ids": [
+        "github.copilot",
+        "github.copilot-chat"
+      ],
+      "mcp_paths": [
+        "~/.copilot/mcp-config.json",
+        ".github/mcp.json",
+        ".mcp.json"
+      ],
+      "package_names": [],
+      "env_var_names": [
+        "COPILOT_OTEL_ENABLED"
+      ],
+      "domain_patterns": [
+        "api.githubcopilot.com",
+        "copilot-proxy.githubusercontent.com"
+      ],
+      "history_patterns": [
+        "gh copilot",
+        "copilot"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "aider",
+      "name": "Aider",
+      "vendor": "Aider",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "supported_connector": "",
+      "binary_names": [
+        "aider"
+      ],
+      "process_names": [
+        "aider"
+      ],
+      "config_paths": [
+        "~/.aider.conf.yml",
+        ".aider.conf.yml",
+        "~/.aider.model.settings.yml",
+        ".aider.model.settings.yml",
+        ".aiderignore",
+        "CONVENTIONS.md"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "aider-chat"
+      ],
+      "env_var_names": [
+        "AIDER_MODEL",
+        "AIDER_OPENAI_API_KEY",
+        "AIDER_ANTHROPIC_API_KEY"
+      ],
+      "domain_patterns": [
+        "aider.chat"
+      ],
+      "history_patterns": [
+        "aider"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "goose",
+      "name": "Goose",
+      "vendor": "Block",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "supported_connector": "",
+      "binary_names": [
+        "goose"
+      ],
+      "process_names": [
+        "goose"
+      ],
+      "config_paths": [
+        "~/.config/goose/config.yaml",
+        "~/.config/goose/history.txt",
+        "~/.local/share/goose/sessions/sessions.db",
+        "~/.local/state/goose/logs"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.config/goose/config.yaml"
+      ],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [],
+      "history_patterns": [
+        "goose"
+      ],
+      "application_names": [
+        "Goose.app",
+        "Goose"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "vendor": "OpenCode",
+      "category": "ai_cli",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [
+        "opencode"
+      ],
+      "process_names": [
+        "opencode"
+      ],
+      "config_paths": [
+        "~/.config/opencode/opencode.json",
+        "opencode.json",
+        "~/.config/opencode/opencode.jsonc",
+        "~/.config/opencode/.opencode.json",
+        "~/.opencode.json",
+        "opencode.jsonc",
+        ".opencode/opencode.json",
+        ".opencode/opencode.jsonc",
+        ".opencode/agent",
+        "~/.config/opencode/agent",
+        ".opencode/plugins",
+        "~/.config/opencode/plugins"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.config/opencode/opencode.json",
+        "~/.config/opencode/opencode.jsonc",
+        "opencode.json",
+        "opencode.jsonc",
+        ".opencode/opencode.json",
+        ".opencode/opencode.jsonc"
+      ],
+      "package_names": [
+        "opencode-ai",
+        "opencode"
+      ],
+      "env_var_names": [
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_MODEL"
+      ],
+      "domain_patterns": [],
+      "history_patterns": [
+        "opencode"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "continue",
+      "name": "Continue",
+      "vendor": "Continue",
+      "category": "editor_extension",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [],
+      "config_paths": [
+        "~/.continue/config.json",
+        "~/.continue/config.yaml",
+        "~/.continue/assistants"
+      ],
+      "extension_ids": [
+        "continue.continue"
+      ],
+      "mcp_paths": [],
+      "package_names": [
+        "@continuedev/continue"
+      ],
+      "env_var_names": [],
+      "domain_patterns": [
+        "continue.dev"
+      ],
+      "history_patterns": [
+        "continue"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "cline",
+      "name": "Cline / Roo Code",
+      "vendor": "Cline",
+      "category": "editor_extension",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "Cline",
+        "cline"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev",
+        "~/Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline"
+      ],
+      "extension_ids": [
+        "saoudrizwan.claude-dev",
+        "rooveterinaryinc.roo-cline",
+        "rooveterinaryinc.roo-code"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [],
+      "history_patterns": [
+        "cline",
+        "roo code"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "amazonq",
+      "name": "Amazon Q Developer",
+      "vendor": "Amazon",
+      "category": "ai_cli",
+      "confidence": 0.86,
+      "supported_connector": "",
+      "binary_names": [
+        "q"
+      ],
+      "process_names": [
+        "q",
+        "Amazon Q"
+      ],
+      "config_paths": [
+        "~/.aws/amazonq",
+        "~/.config/amazon-q",
+        "~/.local/share/amazon-q"
+      ],
+      "extension_ids": [
+        "amazonwebservices.amazon-q-vscode"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "q.amazonaws.com",
+        "bedrock-runtime"
+      ],
+      "history_patterns": [
+        "amazon q",
+        "q chat"
+      ],
+      "application_names": [
+        "Amazon Q.app",
+        "Amazon Q"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "tabnine",
+      "name": "Tabnine",
+      "vendor": "Tabnine",
+      "category": "editor_extension",
+      "confidence": 0.84,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "TabNine",
+        "tabnine"
+      ],
+      "config_paths": [
+        "~/.config/TabNine"
+      ],
+      "extension_ids": [
+        "tabnine.tabnine-vscode"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "tabnine.com"
+      ],
+      "history_patterns": [
+        "tabnine"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "cody",
+      "name": "Sourcegraph Cody",
+      "vendor": "Sourcegraph",
+      "category": "editor_extension",
+      "confidence": 0.84,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "Cody"
+      ],
+      "config_paths": [],
+      "extension_ids": [
+        "sourcegraph.cody-ai"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [
+        "SRC_ENDPOINT",
+        "SRC_ACCESS_TOKEN"
+      ],
+      "domain_patterns": [
+        "sourcegraph.com"
+      ],
+      "history_patterns": [
+        "cody"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "ollama",
+      "name": "Ollama",
+      "vendor": "Ollama",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "supported_connector": "",
+      "binary_names": [
+        "ollama"
+      ],
+      "process_names": [
+        "ollama"
+      ],
+      "config_paths": [
+        "~/.ollama"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "ollama",
+        "ollama-python",
+        "ollama-js"
+      ],
+      "env_var_names": [
+        "OLLAMA_HOST"
+      ],
+      "domain_patterns": [
+        "localhost:11434",
+        "127.0.0.1:11434"
+      ],
+      "history_patterns": [
+        "ollama"
+      ],
+      "application_names": [
+        "Ollama.app",
+        "Ollama"
+      ],
+      "local_endpoints": [
+        "http://127.0.0.1:11434/api/tags"
+      ]
+    },
+    {
+      "id": "ai-sdks",
+      "name": "AI SDKs",
+      "vendor": "Multiple",
+      "category": "package_dependency",
+      "confidence": 0.8,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [],
+      "config_paths": [],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "openai",
+        "anthropic",
+        "@anthropic-ai/sdk",
+        "@google/genai",
+        "langchain",
+        "@langchain/core",
+        "llama-index",
+        "crewai",
+        "pyautogen",
+        "semantic-kernel",
+        "litellm",
+        "google-genai",
+        "google-generativeai",
+        "@langchain/openai",
+        "langchain-openai",
+        "llama-index-core",
+        "autogen-agentchat",
+        "microsoft-autogen",
+        "haystack-ai",
+        "dspy-ai",
+        "instructor",
+        "@ai-sdk/openai",
+        "@ai-sdk/anthropic",
+        "@ai-sdk/google",
+        "@ai-sdk/openai-compatible",
+        "ai",
+        "vercel-ai",
+        "llama-cpp-python",
+        "transformers",
+        "sentence-transformers",
+        "vllm",
+        "openai-agents",
+        "@openai/agents",
+        "github.com/openai/openai-go",
+        "github.com/anthropics/anthropic-sdk-go",
+        "github.com/google/generative-ai-go",
+        "github.com/tmc/langchaingo",
+        "dev.langchain4j",
+        "com.openai:openai-java",
+        "com.azure:azure-ai-openai",
+        "async-openai",
+        "rig-core"
+      ],
+      "env_var_names": [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "BEDROCK_REGION",
+        "MISTRAL_API_KEY",
+        "COHERE_API_KEY",
+        "GROQ_API_KEY",
+        "OPENROUTER_API_KEY",
+        "XAI_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "TOGETHER_API_KEY",
+        "GOOGLE_API_KEY",
+        "AZURE_OPENAI_ENDPOINT",
+        "DEEPSEEK_API_KEY",
+        "FIREWORKS_API_KEY",
+        "REPLICATE_API_TOKEN"
+      ],
+      "domain_patterns": [
+        "api.openai.com",
+        "api.anthropic.com",
+        "generativelanguage.googleapis.com",
+        "api.mistral.ai",
+        "api.cohere.ai",
+        "api.groq.com",
+        "openrouter.ai",
+        "api.x.ai",
+        "api.perplexity.ai",
+        "api.together.xyz",
+        "aiplatform.googleapis.com",
+        "api.deepseek.com",
+        "api.fireworks.ai",
+        "api.replicate.com"
+      ],
+      "history_patterns": [
+        "openai",
+        "anthropic",
+        "langchain",
+        "llama-index",
+        "crewai",
+        "autogen",
+        "semantic-kernel",
+        "litellm",
+        "openrouter",
+        "deepseek",
+        "perplexity",
+        "together ai"
+      ],
+      "application_names": [],
+      "local_endpoints": [],
+      "components": [
+        {"ecosystem": "pypi", "name": "openai", "framework": "OpenAI Python SDK", "vendor": "OpenAI"},
+        {"ecosystem": "pypi", "name": "anthropic", "framework": "Anthropic Python SDK", "vendor": "Anthropic"},
+        {"ecosystem": "pypi", "name": "google-genai", "framework": "Google GenAI SDK (Python)", "vendor": "Google"},
+        {"ecosystem": "pypi", "name": "google-generativeai", "framework": "Google Generative AI (Python)", "vendor": "Google"},
+        {"ecosystem": "pypi", "name": "langchain", "framework": "LangChain", "vendor": "LangChain"},
+        {"ecosystem": "pypi", "name": "langchain-openai", "framework": "LangChain OpenAI integration", "vendor": "LangChain"},
+        {"ecosystem": "pypi", "name": "llama-index", "framework": "LlamaIndex", "vendor": "LlamaIndex"},
+        {"ecosystem": "pypi", "name": "llama-index-core", "framework": "LlamaIndex (core)", "vendor": "LlamaIndex"},
+        {"ecosystem": "pypi", "name": "crewai", "framework": "CrewAI", "vendor": "CrewAI"},
+        {"ecosystem": "pypi", "name": "pyautogen", "framework": "Microsoft AutoGen (legacy)", "vendor": "Microsoft"},
+        {"ecosystem": "pypi", "name": "autogen-agentchat", "framework": "Microsoft AutoGen (agentchat)", "vendor": "Microsoft"},
+        {"ecosystem": "pypi", "name": "microsoft-autogen", "framework": "Microsoft AutoGen", "vendor": "Microsoft"},
+        {"ecosystem": "pypi", "name": "semantic-kernel", "framework": "Microsoft Semantic Kernel", "vendor": "Microsoft"},
+        {"ecosystem": "pypi", "name": "haystack-ai", "framework": "Haystack", "vendor": "deepset"},
+        {"ecosystem": "pypi", "name": "dspy-ai", "framework": "DSPy", "vendor": "Stanford"},
+        {"ecosystem": "pypi", "name": "instructor", "framework": "Instructor", "vendor": "Instructor"},
+        {"ecosystem": "pypi", "name": "litellm", "framework": "LiteLLM", "vendor": "LiteLLM"},
+        {"ecosystem": "pypi", "name": "openai-agents", "framework": "OpenAI Agents SDK (Python)", "vendor": "OpenAI"},
+        {"ecosystem": "pypi", "name": "transformers", "framework": "HuggingFace Transformers", "vendor": "HuggingFace"},
+        {"ecosystem": "pypi", "name": "sentence-transformers", "framework": "Sentence Transformers", "vendor": "HuggingFace"},
+        {"ecosystem": "pypi", "name": "vllm", "framework": "vLLM", "vendor": "vLLM"},
+        {"ecosystem": "pypi", "name": "llama-cpp-python", "framework": "llama.cpp (Python)", "vendor": "llama.cpp"},
+        {"ecosystem": "npm", "name": "openai", "framework": "OpenAI TypeScript SDK", "vendor": "OpenAI"},
+        {"ecosystem": "npm", "name": "@anthropic-ai/sdk", "framework": "Anthropic TypeScript SDK", "vendor": "Anthropic"},
+        {"ecosystem": "npm", "name": "@google/genai", "framework": "Google GenAI SDK (TypeScript)", "vendor": "Google"},
+        {"ecosystem": "npm", "name": "langchain", "framework": "LangChain.js", "vendor": "LangChain"},
+        {"ecosystem": "npm", "name": "@langchain/core", "framework": "LangChain.js core", "vendor": "LangChain"},
+        {"ecosystem": "npm", "name": "@langchain/openai", "framework": "LangChain.js OpenAI integration", "vendor": "LangChain"},
+        {"ecosystem": "npm", "name": "ai", "framework": "Vercel AI SDK", "vendor": "Vercel"},
+        {"ecosystem": "npm", "name": "vercel-ai", "framework": "Vercel AI SDK", "vendor": "Vercel"},
+        {"ecosystem": "npm", "name": "@ai-sdk/openai", "framework": "Vercel AI SDK (OpenAI provider)", "vendor": "Vercel"},
+        {"ecosystem": "npm", "name": "@ai-sdk/anthropic", "framework": "Vercel AI SDK (Anthropic provider)", "vendor": "Vercel"},
+        {"ecosystem": "npm", "name": "@ai-sdk/google", "framework": "Vercel AI SDK (Google provider)", "vendor": "Vercel"},
+        {"ecosystem": "npm", "name": "@ai-sdk/openai-compatible", "framework": "Vercel AI SDK (OpenAI-compatible provider)", "vendor": "Vercel"},
+        {"ecosystem": "npm", "name": "@openai/agents", "framework": "OpenAI Agents SDK (TypeScript)", "vendor": "OpenAI"},
+        {"ecosystem": "go", "name": "github.com/openai/openai-go", "framework": "OpenAI Go SDK", "vendor": "OpenAI"},
+        {"ecosystem": "go", "name": "github.com/anthropics/anthropic-sdk-go", "framework": "Anthropic Go SDK", "vendor": "Anthropic"},
+        {"ecosystem": "go", "name": "github.com/google/generative-ai-go", "framework": "Google Generative AI Go SDK", "vendor": "Google"},
+        {"ecosystem": "go", "name": "github.com/tmc/langchaingo", "framework": "LangChain Go", "vendor": "LangChain"},
+        {"ecosystem": "maven", "name": "dev.langchain4j", "framework": "LangChain4j", "vendor": "LangChain"},
+        {"ecosystem": "maven", "name": "com.openai:openai-java", "framework": "OpenAI Java SDK", "vendor": "OpenAI"},
+        {"ecosystem": "maven", "name": "com.azure:azure-ai-openai", "framework": "Azure OpenAI Java SDK", "vendor": "Microsoft"},
+        {"ecosystem": "cargo", "name": "async-openai", "framework": "async-openai (Rust)", "vendor": "OpenAI community"},
+        {"ecosystem": "cargo", "name": "rig-core", "framework": "Rig (Rust)", "vendor": "Rig"}
+      ]
+    },
+    {
+      "id": "claude-desktop",
+      "name": "Claude Desktop",
+      "vendor": "Anthropic",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "Claude"
+      ],
+      "application_names": [
+        "Claude.app",
+        "Claude"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/Claude/claude_desktop_config.json",
+        "~/.config/Claude/claude_desktop_config.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/Library/Application Support/Claude/claude_desktop_config.json",
+        "~/.config/Claude/claude_desktop_config.json"
+      ],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "claude.ai",
+        "api.anthropic.com"
+      ],
+      "history_patterns": [
+        "claude desktop",
+        "claude_desktop_config"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "chatgpt-desktop",
+      "name": "ChatGPT Desktop",
+      "vendor": "OpenAI",
+      "category": "desktop_app",
+      "confidence": 0.86,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "ChatGPT"
+      ],
+      "application_names": [
+        "ChatGPT.app",
+        "ChatGPT"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/com.openai.chat",
+        "~/Library/Application Support/ChatGPT"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "chatgpt.com",
+        "api.openai.com"
+      ],
+      "history_patterns": [
+        "chatgpt"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "gemini-code-assist",
+      "name": "Gemini Code Assist",
+      "vendor": "Google",
+      "category": "editor_extension",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [],
+      "application_names": [],
+      "config_paths": [
+        "~/Library/Application Support/google-vscode-extension"
+      ],
+      "extension_ids": [
+        "google.geminicodeassist"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "codeassist.google",
+        "generativelanguage.googleapis.com"
+      ],
+      "history_patterns": [
+        "gemini code assist"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "qwen-code",
+      "name": "Qwen Code",
+      "vendor": "Alibaba Cloud",
+      "category": "ai_cli",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [
+        "qwen"
+      ],
+      "process_names": [
+        "qwen"
+      ],
+      "application_names": [],
+      "config_paths": [
+        "~/.qwen/settings.json",
+        ".qwen/settings.json",
+        "QWEN.md",
+        ".qwen/QWEN.md",
+        ".qwen/skills",
+        ".qwen/PROJECT_SUMMARY.md"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.qwen/settings.json",
+        ".qwen/settings.json"
+      ],
+      "package_names": [
+        "@qwen-code/qwen-code",
+        "qwen-code"
+      ],
+      "env_var_names": [
+        "QWEN_SANDBOX",
+        "QWEN_CODE_SYSTEM_SETTINGS_PATH",
+        "QWEN_CODE_SYSTEM_DEFAULTS_PATH"
+      ],
+      "domain_patterns": [
+        "dashscope.aliyuncs.com",
+        "openrouter.ai"
+      ],
+      "history_patterns": [
+        "qwen code",
+        "qwen mcp",
+        "qwen-code"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "openhands",
+      "name": "OpenHands",
+      "vendor": "OpenHands",
+      "category": "ai_cli",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [
+        "openhands"
+      ],
+      "process_names": [
+        "openhands"
+      ],
+      "application_names": [],
+      "config_paths": [
+        "~/.openhands/agent_settings.json",
+        "~/.openhands/cli_config.json",
+        "~/.openhands/mcp.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.openhands/mcp.json"
+      ],
+      "package_names": [
+        "openhands-ai",
+        "openhands"
+      ],
+      "env_var_names": [
+        "OPENHANDS_CONFIG_FILE"
+      ],
+      "domain_patterns": [
+        "openhands.dev"
+      ],
+      "history_patterns": [
+        "openhands"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "ra-aid",
+      "name": "RA.Aid",
+      "vendor": "RA.Aid",
+      "category": "ai_cli",
+      "confidence": 0.84,
+      "supported_connector": "",
+      "binary_names": [
+        "ra-aid"
+      ],
+      "process_names": [
+        "ra-aid"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "ra-aid"
+      ],
+      "env_var_names": [
+        "RA_AID_LOG_MODE",
+        "RA_AID_LOG_LEVEL"
+      ],
+      "domain_patterns": [
+        "docs.ra-aid.ai"
+      ],
+      "history_patterns": [
+        "ra-aid"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "lmstudio",
+      "name": "LM Studio",
+      "vendor": "LM Studio",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "supported_connector": "",
+      "binary_names": [
+        "lms"
+      ],
+      "process_names": [
+        "LM Studio",
+        "lms"
+      ],
+      "application_names": [
+        "LM Studio.app",
+        "LM Studio"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/LM Studio",
+        "~/.cache/lm-studio",
+        "~/.lmstudio"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "@lmstudio/sdk",
+        "lmstudio"
+      ],
+      "env_var_names": [
+        "LM_STUDIO_HOME"
+      ],
+      "domain_patterns": [
+        "localhost:1234",
+        "127.0.0.1:1234",
+        "lmstudio.ai"
+      ],
+      "history_patterns": [
+        "lms server",
+        "lm studio",
+        "lmstudio"
+      ],
+      "local_endpoints": [
+        "http://127.0.0.1:1234/v1/models"
+      ]
+    },
+    {
+      "id": "jan",
+      "name": "Jan",
+      "vendor": "Jan",
+      "category": "desktop_app",
+      "confidence": 0.84,
+      "supported_connector": "",
+      "binary_names": [
+        "jan"
+      ],
+      "process_names": [
+        "Jan",
+        "jan"
+      ],
+      "application_names": [
+        "Jan.app",
+        "Jan"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/Jan/data",
+        "~/.config/Jan/data",
+        "~/.local/share/Jan/data"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [
+        "JAN_DATA_FOLDER"
+      ],
+      "domain_patterns": [
+        "jan.ai"
+      ],
+      "history_patterns": [
+        "jan ai"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "localai",
+      "name": "LocalAI",
+      "vendor": "LocalAI",
+      "category": "ai_cli",
+      "confidence": 0.84,
+      "supported_connector": "",
+      "binary_names": [
+        "local-ai",
+        "localai"
+      ],
+      "process_names": [
+        "local-ai",
+        "localai"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "localai/localai",
+        "local-ai",
+        "localai"
+      ],
+      "env_var_names": [
+        "LOCALAI_CONFIG_DIR"
+      ],
+      "domain_patterns": [
+        "localhost:8080",
+        "127.0.0.1:8080"
+      ],
+      "history_patterns": [
+        "localai",
+        "local-ai"
+      ],
+      "local_endpoints": [
+        "http://127.0.0.1:8080/v1/models"
+      ]
+    },
+    {
+      "id": "vllm",
+      "name": "vLLM",
+      "vendor": "vLLM",
+      "category": "ai_cli",
+      "confidence": 0.84,
+      "supported_connector": "",
+      "binary_names": [
+        "vllm"
+      ],
+      "process_names": [
+        "vllm"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "vllm",
+        "vllm/vllm-openai"
+      ],
+      "env_var_names": [
+        "VLLM_CONFIGURE_LOGGING",
+        "VLLM_PORT"
+      ],
+      "domain_patterns": [
+        "localhost:8000",
+        "127.0.0.1:8000"
+      ],
+      "history_patterns": [
+        "vllm",
+        "vllm serve"
+      ],
+      "local_endpoints": [
+        "http://127.0.0.1:8000/v1/models"
+      ]
+    },
+    {
+      "id": "llamacpp",
+      "name": "llama.cpp",
+      "vendor": "ggml.ai",
+      "category": "ai_cli",
+      "confidence": 0.82,
+      "supported_connector": "",
+      "binary_names": [
+        "llama-cli",
+        "llama-server",
+        "llama-run"
+      ],
+      "process_names": [
+        "llama-cli",
+        "llama-server",
+        "llama-run"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "llama-cpp-python",
+        "llama_cpp",
+        "ggml-org/llama.cpp"
+      ],
+      "env_var_names": [
+        "LLAMA_ARG_MODEL"
+      ],
+      "domain_patterns": [],
+      "history_patterns": [
+        "llama-server",
+        "llama.cpp",
+        "llama-cpp"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "open-webui",
+      "name": "Open WebUI",
+      "vendor": "Open WebUI",
+      "category": "ai_cli",
+      "confidence": 0.8,
+      "supported_connector": "",
+      "binary_names": [
+        "open-webui"
+      ],
+      "process_names": [
+        "open-webui"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [
+        "open-webui",
+        "ghcr.io/open-webui/open-webui"
+      ],
+      "env_var_names": [
+        "OPEN_WEBUI_PORT"
+      ],
+      "domain_patterns": [
+        "localhost:3000",
+        "openwebui.com"
+      ],
+      "history_patterns": [
+        "open-webui",
+        "open webui"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "supermaven",
+      "name": "Supermaven",
+      "vendor": "Supermaven",
+      "category": "editor_extension",
+      "confidence": 0.78,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "supermaven"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [
+        "supermaven.supermaven"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "supermaven.com"
+      ],
+      "history_patterns": [
+        "supermaven"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "qodo",
+      "name": "Qodo",
+      "vendor": "Qodo",
+      "category": "editor_extension",
+      "confidence": 0.76,
+      "supported_connector": "",
+      "binary_names": [
+        "qodo"
+      ],
+      "process_names": [
+        "qodo"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [
+        "codium.codium",
+        "qodo.qodo-vscode"
+      ],
+      "mcp_paths": [],
+      "package_names": [
+        "qodo"
+      ],
+      "env_var_names": [
+        "QODO_TOKEN"
+      ],
+      "domain_patterns": [
+        "qodo.ai",
+        "codium.ai"
+      ],
+      "history_patterns": [
+        "qodo",
+        "codiumai"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "bito",
+      "name": "Bito",
+      "vendor": "Bito",
+      "category": "editor_extension",
+      "confidence": 0.74,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "bito"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [
+        "bito.bito"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "bito.ai"
+      ],
+      "history_patterns": [
+        "bito"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "blackbox",
+      "name": "BLACKBOX AI",
+      "vendor": "BLACKBOX AI",
+      "category": "editor_extension",
+      "confidence": 0.74,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [
+        "blackbox"
+      ],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [
+        "blackboxapp.blackbox"
+      ],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "blackbox.ai"
+      ],
+      "history_patterns": [
+        "blackbox ai"
+      ],
+      "local_endpoints": []
+    },
+    {
+      "id": "replit",
+      "name": "Replit AI",
+      "vendor": "Replit",
+      "category": "editor_extension",
+      "confidence": 0.72,
+      "supported_connector": "",
+      "binary_names": [],
+      "process_names": [],
+      "application_names": [],
+      "config_paths": [],
+      "extension_ids": [
+        "replit.replit"
+      ],
+      "mcp_paths": [],
+      "package_names": [
+        "@replit/agent"
+      ],
+      "env_var_names": [],
+      "domain_patterns": [
+        "replit.com"
+      ],
+      "history_patterns": [
+        "replit ai"
+      ],
+      "local_endpoints": []
+    }
+  ]
+}

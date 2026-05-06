@@ -388,18 +388,18 @@ func (p *SetupPanel) loadSections() {
 				"Changing this without also migrating content will orphan scans.",
 			Fields: []configField{
 				{Label: "Mode", Key: "claw.mode", Kind: "choice",
-					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex"},
+					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"},
 					Value:   string(c.Claw.Mode),
-					Hint:    "Active agent framework: openclaw, zeptoclaw, claudecode (Claude Code), codex. Drives skill/MCP/plugin path resolution — see internal/config/claw.go."},
+					Hint:    "Active agent framework. Drives skill/MCP/plugin path resolution — see internal/config/claw.go."},
 				{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir,
-					Hint: "Override for the connector's home directory (~/.openclaw, ~/.claude, ~/.codex, ~/.zeptoclaw). Leave empty to use the OS default."},
+					Hint: "Override for the connector's home directory. Leave empty to use the OS/default connector paths."},
 				{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile,
 					Hint: "Path to the connector's primary config file (openclaw.json for OpenClaw; ignored for connectors that locate their own config)."},
 			},
 		},
 		{
 			Name:    "Agent Hooks",
-			Summary: "Codex and Claude Code hook policy: when scans run, fail behavior, and watched paths.",
+			Summary: "Dedicated agent hook policy: when scans run, fail behavior, and watched paths.",
 			Help:    "mode controls hook behavior; fail_mode=open lets the agent continue if DefenseClaw is unavailable, closed blocks.",
 			Fields: append(agentHookFields("Claude Code", "claude_code", c.ClaudeCode),
 				agentHookFields("Codex", "codex", c.Codex)...),
@@ -414,7 +414,7 @@ func (p *SetupPanel) loadSections() {
 		{
 			Name:    "Gateway",
 			Summary: "Sidecar WebSocket gateway: where the active agent connects, TLS/auth, API bind, reconnect tuning.",
-			Help: "gateway.port is the WebSocket the agent (OpenClaw / ZeptoClaw / Claude Code / Codex) dials; api_port is the local REST sidecar. " +
+			Help: "gateway.port is the WebSocket the active connector dials when fleet integration is enabled; api_port is the local REST sidecar. " +
 				"Leave host=localhost for embedded runs — change only when running the gateway on a different box. " +
 				"Token *env* keeps secrets out of YAML; device_key_file is the persistent machine identity.",
 			Fields: []configField{
@@ -468,7 +468,7 @@ func (p *SetupPanel) loadSections() {
 						"Transport failures (gateway unreachable / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."},
 				{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"},
 					Hint: "local=regex+judge only; remote=Cisco AI Defense only; both=chained (local then remote)."},
-				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw"},
+				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot"},
 					Hint: "Connector adapter used by the guardrail sidecar. Blank follows claw.mode/backward-compatible defaults."},
 				{Label: "Allow Empty Providers", Key: "guardrail.allow_empty_providers", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.AllowEmptyProviders),
 					Hint: "Let the sidecar boot when no upstream LLM providers are detected. Useful only for tests/stubs."},
@@ -646,7 +646,7 @@ func (p *SetupPanel) loadSections() {
 		[]configField{
 			{Label: "── Plugin / CodeGuard ──", Kind: "header"},
 			{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner,
-				Hint: "Command to scan plugins for the active connector (defaults to built-in plugin scanner — handles OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins)."},
+				Hint: "Command to scan plugins for the active connector (defaults to the built-in connector-aware plugin scanner)."},
 		}...)
 	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
 		llmOverrideFields("Plugin Scanner", "scanners.plugin_llm", c.Scanners.PluginScannerLLM)...)
@@ -656,6 +656,46 @@ func (p *SetupPanel) loadSections() {
 				Hint: "Command for the CodeGuard skill (code-review). See 'codeguard' wizard."},
 		}...)
 	p.sections = append(p.sections, []configSection{
+		{
+			Name:    "AI Visibility",
+			Summary: "Continuous local discovery for supported and shadow AI usage.",
+			Help: "Enhanced mode scans metadata, package manifests, env var names, and shell history patterns. " +
+				"Outbound telemetry uses only hashes, basenames, categories, and bounded metadata.",
+			Fields: []configField{
+				{Label: "Enabled", Key: "ai_discovery.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.Enabled),
+					Hint: "Run the sidecar-native AI discovery service."},
+				{Label: "Mode", Key: "ai_discovery.mode", Kind: "string", Value: c.AIDiscovery.Mode,
+					Hint: "passive or enhanced. Enhanced is metadata-only but includes local artifact scanning."},
+				{Label: "Scan Interval (min)", Key: "ai_discovery.scan_interval_min", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.ScanIntervalMin),
+					Hint: "Minutes between full scans."},
+				{Label: "Process Interval (s)", Key: "ai_discovery.process_interval_s", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.ProcessIntervalSec),
+					Hint: "Seconds between lightweight process scans."},
+				{Label: "Scan Roots", Key: "ai_discovery.scan_roots", Kind: "string", Value: strings.Join(c.AIDiscovery.ScanRoots, ","),
+					Hint: "CSV roots for package/workspace artifact scans."},
+				{Label: "Signature Packs", Key: "ai_discovery.signature_packs", Kind: "string", Value: strings.Join(c.AIDiscovery.SignaturePacks, ","),
+					Hint: "CSV files, directories, or globs for custom AI signature packs."},
+				{Label: "Workspace Signatures", Key: "ai_discovery.allow_workspace_signatures", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.AllowWorkspaceSignatures),
+					Hint: "Opt in to .defenseclaw/ai-signatures.json under scan roots."},
+				{Label: "Disabled Signatures", Key: "ai_discovery.disabled_signature_ids", Kind: "string", Value: strings.Join(c.AIDiscovery.DisabledSignatureIDs, ","),
+					Hint: "CSV signature IDs to suppress from the merged catalog."},
+				{Label: "Shell History", Key: "ai_discovery.include_shell_history", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludeShellHistory),
+					Hint: "Match known AI command patterns; raw commands are never emitted."},
+				{Label: "Package Manifests", Key: "ai_discovery.include_package_manifests", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludePackageManifests),
+					Hint: "Detect AI SDK dependencies in bounded manifest files."},
+				{Label: "Env Var Names", Key: "ai_discovery.include_env_var_names", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludeEnvVarNames),
+					Hint: "Detect AI-related environment variable names only; values are never read."},
+				{Label: "Provider Domains", Key: "ai_discovery.include_network_domains", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.IncludeNetworkDomains),
+					Hint: "Detect known provider domains from metadata sources only."},
+				{Label: "Max Files", Key: "ai_discovery.max_files_per_scan", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.MaxFilesPerScan),
+					Hint: "Upper bound for artifact files inspected per scan."},
+				{Label: "Max File Bytes", Key: "ai_discovery.max_file_bytes", Kind: "int", Value: fmt.Sprintf("%d", c.AIDiscovery.MaxFileBytes),
+					Hint: "Skip larger files to avoid broad content capture."},
+				{Label: "Emit OTel", Key: "ai_discovery.emit_otel", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.EmitOTel),
+					Hint: "Emit sanitized AI visibility logs, metrics, and spans."},
+				{Label: "Store Raw Local Paths", Key: "ai_discovery.store_raw_local_paths", Kind: "bool", Value: fmt.Sprintf("%v", c.AIDiscovery.StoreRawLocalPaths),
+					Hint: "Store raw paths only in the local 0600 state file; never emit them."},
+			},
+		},
 		// P2-#9: Gateway inline watcher/watchdog live alongside the
 		// gateway address settings — they're part of the same
 		// process but logically distinct sub-concerns. Kept as a
@@ -756,7 +796,7 @@ func (p *SetupPanel) loadSections() {
 		},
 		{
 			Name:    "Plugin Actions",
-			Summary: "Per-severity response matrix for plugins from the active connector (OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins).",
+			Summary: "Per-severity response matrix for plugins from the active connector.",
 			Help:    "Same shape as Skill Actions. Governs the plugin_dir admission gate.",
 			Fields:  actionMatrixFields("plugin_actions", c.PluginActions),
 		},
@@ -3044,8 +3084,11 @@ func fmtTristateBool(b *bool) string {
 }
 
 func agentHookModeValue(mode string) string {
-	if mode == "telemetry" {
+	switch mode {
+	case "telemetry":
 		return "observe"
+	case "enforce":
+		return "action"
 	}
 	return mode
 }
@@ -3064,7 +3107,7 @@ func agentHookFields(label, prefix string, h config.AgentHookConfig) []configFie
 		{Label: "── " + label + " ──", Kind: "header"},
 		{Label: "Enabled", Key: prefix + ".enabled", Kind: "bool", Value: fmt.Sprintf("%v", h.Enabled),
 			Hint: label + " hooks master switch."},
-		{Label: "Mode", Key: prefix + ".mode", Kind: "choice", Options: []string{"", "observe", "enforce"}, Value: agentHookModeValue(h.Mode),
+		{Label: "Mode", Key: prefix + ".mode", Kind: "choice", Options: []string{"", "observe", "action"}, Value: agentHookModeValue(h.Mode),
 			Hint: "Hook operating mode. Blank inherits connector defaults."},
 		{Label: "Fail Mode", Key: prefix + ".fail_mode", Kind: "choice", Options: []string{"", "open", "closed"}, Value: h.FailMode,
 			Hint: "open=continue if DefenseClaw is unreachable; closed=block on hook failure."},
@@ -3080,7 +3123,7 @@ func agentHookFields(label, prefix string, h config.AgentHookConfig) []configFie
 }
 
 func connectorHookMapFields(c *config.Config) []configField {
-	names := []string{"codex", "claudecode", "zeptoclaw", "openclaw"}
+	names := []string{"codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
 	seen := map[string]bool{}
 	if c.ConnectorHooks != nil {
 		for name := range c.ConnectorHooks {

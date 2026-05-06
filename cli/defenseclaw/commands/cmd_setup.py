@@ -1024,8 +1024,8 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     Generates a new 32-byte CSPRNG hex token, rewrites
     ~/.defenseclaw/.env atomically (mode 0o600), and refreshes the
     per-connector hook scripts so they pick up the new token. The
-    operator must restart their agent (claude / codex / openclaw /
-    zeptoclaw) for the new credential to take effect.
+    operator must restart their active agent connector for the new
+    credential to take effect.
 
     Plan B5 / S0.5.
     """
@@ -1070,7 +1070,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     ux.ok("Hook scripts refreshed.")
     click.echo()
-    ux.subhead("Next step: restart the agent (claude / codex / openclaw / zeptoclaw) so")
+    ux.subhead("Next step: restart the active agent connector so")
     ux.subhead("the new token is picked up by its inspect / hook subprocess invocations.")
 
 
@@ -1267,7 +1267,17 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 # Connector metadata (mirrors internal/gateway/connector/*.go)
 # ---------------------------------------------------------------------------
 
-_CONNECTOR_NAMES_FALLBACK = ["openclaw", "zeptoclaw", "claudecode", "codex"]
+_CONNECTOR_NAMES_FALLBACK = [
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+]
 
 
 def _fetch_connector_names(cfg=None) -> list[str]:
@@ -1323,6 +1333,36 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "sandbox",
     },
+    "hermes": {
+        "label": "Hermes",
+        "description": "config.yaml hooks + MCP/skills/plugins surfaces",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "cursor": {
+        "label": "Cursor",
+        "description": "hooks.json command hooks + MCP/skills/rules surfaces",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "windsurf": {
+        "label": "Windsurf",
+        "description": "Cascade hooks + documented local config discovery",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "geminicli": {
+        "label": "Gemini CLI",
+        "description": "settings.json hooks + native OTLP + extensions",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "copilot": {
+        "label": "GitHub Copilot CLI",
+        "description": ".github/hooks command hooks (workspace-scoped)",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -1339,14 +1379,44 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     "claudecode": (
         "~/.claude/settings.json hooks",
         "~/.claude/settings.json env OTEL_* / CLAUDE_CODE_ENABLE_TELEMETRY",
-        "Claude Code Project CodeGuard plugin (installed once and left enabled)",
+        "Optional CodeGuard native plugin only when explicitly installed",
         "~/.defenseclaw/hooks/ and subprocess policy files",
     ),
     "codex": (
         "~/.codex/config.toml hooks / features.codex_hooks",
         "~/.codex/config.toml otel / notify",
-        "~/.codex/skills/software-security Project CodeGuard skill (installed once and left enabled)",
+        "Optional CodeGuard native skill only when explicitly installed",
         "~/.defenseclaw/hooks/ and notify bridge files",
+    ),
+    "hermes": (
+        "~/.hermes/config.yaml hooks",
+        "~/.hermes/config.yaml MCP entries when configured explicitly",
+        "~/.hermes/skills and ~/.hermes/plugins discovery/install surfaces",
+        "~/.defenseclaw/hooks/hermes-hook.sh",
+    ),
+    "cursor": (
+        "~/.cursor/hooks.json hooks",
+        "<workspace>/.cursor/mcp.json MCP entries when configured explicitly",
+        "<workspace>/.cursor/skills and <workspace>/.cursor/rules install surfaces",
+        "~/.defenseclaw/hooks/cursor-hook.sh",
+    ),
+    "windsurf": (
+        "~/.codeium/windsurf/hooks.json hooks",
+        "Existing Windsurf MCP/rules paths are discovered but not guessed/created",
+        "~/.defenseclaw/hooks/windsurf-hook.sh",
+    ),
+    "geminicli": (
+        "~/.gemini/settings.json hooks",
+        "~/.gemini/settings.json native OTLP telemetry and MCP entries",
+        "<workspace>/.gemini/skills, extensions, and agents install surfaces",
+        "~/.defenseclaw/hooks/geminicli-hook.sh",
+    ),
+    "copilot": (
+        "<workspace>/.github/hooks/defenseclaw.json hooks",
+        "<workspace>/.github/mcp.json MCP entries when configured explicitly",
+        "<workspace>/.github/skills, agents, and instructions install surfaces",
+        "Native OTLP env vars are documented for the process env; shell rc files are not mutated",
+        "~/.defenseclaw/hooks/copilot-hook.sh",
     ),
 }
 
@@ -1428,6 +1498,14 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
         return "codex"
     if os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")):
         return "zeptoclaw"
+    if os.path.isfile(os.path.join(home, ".hermes", "config.yaml")):
+        return "hermes"
+    if os.path.isfile(os.path.join(home, ".cursor", "hooks.json")):
+        return "cursor"
+    if os.path.isfile(os.path.join(home, ".codeium", "windsurf", "hooks.json")):
+        return "windsurf"
+    if os.path.isfile(os.path.join(home, ".gemini", "settings.json")):
+        return "geminicli"
     return None
 
 
@@ -1501,9 +1579,18 @@ def _hilt_support_note(connector: str) -> str:
     if connector == "claudecode":
         return "Claude Code supports native PreToolUse ask prompts."
     if connector == "codex":
-        return "Codex is partial: PermissionRequest prompts are native; PreToolUse ask is unsupported."
+        return "Codex has no native ask surface here; confirm verdicts are downgraded with raw_action preserved."
     if connector == "zeptoclaw":
-        return "ZeptoClaw is partial: proxy-gated confirmations only; unsupported surfaces alert."
+        return "ZeptoClaw has no native ask surface; confirm verdicts are downgraded with raw_action preserved."
+    if connector == "copilot":
+        return "Copilot CLI supports native ask on documented preToolUse hooks."
+    if connector == "cursor":
+        return "Cursor supports native ask only on documented ask-capable hook events."
+    if connector in {"hermes", "windsurf", "geminicli"}:
+        return (
+            "This connector can block supported hook events but has no native human approval surface; "
+            "confirm falls back explicitly."
+        )
     return "Support depends on the connector surface."
 
 
@@ -1615,7 +1702,11 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 # ---------------------------------------------------------------------------
 
 @setup.command("guardrail")
-@click.option("--disable", is_flag=True, help="Disable guardrail and revert OpenClaw config")
+@click.option(
+    "--disable",
+    is_flag=True,
+    help="Disable guardrail and restore connector config where applicable.",
+)
 # ``--connector`` is the canonical name (matches scripts/install.sh and
 # /v1/connectors). ``--agent`` is kept as an alias for backward
 # compatibility with existing scripts and docs. Both bind to the same
@@ -1624,9 +1715,9 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 # behavior for aliased options.
 @click.option("--connector", "--agent", "agent_name",
               type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False), default=None,
-              help="Agent framework connector (openclaw, claudecode, codex, zeptoclaw). "
-                   "Alias: --agent. Defaults to <data_dir>/picked_connector when set "
-                   "by the installer, else filesystem auto-detection, else openclaw.")
+              help=("Agent framework connector. Alias: --agent. Defaults to "
+                    "<data_dir>/picked_connector when set by the installer, "
+                    "else filesystem auto-detection, else openclaw."))
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None,
               help="Guardrail mode")
 @click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None,
@@ -1653,7 +1744,7 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 @click.option("--disable-redaction/--enable-redaction", default=None,
               help="Disable or enable prompt/log redaction")
 @click.option("--restart/--no-restart", default=True,
-              help="Restart gateway and openclaw after setup (default: on)")
+              help="Restart gateway and the active connector after setup (default: on)")
 @click.option("--verify/--no-verify", default=True,
               help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", "--accept-defaults", is_flag=True,
@@ -1679,7 +1770,7 @@ def setup_guardrail(
     PII, and data exfiltration patterns.
 
     Use --connector (alias: --agent) to select the agent framework
-    connector (openclaw, claudecode, codex, zeptoclaw). The connector
+    connector. The connector
     determines how LLM traffic is intercepted, how tool calls are
     inspected, and what subprocess enforcement policy is applied. When
     omitted, the value defaults to the install-time hint at
@@ -1894,7 +1985,7 @@ def setup_guardrail(
 
 
 # ---------------------------------------------------------------------------
-# setup codex / setup claude-code  —  observability-only aliases
+# setup <observability connector>  —  observability-only aliases
 # ---------------------------------------------------------------------------
 #
 # These are thin wrappers around the existing observability-only branch
@@ -1906,6 +1997,11 @@ def setup_guardrail(
 #
 #   defenseclaw setup codex          → observability-only for Codex
 #   defenseclaw setup claude-code    → observability-only for Claude Code
+#   defenseclaw setup hermes         → observability-only for Hermes
+#   defenseclaw setup cursor         → observability-only for Cursor
+#   defenseclaw setup windsurf       → observability-only for Windsurf
+#   defenseclaw setup geminicli      → observability-only for Gemini CLI
+#   defenseclaw setup copilot        → observability-only for GitHub Copilot CLI
 #
 # Both commands also flip ``claw.mode`` so the rest of the CLI/TUI
 # (skill scanner, MCP scanner, plugin scanner, overview panels) reads
@@ -1938,9 +2034,9 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
     selected by future ``defenseclaw setup guardrail`` invocations.
 
     The bound on contents is intentional: the file is one short word
-    (``codex`` / ``claudecode`` / ``openclaw`` / ``zeptoclaw``) and
-    ``_read_picked_connector`` rejects anything outside ``_CONNECTOR_NAMES``,
-    so even a corrupted write can never escalate to remote code paths.
+    (one of ``_CONNECTOR_NAMES``) and ``_read_picked_connector``
+    rejects anything outside ``_CONNECTOR_NAMES``, so even a corrupted
+    write can never escalate to remote code paths.
     """
     if not data_dir:
         return
@@ -1994,10 +2090,10 @@ def _apply_connector_observability_only(
 
     Returns True on success, False on any persistence error.
     """
-    if connector not in ("codex", "claudecode"):
+    if connector not in _OBSERVABILITY_ONLY_CONNECTORS:
         click.echo(
             f"  ✗ observability-only mode is only supported for "
-            f"codex/claudecode (got {connector!r})",
+            f"{sorted(_OBSERVABILITY_ONLY_CONNECTORS)} (got {connector!r})",
             err=True,
         )
         return False
@@ -2014,11 +2110,14 @@ def _apply_connector_observability_only(
     gc.detection_strategy = "regex_only"
     gc.detection_strategy_completion = "regex_only"
     gc.judge.enabled = False
+    cfg.ai_discovery.enabled = True
+    cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
+    cfg.ai_discovery.include_shell_history = True
+    cfg.ai_discovery.include_package_manifests = True
+    cfg.ai_discovery.include_env_var_names = True
+    cfg.ai_discovery.include_network_domains = True
 
-    if connector == "codex":
-        gc.codex_enforcement_enabled = False
-    else:
-        gc.claudecode_enforcement_enabled = False
+    _set_connector_enforcement(gc, connector, False)
 
     try:
         cfg.save()
@@ -2055,11 +2154,7 @@ def _apply_connector_observability_only(
 
 def _print_connector_observability_banner(connector: str) -> None:
     label = _CONNECTOR_META[connector]["label"]
-    enforcement_flag = (
-        "codex_enforcement_enabled"
-        if connector == "codex"
-        else "claudecode_enforcement_enabled"
-    )
+    enforcement_flag = _connector_enforcement_flag(connector)
     click.echo()
     click.echo(f"  DefenseClaw — {label} observability setup")
     click.echo("  ─────────────────────────────────────────────────────────")
@@ -2073,18 +2168,24 @@ def _print_connector_observability_banner(connector: str) -> None:
         "    • Hooks      — tool calls, prompt-submit, agent stop "
         f"→ /api/v1/{connector}/hook"
     )
-    click.echo(
-        "    • Native OTel — model + token counts, raw API bodies "
-        "→ /v1/logs and /v1/metrics"
-    )
+    native_otel_connectors = {"codex", "claudecode", "geminicli", "copilot"}
+    if connector in native_otel_connectors:
+        click.echo(
+            "    • Native OTel — documented agent telemetry "
+            "→ /v1/logs, /v1/metrics, and/or /v1/traces"
+        )
     if connector == "codex":
         click.echo(
             "    • Notify     — agent-turn-complete events "
             "→ /api/v1/codex/notify"
         )
     click.echo()
-    click.echo(f"  To later turn enforcement on, set guardrail.{enforcement_flag}=true")
-    click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+    if enforcement_flag:
+        click.echo(f"  To later turn proxy interception on, set guardrail.{enforcement_flag}=true")
+        click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+    else:
+        click.echo("  To later enforce supported hook events, set connector_hooks.<name>.mode=action")
+        click.echo("  (or guardrail.mode=action) and restart the gateway.")
     click.echo()
     _print_connector_mutation_notice(connector)
     click.echo()
@@ -2102,6 +2203,7 @@ def _print_observability_summary(connector: str, cfg=None) -> None:
         ("guardrail.enabled", "true (observability-only)"),
         ("guardrail.mode", "observe"),
         ("enforcement", "disabled"),
+        ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
     for k, v in rows:
         click.echo(f"    {k + ':':<22s} {v}")
@@ -2209,13 +2311,13 @@ def _setup_observability_alias(
     restart: bool,
     with_local_stack: bool,
 ) -> None:
-    """Shared body for ``setup codex`` and ``setup claude-code``.
+    """Shared body for observability-only connector setup aliases.
 
     Splitting this out (rather than calling each Click command from
     the other) keeps the wiring linear: each Click command parses its
     own flags, then defers to this helper for the actual work.
     """
-    if connector not in ("codex", "claudecode"):
+    if connector not in _OBSERVABILITY_ONLY_CONNECTORS:
         raise click.ClickException(
             f"unsupported connector for observability alias: {connector!r}"
         )
@@ -2347,14 +2449,83 @@ def setup_claude_code(
     )
 
 
+def _make_observability_setup_command(connector: str) -> click.Command:
+    """Create a ``defenseclaw setup <connector>`` observability alias."""
+    label = _CONNECTOR_META[connector]["label"]
+
+    @click.command(
+        connector,
+        help=(
+            f"Configure DefenseClaw for {label} observability (no enforcement).\n\n"
+            "Pins the active connector so CLI/TUI scanners read that agent's "
+            "documented local surfaces. Enforcement remains opt-in through "
+            "`defenseclaw setup guardrail` or connector hook action mode."
+        ),
+        short_help=f"Configure DefenseClaw for {label} observability.",
+    )
+    @click.option(
+        "--yes", "-y", "yes",
+        is_flag=True,
+        help="Skip the confirmation prompt (non-interactive).",
+    )
+    @click.option(
+        "--restart/--no-restart",
+        default=True,
+        show_default=True,
+        help=(
+            "Restart defenseclaw-gateway after applying changes "
+            "(needed so the connector's hook scripts and telemetry are wired)."
+        ),
+    )
+    @click.option(
+        "--with-local-stack/--no-local-stack",
+        default=False,
+        show_default=True,
+        help=(
+            "Also bring up the bundled Prom/Loki/Tempo/Grafana stack via "
+            "`defenseclaw setup local-observability up` once config is saved."
+        ),
+    )
+    @pass_ctx
+    def _cmd(app: AppContext, yes: bool, restart: bool, with_local_stack: bool) -> None:
+        _setup_observability_alias(
+            app,
+            connector=connector,
+            yes=yes,
+            restart=restart,
+            with_local_stack=with_local_stack,
+        )
+
+    _cmd.__name__ = f"setup_{connector}"
+    _cmd.__doc__ = (
+        f"Configure DefenseClaw for {label} observability (no enforcement).\n\n"
+        "Pins the active connector so CLI/TUI scanners read that agent's "
+        "documented local surfaces. Enforcement remains opt-in through "
+        "`defenseclaw setup guardrail` or connector hook action mode."
+    )
+    return _cmd
+
+
+for _observability_connector in ("hermes", "cursor", "windsurf", "geminicli", "copilot"):
+    setup.add_command(_make_observability_setup_command(_observability_connector))
+
+
 # Connectors that go through the DefenseClaw proxy (port 4000) and
 # therefore support the full guardrail enforcement surface (block,
 # observe, scanner_mode, judge, etc.). The complement set
-# {codex, claudecode} is observability-only — they talk directly to
-# their native upstream and DefenseClaw collects telemetry via
-# hook scripts and OTel without sitting in the data path.
+# _OBSERVABILITY_ONLY_CONNECTORS talks directly to its native upstream
+# and DefenseClaw collects telemetry via hook scripts and, where the
+# vendor documents it, native OTLP without sitting in the LLM data path.
 _GUARDRAIL_SUPPORTING_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
-_OBSERVABILITY_ONLY_CONNECTORS = frozenset({"codex", "claudecode"})
+_OBSERVABILITY_ONLY_CONNECTORS = frozenset({
+    "codex",
+    "claudecode",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+})
 
 
 def _apply_connector_mode_switch(
@@ -2525,7 +2696,7 @@ def _apply_connector_mode_switch(
 @click.argument(
     "connector",
     type=click.Choice(
-        sorted(("openclaw", "zeptoclaw", "codex", "claudecode")),
+        sorted(_CONNECTOR_NAMES),
         case_sensitive=False,
     ),
 )
@@ -2545,13 +2716,13 @@ def _apply_connector_mode_switch(
 )
 @pass_ctx
 def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> None:
-    """Switch the active claw connector with smart guardrail inheritance.
+    """Switch the active agent connector with smart guardrail inheritance.
 
     \b
     Inheritance rules:
       openclaw ↔ zeptoclaw         inherit current guardrail config
-      → codex / claudecode         observability-only (proxy off)
-      from codex / claudecode      observe-only (proxy on, no enforce)
+      → hook/observability agents  observability-only (proxy off)
+      from hook/observability      observe-only (proxy on, no enforce)
 
     The TUI Overview's [m] action calls this command directly.
 
@@ -2875,7 +3046,7 @@ def _interactive_guardrail_setup(
             click.echo()
             click.echo("  Observability-only mode")
             click.echo("  ───────────────────────")
-            click.echo("  Codex / Claude Code talk DIRECTLY to their native upstream;")
+            click.echo(f"  {label} talks DIRECTLY to its native upstream;")
             click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
             click.echo()
             click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")
@@ -2927,6 +3098,9 @@ def _interactive_guardrail_setup(
     proxy_port = gc.port or 4000
     if gc.connector in ("codex", "claudecode"):
         click.echo(f"  Proxy port:    {proxy_port} (enabled for this connector setup)")
+    elif gc.connector in _OBSERVABILITY_ONLY_CONNECTORS:
+        api_port = getattr(app.cfg.gateway, "api_port", 18970)
+        click.echo(f"  API port:      {api_port} (hook endpoint only; no LLM proxy binding)")
     else:
         click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
     click.echo()

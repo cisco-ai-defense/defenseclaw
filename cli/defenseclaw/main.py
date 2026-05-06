@@ -27,6 +27,7 @@ import sys
 import click
 
 from defenseclaw import __version__
+from defenseclaw.commands.cmd_agent import agent
 from defenseclaw.commands.cmd_aibom import aibom
 from defenseclaw.commands.cmd_alerts import alerts
 from defenseclaw.commands.cmd_audit import audit
@@ -54,7 +55,7 @@ from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 
 SKIP_LOAD_COMMANDS = {
-    "init", "migrations", "quickstart", "sandbox", "tui",
+    "agent", "init", "migrations", "quickstart", "sandbox", "tui",
     "uninstall", "reset", "version",
 }
 
@@ -79,10 +80,10 @@ def _is_help_invocation(ctx: click.Context) -> bool:
 @click.version_option(version=__version__, prog_name="defenseclaw")
 @click.pass_context
 def cli(ctx: click.Context) -> None:
-    """Enterprise governance layer for OpenClaw.
+    """Enterprise governance layer for AI coding agents.
 
-    Scans skills, MCP servers, and code before they run.
-    Enforces block/allow lists. Provides audit and alerting.
+    Discovers AI usage, scans skills, MCP servers, plugins, and code
+    before they run, and provides audit, telemetry, and enforcement.
     """
     ctx.ensure_object(AppContext)
     app = ctx.obj
@@ -122,8 +123,6 @@ def cli(ctx: click.Context) -> None:
                       "'defenseclaw doctor --fix' to auto-repair.", err=True)
             raise SystemExit(1)
 
-    _ensure_codeguard_skill(app.cfg)
-
     try:
         app.store = Store(app.cfg.audit_db)
         app.store.init()
@@ -147,6 +146,7 @@ def cleanup(ctx: click.Context, *_args, **_kwargs) -> None:
 
 # Register all commands
 cli.add_command(init_cmd, "init")
+cli.add_command(agent)
 cli.add_command(quickstart_cmd)
 cli.add_command(setup)
 cli.add_command(skill)
@@ -174,14 +174,8 @@ cli.add_command(version_cmd, "version")
 
 
 def _ensure_codeguard_skill(cfg) -> None:
-    """Install CodeGuard skill if the agent appeared since last init."""
-    try:
-        from defenseclaw.codeguard_skill import ensure_codeguard_skill
-
-        connector = getattr(cfg.guardrail, "connector", "") or ""
-        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file, connector)
-    except Exception:
-        pass
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = cfg
 
 
 def _try_launch_tui() -> bool:
