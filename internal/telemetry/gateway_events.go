@@ -197,7 +197,7 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 		log.String("defenseclaw.gateway.event_type", string(e.EventType)),
 	}
 	if e.RunID != "" {
-		attrs = append(attrs, log.String("defenseclaw.run_id", e.RunID))
+		attrs = append(attrs, log.String("defenseclaw.run.id", e.RunID))
 	}
 	if e.RequestID != "" {
 		attrs = append(attrs, log.String("defenseclaw.request_id", e.RequestID))

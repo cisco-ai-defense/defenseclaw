@@ -162,7 +162,7 @@ func TestEmitGatewayEvent_VerdictLogAttributes(t *testing.T) {
 	if got := attrValue(rec, "defenseclaw.gateway.event_type"); got != "verdict" {
 		t.Fatalf("event_type attr=%q", got)
 	}
-	if got := attrValue(rec, "defenseclaw.run_id"); got != "run-1" {
+	if got := attrValue(rec, "defenseclaw.run.id"); got != "run-1" {
 		t.Fatalf("run_id attr=%q", got)
 	}
 	if got := attrValue(rec, "defenseclaw.llm.model"); got != "gpt-4" {
@@ -397,7 +397,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 
 	// String-typed envelope slots — assertAttrString both proves
 	// the key is present AND that the value round-tripped.
-	assertAttrString(t, rec, "defenseclaw.run_id", "run-contract")
+	assertAttrString(t, rec, "defenseclaw.run.id", "run-contract")
 	assertAttrString(t, rec, "defenseclaw.request_id", "req-contract")
 	assertAttrString(t, rec, "gen_ai.conversation.id", "sess-contract")
 	assertAttrString(t, rec, "defenseclaw.trace_id", "trace-contract")
