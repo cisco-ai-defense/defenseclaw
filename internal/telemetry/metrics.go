@@ -1115,15 +1115,19 @@ func (p *Provider) RecordWatcherRestart(ctx context.Context) {
 }
 
 // RecordInspectEvaluation records a tool/message inspect evaluation.
-func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, severity string) {
+func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, severity, destinationApp string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("tool", tool),
 		attribute.String("action", action),
 		attribute.String("severity", severity),
-	))
+	}
+	if destinationApp = strings.TrimSpace(destinationApp); destinationApp != "" {
+		attrs = append(attrs, attribute.String("destination_app", destinationApp))
+	}
+	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordInspectLatency records tool/message inspect latency.
@@ -1140,7 +1144,7 @@ func (p *Provider) RecordInspectLatency(ctx context.Context, tool string, durati
 // gateway. Client-side spawn failures happen before this point, but this metric
 // gives dashboards a durable count of handled hooks, gateway rejections, and
 // handler latency.
-func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector, eventType, result, reason string, durationMs float64) {
+func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector, eventType, result, reason, destinationApp string, durationMs float64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
@@ -1165,6 +1169,9 @@ func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector,
 		attribute.String("event_type", eventType),
 		attribute.String("result", result),
 		attribute.String("reason", reason),
+	}
+	if destinationApp = strings.TrimSpace(destinationApp); destinationApp != "" {
+		attrs = append(attrs, attribute.String("destination_app", destinationApp))
 	}
 	p.metrics.hookInvocations.Add(ctx, 1, metric.WithAttributes(attrs...))
 	p.metrics.hookLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))

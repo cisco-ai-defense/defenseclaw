@@ -1166,7 +1166,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 				"block", "static block list",
 				gatewaylog.SeverityHigh, []string{"policy:block", "surface:tool_call"}, 0)
 			if r.otel != nil {
-				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH")
+				r.otel.RecordInspectEvaluation(context.Background(), payload.Tool, "block", "HIGH", "")
 			}
 			return
 		}
@@ -1222,7 +1222,7 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 						verdict.Severity, len(verdict.Findings),
 						redaction.ForSinkReason(verdict.Reason)))
 				if r.otel != nil {
-					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity)
+					r.otel.RecordInspectEvaluation(ctx, tool, verdict.Action, verdict.Severity, "")
 				}
 			}
 		}(payload.Tool, payload.SessionID, payload.ID, payload.Args)

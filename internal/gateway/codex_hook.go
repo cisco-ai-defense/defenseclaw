@@ -72,7 +72,7 @@ type codexHookResponse struct {
 func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "method", 0)
+			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "method", "", 0)
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -81,7 +81,7 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
 	if err != nil {
 		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_json", 0)
+			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_json", "", 0)
 		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
@@ -89,7 +89,7 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	var req codexHookRequest
 	if err := json.Unmarshal(b, &req); err != nil {
 		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_payload", 0)
+			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_payload", "", 0)
 		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Codex hook payload"})
 		return
@@ -97,7 +97,7 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	req.Payload = payload
 	if req.HookEventName == "" {
 		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "missing_event", 0)
+			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "missing_event", "", 0)
 		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
 		return
@@ -126,8 +126,12 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		if resp.WouldBlock {
 			reason = "would_block"
 		}
-		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
+		destinationApp := ""
+		if req.HookEventName == "PreToolUse" || req.HookEventName == "PermissionRequest" || req.HookEventName == "PostToolUse" {
+			destinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), codexToolName(req))
+		}
+		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, destinationApp, float64(elapsed.Milliseconds()))
+		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity, destinationApp)
 		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
 	}
 

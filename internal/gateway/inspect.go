@@ -402,7 +402,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
 		tool := a.connectorName() + ":" + req.Tool
-		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity)
+		a.otel.RecordInspectEvaluation(context.Background(), tool, verdict.Action, verdict.Severity, "")
 		a.otel.RecordInspectLatency(context.Background(), tool, elapsedMs)
 		a.otel.RecordGuardrailEvaluation(context.Background(), a.connectorName()+":policy-rules", verdict.Action)
 		a.otel.RecordGuardrailLatency(context.Background(), a.connectorName()+":policy-rules", elapsedMs)
