@@ -1,5 +1,7 @@
 # CLI UX Overhaul — First-Run Quickstart, Credential Registry, Lifecycle Commands
 
+> **Status:** IMPLEMENTED (shipped in 0.3.0)
+
 **Status:** Accepted, shipping in the `feat/cli-ux-quickstart` stack
 **Author:** DefenseClaw platform team
 **Target base:** `feat/tui-help-text-and-concurrency-hardening`

@@ -15,7 +15,7 @@ focuses on the connector-package review thread.
 
 | # | Severity | Status as of PR #194 |
 |---|----------|----------------------|
-| 6  | HIGH    | OPEN — needs event-list decision |
+| 6  | HIGH    | DONE — 28 hook events now registered (PR #194 single rollup) |
 | 7  | HIGH    | DONE (Option A) — `HookEventHandler` interface deleted via Phase A5; gateway-level dispatcher is the canonical owner |
 | 8  | MEDIUM  | OPEN — chose pragmatic Option C (test added) |
 | 9  | MEDIUM  | DONE — `withFileLock` + atomic-rename helpers in `helpers.go` |
@@ -44,42 +44,15 @@ focuses on the connector-package review thread.
 
 ## Remaining: Requires Design Decision
 
-### #6 — HIGH: Only 8 of 22+ techspec events registered in hookGroups
+### #6 — HIGH: Hook event registration coverage ~~(was: Only 8 of 22+ techspec events)~~
 
-**File**: `claudecode.go:226-239`
+**Status: DONE** — resolved in PR #194 single rollup. The codebase now registers 28 hook events in `hookGroups`, covering all security-critical and audit-relevant events from the techspec.
 
-**Current state**: `hookGroups` registers 8 events: `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SessionStart`, `Stop`, `SubagentStop`.
+**File**: `claudecode.go`
 
-**Missing events from techspec** (Section 5c):
+**Previous state**: `hookGroups` registered only 8 events: `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, `SessionStart`, `Stop`, `SubagentStop`.
 
-| Event | Security relevance | Suggested priority |
-|-------|-------------------|-------------------|
-| `PermissionRequest` | Gates permission escalation in action mode | P0 — security-critical |
-| `PermissionDenied` | Audit trail for denied permissions | P1 |
-| `SessionEnd` | Session teardown scanning | P1 |
-| `InstructionsLoaded` | Detect instruction injection | P1 |
-| `SubagentStart` | Track subagent spawning | P1 |
-| `StopFailure` | Detect abnormal termination | P2 |
-| `ConfigChange` | Detect runtime config manipulation | P2 |
-| `FileChanged` | Track file mutations | P2 |
-| `CwdChanged` | Track directory traversal | P2 |
-| `TaskCreated` | Task lifecycle audit | P3 |
-| `TaskCompleted` | Task lifecycle audit | P3 |
-| `TeammateIdle` | Multi-agent coordination audit | P3 |
-| `Elicitation` | User interaction tracking | P3 |
-| `ElicitationResult` | User interaction tracking | P3 |
-| `Notification` | Informational, low value | P3 |
-| `Setup` | Session initialization | P3 |
-
-**Decision needed**: Which events to register and at what inspection depth (block/observe/audit-only). Not all events need the same treatment — `PermissionRequest` should support blocking, while `Notification` may only need audit logging.
-
-**Implementation**:
-1. Add entries to `hookGroups` in `claudecode.go` (one line each)
-2. Add dispatch cases in `evaluateClaudeCodeHook()` in `claude_code_hook.go`
-3. Define OPA policy stubs for new events
-4. Update `connector_test.go` expected events list
-
-**Effort**: ~2-3 hours code once the event list is decided.
+**Resolution**: PR #194 expanded registration to 28 events including all P0-P2 items from the techspec (Section 5c): `PermissionRequest`, `PermissionDenied`, `SessionEnd`, `InstructionsLoaded`, `SubagentStart`, `StopFailure`, `ConfigChange`, `FileChanged`, `CwdChanged`, and P3 lifecycle/coordination events. Each event is dispatched through the gateway-level `evaluateClaudeCodeHook()` handler with appropriate inspection depth (block-capable for permission events, audit-only for informational events).
 
 ---
 
@@ -198,7 +171,7 @@ Then `claudeCodeSettingsPath()` checks `opts.SettingsPathOverride` first. Remove
 
 | # | Severity | Category | Effort | Blocking? |
 |---|----------|----------|--------|-----------|
-| 6 | HIGH | Missing hook events | 2-3h (once decided) | Needs event list decision |
+| 6 | HIGH | Missing hook events | — | DONE (PR #194) |
 | 7 | HIGH | HandleHookEvent stub | 30min or 2-3d | Needs architecture decision |
 | 12 | MEDIUM | InstallScope + FailClosed | 2-3h | Needs config schema decision |
 | 8 | MEDIUM | Auth header consistency | 30min | No |
@@ -206,7 +179,7 @@ Then `claudeCodeSettingsPath()` checks `opts.SettingsPathOverride` first. Remove
 | 14 | MEDIUM | Test isolation globals | 1h | No |
 
 **Recommended order**:
-1. Decide #7 (architecture) — this informs whether #6 events dispatch through the connector or gateway
-2. Implement #6 (missing events) — biggest security coverage gap
-3. Implement #9 (atomic writes) — prevents data loss
+1. ~~Decide #7 (architecture)~~ — DONE (Option A)
+2. ~~Implement #6 (missing events)~~ — DONE (28 events registered, PR #194)
+3. ~~Implement #9 (atomic writes)~~ — DONE (`withFileLock` + atomic-rename)
 4. Implement #8, #14, #12 — hardening and config features
