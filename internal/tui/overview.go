@@ -54,6 +54,15 @@ type OverviewPanel struct {
 	// SetSilentBypassCount + internal/tui/egress.go.
 	silentBypass int
 
+	// aiUsage is the most recent snapshot pulled from the sidecar's
+	// /api/v1/ai-usage endpoint. nil until the first poll completes
+	// (or when AI discovery is disabled). The DISCOVERED AI AGENTS
+	// panel reads this directly; we deliberately keep the old
+	// snapshot around on transient fetch errors so the panel
+	// doesn't flap during gateway restarts. See pollAIUsage in
+	// internal/tui/app.go and SetAIUsage below.
+	aiUsage *AIUsageSnapshot
+
 	// doctor is a cached copy of the most recent `defenseclaw
 	// doctor --json-output` run, loaded by the owning Model from
 	// data_dir on startup and refreshed in the background after
@@ -128,6 +137,22 @@ func (p *OverviewPanel) SetSilentBypassCount(n int) {
 // SilentBypassCount returns the currently rendered silent-bypass
 // count. Exposed primarily for tests.
 func (p *OverviewPanel) SilentBypassCount() int { return p.silentBypass }
+
+// SetAIUsage plugs in (or clears) the latest AI discovery snapshot
+// pulled from the sidecar. Passing nil clears the cache and the
+// DISCOVERED AI AGENTS panel reverts to its "ai discovery offline"
+// placeholder; this is intentional for unit tests but Update never
+// calls SetAIUsage(nil) on its own — see the aiUsageUpdateMsg
+// branch in internal/tui/app.go which keeps the prior snapshot on
+// transient fetch errors.
+func (p *OverviewPanel) SetAIUsage(s *AIUsageSnapshot) {
+	p.aiUsage = s
+}
+
+// AIUsage returns the currently rendered AI discovery snapshot,
+// or nil if none has been received yet. Exposed primarily for
+// tests so they can assert what the renderer is pulling from.
+func (p *OverviewPanel) AIUsage() *AIUsageSnapshot { return p.aiUsage }
 
 func (p *OverviewPanel) SetEnforcementCounts(store *audit.Store) error {
 	counts, err := store.GetCounts()
@@ -389,6 +414,16 @@ func (p *OverviewPanel) View(width, height int) string {
 	rightStr := rightCol.String()
 	columns := lipgloss.JoinHorizontal(lipgloss.Top, leftStr, "  ", rightStr)
 	b.WriteString(columns)
+	b.WriteString("\n\n")
+
+	// Full-width DISCOVERED AI AGENTS row. We deliberately render
+	// this beneath the two-column SERVICES/CONFIG/STATS/SCANNERS/
+	// DOCTOR grid so a sparse agent list doesn't unbalance the
+	// columns and a dense one (10+ agents on a developer box) can
+	// stretch horizontally without truncating vendor names. The
+	// inner table still caps the row count itself — see
+	// renderAIDiscoveryBox.
+	b.WriteString(p.renderAIDiscoveryBox(width - 4))
 	b.WriteString("\n\n")
 
 	// Quick actions bar — record pre-scroll line offset for mouse hit-testing
@@ -960,6 +995,302 @@ func (p *OverviewPanel) renderDoctorBox(w int) string {
 	}
 
 	return box.Render(content.String())
+}
+
+// maxAIDiscoveryRows caps the DISCOVERED AI AGENTS table at this
+// many rows so a developer box with dozens of detected tools
+// doesn't push the quick-actions bar off-screen. The full list
+// remains accessible via `defenseclaw agent discover` and the
+// Inventory panel ([i]); the Overview row is a smoke signal, not
+// a report viewer.
+const maxAIDiscoveryRows = 8
+
+// renderAIDiscoveryBox paints the Overview's "DISCOVERED AI
+// AGENTS" panel — the snapshot of AI tools/CLIs/IDE extensions
+// the sidecar's continuous discovery service has fingerprinted.
+// Behaviour:
+//
+//   - If aiUsage is nil (first paint, or sidecar unreachable),
+//     show a one-line offline placeholder.
+//   - If aiUsage.Enabled is false (config has ai_discovery.enabled
+//     false), show an enable hint pointing at the canonical CLI.
+//   - Otherwise, render a header summary line ("3 active, 1 new,
+//     scanned 12s ago") followed by up to maxAIDiscoveryRows
+//     signals, sorted with new-then-changed first so the
+//     just-discovered agents are on top, and overflow truncated
+//     to a "(+N more — defenseclaw agent discover)" tail.
+//
+// Width is the inner content width (already minus the box border
+// + padding); we let lipgloss wrap if it overflows but try not to
+// rely on that — long vendor names are truncated explicitly.
+func (p *OverviewPanel) renderAIDiscoveryBox(w int) string {
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(0, 1).
+		Width(w)
+
+	title := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("62")).
+		Render("DISCOVERED AI AGENTS")
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+
+	var content strings.Builder
+	content.WriteString(title + "\n")
+
+	// Offline placeholder. We don't know whether the user has just
+	// not booted the sidecar yet or the discovery service errored
+	// — point them at the same place either way (`agent discovery
+	// status` is the diagnostic command of choice).
+	if p.aiUsage == nil {
+		content.WriteString(" " + dim.Render(
+			"ai discovery offline — run: defenseclaw agent discovery status",
+		) + "\n")
+		return box.Render(content.String())
+	}
+
+	// Disabled. The CLI command is the canonical enable path; the
+	// TUI offers it via the command palette (Ctrl-K → "agent
+	// discovery enable") but the breadcrumb here is plain text so
+	// it works in any terminal without keybinding hints.
+	if !p.aiUsage.Enabled {
+		content.WriteString(" " + dim.Render(
+			"disabled — run: defenseclaw agent discovery enable",
+		) + "\n")
+		return box.Render(content.String())
+	}
+
+	// Header summary line. We surface counts that map 1:1 to the
+	// fields the sidecar publishes on /health → ai_discovery.details
+	// so the SERVICES row's "3 active, 1 new" is identical to the
+	// summary printed below the title here. Operators frequently
+	// cross-reference the two when debugging "why does my new
+	// agent not show up?".
+	summary := p.aiUsage.Summary
+	parts := []string{
+		fmt.Sprintf("%d active", summary.ActiveSignals),
+	}
+	if summary.NewSignals > 0 {
+		parts = append(parts, p.theme.Clean.Render(fmt.Sprintf("%d new", summary.NewSignals)))
+	}
+	if summary.ChangedSignals > 0 {
+		parts = append(parts, fmt.Sprintf("%d changed", summary.ChangedSignals))
+	}
+	if summary.GoneSignals > 0 {
+		parts = append(parts, fmt.Sprintf("%d gone", summary.GoneSignals))
+	}
+	freshness := ""
+	if !summary.ScannedAt.IsZero() {
+		freshness = " " + dim.Render("scanned "+formatScanAge(summary.ScannedAt))
+	}
+	mode := ""
+	if summary.PrivacyMode != "" {
+		mode = " " + dim.Render("mode "+summary.PrivacyMode)
+	}
+	fmt.Fprintf(&content, " %s%s%s\n", strings.Join(parts, ", "), freshness, mode)
+
+	if len(p.aiUsage.Signals) == 0 {
+		content.WriteString(" " + dim.Render(
+			"no AI agents detected yet — try: defenseclaw agent discover",
+		) + "\n")
+		return box.Render(content.String())
+	}
+
+	rows := sortAIDiscoverySignalsForOverview(p.aiUsage.Signals)
+	limit := maxAIDiscoveryRows
+	overflow := 0
+	if len(rows) > limit {
+		overflow = len(rows) - limit
+		rows = rows[:limit]
+	}
+
+	for _, sig := range rows {
+		stateBadge := renderAIDiscoveryStateBadge(p.theme, sig.State)
+		name := truncate(displayAIDiscoveryName(sig), 22)
+		vendor := truncate(displayAIDiscoveryVendor(sig), 18)
+		conf := fmt.Sprintf("%3d%%", clampPercent(sig.Confidence*100))
+		seen := dim.Render("seen " + formatScanAge(sig.LastSeen))
+		fmt.Fprintf(&content, " %s %-22s %s %s %s\n",
+			stateBadge,
+			name,
+			dim.Render(fmt.Sprintf("%-18s", vendor)),
+			dim.Render(conf),
+			seen,
+		)
+	}
+	if overflow > 0 {
+		fmt.Fprintf(&content, " %s\n", dim.Render(fmt.Sprintf(
+			"… +%d more — defenseclaw agent discover",
+			overflow,
+		)))
+	}
+
+	return box.Render(content.String())
+}
+
+// renderAIDiscoveryStateBadge renders the colored "[NEW]"/"[CHG]"/
+// "[OK ]"/"[GONE]" prefix for a signal row. Kept short and
+// fixed-width so the table aligns regardless of which states
+// appear. Defaults to a dimmed "[OK ]" for unrecognised states
+// rather than blanking — if the sidecar adds a new state value
+// we'd rather show *something* than silently drop the row.
+func renderAIDiscoveryStateBadge(theme *Theme, state string) string {
+	switch strings.ToLower(strings.TrimSpace(state)) {
+	case "new":
+		return theme.Clean.Render("[NEW]")
+	case "changed":
+		return theme.Medium.Render("[CHG]")
+	case "gone":
+		return theme.Dimmed.Render("[GONE]")
+	default:
+		// "active" / "" / unknown — render as plain so the eye is
+		// drawn to the new/changed rows on top.
+		dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+		return dim.Render("[OK ]")
+	}
+}
+
+// displayAIDiscoveryName picks the most useful identifier for the
+// signal row: prefer the human Name from the signature catalog,
+// fall back to Product, then SignatureID, then SignalID. Empty
+// names render as "(unknown)" so a malformed signature doesn't
+// produce a blank row that looks like a render bug.
+func displayAIDiscoveryName(sig AIUsageSignal) string {
+	for _, candidate := range []string{sig.Name, sig.Product, sig.SignatureID, sig.SignalID} {
+		if v := strings.TrimSpace(candidate); v != "" {
+			return v
+		}
+	}
+	return "(unknown)"
+}
+
+// displayAIDiscoveryVendor renders the Vendor cell, with a couple
+// of contextual annotations folded in: the SupportedConnector hint
+// when present (so an operator can see at a glance that the
+// detected agent has a first-party connector), and the version
+// suffix when known.
+func displayAIDiscoveryVendor(sig AIUsageSignal) string {
+	var b strings.Builder
+	vendor := strings.TrimSpace(sig.Vendor)
+	if vendor == "" {
+		vendor = strings.TrimSpace(sig.Category)
+	}
+	if vendor == "" {
+		vendor = "—"
+	}
+	b.WriteString(vendor)
+	if v := strings.TrimSpace(sig.Version); v != "" {
+		b.WriteString(" ")
+		b.WriteString(v)
+	}
+	if c := strings.TrimSpace(sig.SupportedConnector); c != "" {
+		b.WriteString(" (")
+		b.WriteString(c)
+		b.WriteString(")")
+	}
+	return b.String()
+}
+
+// sortAIDiscoverySignalsForOverview returns a copy of the input
+// sorted with new/changed signals first (so they're never pushed
+// off the end of the truncated list), then by descending
+// confidence, then by last-seen recency, then by name for
+// determinism. Returning a copy avoids mutating the model's
+// snapshot — multiple panels may end up reading p.aiUsage.Signals
+// in the future and we don't want this renderer to surprise them.
+func sortAIDiscoverySignalsForOverview(in []AIUsageSignal) []AIUsageSignal {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]AIUsageSignal, len(in))
+	copy(out, in)
+
+	stateRank := func(state string) int {
+		switch strings.ToLower(strings.TrimSpace(state)) {
+		case "new":
+			return 0
+		case "changed":
+			return 1
+		case "active", "":
+			return 2
+		case "gone":
+			return 3
+		default:
+			return 4
+		}
+	}
+
+	sortAIUsageSignals(out, func(a, b AIUsageSignal) bool {
+		ra, rb := stateRank(a.State), stateRank(b.State)
+		if ra != rb {
+			return ra < rb
+		}
+		if a.Confidence != b.Confidence {
+			return a.Confidence > b.Confidence
+		}
+		if !a.LastSeen.Equal(b.LastSeen) {
+			return a.LastSeen.After(b.LastSeen)
+		}
+		return strings.ToLower(displayAIDiscoveryName(a)) < strings.ToLower(displayAIDiscoveryName(b))
+	})
+	return out
+}
+
+// sortAIUsageSignals is a tiny insertion-sort that avoids pulling
+// in sort.Slice for a slice this small (typical n is 1..20). It's
+// stable enough for the deterministic tiebreaker chain above.
+func sortAIUsageSignals(in []AIUsageSignal, less func(a, b AIUsageSignal) bool) {
+	for i := 1; i < len(in); i++ {
+		j := i
+		for j > 0 && less(in[j], in[j-1]) {
+			in[j-1], in[j] = in[j], in[j-1]
+			j--
+		}
+	}
+}
+
+// formatScanAge renders a scan/last-seen timestamp as a compact
+// "12s ago" / "3m ago" / "2h ago" string. The Overview panel uses
+// this both for the summary line ("scanned 12s ago") and for each
+// signal row ("seen 3m ago"). Returns "—" for the zero value so
+// rows from a freshly-imported state file don't render as a
+// nonsensical "55 years ago".
+func formatScanAge(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	d := time.Since(t)
+	if d < 0 {
+		// Future timestamp (clock skew between sidecar and TUI).
+		// Don't render a negative; just say "now".
+		return "now"
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours())/24)
+	}
+}
+
+// clampPercent rounds a 0..100-ish float into a plain int and
+// clamps to [0,100]. Defensive: the wire format documents 0..1
+// for confidence but we'd rather render a sane "100%" than a
+// broken "143%" if a future sidecar surfaces an out-of-range
+// value.
+func clampPercent(v float64) int {
+	if v < 0 {
+		return 0
+	}
+	if v > 100 {
+		return 100
+	}
+	return int(v + 0.5)
 }
 
 func (p *OverviewPanel) renderQuickActions(width int) string {

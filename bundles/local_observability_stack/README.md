@@ -50,6 +50,7 @@ and a `Prometheus-Alerts` Alertmanager-shim that surfaces the rules in
 | **Overview**                    | on-call landing     | `ALERTS` table, SLO gauges, health stats, Loki tail |
 | **Security**                    | security eng / IR   | verdict mix, judge latency + errors, redactions, GenAI tokens |
 | **Scanners**                    | platform / scanner devs | scan rate + p95 latency per scanner, findings by severity/rule, quarantine, queue |
+| **AI Agent Usage & Detection**  | security / governance | active AI signals, scan throughput + latency, signals by category/state/vendor, two-axis Bayesian identity & presence quantiles, component fan-out, detector errors, scan traces (Tempo) and per-signal logs (Loki) |
 | **Reliability**                 | SRE / reliability   | gateway errors by code, sink health + circuit state, webhooks, panics, config errors |
 | **Runtime & SLO**               | SRE                 | goroutines, heap, GC, SQLite size/WAL/busy, block-<2s + TUI-<5s SLO compliance, exporter freshness |
 | **Traffic & Traces**            | perf / integration  | HTTP RPS + 5xx ratio per route, SSE lifecycle, tool calls, LLM bridge / Cisco Inspect latency, Tempo search |
@@ -85,6 +86,7 @@ open, and where relevant a `runbook` pointer under
 | `defenseclaw.security`      | `DefenseClawBlockRateSpike`, `DefenseClawJudgeErrorRate`, `DefenseClawWebhookFailuresSustained` | warning |
 | `defenseclaw.traffic`       | `DefenseClawHTTP5xxSpike`, `DefenseClawHTTPAuthFailuresSurge`, `DefenseClawRateLimitSurge` | warning |
 | `defenseclaw.runtime`       | `DefenseClawGoroutineLeak`, `DefenseClawSQLiteBusyRetries`, `DefenseClawConfigLoadErrors` | warning |
+| `defenseclaw.ai_discovery`  | `DefenseClawAIDiscoveryStalled`, `DefenseClawAIDiscoveryDetectorErrors` | warning |
 
 Rules are owned by Prometheus (so they keep firing even if Grafana is
 down). Grafana reads them through the `Prometheus-Alerts` Alertmanager

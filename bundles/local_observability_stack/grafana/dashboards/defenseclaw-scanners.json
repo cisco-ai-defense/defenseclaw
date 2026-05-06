@@ -1,15 +1,23 @@
 {
   "annotations": {"list": []},
+  "description": "Scanner operational health: throughput, queue depth, scan duration, errors, quarantine. Rule-level finding analysis (top rules, heat map, target attribution, finding→verdict correlation) lives on the Findings dashboard — click 'Open findings detail' from any scanner row.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
+  "links": [
+    {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                       "icon": "external link", "targetBlank": false},
+    {"title": "Findings",         "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}&${scanner:queryparam}&${severity:queryparam}",                          "icon": "external link", "targetBlank": false},
+    {"title": "Verdicts",         "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}&${severity:queryparam}",                                                "icon": "external link", "targetBlank": false},
+    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}",                                                                     "icon": "external link", "targetBlank": false},
+    {"title": "Reliability",      "type": "link", "url": "/d/defenseclaw-reliability?${__url_time_range}",                                                                    "icon": "external link", "targetBlank": false}
+  ],
   "templating": {
     "list": [
       {
         "name": "scanner",
         "label": "Scanner",
-        "description": "Filter panels by scanner name. Defaults to 'All' even if no scanner metrics have been ingested yet, so panels show 'no data' rather than silently matching the empty string.",
+        "description": "Filter panels by scanner. Defaults to All so panels show 'no data' rather than silently matching the empty string when ingest is empty.",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
         "definition": "label_values(defenseclaw_scan_count_total, scanner)",
@@ -27,7 +35,6 @@
       {
         "name": "target_type",
         "label": "Target type",
-        "description": "Filter panels by scanner target (skill, mcp_server, plugin, etc.). Safe on empty ingest.",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
         "definition": "label_values(defenseclaw_scan_count_total, target_type)",
@@ -41,11 +48,31 @@
         "options": [{"text": "All", "value": "$__all", "selected": true}],
         "skipUrlSync": false,
         "hide": 0
+      },
+      {
+        "name": "severity",
+        "label": "Severity",
+        "type": "custom",
+        "query": "critical,high,medium,low,info",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "critical", "value": "critical"},
+          {"text": "high", "value": "high"},
+          {"text": "medium", "value": "medium"},
+          {"text": "low", "value": "low"},
+          {"text": "info", "value": "info"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
       }
     ]
   },
   "panels": [
-    {"type": "row", "title": "Scanner throughput", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}},
+    {"type": "row", "title": "Scanner throughput", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "stat",
@@ -64,11 +91,11 @@
     },
     {
       "type": "stat",
-      "title": "Open findings (all severities)",
+      "title": "Open findings (gauge)",
       "description": "defenseclaw.scan.findings.gauge — up/down counter of live findings.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 1, "w": 6, "h": 4},
-      "targets": [{"expr": "sum(defenseclaw_scan_findings_gauge) or vector(0)", "refId": "A"}]
+      "targets": [{"expr": "sum(defenseclaw_scan_findings_gauge{severity=~\"$severity\"}) or vector(0)", "refId": "A"}]
     },
     {
       "type": "stat",
@@ -78,11 +105,12 @@
       "targets": [{"expr": "sum(rate(defenseclaw_quarantine_actions_total[5m])) * 60 or vector(0)", "refId": "A"}]
     },
 
-    {"type": "row", "title": "Scan rate + latency", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}},
+    {"type": "row", "title": "Scan rate + latency", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
-      "title": "Scans per scanner (rate)",
+      "title": "Scans per scanner (verdict mix)",
+      "description": "Verdict here is the per-scan summary verdict (clean | warn | block) — distinct from the guardrail verdict_action enum used on the Security board.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (scanner, verdict) (rate(defenseclaw_scan_count_total{scanner=~\"$scanner\", target_type=~\"$target_type\"}[$__rate_interval]))", "legendFormat": "{{scanner}} · {{verdict}}", "refId": "A"}],
@@ -90,7 +118,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Scan duration (p50/p95/p99, ms)",
+      "title": "Scan duration p50/p95/p99 (ms)",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
       "targets": [
@@ -102,49 +130,40 @@
     },
     {
       "type": "heatmap",
-      "title": "Scan duration heatmap (all scanners)",
+      "title": "Scan duration heatmap",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 14, "w": 24, "h": 8},
       "targets": [{"expr": "sum by (le) (increase(defenseclaw_scan_duration_milliseconds_bucket{scanner=~\"$scanner\"}[$__rate_interval]))", "format": "heatmap", "legendFormat": "{{le}}", "refId": "A"}],
       "options": {"calculate": false, "yAxis": {"unit": "ms"}}
     },
 
-    {"type": "row", "title": "Findings", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}},
+    {"type": "row", "title": "Findings (operational view — drill to Findings board for rule analysis)", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
       "title": "Findings by severity",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (severity) (rate(defenseclaw_scan_findings_total{scanner=~\"$scanner\", target_type=~\"$target_type\"}[$__rate_interval]))", "legendFormat": "{{severity}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+      "targets": [{"expr": "sum by (severity) (rate(defenseclaw_scan_findings_total{scanner=~\"$scanner\", target_type=~\"$target_type\", severity=~\"$severity\"}[$__rate_interval]))", "legendFormat": "{{severity}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
     },
     {
       "type": "timeseries",
       "title": "Findings by scanner",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (scanner) (rate(defenseclaw_scan_findings_total{scanner=~\"$scanner\", target_type=~\"$target_type\"}[$__rate_interval]))", "legendFormat": "{{scanner}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (scanner) (rate(defenseclaw_scan_findings_total{scanner=~\"$scanner\", target_type=~\"$target_type\", severity=~\"$severity\"}[$__rate_interval]))", "legendFormat": "{{scanner}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}}
     },
-    {
-      "type": "table",
-      "title": "Top rules by findings (1h)",
-      "description": "Hot rules ranked by findings/min. Drill down via rule_id column to investigate false positives.",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 31, "w": 24, "h": 10},
-      "targets": [{"expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
-      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "findings/1h"}}}]
-    },
 
-    {"type": "row", "title": "Quarantine + queue", "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1}},
+    {"type": "row", "title": "Quarantine + queue", "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
       "title": "Quarantine actions",
       "description": "op ∈ {move_in, move_out, restore}. A spike in move_in without matching findings usually means a policy regression.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 42, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (quarantine_op, quarantine_result) (rate(defenseclaw_quarantine_actions_total[$__rate_interval]))", "legendFormat": "{{quarantine_op}} · {{quarantine_result}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}}
     },
@@ -153,38 +172,40 @@
       "title": "Scanner queue depth",
       "description": "Pending scan jobs per scanner. Sustained growth implies the scanner is slower than ingest.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 42, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
       "targets": [{"expr": "defenseclaw_scanner_queue_depth{scanner=~\"$scanner\"}", "legendFormat": "{{scanner}}", "refId": "A"}]
     },
 
-    {"type": "row", "title": "Scanner errors + logs", "gridPos": {"x": 0, "y": 50, "w": 24, "h": 1}},
+    {"type": "row", "title": "Scanner errors", "gridPos": {"x": 0, "y": 40, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
       "title": "Scanner errors by type",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 51, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 41, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (scanner, error_type) (rate(defenseclaw_scan_errors_total{scanner=~\"$scanner\"}[$__rate_interval]))", "legendFormat": "{{scanner}} · {{error_type}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}}
     },
     {
-      "type": "logs",
-      "title": "scan_finding events (Loki)",
-      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
-      "gridPos": {"x": 12, "y": 51, "w": 12, "h": 8},
-      "targets": [{"expr": "{service_namespace=\"defenseclaw\"} |= \"\\\"event_type\\\":\\\"scan_finding\\\"\"", "refId": "A"}],
-      "options": {"showTime": true, "wrapLogMessage": true}
+      "type": "table",
+      "title": "Drilldown — open Findings board",
+      "description": "Top 10 rules right now (1h). The full ranked Findings dashboard has heatmap + first/last-seen + target attribution. Click a rule_id to drill in with the rule pinned.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 41, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(10, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{scanner=~\"$scanner\", severity=~\"$severity\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "findings/1h"}}}],
+      "fieldConfig": {"overrides": [{"matcher": {"id": "byName", "options": "rule_id"}, "properties": [{"id": "links", "value": [{"title": "Open Findings detail", "url": "/d/defenseclaw-findings?${__url_time_range}&var-rule_id=${__value.text}&${severity:queryparam}", "targetBlank": false}]}]}]}
     }
   ],
   "preload": false,
   "refresh": "15s",
   "schemaVersion": 39,
-  "tags": ["defenseclaw", "scanners"],
+  "tags": ["defenseclaw", "scanners", "operations"],
   "time": {"from": "now-6h", "to": "now"},
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw — Scanners",
+  "title": "DefenseClaw — Scanners (Ops)",
   "uid": "defenseclaw-scanners",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

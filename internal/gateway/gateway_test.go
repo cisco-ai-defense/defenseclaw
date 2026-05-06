@@ -5574,6 +5574,69 @@ func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
 	}
 }
 
+// TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
+// H-2 follow-up: the path-token branch of apiCSRFProtect skips the
+// X-DefenseClaw-Client header (OTLP exporters can't set arbitrary
+// headers) but MUST still enforce an OTLP-compatible Content-Type so a
+// browser-initiated CSRF POST with the default text/plain or
+// application/x-www-form-urlencoded cannot smuggle a malicious payload
+// in even if it somehow learned the path token.
+func TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name       string
+		ct         string
+		wantStatus int
+	}{
+		{"missing content-type rejected", "", http.StatusUnsupportedMediaType},
+		{"text/plain rejected", "text/plain", http.StatusUnsupportedMediaType},
+		{"form-urlencoded rejected", "application/x-www-form-urlencoded", http.StatusUnsupportedMediaType},
+		{"application/json accepted", "application/json", http.StatusOK},
+		{"application/json with charset accepted", "application/json; charset=utf-8", http.StatusOK},
+		{"application/x-protobuf accepted", "application/x-protobuf", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			if tc.ct != "" {
+				req.Header.Set("Content-Type", tc.ct)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Errorf("Content-Type=%q: status = %d, want %d", tc.ct, rr.Code, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected pins
+// the existing Origin gate stays active inside the path-token branch
+// (a browser tab on http://evil.example.com cannot bypass CSRF by
+// crafting an OTLP path-token URL — even if it somehow learned the
+// token).
+func TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("non-localhost Origin: status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+}
+
 func TestTokenAuth_RejectWrongToken(t *testing.T) {
 	api, _ := tokenAuthTestServer(t, "secret-token-123")
 	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

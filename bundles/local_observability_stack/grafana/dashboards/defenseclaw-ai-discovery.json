@@ -1,0 +1,462 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "enable": true,
+        "expr": "ALERTS{alertstate=\"firing\", surface=\"ai-discovery\"}",
+        "iconColor": "red",
+        "name": "AI discovery alerts",
+        "tagKeys": "alertname,severity",
+        "titleFormat": "{{alertname}} — {{severity}}",
+        "useValueForTime": false
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}",        "icon": "external link", "targetBlank": false},
+    {"title": "Connector detail", "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}",  "icon": "external link", "targetBlank": false},
+    {"title": "Security",         "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "HITL",             "type": "link", "url": "/d/defenseclaw-hitl?${__url_time_range}",              "icon": "external link", "targetBlank": false},
+    {"title": "Findings",         "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "Policy decisions", "type": "link", "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",  "icon": "external link", "targetBlank": false},
+    {"title": "Agent identity",   "type": "link", "url": "/d/defenseclaw-agent-identity?${__url_time_range}",    "icon": "external link", "targetBlank": false},
+    {"title": "Scanners",         "type": "link", "url": "/d/defenseclaw-scanners?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "Reliability",      "type": "link", "url": "/d/defenseclaw-reliability?${__url_time_range}",       "icon": "external link", "targetBlank": false},
+    {"title": "Runtime",          "type": "link", "url": "/d/defenseclaw-runtime?${__url_time_range}",           "icon": "external link", "targetBlank": false},
+    {"title": "Traffic",          "type": "link", "url": "/d/defenseclaw-traffic?${__url_time_range}",           "icon": "external link", "targetBlank": false}
+  ],
+  "liveNow": false,
+  "templating": {
+    "list": [
+      {
+        "name": "vendor",
+        "label": "AI vendor",
+        "description": "Filter signal panels by ai.vendor (anthropic, openai, microsoft, ...). Safe on empty ingest — defaults to All so panels render 'no data' rather than silently matching empty strings.",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "definition": "label_values(defenseclaw_ai_discovery_signals_total, ai_vendor)",
+        "query": {"query": "label_values(defenseclaw_ai_discovery_signals_total, ai_vendor)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "category",
+        "label": "Signal category",
+        "description": "Filter by signal.category (cli, ide_extension, sdk, mcp_server, runtime, browser_extension, shell_history). Bounded enum — cardinality is safe to multi-select.",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "definition": "label_values(defenseclaw_ai_discovery_signals_total, signal_category)",
+        "query": {"query": "label_values(defenseclaw_ai_discovery_signals_total, signal_category)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "state",
+        "label": "Signal state",
+        "description": "Filter by lifecycle state: new, changed, seen, gone. 'new' + 'changed' is the most useful default for hunting; 'gone' surfaces removals.",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "definition": "label_values(defenseclaw_ai_discovery_signals_total, state)",
+        "query": {"query": "label_values(defenseclaw_ai_discovery_signals_total, state)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "source",
+        "label": "Discovery source",
+        "description": "Filter by discovery driver source (sidecar=continuous loop, scan=on-demand /api/v1/ai-usage/scan).",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "definition": "label_values(defenseclaw_ai_discovery_runs_total, source)",
+        "query": {"query": "label_values(defenseclaw_ai_discovery_runs_total, source)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {"type": "row", "title": "Detection at a glance", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "stat",
+      "title": "Active AI signals",
+      "description": "Latest snapshot of distinct AI usage signals (CLIs, IDE extensions, SDKs, MCP servers, ...) that the continuous discovery loop is fingerprinting on the host. Sourced from the gauge `defenseclaw.ai.discovery.active_signals` (last value per (source, privacy_mode)). 0 with the sidecar enabled means the loop hasn't completed a scan yet — check the next panel.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(defenseclaw_ai_discovery_active_signals{source=~\"$source\"}) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}, {"color": "green", "value": 1}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Scans / min",
+      "description": "Continuous AI discovery scan completions per minute (counter `defenseclaw.ai.discovery.runs`). On a healthy sidecar this should match `60 / ai_discovery.scan_interval_min` (default scan_interval_min=5 → ~0.2/min). 0 here while AI discovery is enabled is a **stalled** loop.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_ai_discovery_runs_total{source=~\"$source\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 2}}
+    },
+    {
+      "type": "stat",
+      "title": "New + changed signals (1h)",
+      "description": "Net-new or fingerprint-changed AI signals discovered in the last hour (counter `defenseclaw.ai.discovery.new_signals`). Spikes mean a developer just installed an AI tool, an SDK was upgraded, or a new MCP server appeared. Drill via the 'Signals by state over time' panel and the Loki signal log below.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_ai_discovery_new_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 25}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Disappeared signals (1h)",
+      "description": "AI signals that were present in a previous scan but missing in the latest full scan (counter `defenseclaw.ai.discovery.gone_signals`). Counts as 'gone' only on a full sweep — partial scans never demote signals. Spikes here usually mean an SDK was uninstalled or an extension was disabled.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_ai_discovery_gone_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short"}}
+    },
+    {
+      "type": "stat",
+      "title": "Detector errors / min",
+      "description": "Continuous AI discovery detector errors per minute (counter `defenseclaw.ai.discovery.errors`, labelled by detector + reason). Any sustained non-zero rate indicates a detector that is failing — open the 'Detector errors by reason' panel below to isolate.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_ai_discovery_errors_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.1}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Files scanned / min",
+      "description": "Package manifests + shell history files inspected by the discovery loop per minute (counter `defenseclaw.ai.discovery.files_scanned`). Sudden drops below the steady-state imply the file walker is being blocked (permissions, full disk) — cross-reference with detector errors.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"},
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 1}}
+    },
+
+    {"type": "row", "title": "Discovery throughput + latency", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Scan completions by result",
+      "description": "Stacked rate of scan completions, broken down by `result` ∈ {ok, partial, failed}. A growing 'partial' wedge means at least one detector errored on each run. Source is `defenseclaw.ai.discovery.runs` (Counter).",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (result) (rate(defenseclaw_ai_discovery_runs_total{source=~\"$source\"}[$__rate_interval]))", "legendFormat": "{{result}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Scan duration (p50 / p95 / p99, ms)",
+      "description": "Wall-clock time of each continuous discovery scan (histogram `defenseclaw.ai.discovery.duration` in ms). p99 climbing past a few seconds usually means a detector is walking too many files — tune `ai_discovery.max_files_per_scan` or narrow `ai_discovery.scan_roots`.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval])))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval])))", "legendFormat": "p95", "refId": "p95"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval])))", "legendFormat": "p99", "refId": "p99"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms"}}
+    },
+    {
+      "type": "heatmap",
+      "title": "Scan duration heatmap (ms)",
+      "description": "Distribution of scan durations over time. A bimodal heatmap (a hot 'fast' band + a hot 'slow' band) is the fingerprint of a flaky detector that occasionally fans out to a bigger workspace.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 14, "w": 24, "h": 8},
+      "targets": [{"expr": "sum by (le) (increase(defenseclaw_ai_discovery_duration_milliseconds_bucket{source=~\"$source\"}[$__rate_interval]))", "format": "heatmap", "legendFormat": "{{le}}", "refId": "A"}],
+      "options": {"calculate": false, "yAxis": {"unit": "ms"}}
+    },
+
+    {"type": "row", "title": "Signals discovered", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Signals by category",
+      "description": "Stacked discovery signal rate by signal.category (cli, ide_extension, sdk, mcp_server, runtime, browser_extension, shell_history). Sourced from counter `defenseclaw.ai.discovery.signals` — increments per signal per scan.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (signal_category) (rate(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[$__rate_interval]))", "legendFormat": "{{signal_category}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Signals by state",
+      "description": "Lifecycle of discovered signals over time: `new` (first appearance), `changed` (fingerprint shifted), `seen` (re-confirmed unchanged), `gone` (dropped on a full scan). A flat 'seen' baseline with sporadic 'new' spikes is the healthy shape.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (state) (rate(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\"}[$__rate_interval]))", "legendFormat": "{{state}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "table",
+      "title": "Top vendor / product (1h)",
+      "description": "Hottest (vendor, product, category) tuples ranked by signal volume in the last hour. Use this to answer 'which AI tools are people using right now?'. Confidence column is the bucket label emitted by the engine (very_low | low | medium | high | very_high).",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 31, "w": 12, "h": 10},
+      "targets": [{"expr": "topk(20, sort_desc(sum by (ai_vendor, ai_product, signal_category, confidence) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\", state=~\"$state\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "indexByName": {"ai_vendor": 0, "ai_product": 1, "signal_category": 2, "confidence": 3, "Value": 4}, "renameByName": {"ai_vendor": "vendor", "ai_product": "product", "signal_category": "category", "Value": "signals/1h"}}}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"align": "left"}}}
+    },
+    {
+      "type": "bargauge",
+      "title": "Signals by detector (1h)",
+      "description": "Which detector contributed the most signals in the last hour (label `detector`). Imbalance here is normal — `process` always dominates on developer hosts because it polls the proc table — but a detector that's flat-line zero is a regression to investigate.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 31, "w": 12, "h": 10},
+      "targets": [{"expr": "topk(15, sort_desc(sum by (detector) (increase(defenseclaw_ai_discovery_signals_total{ai_vendor=~\"$vendor\", signal_category=~\"$category\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "options": {"orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "valueMode": "color"},
+      "fieldConfig": {"defaults": {"unit": "short", "thresholds": {"mode": "percentage", "steps": [{"color": "blue", "value": null}, {"color": "green", "value": 30}, {"color": "orange", "value": 70}]}}}
+    },
+
+    {"type": "row", "title": "Components & confidence (Bayesian engine)", "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Identity score quantiles (cumulative across scans)",
+      "description": "Two-axis Bayesian engine identity score (probability that a fingerprint is *the* named SDK) histogram-quantiled across every scan in Prometheus retention. p50 ≈ 0.6 + p95 ≈ 0.9 is healthy. A drop in p95 means recent scans had ambiguous fingerprints — usually a corrupt manifest or a detector regression. Histogram `defenseclaw.ai.confidence.identity_score` is bucketed for the [0,1] range. We deliberately quantile over the *cumulative* `_bucket` series rather than `rate(...)` because confidence is emitted once-per-scan: at idle a rate-based quantile collapses to NaN, while the cumulative form preserves the lifetime distribution and reacts immediately when a new scan moves a bucket.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 42, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (defenseclaw_ai_confidence_identity_score_bucket))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (defenseclaw_ai_confidence_identity_score_bucket))", "legendFormat": "p95", "refId": "p95"}
+      ],
+      "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "short", "decimals": 2, "noValue": "no scans yet"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Presence score quantiles (cumulative across scans)",
+      "description": "Two-axis Bayesian engine presence score (probability the SDK is *currently* deployed) histogram-quantiled across every scan in Prometheus retention. p50 collapsing to ~0 with identity_score still high is the canonical signal for 'SDK was uninstalled but the manifest is still on disk'. Histogram `defenseclaw.ai.confidence.presence_score` is bucketed for the [0,1] range. Quantile is computed against the cumulative `_bucket` counts (no `rate(...)`) so the panel renders at idle and updates the moment a new scan moves a bucket — see the Identity panel description for the why.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 42, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum by (le) (defenseclaw_ai_confidence_presence_score_bucket))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (defenseclaw_ai_confidence_presence_score_bucket))", "legendFormat": "p95", "refId": "p95"}
+      ],
+      "fieldConfig": {"defaults": {"min": 0, "max": 1, "unit": "short", "decimals": 2, "noValue": "no scans yet"}}
+    },
+    {
+      "type": "table",
+      "title": "Top components by install count",
+      "description": "Distinct install evidences per (ecosystem, name) component as of the last scan (gauge `defenseclaw.ai.components.installs`). Together with workspaces below, lets you say 'we found openai==1.40.0 in 6 manifests across 3 workspaces' without leaving Grafana. Series are summed across scrape jobs so the same component never appears twice when both the OTel collector's prometheus exporter and the sidecar push pipeline are scraped.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 50, "w": 12, "h": 10},
+      "targets": [{"expr": "topk(20, max by (ecosystem, name) (defenseclaw_ai_components_installs))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "exported_job": true, "service_namespace": true, "service_name": true, "service": true, "service_version": true, "deployment_environment": true, "host_name": true, "host_arch": true, "os_type": true, "defenseclaw_claw_home_dir": true, "defenseclaw_claw_mode": true, "defenseclaw_device_id": true, "defenseclaw_gateway_host": true, "defenseclaw_gateway_port": true, "defenseclaw_instance_id": true, "defenseclaw_preset": true, "defenseclaw_preset_name": true, "framework": true}, "indexByName": {"ecosystem": 0, "name": 1, "Value": 2}, "renameByName": {"Value": "installs"}}}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"align": "left"}}}
+    },
+    {
+      "type": "table",
+      "title": "Top components by workspace fan-out",
+      "description": "Distinct workspaces a component appears in as of the last scan (gauge `defenseclaw.ai.components.workspaces`). High fan-out + low identity_band ('low' / 'very_low') is the classic shape of a typo-squatted package — drill into the Loki signal log to confirm. Series are deduplicated by (ecosystem, name) so the same component doesn't double-count when scraped from multiple pipelines.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 50, "w": 12, "h": 10},
+      "targets": [{"expr": "topk(20, max by (ecosystem, name) (defenseclaw_ai_components_workspaces))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "exported_job": true, "service_namespace": true, "service_name": true, "service": true, "service_version": true, "deployment_environment": true, "host_name": true, "host_arch": true, "os_type": true, "defenseclaw_claw_home_dir": true, "defenseclaw_claw_mode": true, "defenseclaw_device_id": true, "defenseclaw_gateway_host": true, "defenseclaw_gateway_port": true, "defenseclaw_instance_id": true, "defenseclaw_preset": true, "defenseclaw_preset_name": true, "framework": true}, "indexByName": {"ecosystem": 0, "name": 1, "Value": 2}, "renameByName": {"Value": "workspaces"}}}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"align": "left"}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Component observations by identity band",
+      "description": "Bayesian-bucketed component observation rate (`defenseclaw.ai.components.observations`). 'very_low' / 'low' identity_band climbing relative to 'high' / 'very_high' usually means the catalog needs a refresh — fingerprints are matching, but the engine isn't confident enough to name them.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 60, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (identity_band) (rate(defenseclaw_ai_components_observations_total[$__rate_interval]))", "legendFormat": "{{identity_band}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Component observations by presence band",
+      "description": "Same observation counter sliced by `presence_band`. A wedge of 'very_low' presence with stable identity is the 'manifest left over from an old install' shape — components are still cataloged but not actually deployed.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 60, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (presence_band) (rate(defenseclaw_ai_components_observations_total[$__rate_interval]))", "legendFormat": "{{presence_band}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+
+    {"type": "row", "title": "Operational health (files / dedupe / errors)", "gridPos": {"x": 0, "y": 68, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Files scanned vs. dedupe-suppressed",
+      "description": "Files inspected per minute (`defenseclaw.ai.discovery.files_scanned`) overlaid with duplicate signals suppressed within a single scan (`defenseclaw.ai.discovery.dedupe_suppressed`). High dedupe with stable file count is the steady state on a developer host that has multiple Cursor/VS Code installs of the same extension.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 69, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total[$__rate_interval])) * 60", "legendFormat": "files / min", "refId": "files"},
+        {"expr": "sum(rate(defenseclaw_ai_discovery_dedupe_suppressed_total[$__rate_interval])) * 60", "legendFormat": "dedupe / min", "refId": "dedupe"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "short", "decimals": 1}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Detector errors by reason",
+      "description": "Detector errors broken down by `detector` and `reason` (counter `defenseclaw.ai.discovery.errors`). 'partial' on every run means one detector is consistently failing — the detector label points at it.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 69, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (detector, reason) (rate(defenseclaw_ai_discovery_errors_total[$__rate_interval]))", "legendFormat": "{{detector}} · {{reason}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "table",
+      "title": "Errors by detector (1h increase)",
+      "description": "Top detectors by error volume in the last hour. Use as the entry point for 'which detector regressed?'. If `process` shows up here it's almost always a permission issue (proc/<pid> read failed); if `manifest` shows up it's a malformed package.json/poetry.lock.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 77, "w": 24, "h": 8},
+      "targets": [{"expr": "sort_desc(sum by (detector, reason) (increase(defenseclaw_ai_discovery_errors_total[1h])))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [
+        {"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "indexByName": {"detector": 0, "reason": 1, "Value": 2}, "renameByName": {"Value": "errors/1h"}}}
+      ],
+      "fieldConfig": {"defaults": {"custom": {"align": "left"}}}
+    },
+
+    {"type": "row", "title": "Recent scan traces (Tempo)", "gridPos": {"x": 0, "y": 85, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "table",
+      "title": "Recent AI discovery scans (Tempo)",
+      "description": "TraceQL search for the parent span emitted by every continuous scan: `name = defenseclaw.ai.discovery`. Span attributes carry the per-scan rollup: `defenseclaw.ai.discovery.scan_id`, `.source`, `.privacy_mode`, `.signals`, `.active_signals`, `.files_scanned`. Click a Trace ID to open the flame graph; child spans are one `defenseclaw.ai.discovery.detector` per detector.",
+      "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"},
+      "gridPos": {"x": 0, "y": 86, "w": 24, "h": 12},
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "filters": [
+            {"id": "service-name", "tag": "service.name", "operator": "=", "scope": "resource", "value": ["defenseclaw"], "valueType": "string"},
+            {"id": "span-name",    "tag": "name",         "operator": "=", "scope": "span",     "value": ["defenseclaw.ai.discovery"], "valueType": "string"}
+          ],
+          "limit": 50,
+          "tableType": "traces",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "left"},
+          "links": [
+            {
+              "title": "Open trace",
+              "url": "/explore?left=%7B%22datasource%22:%22defenseclaw-tempo%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22tempo%22,%22uid%22:%22defenseclaw-tempo%22%7D,%22queryType%22:%22traceql%22,%22query%22:%22${__data.fields.traceID}%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D",
+              "targetBlank": true
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "table",
+      "title": "Slow detectors (Tempo, p95 child-span duration)",
+      "description": "TraceQL search over the per-detector child spans (`defenseclaw.ai.discovery.detector`). Sorted by duration so the slowest detectors float to the top — this is the right entry point if scan p95 is climbing in the latency panel above.",
+      "datasource": {"type": "tempo", "uid": "defenseclaw-tempo"},
+      "gridPos": {"x": 0, "y": 98, "w": 24, "h": 10},
+      "targets": [
+        {
+          "queryType": "traceqlSearch",
+          "filters": [
+            {"id": "service-name", "tag": "service.name", "operator": "=", "scope": "resource", "value": ["defenseclaw"], "valueType": "string"},
+            {"id": "span-name",    "tag": "name",         "operator": "=", "scope": "span",     "value": ["defenseclaw.ai.discovery.detector"], "valueType": "string"}
+          ],
+          "limit": 50,
+          "tableType": "traces",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {"align": "left"},
+          "links": [
+            {
+              "title": "Open trace",
+              "url": "/explore?left=%7B%22datasource%22:%22defenseclaw-tempo%22,%22queries%22:%5B%7B%22refId%22:%22A%22,%22datasource%22:%7B%22type%22:%22tempo%22,%22uid%22:%22defenseclaw-tempo%22%7D,%22queryType%22:%22traceql%22,%22query%22:%22${__data.fields.traceID}%22%7D%5D,%22range%22:%7B%22from%22:%22now-1h%22,%22to%22:%22now%22%7D%7D",
+              "targetBlank": true
+            }
+          ]
+        }
+      }
+    },
+
+    {"type": "row", "title": "Recent events (Loki)", "gridPos": {"x": 0, "y": 108, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "logs",
+      "title": "AI discovery summary log",
+      "description": "OTel log records emitted by `EmitAIDiscoverySummaryLog` once per scan (`event.name=defenseclaw.ai.discovery`). Severity is INFO when result=ok, WARN when result≠ok. Body fields: source, privacy_mode, result, duration_ms, signals_total, active_total, new_total, gone_total, files_scanned. Loki flattens the dotted attribute keys to underscores (e.g. `event.name` → `event_name`).",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 109, "w": 24, "h": 10},
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | event_name=\"defenseclaw.ai.discovery\" | line_format \"{{.severity}} | source={{.defenseclaw_ai_discovery_source}} mode={{.defenseclaw_ai_discovery_privacy_mode}} result={{.defenseclaw_ai_discovery_result}} | active={{.defenseclaw_ai_discovery_active_total}} new={{.defenseclaw_ai_discovery_new_total}} gone={{.defenseclaw_ai_discovery_gone_total}} files={{.defenseclaw_ai_discovery_files_scanned}} duration_ms={{.defenseclaw_ai_discovery_duration_ms}}\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    },
+    {
+      "type": "logs",
+      "title": "AI discovery per-signal log",
+      "description": "Per-signal OTel log records emitted by `EmitAIDiscoverySignalLog` (`event.name=defenseclaw.ai.discovery.signal`). One record per signal per scan; bounded labels keep cardinality safe. Use the search bar to grep for a specific vendor/product or detector.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 119, "w": 24, "h": 10},
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | event_name=\"defenseclaw.ai.discovery.signal\" | line_format \"{{.state}} | {{.signal_category}} · {{.ai_vendor}}/{{.ai_product}} · detector={{.detector}} · confidence={{.confidence}}\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    },
+    {
+      "type": "logs",
+      "title": "Gateway ai_discovery events (Loki)",
+      "description": "Sanitized gateway envelope events with `event_type=ai_discovery` (`gatewaylog.EventAIDiscovery`). These carry the audit-trail payload (signal_id, scan_id, evidence_types, path_hashes) and are HMAC-stamped for integrity. Loki's `| json` parser flattens nested keys with `_`, so the AIDiscoveryPayload fields (`ai_discovery.scan_id`, `.signal_id`, `.state`, `.category`, `.vendor`, `.product`) show up here as `ai_discovery_*` (no `defenseclaw_` prefix — that prefix is reserved for envelope-level OTel attributes set by `EmitGatewayEventLog`).",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 129, "w": 24, "h": 12},
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"ai_discovery\" | line_format \"{{.severity}} | scan={{.ai_discovery_scan_id}} signal={{.ai_discovery_signal_id}} state={{.ai_discovery_state}} category={{.ai_discovery_category}} vendor={{.ai_discovery_vendor}} product={{.ai_discovery_product}} | {{__line__}}\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "ai-discovery", "ai-visibility", "agents"],
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — AI Agent Usage & Detection",
+  "uid": "defenseclaw-ai-discovery",
+  "version": 3,
+  "weekStart": ""
+}

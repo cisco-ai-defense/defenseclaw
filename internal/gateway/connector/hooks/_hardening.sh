@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v4
 # Plan B4 / S0.4: shell-side hook hardening helpers.
 #
 # Schema versions:
@@ -16,6 +16,16 @@
 #        compares it against the on-disk file and refuses to downgrade
 #        so an older `defenseclaw-gateway restart` can't silently
 #        clobber a newer install.
+#   v4 — defenseclaw_harden_env now calls
+#        _defenseclaw_sweep_stale_hook_dirs at the end so the legacy
+#        fallback path (DEFENSECLAW_HOME/hook-tmp.$$, used when mktemp
+#        is missing) doesn't accumulate orphaned directories from
+#        crashed / SIGKILLed hooks where the EXIT trap never fires.
+#        The sweep is best-effort; the EXIT-trap cleanup is still the
+#        primary mechanism. Behaviour is otherwise identical to v3
+#        (no helper signatures changed), so a downgrade to v3 only
+#        loses the stale-dir sweep — older hook scripts that source
+#        either version keep working unmodified.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
 # codex-hook.sh, inspect-*.sh) BEFORE any agent-supplied data is touched.
@@ -86,6 +96,42 @@ defenseclaw_harden_env() {
   # don't shift under the agent's locale.
   export LC_ALL=C
   export LANG=C
+
+  # L-3 (v4): best-effort sweep of stale fallback hook-tmp.* dirs
+  # under DEFENSECLAW_HOME. The EXIT-trap cleanup above is still the
+  # primary mechanism, but it's bypassed by SIGKILL / OOM / `kill -9`,
+  # and on systems without mktemp every hook invocation creates
+  # hook-tmp.<PID>. Without this sweep those orphans accumulate
+  # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
+  # planted `find`.
+  _defenseclaw_sweep_stale_hook_dirs
+}
+
+# _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*
+# directories under DEFENSECLAW_HOME that haven't been touched in 60+
+# minutes. The 60-minute floor is the longest the hook itself can run
+# (see VERSION_TIMEOUT_SECONDS / curl --max-time bounds: every hook
+# completes within seconds, so any hook-tmp dir older than an hour is
+# unambiguously orphaned). Best-effort; logs nothing because cleanup
+# runs on a hot path and any noise here would race with the agent's
+# own stdout/stderr. The find invocation is bounded:
+#   - -maxdepth 1: never descend into the dirs we're removing
+#   - -mindepth 1: don't accidentally rm DEFENSECLAW_HOME itself
+#   - -name "hook-tmp.*": only the fallback-prefix pattern
+#   - -mmin +60: older than 60 minutes
+# Failure to find/rm is silently swallowed so a hardened FS (read-only
+# DEFENSECLAW_HOME, missing find binary) can't break the hook.
+_defenseclaw_sweep_stale_hook_dirs() {
+  local root="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  if [ ! -d "$root" ]; then
+    return 0
+  fi
+  if ! command -v find >/dev/null 2>&1; then
+    return 0
+  fi
+  find "$root" -mindepth 1 -maxdepth 1 -name "hook-tmp.*" -type d -mmin +60 \
+    -exec rm -rf -- {} + 2>/dev/null || true
+  return 0
 }
 
 _defenseclaw_hook_cleanup() {

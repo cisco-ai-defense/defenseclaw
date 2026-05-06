@@ -1,0 +1,265 @@
+{
+  "annotations": {"list": []},
+  "description": "Human-in-the-loop dashboard. Two clearly separated sections: chat HILT (openclaw:hilt approval/denial/timeout funnel) and exec approvals (RecordApproval result mix). The verdict-funnel header bar at the top shows verdict_action=confirm — the upstream signal that causes a HITL prompt — so operators can see the full chain at a glance.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "links": [
+    {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                                  "icon": "external link", "targetBlank": false},
+    {"title": "Verdicts",         "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}&${connector:queryparam}&var-action=confirm",                                       "icon": "external link", "targetBlank": false},
+    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}&${connector:queryparam}",                                                        "icon": "external link", "targetBlank": false},
+    {"title": "Connector detail", "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}&${connector:queryparam}",                                                  "icon": "external link", "targetBlank": false},
+    {"title": "Policy decisions", "type": "link", "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",                                                                          "icon": "external link", "targetBlank": false}
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "type": "custom",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "openclaw", "value": "openclaw"},
+          {"text": "codex", "value": "codex"},
+          {"text": "claudecode", "value": "claudecode"},
+          {"text": "zeptoclaw", "value": "zeptoclaw"},
+          {"text": "hermes", "value": "hermes"},
+          {"text": "cursor", "value": "cursor"},
+          {"text": "windsurf", "value": "windsurf"},
+          {"text": "geminicli", "value": "geminicli"},
+          {"text": "copilot", "value": "copilot"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {"type": "row", "title": "Funnel: confirm verdict → HITL outcome", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "stat",
+      "title": "Confirms (1h)",
+      "description": "verdict_action=confirm: the verdict that asks DefenseClaw to step up to a human. Sum of all stages.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\", destination_app=~\"$connector\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
+    },
+    {
+      "type": "stat",
+      "title": "Chat HILT requested (1h)",
+      "description": "approval_requested events emitted by the OpenClaw HILTApprovalManager.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_requested\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"}
+    },
+    {
+      "type": "stat",
+      "title": "Chat HILT approved (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_approved\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "green", "mode": "fixed"}}}
+    },
+    {
+      "type": "stat",
+      "title": "Chat HILT denied (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_denied\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"},
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "red", "mode": "fixed"}}}
+    },
+    {
+      "type": "stat",
+      "title": "Chat HILT timeout (1h)",
+      "description": "Operators didn't respond in time. Sustained timeouts mean operator overload or a runaway agent.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_timeout\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 5}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "HILT unsupported (1h)",
+      "description": "hilt_unsupported — the connector accepted the prompt but the operator surface (chat client) cannot render an approval UI. Often indicates a misconfigured connector.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"hilt_unsupported\"}[1h])) or vector(0)", "refId": "A"}],
+      "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background"},
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+
+    {
+      "type": "bargauge",
+      "title": "Funnel snapshot (1h totals)",
+      "description": "Visual funnel from upstream verdict_action=confirm into chat HILT and exec approval outcomes. The two pipelines are independent — exec approvals are routed via the WebSocket exec-approval pipeline, chat HILT via the OpenClaw approval manager — but both originate from a verdict_action=confirm.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 5, "w": 24, "h": 6},
+      "targets": [
+        {"expr": "sum(increase(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\", destination_app=~\"$connector\"}[1h]))", "legendFormat": "1. confirm verdicts", "refId": "A", "instant": true},
+        {"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_requested\"}[1h]))", "legendFormat": "2a. chat HILT requested", "refId": "B", "instant": true},
+        {"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_approved\"}[1h]))", "legendFormat": "3a. chat HILT approved", "refId": "C", "instant": true},
+        {"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_denied\"}[1h]))", "legendFormat": "3b. chat HILT denied", "refId": "D", "instant": true},
+        {"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_timeout\"}[1h]))", "legendFormat": "3c. chat HILT timeout", "refId": "E", "instant": true},
+        {"expr": "sum(increase(defenseclaw_approval_count_total{result=\"approved\"}[1h]))", "legendFormat": "2b. exec approval approved", "refId": "F", "instant": true},
+        {"expr": "sum(increase(defenseclaw_approval_count_total{result=\"denied\"}[1h]))", "legendFormat": "2c. exec approval denied", "refId": "G", "instant": true}
+      ],
+      "options": {"displayMode": "gradient", "valueMode": "color", "showUnfilled": true, "orientation": "horizontal"}
+    },
+
+    {"type": "row", "title": "Chat HILT (openclaw:hilt)", "gridPos": {"x": 0, "y": 11, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "Chat HILT status mix over time",
+      "description": "Status counters from RecordGuardrailEvaluation(\"openclaw:hilt\", action). Stack shows requested vs approved/denied/timeout/unsupported simultaneously so you can see the operator-response funnel.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (guardrail_action_taken) (rate(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\"}[$__rate_interval]))", "legendFormat": "{{guardrail_action_taken}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Chat HILT approval-vs-denial rate (1h rolling)",
+      "description": "approved / (approved + denied + timeout). Slow drift toward 0 means operators are denying more often — investigate via the verdict-categories panel on Security.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [{"expr": "sum(rate(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_approved\"}[1h])) / clamp_min(sum(rate(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[1h])), 0.0001)", "legendFormat": "approval rate", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}}
+    },
+    {
+      "type": "stat",
+      "title": "Pending requests gauge (5m window)",
+      "description": "Approximation of in-flight requests = requested - (approved + denied + timeout) summed over the last 5 minutes. Sustained positive value means operators are slow to respond. Negative or zero means the queue is clear.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 20, "w": 8, "h": 6},
+      "targets": [{"expr": "clamp_min(sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_requested\"}[5m])) - sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])), 0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 20}]}}},
+      "options": {"colorMode": "background", "graphMode": "area"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Chat HILT mean time-to-decision (Loki, 5m)",
+      "description": "Computed from gateway audit log lines: time from approval_requested to the matching terminal action (approval_approved | approval_denied | approval_timeout) keyed by approval_id. Approximate — Loki can only sample what survives in the index.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 8, "y": 20, "w": 16, "h": 6},
+      "targets": [{"expr": "avg_over_time({service_namespace=~\"defenseclaw|ai-governance\"} |= \"approval_\" | json | __error__=\"\" | unwrap defenseclaw_approval_decision_latency_ms [5m])", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Exec approvals (RecordApproval / WebSocket)", "gridPos": {"x": 0, "y": 26, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "stat",
+      "title": "Exec approvals approved (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 27, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_approval_count_total{result=\"approved\"}[1h])) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "green", "mode": "fixed"}}}
+    },
+    {
+      "type": "stat",
+      "title": "Exec approvals denied (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 4, "y": 27, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_approval_count_total{result=\"denied\"}[1h])) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"color": {"fixedColor": "red", "mode": "fixed"}}}
+    },
+    {
+      "type": "stat",
+      "title": "Exec approvals pending (1h)",
+      "description": "result=pending — request sent to the operator but not yet decided.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 8, "y": 27, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(increase(defenseclaw_approval_count_total{result=\"pending\"}[1h])) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Auto-approval ratio (1h)",
+      "description": "auto=\"true\" share — fraction of approvals granted by policy without operator interaction. Watch for unexpected spikes.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 27, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_approval_count_total{auto=\"true\"}[1h])) / clamp_min(sum(rate(defenseclaw_approval_count_total[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "type": "stat",
+      "title": "Dangerous-command share (1h)",
+      "description": "dangerous=\"true\" share — fraction of approval requests flagged dangerous by the inspector.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 16, "y": 27, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_approval_count_total{dangerous=\"true\"}[1h])) / clamp_min(sum(rate(defenseclaw_approval_count_total[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.20}, {"color": "red", "value": 0.50}]}}}
+    },
+    {
+      "type": "stat",
+      "title": "Denial rate of dangerous (1h)",
+      "description": "Among dangerous=\"true\" approvals, what fraction were denied. Should track upward — operators should reject most dangerous commands.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 20, "y": 27, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_approval_count_total{dangerous=\"true\", result=\"denied\"}[1h])) / clamp_min(sum(rate(defenseclaw_approval_count_total{dangerous=\"true\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Exec approval result mix over time",
+      "description": "Stacked counters for result ∈ {approved, denied, pending, timeout}. The pending bar should drain to zero quickly; sustained pending means operators are not responding.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 31, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (result) (rate(defenseclaw_approval_count_total[$__rate_interval]))", "legendFormat": "{{result}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Auto-approval vs operator decisions",
+      "description": "auto=true (policy automatic) vs auto=false (operator). Big surges in auto without dangerous commands usually mean the policy is too permissive.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 31, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (auto) (rate(defenseclaw_approval_count_total[$__rate_interval]))", "legendFormat": "auto={{auto}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+
+    {"type": "row", "title": "Recent HITL events (Loki)", "gridPos": {"x": 0, "y": 39, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "logs",
+      "title": "Recent chat HILT lifecycle (approval_requested / _approved / _denied / _timeout / hilt_unsupported)",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 40, "w": 24, "h": 10},
+      "timeFrom": "1h",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | action=~\"approval_requested|approval_approved|approval_denied|approval_timeout|hilt_unsupported\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    },
+    {
+      "type": "logs",
+      "title": "Recent exec approval lifecycle (gateway-approval-*)",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 50, "w": 24, "h": 10},
+      "timeFrom": "1h",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | action=~\"gateway-approval-requested|gateway-approval-approved|gateway-approval-granted|gateway-approval-denied|gateway-approval-pending\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "hitl", "human-in-the-loop", "approvals"],
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — HITL (Human-in-the-Loop)",
+  "uid": "defenseclaw-hitl",
+  "version": 1,
+  "weekStart": ""
+}

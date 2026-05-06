@@ -243,6 +243,7 @@ type AIDiscoveryConfig struct {
 	MaxFileBytes             int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
 	EmitOTel                 bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
 	StoreRawLocalPaths       bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	ConfidencePolicyPath     string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -2063,6 +2064,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
 	viper.SetDefault("ai_discovery.emit_otel", true)
 	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
+	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")

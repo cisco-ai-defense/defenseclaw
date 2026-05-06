@@ -113,6 +113,10 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
 def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.setattr(ad.shutil, "which", lambda name: "/usr/local/bin/codex")
+    # M-4: bypass the trusted-prefix file-existence check so we can
+    # exercise the timeout branch with a path the test doesn't have to
+    # actually create on disk.
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
 
     def timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"])
@@ -131,6 +135,10 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     calls = []
     monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/codex")
+    # M-4: this fake binary lives in /opt/bin (not a default trusted
+    # prefix); waive the trust check so the test focuses on subprocess
+    # invocation contract.
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
 
     def fake_run(args, **kwargs):
         calls.append((args, kwargs))
@@ -148,6 +156,73 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert kwargs["timeout"] == 2.0
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
+
+
+# M-4 regression coverage: the version probe MUST refuse to exec a
+# binary that lives outside the canonical install prefixes (an attacker
+# who can prepend a hostile directory to PATH could otherwise have us
+# run their binary as part of a passive discovery scan).
+def test_version_probe_refuses_binary_outside_trusted_prefix(monkeypatch, tmp_path):
+    hostile = tmp_path / "hostile_bin" / "codex"
+    hostile.parent.mkdir(parents=True, exist_ok=True)
+    hostile.write_text("#!/bin/sh\nexit 0\n")
+    hostile.chmod(0o755)
+    monkeypatch.setattr(ad.shutil, "which", lambda name: str(hostile))
+
+    called = []
+
+    def fake_run(*args, **kwargs):
+        called.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="pwned 0.0\n", stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+
+    signal = ad._scan_agent("codex")
+
+    assert called == [], "version probe exec'd a binary outside the trusted prefix"
+    assert signal.binary_path == str(hostile)
+    assert signal.version == ""
+    assert "trusted install prefix" in signal.error.lower()
+
+
+def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
+    # Add tmp_path as a trusted prefix and place a real, non-world-writable
+    # binary inside it.
+    binary = tmp_path / "bin" / "codex"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    binary.parent.chmod(0o755)
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(tmp_path))
+    assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+def test_trust_check_rejects_world_writable_parent(monkeypatch, tmp_path):
+    binary = tmp_path / "bin" / "codex"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text("#!/bin/sh\nexit 0\n")
+    binary.chmod(0o755)
+    # World-writable parent → an attacker who can write here could swap
+    # the binary out from under us at any time.
+    binary.parent.chmod(0o757)
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(tmp_path))
+    assert ad._is_trusted_binary_path(str(binary)) is False
+
+
+def test_trust_check_follows_symlinks(monkeypatch, tmp_path):
+    real = tmp_path / "untrusted" / "real-bin"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+    trusted_dir = tmp_path / "trusted"
+    trusted_dir.mkdir()
+    link = trusted_dir / "codex"
+    link.symlink_to(real)
+    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(trusted_dir))
+    # Symlink is in a trusted prefix, but its target is not — must reject.
+    assert ad._is_trusted_binary_path(str(link)) is False
 
 
 def test_first_installed_precedence():

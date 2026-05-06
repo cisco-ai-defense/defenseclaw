@@ -275,6 +275,27 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/ai-usage", a.handleAIUsage)
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
+	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	// Locations + history endpoints share the /api/v1/ai-usage/components/
+	// prefix; the handlers parse {ecosystem}/{name}/{leaf} themselves.
+	// Net/http's mux uses longest-prefix routing, so registering
+	// /api/v1/ai-usage/components/ catches the deeper paths without
+	// shadowing the bare /components endpoint above.
+	mux.HandleFunc("/api/v1/ai-usage/components/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/locations"):
+			a.handleAIUsageComponentLocations(w, r)
+		case strings.HasSuffix(r.URL.Path, "/history"):
+			a.handleAIUsageComponentHistory(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	// Confidence policy inspection + dry-run validate. Lets the
+	// CLI ship `agent confidence policy {show, default, validate}`
+	// without shelling into the sidecar host.
+	mux.HandleFunc("/api/v1/ai-usage/confidence/policy", a.handleAIUsageConfidencePolicy)
+	mux.HandleFunc("/api/v1/ai-usage/confidence/policy/validate", a.handleAIUsageConfidencePolicyValidate)
 	// Codex agent-turn-complete notifier. The notify-bridge.sh shim
 	// installed by the codex connector POSTs codex's JSON arg here
 	// after every turn (see https://developers.openai.com/codex/
@@ -1918,6 +1939,12 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 }
 
 // metricsMiddleware records HTTP request count and duration via OTel.
+//
+// SECURITY (Plan B5): the path-token OTLP endpoint encodes the master gateway
+// bearer token as a URL segment, so we MUST sanitize r.URL.Path before any
+// telemetry sink sees it — otherwise the token would leak to any backend the
+// gateway exports OTel metrics to. We also prefer r.Pattern when set so
+// parametric routes don't blow up label cardinality.
 func (a *APIServer) metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if a.otel == nil {
@@ -1928,7 +1955,11 @@ func (a *APIServer) metricsMiddleware(next http.Handler) http.Handler {
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r)
 		durationMs := float64(time.Since(t0).Milliseconds())
-		a.otel.RecordHTTPRequest(r.Context(), r.Method, r.URL.Path, sw.status, durationMs)
+		route := r.Pattern
+		if route == "" {
+			route = sanitizeRouteForTelemetry(r.URL.Path)
+		}
+		a.otel.RecordHTTPRequest(r.Context(), r.Method, route, sw.status, durationMs)
 	})
 }
 
@@ -1957,9 +1988,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		route := r.URL.Path
-		if r.Pattern != "" {
-			route = r.Pattern
+		route := r.Pattern
+		if route == "" {
+			// SECURITY (Plan B5): sanitize so the OTLP path-token is never
+			// recorded as a route attribute on auth-failure telemetry.
+			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
 
@@ -2035,9 +2068,10 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		route := r.URL.Path
-		if r.Pattern != "" {
-			route = r.Pattern
+		route := r.Pattern
+		if route == "" {
+			// SECURITY (Plan B5): never let the path-token reach a metric label.
+			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
 
@@ -2052,9 +2086,27 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			}
 		}
 		if _, _, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
+			// SECURITY (Plan B5 follow-up): the X-DefenseClaw-Client header
+			// CANNOT be enforced here because OTLP exporters (Gemini CLI's
+			// settings.json, etc.) cannot set arbitrary HTTP headers — only
+			// path / Content-Type / body. We do however enforce:
+			//   1. Loopback (the conditional above; a non-loopback request
+			//      bypasses this branch entirely and falls into the standard
+			//      CSRF gate).
+			//   2. localhost Origin if the browser supplied one (prevents
+			//      non-loopback DNS rebinding from sneaking through).
+			//   3. An OTLP Content-Type, mirroring the unparameterized
+			//      /v1/logs|metrics|traces gate below, so a browser cannot
+			//      smuggle a CSRF POST with default text/plain or
+			//      application/x-www-form-urlencoded.
 			if origin := r.Header.Get("Origin"); origin != "" && !isLocalhostOrigin(origin) {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthOriginBlocked, "origin_blocked")
 				http.Error(w, `{"error":"non-localhost Origin rejected"}`, http.StatusForbidden)
+				return
+			}
+			if !isOTLPContentType(r.Header.Get("Content-Type")) {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "bad_content_type")
+				http.Error(w, `{"error":"Content-Type must be application/json or application/x-protobuf"}`, http.StatusUnsupportedMediaType)
 				return
 			}
 			next.ServeHTTP(w, r)

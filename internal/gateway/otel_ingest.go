@@ -1230,6 +1230,28 @@ func isOTLPEndpointPath(path string) bool {
 	}
 }
 
+// sanitizeRouteForTelemetry returns a fixed-cardinality route label safe for
+// OTel metrics / span attributes. The path-token OTLP endpoint embeds the
+// gateway bearer token as a URL segment, so we MUST never let that segment
+// reach an exporter (it would leak the master credential to whatever
+// observability backend is configured). For path-token URLs we collapse the
+// token segment to "_token_"; everything else is passed through unchanged.
+//
+// SECURITY: do not bypass this for any route that participates in the OTel
+// pipeline. See parseOTLPPathToken for the URL shape and tokenAuth for the
+// auth contract that justifies allowing the token in the URL at all.
+func sanitizeRouteForTelemetry(path string) string {
+	_, source, ok := parseOTLPPathToken(path)
+	if !ok {
+		return path
+	}
+	// Recover the trailing signal segment (logs|metrics|traces). parseOTLPPathToken
+	// has already validated the shape so the split is safe.
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	signal := parts[len(parts)-1]
+	return "/otlp/" + source + "/_token_/v1/" + signal
+}
+
 // writeOTLPSuccess writes the canonical empty-success OTLP-HTTP
 // response body. We use {} (the JSON form of ExportPartialSuccess
 // with no rejected_log_records) so OTel SDKs treat the request as

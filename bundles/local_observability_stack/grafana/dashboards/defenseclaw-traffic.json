@@ -4,6 +4,20 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
+  "links": [
+    {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}",        "icon": "external link", "targetBlank": false},
+    {"title": "Connector detail", "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}",  "icon": "external link", "targetBlank": false},
+    {"title": "Security",         "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "HITL",             "type": "link", "url": "/d/defenseclaw-hitl?${__url_time_range}",              "icon": "external link", "targetBlank": false},
+    {"title": "Findings",         "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "Policy decisions", "type": "link", "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",  "icon": "external link", "targetBlank": false},
+    {"title": "Agent identity",   "type": "link", "url": "/d/defenseclaw-agent-identity?${__url_time_range}",    "icon": "external link", "targetBlank": false},
+    {"title": "Scanners",         "type": "link", "url": "/d/defenseclaw-scanners?${__url_time_range}",          "icon": "external link", "targetBlank": false},
+    {"title": "AI discovery",     "type": "link", "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",      "icon": "external link", "targetBlank": false},
+    {"title": "Reliability",      "type": "link", "url": "/d/defenseclaw-reliability?${__url_time_range}",       "icon": "external link", "targetBlank": false},
+    {"title": "Runtime",          "type": "link", "url": "/d/defenseclaw-runtime?${__url_time_range}",           "icon": "external link", "targetBlank": false}
+  ],
   "panels": [
     {"type": "row", "title": "HTTP surface", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}},
 

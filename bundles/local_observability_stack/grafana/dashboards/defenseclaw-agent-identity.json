@@ -1,0 +1,248 @@
+{
+  "annotations": {"list": []},
+  "description": "v7 correlation surface: agent.id × agent.instance_id × sidecar.instance_id, identity churn, on-demand agent discovery confidence, continuous AI inventory rollups, and per-connector header-presence rate.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "liveNow": false,
+  "links": [
+    {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                  "icon": "external link", "targetBlank": false},
+    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}&${connector:queryparam}",                                       "icon": "external link", "targetBlank": false},
+    {"title": "Connector detail", "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}&${connector:queryparam}",                                  "icon": "external link", "targetBlank": false},
+    {"title": "AI discovery",     "type": "link", "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",                                                              "icon": "external link", "targetBlank": false}
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "type": "custom",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "openclaw", "value": "openclaw"},
+          {"text": "codex", "value": "codex"},
+          {"text": "claudecode", "value": "claudecode"},
+          {"text": "zeptoclaw", "value": "zeptoclaw"},
+          {"text": "hermes", "value": "hermes"},
+          {"text": "cursor", "value": "cursor"},
+          {"text": "windsurf", "value": "windsurf"},
+          {"text": "geminicli", "value": "geminicli"},
+          {"text": "copilot", "value": "copilot"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {"type": "row", "title": "Identity at a glance", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "stat",
+      "title": "Active agent.id (5m)",
+      "description": "Distinct gen_ai_agent_id values that emitted a token in the last 5 minutes. Should match the number of installed connectors that are actively receiving traffic.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "count(group by (gen_ai_agent_id) (rate(gen_ai_client_token_usage_sum{gen_ai_agent_name=~\"$connector\"}[5m]) > 0)) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Active agent_instance_id (5m, Loki)",
+      "description": "Distinct defenseclaw_agent_instance_id values seen on gateway events in the last 5 minutes. agent_instance_id lives on log attributes (not on metric labels — keeps Prometheus cardinality bounded) so we read it from Loki. A single connector running multiple shells will show >1 here.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "count(sum by (defenseclaw_agent_instance_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_agent_instance_id != \"\" [5m])))", "refId": "A", "instant": true}]
+    },
+    {
+      "type": "stat",
+      "title": "Sidecar instances (5m)",
+      "description": "Distinct sidecar.instance_id values seen on gateway events. Should be exactly 1 unless you are running multiple sidecars on the same host.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "count(sum by (defenseclaw_sidecar_instance_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_sidecar_instance_id != \"\" [5m])))", "refId": "A", "instant": true}]
+    },
+    {
+      "type": "stat",
+      "title": "Discovery runs / hour",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_agent_discovery_runs_total[1h])) * 3600 or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "AI discovery active signals",
+      "description": "Most recent active-signal count from continuous AI visibility scans.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "max(defenseclaw_ai_discovery_active_signals) or vector(0)", "refId": "A"}]
+    },
+    {
+      "type": "stat",
+      "title": "Components observed",
+      "description": "Distinct (ecosystem, name) components scored by the two-axis Bayesian engine.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "count(group by (ecosystem, name) (defenseclaw_ai_components_installs)) or vector(0)", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Per-connector activity (instability indicator)", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "text",
+      "title": "How to read this row",
+      "gridPos": {"x": 0, "y": 6, "w": 24, "h": 2},
+      "options": {"mode": "markdown", "content": "Identity health is a function of *traffic*. The two left panels populate as soon as any connector posts OTLP or fires a hook. The two right panels populate once an LLM call flows through the sidecar — they're sourced from Loki because `gen_ai.agent.id` is a log/event attribute (kept off Prometheus labels to bound cardinality)."}
+    },
+    {
+      "type": "timeseries",
+      "title": "OTLP records by connector (source)",
+      "description": "Inbound OTLP-JSON records grouped by the `source` label (= connector name). Populates as soon as a connector starts posting to /v1/logs|metrics|traces. Empty == no connector wired to the local OTel collector yet.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 8, "w": 12, "h": 7},
+      "targets": [{"expr": "sum by (source) (rate(defenseclaw_otel_ingest_records_total{source=~\"$connector\"}[$__rate_interval]))", "legendFormat": "{{source}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "noValue": "no traffic"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Hook invocations by connector",
+      "description": "Connector hook fires (`defenseclaw_connector_hook_invocations_total`) — `connector` label is the canonical name. Populates as soon as a hook script (Codex, Claude Code, Hermes, Cursor, Windsurf, GeminiCLI, Copilot) fires.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 8, "w": 12, "h": 7},
+      "targets": [{"expr": "sum by (connector) (rate(defenseclaw_connector_hook_invocations_total{connector=~\"$connector\"}[$__rate_interval]))", "legendFormat": "{{connector}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "noValue": "no hook traffic"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Distinct agent.id observed (Loki, by gen_ai.agent.name)",
+      "description": "Loki-derived count of distinct `gen_ai_agent_id` values per connector observed in event logs. Populates only when LLM events flow through the sidecar. Sustained growth on the same `gen_ai_agent_name` = the connector is rotating its agent.id (instability — should be stable per install).",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 15, "w": 12, "h": 7},
+      "targets": [{"expr": "count by (gen_ai_agent_name) (sum by (gen_ai_agent_name, gen_ai_agent_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | gen_ai_agent_id != \"\" [$__interval])))", "legendFormat": "{{gen_ai_agent_name}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"noValue": "no LLM traffic yet"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Header-presence rate (Loki) — events with gen_ai.agent.id set",
+      "description": "Loki-derived: fraction of gateway log events (per connector via `gen_ai_agent_name`) that also carry `gen_ai_agent_id` (i.e. the `X-DefenseClaw-Agent-Id` header was honored end-to-end). 1.0 = healthy, below 1.0 = the connector is dropping identity on some calls.",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 12, "y": 15, "w": 12, "h": 7},
+      "targets": [{"expr": "sum by (gen_ai_agent_name) (rate({service_namespace=~\"defenseclaw|ai-governance\"} | json | gen_ai_agent_id != \"\" [$__interval])) / sum by (gen_ai_agent_name) (rate({service_namespace=~\"defenseclaw|ai-governance\"} | json | gen_ai_agent_name != \"\" [$__interval]))", "legendFormat": "{{gen_ai_agent_name}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "noValue": "no LLM traffic yet", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0.5}, {"color": "green", "value": 0.95}]}}}
+    },
+
+    {"type": "row", "title": "On-demand agent discovery (CLI)", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "text",
+      "title": "How to populate",
+      "gridPos": {"x": 0, "y": 23, "w": 24, "h": 2},
+      "options": {"mode": "markdown", "content": "These panels track on-demand agent discovery runs (POST /agent/discovery). Run **`defenseclaw agent discover`** from any host with the CLI installed and reports will start landing here."}
+    },
+    {
+      "type": "timeseries",
+      "title": "Discovery runs by source × cache_hit × result",
+      "description": "Per-minute rate of accepted on-demand discovery reports, broken down by report `source` (cli/api), whether the CLI hit its local cache, and the gateway's accept verdict (`ok`/`malformed`/`rejected`).",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 25, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (source, cache_hit, result) (rate(defenseclaw_agent_discovery_runs_total[$__rate_interval]))", "legendFormat": "{{source}} · cache={{cache_hit}} · {{result}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "noValue": "no on-demand discoveries yet — run `defenseclaw agent discover`"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Discovery duration p50/p95",
+      "description": "Wall-clock time per on-demand discovery scan, sourced from `defenseclaw_agent_discovery_duration_milliseconds`. Sustained p95 > 1s usually means a connector probe is timing out — cross-reference the errors table.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 25, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(defenseclaw_agent_discovery_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_agent_discovery_duration_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms", "noValue": "no on-demand discoveries yet"}}
+    },
+    {
+      "type": "table",
+      "title": "Per-connector install state (latest)",
+      "description": "1=installed, 0=not installed. Sourced from `defenseclaw_agent_discovery_installed_ratio` (the gauge `defenseclaw.agent.discovery.installed` is unitless, so the OTel-Prometheus exporter appends the conventional `_ratio` suffix). Empty until at least one CLI discovery report lands.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 33, "w": 12, "h": 8},
+      "targets": [{"expr": "max by (connector) (defenseclaw_agent_discovery_installed_ratio)", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "installed (latest)"}}}],
+      "fieldConfig": {"defaults": {"noValue": "no on-demand discoveries yet"}, "overrides": [{"matcher": {"id": "byName", "options": "connector"}, "properties": [{"id": "links", "value": [{"title": "Open Connector Detail", "url": "/d/defenseclaw-connector-detail?${__url_time_range}&var-connector=${__value.text}", "targetBlank": false}]}]}, {"matcher": {"id": "byName", "options": "installed (latest)"}, "properties": [{"id": "mappings", "value": [{"type": "value", "options": {"0": {"text": "not installed", "color": "red"}, "1": {"text": "installed", "color": "green"}}}]}]}]}
+    },
+    {
+      "type": "table",
+      "title": "Discovery errors by connector × reason (1h)",
+      "description": "Bounded error reasons emitted by `defenseclaw.agent.discovery.errors` (e.g. version-probe timeout, parse failure). Empty == clean discovery runs.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 33, "w": 12, "h": 8},
+      "targets": [{"expr": "sort_desc(sum by (connector, reason) (increase(defenseclaw_agent_discovery_errors_total[1h])))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "errors/1h"}}}],
+      "fieldConfig": {"defaults": {"noValue": "no errors recorded"}}
+    },
+
+    {"type": "row", "title": "Continuous AI inventory (sidecar shadow-AI)", "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "timeseries",
+      "title": "AI signals by category",
+      "description": "supported_connector / ai_cli / ai_lib / ai_extension / etc. — the bounded taxonomy continuous AI discovery emits.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 42, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (signal_category) (rate(defenseclaw_ai_discovery_signals_total[$__rate_interval]))", "legendFormat": "{{signal_category}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps"}}
+    },
+    {
+      "type": "table",
+      "title": "Top vendors / products (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 42, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(20, sort_desc(sum by (ai_vendor, ai_product, signal_category) (increase(defenseclaw_ai_discovery_signals_total[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "signals/1h"}}}]
+    },
+
+    {
+      "type": "histogram",
+      "title": "Identity confidence distribution",
+      "description": "Two-axis Bayesian engine identity_score [0,1] across all components. Cluster near 1.0 = strong identity (we're sure what this is). Cluster near 0 = ambiguous components — usually means the detector saw a signal that overlaps with multiple known products.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 50, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (le) (increase(defenseclaw_ai_confidence_identity_score_bucket[1h]))", "format": "heatmap", "refId": "A"}]
+    },
+    {
+      "type": "histogram",
+      "title": "Presence confidence distribution",
+      "description": "presence_score [0,1] — how confident the engine is that the component is currently installed. very_low presence with high identity is the 'SDK was removed but manifest still around' signature.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 50, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (le) (increase(defenseclaw_ai_confidence_presence_score_bucket[1h]))", "format": "heatmap", "refId": "A"}]
+    },
+
+    {"type": "row", "title": "Recent identity events (Loki)", "gridPos": {"x": 0, "y": 58, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "logs",
+      "title": "agent.discovery + ai.discovery events",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 0, "y": 59, "w": 24, "h": 14},
+      "timeFrom": "1h",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | (event_name=~\"defenseclaw.agent.discovery.*|defenseclaw.ai.discovery.*|defenseclaw.ai.confidence.*\")", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
+    }
+  ],
+  "preload": false,
+  "refresh": "15s",
+  "schemaVersion": 39,
+  "tags": ["defenseclaw", "agent-identity", "discovery", "ai-visibility"],
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DefenseClaw — Agent identity",
+  "uid": "defenseclaw-agent-identity",
+  "version": 2,
+  "weekStart": ""
+}

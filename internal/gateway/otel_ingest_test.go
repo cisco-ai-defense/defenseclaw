@@ -706,6 +706,71 @@ func TestOTLPIngest_IsOTLPContentType_AcceptsJSONAndProtobuf(t *testing.T) {
 	}
 }
 
+// TestSanitizeRouteForTelemetry pins the contract that the OTLP
+// path-token segment is replaced with a fixed "_token_" placeholder
+// before reaching telemetry. If this test ever regresses, the master
+// gateway bearer token will leak from /otlp/<source>/<token>/v1/<signal>
+// URLs into whatever OTel backend the sidecar exports to (and into the
+// gateway's own otel.http.* metrics, which then get exported again).
+func TestSanitizeRouteForTelemetry(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "geminicli logs path-token redacted",
+			in:   "/otlp/geminicli/sk-dc-supersecret-master-token/v1/logs",
+			want: "/otlp/geminicli/_token_/v1/logs",
+		},
+		{
+			name: "metrics signal redacted",
+			in:   "/otlp/cursor/abcdef0123456789/v1/metrics",
+			want: "/otlp/cursor/_token_/v1/metrics",
+		},
+		{
+			name: "traces signal redacted",
+			in:   "/otlp/codex/raw.token.value/v1/traces",
+			want: "/otlp/codex/_token_/v1/traces",
+		},
+		{
+			name: "url-escaped token still scrubbed",
+			in:   "/otlp/geminicli/sk%2Ddc%2Dabc/v1/logs",
+			want: "/otlp/geminicli/_token_/v1/logs",
+		},
+		{
+			name: "non-otlp route untouched",
+			in:   "/api/v1/agents/discover",
+			want: "/api/v1/agents/discover",
+		},
+		{
+			name: "shared otlp endpoint untouched (no path-token)",
+			in:   "/v1/logs",
+			want: "/v1/logs",
+		},
+		{
+			name: "malformed otlp path untouched",
+			in:   "/otlp/geminicli/v1/logs",
+			want: "/otlp/geminicli/v1/logs",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeRouteForTelemetry(tc.in)
+			if got != tc.want {
+				t.Fatalf("sanitizeRouteForTelemetry(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			// Defensive: ensure the original token (if any) does not
+			// survive in the output. We use a representative secret
+			// pattern; if the implementation regresses to a substring
+			// match this assertion will still catch the token leak.
+			if strings.Contains(tc.in, "supersecret") && strings.Contains(got, "supersecret") {
+				t.Fatalf("sanitized route still contains the master token: %q", got)
+			}
+		})
+	}
+}
+
 // TestOTLPIngest_SummarizeLogs_CountsResourcesAndRecords pins the
 // audit summary contract. The Details column for /v1/logs events
 // must include the resource count and the leaf record count so a

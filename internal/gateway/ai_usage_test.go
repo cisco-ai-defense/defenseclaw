@@ -17,10 +17,14 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 )
@@ -59,5 +63,84 @@ func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
+	tmp := t.TempDir()
+	home := filepath.Join(tmp, "home")
+	rawPath := filepath.Join(home, ".raw-ai", "config.json")
+	if err := os.MkdirAll(filepath.Dir(rawPath), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(rawPath, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	svc := inventory.NewContinuousDiscoveryServiceWithOptions(
+		inventory.AIDiscoveryOptions{
+			Enabled:                 true,
+			Mode:                    "enhanced",
+			DataDir:                 filepath.Join(tmp, "data"),
+			HomeDir:                 home,
+			ScanRoots:               []string{home},
+			IncludeShellHistory:     false,
+			IncludePackageManifests: false,
+			IncludeEnvVarNames:      false,
+			IncludeNetworkDomains:   false,
+			StoreRawLocalPaths:      true,
+			DisableRedaction:        false,
+			EmitOTel:                false,
+		},
+		[]inventory.AISignature{{
+			ID:          "raw-ai-config",
+			Name:        "Raw AI",
+			Vendor:      "Example",
+			Category:    inventory.SignalWorkspaceArtifact,
+			ConfigPaths: []string{"~/.raw-ai/config.json"},
+		}},
+		nil,
+		nil,
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(ctx) }()
+	scanCtx, scanCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	report, err := svc.ScanNow(scanCtx)
+	scanCancel()
+	if err != nil {
+		t.Fatalf("ScanNow: %v", err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("discovery service did not stop")
+	}
+	var sawRaw bool
+	for _, sig := range report.Signals {
+		for _, ev := range sig.Evidence {
+			if ev.RawPath == rawPath {
+				sawRaw = true
+			}
+		}
+	}
+	if !sawRaw {
+		t.Fatalf("test setup did not retain raw path in local report: %+v", report.Signals)
+	}
+
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+	api.SetAIDiscoveryService(svc)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage", nil)
+	w := httptest.NewRecorder()
+
+	api.handleAIUsage(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), rawPath) || strings.Contains(w.Body.String(), `"raw_path"`) {
+		t.Fatalf("usage API leaked raw path with redaction enabled: %s", w.Body.String())
 	}
 }

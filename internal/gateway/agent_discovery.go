@@ -74,13 +74,27 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := a.validateAgentDiscoveryReport(&report); err != nil {
+	dropped, err := a.validateAgentDiscoveryReport(&report)
+	if err != nil {
 		if a.otel != nil {
 			a.otel.RecordAgentDiscovery(r.Context(), discoverySourceOrUnknown(report.Source), report.CacheHit, "rejected", float64(report.DurationMs), len(report.Agents), 0)
 			a.otel.EmitAgentDiscoverySummaryLog(r.Context(), discoverySourceOrUnknown(report.Source), report.CacheHit, "rejected", float64(report.DurationMs), len(report.Agents), 0)
 		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	// H-4: a CLI rolled out ahead of the sidecar may report a connector
+	// the sidecar doesn't know about yet. The previous behaviour rejected
+	// the entire report (HTTP 400), which made staged rollouts brittle —
+	// every other agent in the same batch was discarded too. We now drop
+	// only the unknown entries (validateAgentDiscoveryReport stripped
+	// them and returned the names) and continue, while recording an OTel
+	// counter so the silent drop is visible to operators triaging
+	// "why isn't agent X showing up?".
+	for _, name := range dropped {
+		if a.otel != nil {
+			a.otel.RecordAgentDiscoveryError(r.Context(), name, "unknown_connector")
+		}
 	}
 
 	source := discoverySourceOrUnknown(report.Source)
@@ -118,40 +132,64 @@ func (a *APIServer) handleAgentDiscovery(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) error {
+// validateAgentDiscoveryReport sanitizes the report in place and returns
+// the names of connectors that were dropped because the sidecar's
+// connector registry doesn't know them. Caller is expected to record
+// the drops via OTel; the report itself only retains known, valid
+// signals after this returns.
+//
+// Returning a (dropped, err) pair lets us preserve the existing
+// "wrong shape ⇒ HTTP 400" behaviour for malformed signals while
+// gracefully degrading the unknown-connector path to "drop and
+// continue" — see handleAgentDiscovery's H-4 callsite for rationale.
+func (a *APIServer) validateAgentDiscoveryReport(report *agentDiscoveryReport) ([]string, error) {
 	if report == nil {
-		return fmt.Errorf("missing discovery report")
+		return nil, fmt.Errorf("missing discovery report")
 	}
 	if strings.TrimSpace(report.ScannedAt) == "" || len(report.ScannedAt) > 64 {
-		return fmt.Errorf("scanned_at is required")
+		return nil, fmt.Errorf("scanned_at is required")
 	}
 	if report.DurationMs < 0 {
-		return fmt.Errorf("duration_ms must be non-negative")
+		return nil, fmt.Errorf("duration_ms must be non-negative")
 	}
 	if len(report.Agents) == 0 {
-		return fmt.Errorf("agents is required")
+		return nil, fmt.Errorf("agents is required")
 	}
 	if len(report.Agents) > maxAgentDiscoveryAgents {
-		return fmt.Errorf("too many agents")
+		return nil, fmt.Errorf("too many agents")
 	}
 
 	reg := a.connectorRegistry
 	if reg == nil {
 		reg = connector.NewDefaultRegistry()
 	}
+	var dropped []string
 	for name, signal := range report.Agents {
-		name = strings.TrimSpace(strings.ToLower(name))
-		if name == "" {
-			return fmt.Errorf("connector name is required")
+		normalized := strings.TrimSpace(strings.ToLower(name))
+		if normalized == "" {
+			return nil, fmt.Errorf("connector name is required")
 		}
-		if _, ok := reg.Get(name); !ok {
-			return fmt.Errorf("unknown connector %q", name)
+		if _, ok := reg.Get(normalized); !ok {
+			// Forward-compat: drop unknown entries instead of rejecting
+			// the whole batch. Caller surfaces this as an OTel signal
+			// so the drop isn't invisible.
+			dropped = append(dropped, normalized)
+			delete(report.Agents, name)
+			continue
 		}
 		if err := validateDiscoverySignal(signal); err != nil {
-			return fmt.Errorf("%s: %w", name, err)
+			return nil, fmt.Errorf("%s: %w", normalized, err)
 		}
 	}
-	return nil
+	if len(report.Agents) == 0 {
+		// Every entry was unknown — preserve the historical 400 so a
+		// CLI that ONLY reports unknown connectors gets a clear error
+		// (otherwise the operator-side telemetry shows agent_discovery=ok
+		// while installed=0, which is misleading). dropped is also
+		// returned so the caller can emit the per-name drop counters.
+		return dropped, fmt.Errorf("no known connectors in report")
+	}
+	return dropped, nil
 }
 
 func validateDiscoverySignal(signal agentDiscoverySignal) error {

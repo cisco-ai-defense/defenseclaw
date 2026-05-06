@@ -749,32 +749,97 @@ def _resolve_splunk_bridge_bundle():
     return bundled_splunk_bridge_dir()
 
 
+_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = ("bin", "run.sh")
+
+
 def _seed_local_observability_stack(data_dir: str) -> None:
     """Copy bundled Prom/Loki/Tempo/Grafana stack into ~/.defenseclaw/observability-stack/.
 
     Mirrors _seed_splunk_bridge so ``defenseclaw setup
     local-observability`` can drive a user-editable copy of the stack
     (dashboards, alert rules, prom config) without requiring the
-    operator to unpack the wheel. Preserves an existing seeded copy so
-    operator edits survive subsequent ``init`` runs.
+    operator to unpack the wheel.
+
+    On a fresh data dir we copy the entire bundle. On a re-init, we
+    *preserve* operator-editable config (dashboards, prom rules,
+    compose overrides, OTel collector config) but *refresh* the
+    maintainer-owned bridge entry points (``bin/`` and ``run.sh``) so
+    bug fixes shipped in the wheel actually reach previously-seeded
+    installs. Without this, a stale seeded bridge (e.g. one missing
+    the bash 3.2 ``set -u`` empty-array guard on macOS) would keep
+    crashing even after ``pip install --upgrade``.
     """
     bundled = bundled_local_observability_dir()
     if not bundled.is_dir():
         return
 
     dest = os.path.join(data_dir, "observability-stack")
-    if os.path.isdir(dest):
-        click.echo(f"  Observability stack: preserved existing ({dest})")
+    if not os.path.isdir(dest):
+        shutil.copytree(str(bundled), dest)
+        _ensure_observability_stack_executables(dest)
+        click.echo(f"  Observability stack: seeded in {dest}")
         return
 
-    shutil.copytree(str(bundled), dest)
-    bridge_bin = os.path.join(dest, "bin", "openclaw-observability-bridge")
-    if os.path.isfile(bridge_bin):
-        os.chmod(bridge_bin, 0o755)
-    shim = os.path.join(dest, "run.sh")
-    if os.path.isfile(shim):
-        os.chmod(shim, 0o755)
-    click.echo(f"  Observability stack: seeded in {dest}")
+    refreshed = _refresh_observability_stack_scripts(bundled, dest)
+    _ensure_observability_stack_executables(dest)
+    if refreshed:
+        joined = ", ".join(sorted(refreshed))
+        click.echo(
+            f"  Observability stack: preserved existing ({dest}); refreshed {joined}"
+        )
+    else:
+        click.echo(f"  Observability stack: preserved existing ({dest})")
+
+
+def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
+    """Overwrite maintainer-owned scripts in ``dest`` from ``bundled``.
+
+    Only files under :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
+    refreshed — these are pure code (the ``openclaw-observability-bridge``
+    bash entry point and its ``run.sh`` shim) and have no operator
+    config baked in, so unconditional overwrite is safe.
+
+    Returns the list of relative paths that were actually rewritten so
+    the caller can surface a clear status line. Best-effort: missing
+    sources are skipped silently and copy failures are surfaced as
+    warnings rather than failing ``init`` outright.
+    """
+    refreshed: list[str] = []
+    for rel in _OBSERVABILITY_STACK_REFRESH_PATHS:
+        src = bundled / rel
+        if not src.exists():
+            continue
+        target = os.path.join(dest, rel)
+        try:
+            if src.is_dir():
+                if os.path.isdir(target):
+                    shutil.rmtree(target)
+                shutil.copytree(str(src), target)
+            else:
+                os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+                shutil.copy2(str(src), target)
+        except OSError as exc:
+            click.echo(
+                f"  warning: could not refresh observability stack {rel}: {exc}",
+                err=True,
+            )
+            continue
+        refreshed.append(rel)
+    return refreshed
+
+
+def _ensure_observability_stack_executables(dest: str) -> None:
+    """Make sure the bridge entry points are executable after a copy."""
+    for rel in (
+        os.path.join("bin", "openclaw-observability-bridge"),
+        "run.sh",
+    ):
+        path = os.path.join(dest, rel)
+        if os.path.isfile(path):
+            try:
+                os.chmod(path, 0o755)
+            except OSError:
+                pass
 
 
 def _install_scanners(cfg, logger, skip: bool) -> None:

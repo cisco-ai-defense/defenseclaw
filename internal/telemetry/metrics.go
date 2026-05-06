@@ -201,6 +201,20 @@ type metricsSet struct {
 	aiDiscoveryFilesScanned     metric.Int64Counter
 	aiDiscoveryDedupeSuppressed metric.Int64Counter
 
+	// Component-level confidence emissions, derived from the
+	// two-axis Bayesian engine. These are scoped per (ecosystem,
+	// name) and are deliberately separate from the per-signal
+	// counters above so dashboards can show "what does the
+	// gateway think it observed?" alongside "how raw signals
+	// fanned in?". Cardinality is bounded by the discovered
+	// component set (typically tens to low hundreds per host),
+	// not by signal volume.
+	aiComponentObservations metric.Int64Counter
+	aiComponentInstalls     metric.Int64Gauge
+	aiComponentWorkspaces   metric.Int64Gauge
+	aiConfidenceIdentity    metric.Float64Histogram
+	aiConfidencePresence    metric.Float64Histogram
+
 	// Codex notify webhook (agent-turn-complete et al.). type is
 	// the sanitized notify type ("agent-turn-complete", "unknown",
 	// "malformed"); status is the codex-supplied status string when
@@ -959,6 +973,60 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	ms.aiDiscoveryDedupeSuppressed, err = m.Int64Counter("defenseclaw.ai.discovery.dedupe_suppressed",
 		metric.WithUnit("{signal}"),
 		metric.WithDescription("Duplicate AI discovery signals suppressed within a scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// Component-level instruments. We use bounded labels
+	// (ecosystem, name, identity_band, presence_band) so the
+	// cardinality stays proportional to the discovered component
+	// set, not to scan or signal volume. Score histograms expose
+	// the calibrated confidence so operators can alert on drift
+	// (e.g. "presence_band==very_low for >24h means the SDK was
+	// removed without a redeploy").
+	ms.aiComponentObservations, err = m.Int64Counter("defenseclaw.ai.components.observations",
+		metric.WithUnit("{observation}"),
+		metric.WithDescription("Per-(ecosystem,name) confidence emissions; one increment per scan that produced a component rollup."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiComponentInstalls, err = m.Int64Gauge("defenseclaw.ai.components.installs",
+		metric.WithUnit("{install}"),
+		metric.WithDescription("Distinct install evidences per component as of the last scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiComponentWorkspaces, err = m.Int64Gauge("defenseclaw.ai.components.workspaces",
+		metric.WithUnit("{workspace}"),
+		metric.WithDescription("Distinct workspaces a component appears in as of the last scan."),
+	)
+	if err != nil {
+		return nil, err
+	}
+	// Bucket boundaries explicitly tuned for [0,1] confidence scores.
+	// Without this override, the OTel SDK falls back to the default
+	// latency-shaped boundaries (0, 5, 10, 25, …, 10000, +Inf), which
+	// puts every confidence sample in the le=5.0 bucket and makes
+	// `histogram_quantile(...)` flat-line at zero on dashboards. The
+	// granularity below mirrors the bands the engine itself surfaces
+	// (very_low / low / medium / high / very_high) so band thresholds
+	// stay queryable directly off the bucket counts.
+	confidenceBuckets := []float64{0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.0}
+	ms.aiConfidenceIdentity, err = m.Float64Histogram("defenseclaw.ai.confidence.identity_score",
+		metric.WithUnit("1"),
+		metric.WithDescription("Two-axis Bayesian engine identity score in [0,1] per component, per scan."),
+		metric.WithExplicitBucketBoundaries(confidenceBuckets...),
+	)
+	if err != nil {
+		return nil, err
+	}
+	ms.aiConfidencePresence, err = m.Float64Histogram("defenseclaw.ai.confidence.presence_score",
+		metric.WithUnit("1"),
+		metric.WithDescription("Two-axis Bayesian engine presence score in [0,1] per component, per scan."),
+		metric.WithExplicitBucketBoundaries(confidenceBuckets...),
 	)
 	if err != nil {
 		return nil, err
@@ -2329,6 +2397,135 @@ func (p *Provider) EmitAIDiscoverySignalLog(ctx context.Context, category, vendo
 		otellog.String("confidence", confidenceBucket(confidence)),
 	)
 	p.logger.Emit(ctx, rec)
+}
+
+// AIComponentConfidenceAttrs is the bounded-label payload for one
+// component-level confidence emission. We pass it as a struct so
+// adding fields (e.g. policy_version) doesn't break call sites or
+// silently swap argument order. Identity / presence bands are the
+// operator-facing labels (very_high|high|medium|low|very_low) the
+// engine produced; ecosystem and name are the dedupe key the
+// /components endpoint groups on.
+type AIComponentConfidenceAttrs struct {
+	Ecosystem      string
+	Name           string
+	Framework      string
+	IdentityScore  float64
+	IdentityBand   string
+	PresenceScore  float64
+	PresenceBand   string
+	InstallCount   int
+	WorkspaceCount int
+	PolicyVersion  int
+	DetectorCount  int
+}
+
+// RecordAIComponentConfidence emits one bounded metric burst per
+// component the gateway scored in the latest scan: a counter so
+// "how many scans saw openai?" is queryable, two gauges for
+// install / workspace fan-out, and two histograms for the
+// identity/presence score distribution. Cardinality is bounded
+// by the discovered component set (ecosystem + name only — bands
+// are sub-attributes), which is independent of signal volume.
+func (p *Provider) RecordAIComponentConfidence(ctx context.Context, attrs AIComponentConfidenceAttrs) {
+	if p == nil || !p.Enabled() || p.metrics == nil {
+		return
+	}
+	ecosystem := normalizeTelemetryLabel(attrs.Ecosystem, "unknown")
+	name := normalizeTelemetryLabel(attrs.Name, "unknown")
+	framework := normalizeTelemetryLabel(attrs.Framework, "unknown")
+	identityBand := normalizeTelemetryLabel(attrs.IdentityBand, "unknown")
+	presenceBand := normalizeTelemetryLabel(attrs.PresenceBand, "unknown")
+	identity := clampUnitInterval(attrs.IdentityScore)
+	presence := clampUnitInterval(attrs.PresenceScore)
+
+	// Counter labels carry the bands so an operator can graph
+	// "components in very_low presence band over time" without
+	// pulling histogram percentiles. The gauge labels deliberately
+	// drop the band so the value reflects the latest scan even
+	// when the band changes between scans.
+	counterAttrs := metric.WithAttributes(
+		attribute.String("ecosystem", ecosystem),
+		attribute.String("name", name),
+		attribute.String("identity_band", identityBand),
+		attribute.String("presence_band", presenceBand),
+	)
+	gaugeAttrs := metric.WithAttributes(
+		attribute.String("ecosystem", ecosystem),
+		attribute.String("name", name),
+	)
+	histogramAttrs := metric.WithAttributes(
+		attribute.String("ecosystem", ecosystem),
+		attribute.String("name", name),
+		attribute.String("framework", framework),
+	)
+
+	p.metrics.aiComponentObservations.Add(ctx, 1, counterAttrs)
+	p.metrics.aiComponentInstalls.Record(ctx, int64(attrs.InstallCount), gaugeAttrs)
+	p.metrics.aiComponentWorkspaces.Record(ctx, int64(attrs.WorkspaceCount), gaugeAttrs)
+	p.metrics.aiConfidenceIdentity.Record(ctx, identity, histogramAttrs)
+	p.metrics.aiConfidencePresence.Record(ctx, presence, histogramAttrs)
+}
+
+// EmitAIComponentConfidenceLog records one structured log per
+// scored component so SIEMs that only ingest the OTel logs stream
+// (no metrics pipeline) still get the full identity/presence
+// breakdown. Severity escalates to WARN when identity is high but
+// presence dropped to very_low — the signature operators alert on
+// for "the SDK was removed but the manifest is still around".
+func (p *Provider) EmitAIComponentConfidenceLog(ctx context.Context, attrs AIComponentConfidenceAttrs) {
+	if p == nil || !p.LogsEnabled() {
+		return
+	}
+	identity := clampUnitInterval(attrs.IdentityScore)
+	presence := clampUnitInterval(attrs.PresenceScore)
+	identityBand := normalizeTelemetryLabel(attrs.IdentityBand, "unknown")
+	presenceBand := normalizeTelemetryLabel(attrs.PresenceBand, "unknown")
+	rec := otellog.Record{}
+	now := time.Now()
+	rec.SetTimestamp(now)
+	rec.SetObservedTimestamp(now)
+	if identity >= 0.7 && presence <= 0.2 {
+		rec.SetSeverity(otellog.SeverityWarn)
+		rec.SetSeverityText("WARN")
+	} else {
+		rec.SetSeverity(otellog.SeverityInfo)
+		rec.SetSeverityText("INFO")
+	}
+	rec.SetBody(otellog.StringValue("AI component confidence"))
+	rec.AddAttributes(
+		otellog.String("event.name", "defenseclaw.ai.confidence.component"),
+		otellog.String("event.domain", "defenseclaw.ai_visibility"),
+		otellog.String("ai.component.ecosystem", normalizeTelemetryLabel(attrs.Ecosystem, "unknown")),
+		otellog.String("ai.component.name", normalizeTelemetryLabel(attrs.Name, "unknown")),
+		otellog.String("ai.component.framework", normalizeTelemetryLabel(attrs.Framework, "unknown")),
+		otellog.Float64("ai.confidence.identity_score", identity),
+		otellog.String("ai.confidence.identity_band", identityBand),
+		otellog.Float64("ai.confidence.presence_score", presence),
+		otellog.String("ai.confidence.presence_band", presenceBand),
+		otellog.Int64("ai.component.install_count", int64(attrs.InstallCount)),
+		otellog.Int64("ai.component.workspace_count", int64(attrs.WorkspaceCount)),
+		otellog.Int64("ai.component.detector_count", int64(attrs.DetectorCount)),
+		otellog.Int64("ai.confidence.policy_version", int64(attrs.PolicyVersion)),
+	)
+	p.logger.Emit(ctx, rec)
+}
+
+// clampUnitInterval normalizes the score histogram inputs so a
+// rounding error in the engine (e.g. 1.0000000002) doesn't slip
+// past the OTel histogram and skew the +Inf bucket. The engine
+// already targets [0,1] but defense in depth here is cheap.
+func clampUnitInterval(v float64) float64 {
+	if v != v { // NaN — engine never produces this but guard anyway.
+		return 0
+	}
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
 }
 
 func confidenceBucket(confidence float64) string {

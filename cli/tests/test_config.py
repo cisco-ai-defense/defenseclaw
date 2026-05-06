@@ -165,11 +165,21 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertTrue(cfg.ai_discovery.enabled)
         self.assertEqual(cfg.ai_discovery.mode, "enhanced")
         self.assertTrue(cfg.ai_discovery.include_shell_history)
+        self.assertEqual(
+            cfg.ai_discovery.confidence_policy_path,
+            os.path.join(cfg.data_dir, "confidence.yaml"),
+        )
 
     def test_disabled_default_is_omitted_on_save_round_trip(self):
         cfg = Config(data_dir=tempfile.mkdtemp(), ai_discovery=AIDiscoveryConfig(enabled=False))
         data = config_mod._config_to_dict(cfg)
         self.assertNotIn("ai_discovery", data)
+
+    def test_merge_preserves_confidence_policy_path(self):
+        cfg = config_mod._merge_ai_discovery(
+            {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
+        )
+        self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
 
 
 class TestMergeFunctions(unittest.TestCase):

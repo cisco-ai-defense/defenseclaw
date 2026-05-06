@@ -824,6 +824,127 @@ class TestInitSeedsSplunkBridge(unittest.TestCase):
         self.assertTrue(os.access(seeded_bin, os.X_OK))
 
 
+class TestSeedLocalObservabilityStack(unittest.TestCase):
+    """Cover the seed/refresh contract for the local observability bundle.
+
+    The fresh-seed path is an existing-behaviour check; the
+    refresh-on-stale-bridge path is the regression test for the bash
+    3.2 ``set -u`` empty-array crash that hit operators with a
+    pre-fix seeded copy in ``~/.defenseclaw/observability-stack/``.
+    """
+
+    _OLD_BRIDGE = "#!/usr/bin/env bash\n# stale bridge (pre-fix)\nexit 1\n"
+    _NEW_BRIDGE = (
+        "#!/usr/bin/env bash\n# refreshed bridge (post-fix)\n"
+        "PASSTHROUGH=()\necho \"${PASSTHROUGH[@]+\\\"${PASSTHROUGH[@]}\\\"}\"\n"
+    )
+    _OLD_SHIM = "#!/usr/bin/env bash\n# stale run.sh (pre-fix)\nexit 1\n"
+    _NEW_SHIM = "#!/usr/bin/env bash\n# refreshed run.sh\nexec ./bin/openclaw-observability-bridge \"$@\"\n"
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-obs-")
+        self.bundle_dir = tempfile.mkdtemp(prefix="dclaw-bundle-obs-")
+
+        bin_dir = os.path.join(self.bundle_dir, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        with open(
+            os.path.join(bin_dir, "openclaw-observability-bridge"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write(self._NEW_BRIDGE)
+
+        with open(os.path.join(self.bundle_dir, "run.sh"), "w", encoding="utf-8") as handle:
+            handle.write(self._NEW_SHIM)
+
+        dashboards_dir = os.path.join(self.bundle_dir, "grafana", "dashboards")
+        os.makedirs(dashboards_dir, exist_ok=True)
+        with open(
+            os.path.join(dashboards_dir, "defenseclaw-overview.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            handle.write('{"title": "bundled"}\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        shutil.rmtree(self.bundle_dir, ignore_errors=True)
+
+    @patch("defenseclaw.commands.cmd_init.bundled_local_observability_dir")
+    def test_seeds_when_absent(self, mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_local_observability_stack
+
+        mock_bundled.return_value = Path(self.bundle_dir)
+        _seed_local_observability_stack(self.tmp_dir)
+
+        seeded_bin = os.path.join(
+            self.tmp_dir,
+            "observability-stack",
+            "bin",
+            "openclaw-observability-bridge",
+        )
+        self.assertTrue(os.path.isfile(seeded_bin))
+        self.assertTrue(os.access(seeded_bin, os.X_OK))
+        with open(seeded_bin, encoding="utf-8") as handle:
+            self.assertIn("refreshed bridge", handle.read())
+
+        seeded_shim = os.path.join(self.tmp_dir, "observability-stack", "run.sh")
+        self.assertTrue(os.access(seeded_shim, os.X_OK))
+
+    @patch("defenseclaw.commands.cmd_init.bundled_local_observability_dir")
+    def test_refreshes_stale_bridge_on_reinit(self, mock_bundled):
+        """A pre-existing seeded copy with a stale bridge should be
+        refreshed so wheel-shipped bug fixes (e.g. the bash 3.2 empty
+        array guard) propagate to operators who already ran ``init``.
+        """
+        from defenseclaw.commands.cmd_init import _seed_local_observability_stack
+
+        mock_bundled.return_value = Path(self.bundle_dir)
+
+        dest = os.path.join(self.tmp_dir, "observability-stack")
+        os.makedirs(os.path.join(dest, "bin"), exist_ok=True)
+        stale_bridge = os.path.join(dest, "bin", "openclaw-observability-bridge")
+        with open(stale_bridge, "w", encoding="utf-8") as handle:
+            handle.write(self._OLD_BRIDGE)
+        os.chmod(stale_bridge, 0o644)
+
+        stale_shim = os.path.join(dest, "run.sh")
+        with open(stale_shim, "w", encoding="utf-8") as handle:
+            handle.write(self._OLD_SHIM)
+        os.chmod(stale_shim, 0o644)
+
+        operator_dashboards = os.path.join(dest, "grafana", "dashboards")
+        os.makedirs(operator_dashboards, exist_ok=True)
+        operator_dashboard = os.path.join(operator_dashboards, "defenseclaw-overview.json")
+        with open(operator_dashboard, "w", encoding="utf-8") as handle:
+            handle.write('{"title": "operator-edited"}\n')
+
+        _seed_local_observability_stack(self.tmp_dir)
+
+        with open(stale_bridge, encoding="utf-8") as handle:
+            content = handle.read()
+        self.assertIn("refreshed bridge", content)
+        self.assertNotIn("stale bridge", content)
+        self.assertTrue(os.access(stale_bridge, os.X_OK))
+
+        with open(stale_shim, encoding="utf-8") as handle:
+            self.assertIn("refreshed run.sh", handle.read())
+        self.assertTrue(os.access(stale_shim, os.X_OK))
+
+        with open(operator_dashboard, encoding="utf-8") as handle:
+            self.assertIn("operator-edited", handle.read())
+
+    @patch("defenseclaw.commands.cmd_init.bundled_local_observability_dir")
+    def test_missing_bundle_is_noop(self, mock_bundled):
+        from defenseclaw.commands.cmd_init import _seed_local_observability_stack
+
+        bogus = Path(self.bundle_dir) / "does-not-exist"
+        mock_bundled.return_value = bogus
+        _seed_local_observability_stack(self.tmp_dir)
+
+        self.assertFalse(os.path.isdir(os.path.join(self.tmp_dir, "observability-stack")))
+
+
 class TestSeedGuardrailProfiles(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-guardrail-")

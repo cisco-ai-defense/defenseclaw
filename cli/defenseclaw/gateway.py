@@ -32,6 +32,7 @@ from __future__ import annotations
 import os
 import shutil
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -150,6 +151,105 @@ class OrchestratorClient:
 
     def scan_ai_usage(self) -> dict[str, Any]:
         resp = self._session.post(f"{self.base_url}/api/v1/ai-usage/scan", json={}, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage_components(self) -> dict[str, Any]:
+        """Fetch the deduped components rollup (one row per
+        (ecosystem, name, version)).
+
+        The sidecar exposes this view at ``GET /api/v1/ai-usage/components``;
+        it folds across every detector + workspace so the CLI can render
+        a true "what SDKs and versions are on this fleet" table without
+        re-implementing the join.
+        """
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage/components", timeout=self.timeout
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage_component_locations(self, ecosystem: str, name: str) -> dict[str, Any]:
+        """Fetch the locations detail for one component (the rows
+        from ``ai_signals`` for the latest scan).
+
+        Powered by ``GET /api/v1/ai-usage/components/{ecosystem}/{name}/locations``;
+        when ``privacy.disable_redaction`` and
+        ``ai_discovery.store_raw_local_paths`` are both set on the
+        sidecar, each row may include a ``raw_path`` field, otherwise
+        only basenames + path hashes are returned.
+
+        ``ecosystem`` and ``name`` are URL-encoded with ``safe=""``
+        so any character (including ``/``, ``?``, ``#``, ``%``,
+        whitespace) round-trips intact through the path. The gateway
+        parses the path via ``r.URL.EscapedPath()`` and
+        ``url.PathUnescape``s each segment, so a percent-encoded
+        slash inside a scoped npm name like ``@anthropic-ai/sdk``
+        survives the split and the lookup hits the right row.
+        """
+        url = (
+            f"{self.base_url}/api/v1/ai-usage/components/"
+            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/locations"
+        )
+        resp = self._session.get(url, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage_component_history(self, ecosystem: str, name: str) -> dict[str, Any]:
+        """Fetch up to 50 confidence snapshots for one component
+        (most-recent-first) so ``agent components history`` can render
+        the trend without recomputing scores.
+
+        ``ecosystem`` and ``name`` are URL-encoded with ``safe=""``
+        for the same reason as ``ai_usage_component_locations``.
+        """
+        url = (
+            f"{self.base_url}/api/v1/ai-usage/components/"
+            f"{quote(ecosystem, safe='')}/{quote(name, safe='')}/history"
+        )
+        resp = self._session.get(url, timeout=self.timeout)
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage_confidence_policy(self, *, source: str = "merged") -> dict[str, Any]:
+        """Fetch the active confidence policy.
+
+        ``source`` is forwarded as a query parameter. ``merged``
+        returns whatever the engine currently uses (default + any
+        operator override deep-merged on top); ``default`` returns
+        the embedded baseline so an operator can diff against their
+        override.
+        """
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage/confidence/policy",
+            params={"source": source},
+            timeout=self.timeout,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def ai_usage_validate_confidence_policy(self, yaml_text: str) -> dict[str, Any]:
+        """Dry-run a candidate policy YAML against the sidecar's
+        loader + validator without writing anything to disk.
+
+        The wire format is a JSON envelope ``{"yaml": "<raw YAML>"}``
+        (not a raw YAML body) because the sidecar's CSRF gate rejects
+        every non-OTLP POST that doesn't advertise
+        ``application/json``. See the matching server comment in
+        ``handleAIUsageConfidencePolicyValidate`` for context.
+
+        Always returns 200 OK; the response carries a ``valid``
+        boolean and (on failure) an ``error`` message so the CLI can
+        exit non-zero with the same diagnostic the loader would
+        print.
+        """
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/ai-usage/confidence/policy/validate",
+            json={"yaml": yaml_text},
+            timeout=self.timeout,
+        )
+        if resp.status_code == 413:
+            return {"valid": False, "error": "policy file exceeds size limit"}
         resp.raise_for_status()
         return resp.json()
 

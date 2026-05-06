@@ -53,13 +53,21 @@ const (
 	// tab navigation. Re-ordering would silently change muscle
 	// memory for every operator — don't do it without a migration.
 	PanelTools
+	// PanelAIVisibility shares the no-numeric-shortcut convention
+	// PanelTools established. We deliberately insert it BEFORE
+	// PanelSetup (which must keep mapping to '0') and after
+	// PanelTools so the digit-key bindings 1–9 and 0 are all
+	// preserved. Reach it with the dedicated 'V' shortcut, the
+	// command palette, or tab navigation.
+	PanelAIVisibility
 	PanelSetup
 	panelCount
 )
 
 var panelNames = [panelCount]string{
 	"Overview", "Alerts", "Skills", "MCPs", "Plugins",
-	"Inventory", "Policy", "Logs", "Audit", "Activity", "Tools", "Setup",
+	"Inventory", "Policy", "Logs", "Audit", "Activity", "Tools",
+	"AI Visibility", "Setup",
 }
 
 const refreshInterval = 5 * time.Second
@@ -137,6 +145,7 @@ type Model struct {
 	auditHist AuditPanel
 	activity  ActivityPanel
 	tools     ToolsPanel
+	aiVisib   AIVisibilityPanel
 	setup     SetupPanel
 	firstRun  FirstRunPanel
 
@@ -230,6 +239,7 @@ func New(deps Deps) Model {
 		auditHist:      NewAuditPanel(theme, deps.Store),
 		activity:       NewActivityPanel(theme, dataDir),
 		tools:          NewToolsPanel(deps.Store),
+		aiVisib:        NewAIVisibilityPanel(),
 		setup:          NewSetupPanel(theme, deps.Config, executor),
 		firstRun:       NewFirstRunPanel(theme, deps.FirstRun),
 		detail:         NewDetailModal(),
@@ -276,6 +286,11 @@ func (m Model) Init() tea.Cmd {
 		// the Overview panel can render status immediately
 		// without waiting for the user to manually re-run doctor.
 		m.loadDoctorCacheCmd(),
+		// Prime the Overview's "DISCOVERED AI AGENTS" box on boot
+		// so first-paint matches what the next slow-refresh tick
+		// would show — without this, the box would remain empty
+		// for the first slowRefreshInterval (30s) on every launch.
+		m.pollAIUsage(),
 	)
 }
 
@@ -378,10 +393,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toasts.Tick()
 		cmds = append(cmds, tickRefresh())
 		cmds = append(cmds, m.pollHealth())
+		// When the AI Visibility tab is foregrounded, poll the
+		// sidecar on the FAST tick (5s) too -- the discovery scan
+		// itself only re-runs every ai_discovery.scan_interval_min
+		// minutes, but the GET is cheap and an operator with the
+		// tab open expects to see process / state changes promptly
+		// (e.g. a Codex session starting / stopping). We keep the
+		// 30s slow tick for everyone ELSE so the gateway isn't
+		// hammered when the panel isn't visible.
+		if m.activePanel == PanelAIVisibility {
+			cmds = append(cmds, m.pollAIUsage())
+		}
 		return m, tea.Batch(cmds...)
 
 	case slowRefreshMsg:
 		cmds = append(cmds, tickSlowRefresh())
+		// AI discovery snapshot — cheap GET, but we keep it on the
+		// slow tick (30s) instead of the fast tick (5s) because the
+		// underlying discovery service only re-scans every
+		// ai_discovery.scan_interval_min minutes (default 5). A
+		// faster poll would just repaint the same data.
+		cmds = append(cmds, m.pollAIUsage())
 		if m.inventory.loaded && !m.inventory.loading {
 			cmds = append(cmds, m.inventory.LoadCmd())
 		}
@@ -408,6 +440,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.overview.SetHealth(m.health)
 		m.propagateConnector()
+		return m, nil
+
+	case aiUsageUpdateMsg:
+		// Discovery scans run every ai_discovery.scan_interval_min
+		// minutes (default 5), so a transient fetch error is much
+		// more often "sidecar restarting" than "discovery broke".
+		// We deliberately keep the prior snapshot on error so the
+		// Overview doesn't flap between "DISCOVERED AI AGENTS" and
+		// the "ai discovery offline" placeholder during a normal
+		// `defenseclaw-gateway restart`.
+		//
+		// Both the Overview AI box AND the dedicated AI Visibility
+		// panel feed off the same snapshot -- we fan-out here so
+		// the gateway endpoint is hit ONCE per tick instead of
+		// twice. The AI Visibility panel rebuilds its dedup'd row
+		// cache inside SetSnapshot so the next View() call sees
+		// fresh rows immediately.
+		if msg.Err == nil {
+			m.overview.SetAIUsage(msg.Snapshot)
+			m.aiVisib.SetSnapshot(msg.Snapshot)
+		}
 		return m, nil
 
 	case CommandStartMsg:
@@ -1247,6 +1300,15 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if cmd := m.switchPanel(PanelTools); cmd != nil {
 			return m, cmd
 		}
+	case "V":
+		// AI Visibility -- 'V' for "Visibility" since 'A' is
+		// already taken by Alerts (panel 2). Uppercase to match
+		// the convention PanelTools established (see 'T' above).
+		// We force a poll on entry so the panel never paints an
+		// empty table just because the slow tick hasn't fired
+		// yet; pollAIUsage is idempotent and cheap.
+		m.activePanel = PanelAIVisibility
+		return m, m.pollAIUsage()
 
 	case "tab":
 		if m.activePanel == PanelPolicy {
@@ -1299,6 +1361,8 @@ func (m Model) panelExclusive() bool {
 		return m.plugins.IsDetailOpen()
 	case PanelTools:
 		return m.tools.IsDetailOpen()
+	case PanelAIVisibility:
+		return m.aiVisib.IsDetailOpen()
 	case PanelAlerts:
 		return m.alerts.IsDetailOpen()
 	case PanelAudit:
@@ -1323,6 +1387,8 @@ func (m Model) isFilterActive() bool {
 		return m.mcps.IsFiltering()
 	case PanelAudit:
 		return m.auditHist.IsFiltering()
+	case PanelAIVisibility:
+		return m.aiVisib.IsFiltering()
 	}
 	return false
 }
@@ -1337,6 +1403,8 @@ func (m Model) startFilter() (tea.Model, tea.Cmd) {
 		m.mcps.StartFilter()
 	case PanelAudit:
 		m.auditHist.StartFilter()
+	case PanelAIVisibility:
+		m.aiVisib.StartFilter()
 	}
 	return m, nil
 }
@@ -1354,6 +1422,8 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.mcps.ClearFilter()
 		case PanelAudit:
 			m.auditHist.ClearFilter()
+		case PanelAIVisibility:
+			m.aiVisib.ClearFilter()
 		}
 	case "enter":
 		switch m.activePanel {
@@ -1365,6 +1435,8 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.mcps.StopFilter()
 		case PanelAudit:
 			m.auditHist.StopFilter()
+		case PanelAIVisibility:
+			m.aiVisib.StopFilter()
 		}
 	case "backspace":
 		switch m.activePanel {
@@ -1388,6 +1460,11 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if len(f) > 0 {
 				m.auditHist.SetFilter(f[:len(f)-1])
 			}
+		case PanelAIVisibility:
+			f := m.aiVisib.FilterText()
+			if len(f) > 0 {
+				m.aiVisib.SetFilter(f[:len(f)-1])
+			}
 		}
 	default:
 		if len(key) == 1 {
@@ -1400,6 +1477,8 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.mcps.SetFilter(m.mcps.FilterText() + key)
 			case PanelAudit:
 				m.auditHist.SetFilter(m.auditHist.FilterText() + key)
+			case PanelAIVisibility:
+				m.aiVisib.SetFilter(m.aiVisib.FilterText() + key)
 			}
 		}
 	}
@@ -1687,8 +1766,40 @@ func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleActivityKey(msg)
 	case PanelTools:
 		return m.handleToolsKey(msg)
+	case PanelAIVisibility:
+		return m.handleAIVisibilityKey(msg)
 	case PanelSetup:
 		return m.handleSetupKey(msg)
+	}
+	return m, nil
+}
+
+// handleAIVisibilityKey routes keys for the AI Visibility panel.
+// j/k for cursor, Enter for the per-signal drill-down, r for an
+// immediate poll, Esc to close detail or clear an applied filter.
+// Filter-as-you-type is handled by the global handleFilterKey path
+// (see isFilterActive / startFilter additions below) so the muscle
+// memory matches Skills / MCPs / Alerts.
+func (m Model) handleAIVisibilityKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		m.aiVisib.CursorDown()
+	case "k", "up":
+		m.aiVisib.CursorUp()
+	case "enter":
+		m.aiVisib.ToggleDetail()
+	case "esc":
+		if m.aiVisib.IsDetailOpen() {
+			m.aiVisib.ToggleDetail()
+		} else if m.aiVisib.FilterText() != "" {
+			m.aiVisib.ClearFilter()
+		}
+	case "r":
+		// Force-refresh: the operator pressed `r` so they're
+		// expecting to see the result of pressing it. Returning
+		// pollAIUsage as a one-shot Cmd reuses the same fetch
+		// path the slow ticker uses.
+		return m, m.pollAIUsage()
 	}
 	return m, nil
 }
@@ -3045,6 +3156,7 @@ func (m *Model) resizePanels() {
 	m.skills.SetSize(m.width, panelH)
 	m.mcps.SetSize(m.width, panelH)
 	m.tools.SetSize(m.width, panelH)
+	m.aiVisib.SetSize(m.width, panelH)
 	m.detail.SetSize(m.width, m.height)
 	m.actionMenu.SetSize(m.width, m.height)
 	m.firstRun.SetSize(m.width, m.height)
@@ -3060,6 +3172,31 @@ func (m Model) pollHealth() tea.Cmd {
 		}
 		health, err := fetchHealth(apiPort)
 		return healthUpdateMsg{Health: health, Err: err}
+	}
+}
+
+// pollAIUsage hits the local sidecar's /api/v1/ai-usage endpoint
+// and forwards the result to the Overview panel. The Bearer token
+// comes from the same resolver the rest of the codebase uses
+// (config.GatewayConfig.ResolvedToken), so DEFENSECLAW_GATEWAY_TOKEN
+// or the configured token_env var both work without TUI-specific
+// plumbing. When cfg is nil (rare, only during very early
+// startup before the Model gets a config) we still attempt the
+// call so an unauthenticated install still gets the disabled
+// payload back; auth-required installs will see a fetch error
+// which Update handles by keeping the prior snapshot.
+func (m Model) pollAIUsage() tea.Cmd {
+	return func() tea.Msg {
+		apiPort := 9090
+		token := ""
+		if m.cfg != nil {
+			if m.cfg.Gateway.APIPort > 0 {
+				apiPort = m.cfg.Gateway.APIPort
+			}
+			token = m.cfg.Gateway.ResolvedToken()
+		}
+		snap, err := fetchAIUsage(context.Background(), apiPort, token)
+		return aiUsageUpdateMsg{Snapshot: snap, Err: err}
 	}
 }
 
@@ -3100,6 +3237,10 @@ func (m Model) buildSystemState() SystemState {
 	case PanelAudit:
 		if m.auditHist.IsFiltering() {
 			state.FilterActive = m.auditHist.FilterText()
+		}
+	case PanelAIVisibility:
+		if m.aiVisib.IsFiltering() {
+			state.FilterActive = m.aiVisib.FilterText()
 		}
 	}
 	return state
@@ -3255,6 +3396,8 @@ func (m Model) renderActivePanel() string {
 		return m.activity.View()
 	case PanelTools:
 		return m.tools.View()
+	case PanelAIVisibility:
+		return m.aiVisib.View(m.width, m.height-5)
 	case PanelSetup:
 		return m.setup.View(m.width, m.height-5)
 	default:

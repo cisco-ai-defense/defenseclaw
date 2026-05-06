@@ -145,6 +145,7 @@ func DefaultConfig() *Config {
 			MaxFileBytes:             512 * 1024,
 			EmitOTel:                 true,
 			StoreRawLocalPaths:       false,
+			ConfidencePolicyPath:     filepath.Join(dataDir, "confidence.yaml"),
 		},
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),

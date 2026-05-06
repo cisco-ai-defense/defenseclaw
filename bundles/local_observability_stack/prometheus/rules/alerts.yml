@@ -315,3 +315,51 @@ groups:
             schema drift or the operator set a non-OTLP exporter
             endpoint by mistake. Inspect Loki for matching
             `defenseclaw.otel.ingest.malformed` log records.
+
+  - name: defenseclaw.ai_discovery
+    rules:
+      # Continuous AI discovery loop has stopped completing scans.
+      # Gated on `active_signals` being present so we don't fire on
+      # hosts where AI discovery was never enabled (and on which the
+      # `runs_total` series simply doesn't exist). Default
+      # `ai_discovery.scan_interval_min` is 5 — 30m without a scan is
+      # 6× the budget and almost always a hung detector or a deadlocked
+      # goroutine in `ContinuousDiscoveryService.runScan`.
+      - alert: DefenseClawAIDiscoveryStalled
+        expr: |
+          (sum(increase(defenseclaw_ai_discovery_runs_total[30m])) or vector(0)) == 0
+          and on() (sum(defenseclaw_ai_discovery_active_signals) > 0)
+        for: 5m
+        labels:
+          severity: warning
+          surface: ai-discovery
+        annotations:
+          summary: "AI discovery loop stalled — no scan completed in 30m"
+          description: |
+            The continuous AI discovery service has not completed a scan
+            in the last 30 minutes despite having reported active
+            signals previously. Open the AI Discovery dashboard
+            ("Scan completions by result" + "Detector errors by reason")
+            and inspect Tempo for the most recent `defenseclaw.ai.discovery`
+            span — a missing child span is the fingerprint of a hung
+            detector. Recovery is usually `defenseclaw-gateway restart`.
+
+      # Detector errors are sustained — not a one-off transient. We
+      # alert on rate not increase() so a sudden burst of 50 errors
+      # over a minute fires fast, while a flapping single error per
+      # 10m doesn't.
+      - alert: DefenseClawAIDiscoveryDetectorErrors
+        expr: sum(rate(defenseclaw_ai_discovery_errors_total[5m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+          surface: ai-discovery
+        annotations:
+          summary: "AI discovery detector errors above 6/min for 15m"
+          description: |
+            One or more detectors in `ContinuousDiscoveryService.scanSignals`
+            have been failing at >6/min for 15 minutes. Open AI Discovery
+            → "Errors by detector (1h increase)" to isolate which detector
+            and reason is regressing. Common causes: permission errors on
+            `/proc` walks, malformed package manifests, or a workspace
+            root that has grown beyond `ai_discovery.max_files_per_scan`.

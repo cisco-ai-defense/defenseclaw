@@ -1,51 +1,192 @@
 {
   "annotations": {"list": []},
+  "description": "Verdict funnel + judge + cache + redactions. Variables let you slice by stage / action / severity / direction (surface) / connector / policy_id without touching every PromQL expression. Panels prefer destination_app and direction labels so you can pin a single connector / surface in URL state and the whole board narrows.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "liveNow": false,
+  "links": [
+    {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                                       "icon": "external link", "targetBlank": false},
+    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}&${connector:queryparam}",                                                              "icon": "external link", "targetBlank": false},
+    {"title": "Connector detail", "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}&${connector:queryparam}&${surface:queryparam}",                                  "icon": "external link", "targetBlank": false},
+    {"title": "HITL",             "type": "link", "url": "/d/defenseclaw-hitl?${__url_time_range}&${connector:queryparam}",                                                                    "icon": "external link", "targetBlank": false},
+    {"title": "Findings",         "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}&${severity:queryparam}",                                                                 "icon": "external link", "targetBlank": false},
+    {"title": "Policy decisions", "type": "link", "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",                                                                                "icon": "external link", "targetBlank": false}
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "type": "custom",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "openclaw", "value": "openclaw"},
+          {"text": "codex", "value": "codex"},
+          {"text": "claudecode", "value": "claudecode"},
+          {"text": "zeptoclaw", "value": "zeptoclaw"},
+          {"text": "hermes", "value": "hermes"},
+          {"text": "cursor", "value": "cursor"},
+          {"text": "windsurf", "value": "windsurf"},
+          {"text": "geminicli", "value": "geminicli"},
+          {"text": "copilot", "value": "copilot"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "stage",
+        "label": "Verdict stage",
+        "description": "Pin a single stage to see its action mix in isolation. Stages: regex / judge / cisco_ai_defense / opa / final / session_message / multi_turn / block_list / approval.",
+        "type": "custom",
+        "query": "regex,judge,cisco_ai_defense,opa,final,session_message,multi_turn,block_list,approval",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "regex", "value": "regex"},
+          {"text": "judge", "value": "judge"},
+          {"text": "cisco_ai_defense", "value": "cisco_ai_defense"},
+          {"text": "opa", "value": "opa"},
+          {"text": "final", "value": "final"},
+          {"text": "session_message", "value": "session_message"},
+          {"text": "multi_turn", "value": "multi_turn"},
+          {"text": "block_list", "value": "block_list"},
+          {"text": "approval", "value": "approval"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "action",
+        "label": "Verdict action",
+        "type": "custom",
+        "query": "allow,warn,alert,confirm,block",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "allow", "value": "allow"},
+          {"text": "warn", "value": "warn"},
+          {"text": "alert", "value": "alert"},
+          {"text": "confirm", "value": "confirm"},
+          {"text": "block", "value": "block"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "severity",
+        "label": "Severity",
+        "type": "custom",
+        "query": "CRITICAL,HIGH,MEDIUM,LOW,INFO,NONE",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "CRITICAL", "value": "CRITICAL"},
+          {"text": "HIGH", "value": "HIGH"},
+          {"text": "MEDIUM", "value": "MEDIUM"},
+          {"text": "LOW", "value": "LOW"},
+          {"text": "INFO", "value": "INFO"},
+          {"text": "NONE", "value": "NONE"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "surface",
+        "label": "Surface (direction)",
+        "description": "Direction. Note: defenseclaw_gateway_verdicts_total does not currently carry direction as a metric label (it lives on logs). The variable is exposed so it carries through URL state to the Connector Detail / HITL boards.",
+        "type": "custom",
+        "query": "prompt,completion,tool_call",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [
+          {"text": "All", "value": "$__all", "selected": true},
+          {"text": "prompt", "value": "prompt"},
+          {"text": "completion", "value": "completion"},
+          {"text": "tool_call", "value": "tool_call"}
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "policy_id",
+        "label": "Policy id",
+        "description": "Filter verdicts by policy_id. Bounded per deployment (handful of policies); pulled live from the verdict counter.",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "definition": "label_values(defenseclaw_gateway_verdicts_total, policy_id)",
+        "query": {"query": "label_values(defenseclaw_gateway_verdicts_total, policy_id)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "options": [{"text": "All", "value": "$__all", "selected": true}],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
   "panels": [
-    {"type": "row", "title": "Verdict summary", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "Verdict KPIs", "gridPos": {"x": 0, "y": 0, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "stat",
-      "title": "Total verdicts (1h)",
+      "title": "Verdicts (1h)",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(increase(defenseclaw_gateway_verdicts_total[1h])) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(increase(defenseclaw_gateway_verdicts_total{verdict_stage=~\"$stage\", verdict_action=~\"$action\", verdict_severity=~\"$severity\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])) or vector(0)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"}
     },
     {
       "type": "stat",
       "title": "Block rate (1h)",
-      "description": "verdict=block / total verdicts over the last hour.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"block\"}[1h])) / clamp_min(sum(rate(defenseclaw_gateway_verdicts_total[1h])), 1)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"block\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])) / clamp_min(sum(rate(defenseclaw_gateway_verdicts_total{destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.05}, {"color": "red", "value": 0.25}]}}}
     },
     {
       "type": "stat",
-      "title": "Warn rate (1h)",
+      "title": "Confirm rate (1h)",
+      "description": "verdict_action=confirm — DefenseClaw asked for human approval on this fraction of decisions. Drill into the HITL board for outcomes.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"warn\"}[1h])) / clamp_min(sum(rate(defenseclaw_gateway_verdicts_total[1h])), 1)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])) / clamp_min(sum(rate(defenseclaw_gateway_verdicts_total{destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
+    },
+    {
+      "type": "stat",
+      "title": "Warn / alert rate (1h)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=~\"warn|alert\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])) / clamp_min(sum(rate(defenseclaw_gateway_verdicts_total{destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit"}}
     },
     {
       "type": "stat",
       "title": "Redactions / min",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
+      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
       "targets": [{"expr": "sum(rate(defenseclaw_redaction_applied_total[5m])) * 60 or vector(0)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
-    },
-    {
-      "type": "stat",
-      "title": "Judge invocations / min",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_gateway_judge_invocations_total[5m])) * 60 or vector(0)", "refId": "A"}]
     },
     {
       "type": "stat",
@@ -56,50 +197,84 @@
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 0.01}]}}}
     },
 
-    {"type": "row", "title": "Verdicts", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "Verdict funnel (stage × action)", "gridPos": {"x": 0, "y": 5, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "bargauge",
+      "title": "Funnel: stage → action (1h)",
+      "description": "How traffic flows through enforcement stages. Each cell is total verdicts (1h) for that (stage, action) pair. Long bars on action=block at stage=approval mean exec approvals are heavily denying; long bars at stage=judge with action=confirm mean the LLM judge is asking for HITL escalation.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 6, "w": 24, "h": 8},
+      "targets": [{"expr": "sort_desc(sum by (verdict_stage, verdict_action) (increase(defenseclaw_gateway_verdicts_total{verdict_stage=~\"$stage\", verdict_action=~\"$action\", verdict_severity=~\"$severity\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[1h])))", "instant": true, "format": "time_series", "legendFormat": "{{verdict_stage}} → {{verdict_action}}", "refId": "A"}],
+      "options": {"displayMode": "gradient", "valueMode": "color", "showUnfilled": true, "orientation": "horizontal"}
+    },
+    {
+      "type": "timeseries",
+      "title": "Action mix over time (stacked)",
+      "description": "Verdict action share through time. allow / warn / alert / confirm / block stacked.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total{verdict_stage=~\"$stage\", verdict_severity=~\"$severity\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[$__rate_interval]))", "legendFormat": "{{verdict_action}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Verdicts by stage (stacked)",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_stage) (rate(defenseclaw_gateway_verdicts_total{verdict_action=~\"$action\", verdict_severity=~\"$severity\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[$__rate_interval]))", "legendFormat": "{{verdict_stage}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+
+    {"type": "row", "title": "Confirm-rate handoff to HITL", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
-      "title": "Verdicts by stage",
-      "description": "Which enforcement stage produced each verdict: regex, cisco, judge, egress.",
+      "title": "Confirm rate over time (per connector)",
+      "description": "Per-connector confirm rate trend. A spike here should match a spike in chat HILT or exec approvals on the HITL board.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (verdict_stage) (rate(defenseclaw_gateway_verdicts_total[$__rate_interval]))", "legendFormat": "{{verdict_stage}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (destination_app) (rate(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\", destination_app=~\"$connector\"}[$__rate_interval])) / clamp_min(sum by (destination_app) (rate(defenseclaw_gateway_verdicts_total{destination_app=~\"$connector\"}[$__rate_interval])), 0.0001)", "legendFormat": "{{destination_app}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percentunit"}}
     },
+    {
+      "type": "timeseries",
+      "title": "Approval-stage actions over time",
+      "description": "Verdicts emitted by the exec-approval pipeline (verdict_stage=\"approval\"). Action mix on this row shows the live exec-approval funnel: confirm = pending, block = denied, allow = granted.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total{verdict_stage=\"approval\", destination_app=~\"$connector\"}[$__rate_interval]))", "legendFormat": "{{verdict_action}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
+    },
+
+    {"type": "row", "title": "Severity + per-policy breakdown", "gridPos": {"x": 0, "y": 31, "w": 24, "h": 1}, "collapsed": false},
+
     {
       "type": "timeseries",
       "title": "Verdicts by severity",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (verdict_severity) (rate(defenseclaw_gateway_verdicts_total[$__rate_interval]))", "legendFormat": "{{verdict_severity}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
-    },
-    {
-      "type": "piechart",
-      "title": "Verdict mix by action",
-      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 14, "w": 8, "h": 8},
-      "targets": [{"expr": "sum by (verdict_action) (increase(defenseclaw_gateway_verdicts_total[$__range]))", "legendFormat": "{{verdict_action}}", "refId": "A"}]
+      "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (verdict_severity) (rate(defenseclaw_gateway_verdicts_total{verdict_stage=~\"$stage\", verdict_action=~\"$action\", destination_app=~\"$connector\", policy_id=~\"$policy_id\"}[$__rate_interval]))", "legendFormat": "{{verdict_severity}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
     },
     {
       "type": "table",
-      "title": "Verdict breakdown",
-      "description": "stage + action + severity with per-minute rate.",
+      "title": "Top blocked policies (1h)",
+      "description": "policy_id × verdict_stage with action=block ranked. Empty when no policies tag verdicts (older deployments).",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 8, "y": 14, "w": 16, "h": 8},
-      "targets": [{"expr": "sort_desc(sum by (verdict_stage, verdict_action, verdict_severity) (rate(defenseclaw_gateway_verdicts_total[5m])) * 60)", "instant": true, "format": "table", "refId": "A"}],
-      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "per min"}}}]
+      "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(20, sort_desc(sum by (policy_id, verdict_stage) (increase(defenseclaw_gateway_verdicts_total{verdict_action=\"block\", destination_app=~\"$connector\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "blocks/1h"}}}]
     },
 
-    {"type": "row", "title": "LLM judge", "gridPos": {"x": 0, "y": 22, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "LLM judge (latency, errors, cache)", "gridPos": {"x": 0, "y": 40, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
-      "title": "Judge latency (p50/p95/p99)",
-      "description": "Investigate if p95 > 2000 ms — a judge-slow upstream will stall the whole guardrail stage.",
+      "title": "Judge latency p50/p95/p99",
+      "description": "Investigate if p95 > 2000 ms — a judge-slow upstream stalls the whole guardrail stage.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 41, "w": 12, "h": 8},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum(rate(defenseclaw_gateway_judge_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
         {"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_gateway_judge_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
@@ -111,7 +286,7 @@
       "type": "timeseries",
       "title": "Judge calls by kind",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 41, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (judge_kind) (rate(defenseclaw_gateway_judge_invocations_total[$__rate_interval]))", "legendFormat": "{{judge_kind}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}}
     },
@@ -119,30 +294,26 @@
       "type": "timeseries",
       "title": "Judge errors by reason",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 31, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 49, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (judge_kind, judge_reason) (rate(defenseclaw_gateway_judge_errors_total[$__rate_interval]))", "legendFormat": "{{judge_kind}} / {{judge_reason}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}}
     },
     {
       "type": "timeseries",
-      "title": "Judge semaphore depth (concurrency)",
-      "description": "Slots currently held + drops when the queue is full.",
+      "title": "Judge concurrency depth + drops",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 31, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 49, "w": 12, "h": 8},
       "targets": [
         {"expr": "defenseclaw_judge_semaphore_depth", "legendFormat": "depth", "refId": "A"},
         {"expr": "sum(rate(defenseclaw_judge_semaphore_drops_total[$__rate_interval]))", "legendFormat": "drops/s", "refId": "B"}
       ]
     },
-
-    {"type": "row", "title": "Verdict cache (LLM judge)", "gridPos": {"x": 0, "y": 39, "w": 24, "h": 1}, "collapsed": false},
-
     {
       "type": "timeseries",
-      "title": "Cache hit rate per scanner",
-      "description": "Higher = more traffic served from verdict cache instead of re-invoking the judge. Aim for >70% on hot scanners.",
+      "title": "Verdict cache hit rate (per scanner)",
+      "description": "Higher = traffic served from verdict cache instead of re-invoking the judge. Aim for >70% on hot scanners.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 40, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 57, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (scanner) (rate(defenseclaw_guardrail_cache_hits_total[$__rate_interval])) / clamp_min(sum by (scanner) (rate(defenseclaw_guardrail_cache_hits_total[$__rate_interval]) + rate(defenseclaw_guardrail_cache_misses_total[$__rate_interval])), 0.0001)", "legendFormat": "{{scanner}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}}
     },
@@ -150,7 +321,7 @@
       "type": "timeseries",
       "title": "Cache hits vs misses",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 40, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 57, "w": 12, "h": 8},
       "targets": [
         {"expr": "sum(rate(defenseclaw_guardrail_cache_hits_total[$__rate_interval]))", "legendFormat": "hits", "refId": "A"},
         {"expr": "sum(rate(defenseclaw_guardrail_cache_misses_total[$__rate_interval]))", "legendFormat": "misses", "refId": "B"}
@@ -158,22 +329,21 @@
       "fieldConfig": {"defaults": {"unit": "cps"}}
     },
 
-    {"type": "row", "title": "GenAI (tokens + latency)", "gridPos": {"x": 0, "y": 48, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "GenAI tokens + LLM duration", "gridPos": {"x": 0, "y": 65, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "timeseries",
-      "title": "Tokens / sec by direction + model",
-      "description": "OTel GenAI semconv: gen_ai.client.token.usage",
+      "title": "Tokens / sec by direction × model",
+      "description": "OTel GenAI semconv: gen_ai.client.token.usage. Direction = input/output (gen_ai_token_type).",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 49, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 66, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (gen_ai_token_type, gen_ai_request_model) (rate(gen_ai_client_token_usage_sum[$__rate_interval]))", "legendFormat": "{{gen_ai_request_model}} {{gen_ai_token_type}}", "refId": "A"}]
     },
     {
       "type": "timeseries",
       "title": "LLM op duration (p50/p95/p99, s)",
-      "description": "OTel GenAI semconv: gen_ai.client.operation.duration",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 49, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 66, "w": 12, "h": 8},
       "targets": [
         {"expr": "histogram_quantile(0.50, sum(rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
         {"expr": "histogram_quantile(0.95, sum(rate(gen_ai_client_operation_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
@@ -183,51 +353,73 @@
     },
     {
       "type": "timeseries",
-      "title": "LiteLLM bridge latency",
+      "title": "LiteLLM bridge latency p95 by model",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 57, "w": 12, "h": 8},
-      "targets": [
-        {"expr": "histogram_quantile(0.95, sum by (le, gen_ai_request_model) (rate(defenseclaw_llm_bridge_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{gen_ai_request_model}} p95", "refId": "A"}
-      ],
+      "gridPos": {"x": 0, "y": 74, "w": 12, "h": 8},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, gen_ai_request_model) (rate(defenseclaw_llm_bridge_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{gen_ai_request_model}} p95", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ms"}}
     },
     {
       "type": "timeseries",
       "title": "Redactions by detector",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 57, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 74, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (detector) (rate(defenseclaw_redaction_applied_total[$__rate_interval]))", "legendFormat": "{{detector}}", "refId": "A"}]
     },
 
-    {"type": "row", "title": "Recent verdicts + judge (Loki)", "gridPos": {"x": 0, "y": 65, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "Top blocked categories + rules (Loki + Prom)", "gridPos": {"x": 0, "y": 82, "w": 24, "h": 1}, "collapsed": false},
+
+    {
+      "type": "table",
+      "title": "Top finding rules during blocks (1h)",
+      "description": "Findings emitted with severity HIGH or CRITICAL during the 1h window. Use this with the verdict funnel above to see which rules are pushing traffic into block.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 83, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(20, sort_desc(sum by (scanner, rule_id, severity) (increase(defenseclaw_scan_findings_by_rule_total{severity=~\"high|critical|HIGH|CRITICAL\"}[1h]))))", "instant": true, "format": "table", "refId": "A"}],
+      "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true, "job": true, "instance": true, "service_namespace": true}, "renameByName": {"Value": "findings/1h"}}}],
+      "fieldConfig": {"overrides": [{"matcher": {"id": "byName", "options": "rule_id"}, "properties": [{"id": "links", "value": [{"title": "Drill into rule on Findings board", "url": "/d/defenseclaw-findings?${__url_time_range}&var-rule_id=${__value.text}", "targetBlank": false}]}]}]}
+    },
+    {
+      "type": "table",
+      "title": "Top blocked categories (Loki)",
+      "description": "Extracted from defenseclaw.verdict.categories on EventVerdict log records. Keys are the upstream categorizer's labels (e.g. pii.email, prompt.injection).",
+      "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
+      "gridPos": {"x": 12, "y": 83, "w": 12, "h": 8},
+      "targets": [{"expr": "topk(20, sum by (defenseclaw_verdict_categories) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"verdict\" | defenseclaw_verdict_action=\"block\" [1h])))", "instant": true, "refId": "A"}],
+      "options": {"showHeader": true}
+    },
+
+    {"type": "row", "title": "Recent verdicts + judge (Loki)", "gridPos": {"x": 0, "y": 91, "w": 24, "h": 1}, "collapsed": false},
 
     {
       "type": "logs",
       "title": "Recent verdict events",
+      "description": "Last 1h of EventVerdict records. Click a row to see policy_id, run_id, request_id, defenseclaw.verdict.categories, and the redacted reason.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
-      "gridPos": {"x": 0, "y": 66, "w": 24, "h": 10},
-      "targets": [{"expr": "{service_namespace=\"defenseclaw\"} |= \"\\\"event_type\\\":\\\"verdict\\\"\"", "refId": "A"}],
-      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none"}
+      "gridPos": {"x": 0, "y": 92, "w": 24, "h": 10},
+      "timeFrom": "1h",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"verdict\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
     {
       "type": "logs",
       "title": "Recent judge events",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
-      "gridPos": {"x": 0, "y": 76, "w": 24, "h": 10},
-      "targets": [{"expr": "{service_namespace=\"defenseclaw\"} |= \"\\\"event_type\\\":\\\"judge\\\"\"", "refId": "A"}],
-      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none"}
+      "gridPos": {"x": 0, "y": 102, "w": 24, "h": 10},
+      "timeFrom": "1h",
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | defenseclaw_gateway_event_type=\"judge\"", "refId": "A"}],
+      "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],
   "preload": false,
   "refresh": "15s",
   "schemaVersion": 39,
-  "tags": ["defenseclaw", "security", "guardrail", "llm"],
-  "templating": {"list": []},
+  "tags": ["defenseclaw", "security", "guardrail", "verdicts", "llm"],
   "time": {"from": "now-6h", "to": "now"},
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw — Security",
+  "title": "DefenseClaw — Security (Verdicts)",
   "uid": "defenseclaw-security",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

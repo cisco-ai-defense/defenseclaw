@@ -636,10 +636,58 @@ go run ./cmd/defenseclaw gateway
 ./bin/openclaw-observability-bridge down
 ```
 
-The provisioned dashboard pulls straight from the live Prometheus
+The provisioned dashboards pull straight from the live Prometheus
 metric names the sidecar already emits: `defenseclaw_gateway_verdicts`,
 `defenseclaw_scanner_errors`, `defenseclaw_guardrail_latency`, plus
 the v7 addition `defenseclaw_schema_violations_total` (see below).
+
+### 8.0 Dashboard catalog
+
+Every JSON file under
+`bundles/local_observability_stack/grafana/dashboards/` is auto-loaded
+by Grafana via the file provisioner
+(`grafana/provisioning/dashboards/dashboards.yml`). The catalog is:
+
+| Dashboard | UID | Purpose |
+| --- | --- | --- |
+| **Overview** | `defenseclaw-overview` | KPI strip (verdicts, blocks, confirm-rate, HITL pending, top blocked rule, exporter freshness, panics), firing alerts, SLO gauges. Top-of-funnel landing — every other board is one click away. |
+| **Connectors (Overview)** | `defenseclaw-connectors` | Cross-connector compare board: per-connector traffic, blocks, redactions, errors, hooks-vs-OTel drift, identity assignment rate. The connector table cell drills into Connector Detail. |
+| **Connector Detail** | `defenseclaw-connector-detail` | Single-connector deep dive driven by `$connector`: identity, ingest, hooks, verdicts, judge, findings, HITL, SSE, tools, scoped Loki streams. |
+| **Security (Verdicts)** | `defenseclaw-security` | Verdict funnel by stage × action, action mix over time, prompt/completion/tool_call split, confirm-rate handoff to HITL, judge + cache + redactions, top blocked categories and rules. |
+| **HITL (Human-in-the-Loop)** | `defenseclaw-hitl` | Two stacked sections: chat HILT (`openclaw:hilt` status mix, approval / denial / timeout rates, pending gauge, mean-time-to-decision) and exec approvals (`RecordApproval` result mix, auto-approval ratio, dangerous share, latency, top denied commands). |
+| **Findings (Rule detail)** | `defenseclaw-findings` | Top rules with sparklines, rule_id × time heatmap, last-seen / first-seen tables, top targets, finding-to-verdict correlation, scoped Loki `scan_finding` stream. |
+| **Policy decisions** | `defenseclaw-policy-decisions` | OPA verdicts by `policy_domain` × `policy_verdict`, egress branch / decision split, block-list hits, multi-turn injection trips, schema violation panel. |
+| **Agent identity** | `defenseclaw-agent-identity` | v7 correlation: agent.id × agent.instance_id × sidecar.instance_id counts, identity churn, on-demand discovery latency / errors, continuous AI confidence histograms, per-connector header presence. |
+| **Scanners (Ops)** | `defenseclaw-scanners` | Scanner ops focus: throughput, queue depth, scan duration p95 + heatmap, errors by `error_type`, quarantine actions, top rules with drill into Findings. |
+| **AI Agent Usage & Detection** | `defenseclaw-ai-discovery` | Continuous AI inventory loop: active signals, scan completions, new / gone signals, detector errors, per-vendor / per-product tables, two-axis Bayesian confidence, scoped traces and logs. |
+| **Reliability** | `defenseclaw-reliability` | Schema violations, gateway errors by subsystem / code, sink health, panics, config errors. |
+| **Runtime & SLO** | `defenseclaw-runtime` | Process health, runtime metrics, SLO histograms (block <2s, TUI refresh <5s). |
+| **Traffic & Traces** | `defenseclaw-traffic` | HTTP surface latency / status, OTel ingest rates, trace samples. |
+
+### 8.0.1 Shared template-variable contract
+
+To keep URL-state reusable across boards, every dashboard exposes the
+relevant subset of these template variables. The dashboard navbar then
+propagates the active selections via `${var:queryparam}` so a click on
+`Connector detail` from anywhere preserves the chosen connector,
+severity, action, etc.
+
+| Variable | Source | Used on |
+| --- | --- | --- |
+| `connector` | `defenseclaw_connector_hook_invocations_total{connector}` ∪ `defenseclaw_otel_ingest_records_total{source}` | Connectors, Connector Detail (single-select), Security, HITL, Agent identity. |
+| `surface` | `defenseclaw_direction` (`prompt` / `completion` / `tool_call`) | Connector Detail, Security. |
+| `stage` | `defenseclaw_gateway_verdicts_total{verdict_stage}` | Security, Connector Detail. |
+| `action` | `defenseclaw_gateway_verdicts_total{verdict_action}` | Security, Connector Detail. |
+| `severity` | `defenseclaw_scan_findings_total{severity}` | Security, Findings, Scanners. |
+| `scanner` | `defenseclaw_scan_findings_total{scanner}` | Findings, Scanners. |
+| `rule_id` | `defenseclaw_scan_findings_by_rule_total{rule_id}` | Findings. |
+| `policy_id` | `defenseclaw_gateway_verdicts_total{policy_id}` | Security. |
+| `policy_domain` / `egress_branch` | `defenseclaw_opa_evaluations_total{policy_domain}`, `defenseclaw_egress_decisions_total{branch}` | Policy decisions. |
+
+Panel-level data links carry the same convention: a click on a
+`connector` cell opens Connector Detail with `var-connector=...`, a
+click on a `rule_id` cell opens Findings with `var-rule_id=...`, a
+click on a `verdict_action=confirm` series opens HITL, etc.
 
 ### 8.1 Runtime JSON-schema validation
 
@@ -794,12 +842,23 @@ inventory reporting. Treat `path_hashes`, `basenames`, and
 
 Provisioned in `bundles/local_observability_stack/`:
 
-- **DefenseClaw — Connectors** dashboard
+- **DefenseClaw — Connectors (Overview)** dashboard
   (`bundles/local_observability_stack/grafana/dashboards/
   defenseclaw-connectors.json`, uid `defenseclaw-connectors`):
-  per-connector OTLP request rate, leaf-record volume, byte rate,
-  malformed ratio, hook-vs-OTel drift, GenAI tokens / latency, and
-  the live ingest log stream.
+  cross-connector compare board — per-connector OTLP request rate,
+  leaf-record volume, byte rate, malformed ratio, hook-vs-OTel drift,
+  GenAI tokens / latency, identity assignment rate, and the live
+  ingest log stream. The connector table cell deep-links into
+  Connector Detail with `var-connector=...` preserved.
+
+- **DefenseClaw — Connector Detail** dashboard
+  (`defenseclaw-connector-detail.json`, uid
+  `defenseclaw-connector-detail`): driven by the `$connector`
+  template variable. Drills into one connector's identity (agent.id /
+  agent.instance_id stability), OTLP ingest, hook results, verdicts,
+  judge invocations, findings, HITL, SSE lifecycle, top tools, and
+  Loki streams scoped to `defenseclaw_destination_app="$connector"`
+  and `gen_ai_agent_name="$connector"`.
 
 - **Recording rules** (`prometheus/rules/recording.yml` →
   `defenseclaw.connectors` group):

@@ -38,28 +38,60 @@ const (
 	defaultMaxSignatureBytes = 1024 * 1024
 )
 
+// AISignatureComponent declares a high-fidelity sub-identity that the
+// `package_manifest` detector can resolve a matched package name to.
+//
+// When a signature pack ships `components`, the detector emits one signal
+// per matched component (instead of collapsing them all into a single
+// catch-all row), and the resulting signals carry the component's
+// `framework` / `vendor` / parsed `version` instead of the generic
+// signature `name` / `vendor`.
+//
+// Match priority: when the matched package matches more than one
+// component (e.g. `langchain` and `langchain-openai`), the longest
+// component name wins to prefer the most specific framework label.
+type AISignatureComponent struct {
+	Ecosystem string `json:"ecosystem"`           // pypi | npm | cargo | go | dotnet | rubygems | maven | gradle
+	Name      string `json:"name"`                // canonical package name (case-insensitive match against PackageNames)
+	Framework string `json:"framework,omitempty"` // human-readable label used as the signal `Product`
+	Vendor    string `json:"vendor,omitempty"`    // optional per-component vendor override
+}
+
 // AISignature describes one known AI surface or provider family. It is the
 // shared source used by the continuous sidecar scanner and the Python CLI
 // rendering/tests. Keep the JSON shape intentionally primitive so other
 // runtimes can consume it without linking Go code.
+//
+// Confidence model (back-compat):
+//   - Legacy catalogs ship a single `confidence` field. Loaders normalize
+//     it into `CuratorConfidence` and default `Specificity` to 0.7.
+//   - The two-axis Bayesian engine in confidence.go reads
+//     `CuratorConfidence` as the prior probability for identity (when
+//     the policy says `priors.identity: signature`), and uses
+//     `Specificity` as a per-signature exponent on detector LRs so
+//     overly-generic signatures (e.g. matching the literal word "ai")
+//     contribute less per observation than tightly-scoped ones.
 type AISignature struct {
-	ID                 string   `json:"id"`
-	Name               string   `json:"name"`
-	Vendor             string   `json:"vendor"`
-	Category           string   `json:"category"`
-	Confidence         float64  `json:"confidence"`
-	SupportedConnector string   `json:"supported_connector,omitempty"`
-	BinaryNames        []string `json:"binary_names,omitempty"`
-	ProcessNames       []string `json:"process_names,omitempty"`
-	ApplicationNames   []string `json:"application_names,omitempty"`
-	ConfigPaths        []string `json:"config_paths,omitempty"`
-	ExtensionIDs       []string `json:"extension_ids,omitempty"`
-	MCPPaths           []string `json:"mcp_paths,omitempty"`
-	PackageNames       []string `json:"package_names,omitempty"`
-	EnvVarNames        []string `json:"env_var_names,omitempty"`
-	DomainPatterns     []string `json:"domain_patterns,omitempty"`
-	HistoryPatterns    []string `json:"history_patterns,omitempty"`
-	LocalEndpoints     []string `json:"local_endpoints,omitempty"`
+	ID                 string                 `json:"id"`
+	Name               string                 `json:"name"`
+	Vendor             string                 `json:"vendor"`
+	Category           string                 `json:"category"`
+	Confidence         float64                `json:"confidence,omitempty"`         // legacy seed; normalized into CuratorConfidence on load
+	CuratorConfidence  float64                `json:"curator_confidence,omitempty"` // operator-meaningful base prior on identity, in (0, 1)
+	Specificity        float64                `json:"specificity,omitempty"`        // how unique the matched value is; (0, 1], default 0.7
+	SupportedConnector string                 `json:"supported_connector,omitempty"`
+	BinaryNames        []string               `json:"binary_names,omitempty"`
+	ProcessNames       []string               `json:"process_names,omitempty"`
+	ApplicationNames   []string               `json:"application_names,omitempty"`
+	ConfigPaths        []string               `json:"config_paths,omitempty"`
+	ExtensionIDs       []string               `json:"extension_ids,omitempty"`
+	MCPPaths           []string               `json:"mcp_paths,omitempty"`
+	PackageNames       []string               `json:"package_names,omitempty"`
+	EnvVarNames        []string               `json:"env_var_names,omitempty"`
+	DomainPatterns     []string               `json:"domain_patterns,omitempty"`
+	HistoryPatterns    []string               `json:"history_patterns,omitempty"`
+	LocalEndpoints     []string               `json:"local_endpoints,omitempty"`
+	Components         []AISignatureComponent `json:"components,omitempty"`
 }
 
 type aiSignatureCatalog struct {
@@ -354,11 +386,35 @@ func normalizeAISignature(sig *AISignature) {
 	sig.SupportedConnector = normalizeAIID(sig.SupportedConnector)
 	sig.Name = strings.TrimSpace(sig.Name)
 	sig.Vendor = strings.TrimSpace(sig.Vendor)
+	// Legacy `confidence` field becomes the seed for both
+	// CuratorConfidence (when the operator hasn't declared one
+	// explicitly) and stays populated for any downstream code that
+	// still reads it directly. Order matters: catalog edits that
+	// declare `curator_confidence` win, then `confidence` fills the
+	// gap, then a sane default (0.85 -- intentionally above the
+	// presence prior so the engine's identity prior is never lower
+	// than its presence prior).
 	if sig.Confidence <= 0 {
 		sig.Confidence = 0.5
 	}
 	if sig.Confidence > 1 {
 		sig.Confidence = 1
+	}
+	if sig.CuratorConfidence <= 0 {
+		sig.CuratorConfidence = sig.Confidence
+	}
+	if sig.CuratorConfidence > 1 {
+		sig.CuratorConfidence = 1
+	}
+	// Specificity defaults to 0.7 (neutral): high enough that an
+	// observation contributes most of its log-odds, low enough that
+	// extremely-generic signatures (like a regex matching "ai") need
+	// to be explicitly declared to prevent over-counting.
+	if sig.Specificity <= 0 {
+		sig.Specificity = 0.7
+	}
+	if sig.Specificity > 1 {
+		sig.Specificity = 1
 	}
 }
 
@@ -398,7 +454,105 @@ func validateAISignature(sig AISignature) error {
 			return err
 		}
 	}
+	if len(sig.Components) > 1024 {
+		return fmt.Errorf("ai signature catalog: %s: components has too many entries", sig.ID)
+	}
+	for i, comp := range sig.Components {
+		if strings.TrimSpace(comp.Ecosystem) == "" {
+			return fmt.Errorf("ai signature catalog: %s: components[%d].ecosystem is required", sig.ID, i)
+		}
+		if strings.TrimSpace(comp.Name) == "" {
+			return fmt.Errorf("ai signature catalog: %s: components[%d].name is required", sig.ID, i)
+		}
+		if len(comp.Ecosystem) > 64 || len(comp.Name) > 256 ||
+			len(comp.Framework) > 256 || len(comp.Vendor) > 128 {
+			return fmt.Errorf("ai signature catalog: %s: components[%d] field too long", sig.ID, i)
+		}
+		for _, value := range []string{comp.Ecosystem, comp.Name, comp.Framework, comp.Vendor} {
+			if strings.ContainsRune(value, '\x00') {
+				return fmt.Errorf("ai signature catalog: %s: components[%d] entry contains NUL", sig.ID, i)
+			}
+		}
+	}
 	return nil
+}
+
+// resolveComponent finds the most specific component declared for a
+// signature that matches a value (typically a lower-case package name
+// substring). Match rule: case-insensitive equality, with longest-name
+// preference so `langchain-openai` beats `langchain` for that string.
+// Returns nil when no component is declared.
+func (sig AISignature) resolveComponent(value, ecosystem string) *AISignatureComponent {
+	if len(sig.Components) == 0 {
+		return nil
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return nil
+	}
+	ecosystem = strings.ToLower(strings.TrimSpace(ecosystem))
+	// Short package names (≤3 chars) are too noisy to match
+	// without an ecosystem hint. Files like `Dockerfile`,
+	// `docker-compose.yml`, and shell history don't carry an
+	// ecosystem (lockparse returns ""), and their bodies
+	// always contain the substring "ai" via words like
+	// "main", "args", "RUN apt install", etc. Refusing the
+	// match preserves recall for longer names like "openai"
+	// while killing the Dockerfile/Cargo.toml-class false
+	// positives that produced 685 spurious "Vercel AI SDK"
+	// signals on the live machine.
+	if ecosystem == "" && len(value) <= 3 {
+		return nil
+	}
+	var best *AISignatureComponent
+	for i := range sig.Components {
+		c := &sig.Components[i]
+		if c == nil {
+			continue
+		}
+		// Ecosystem hint: when the caller knows the ecosystem
+		// (manifest filename → npm, pypi, …) prefer same-ecosystem
+		// matches. Fall back to ecosystem-agnostic match when no
+		// caller hint is given (`ecosystem == ""`).
+		if ecosystem != "" && strings.ToLower(c.Ecosystem) != ecosystem {
+			continue
+		}
+		if strings.ToLower(c.Name) != value {
+			continue
+		}
+		if best == nil || len(c.Name) > len(best.Name) {
+			best = c
+		}
+	}
+	if best != nil {
+		return best
+	}
+	// Second-pass ecosystem-agnostic fallback so packs that omit a
+	// per-ecosystem listing still resolve -- but ONLY when the
+	// caller couldn't determine the ecosystem (`ecosystem == ""`).
+	// When the caller passed a real ecosystem hint (manifest
+	// filename → npm/pypi/cargo/…) we must NOT silently drop it,
+	// otherwise short package names like `ai` (npm) get attributed
+	// to a Cargo.toml hit because the npm component is the only
+	// one named `ai` in the catalog. This was the root cause of
+	// "685 Vercel AI SDK signals" with 209 of them being Cargo.toml
+	// false positives.
+	if ecosystem != "" {
+		return nil
+	}
+	// Note: short-name guard already ran at function entry
+	// (`ecosystem == "" && len(value) <= 3`), so by here we know
+	// `len(value) > 3` and the agnostic fallback is safe.
+	for i := range sig.Components {
+		c := &sig.Components[i]
+		if c == nil || strings.ToLower(c.Name) != value {
+			continue
+		}
+		if best == nil || len(c.Name) > len(best.Name) {
+			best = c
+		}
+	}
+	return best
 }
 
 func validateSignatureValues(id, field string, values []string) error {

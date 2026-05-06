@@ -1,0 +1,145 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+#
+# DefenseClaw AI inventory confidence policy v1.
+#
+# This file is the calibration source-of-truth for the Bayesian
+# confidence engine in `internal/inventory/confidence.go`. The
+# embedded copy (loaded via `//go:embed`) ships with conservative
+# defaults; operators can override individual fields by writing
+# `~/.defenseclaw/confidence.yaml` (or pointing
+# `ai_discovery.confidence_policy_path` at any other path), and the
+# loader will deep-merge the override on top of these defaults.
+#
+# Validate edits with:
+#   defenseclaw agent confidence policy validate
+#
+# Inspect the effective (merged) policy with:
+#   defenseclaw agent confidence policy show
+#
+# CALIBRATION NOTE: detector keys here MUST match the values stamped
+# on `AISignal.Detector` by `internal/inventory/ai_discovery.go`. The
+# engine reads `policy.detectors[signal.Detector]` for each signal
+# and applies `Quality * Specificity` (and recency for presence) as
+# an exponent on the LR. Unknown signal detectors fall back to a
+# neutral LR=1 so a new detector added in code never crashes scoring
+# -- it just contributes zero log-odds until you add a row here.
+version: 1
+
+priors:
+  # When `identity` is the literal string "signature", the engine uses
+  # the per-signature `curator_confidence` as the prior. Any numeric
+  # value here is used as a uniform prior instead.
+  identity: signature
+  # Low base rate -- most boxes do not have most SDKs installed.
+  presence: 0.05
+
+# Half-life for the exponential recency decay applied to presence
+# likelihood ratios. After `half_life_hours` of no activity, each
+# presence detector's contribution is halved. Identity does not decay
+# (a stale install is still the same SDK; only its presence weakens).
+half_life_hours: 168 # 7 days
+
+# Per-detector likelihood ratios. Keys are the stable detector
+# identifiers stamped by the inventory service (see ai_discovery.go).
+# Each entry is the ratio
+#   P(observation | component truly present) /
+#   P(observation | absent).
+#
+# Identity LRs: how strongly does this observation tell us *what* is
+# installed?
+#
+# Presence LRs: how strongly does this observation tell us the
+# component is *currently usable*? A live PID is overwhelming; a
+# config file barely shifts presence at all.
+detectors:
+  # Active process snapshot from `ps`. The dominant presence signal --
+  # presence_lr is calibrated so a single fresh exact-match process
+  # against the prior 0.05 produces a very_high (>=0.95) presence
+  # score. Identity_lr is moderate because comm strings can be
+  # spoofed and an exact comm name does not necessarily prove the
+  # specific SDK is in use.
+  process:
+    identity_lr: 8
+    presence_lr: 250
+  # A package name resolved against a manifest body. Quality 1.0 +
+  # MatchKind=exact when we resolved to a declared component;
+  # Quality 0.6 + substring otherwise. Manifest hits are strong
+  # identity (the package is named) but weak presence (just being
+  # listed in a lockfile does not mean it ran today).
+  package_manifest:
+    identity_lr: 30
+    presence_lr: 5
+  # Binary discovered in $PATH. Strong presence (it's executable now)
+  # but moderate identity (could be a wrapper).
+  binary:
+    identity_lr: 10
+    presence_lr: 50
+  # MCP server manifest discovered on disk.
+  mcp:
+    identity_lr: 20
+    presence_lr: 15
+  # Config file matched a known path.
+  config:
+    identity_lr: 15
+    presence_lr: 8
+  # Locally listening AI endpoint (e.g. ollama on 11434). Almost as
+  # strong as a live process for presence -- the port is open right
+  # now, so something IS running.
+  local_endpoint:
+    identity_lr: 12
+    presence_lr: 200
+  # Editor extension installed.
+  editor_extension:
+    identity_lr: 12
+    presence_lr: 10
+  # Desktop application present (.app bundle, Programs entry).
+  application:
+    identity_lr: 10
+    presence_lr: 6
+  # Environment variable *name* present in the user's shell. Heuristic.
+  env:
+    identity_lr: 3
+    presence_lr: 1.5
+  # Shell-history substring scan (heuristic).
+  shell_history:
+    identity_lr: 4
+    presence_lr: 2
+
+# Negative signals subtract from the relevant logit. `axis` may be
+# `identity`, `presence`, or `both`. `scale_with_count: true` means
+# the absolute logit value is multiplied by `(count - 1)` -- e.g. used
+# for signature-collision penalties where 2 collisions hurt more than
+# 1.
+penalties:
+  version_conflict:
+    axis: identity
+    logit: -1.5
+  stale_binary:
+    axis: presence
+    logit: -2.0
+  signature_collision:
+    axis: identity
+    logit: -0.5
+    scale_with_count: true
+  weak_evidence_only:
+    axis: presence
+    logit: -1.0
+  heuristic_only:
+    axis: both
+    logit: -0.7
+
+# Bands are applied independently to identity_score and
+# presence_score. The first band whose `min` is <= the score wins, so
+# entries must be listed in strictly decreasing `min` order.
+bands:
+  - min: 0.95
+    label: very_high
+  - min: 0.80
+    label: high
+  - min: 0.60
+    label: medium
+  - min: 0.30
+    label: low
+  - min: 0.00
+    label: very_low

@@ -38,6 +38,38 @@ CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
 
+# M-4: canonical install prefixes that we trust enough to exec
+# `<binary> --version` against. Anything outside this allow-list is
+# refused — even when ``shutil.which`` returns it — because a user PATH
+# entry pointing to /tmp, the current directory, or some other
+# attacker-writable location could otherwise have us run a hostile
+# binary as part of a passive discovery scan. Operators with bespoke
+# install layouts can extend the allow-list at runtime via the
+# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (colon-separated).
+_TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
+    "/usr/bin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/local/sbin",
+    "/bin",
+    "/sbin",
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/opt/local/bin",
+    "/opt/local/sbin",
+    "~/.local/bin",
+    "~/.cargo/bin",
+    "~/.npm-global/bin",
+    "~/.volta/bin",
+    "~/.nvm",
+    "~/.fnm",
+    "~/.asdf",
+    "~/.pyenv",
+    "~/.pipx",
+    "~/Library/Application Support",
+    "/Applications",
+)
+
 DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "codex",
     "claudecode",
@@ -188,7 +220,80 @@ def _scan_agent(name: str) -> AgentSignal:
     )
 
 
+def _trusted_bin_prefixes() -> tuple[str, ...]:
+    """Return the allow-list of canonical install prefixes.
+
+    The defaults cover platform-package, Homebrew, MacPorts, and common
+    user-scoped tooling (cargo, npm, pyenv, asdf, pipx, etc.). Operators
+    can extend the list at runtime via ``DEFENSECLAW_TRUSTED_BIN_PREFIXES``
+    (colon-separated). Each entry is tilde-expanded and absolutised
+    before comparison.
+    """
+    extras: list[str] = []
+    raw = os.environ.get("DEFENSECLAW_TRUSTED_BIN_PREFIXES", "")
+    for piece in raw.split(":"):
+        piece = piece.strip()
+        if piece:
+            extras.append(piece)
+    expanded: list[str] = []
+    for prefix in (*_TRUSTED_BIN_PREFIXES_DEFAULT, *extras):
+        try:
+            expanded.append(os.path.abspath(_expand(prefix)))
+        except Exception:
+            continue
+    return tuple(expanded)
+
+
+def _is_trusted_binary_path(binary_path: str) -> bool:
+    """M-4: refuse to exec a binary that lives outside the allow-list.
+
+    The check follows symlinks (``os.path.realpath``) so an attacker
+    can't drop a symlink into a trusted prefix that points at a hostile
+    target outside it. We also reject world-writable parent directories
+    — a binary in ``/usr/local/bin`` is only trustworthy if root or the
+    operator owns the directory.
+    """
+    if not binary_path:
+        return False
+    try:
+        resolved = os.path.realpath(binary_path)
+    except (OSError, ValueError):
+        return False
+    if not os.path.isabs(resolved):
+        return False
+    if not os.path.isfile(resolved):
+        return False
+    if not os.access(resolved, os.X_OK):
+        return False
+    parent = os.path.dirname(resolved)
+    try:
+        parent_st = os.stat(parent)
+    except OSError:
+        return False
+    # World-writable parent → an attacker who can write to that dir
+    # could swap the binary at any time. Treat as untrusted.
+    if parent_st.st_mode & 0o002:
+        return False
+    prefixes = _trusted_bin_prefixes()
+    for prefix in prefixes:
+        # Both the resolved binary and the candidate need to share a
+        # path-component boundary; suffix-string match would let
+        # /usr/binEvil sneak past /usr/bin.
+        if resolved == prefix:
+            return True
+        if resolved.startswith(prefix.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 def _version_for_binary(binary_path: str) -> tuple[str, str]:
+    # M-4: the value of ``binary_path`` is sourced from
+    # ``shutil.which(binary_name)`` which honours $PATH — an attacker
+    # who can prepend a hostile directory to PATH can otherwise have us
+    # exec their binary as part of a passive discovery scan. Refuse
+    # anything outside the canonical install prefixes.
+    if not _is_trusted_binary_path(binary_path):
+        return "", "binary path is not in a trusted install prefix"
     try:
         result = subprocess.run(
             [binary_path, "--version"],

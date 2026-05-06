@@ -85,6 +85,12 @@ services:
       - "--storage.tsdb.retention.time=7d"
       - "--web.enable-remote-write-receiver"
       - "--web.enable-lifecycle"
+      # admin api enables /api/v1/admin/tsdb/{delete_series,clean_tombstones}
+      # so operators can purge stale series after a sidecar restart that
+      # changed histogram bucket boundaries (or any schema change). Bound
+      # to 127.0.0.1 only via the ports stanza below, so the admin API
+      # surface stays inside the developer laptop.
+      - "--web.enable-admin-api"
       - "--enable-feature=exemplar-storage,native-histograms"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro

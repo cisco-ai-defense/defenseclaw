@@ -960,6 +960,7 @@ class AIDiscoveryConfig:
     max_file_bytes: int = 512 * 1024
     emit_otel: bool = True
     store_raw_local_paths: bool = False
+    confidence_policy_path: str = ""
 
 
 @dataclass
@@ -1996,6 +1997,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
         emit_otel=bool(raw.get("emit_otel", True)),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
+        confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
     )
 
 
@@ -2018,7 +2020,10 @@ def default_config() -> Config:
             rules_file=os.path.join(data_dir, "firewall.pf.conf"),
         ),
         guardrail=GuardrailConfig(),
-        ai_discovery=AIDiscoveryConfig(enabled=True),
+        ai_discovery=AIDiscoveryConfig(
+            enabled=True,
+            confidence_policy_path=os.path.join(data_dir, "confidence.yaml"),
+        ),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),
         ),

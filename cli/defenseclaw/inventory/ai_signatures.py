@@ -59,12 +59,39 @@ class SignaturePackError(ValueError):
 
 
 @dataclass(frozen=True)
+class AISignatureComponent:
+    """High-fidelity sub-identity attached to a signature.
+
+    Mirrors the Go ``AISignatureComponent``: when a manifest match
+    resolves to one of these, the resulting signal carries the
+    ``framework``/``vendor`` here instead of the catch-all signature
+    name. ``ecosystem`` and ``name`` are required; ``framework`` and
+    ``vendor`` are optional overrides.
+    """
+
+    ecosystem: str
+    name: str
+    framework: str = ""
+    vendor: str = ""
+
+
+@dataclass(frozen=True)
 class AISignature:
     id: str
     name: str
     vendor: str
     category: str
+    # `confidence` is the legacy seed; new catalogs may instead
+    # populate `curator_confidence` (operator-meaningful base prior on
+    # identity) and `specificity` (how unique the matched value is, in
+    # (0, 1]). When a catalog ships only `confidence`, the loader
+    # mirrors it into `curator_confidence` and defaults `specificity`
+    # to 0.7. The two-axis confidence engine on the Go side reads
+    # `curator_confidence` and `specificity`; the Python catalog
+    # carries them so renderers and tests agree on the surface.
     confidence: float
+    curator_confidence: float = 0.0
+    specificity: float = 0.0
     source: str = "builtin"
     supported_connector: str = ""
     binary_names: tuple[str, ...] = ()
@@ -78,6 +105,7 @@ class AISignature:
     domain_patterns: tuple[str, ...] = ()
     history_patterns: tuple[str, ...] = ()
     local_endpoints: tuple[str, ...] = ()
+    components: tuple[AISignatureComponent, ...] = ()
 
 
 def load_ai_signatures(
@@ -207,12 +235,28 @@ def _parse_catalog_text(text: str, *, source: str) -> list[AISignature]:
 def _signature_from_raw(raw: Any, *, source: str) -> AISignature:
     if not isinstance(raw, dict):
         raise SignaturePackError(f"{source}: each signature must be an object")
+    confidence = float(raw.get("confidence", 0.5) or 0.5)
+    curator_confidence = float(raw.get("curator_confidence", 0.0) or 0.0)
+    if curator_confidence <= 0:
+        # Back-compat: legacy catalogs only ship `confidence`. Mirror
+        # it into `curator_confidence` so the Python view always
+        # exposes the same two-axis fields the Go engine consumes.
+        curator_confidence = confidence
+    if curator_confidence > 1:
+        curator_confidence = 1.0
+    specificity = float(raw.get("specificity", 0.0) or 0.0)
+    if specificity <= 0:
+        specificity = 0.7  # neutral default
+    if specificity > 1:
+        specificity = 1.0
     sig = AISignature(
         id=_normalize_id(str(raw.get("id", ""))),
         name=str(raw.get("name", "")).strip(),
         vendor=str(raw.get("vendor", "")).strip(),
         category=_normalize_category(str(raw.get("category", ""))),
-        confidence=float(raw.get("confidence", 0.5) or 0.5),
+        confidence=confidence,
+        curator_confidence=curator_confidence,
+        specificity=specificity,
         source=source,
         supported_connector=_normalize_id(str(raw.get("supported_connector", ""))),
         binary_names=_tuple(raw.get("binary_names", [])),
@@ -226,9 +270,30 @@ def _signature_from_raw(raw: Any, *, source: str) -> AISignature:
         domain_patterns=_tuple(raw.get("domain_patterns", [])),
         history_patterns=_tuple(raw.get("history_patterns", [])),
         local_endpoints=_tuple(raw.get("local_endpoints", [])),
+        components=_components_tuple(raw.get("components", [])),
     )
     _validate_signature(sig)
     return sig
+
+
+def _components_tuple(value: Any) -> tuple[AISignatureComponent, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise SignaturePackError("components must be an array")
+    out: list[AISignatureComponent] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise SignaturePackError("each component must be an object")
+        out.append(
+            AISignatureComponent(
+                ecosystem=str(entry.get("ecosystem", "")).strip(),
+                name=str(entry.get("name", "")).strip(),
+                framework=str(entry.get("framework", "")).strip(),
+                vendor=str(entry.get("vendor", "")).strip(),
+            )
+        )
+    return tuple(out)
 
 
 def _validate_signature(sig: AISignature) -> None:
@@ -246,6 +311,10 @@ def _validate_signature(sig: AISignature) -> None:
         raise SignaturePackError(f"{sig.id}: confidence must be positive")
     if sig.confidence > 1:
         raise SignaturePackError(f"{sig.id}: confidence must be <= 1")
+    if sig.curator_confidence <= 0 or sig.curator_confidence > 1:
+        raise SignaturePackError(f"{sig.id}: curator_confidence must be in (0, 1]")
+    if sig.specificity <= 0 or sig.specificity > 1:
+        raise SignaturePackError(f"{sig.id}: specificity must be in (0, 1]")
     for field in (
         "binary_names",
         "process_names",
@@ -267,6 +336,23 @@ def _validate_signature(sig: AISignature) -> None:
                 raise SignaturePackError(f"{sig.id}: {field} entry is too long")
             if "\x00" in value:
                 raise SignaturePackError(f"{sig.id}: {field} entry contains NUL")
+    if len(sig.components) > 1024:
+        raise SignaturePackError(f"{sig.id}: components has too many entries")
+    for idx, comp in enumerate(sig.components):
+        if not comp.ecosystem:
+            raise SignaturePackError(f"{sig.id}: components[{idx}].ecosystem is required")
+        if not comp.name:
+            raise SignaturePackError(f"{sig.id}: components[{idx}].name is required")
+        if (
+            len(comp.ecosystem) > 64
+            or len(comp.name) > 256
+            or len(comp.framework) > 256
+            or len(comp.vendor) > 128
+        ):
+            raise SignaturePackError(f"{sig.id}: components[{idx}] field too long")
+        for value in (comp.ecosystem, comp.name, comp.framework, comp.vendor):
+            if "\x00" in value:
+                raise SignaturePackError(f"{sig.id}: components[{idx}] entry contains NUL")
 
 
 def _signature_pack_paths(
