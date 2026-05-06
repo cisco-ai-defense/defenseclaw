@@ -177,6 +177,36 @@ func TestCodexHookSameTurnPromptsGetDistinctIDsAndCorrelateToLatest(t *testing.T
 	if got := (*events)[1].UserID; got != "alice-id" {
 		t.Fatalf("user_id=%q want alice-id", got)
 	}
+	if got := (*events)[2].DestinationApp; got != "builtin" {
+		t.Fatalf("destination_app=%q want builtin", got)
+	}
+}
+
+func TestCodexHookMCPToolSetsDestinationApp(t *testing.T) {
+	events := captureGatewayEvents(t)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+	redaction.SetDisableAll(true)
+
+	api := &APIServer{}
+	req := codexHookRequest{
+		HookEventName: "PreToolUse",
+		SessionID:     "sess-codex",
+		TurnID:        "turn-1",
+		Model:         "gpt-5.5",
+		ToolName:      "mcp__github__search_issues",
+		ToolUseID:     "tool-1",
+		Payload: map[string]interface{}{
+			"mcp_server_name": "github",
+		},
+	}
+	api.emitCodexHookLLMEvent(context.Background(), req, nil, []byte(`{"hook_event_name":"PreToolUse"}`))
+
+	if len(*events) != 1 {
+		t.Fatalf("events=%d want 1", len(*events))
+	}
+	if got := (*events)[0].DestinationApp; got != "mcp:github" {
+		t.Fatalf("destination_app=%q want mcp:github", got)
+	}
 }
 
 func TestHookLLMEventMetaFallsBackToLocalUser(t *testing.T) {
@@ -188,5 +218,26 @@ func TestHookLLMEventMetaFallsBackToLocalUser(t *testing.T) {
 	meta := hookLLMEventMeta("codex", "sess", "turn", "gpt-5.5", "openai", "", "codex", map[string]interface{}{})
 	if meta.UserID == "" && meta.UserName == "" {
 		t.Fatalf("expected local user fallback, got user_id=%q user_name=%q", meta.UserID, meta.UserName)
+	}
+}
+
+func TestHookToolDestinationApp(t *testing.T) {
+	cases := []struct {
+		name       string
+		serverName string
+		toolName   string
+		want       string
+	}{
+		{name: "explicit server", serverName: "github", toolName: "Bash", want: "mcp:github"},
+		{name: "mcp tool name", toolName: "mcp__filesystem__read_file", want: "mcp:filesystem"},
+		{name: "builtin tool", toolName: "apply_patch", want: "builtin"},
+		{name: "empty tool", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hookToolDestinationApp(tc.serverName, tc.toolName); got != tc.want {
+				t.Fatalf("hookToolDestinationApp(%q, %q) = %q, want %q", tc.serverName, tc.toolName, got, tc.want)
+			}
+		})
 	}
 }
