@@ -94,6 +94,7 @@ open, and where relevant a `runbook` pointer under
 | `defenseclaw.runtime`       | `DefenseClawGoroutineLeak`, `DefenseClawSQLiteBusyRetries`, `DefenseClawConfigLoadErrors` | warning |
 | `defenseclaw.connectors`    | `DefenseClawConnectorHookErrorRate`, `DefenseClawConnectorAgentIdChurn` | warning |
 | `defenseclaw.ai_discovery`  | `DefenseClawAIDiscoveryStalled`, `DefenseClawAIDiscoveryDetectorErrors` | warning |
+| `defenseclaw.observability_pipeline` | `DefenseClawLokiIngestOverflow` | warning |
 
 Rules are owned by Prometheus (so they keep firing even if Grafana is
 down). Grafana reads them through the `Prometheus-Alerts` Alertmanager

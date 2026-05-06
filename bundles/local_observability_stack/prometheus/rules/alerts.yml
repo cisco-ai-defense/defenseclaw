@@ -316,6 +316,56 @@ groups:
             endpoint by mistake. Inspect Loki for matching
             `defenseclaw.otel.ingest.malformed` log records.
 
+  - name: defenseclaw.observability_pipeline
+    rules:
+      # Loki silently drops log entries that exceed `max_line_size` or
+      # `max_structured_metadata_size`. Without this alert an oversize
+      # audit event simply disappears from Grafana — exactly the
+      # observability gap that compromises forensic / compliance use
+      # of the audit pipeline. We page on:
+      #   - any sustained absolute rate of overflow discards (a single
+      #     dropped event is a correctness regression — the audit
+      #     contract says no event leaves the gateway and gets
+      #     silently dropped en route).
+      # The recording rule pipeline:loki_ingest_overflow:rate5m
+      # aggregates by `reason` so the alert label tells operators
+      # which limit blew (line_too_long vs structured_metadata_too_big),
+      # which maps directly to the remediation knob in
+      # bundles/local_observability_stack/loki/loki.yaml.
+      - alert: DefenseClawLokiIngestOverflow
+        expr: pipeline:loki_ingest_overflow:rate5m > 0
+        for: 5m
+        labels:
+          severity: warning
+          surface: telemetry
+        annotations:
+          summary: "Loki dropping log entries (reason={{ $labels.reason }})"
+          description: |
+            Loki has been discarding log entries for reason
+            `{{ $labels.reason }}` for 5+ minutes — DefenseClaw audit
+            and gateway events that exceed Loki's payload limits are
+            being silently dropped before they reach Grafana / the
+            on-call dashboards.
+
+            Most common cause: `privacy.disable_redaction=true` on the
+            sidecar combined with a chat-completion request that
+            embedded a large file or tool output. The full payload
+            still lives in the local SQLite audit DB and (if
+            configured) the audit OTLP-logs sink to your SIEM, but
+            Grafana's Loki view is now incomplete.
+
+            Remediation:
+              1. Confirm the OTel Collector's `transform/loki-payload-cap`
+                 processor is wired into the logs pipeline (see
+                 bundles/local_observability_stack/otel-collector/config.yaml).
+              2. If the discard rate is sustained, raise
+                 `max_line_size` / `max_structured_metadata_size` in
+                 bundles/local_observability_stack/loki/loki.yaml.
+              3. Consider re-enabling redaction on the sidecar
+                 (`defenseclaw config set privacy.disable_redaction false`)
+                 — raw payloads still exist in the audit DB and remain
+                 viewable on the workstation via DEFENSECLAW_REVEAL_PII=1.
+
   - name: defenseclaw.ai_discovery
     rules:
       # Continuous AI discovery loop has stopped completing scans.
