@@ -90,7 +90,7 @@ func TestRetry_ExhaustedReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	s := newTestSink(t, srv.URL, func(c *SplunkHECConfig) {
-		c.MaxRetries = 2 // 3 total attempts
+		c.MaxRetries = 2                // 3 total attempts
 		c.CircuitBreakerThreshold = 999 // don't open circuit mid-test
 	})
 

@@ -88,8 +88,8 @@ type SplunkHECConfig struct {
 	// CircuitBreakerCooldownS is how long (in seconds) the circuit
 	// stays open before moving to half-open for a probe attempt.
 	// Defaults: CircuitBreakerThreshold=5, CircuitBreakerCooldownS=60.
-	CircuitBreakerThreshold  int
-	CircuitBreakerCooldownS  int
+	CircuitBreakerThreshold int
+	CircuitBreakerCooldownS int
 
 	// SourceTypeOverrides maps a canonical audit action (e.g.
 	// "llm-judge-response") to a dedicated Splunk sourcetype
@@ -144,10 +144,10 @@ type SplunkHECSink struct {
 
 	// circuit breaker state — protected by cbMu so it never
 	// contends with the batch mutex on the hot path.
-	cbMu            sync.Mutex
-	cbState         circuitState
-	cbFailures      int       // consecutive failures since last success
-	cbOpenedAt      time.Time // when the circuit last opened
+	cbMu       sync.Mutex
+	cbState    circuitState
+	cbFailures int       // consecutive failures since last success
+	cbOpenedAt time.Time // when the circuit last opened
 }
 
 type splunkEvent struct {
