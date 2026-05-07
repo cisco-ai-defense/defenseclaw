@@ -1,11 +1,25 @@
 # LLM Guardrail — Data Flow & Architecture
 
-The LLM guardrail intercepts all traffic between OpenClaw and LLM providers.
-It combines a TypeScript fetch interceptor plugin (running inside OpenClaw's
-Node.js process) with a Go guardrail reverse proxy
-(`internal/gateway/proxy.go`, `internal/gateway/guardrail.go`) to inspect
-every prompt and response without requiring any changes to OpenClaw or agent
-code.
+The LLM guardrail intercepts all traffic between agent runtimes and LLM
+providers. Each connector routes traffic through the Go guardrail reverse
+proxy (`internal/gateway/proxy.go`, `internal/gateway/guardrail.go`) via a
+connector-specific mechanism. The proxy inspects every prompt and response
+without requiring agent code changes.
+
+**Connector routing mechanisms:**
+
+| Connector | How LLM traffic reaches the proxy |
+|-----------|----------------------------------|
+| OpenClaw | TypeScript fetch interceptor patches `globalThis.fetch` in Node.js; injects `X-DC-Target-URL` header |
+| Claude Code | `ANTHROPIC_BASE_URL=http://127.0.0.1:4000/c/claudecode` env var set during connector setup |
+| Codex | `openai_base_url` patched in `~/.codex/config.toml` to `http://127.0.0.1:4000/c/codex` |
+| ZeptoClaw | `api_base` patched in `~/.zeptoclaw/config.json` to `http://127.0.0.1:4000/c/zeptoclaw` |
+
+The proxy's `connectorPrefixStripper` middleware strips `/c/<connector>/`,
+identifies the source connector, and calls `Route()` for signal extraction
+before running the same 4-stage inspection pipeline for all connectors.
+
+## OpenClaw Fetch Interceptor (connector-specific detail)
 
 If you are trying to tune false positives, switch between `default` /
 `strict` / `permissive`, or edit `suppressions.yaml`, see

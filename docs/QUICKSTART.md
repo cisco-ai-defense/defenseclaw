@@ -1,5 +1,9 @@
 # Quick Start
 
+> **Fastest path:** Run `defenseclaw quickstart` after install for a zero-prompt setup
+> with safe defaults (observe mode, local scanner, no judge). The steps below
+> give you more control over each configuration choice.
+
 Get DefenseClaw running in under 5 minutes.
 
 ## 1. Setup

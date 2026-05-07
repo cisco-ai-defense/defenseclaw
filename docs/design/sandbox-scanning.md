@@ -1,5 +1,7 @@
 # Sandbox Scanning: Skill & MCP Scanning Inside OpenShell
 
+> **Status:** PROPOSAL (designed, not implemented)
+
 ## Problem
 
 When OpenClaw runs inside an OpenShell sandbox, the host-side Go sidecar's

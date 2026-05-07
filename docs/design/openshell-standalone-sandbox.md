@@ -1,5 +1,7 @@
 # OpenShell Standalone Sandbox — Design Document
 
+> **Status:** PROPOSAL (designed, not implemented)
+
 ## Overview
 
 This document describes how DefenseClaw integrates with `openshell-sandbox`

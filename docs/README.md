@@ -11,9 +11,13 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 | [Install](INSTALL.md) | DGX Spark, macOS, Linux, existing OpenClaw installs, and source builds |
 | [Quick Start](QUICKSTART.md) | First successful setup, scan, guardrail, and dashboard flow |
 | [Architecture](ARCHITECTURE.md) | System diagram, data flow, and component responsibilities |
-| [CLI Reference](CLI.md) | Python CLI commands and flags |
+| [CLI Reference](CLI.md) | Python CLI and Go gateway commands and flags |
 | [API Reference](API.md) | Go sidecar REST API endpoints |
 | [Config Files](CONFIG_FILES.md) | Config paths, environment variables, policy files, and defaults |
+| [Connectors](CONNECTORS.md) | Connector setup guide (OpenClaw, Claude Code, Codex, ZeptoClaw) |
+| [Credentials](CREDENTIALS.md) | API key management, credential registry, and secrets handling |
+| [LLM Providers](PROVIDERS.md) | Supported LLM providers, routing, and configuration |
+| [Hook Events](HOOKS.md) | Hook event system for Claude Code and Codex connectors |
 
 ## Runtime Security
 
@@ -64,3 +68,7 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 | [Standalone Sandbox Issues](design/standalone-sandbox-issues.md) | Known issue tracking notes |
 | [Local Observability Stack Moved Notice](archive/LOCAL_OBSERVABILITY_STACK_MOVED.md) | Archived pointer from the old deploy path to the bundled stack |
 | [Webhook Notifications PR Description](archive/WEBHOOK_NOTIFICATIONS_PR_DESCRIPTION.md) | Archived PR description retained for implementation context |
+| [PR141 Code Walkthrough](archive/PR141-CODE-WALKTHROUGH.md) | Archived PR #141 code walkthrough |
+| [PR141 Matrix Update](archive/PR141-MATRIX-UPDATE.md) | Archived PR #141 connector matrix update |
+| [D4-S8 Verification](archive/D4-S8-verification.md) | Archived verification notes |
+| [Connector Commit Summary](archive/CONNECTOR-COMMIT-SUMMARY.md) | Archived connector commit history |
