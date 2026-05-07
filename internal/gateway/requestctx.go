@@ -427,6 +427,9 @@ func enrichHTTPSpanFromContext(ctx context.Context) {
 	if span == nil || !span.IsRecording() {
 		return
 	}
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
+	}
 	if id := RequestIDFromContext(ctx); id != "" {
 		span.SetAttributes(attribute.String("defenseclaw.request_id", id))
 	}

@@ -46,6 +46,7 @@
     },
     "deployment.mode": {
       "type": "string",
+      "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"],
       "description": "Deployment mode when configured."
     },
     "discovery.source": {
@@ -65,6 +66,11 @@
       "type": "string",
       "enum": ["darwin", "linux"],
       "description": "Operating system (runtime.GOOS)."
+    },
+    "deployment.mode": {
+      "type": "string",
+      "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"],
+      "description": "Deployment mode when configured."
     },
     "defenseclaw.claw.mode": {
       "type": "string",

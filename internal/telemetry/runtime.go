@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -246,6 +247,9 @@ func (p *Provider) StartAgentSpan(
 	}
 	if agentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", agentID))
+	}
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
 	}
 	if inst := p.AgentInstanceID(); inst != "" {
 		span.SetAttributes(attribute.String("defenseclaw.agent.instance_id", inst))
@@ -576,6 +580,9 @@ func (p *Provider) StartLLMSpan(
 		attribute.Int("gen_ai.request.max_tokens", maxTokens),
 		attribute.Float64("gen_ai.request.temperature", temperature),
 	)
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
+	}
 
 	return ctx, span
 }

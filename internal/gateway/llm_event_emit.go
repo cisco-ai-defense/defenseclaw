@@ -234,10 +234,12 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	case "PreToolUse", "PermissionRequest":
 		meta.PromptID = firstNonEmpty(a.lastHookPromptIDForTurn("codex", req.SessionID, req.TurnID), a.lastHookPromptID("codex", req.SessionID), promptIDForTurn("codex", req.SessionID, req.TurnID))
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), codexToolName(req))
 		emitToolInvocationEvent(ctx, meta, "call", codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), "", nil)
 	case "PostToolUse":
 		meta.PromptID = firstNonEmpty(a.lastHookPromptIDForTurn("codex", req.SessionID, req.TurnID), a.lastHookPromptID("codex", req.SessionID), promptIDForTurn("codex", req.SessionID, req.TurnID))
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), codexToolName(req))
 		emitToolInvocationEvent(ctx, meta, "result", codexToolName(req), "", codexToolResponseString(req.ToolResponse), nil)
 	case "Stop":
 		if strings.TrimSpace(req.LastAssistantMessage) == "" {
@@ -260,10 +262,12 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
 		meta.PromptID = a.lastHookPromptID("claudecode", req.SessionID)
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, claudeCodeToolName(req))
 		emitToolInvocationEvent(ctx, meta, "call", claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)), "", nil)
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
 		meta.PromptID = a.lastHookPromptID("claudecode", req.SessionID)
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, claudeCodeToolName(req))
 		emitToolInvocationEvent(ctx, meta, "result", claudeCodeToolName(req), "", claudeCodeToolOutput(req), nil)
 	case "Stop", "SubagentStop", "SessionEnd":
 		if strings.TrimSpace(req.LastAssistantMessage) == "" {
@@ -293,6 +297,19 @@ func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, age
 		UserID:    userID,
 		UserName:  userName,
 	}
+}
+
+func hookToolDestinationApp(serverName, toolName string) string {
+	if server := strings.TrimSpace(serverName); server != "" {
+		return toolDestinationApp("mcp", server)
+	}
+	if server := serverFromMCPToolName(toolName); server != "" {
+		return toolDestinationApp("mcp", server)
+	}
+	if strings.TrimSpace(toolName) == "" {
+		return ""
+	}
+	return toolDestinationApp("builtin", "")
 }
 
 func (a *APIServer) rememberHookPromptID(source, sessionID, turnID, promptID string) {

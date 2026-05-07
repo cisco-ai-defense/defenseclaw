@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -444,6 +445,9 @@ func TestSanitizeHookCWD_Traversal(t *testing.T) {
 }
 
 func TestHandleCodexHook_EnrichesHTTPSpan(t *testing.T) {
+	gatewaylog.SetProcessRunID("run-hook-123")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSyncer(exp),
@@ -493,6 +497,7 @@ func TestHandleCodexHook_EnrichesHTTPSpan(t *testing.T) {
 
 	for key, want := range map[string]string{
 		"gen_ai.conversation.id":         "session-123",
+		"defenseclaw.run.id":             "run-hook-123",
 		"gen_ai.agent.name":              "codex",
 		"gen_ai.agent.type":              "codex",
 		"gen_ai.agent.id":                "openai_codex",

@@ -32,6 +32,26 @@ const (
 	EnvLinux    Environment = "linux"
 )
 
+type DeploymentMode string
+
+const (
+	DeploymentModeManagedEnterprise DeploymentMode = "managed_enterprise"
+	DeploymentModeUnmanagedBYOD     DeploymentMode = "unmanaged_byod"
+	DeploymentModeCICD              DeploymentMode = "ci_cd"
+	DeploymentModeSandboxed         DeploymentMode = "sandboxed"
+	DeploymentModeServer            DeploymentMode = "server"
+	DeploymentModeSaaS              DeploymentMode = "saas"
+)
+
+var validDeploymentModes = map[string]struct{}{
+	string(DeploymentModeManagedEnterprise): {},
+	string(DeploymentModeUnmanagedBYOD):     {},
+	string(DeploymentModeCICD):              {},
+	string(DeploymentModeSandboxed):         {},
+	string(DeploymentModeServer):            {},
+	string(DeploymentModeSaaS):              {},
+}
+
 const (
 	DefaultDataDirName = ".defenseclaw"
 	DefaultAuditDBName = "audit.db"
