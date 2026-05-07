@@ -916,15 +916,66 @@ def _probe_otel_destination(cfg, d, r: _DoctorResult) -> None:
         _emit("warn", label, f"{host}:{port} not reachable: {exc}", r=r)
 
 
+# HEC internal reply codes from Splunk docs — used to surface
+# actionable diagnostics instead of the raw HTTP status code.
+# Source: https://help.splunk.com/en/splunk-enterprise/get-started/get-data-in/10.2/get-data-with-http-event-collector/troubleshoot-http-event-collector
+_HEC_CODES = {
+    0:  "success",
+    1:  "token is disabled — enable it in Splunk HEC settings",
+    2:  "no authorization — token is required",
+    3:  "invalid authorization header format",
+    4:  "invalid token — check the token value in your config",
+    5:  "no data in request",
+    6:  "invalid data format",
+    7:  "incorrect index — the index does not exist in Splunk",
+    9:  "server busy — Splunk HEC is overloaded",
+    10: "data channel missing",
+    11: "invalid data channel",
+    12: "event field is required",
+    13: "event field cannot be blank",
+    17: "HEC is healthy",
+    18: "HEC unhealthy — queues are full",
+}
+
+
+def _parse_hec_response(body: str) -> tuple[int | None, str]:
+    """Parse a Splunk HEC JSON response body.
+
+    Returns (hec_code, human_readable_message). hec_code is None when
+    the body is not valid HEC JSON (e.g. a load balancer error page).
+    """
+    try:
+        obj = json.loads(body)
+    except (ValueError, TypeError):
+        return None, body[:120] if body else ""
+    hec_code = obj.get("code")
+    text = obj.get("text", "")
+    if hec_code is None:
+        return None, text or body[:120]
+    human = _HEC_CODES.get(hec_code)
+    if human:
+        return hec_code, human
+    return hec_code, text or f"HEC code {hec_code}"
+
+
 def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
-    """HEC probe: POST a single test event with the resolved token."""
+    """HEC probe: POST a minimal test event and surface actionable diagnostics.
+
+    Interprets both the HTTP status code and the Splunk HEC JSON reply
+    code in the response body so operators see specific failure reasons
+    (wrong index, disabled token, server busy, etc.) rather than a
+    generic HTTP status.
+    """
     label = f"{d.name} ({_splunk_hec_label_kind(d)})"
     endpoint, token = _resolve_audit_sink_endpoint_and_token(cfg, d)
     if not endpoint or not token:
-        _emit("fail", label, "endpoint or token missing", r=r)
+        _emit("fail", label, "endpoint or token missing — set splunk_hec.token_env in config", r=r)
         return
 
-    code, body = _http_probe(
+    # Warn if the token is stored inline rather than via token_env.
+    _check_splunk_token_posture(cfg, d, label, r)
+
+    http_code, body = _http_probe(
         endpoint,
         method="POST",
         headers={
@@ -935,15 +986,84 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
         timeout=10.0,
     )
 
-    if code == 200:
-        _emit("pass", label, endpoint, r=r)
-    elif code in (401, 403):
-        _emit("fail", label, f"authentication failed (HTTP {code})", r=r)
-    elif code == 0:
-        _emit("warn", label, f"unreachable: {body[:100]}", r=r)
-    else:
-        _emit("warn", label, f"HTTP {code}", r=r)
+    if http_code == 200:
+        hec_code, msg = _parse_hec_response(body)
+        if hec_code is not None and hec_code not in (0, 17):
+            _emit("warn", label, f"unexpected HEC response on 200: {msg}", r=r)
+        else:
+            _emit("pass", label, endpoint, r=r)
+        return
 
+    hec_code, hec_msg = _parse_hec_response(body)
+
+    if http_code in (401, 403):
+        if hec_code == 1:
+            _emit("fail", label, "token is disabled — enable the HEC token in Splunk", r=r)
+        elif hec_code == 4:
+            _emit("fail", label, "invalid token — verify splunk_hec.token_env points to the correct value", r=r)
+        elif hec_code in (2, 3):
+            _emit("fail", label, f"authorization error: {hec_msg}", r=r)
+        else:
+            _emit("fail", label, f"authentication failed (HTTP {http_code}): {hec_msg}", r=r)
+        return
+
+    if http_code == 400:
+        if hec_code == 7:
+            index_hint = f" (configured index: {d.index!r})" if getattr(d, "index", None) else ""
+            msg = f"incorrect index{index_hint} — create the index in Splunk or update splunk_hec.index"
+            _emit("fail", label, msg, r=r)
+        else:
+            _emit("fail", label, f"bad request: {hec_msg}", r=r)
+        return
+
+    if http_code in (503, 429):
+        if hec_code == 18:
+            _emit("warn", label, "Splunk HEC queues are full — indexer may be overloaded", r=r)
+        elif hec_code == 9:
+            _emit("warn", label, "Splunk HEC server busy — consider reducing flush frequency", r=r)
+        else:
+            _emit("warn", label, f"HEC temporarily unavailable (HTTP {http_code}): {hec_msg}", r=r)
+        return
+
+    if http_code == 0:
+        if any(kw in body.lower() for kw in ("ssl", "certificate", "tls")):
+            _emit("fail", label, f"TLS error — check verify_tls setting and endpoint certificate: {body[:120]}", r=r)
+        else:
+            _emit("warn", label, f"unreachable: {body[:120]}", r=r)
+        return
+
+    _emit("warn", label, f"HTTP {http_code}: {hec_msg or body[:120]}", r=r)
+
+
+def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
+    """Warn if the HEC token is stored inline in config rather than via token_env.
+
+    Splunk's own best practices recommend against storing HEC tokens in
+    configuration files. This check surfaces that posture issue during
+    doctor so operators are nudged toward token_env before it becomes a
+    security finding.
+    """
+    import os
+
+    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+    try:
+        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+    except Exception:
+        return
+    sinks = doc.get("audit_sinks") or []
+    for sink in sinks:
+        if not isinstance(sink, dict) or sink.get("name") != d.name:
+            continue
+        sub = sink.get("splunk_hec") or {}
+        if isinstance(sub, dict) and sub.get("token") and not sub.get("token_env"):
+            _emit(
+                "warn",
+                label,
+                "HEC token is stored inline in config — use token_env to reference an "
+                "environment variable instead (see Splunk HEC security best practices)",
+                r=r,
+            )
+        return
 
 def _destination_label_kind(d, presets) -> str:
     if d.kind == "splunk_hec":
