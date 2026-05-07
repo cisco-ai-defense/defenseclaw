@@ -1831,6 +1831,16 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// For fetch-intercepted OpenAI-compatible requests, preserve the
+	// original request body when forwarding to the real upstream. This is
+	// required because provider-specific extension fields such as
+	// chat_template_kwargs, extra_body, and parallel_tool_calls must not be
+	// dropped by the structured provider translation path.
+	if req.TargetURL != "" {
+		p.rawForwardChatCompletion(w, r, body, &req)
+		return
+	}
+
 	// --- Forward to upstream provider ---
 	if p.resolveProviderFn == nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "proxy misconfigured: no provider resolver")
@@ -4130,4 +4140,181 @@ func (s *sseByteMeter) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// rawForwardChatCompletion preserves the original OpenAI-compatible JSON body
+// for fetch-intercepted requests while keeping DefenseClaw PRE-CALL and
+// POST-CALL guardrail checks active.
+func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http.Request, body []byte, req *ChatRequest) {
+	targetOrigin := strings.TrimRight(req.TargetURL, "/")
+	if targetOrigin == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
+		return
+	}
+
+	upstreamURL := targetOrigin + r.URL.RequestURI()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 120*time.Second)
+	defer cancel()
+
+	forwardBody := body
+	if len(req.RawBody) > 0 {
+		forwardBody = req.RawBody
+	}
+
+	upReq, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(forwardBody))
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to create upstream request")
+		return
+	}
+
+	upReq.Header.Set("Content-Type", "application/json")
+	if req.TargetAPIKey != "" {
+		upReq.Header.Set("Authorization", "Bearer "+strings.TrimPrefix(req.TargetAPIKey, "Bearer "))
+	}
+	if v := r.Header.Get("Accept"); v != "" {
+		upReq.Header.Set("Accept", v)
+	}
+
+	resp, err := providerHTTPClient.Do(upReq)
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 20*1024*1024))
+	if err != nil {
+		writeOpenAIError(w, http.StatusBadGateway, "failed to read upstream response")
+		return
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		for k, vals := range resp.Header {
+			if strings.EqualFold(k, "Content-Length") {
+				continue
+			}
+			for _, v := range vals {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = w.Write(respBody)
+		return
+	}
+
+	completion, usage := extractRawForwardCompletion(respBody, req.Stream)
+
+	if completion != "" {
+		p.reloadRuntimeConfig()
+		p.rtMu.RLock()
+		mode := p.mode
+		customBlockMsg := p.blockMessage
+		p.rtMu.RUnlock()
+
+		postCtx, postCancel := p.postCallContext(r.Context())
+		defer postCancel()
+
+		postStart := time.Now()
+		respMessages := []ChatMessage{{Role: "assistant", Content: completion}}
+		verdict := p.inspector.Inspect(postCtx, "completion", completion, respMessages, req.Model, mode)
+		p.logPostCall(req.Model, completion, verdict, time.Since(postStart), usage)
+		p.recordTelemetry(r.Context(), "completion", req.Model, verdict, time.Since(postStart), nil, nil)
+
+		if verdict != nil && verdict.Action == "block" && mode == "action" {
+			msg := blockMessage(customBlockMsg, "completion", verdict.Reason)
+			p.enqueueBlockNotification(verdict, "completion", req.Model)
+			if req.Stream {
+				p.writeBlockedStream(w, req.Model, msg)
+			} else {
+				p.writeBlockedResponse(w, req.Model, msg)
+			}
+			return
+		}
+	}
+
+	for k, vals := range resp.Header {
+		if strings.EqualFold(k, "Content-Length") {
+			continue
+		}
+		for _, v := range vals {
+			w.Header().Add(k, v)
+		}
+	}
+
+	if w.Header().Get("Content-Type") == "" {
+		if req.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+		} else {
+			w.Header().Set("Content-Type", "application/json")
+		}
+	}
+
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(respBody)
+}
+
+// extractRawForwardCompletion extracts assistant-visible text only.
+//
+// For non-streaming responses, it reads choices[].message.content.
+// For streaming responses, it reads choices[].delta.content.
+// It deliberately does not scan the original request body, tool schemas,
+// system prompts, or raw SSE JSON.
+func extractRawForwardCompletion(respBody []byte, stream bool) (string, *ChatUsage) {
+	if !stream {
+		var parsed ChatResponse
+		if err := json.Unmarshal(respBody, &parsed); err != nil {
+			return "", nil
+		}
+
+		out := strings.Builder{}
+		for _, ch := range parsed.Choices {
+			if ch.Message != nil && ch.Message.Content != "" {
+				out.WriteString(ch.Message.Content)
+			}
+		}
+		return out.String(), parsed.Usage
+	}
+
+	out := strings.Builder{}
+
+	lines := strings.Split(string(respBody), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+				Message *ChatMessage `json:"message,omitempty"`
+			} `json:"choices"`
+		}
+
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue
+		}
+
+		for _, ch := range chunk.Choices {
+			if ch.Delta.Content != "" {
+				out.WriteString(ch.Delta.Content)
+			}
+			if ch.Message != nil && ch.Message.Content != "" {
+				out.WriteString(ch.Message.Content)
+			}
+		}
+	}
+
+	return out.String(), nil
 }
