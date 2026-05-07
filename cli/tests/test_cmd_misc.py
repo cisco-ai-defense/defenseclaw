@@ -978,6 +978,156 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
         self.assertIn("Log in with admin", result.output)
 
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_logs_bootstrap_bridge_s3_export_env(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--logs",
+                "--s3-export",
+                "--s3-bucket",
+                "agentwatch-demo",
+                "--s3-prefix",
+                "agentwatch/defenseclaw",
+                "--aws-region",
+                "us-west-2",
+                "--non-interactive",
+                "--accept-splunk-license",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        env = next(
+            call.kwargs["env"]
+            for call in mock_run.call_args_list
+            if call.kwargs.get("env", {}).get("S3_EXPORT_ENABLED") == "true"
+        )
+        self.assertEqual(env["S3_EXPORT_ENABLED"], "true")
+        self.assertEqual(env["S3_BUCKET"], "agentwatch-demo")
+        self.assertEqual(env["S3_PREFIX"], "agentwatch/defenseclaw")
+        self.assertEqual(env["AWS_REGION"], "us-west-2")
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_setup_splunk_s3_export_implies_logs(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--s3-export",
+                "--s3-bucket",
+                "agentwatch-demo",
+                "--non-interactive",
+                "--accept-splunk-license",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        env = next(
+            call.kwargs["env"]
+            for call in mock_run.call_args_list
+            if call.kwargs.get("env", {}).get("S3_EXPORT_ENABLED") == "true"
+        )
+        self.assertEqual(env["S3_EXPORT_ENABLED"], "true")
+        self.assertEqual(env["S3_BUCKET"], "agentwatch-demo")
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_bootstrap_bridge_s3_export_uses_single_run_kwargs(
+        self, _mock_bridge_bin, mock_run,
+    ):
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        contract = _bootstrap_bridge(
+            self.tmp_dir,
+            s3_export=True,
+            s3_bucket="agentwatch-demo",
+            s3_prefix="agentwatch/defenseclaw",
+            aws_region="us-west-2",
+        )
+
+        self.assertEqual(contract["hec_token"], "bootstrap-token")
+        mock_run.assert_called_once()
+        self.assertEqual(
+            mock_run.call_args.args[0],
+            ["/tmp/fake-splunk-claw-bridge", "up", "--output", "json"],
+        )
+        kwargs = mock_run.call_args.kwargs
+        self.assertEqual(kwargs["capture_output"], True)
+        self.assertEqual(kwargs["text"], True)
+        self.assertEqual(kwargs["timeout"], 300)
+        self.assertEqual(kwargs["env"]["S3_EXPORT_ENABLED"], "true")
+        self.assertEqual(kwargs["env"]["S3_BUCKET"], "agentwatch-demo")
+        self.assertEqual(kwargs["env"]["S3_PREFIX"], "agentwatch/defenseclaw")
+        self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
+
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
     def test_setup_splunk_logs_non_interactive_fails_when_bridge_bootstrap_fails(

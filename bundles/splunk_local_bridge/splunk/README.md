@@ -23,6 +23,11 @@ or long-term deployment, it does not promise a seamless upgrade or migration
 path, it does not guarantee all Splunk Enterprise capabilities in every license
 mode, and it does not proxy or replace a direct O11y integration.
 
+The optional `s3_exporter/` sidecar follows the same local/demo positioning. It
+can copy local `defenseclaw_local` events to S3-compatible storage for handoff
+testing, but it is not SmartStore, not an ES dependency, and not a supported
+long-term archival or customer-managed production path.
+
 ## Main Files
 
 - [default.yml](default.yml)
@@ -39,6 +44,34 @@ mode, and it does not proxy or replace a direct O11y integration.
   - generated app archive location
 - [package_local_mode_app.sh](package_local_mode_app.sh)
   - packages the app source into `build/defenseclaw_local_mode.tgz`
+- `../s3_exporter/`
+  - optional local sidecar that exports batches from local Splunk to S3 as
+    normalized JSONL.GZ plus manifests
+  - disabled by default through `S3_EXPORT_ENABLED=false`
+  - can be started from the CLI with `defenseclaw setup splunk --s3-export --s3-bucket <bucket>`
+
+## Optional S3 Export
+
+The quickest demo path is:
+
+```bash
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+
+defenseclaw setup splunk --s3-export \
+  --s3-bucket agentwatch-demo \
+  --s3-prefix agentwatch/defenseclaw \
+  --aws-region us-west-2 \
+  --accept-splunk-license \
+  --non-interactive
+```
+
+For a short demo loop, set `S3_EXPORT_INTERVAL_SECONDS=30` before running setup.
+The exporter writes JSONL.GZ data objects by tenant/workspace/day/hour partition
+and writes one companion manifest for each non-empty batch. See
+`../s3_exporter/README.md` for MinIO/Localstack examples, manifest shape,
+expected delay, and edge cases.
+
 ## Supported Pattern
 
 This repo uses the native `docker-splunk` / `splunk-ansible` bootstrap path first:

@@ -49,6 +49,9 @@ Options:
   --run-label LABEL     Harness run label for smoke. Default: bridge-smoke
   --query SPL           SPL query string to execute with the query action
   --auth-role ROLE      Query auth role: local or admin. Default: local
+
+Optional S3 export is env-driven. Set S3_EXPORT_ENABLED=true and S3_BUCKET
+before running up to start the splunk-s3-exporter sidecar.
 EOF
 }
 
@@ -164,11 +167,51 @@ bridge_runs_in_free_mode() {
   [[ "${SPLUNK_LICENSE_URI:-}" == "Free" ]]
 }
 
+capture_s3_env_overrides() {
+  local override_file
+  override_file="$(mktemp)"
+  local -a names=(
+    S3_EXPORT_ENABLED
+    S3_EXPORT_ONCE
+    S3_BUCKET
+    S3_PREFIX
+    AWS_REGION
+    AWS_ACCESS_KEY_ID
+    AWS_SECRET_ACCESS_KEY
+    AWS_SESSION_TOKEN
+    S3_ENDPOINT_URL
+    S3_SSE
+    SPLUNK_USERNAME
+    SPLUNK_PASSWORD
+    S3_EXPORT_INTERVAL_SECONDS
+    S3_EXPORT_WINDOW_SECONDS
+    S3_EXPORT_LOOKBACK_SECONDS
+    TENANT_ID
+    WORKSPACE_ID
+    DEPLOYMENT_ENVIRONMENT
+  )
+  local name value
+  for name in "${names[@]}"; do
+    if eval '[ "${'"${name}"'+set}" = set ]'; then
+      value="$(eval "printf '%s' \"\${${name}}\"")"
+      printf 'export %s=%q\n' "${name}" "${value}" >> "${override_file}"
+    fi
+  done
+  printf '%s\n' "${override_file}"
+}
+
 load_env_contract() {
+  local s3_override_file
+  s3_override_file="$(capture_s3_env_overrides)"
   set -a
   # shellcheck disable=SC1090
   source "${ENV_FILE}"
   set +a
+  if [[ -s "${s3_override_file}" ]]; then
+    # shellcheck disable=SC1090
+    source "${s3_override_file}"
+  fi
+  rm -f "${s3_override_file}"
 
   export SPLUNK_ENV_FILE="${ENV_FILE}"
   if [[ -n "${IMAGE_OVERRIDE}" ]]; then
@@ -177,6 +220,11 @@ load_env_contract() {
   if [[ "${DEBUG_MODE}" == "true" ]]; then
     export DEBUG="true"
     export ANSIBLE_EXTRA_FLAGS="-vvv"
+  fi
+  if is_truthy "${S3_EXPORT_ENABLED:-false}"; then
+    if [[ ",${COMPOSE_PROFILES:-}," != *",s3-export,"* ]]; then
+      export COMPOSE_PROFILES="${COMPOSE_PROFILES:+${COMPOSE_PROFILES},}s3-export"
+    fi
   fi
 }
 
