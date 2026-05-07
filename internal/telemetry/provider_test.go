@@ -1170,6 +1170,82 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	}
 }
 
+func TestRecordInspectEvaluation_IncludesDestinationApp(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	p.RecordInspectEvaluation(ctx, "codex:PreToolUse", "block", "CRITICAL", "mcp:github")
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	found := findCounter(rm, "defenseclaw.inspect.evaluations")
+	if found == nil {
+		t.Fatal("metric defenseclaw.inspect.evaluations not found")
+	}
+
+	sum, ok := found.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", found.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("inspect datapoints = %d, want 1", len(sum.DataPoints))
+	}
+
+	dp := sum.DataPoints[0]
+	if !hasAttribute(dp.Attributes, "tool", "codex:PreToolUse") {
+		t.Fatal("inspect counter missing tool=codex:PreToolUse")
+	}
+	if !hasAttribute(dp.Attributes, "destination_app", "mcp:github") {
+		t.Fatal("inspect counter missing destination_app=mcp:github")
+	}
+}
+
+func TestRecordConnectorHookInvocation_IncludesDestinationApp(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	p.RecordConnectorHookInvocation(ctx, "codex", "PreToolUse", "ok", "would_block", "builtin", 12)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+
+	found := findCounter(rm, "defenseclaw.connector.hook.invocations")
+	if found == nil {
+		t.Fatal("metric defenseclaw.connector.hook.invocations not found")
+	}
+
+	sum, ok := found.Data.(metricdata.Sum[int64])
+	if !ok {
+		t.Fatalf("expected Sum[int64], got %T", found.Data)
+	}
+	if len(sum.DataPoints) != 1 {
+		t.Fatalf("hook datapoints = %d, want 1", len(sum.DataPoints))
+	}
+
+	dp := sum.DataPoints[0]
+	if !hasAttribute(dp.Attributes, "connector", "codex") {
+		t.Fatal("hook counter missing connector=codex")
+	}
+	if !hasAttribute(dp.Attributes, "destination_app", "builtin") {
+		t.Fatal("hook counter missing destination_app=builtin")
+	}
+}
+
 func TestRecordGuardrailEvaluation_DisabledProvider_NoOp(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")
 	p.RecordGuardrailEvaluation(context.Background(), "test", "block")
