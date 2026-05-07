@@ -104,7 +104,7 @@ override-dependencies = [
     "click>=8.3.1",
     "importlib-metadata>=8.7.1",
     "jsonschema>=4.26.0",
-    "python-multipart>=0.0.26", # CVE-2026-40347 fixed in 0.0.26
+    "python-multipart>=0.0.27", # CVE-2026-42561 fixed in 0.0.27
 ]
 
 [tool.ruff]

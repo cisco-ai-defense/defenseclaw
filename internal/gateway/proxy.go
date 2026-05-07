@@ -1537,7 +1537,19 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	}
 
 	apiKey := ""
-	if req.TargetAPIKey != "" {
+	// If an external token resolver is registered, use it for direct-provider mode too.
+	if tokenResolver != nil {
+		providerPrefix, modelID := splitModel(cfgModel)
+		if providerPrefix == "" {
+			providerPrefix = inferProvider(modelID, "")
+		}
+		resolvedKey, err := tokenResolver(context.Background(), providerPrefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for configured model %q: %v\n", cfgModel, err)
+			return nil
+		}
+		apiKey = resolvedKey
+	} else if req.TargetAPIKey != "" {
 		apiKey = req.TargetAPIKey
 	} else if p.cfg.APIKeyEnv != "" {
 		dotenvPath := filepath.Join(p.dataDir, ".env")
@@ -1590,6 +1602,17 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 	prefix := inferProviderFromURL(req.TargetURL + req.TargetPath)
 	if prefix == "" {
 		return nil
+	}
+
+	// If an external token resolver is registered, use it to obtain the API key
+	// instead of relying on X-AI-Auth or local env resolution.
+	if tokenResolver != nil {
+		resolvedKey, err := tokenResolver(context.Background(), prefix)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for %q: %v\n", prefix, err)
+			return nil
+		}
+		req.TargetAPIKey = resolvedKey
 	}
 
 	// Azure requires the specific resource endpoint as baseURL.
@@ -1666,20 +1689,25 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// X-AI-Auth carries the real provider API key, normalized to
 	// "Bearer <key>" by the fetch interceptor regardless of which header
 	// the provider SDK originally used (Authorization, x-api-key, api-key).
-	if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
-		req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
+	// Skip extraction when local key resolution is disabled (enterprise mode).
+	if !localKeyResolutionDisabled {
+		if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
+			req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
+		}
 	}
 
 	// Native-binary connectors (zeptoclaw) have no fetch interceptor, so the
 	// request arrives without X-DC-Target-URL / X-AI-Auth. Ask the active
 	// connector to resolve them from its captured config snapshot. Existing
 	// header values win — fetch-interceptor paths are unchanged.
-	if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
-		if req.TargetURL == "" {
-			req.TargetURL = connUpstream
-		}
-		if req.TargetAPIKey == "" {
-			req.TargetAPIKey = connKey
+	if !localKeyResolutionDisabled {
+		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
+			if req.TargetURL == "" {
+				req.TargetURL = connUpstream
+			}
+			if req.TargetAPIKey == "" {
+				req.TargetAPIKey = connKey
+			}
 		}
 	}
 
