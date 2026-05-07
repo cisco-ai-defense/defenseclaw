@@ -3770,6 +3770,14 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
               help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
 @click.option("--logs", "enable_logs", is_flag=True, default=False,
               help="Enable local Splunk via Docker (HEC logs + dashboards, Free mode)")
+@click.option("--s3-export", is_flag=True, default=False,
+              help="Enable local Splunk and start the optional S3 exporter sidecar")
+@click.option("--s3-bucket", default=None,
+              help="S3 bucket for --s3-export (or set S3_BUCKET)")
+@click.option("--s3-prefix", default=None,
+              help="S3 prefix for --s3-export (default: agentwatch/defenseclaw)")
+@click.option("--aws-region", default=None,
+              help="AWS region for --s3-export (default: us-west-2)")
 @click.option("--enterprise", "enable_enterprise", is_flag=True, default=False,
               help="Enable remote Splunk Enterprise via HEC endpoint + token")
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
@@ -3806,6 +3814,10 @@ def setup_splunk(
     app: AppContext,
     enable_o11y: bool,
     enable_logs: bool,
+    s3_export: bool,
+    s3_bucket: str | None,
+    s3_prefix: str | None,
+    aws_region: str | None,
     enable_enterprise: bool,
     realm: str | None,
     access_token: str | None,
@@ -3851,6 +3863,9 @@ def setup_splunk(
         _disable_splunk(app, enable_o11y, enable_logs, enable_enterprise, non_interactive)
         return
 
+    if s3_export:
+        enable_logs = True
+
     if not enable_o11y and not enable_logs and not enable_enterprise and not non_interactive:
         _interactive_splunk_setup(app, realm, access_token, app_name, skip_test=skip_test)
         return
@@ -3881,6 +3896,10 @@ def setup_splunk(
             index=logs_index,
             source=logs_source,
             sourcetype=logs_sourcetype,
+            s3_export=s3_export,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+            aws_region=aws_region,
         )
 
     if enable_enterprise:
@@ -3917,6 +3936,8 @@ def setup_splunk(
             parts.append("o11y=enabled")
         if did_logs:
             parts.append("logs=enabled")
+            if s3_export:
+                parts.append("s3_export=enabled")
         if did_enterprise:
             parts.append("enterprise=enabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
@@ -4151,6 +4172,10 @@ def _setup_logs(
     index: str | None = None,
     source: str | None = None,
     sourcetype: str | None = None,
+    s3_export: bool = False,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
+    aws_region: str | None = None,
 ) -> bool:
     if not _ensure_splunk_license_acceptance(
         accept_splunk_license=accept_splunk_license,
@@ -4165,12 +4190,20 @@ def _setup_logs(
             raise SystemExit(1)
         return False
 
+    if s3_export and not (s3_bucket or os.environ.get("S3_BUCKET")):
+        click.echo("  error: --s3-bucket is required with --s3-export (or set S3_BUCKET)", err=True)
+        raise SystemExit(1)
+
     _apply_logs_config(
         app,
         index=index or "defenseclaw_local",
         source=source or "defenseclaw",
         sourcetype=sourcetype or "defenseclaw:json",
         bootstrap_bridge=True,
+        s3_export=s3_export,
+        s3_bucket=s3_bucket,
+        s3_prefix=s3_prefix,
+        aws_region=aws_region,
     )
     click.echo("  Local Splunk configured (Free mode from day 1)")
     return True
@@ -4319,6 +4352,10 @@ def _apply_logs_config(
     source: str,
     sourcetype: str,
     bootstrap_bridge: bool,
+    s3_export: bool = False,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
+    aws_region: str | None = None,
 ) -> None:
     """Thin alias over ``observability.apply_preset("splunk-hec", ...)``.
 
@@ -4330,7 +4367,13 @@ def _apply_logs_config(
     """
     contract: dict[str, str] | None = None
     if bootstrap_bridge:
-        contract = _bootstrap_bridge(app.cfg.data_dir)
+        contract = _bootstrap_bridge(
+            app.cfg.data_dir,
+            s3_export=s3_export,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+            aws_region=aws_region,
+        )
         if not contract:
             raise SystemExit(1)
 
@@ -4464,7 +4507,14 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
-def _bootstrap_bridge(data_dir: str) -> dict[str, str] | None:
+def _bootstrap_bridge(
+    data_dir: str,
+    *,
+    s3_export: bool = False,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
+    aws_region: str | None = None,
+) -> dict[str, str] | None:
     """Start the local Splunk bridge and return the connection contract."""
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
@@ -4473,10 +4523,23 @@ def _bootstrap_bridge(data_dir: str) -> dict[str, str] | None:
         return None
 
     click.echo("  Starting local Splunk (this takes ~2 minutes)...")
+    env = None
+    if s3_export:
+        env = os.environ.copy()
+        env["S3_EXPORT_ENABLED"] = "true"
+        if s3_bucket:
+            env["S3_BUCKET"] = s3_bucket
+        if s3_prefix:
+            env["S3_PREFIX"] = s3_prefix
+        if aws_region:
+            env["AWS_REGION"] = aws_region
     try:
+        run_kwargs = {"capture_output": True, "text": True, "timeout": 300}
+        if env is not None:
+            run_kwargs["env"] = env
         result = subprocess.run(
             [bridge, "up", "--output", "json"],
-            capture_output=True, text=True, timeout=300,
+            **run_kwargs,
         )
         if result.returncode != 0:
             click.echo(f"  Bridge startup failed (exit {result.returncode})")
