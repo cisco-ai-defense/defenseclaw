@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -59,6 +61,7 @@ type APIServer struct {
 	addr       string
 	scannerCfg *config.Config
 	otel       *telemetry.Provider
+	hilt       *HILTApprovalManager
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -68,6 +71,18 @@ type APIServer struct {
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
+
+	claudeCodeMu                 sync.Mutex
+	claudeCodeLastComponentScan  time.Time
+	codexMu                      sync.Mutex
+	codexLastComponentScan       time.Time
+	rawTelemetryMu               sync.Mutex
+	rawTelemetryDedupe           *rawTelemetryDeduper
+	llmPromptMu                  sync.Mutex
+	llmPromptBySourceSession     map[string]string
+	llmPromptBySourceSessionTurn map[string]string
+
+	connectorRegistry *connector.Registry
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events
@@ -76,10 +91,102 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
 }
 
+func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
+	a.hilt = m
+}
+
+func (a *APIServer) connectorName() string {
+	if a.scannerCfg != nil {
+		if c := strings.TrimSpace(a.scannerCfg.Guardrail.Connector); c != "" {
+			return strings.ToLower(c)
+		}
+		if c := strings.TrimSpace(string(a.scannerCfg.Claw.Mode)); c != "" {
+			return strings.ToLower(c)
+		}
+	}
+	return "unknown"
+}
+
 // SetPolicyReloader registers a callback that atomically reloads the
 // shared OPA policy engine.  It is called by the /policy/reload handler.
 func (a *APIServer) SetPolicyReloader(fn func() error) {
 	a.policyReloader = fn
+}
+
+// SetConnectorRegistry attaches the connector registry so the
+// /v1/connectors endpoint can list available connectors.
+func (a *APIServer) SetConnectorRegistry(reg *connector.Registry) {
+	a.connectorRegistry = reg
+}
+
+// hookHandlers maps connector names to their gateway-side HTTP handlers.
+// connectorHookHandlerByName is the registry that lets api.go map a
+// connector name to the http.HandlerFunc that owns its hook endpoint.
+// Plan C1 / S2.4: registration is data-driven so adding a new
+// connector no longer requires editing the switch in
+// registerConnectorHookRoutes; the gateway package populates this
+// map in api.go's init() (see the bottom of this file).
+//
+// The handler bodies still live in the gateway package because they
+// reach into APIServer state (logger, otel, config, redactor). The
+// HookEndpoint interface in the connector package supplies the path;
+// the map below supplies the handler. Together they encode the
+// "what" (route) on the connector side and the "how" (gateway-level
+// state plumbing) on this side, with no name-cased switch in either.
+var connectorHookHandlerByName = map[string]func(*APIServer) http.HandlerFunc{}
+
+// registerHookHandler is the registration entry point used by
+// gateway-package init() blocks. Idempotent — duplicate registration
+// for the same name overwrites; the last-writer-wins semantics keeps
+// test fixtures hermetic when they swap a stub handler in.
+func registerHookHandler(name string, factory func(*APIServer) http.HandlerFunc) {
+	connectorHookHandlerByName[name] = factory
+}
+
+// registerConnectorHookRoutes dynamically registers hook endpoints for
+// connectors that implement the HookEndpoint interface and have a
+// matching gateway-side handler factory in connectorHookHandlerByName.
+//
+// Plan C1: when a connector is in the registry but has no factory,
+// we log and skip rather than fall back to a hardcoded path — that
+// way an out-of-tree connector can ship without forcing a gateway
+// rebuild, and a misnamed factory fails loud (logged) rather than
+// silent (a 404 at request time).
+func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux) {
+	if a.connectorRegistry == nil {
+		// No registry plumbed (legacy boot path, tests). Fall back
+		// to the previous hardcoded routes so existing flows keep
+		// working — we never unconditionally register a route the
+		// connector didn't ask for.
+		if f, ok := connectorHookHandlerByName["claudecode"]; ok {
+			mux.HandleFunc("/api/v1/claude-code/hook", f(a))
+		}
+		if f, ok := connectorHookHandlerByName["codex"]; ok {
+			mux.HandleFunc("/api/v1/codex/hook", f(a))
+		}
+		return
+	}
+
+	for _, name := range a.connectorRegistry.Names() {
+		conn, ok := a.connectorRegistry.Get(name)
+		if !ok {
+			continue
+		}
+		he, ok := conn.(connector.HookEndpoint)
+		if !ok {
+			continue
+		}
+		factory, ok := connectorHookHandlerByName[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr,
+				"[api] connector %q implements HookEndpoint but no gateway handler is registered; skipping route %s\n",
+				name, he.HookAPIPath())
+			continue
+		}
+		path := he.HookAPIPath()
+		mux.HandleFunc(path, factory(a))
+		fmt.Fprintf(os.Stderr, "[api] registered hook endpoint: %s → %s\n", name, path)
+	}
 }
 
 // NewAPIServer creates the REST API server bound to the given address.
@@ -129,15 +236,40 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
-	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
+	// /api/v1/inspect/* is in the agent's critical path: every hook
+	// callback (claude-code-hook, codex-hook, inspect-tool) hits one of
+	// these. Wrap them in a per-IP token bucket so a misbehaving or
+	// compromised local agent can never blast the path. Loopback callers
+	// (the gateway's own hooks) are exempt inside perIPRateLimiter.
+	inspectMux := http.NewServeMux()
+	inspectMux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
+	inspectMux.HandleFunc("/api/v1/inspect/request", a.handleInspectRequest)
+	inspectMux.HandleFunc("/api/v1/inspect/response", a.handleInspectResponse)
+	inspectMux.HandleFunc("/api/v1/inspect/tool-response", a.handleInspectToolResponse)
+	mux.Handle("/api/v1/inspect/", perIPRateLimiter(20, 40)(inspectMux))
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
+	a.registerConnectorHookRoutes(mux)
+	// OTLP-HTTP receiver for the three signal types codex
+	// (via [otel.exporter.otlp-http]) and Claude Code (via
+	// OTEL_EXPORTER_OTLP_ENDPOINT) post telemetry to. Body shape is
+	// OTLP-JSON; tokenAuth + apiCSRFProtect protect the endpoints
+	// the same way they protect /api/v1/codex/hook. See
+	// internal/gateway/otel_ingest.go.
+	mux.HandleFunc("/v1/logs", a.handleOTLPLogs)
+	mux.HandleFunc("/v1/metrics", a.handleOTLPMetrics)
+	mux.HandleFunc("/v1/traces", a.handleOTLPTraces)
+	// Codex agent-turn-complete notifier. The notify-bridge.sh shim
+	// installed by the codex connector POSTs codex's JSON arg here
+	// after every turn (see https://developers.openai.com/codex/
+	// config-advanced). Audited as a structured event so the SIEM
+	// can roll up turn counts + completion reasons per session.
+	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
+	mux.HandleFunc("/v1/connectors", a.handleConnectors)
 
 	handler := maxBodyMiddleware(mux, 1<<20)
 	handler = a.apiCSRFProtect(handler)
-	if a.scannerCfg != nil && a.scannerCfg.Gateway.Token != "" {
-		handler = a.tokenAuth(handler)
-	}
+	handler = a.tokenAuth(handler)
 	handler = a.metricsMiddleware(handler)
 	var reg *AgentRegistry
 	if a.scannerCfg != nil {
@@ -201,6 +333,40 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	a.writeJSON(w, http.StatusOK, body)
 }
 
+func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	reg := a.connectorRegistry
+	if reg == nil {
+		reg = connector.NewDefaultRegistry()
+	}
+	type connectorEntry struct {
+		Name               string `json:"name"`
+		Description        string `json:"description"`
+		Source             string `json:"source"`
+		ToolInspectionMode string `json:"tool_inspection_mode"`
+		SubprocessPolicy   string `json:"subprocess_policy"`
+	}
+	avail := reg.Available()
+	entries := make([]connectorEntry, len(avail))
+	for i, info := range avail {
+		entries[i] = connectorEntry{
+			Name:               info.Name,
+			Description:        info.Description,
+			Source:             info.Source,
+			ToolInspectionMode: string(info.ToolInspectionMode),
+			SubprocessPolicy:   string(info.SubprocessPolicy),
+		}
+	}
+	resp := map[string]interface{}{
+		"active":     a.connectorName(),
+		"connectors": entries,
+	}
+	a.writeJSON(w, http.StatusOK, resp)
+}
+
 func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -212,6 +378,16 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
 		"health":     snap,
 		"provenance": version.Current(),
+		// connector_mode reports which guardrail surface the active
+		// connector is running. The TUI uses this to render the
+		// "Observability mode" banner with the right copy and to
+		// hide proxy-related panels (proxy_addr, openai_base_url
+		// override) when enforcement is off. This is the single
+		// source of truth: the proxy's "running / observability-only"
+		// summary in health.proxy mirrors this but the structured
+		// field below is what programmatic consumers (CLI status,
+		// dashboards) should read.
+		"connector_mode": a.connectorModeSummary(),
 	}
 
 	if a.client != nil && a.client.Hello() != nil {
@@ -220,6 +396,68 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, status)
+}
+
+// connectorModeSummary returns the per-connector enforcement /
+// observability mode for the active connector. The shape is:
+//
+//	{
+//	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
+//	  "mode":       "guardrail" | "observability",
+//	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
+//	  "proxy_intercept": true | false,
+//	}
+//
+// "guardrail" means the proxy listener is bound and inline blocking
+// is active; "observability" means traffic is NOT intercepted and
+// the gateway only ingests telemetry. Telemetry channels reflect
+// what Setup() actually wired (hooks always on; otel + notify are
+// codex/claude-only; openclaw/zeptoclaw enumerate "hooks" alone).
+func (a *APIServer) connectorModeSummary() map[string]interface{} {
+	name := a.connectorName()
+	mode := "guardrail"
+	intercept := true
+	var telemetry []string
+
+	a.cfgMu.RLock()
+	gc := config.GuardrailConfig{}
+	if a.scannerCfg != nil {
+		gc = a.scannerCfg.Guardrail
+	}
+	a.cfgMu.RUnlock()
+
+	switch name {
+	case "codex":
+		if !gc.CodexEnforcementEnabled {
+			mode = "observability"
+			intercept = false
+		}
+		// codex telemetry always wires all three channels (hooks,
+		// the [otel.exporter.otlp-http] block, the notify bridge).
+		// Setup() runs these unconditionally; we only gate proxy
+		// interception on enforcement.
+		telemetry = []string{"hooks", "otel", "notify"}
+	case "claudecode":
+		if !gc.ClaudeCodeEnforcementEnabled {
+			mode = "observability"
+			intercept = false
+		}
+		// Claude Code uses hooks + the OTel env-block; no notify
+		// equivalent (Anthropic doesn't ship a turn-complete shim).
+		telemetry = []string{"hooks", "otel"}
+	default:
+		// openclaw / zeptoclaw / unknown: enforcement is the only
+		// supported mode today. Hooks are wired by the connector;
+		// no native OTel surface from those agents.
+		telemetry = []string{"hooks"}
+	}
+
+	return map[string]interface{}{
+		"connector":       name,
+		"mode":            mode,
+		"telemetry":       telemetry,
+		"proxy_intercept": intercept,
+	}
 }
 
 type skillActionRequest struct {
@@ -1235,10 +1473,18 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// PR #141 audit M6: compute the redacted reason BEFORE the details
+	// string is composed so the audit-store row, the gateway.log line,
+	// and any sink-forwarded copy all carry the redacted form. The
+	// upstream rule-id literal is still preserved on stderr (see
+	// switch-block below) for operator-facing visibility, but every
+	// persisted surface now matches the rest of the v7 redaction
+	// contract.
+	redactedReason := redaction.Reason(req.Reason)
 	details := fmt.Sprintf("direction=%s action=%s severity=%s findings=%d elapsed_ms=%.1f",
 		req.Direction, req.Action, req.Severity, len(req.Findings), req.ElapsedMs)
 	if req.Reason != "" {
-		details += fmt.Sprintf(" reason=%s", truncate(req.Reason, 120))
+		details += fmt.Sprintf(" reason=%s", truncate(redactedReason, 120))
 	}
 
 	if nfs := NormalizeScanVerdict(&ScanVerdict{
@@ -1262,10 +1508,10 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 
 	// Both Reason and Findings are composed upstream by the
 	// guardrail proxy and routinely embed the matched literal
-	// in RULE-ID:description form. Redact both for the
-	// operator-facing stderr lines (Reveal flag can unmask
-	// locally if needed); rule IDs survive intact.
-	redactedReason := redaction.Reason(req.Reason)
+	// in RULE-ID:description form. redactedReason is computed
+	// above (see audit M6); the same Reveal-aware redaction is
+	// applied to each finding for parity with the persisted
+	// `details` string. Rule IDs survive intact in either form.
 	redactedFindings := make([]string, len(req.Findings))
 	for i, f := range req.Findings {
 		redactedFindings[i] = redaction.Reason(f)
@@ -1341,7 +1587,11 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if req.TokensOut != nil {
 				tOut = *req.TokensOut
 			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, "openclaw", SharedAgentRegistry().AgentID(), tIn, tOut)
+			agentName := a.connectorName()
+			if reg := SharedAgentRegistry(); reg != nil && reg.AgentName() != "" {
+				agentName = reg.AgentName()
+			}
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, agentName, SharedAgentRegistry().AgentID(), tIn, tOut)
 		}
 	}
 
@@ -1386,6 +1636,29 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		LocalResult:   req.LocalResult,
 		CiscoResult:   req.CiscoResult,
 		ContentLength: req.ContentLength,
+	}
+
+	// Inject the live HILT configuration so the Rego policy reads
+	// `input.hilt.*` and config.yaml stays the single source of truth.
+	// Without this, the policy would fall back to `data.guardrail.hilt`
+	// in policies/rego/data.json, which historically drifted out of sync
+	// with config.yaml and surfaced HIGH-severity findings as `alert`
+	// instead of `confirm`. See cmd_setup.py:_sync_guardrail_hilt_to_opa
+	// for the legacy mirror — preserved as a fallback for non-gateway
+	// callers (e.g. direct `opa eval`) but no longer authoritative for
+	// requests routed through this endpoint.
+	if a.scannerCfg != nil {
+		a.cfgMu.RLock()
+		hilt := a.scannerCfg.Guardrail.HILT
+		a.cfgMu.RUnlock()
+		minSev := strings.ToUpper(strings.TrimSpace(hilt.MinSeverity))
+		if minSev == "" {
+			minSev = "HIGH"
+		}
+		input.HILT = &policy.GuardrailHILTInput{
+			Enabled:     hilt.Enabled,
+			MinSeverity: minSev,
+		}
 	}
 
 	out, err := a.evaluateGuardrailPolicy(r.Context(), input)
@@ -1460,6 +1733,31 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.writeJSON(w, http.StatusOK, cfg)
 
 	case http.MethodPatch:
+		// PR #141 audit C1: defense-in-depth gate. tokenAuth already
+		// fail-closes when no gateway token is configured, but mode
+		// changes are too security-sensitive to depend on a single
+		// middleware layer. A future refactor that exposes this
+		// handler outside the tokenAuth chain (or a misconfigured
+		// custom mux) must not silently downgrade `action` → `observe`
+		// without an authenticated caller. Re-validate here with the
+		// same constant-time compare tokenAuth uses.
+		if a.scannerCfg != nil {
+			token := ""
+			if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+				token = strings.TrimPrefix(auth, "Bearer ")
+			}
+			if token == "" {
+				token = r.Header.Get("X-DefenseClaw-Token")
+			}
+			expected := a.scannerCfg.Gateway.Token
+			if expected == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+				a.writeJSON(w, http.StatusForbidden, map[string]string{
+					"error": "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN",
+				})
+				return
+			}
+		}
+
 		var req map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
@@ -1548,7 +1846,6 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	}
 
 	sev := "NONE"
-	action := "allow"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
 		if res == nil {
@@ -1557,13 +1854,13 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 		rank := map[string]int{"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
 		if rank[res.Severity] > rank[sev] {
 			sev = res.Severity
-			action = res.Action
 		}
 		if res.Severity != "NONE" {
 			sources = append(sources, "scanner")
 		}
 	}
 
+	action := guardrailFallbackActionForSeverity(sev)
 	if input.Mode == "observe" && action == "block" {
 		action = "alert"
 	}
@@ -1635,7 +1932,13 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			expected = a.scannerCfg.Gateway.Token
 		}
 		if expected == "" {
-			next.ServeHTTP(w, r)
+			// Plan B2 / S0.2: fail-closed when no token is configured.
+			// EnsureGatewayToken synthesizes one at boot, so this branch
+			// is unreachable in production. Treat it as a misconfiguration
+			// (503) rather than silently allowing loopback — the previous
+			// "no token, trust loopback" path was a local-IDOR risk.
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthMissingToken, "no_token_configured")
+			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
 		}
 		if token == "" {
@@ -1643,7 +1946,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if token != expected {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -1667,9 +1970,17 @@ func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, ro
 }
 
 // apiCSRFProtect is the CSRF gate for the REST API with structured auth telemetry.
+//
+// Plan A3 (S0.13): GET/HEAD remain exempt because the inspect handlers (and
+// every state-changing endpoint) reject non-POST. OPTIONS is no longer a
+// blanket exemption — CORS preflight is rejected via the same Sec-Fetch-Site
+// gate that protects POST. There is no legitimate cross-origin caller of
+// the sidecar API today; if one is added, it must explicitly bypass this
+// gate by setting Sec-Fetch-Site to same-origin or none in a non-browser
+// caller (where the header is absent).
 func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1678,6 +1989,31 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 			route = r.Pattern
 		}
 		ctx := r.Context()
+
+		// Sec-Fetch-Site is a browser-enforced header that cannot be spoofed
+		// by JavaScript. When present, reject cross-site requests outright.
+		// For OPTIONS (CORS preflight), this is the primary signal.
+		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+			if sfs != "same-origin" && sfs != "none" {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "sec_fetch_site_rejected")
+				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				return
+			}
+		}
+
+		// CORS preflights legitimately have no body / Content-Type but
+		// browsers always set Origin and Sec-Fetch-Site=cross-site for them.
+		// If an OPTIONS reaches here with same-origin / no Sec-Fetch-Site
+		// (curl, internal callers) it must still present the CSRF tag.
+		if r.Method == http.MethodOptions {
+			if r.Header.Get("X-DefenseClaw-Client") == "" {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch_options")
+				http.Error(w, `{"error":"missing X-DefenseClaw-Client header"}`, http.StatusForbidden)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthCSRFMismatch, "csrf_mismatch")
@@ -1727,6 +2063,13 @@ func csrfProtect(next http.Handler) http.Handler {
 		if r.Method == http.MethodGet || r.Method == http.MethodHead || r.Method == http.MethodOptions {
 			next.ServeHTTP(w, r)
 			return
+		}
+
+		if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+			if sfs != "same-origin" && sfs != "none" {
+				http.Error(w, `{"error":"cross-site request rejected"}`, http.StatusForbidden)
+				return
+			}
 		}
 
 		if r.Header.Get("X-DefenseClaw-Client") == "" {

@@ -26,7 +26,49 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
+
+// spanContextResourceKeys are the deployment/join keys we intentionally
+// mirror from the process resource onto individual spans. Resource
+// attributes remain the canonical emitter context, but repeating these
+// specific keys on spans makes downstream span-row joins and filtering
+// reliable even in backends or export paths that do not preserve
+// resource context alongside every span record.
+var spanContextResourceKeys = map[string]struct{}{
+	"tenant.id":              {},
+	"workspace.id":           {},
+	"deployment.environment": {},
+	"deployment.mode":        {},
+	"discovery.source":       {},
+	"defenseclaw.device.id":  {},
+}
+
+func (p *Provider) resourceSpanContextAttrs() []attribute.KeyValue {
+	if p == nil || p.res == nil {
+		return nil
+	}
+	attrs := make([]attribute.KeyValue, 0, len(spanContextResourceKeys))
+	iter := p.res.Iter()
+	for iter.Next() {
+		kv := iter.Attribute()
+		if _, ok := spanContextResourceKeys[string(kv.Key)]; ok {
+			attrs = append(attrs, kv)
+		}
+	}
+	return attrs
+}
+
+func (p *Provider) setSpanResourceContext(span trace.Span) {
+	if span == nil {
+		return
+	}
+	if attrs := p.resourceSpanContextAttrs(); len(attrs) > 0 {
+		span.SetAttributes(attrs...)
+	}
+}
 
 // EmitStartupSpan creates a short-lived span to verify the trace export pipeline
 // is working. Called once at sidecar startup.
@@ -38,6 +80,7 @@ func (p *Provider) EmitStartupSpan(ctx context.Context) {
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithTimestamp(time.Now()),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(attribute.String("defenseclaw.event", "sidecar_start"))
 	span.SetStatus(codes.Ok, "")
 	span.End()
@@ -58,6 +101,7 @@ func (p *Provider) StartGuardrailStageSpan(ctx context.Context, stage, direction
 	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail/%s", stage),
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.guardrail.stage", stage),
 		attribute.String("defenseclaw.guardrail.direction", direction),
@@ -105,6 +149,7 @@ func (p *Provider) StartGuardrailPhaseSpan(ctx context.Context, phase string) (c
 	ctx, span := p.tracer.Start(ctx, fmt.Sprintf("guardrail.%s", phase),
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.guardrail.phase", phase),
 	)
@@ -145,6 +190,7 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 		trace.WithSpanKind(trace.SpanKindInternal),
 		trace.WithTimestamp(time.Now().Add(-time.Duration(durationMs)*time.Millisecond)),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.inspect.tool", tool),
 		attribute.String("defenseclaw.inspect.action", action),
@@ -171,7 +217,7 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 // DefenseClaw-specific defenseclaw.agent.instance_id attribute.
 func (p *Provider) StartAgentSpan(
 	ctx context.Context,
-	conversationID, agentName, agentID, provider string,
+	conversationID, agentName, agentType, agentID, provider string,
 ) (context.Context, trace.Span) {
 	if !p.TracesEnabled() {
 		return ctx, nil
@@ -187,6 +233,7 @@ func (p *Provider) StartAgentSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
 		attribute.String("gen_ai.agent.name", agentName),
@@ -195,8 +242,14 @@ func (p *Provider) StartAgentSpan(
 	if provider != "" {
 		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
 	}
+	if agentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", agentType))
+	}
 	if agentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", agentID))
+	}
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
 	}
 	if inst := p.AgentInstanceID(); inst != "" {
 		span.SetAttributes(attribute.String("defenseclaw.agent.instance_id", inst))
@@ -258,6 +311,10 @@ type ToolSpanContext struct {
 	// cfg.Claw.Mode.
 	AgentName string
 
+	// AgentType is the stable category/runtime type for the agent
+	// when known. It maps to gen_ai.agent.type.
+	AgentType string
+
 	// AgentID is the logical agent identity when known. Unlike
 	// AgentInstanceID, this is stable across restarts and sessions.
 	// It maps to gen_ai.agent.id when present.
@@ -292,6 +349,7 @@ func (p *Provider) StartToolSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "execute_tool"),
 		attribute.String("gen_ai.tool.name", tool),
@@ -302,6 +360,9 @@ func (p *Provider) StartToolSpan(
 		attribute.Bool("defenseclaw.tool.dangerous", dangerous),
 		attribute.String("defenseclaw.tool.provider", toolProvider),
 	)
+	if redaction.DisableAll() && len(args) > 0 {
+		span.SetAttributes(attribute.String("defenseclaw.tool.args", string(args)))
+	}
 
 	if skillKey != "" {
 		span.SetAttributes(attribute.String("defenseclaw.tool.skill_key", skillKey))
@@ -325,6 +386,9 @@ func (p *Provider) StartToolSpan(
 	if cor.AgentName != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
 	}
+	if cor.AgentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", cor.AgentType))
+	}
 	if cor.AgentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", cor.AgentID))
 	}
@@ -341,6 +405,25 @@ func (p *Provider) StartToolSpan(
 	}
 
 	return ctx, span
+}
+
+// SetRawSpanString adds a raw string attribute only when the operator has
+// explicitly disabled redaction. This is the narrow escape hatch for
+// single-tenant/debug installs that want full prompt/tool telemetry while
+// preserving the default low-content span contract.
+func (p *Provider) SetRawSpanString(span trace.Span, key, value string) {
+	if span == nil || key == "" || value == "" || !redaction.DisableAll() {
+		return
+	}
+	span.SetAttributes(attribute.String(key, value))
+}
+
+// SetRawSpanStringSlice is the slice variant of SetRawSpanString.
+func (p *Provider) SetRawSpanStringSlice(span trace.Span, key string, values []string) {
+	if span == nil || key == "" || len(values) == 0 || !redaction.DisableAll() {
+		return
+	}
+	span.SetAttributes(attribute.StringSlice(key, values))
 }
 
 // EndToolSpan ends an active tool call span with result data.
@@ -374,7 +457,8 @@ func (p *Provider) EndToolSpan(span trace.Span, exitCode, outputLen int, startTi
 }
 
 // StartApprovalSpan starts a new OTel span for an exec approval request.
-// Raw command strings and argv are not exported to avoid leaking tokens or secrets.
+// Raw command strings and argv are exported only when redaction is explicitly
+// disabled.
 //
 // cor carries optional correlation identifiers (session, run, policy,
 // destination). Empty fields are skipped; older callers that still
@@ -395,11 +479,23 @@ func (p *Provider) StartApprovalSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.approval.id", id),
 		attribute.String("defenseclaw.approval.command_name", baseCommand(command)),
 		attribute.Int("defenseclaw.approval.argc", len(argv)),
 	)
+	if redaction.DisableAll() {
+		if command != "" {
+			span.SetAttributes(attribute.String("defenseclaw.approval.command", command))
+		}
+		if len(argv) > 0 {
+			span.SetAttributes(attribute.StringSlice("defenseclaw.approval.argv", argv))
+		}
+		if cwd != "" {
+			span.SetAttributes(attribute.String("defenseclaw.approval.cwd", cwd))
+		}
+	}
 	if cor.ToolID != "" {
 		span.SetAttributes(attribute.String("gen_ai.tool.call.id", cor.ToolID))
 	}
@@ -417,6 +513,9 @@ func (p *Provider) StartApprovalSpan(
 	}
 	if cor.AgentName != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.name", cor.AgentName))
+	}
+	if cor.AgentType != "" {
+		span.SetAttributes(attribute.String("gen_ai.agent.type", cor.AgentType))
 	}
 	if cor.AgentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", cor.AgentID))
@@ -472,6 +571,7 @@ func (p *Provider) StartLLMSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "chat"),
 		attribute.String("gen_ai.system", system),
@@ -480,6 +580,9 @@ func (p *Provider) StartLLMSpan(
 		attribute.Int("gen_ai.request.max_tokens", maxTokens),
 		attribute.Float64("gen_ai.request.temperature", temperature),
 	)
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
+	}
 
 	return ctx, span
 }
@@ -498,6 +601,7 @@ func (p *Provider) EndLLMSpan(
 	providerName string,
 	startTime time.Time,
 	agentName string,
+	agentType string,
 	agentID string,
 ) {
 	// Use the span's context so the SDK attaches exemplars (trace ID + span ID)
@@ -529,6 +633,9 @@ func (p *Provider) EndLLMSpan(
 	if agentName != "" {
 		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.name", agentName))
 	}
+	if agentType != "" {
+		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.type", agentType))
+	}
 	if agentID != "" {
 		spanAttrs = append(spanAttrs, attribute.String("gen_ai.agent.id", agentID))
 	}
@@ -558,6 +665,7 @@ func (p *Provider) StartJudgeSpan(
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithTimestamp(time.Now()),
 	)
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.system", genAISystem),
 		attribute.String("gen_ai.request.model", model),
@@ -616,6 +724,7 @@ func (p *Provider) StartGuardrailSpan(
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "apply_guardrail"),
 		attribute.String("gen_ai.guardrail.name", name),
@@ -670,6 +779,7 @@ func (p *Provider) StartPolicySpan(ctx context.Context, domain, targetType, targ
 		trace.WithTimestamp(time.Now()),
 	)
 
+	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("defenseclaw.policy.domain", domain),
 		attribute.String("defenseclaw.policy.target_type", targetType),

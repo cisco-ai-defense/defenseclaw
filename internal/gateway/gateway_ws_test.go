@@ -243,6 +243,7 @@ func TestClientConnectSuccess(t *testing.T) {
 	hello := client.Hello()
 	if hello == nil {
 		t.Fatal("Hello() should not be nil after connect")
+		return
 	}
 	if hello.Protocol != 3 {
 		t.Errorf("Protocol = %d, want 3", hello.Protocol)
@@ -1101,8 +1102,16 @@ func TestHandleAdmissionResultBlocked(t *testing.T) {
 	client := connectToMockGW(t, srv)
 	_, logger := testStoreAndLogger(t)
 
+	// Guardrail.Connector="openclaw" is required for the watcher's
+	// fleet RPC path (s.client.DisableSkill) to fire — fleetRPCsEnabled
+	// gates on gatewayShouldConnectForConfiguredConnector, which
+	// returns true only for openclaw/zeptoclaw or codex/claudecode +
+	// non-loopback host. Without this, the watcher silently skips
+	// the WS RPC (correct standalone-mode behavior) and the test
+	// times out waiting for skills.update on the mock GW.
 	s := &Sidecar{
 		cfg: &config.Config{
+			Guardrail: config.GuardrailConfig{Connector: "openclaw"},
 			Gateway: config.GatewayConfig{
 				Watcher: config.GatewayWatcherConfig{
 					Skill: config.GatewayWatcherSkillConfig{TakeAction: true},
@@ -1139,6 +1148,64 @@ func TestHandleAdmissionResultBlocked(t *testing.T) {
 	}
 }
 
+// TestHandleAdmissionResultBlocked_StandaloneSkipsFleetRPC pins the
+// watcher-side fleet-RPC gate. In standalone mode (codex/claudecode
+// + loopback host, default no-OpenClaw setup) the watcher must NOT
+// invoke s.client.DisableSkill — local enforcement (file quarantine,
+// runtime block, the SecurityNotification queue, webhook dispatch)
+// runs unconditionally before the gate, so skipping the WS RPC
+// removes only dead weight. Pre-fix the watcher would call into the
+// WS client every time and emit "watcher→gateway disable skill ...
+// failed: gateway: not connected" once per blocked admission, which
+// was visible in operators' gateway.log files.
+//
+// We assert the absence of any RPC delivery over a 200ms window —
+// short enough not to slow the suite, long enough that a regression
+// (forgotten gate, predicate drift) would have time to fire its
+// goroutine before the test ends.
+func TestHandleAdmissionResultBlocked_StandaloneSkipsFleetRPC(t *testing.T) {
+	received := make(chan receivedRequest, 5)
+	srv := startMockGW(t, rpcRecordingLoop(received))
+	client := connectToMockGW(t, srv)
+	_, logger := testStoreAndLogger(t)
+
+	s := &Sidecar{
+		cfg: &config.Config{
+			// codex + loopback host = standalone. fleetRPCsEnabled
+			// returns false, watcher must skip the WS RPC.
+			Guardrail: config.GuardrailConfig{Connector: "codex"},
+			Gateway: config.GatewayConfig{
+				Host: "127.0.0.1",
+				Watcher: config.GatewayWatcherConfig{
+					Skill: config.GatewayWatcherSkillConfig{TakeAction: true},
+				},
+			},
+		},
+		client: client,
+		logger: logger,
+		notify: NewNotificationQueue(),
+		router: NewEventRouter(client, nil, logger, false, nil),
+	}
+
+	s.handleAdmissionResult(watcher.AdmissionResult{
+		Event: watcher.InstallEvent{
+			Type: watcher.InstallSkill,
+			Name: "malicious-skill-standalone",
+			Path: "/path/to/skill",
+		},
+		Verdict: watcher.VerdictBlocked,
+		Reason:  "on block list",
+	})
+
+	select {
+	case rpc := <-received:
+		t.Fatalf("standalone mode unexpectedly invoked WS RPC %s with params %s — fleet gate broke",
+			rpc.Method, string(rpc.Params))
+	case <-time.After(200 * time.Millisecond):
+		// Expected: no RPC fired.
+	}
+}
+
 func TestHandleAdmissionResultRejected(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
@@ -1147,6 +1214,7 @@ func TestHandleAdmissionResultRejected(t *testing.T) {
 
 	s := &Sidecar{
 		cfg: &config.Config{
+			Guardrail: config.GuardrailConfig{Connector: "openclaw"},
 			Gateway: config.GatewayConfig{
 				Watcher: config.GatewayWatcherConfig{
 					Skill: config.GatewayWatcherSkillConfig{TakeAction: true},
@@ -1303,6 +1371,7 @@ func TestHandlePluginAdmissionBlocked(t *testing.T) {
 
 	s := &Sidecar{
 		cfg: &config.Config{
+			Guardrail: config.GuardrailConfig{Connector: "openclaw"},
 			Gateway: config.GatewayConfig{
 				Watcher: config.GatewayWatcherConfig{
 					Plugin: config.GatewayWatcherPluginConfig{TakeAction: true},
@@ -1500,6 +1569,7 @@ func TestHandlePluginAdmissionRejected(t *testing.T) {
 
 	s := &Sidecar{
 		cfg: &config.Config{
+			Guardrail: config.GuardrailConfig{Connector: "openclaw"},
 			Gateway: config.GatewayConfig{
 				Watcher: config.GatewayWatcherConfig{
 					Plugin: config.GatewayWatcherPluginConfig{TakeAction: true},
@@ -1591,6 +1661,7 @@ func TestHandleMCPAdmissionBlocked(t *testing.T) {
 
 	s := &Sidecar{
 		cfg: &config.Config{
+			Guardrail: config.GuardrailConfig{Connector: "openclaw"},
 			Gateway: config.GatewayConfig{
 				Watcher: config.GatewayWatcherConfig{
 					MCP: config.GatewayWatcherMCPConfig{TakeAction: true},

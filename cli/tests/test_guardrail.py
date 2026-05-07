@@ -20,21 +20,19 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.config import (
     Config,
     GuardrailConfig,
     default_config,
-    load,
 )
 from defenseclaw.guardrail import (
     _backup,
@@ -44,14 +42,13 @@ from defenseclaw.guardrail import (
     _unregister_plugin_from_config,
     detect_api_key_env,
     detect_current_model,
-    install_openclaw_plugin,
     model_to_proxy_name,
     patch_openclaw_config,
     restore_openclaw_config,
     uninstall_openclaw_plugin,
 )
-from tests.helpers import make_app_context, cleanup_app
 
+from tests.helpers import cleanup_app, make_app_context
 
 # ---------------------------------------------------------------------------
 # GuardrailConfig dataclass
@@ -66,6 +63,8 @@ class TestGuardrailConfig(unittest.TestCase):
         self.assertEqual(gc.model, "")
         self.assertEqual(gc.api_key_env, "")
         self.assertEqual(gc.block_message, "")
+        self.assertFalse(gc.hilt.enabled)
+        self.assertEqual(gc.hilt.min_severity, "HIGH")
 
     def test_default_config_includes_guardrail(self):
         cfg = default_config()
@@ -92,6 +91,8 @@ class TestGuardrailConfig(unittest.TestCase):
                     block_message="Blocked by policy. Contact security@acme.com.",
                 ),
             )
+            cfg.guardrail.hilt.enabled = True
+            cfg.guardrail.hilt.min_severity = "HIGH"
             cfg.save()
 
             import yaml
@@ -106,6 +107,8 @@ class TestGuardrailConfig(unittest.TestCase):
             self.assertEqual(g["model_name"], "claude-opus")
             self.assertEqual(g["api_key_env"], "ANTHROPIC_API_KEY")
             self.assertEqual(g["block_message"], "Blocked by policy. Contact security@acme.com.")
+            self.assertEqual(g["hilt"]["enabled"], True)
+            self.assertEqual(g["hilt"]["min_severity"], "HIGH")
 
 
 # ---------------------------------------------------------------------------
@@ -176,128 +179,9 @@ class TestDetectCurrentModel(unittest.TestCase):
             self.assertEqual(provider, "defenseclaw")
 
 
-# ---------------------------------------------------------------------------
-# install_openclaw_plugin
-# ---------------------------------------------------------------------------
-
-class TestInstallOpenclawPlugin(unittest.TestCase):
-    def _make_built_plugin(self, tmpdir):
-        """Create a fake built plugin tree with dist/, manifest, and node_modules/."""
-        plugin_dir = os.path.join(tmpdir, "extensions", "defenseclaw")
-        dist_dir = os.path.join(plugin_dir, "dist")
-        os.makedirs(dist_dir)
-        with open(os.path.join(plugin_dir, "package.json"), "w") as f:
-            json.dump({"name": "@defenseclaw/openclaw-plugin", "version": "0.2.0", "main": "dist/index.js"}, f)
-        with open(os.path.join(plugin_dir, "openclaw.plugin.json"), "w") as f:
-            json.dump({"id": "defenseclaw", "configSchema": {"type": "object"}}, f)
-        with open(os.path.join(dist_dir, "index.js"), "w") as f:
-            f.write("// compiled plugin\n")
-
-        nm = os.path.join(plugin_dir, "node_modules")
-        for dep in ("js-yaml", "argparse"):
-            dep_dir = os.path.join(nm, dep)
-            os.makedirs(dep_dir)
-            with open(os.path.join(dep_dir, "index.js"), "w") as f:
-                f.write(f"// {dep}\n")
-        return plugin_dir
-
-    def _make_oc_home(self, tmpdir):
-        """Create a fake openclaw home with openclaw.json."""
-        oc_home = os.path.join(tmpdir, "openclaw-home")
-        os.makedirs(oc_home)
-        with open(os.path.join(oc_home, "openclaw.json"), "w") as f:
-            json.dump({"plugins": {}}, f)
-        return oc_home
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_manual_fallback_installs_to_openclaw_extensions(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "manual")
-            self.assertIn("not found", cli_error)
-            target = os.path.join(oc_home, "extensions", "defenseclaw")
-            self.assertTrue(os.path.isfile(os.path.join(target, "package.json")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "openclaw.plugin.json")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "dist", "index.js")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "node_modules", "js-yaml", "index.js")))
-            self.assertTrue(os.path.isfile(os.path.join(target, "node_modules", "argparse", "index.js")))
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_manual_fallback_registers_in_config(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            install_openclaw_plugin(plugin_dir, oc_home)
-
-            with open(os.path.join(oc_home, "openclaw.json")) as f:
-                cfg = json.load(f)
-            plugins = cfg["plugins"]
-            self.assertIn("defenseclaw", plugins.get("entries", {}))
-            self.assertTrue(plugins["entries"]["defenseclaw"]["enabled"])
-            self.assertIn("defenseclaw", plugins.get("installs", {}))
-            install_path = os.path.join(oc_home, "extensions", "defenseclaw")
-            self.assertIn(install_path, plugins.get("load", {}).get("paths", []))
-
-    @patch("defenseclaw.guardrail.subprocess.run")
-    @patch("defenseclaw.config.openclaw_bin", return_value="openclaw")
-    def test_cli_install_when_openclaw_available(self, _mock_bin, mock_run):
-        mock_run.return_value = MagicMock(returncode=0)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "cli")
-            self.assertEqual(cli_error, "")
-            mock_run.assert_called_once()
-            cmd = mock_run.call_args[0][0]
-            self.assertEqual(cmd, ["openclaw", "plugins", "install", plugin_dir])
-
-    def test_returns_empty_when_not_built(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = os.path.join(tmpdir, "extensions", "defenseclaw")
-            os.makedirs(plugin_dir)
-            with open(os.path.join(plugin_dir, "package.json"), "w") as f:
-                f.write("{}")
-
-            method, _ = install_openclaw_plugin(plugin_dir, os.path.join(tmpdir, "oc"))
-            self.assertEqual(method, "")
-
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_reinstall_replaces_existing(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            install_openclaw_plugin(plugin_dir, oc_home)
-
-            stale = os.path.join(oc_home, "extensions", "defenseclaw", "stale.txt")
-            with open(stale, "w") as f:
-                f.write("old")
-
-            install_openclaw_plugin(plugin_dir, oc_home)
-            self.assertFalse(os.path.exists(stale))
-            self.assertTrue(os.path.isfile(
-                os.path.join(oc_home, "extensions", "defenseclaw", "dist", "index.js"),
-            ))
-
-    @patch("defenseclaw.guardrail.subprocess.run")
-    def test_manual_fallback_shows_cli_error(self, mock_run):
-        mock_run.return_value = MagicMock(returncode=1, stderr="plugin validation failed", stdout="")
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
-
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "manual")
-            self.assertIn("plugin validation failed", cli_error)
+# install_openclaw_plugin was removed — the gateway's OpenClaw connector
+# performs the install at sidecar boot via embedded files. See
+# TestOpenClaw_Setup_InstallsExtensionAndPatchesConfig in the Go tests.
 
 
 # ---------------------------------------------------------------------------
@@ -328,7 +212,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             }, f)
         return oc_home
 
-    @patch("defenseclaw.guardrail.subprocess.run")
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run")
     @patch("defenseclaw.config.openclaw_bin", return_value="openclaw")
     def test_cli_uninstall_when_openclaw_available(self, _mock_bin, mock_run):
         mock_run.return_value = MagicMock(returncode=0)
@@ -342,7 +226,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             cmd = mock_run.call_args[0][0]
             self.assertEqual(cmd, ["openclaw", "plugins", "uninstall", "defenseclaw"])
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_manual_fallback_removes_directory(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_oc_home_with_plugin(tmpdir)
@@ -353,7 +237,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             ext = os.path.join(tmpdir, "extensions", "defenseclaw")
             self.assertFalse(os.path.exists(ext))
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_manual_fallback_cleans_config(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_oc_home_with_plugin(tmpdir)
@@ -372,7 +256,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
         os.name == "nt" and not os.environ.get("CI"),
         "os.symlink requires admin or Developer Mode on Windows",
     )
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_manual_fallback_removes_symlink(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             ext_parent = os.path.join(tmpdir, "extensions")
@@ -393,7 +277,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             result = uninstall_openclaw_plugin(tmpdir)
             self.assertEqual(result, "")
 
-    @patch("defenseclaw.guardrail.subprocess.run")
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run")
     def test_cli_failure_falls_back_to_manual(self, mock_run):
         mock_run.return_value = MagicMock(returncode=1, stderr="error", stdout="")
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -405,7 +289,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             ext = os.path.join(tmpdir, "extensions", "defenseclaw")
             self.assertFalse(os.path.exists(ext))
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_removes_from_plugins_allow(self, _mock_run):
         with tempfile.TemporaryDirectory() as tmpdir:
             self._make_oc_home_with_plugin(tmpdir)
@@ -417,7 +301,7 @@ class TestUninstallOpenclawPlugin(unittest.TestCase):
             self.assertNotIn("defenseclaw", cfg["plugins"]["allow"])
             self.assertIn("other", cfg["plugins"]["allow"])
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
+    @patch("defenseclaw.openclaw_guardrail.subprocess.run", side_effect=FileNotFoundError)
     def test_timeout_on_cli_falls_back_to_manual(self, _mock_run):
         _mock_run.side_effect = subprocess.TimeoutExpired(cmd="openclaw", timeout=30)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -507,6 +391,58 @@ class TestPatchOpenclawConfig(unittest.TestCase):
             result = patch_openclaw_config(path, "", 4000, "sk-dc-test", "")
             # Should succeed without error regardless of empty model_name
             self.assertIsNotNone(result)
+
+    def test_enables_plugin_approvals_when_requested(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._make_openclaw_json(tmpdir)
+
+            patch_openclaw_config(
+                path,
+                "claude-opus",
+                4000,
+                "sk-dc-test",
+                "",
+                enable_plugin_approvals=True,
+            )
+
+            with open(path) as f:
+                cfg = json.load(f)
+
+            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
+            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "session")
+
+    def test_preserves_existing_plugin_approval_routing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._make_openclaw_json(tmpdir)
+            with open(path) as f:
+                cfg = json.load(f)
+            cfg["approvals"] = {
+                "plugin": {
+                    "mode": "both",
+                    "targets": [{"channel": "slack", "to": "#secops"}],
+                }
+            }
+            with open(path, "w") as f:
+                json.dump(cfg, f)
+
+            patch_openclaw_config(
+                path,
+                "claude-opus",
+                4000,
+                "sk-dc-test",
+                "",
+                enable_plugin_approvals=True,
+            )
+
+            with open(path) as f:
+                cfg = json.load(f)
+
+            self.assertTrue(cfg["approvals"]["plugin"]["enabled"])
+            self.assertEqual(cfg["approvals"]["plugin"]["mode"], "both")
+            self.assertEqual(
+                cfg["approvals"]["plugin"]["targets"],
+                [{"channel": "slack", "to": "#secops"}],
+            )
 
 
 class TestRestoreOpenclawConfig(unittest.TestCase):
@@ -748,7 +684,7 @@ class TestDeriveMasterKey(unittest.TestCase):
 
             key = _derive_master_key(key_file)
             self.assertTrue(key.startswith("sk-dc-"))
-            self.assertEqual(len(key), 6 + 32)  # HMAC-SHA256 → 32 hex chars
+            self.assertEqual(len(key), 6 + 64)  # PBKDF2-SHA256, 32 bytes encoded as hex
 
     def test_deterministic(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -760,7 +696,7 @@ class TestDeriveMasterKey(unittest.TestCase):
             key2 = _derive_master_key(key_file)
             self.assertEqual(key1, key2)
 
-    @patch("defenseclaw.guardrail.Path")
+    @patch("defenseclaw.llm_keys.Path")
     def test_raises_when_file_missing(self, mock_path):
         mock_path.home.return_value = Path("/nonexistent-home")
         with self.assertRaises(RuntimeError):
@@ -852,64 +788,55 @@ class TestDetectApiKeyEnvEdgeCases(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# install_openclaw_plugin edge cases
+# picked_connector hint helper (S8.2 / F32)
 # ---------------------------------------------------------------------------
 
-class TestInstallOpenclawPluginEdgeCases(unittest.TestCase):
-    def _make_built_plugin(self, tmpdir):
-        plugin_dir = os.path.join(tmpdir, "extensions", "defenseclaw")
-        dist_dir = os.path.join(plugin_dir, "dist")
-        os.makedirs(dist_dir)
-        with open(os.path.join(plugin_dir, "package.json"), "w") as f:
-            json.dump({"name": "defenseclaw", "main": "dist/index.js"}, f)
-        with open(os.path.join(plugin_dir, "openclaw.plugin.json"), "w") as f:
-            json.dump({"id": "defenseclaw"}, f)
-        with open(os.path.join(dist_dir, "index.js"), "w") as f:
-            f.write("// compiled plugin\n")
-        return plugin_dir
+class TestReadPickedConnector(unittest.TestCase):
+    """Unit tests for _read_picked_connector — the install-time hint reader."""
 
-    def _make_oc_home(self, tmpdir):
-        oc_home = os.path.join(tmpdir, "openclaw-home")
-        os.makedirs(oc_home)
-        with open(os.path.join(oc_home, "openclaw.json"), "w") as f:
-            json.dump({"plugins": {}}, f)
-        return oc_home
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-picked-")
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="openclaw", timeout=60))
-    def test_cli_timeout_falls_back_to_manual(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
+    def _write(self, contents: str) -> None:
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write(contents)
 
-            self.assertEqual(method, "manual")
-            self.assertIn("timed out", cli_error)
+    def test_returns_value_when_file_exists(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self._write("codex\n")
+        self.assertEqual(_read_picked_connector(self.tmp_dir), "codex")
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    @patch("defenseclaw.guardrail.shutil.copytree", side_effect=OSError("permission denied"))
-    def test_manual_copy_failure_returns_error(self, _mock_copy, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
+    def test_strips_whitespace_and_lowercases(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self._write("  CODEX  \n")
+        self.assertEqual(_read_picked_connector(self.tmp_dir), "codex")
 
-            method, cli_error = install_openclaw_plugin(plugin_dir, oc_home)
+    def test_returns_none_when_file_missing(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self.assertIsNone(_read_picked_connector(self.tmp_dir))
 
-            self.assertEqual(method, "error")
-            self.assertIn("manual copy failed", cli_error)
+    def test_returns_none_for_empty_data_dir(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self.assertIsNone(_read_picked_connector(""))
+        self.assertIsNone(_read_picked_connector(None))
 
-    @patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError)
-    def test_manual_copy_without_node_modules(self, _mock_run):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            plugin_dir = self._make_built_plugin(tmpdir)
-            oc_home = self._make_oc_home(tmpdir)
+    def test_returns_none_for_unknown_value(self):
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        self._write("malicious-rm-rf-slash\n")
+        self.assertIsNone(_read_picked_connector(self.tmp_dir))
 
-            method, _ = install_openclaw_plugin(plugin_dir, oc_home)
-
-            self.assertEqual(method, "manual")
-            target = os.path.join(oc_home, "extensions", "defenseclaw")
-            self.assertTrue(os.path.isfile(os.path.join(target, "dist", "index.js")))
-            self.assertFalse(os.path.isdir(os.path.join(target, "node_modules")))
+    def test_caps_read_size_against_huge_files(self):
+        """A pathologically large file must not be slurped into memory."""
+        from defenseclaw.commands.cmd_setup import _read_picked_connector
+        # Pad the file with garbage well beyond the legitimate name.
+        # The reader bounds to 64 bytes so the trailing junk is ignored,
+        # and the leading garbage will not match a connector name —
+        # i.e. we must get None, not a hang or OOM.
+        self._write("x" * (1024 * 1024))
+        self.assertIsNone(_read_picked_connector(self.tmp_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -950,7 +877,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(setup, ["guardrail", "--disable"], obj=self.app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Disabling", result.output)
-        self.assertIn("OpenClaw plugin removed", result.output)
+        self.assertIn("Config saved", result.output)
 
     def test_non_interactive_with_model(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -964,7 +891,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
         self.assertIn("Config saved", result.output)
 
         import yaml
@@ -973,7 +900,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertTrue(raw["guardrail"]["enabled"])
         self.assertEqual(raw["guardrail"]["mode"], "observe")
 
-    def test_preflight_aborts_when_openclaw_config_missing(self):
+    def test_setup_succeeds_without_openclaw_config(self):
+        """Setup no longer requires OpenClaw config — connector setup runs at gateway start."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -986,9 +914,8 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw config not found", result.output)
-        self.assertIn("Make sure OpenClaw is installed", result.output)
-        self.assertNotIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
+        self.assertIn("Connector setup will run automatically", result.output)
 
     def test_preflight_succeeds_with_empty_model(self):
         """Model is no longer required — fetch interceptor scans all models."""
@@ -1003,7 +930,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         # Setup proceeds without model — all models scanned automatically
-        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
 
     def test_api_key_env_warning_when_not_set(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1020,9 +947,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Guardrail proxy is built into the Go binary", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
 
-    def test_openclaw_config_patched_output(self):
+    def test_setup_shows_connector_info(self):
+        """Setup shows connector details instead of OpenClaw-specific patching."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.guardrail.model_name = "claude-opus"
@@ -1034,8 +962,138 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw config patched", result.output)
-        self.assertIn("Original model saved for revert", result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
+        self.assertIn("Connector setup will run automatically", result.output)
+
+    # ----- picked_connector hint (S8.2 / F32) ----------------------------
+
+    def test_picked_connector_hint_drives_default(self):
+        """`<data_dir>/picked_connector` defaults gc.connector when no flag is given."""
+        from defenseclaw.commands.cmd_setup import setup
+        # Simulate scripts/install.sh --connector codex having recorded
+        # the operator's choice. The CLI should pick it up without
+        # requiring --connector / --agent on every subsequent setup call.
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("codex\n")
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: Codex (codex)", result.output)
+
+    def test_explicit_connector_flag_beats_picked_hint(self):
+        """--connector wins over the install-time picked_connector hint."""
+        from defenseclaw.commands.cmd_setup import setup
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("codex\n")
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail",
+             "--non-interactive", "--connector", "claudecode",
+             "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: Claude Code (claudecode)", result.output)
+
+    def test_non_interactive_claudecode_action_enables_enforcement(self):
+        from defenseclaw.commands.cmd_setup import setup
+        self.app.cfg.claw.home_dir = self.tmp_dir
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--connector",
+                "claudecode",
+                "--mode",
+                "action",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.guardrail.claudecode_enforcement_enabled)
+        self.assertEqual(self.app.cfg.guardrail.mode, "action")
+
+    def test_non_interactive_codex_observe_flag_enables_enforcement(self):
+        from defenseclaw.commands.cmd_setup import setup
+        self.app.cfg.claw.home_dir = self.tmp_dir
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--connector",
+                "codex",
+                "--mode",
+                "observe",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertTrue(self.app.cfg.guardrail.codex_enforcement_enabled)
+        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+
+    def test_agent_alias_still_works(self):
+        """--agent is preserved as an alias of --connector for backward compat."""
+        from defenseclaw.commands.cmd_setup import setup
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail",
+             "--non-interactive", "--agent", "zeptoclaw",
+             "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
+
+    def test_picked_connector_hint_invalid_value_is_ignored(self):
+        """Garbage in picked_connector falls back to openclaw, not a crash."""
+        from defenseclaw.commands.cmd_setup import setup
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("not-a-connector\n")
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: OpenClaw (openclaw)", result.output)
+
+    def test_picked_connector_hint_does_not_override_explicit_existing(self):
+        """If gc.connector is already a non-default value, the hint must not flip it."""
+        from defenseclaw.commands.cmd_setup import setup
+        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
+            f.write("codex\n")
+        # Operator previously ran `setup guardrail --connector zeptoclaw`
+        # and saved it. The picked_connector hint must not silently
+        # downgrade their explicit choice on the next bare re-run.
+        self.app.cfg.guardrail.connector = "zeptoclaw"
+        self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Connector: ZeptoClaw (zeptoclaw)", result.output)
 
     def test_shows_disable_instructions(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1074,6 +1132,39 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             raw = yaml.safe_load(f)
         self.assertEqual(raw["guardrail"]["block_message"], custom_msg)
+
+    def test_non_interactive_advanced_hilt_and_redaction_flags(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        result = self.runner.invoke(
+            setup,
+            [
+                "guardrail",
+                "--non-interactive",
+                "--mode",
+                "action",
+                "--rule-pack",
+                "strict",
+                "--human-approval",
+                "--hilt-min-severity",
+                "MEDIUM",
+                "--disable-redaction",
+                "--no-restart",
+            ],
+            obj=self.app,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("guardrail.hilt.enabled", result.output)
+        self.assertIn("privacy.disable_redaction", result.output)
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
+        self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
+        self.assertTrue(raw["privacy"]["disable_redaction"])
+        self.assertTrue(raw["guardrail"]["rule_pack_dir"].endswith("/policies/guardrail/strict"))
 
     def test_block_message_written_to_runtime_json(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1123,6 +1214,146 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         result = self.runner.invoke(setup, ["guardrail", "--help"])
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--block-message", result.output)
+
+    def test_interactive_action_mode_prompts_hilt_inline(self):
+        """HILT is asked inline (not under advanced options) whenever
+        the operator selects action mode, regardless of whether they
+        opt into advanced options afterward.
+
+        Replaces the previous ``test_interactive_advanced_configures_hilt``
+        test from before HILT was hoisted out of advanced. The previous
+        wiring buried HILT under "Configure advanced options? [y/N]"
+        which defaulted to N — so first-time operators never saw the
+        prompt unless they discovered HILT existed and explicitly opted
+        into advanced. The new contract is: in action mode, every
+        guardrail setup asks about HILT.
+        """
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        user_input = "\n".join([
+            "",          # enable guardrail
+            "2",         # action mode
+            "",          # hook fail-mode (default = open)
+            "y",         # human approval — INLINE PROMPT (mode == action)
+            "MEDIUM",    # approval min severity
+            "",          # local scanner
+            "n",         # no LLM judge
+            "n",         # decline advanced options — HILT is no longer there
+            "",
+        ])
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            obj=self.app,
+            input=user_input,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Human Approval (HILT)", result.output)
+        self.assertIn("guardrail.hilt.enabled", result.output)
+        # Sanity: the inline-HILT prompt must run BEFORE the scanner
+        # engine, not after the advanced-options gate. We compare
+        # output offsets to lock in the intended ordering — if a
+        # future refactor shuffles sections, this test fires.
+        hilt_pos = result.output.index("Human Approval (HILT)")
+        scanner_pos = result.output.index("Scanner engine")
+        self.assertLess(hilt_pos, scanner_pos,
+            "HILT prompt must appear before the scanner engine "
+            "section in action mode (it was previously buried under "
+            "advanced options).")
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["guardrail"]["hilt"]["enabled"])
+        self.assertEqual(raw["guardrail"]["hilt"]["min_severity"], "MEDIUM")
+        self.assertNotIn("privacy", raw)
+
+    def test_interactive_advanced_can_disable_redaction(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        user_input = "\n".join([
+            "",       # enable guardrail
+            "2",      # action mode
+            "",       # hook fail-mode (default = open)
+            "n",      # human approval (inline) — declined
+            "",       # local scanner
+            "n",      # no LLM judge
+            "y",      # configure advanced options
+            "",       # default port
+            "",       # no custom block message
+            # HILT was previously here; now hoisted inline so there
+            # is one fewer prompt under advanced.
+            "y",      # disable redaction
+            "y",      # acknowledge raw-content warning
+            "",
+        ])
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            obj=self.app,
+            input=user_input,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Disabling redaction writes RAW content", result.output)
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            raw = yaml.safe_load(f)
+        self.assertTrue(raw["privacy"]["disable_redaction"])
+        self.assertFalse(raw["guardrail"]["hilt"]["enabled"])
+
+    def test_interactive_observe_mode_skips_hilt_entirely(self):
+        """In observe mode the HILT prompt is skipped entirely.
+
+        Replaces the previous
+        ``test_interactive_advanced_observe_reports_hilt_inactive``
+        test which expected the ``Human approval is action-mode only``
+        short-circuit message under advanced options. With HILT now
+        hoisted inline AND gated on ``gc.mode == "action"``, observe-
+        mode operators see no HILT prompt and no inactive-mode message
+        at all — the wizard just moves on to the scanner engine.
+
+        This is intentional: the inactive-mode message made sense when
+        the call lived under "Advanced options" and the operator had
+        explicitly opted in (so ``never mind`` was useful feedback);
+        in the always-on inline placement, asking-then-immediately-
+        cancelling would look like a wizard bug.
+        """
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        user_input = "\n".join([
+            "",      # enable guardrail
+            "",      # observe mode (default)
+            "",      # hook fail-mode (default = open)
+            # NO HILT prompt here — observe mode skips it entirely.
+            "",      # local scanner
+            "n",     # no LLM judge
+            "y",     # configure advanced options
+            "",      # default port
+            "n",     # keep redaction on
+            "",
+        ])
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--connector", "openclaw", "--no-restart"],
+            obj=self.app,
+            input=user_input,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Neither the active-HILT prompt nor the action-mode-only
+        # short-circuit message should appear.
+        self.assertNotIn("Human Approval (HILT)", result.output)
+        self.assertNotIn("Human approval is action-mode only", result.output)
+        self.assertNotIn("Human approval for risky actions?", result.output)
+        # HILT toggle persists at whatever it was before — since this
+        # fresh-config path starts with default False, it stays False.
+        self.assertFalse(self.app.cfg.guardrail.hilt.enabled)
 
 
 # ---------------------------------------------------------------------------
@@ -1207,6 +1438,52 @@ class TestRestartDefenseGateway(unittest.TestCase):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
         with tempfile.TemporaryDirectory() as tmpdir:
             _restart_defense_gateway(tmpdir)
+
+
+class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
+    """_restart_services should actively restart the agent-framework
+    gateway (not just monitor it) when the selected connector manages
+    its own gateway process — e.g. OpenClaw. Before this test, the
+    call was a passive health probe, so operators had to remember a
+    separate `openclaw gateway restart` step that was easy to skip."""
+
+    @patch("defenseclaw.commands.cmd_setup._check_openclaw_gateway")
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_openclaw_connector_runs_openclaw_gateway_restart(
+        self, mock_run, _mock_dc, _mock_check,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="openclaw")
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertIn(
+            ["openclaw", "gateway", "restart"],
+            commands,
+            f"expected `openclaw gateway restart` to be invoked, got {commands}",
+        )
+
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway")
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_non_openclaw_connector_does_not_run_openclaw_gateway_restart(
+        self, mock_run, _mock_dc,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="zeptoclaw")
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        for cmd in commands:
+            self.assertNotEqual(
+                cmd[:3] if isinstance(cmd, list) else None,
+                ["openclaw", "gateway", "restart"],
+                f"must not restart openclaw when a different connector is selected; got {commands}",
+            )
 
 
 class TestCheckOpenclawGateway(unittest.TestCase):
@@ -1298,41 +1575,34 @@ class TestSetupGuardrailRestart(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("defenseclaw-gateway restart", result.output)
 
-    def test_disable_restarts_openclaw(self):
-        """Disabling always restarts OpenClaw gateway to unload the plugin."""
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_restarts_gateway_for_teardown(self, mock_restart):
+        """Disabling restarts the gateway so connector teardown runs immediately."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
         self.app.cfg.guardrail.original_model = "anthropic/claude-opus-4-5"
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup,
-                ["guardrail", "--disable"],
-                obj=self.app,
-            )
-        self.assertEqual(result.exit_code, 0, result.output)
-        # Verify openclaw gateway restart was attempted
-        calls = [str(c) for c in mock_run.call_args_list]
-        self.assertTrue(
-            any("openclaw" in c and "gateway" in c and "restart" in c for c in calls),
-            f"Expected openclaw gateway restart call. Got: {calls}"
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--disable"],
+            obj=self.app,
         )
-        self.assertIn("OpenClaw gateway restarted", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector teardown", result.output.lower())
+        mock_restart.assert_called_once()
 
-    def test_disable_without_restart_shows_instructions(self):
-        """--disable always restarts OpenClaw; no separate --restart flag needed."""
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_shows_teardown_complete(self, mock_restart):
+        """--disable runs teardown and shows completion message."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.enabled = True
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup,
-                ["guardrail", "--disable"],
-                obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup,
+            ["guardrail", "--disable"],
+            obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw plugin removed", result.output)
-        self.assertIn("Restarting OpenClaw gateway", result.output)
+        self.assertIn("Config saved", result.output)
+        self.assertIn("teardown complete", result.output.lower())
 
     def test_help_shows_restart_option(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1379,65 +1649,61 @@ class TestDisableGuardrailFlow(unittest.TestCase):
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
-    def test_successful_restore_with_original_model(self):
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_successful_disable_saves_config_and_runs_teardown(self, mock_restart):
+        """Disable saves config and restarts gateway to run connector teardown."""
         from defenseclaw.commands.cmd_setup import setup
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup, ["guardrail", "--disable"], obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup, ["guardrail", "--disable"], obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Config saved", result.output)
-        self.assertNotIn("Manual steps required", result.output)
+        self.assertIn("teardown complete", result.output.lower())
+        self.assertFalse(self.app.cfg.guardrail.enabled)
+        mock_restart.assert_called_once()
 
-        with open(self.oc_path) as f:
-            cfg = json.load(f)
-        # Primary model untouched — setup no longer changes it
-        self.assertNotIn("litellm", cfg["models"]["providers"])
-        # Plugin removed
-        self.assertNotIn("defenseclaw", cfg.get("plugins", {}).get("allow", []))
-
-    def test_restore_failure_shows_manual_steps(self):
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_works_without_openclaw_config(self, mock_restart):
+        """Disable works without OpenClaw config — teardown runs at gateway level."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.claw.config_file = "/nonexistent/openclaw.json"
         result = self.runner.invoke(
             setup, ["guardrail", "--disable"], obj=self.app,
         )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Could not update OpenClaw config", result.output)
-        self.assertIn("Manual steps required", result.output)
-        self.assertIn("Manually remove defenseclaw", result.output)
+        self.assertIn("Config saved", result.output)
+        self.assertIn("teardown complete", result.output.lower())
 
-    def test_uninstalls_plugin_during_disable(self):
-        from unittest.mock import patch
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_does_not_touch_extensions(self, mock_restart):
+        """Plugin cleanup runs via connector teardown in the gateway,
+        not directly by the CLI disable command."""
         from defenseclaw.commands.cmd_setup import setup
         ext = os.path.join(self.tmp_dir, "extensions", "defenseclaw")
         os.makedirs(ext)
         with open(os.path.join(ext, "index.js"), "w") as f:
             f.write("// plugin")
 
-        with patch("defenseclaw.guardrail.subprocess.run", side_effect=FileNotFoundError):
-            result = self.runner.invoke(
-                setup, ["guardrail", "--disable"], obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup, ["guardrail", "--disable"], obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("plugin removed from extensions", result.output)
-        self.assertFalse(os.path.exists(ext))
+        self.assertIn("teardown complete", result.output.lower())
 
-    def test_no_original_model_still_disables(self):
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_no_original_model_still_disables(self, mock_restart):
         """Disable works without original_model since we no longer change the model."""
         from defenseclaw.commands.cmd_setup import setup
         self.app.cfg.guardrail.original_model = ""
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
-            result = self.runner.invoke(
-                setup, ["guardrail", "--disable"], obj=self.app,
-            )
+        result = self.runner.invoke(
+            setup, ["guardrail", "--disable"], obj=self.app,
+        )
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("OpenClaw plugin removed", result.output)
-        self.assertIn("Restarting OpenClaw gateway", result.output)
+        self.assertIn("Config saved", result.output)
+        self.assertIn("teardown complete", result.output.lower())
 
-    def test_disable_sets_enabled_false(self):
+    @patch("defenseclaw.commands.cmd_setup._restart_services")
+    def test_disable_sets_enabled_false(self, mock_restart):
         from defenseclaw.commands.cmd_setup import setup
         self.assertTrue(self.app.cfg.guardrail.enabled)
         self.runner.invoke(

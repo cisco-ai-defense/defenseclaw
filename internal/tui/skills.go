@@ -92,7 +92,17 @@ type SkillsPanel struct {
 	detailOpen     bool
 	detailCache    *SkillDetailInfo
 	detailCacheIdx int
+
+	// connector is the active agent framework name (openclaw,
+	// zeptoclaw, claudecode, codex). Used by View() to render the
+	// "Source: …" banner so operators see where listed skills
+	// came from. Empty string falls back to the OpenClaw label.
+	connector string
 }
+
+// SetConnector updates the active connector for source labelling.
+// Called by the root Model whenever cfg or /health changes.
+func (p *SkillsPanel) SetConnector(name string) { p.connector = name }
 
 // SkillsLoadedMsg is sent when `defenseclaw skill list --json` completes.
 // Modeled on PluginsLoadedMsg so the dispatch pattern is identical —
@@ -165,7 +175,7 @@ func skillListToItem(s skillListJSON) skillItem {
 		}
 	}
 
-	status := "active"
+	var status string
 	actionsSummary := "-"
 	switch {
 	case s.Disabled:
@@ -431,6 +441,23 @@ func (p *SkillsPanel) BlockedCount() int {
 	return n
 }
 
+// sourceBanner is the one-line "Source: <connector> — <paths>" header
+// rendered just under the count summary. Tells operators which agent
+// framework's skill catalog they're looking at and which on-disk
+// locations the CLI scans for it. Empty string is rendered as a
+// dimmed placeholder rather than blank so the layout doesn't shift
+// between panels with and without health data.
+func (p *SkillsPanel) sourceBanner() string {
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	bold := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true)
+	name := FriendlyConnectorName(p.connector)
+	paths := ConnectorSourceLabel(p.connector, "skills")
+	if paths == "" {
+		return dim.Render("  Source: ") + bold.Render(name)
+	}
+	return dim.Render("  Source: ") + bold.Render(name) + dim.Render(" — "+paths)
+}
+
 func statusBadge(status string) string {
 	// Colors chosen to match what the CLI uses for the same labels:
 	// rejected borrows the `blocked` red (the two are emotionally
@@ -490,6 +517,7 @@ func (p *SkillsPanel) View() string {
 		Render(fmt.Sprintf("%d total", len(p.items)))
 
 	b.WriteString("  " + blockedBadge + "  " + allowedBadge + "   " + totalLabel + "\n")
+	b.WriteString(p.sourceBanner() + "\n")
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("238")).Render(strings.Repeat("─", p.width)) + "\n")
 
 	if p.filter != "" {
@@ -509,7 +537,11 @@ func (p *SkillsPanel) View() string {
 				"  Press \"r\" to load skills. Runs \"defenseclaw skill list --json\".")
 		}
 		return b.String() + "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
-			"  No skills found.\n  Install one with: defenseclaw skill install <name>")
+			fmt.Sprintf(
+				"  No skills found in %s (active connector: %s).\n  Install one with: defenseclaw skill install <name>",
+				ConnectorSourceLabel(p.connector, "skills"),
+				FriendlyConnectorName(p.connector),
+			))
 	}
 
 	header := fmt.Sprintf("  %-14s %-28s %-14s %-10s %-18s", "STATUS", "NAME", "SOURCE", "SEVERITY", "ACTIONS")
@@ -541,10 +573,6 @@ func (p *SkillsPanel) View() string {
 		if len(source) > 14 {
 			source = source[:11] + "…"
 		}
-		severity := item.Severity
-		if severity == "" {
-			severity = "-"
-		}
 		actions := item.Actions
 		if len(actions) > 18 {
 			actions = actions[:15] + "…"
@@ -555,11 +583,9 @@ func (p *SkillsPanel) View() string {
 			pointer = lipgloss.NewStyle().Foreground(lipgloss.Color("62")).Bold(true).Render("▸ ")
 		}
 
-		sev := severity
+		sev := fmt.Sprintf("%-10s", "-")
 		if item.Severity != "" {
 			sev = SeverityStyle(item.Severity).Render(fmt.Sprintf("%-10s", item.Severity))
-		} else {
-			sev = fmt.Sprintf("%-10s", "-")
 		}
 
 		line := fmt.Sprintf("%s%s %-28s %-14s %s %-18s", pointer, badge, name, source, sev, actions)

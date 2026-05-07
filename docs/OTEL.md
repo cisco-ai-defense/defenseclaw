@@ -51,12 +51,16 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `service.version` | string | `0.5.0` | build-time `version` var |
 | `service.namespace` | string | `ai-governance` | hardcoded |
 | `deployment.environment` | string | `macos` | `config.Environment` |
+| `tenant.id` | string | `tenant-a` | `config.tenant_id` when set |
+| `workspace.id` | string | `workspace-1` | `config.workspace_id` when set |
+| `deployment.mode` | string | `managed_enterprise` | `config.deployment_mode` when set. Allowed values: `managed_enterprise`, `unmanaged_byod`, `ci_cd`, `sandboxed`, `server`, `saas` |
+| `discovery.source` | string | `registry` | `config.discovery_source` when set |
 | `host.name` | string | `dgx-spark-01` | `os.Hostname()` |
 | `host.arch` | string | `arm64` | `runtime.GOARCH` |
 | `os.type` | string | `darwin` | `runtime.GOOS` |
-| `defenseclaw.claw.mode` | string | `openclaw` | `config.Claw.Mode` |
-| `defenseclaw.claw.home_dir` | string | `/home/user/.openclaw` | resolved at startup |
-| `defenseclaw.device.id` | string | `a1b2c3...` | Ed25519 fingerprint |
+| `defenseclaw.claw.mode` | string | `openclaw` \| `zeptoclaw` \| `claudecode` \| `codex` (or `""` before `defenseclaw setup connector`) | `config.Claw.Mode` |
+| `defenseclaw.claw.home_dir` | string | `/home/user/.openclaw`, `/home/user/.zeptoclaw`, `/home/user/.claude`, `/home/user/.codex` | resolved at startup |
+| `defenseclaw.device.id` | string | `a1b2c3...` | DefenseClaw Ed25519 public-key fingerprint |
 | `defenseclaw.gateway.host` | string | `127.0.0.1` | `config.Gateway.Host` |
 | `defenseclaw.gateway.port` | int | `18789` | `config.Gateway.Port` |
 | `defenseclaw.instance.id` | string | `uuid` | generated at startup |
@@ -368,12 +372,8 @@ Uses [OTEL GenAI semantic conventions](https://opentelemetry.io/docs/specs/semco
 
 | Metric | Attributes |
 |---|---|
-| `gen_ai.client.token.usage` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` (`input`/`output`) |
-| `gen_ai.client.operation.duration` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model` |
-
-> **TODO**: Add `gen_ai.agent.name` to metric attributes when available
-> from the parent `invoke_agent` span. See
-> [OTEL-IMPLEMENTATION-STATUS.md](OTEL-IMPLEMENTATION-STATUS.md) §1.
+| `gen_ai.client.token.usage` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` (`input`/`output`), `gen_ai.agent.name` / `gen_ai.agent.id` when known |
+| `gen_ai.client.operation.duration` | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.agent.name` / `gen_ai.agent.id` when known |
 
 ### 5e. Guardrail Span ✅ IMPLEMENTED
 
@@ -547,13 +547,10 @@ All metrics use the `defenseclaw.*` namespace.
 
 | Metric | Type | Unit | Buckets | Attributes |
 |---|---|---|---|---|
-| `gen_ai.client.token.usage` | Histogram | `{token}` | 1,4,16,64,256,1K,4K,16K,64K,256K,1M,4M,16M,64M | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type` |
-| `gen_ai.client.operation.duration` | Histogram | `s` | 0.01,0.02,0.04,...,81.92 | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model` |
+| `gen_ai.client.token.usage` | Histogram | `{token}` | 1,4,16,64,256,1K,4K,16K,64K,256K,1M,4M,16M,64M | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.token.type`, `gen_ai.agent.name` / `gen_ai.agent.id` when known |
+| `gen_ai.client.operation.duration` | Histogram | `s` | 0.01,0.02,0.04,...,81.92 | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.agent.name` / `gen_ai.agent.id` when known |
 
 > **Note**: Buckets follow [OTel GenAI semconv metrics spec](https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-metrics.md). `gen_ai.token.type` values are `input` and `output`.
-
-> **TODO**: Add `gen_ai.agent.name` attribute to these metrics when the
-> agent name is available from the parent `invoke_agent` span context.
 
 ### Alert Metrics
 

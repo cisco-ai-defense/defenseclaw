@@ -17,11 +17,12 @@
 """Tests for 'defenseclaw init' command."""
 
 import os
+import json
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import ANY, patch, MagicMock
 
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -89,6 +90,126 @@ class TestInitCommand(unittest.TestCase):
         self.assertEqual(len(init_events), 1, f"expected exactly one 'init' event, got actions: {[e.action for e in events]}")
         self.assertEqual(init_events[0].action, "init")
         store.close()
+
+
+class TestInitFirstRunBackend(unittest.TestCase):
+    """Tests for the new canonical first-run backend behind init."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-first-run-")
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _invoke(self, args):
+        return self.runner.invoke(
+            init_cmd,
+            args,
+            obj=AppContext(),
+            env={"DEFENSECLAW_HOME": self.tmp_dir},
+        )
+
+    def test_json_summary_codex_does_not_default_to_openclaw(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "codex")
+        self.assertEqual(summary["profile"], "observe")
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["claw"]["mode"], "codex")
+        self.assertEqual(cfg["guardrail"]["connector"], "codex")
+        self.assertTrue(cfg["guardrail"]["enabled"])
+        self.assertFalse(cfg["guardrail"]["codex_enforcement_enabled"])
+        self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
+
+    def test_first_run_persists_llm_secret_to_dotenv_not_config(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--llm-model",
+            "openai/gpt-4o",
+            "--llm-api-key",
+            "sk-test-secret",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        config_text = Path(self.tmp_dir, "config.yaml").read_text(encoding="utf-8")
+        dotenv_text = Path(self.tmp_dir, ".env").read_text(encoding="utf-8")
+        self.assertNotIn("sk-test-secret", config_text)
+        self.assertIn("DEFENSECLAW_LLM_KEY=sk-test-secret", dotenv_text)
+
+    def test_targeted_readiness_skips_unconfigured_cloud_probes(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        readiness = {step["name"]: step for step in summary["readiness"]}
+        self.assertEqual(readiness["LLM API"]["status"], "skip")
+        self.assertEqual(readiness["Cisco AI Defense"]["status"], "skip")
+
+    def test_observe_preserves_remote_scanner_choice_for_cisco_probe(self):
+        from defenseclaw.bootstrap import StepResult
+
+        with patch(
+            "defenseclaw.bootstrap._doctor_check",
+            return_value=StepResult("Cisco AI Defense", "pass", "ok"),
+        ) as doctor_check:
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "codex",
+                "--profile",
+                "observe",
+                "--scanner-mode",
+                "remote",
+                "--skip-install",
+                "--no-start-gateway",
+                "--json-summary",
+            ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        doctor_check.assert_any_call("_check_cisco_ai_defense", ANY, "Cisco AI Defense")
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["scanner_mode"], "remote")
 
 class TestInitVersionDisplay(unittest.TestCase):
     """Tests for version info in init Environment section."""
@@ -372,7 +493,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Gateway", result.output)
-        self.assertIn("OpenClaw:", result.output)
+        self.assertIn("connector: openclaw", result.output)
         self.assertIn("127.0.0.1:18789", result.output)
         self.assertIn("API port:", result.output)
         self.assertIn("18970", result.output)
@@ -435,7 +556,14 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
         app = AppContext()
         result = self.runner.invoke(init_cmd, ["--skip-install"], obj=app)
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("none (local)", result.output)
+        # Plan B2 / S0.2: the empty-token path no longer reports
+        # "loopback auth" as the fallback because B2 removed the
+        # empty-token allow path. Init now tells the operator that
+        # the first-boot CSPRNG token will be auto-generated under
+        # ~/.defenseclaw/.env. The test pins the new copy so a
+        # future regression to "loopback auth" is caught loudly.
+        self.assertIn("auto-generated on first boot", result.output)
+        self.assertIn(".defenseclaw/.env", result.output)
 
 
 class TestResolveOpenclawGateway(unittest.TestCase):
@@ -1097,6 +1225,249 @@ class TestRestoreOpenclawOwnership(unittest.TestCase):
 
         self.assertFalse(os.path.islink(symlink_path))
         self.assertFalse(os.path.isfile(backup_path))
+
+
+class TestInitFailModeFlag(unittest.TestCase):
+    """Pin --fail-mode wiring through cmd_init.
+
+    The 0.4.0 launch shipped a `defenseclaw guardrail fail-mode`
+    command and a setup-time prompt, but `init` and `quickstart`
+    didn't expose the option. Operators running `quickstart` or
+    headless `init --json-summary` flows ended up with whatever
+    default `default_config()` returned, with no way to choose
+    fail-closed without a second command. These tests pin the new
+    surface so it can't regress.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-failmode-")
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _invoke(self, args):
+        return self.runner.invoke(
+            init_cmd,
+            args,
+            obj=AppContext(),
+            env={"DEFENSECLAW_HOME": self.tmp_dir},
+        )
+
+    def test_help_lists_fail_mode_flag(self):
+        result = self.runner.invoke(init_cmd, ["--help"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertIn("--fail-mode", result.output)
+
+    def test_fail_mode_closed_persists_to_config(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--fail-mode",
+            "closed",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["guardrail"]["hook_fail_mode"], "closed")
+
+    def test_fail_mode_open_persists_to_config(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--fail-mode",
+            "open",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        # "open" is the canonical default; YAML may or may not
+        # serialize it depending on whether the dataclass treats it
+        # as default. The contract that matters is that it ends up
+        # as effectively-open in config.
+        from defenseclaw.config import _normalize_hook_fail_mode
+        self.assertEqual(
+            _normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "open")),
+            "open",
+        )
+
+    def test_omitting_flag_is_noninvasive(self):
+        # No --fail-mode means "leave existing alone." On a brand
+        # new config, that resolves to the default ("open") via
+        # default_config(). The point of this test is to make sure
+        # the wiring does NOT clobber the default with empty
+        # string, which would be a serialization bug.
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "codex",
+            "--profile",
+            "observe",
+            "--scanner-mode",
+            "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        # Whatever the YAML serializer wrote, the loader-level
+        # normalizer must resolve it to "open".
+        from defenseclaw.config import _normalize_hook_fail_mode
+        raw = cfg["guardrail"].get("hook_fail_mode", "open")
+        self.assertEqual(_normalize_hook_fail_mode(raw), "open")
+
+
+class TestInitHITLFlags(unittest.TestCase):
+    """Pin --human-approval / --hilt-min-severity wiring through cmd_init.
+
+    HITL was previously settable only via the interactive ``defenseclaw
+    setup guardrail`` wizard. Operators running headless ``init
+    --json-summary`` (CI, install scripts, automation) had no way to
+    toggle approval prompts at first-run time. These tests pin the new
+    surface and the no-op contract for omitted flags so a regression
+    can't silently disable HITL on an upgrade.
+    """
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-hilt-")
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _invoke(self, args):
+        return self.runner.invoke(
+            init_cmd,
+            args,
+            obj=AppContext(),
+            env={"DEFENSECLAW_HOME": self.tmp_dir},
+        )
+
+    def _load_cfg(self) -> dict:
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            return yaml.safe_load(fh)
+
+    def test_help_lists_hilt_flags(self):
+        result = self.runner.invoke(init_cmd, ["--help"])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertIn("--human-approval", result.output,
+                      "operator-facing --help must advertise the HITL toggle "
+                      "or no one will discover it")
+        self.assertIn("--hilt-min-severity", result.output)
+
+    def test_human_approval_enables_with_severity_floor(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector", "codex",
+            "--profile", "action",
+            "--scanner-mode", "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--human-approval",
+            "--hilt-min-severity", "MEDIUM",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        cfg = self._load_cfg()
+        hilt = cfg["guardrail"]["hilt"]
+        self.assertTrue(hilt["enabled"],
+                        "explicit --human-approval must persist as enabled=True "
+                        "in config.yaml; otherwise the prompt UX is a lie")
+        self.assertEqual(hilt["min_severity"], "MEDIUM")
+
+    def test_human_approval_normalizes_lowercase_severity(self):
+        # Click normalizes case via case_sensitive=False, but pin the
+        # contract end-to-end: a user who types ``--hilt-min-severity
+        # low`` must end up with ``"LOW"`` on disk to match the
+        # canonical HIGH/MEDIUM/LOW/CRITICAL set the gateway compares
+        # against.
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector", "codex",
+            "--profile", "action",
+            "--scanner-mode", "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--human-approval",
+            "--hilt-min-severity", "low",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(self._load_cfg()["guardrail"]["hilt"]["min_severity"], "LOW")
+
+    def test_no_human_approval_disables_explicitly(self):
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector", "codex",
+            "--profile", "action",
+            "--scanner-mode", "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--no-human-approval",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertFalse(self._load_cfg()["guardrail"]["hilt"]["enabled"])
+
+    def test_omitting_flags_preserves_default(self):
+        # Brand-new config: HITL defaults are enabled=False,
+        # min_severity="HIGH" (HILTConfig). Omitting both flags must
+        # leave those defaults intact, matching the "leave existing
+        # alone" contract.
+        result = self._invoke([
+            "--non-interactive",
+            "--yes",
+            "--connector", "codex",
+            "--profile", "action",
+            "--scanner-mode", "local",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        hilt = self._load_cfg()["guardrail"]["hilt"]
+        self.assertFalse(hilt["enabled"],
+                         "no flag = no change; default_config() seeds enabled=False")
+        self.assertEqual(hilt["min_severity"], "HIGH")
 
 
 if __name__ == "__main__":

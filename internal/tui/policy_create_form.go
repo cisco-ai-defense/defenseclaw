@@ -187,7 +187,7 @@ func (f *PolicyCreateForm) HandleKey(key string) (submit bool, binary string, ar
 func (f *PolicyCreateForm) BuildCommand() ([]string, error) {
 	name := strings.TrimSpace(f.values[policyFieldName])
 	if name == "" {
-		return nil, fmt.Errorf("Name is required")
+		return nil, fmt.Errorf("name is required")
 	}
 	// Mirror the CLI's _sanitize_policy_name regex (alnum/_/-) at
 	// the form boundary: the CLI uppercases this failure into a
@@ -197,7 +197,7 @@ func (f *PolicyCreateForm) BuildCommand() ([]string, error) {
 		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
 			(r >= '0' && r <= '9') || r == '_' || r == '-'
 		if !ok {
-			return nil, fmt.Errorf("Name may only contain letters, digits, _ or -")
+			return nil, fmt.Errorf("name may only contain letters, digits, _ or -")
 		}
 	}
 

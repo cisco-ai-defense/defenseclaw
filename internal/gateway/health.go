@@ -18,7 +18,10 @@ package gateway
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 type SubsystemState string
@@ -39,6 +42,20 @@ type SubsystemHealth struct {
 	Details   map[string]interface{} `json:"details,omitempty"`
 }
 
+// ConnectorHealth reports the active connector's identity, mode, and counters.
+type ConnectorHealth struct {
+	Name               string                       `json:"name"`
+	State              SubsystemState               `json:"state"`
+	Since              time.Time                    `json:"since"`
+	ToolInspectionMode connector.ToolInspectionMode `json:"tool_inspection_mode"`
+	SubprocessPolicy   connector.SubprocessPolicy   `json:"subprocess_policy"`
+	Requests           int64                        `json:"requests"`
+	Errors             int64                        `json:"errors"`
+	ToolInspections    int64                        `json:"tool_inspections"`
+	ToolBlocks         int64                        `json:"tool_blocks"`
+	SubprocessBlocks   int64                        `json:"subprocess_blocks"`
+}
+
 type HealthSnapshot struct {
 	StartedAt time.Time       `json:"started_at"`
 	UptimeMs  int64           `json:"uptime_ms"`
@@ -50,8 +67,9 @@ type HealthSnapshot struct {
 	// Sinks reports the aggregate health of all configured audit sinks
 	// (splunk_hec, otlp_logs, http_jsonl, …). Details["sinks"] holds
 	// per-sink state for the TUI/CLI to render individual rows.
-	Sinks   SubsystemHealth  `json:"sinks"`
-	Sandbox *SubsystemHealth `json:"sandbox,omitempty"`
+	Sinks     SubsystemHealth  `json:"sinks"`
+	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
+	Connector *ConnectorHealth `json:"connector,omitempty"`
 }
 
 type SidecarHealth struct {
@@ -63,7 +81,15 @@ type SidecarHealth struct {
 	telemetry SubsystemHealth
 	sinks     SubsystemHealth
 	sandbox   *SubsystemHealth
+	conn      *ConnectorHealth
 	startedAt time.Time
+
+	// Atomic counters for connector stats (lock-free hot path).
+	connRequests         atomic.Int64
+	connErrors           atomic.Int64
+	connToolInspections  atomic.Int64
+	connToolBlocks       atomic.Int64
+	connSubprocessBlocks atomic.Int64
 }
 
 func NewSidecarHealth() *SidecarHealth {
@@ -161,10 +187,39 @@ func (h *SidecarHealth) SetSandbox(state SubsystemState, lastErr string, details
 	}
 }
 
+// SetConnector initializes connector health tracking for the active connector.
+func (h *SidecarHealth) SetConnector(name string, mode connector.ToolInspectionMode, policy connector.SubprocessPolicy) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.conn = &ConnectorHealth{
+		Name:               name,
+		State:              StateRunning,
+		Since:              time.Now(),
+		ToolInspectionMode: mode,
+		SubprocessPolicy:   policy,
+	}
+}
+
+// RecordConnectorRequest increments the connector request counter.
+func (h *SidecarHealth) RecordConnectorRequest() { h.connRequests.Add(1) }
+
+// RecordConnectorError increments the connector error counter.
+func (h *SidecarHealth) RecordConnectorError() { h.connErrors.Add(1) }
+
+// RecordToolInspection increments the tool inspection counter.
+func (h *SidecarHealth) RecordToolInspection() { h.connToolInspections.Add(1) }
+
+// RecordToolBlock increments the tool block counter.
+func (h *SidecarHealth) RecordToolBlock() { h.connToolBlocks.Add(1) }
+
+// RecordSubprocessBlock increments the subprocess block counter.
+func (h *SidecarHealth) RecordSubprocessBlock() { h.connSubprocessBlocks.Add(1) }
+
 func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return HealthSnapshot{
+
+	snap := HealthSnapshot{
 		StartedAt: h.startedAt,
 		UptimeMs:  time.Since(h.startedAt).Milliseconds(),
 		Gateway:   h.gateway,
@@ -175,4 +230,16 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Sinks:     h.sinks,
 		Sandbox:   h.sandbox,
 	}
+
+	if h.conn != nil {
+		ch := *h.conn
+		ch.Requests = h.connRequests.Load()
+		ch.Errors = h.connErrors.Load()
+		ch.ToolInspections = h.connToolInspections.Load()
+		ch.ToolBlocks = h.connToolBlocks.Load()
+		ch.SubprocessBlocks = h.connSubprocessBlocks.Load()
+		snap.Connector = &ch
+	}
+
+	return snap
 }

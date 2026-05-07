@@ -124,7 +124,7 @@ rules:
   - id: CMD-SYSTEMCTL
     pattern: '(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b'
     title: "Suspicious systemd persistence enablement"
-    severity: HIGH
+    severity: CRITICAL
     confidence: 0.82
     tags: [persistence]
   - id: CMD-NETCAT-LISTEN
@@ -152,7 +152,7 @@ rules:
     confidence: 0.95
     tags: [execution, reverse-shell]
   - id: CMD-ENV-DUMP
-    pattern: '(?:^|[\s;|&])(?:env|printenv|export\s+-p)\b'
+    pattern: '(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\s+-p)\b'
     title: "Environment variable dump"
     severity: HIGH
     confidence: 0.80

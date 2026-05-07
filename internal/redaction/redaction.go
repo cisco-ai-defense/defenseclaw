@@ -38,6 +38,29 @@
 // enforced by routing those sinks through ForSink* helpers below
 // rather than the raw Reveal-respecting variants.
 //
+// # Disable-all flag
+//
+// For deployments that explicitly opt out of redaction (single-tenant
+// installs used only for prompt-engineering debugging, lab
+// environments where every downstream sink lives inside the same
+// trust boundary), two stronger toggles bypass redaction across
+// EVERY sink — including the persistent ones the Reveal flag
+// deliberately leaves alone:
+//
+//   - DEFENSECLAW_DISABLE_REDACTION=1 (env var, ephemeral)
+//   - SetDisableAll(true) (process-wide override, set from
+//     Privacy.DisableRedaction at sidecar startup so the choice
+//     survives restarts without env-var ceremony)
+//
+// Either path makes ForSinkString / ForSinkEntity /
+// ForSinkMessageContent / ForSinkReason / ForSinkEvidence return
+// their raw inputs untouched. This is the strongest opt-out we
+// offer; the unconditional-redaction contract documented in
+// OBSERVABILITY.md is explicitly violated when this flag is on.
+// The CLI emits a warning on flip, and config loaders emit a
+// once-per-process warning when they observe the setting so the
+// runtime state stays auditable without spamming reload loops.
+//
 // # Output format
 //
 // Redactions follow a single, parseable shape:
@@ -56,6 +79,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -64,6 +88,62 @@ import (
 // unexported constant so callers cannot accidentally introduce parallel
 // flags that defeat the audit story.
 const revealEnvVar = "DEFENSECLAW_REVEAL_PII"
+
+// disableEnvVar fully disables redaction for ALL sinks (operator-facing
+// AND persistent — SQLite, OTel, webhooks, Splunk). Distinct from
+// revealEnvVar because the threat models diverge:
+//
+//   - revealEnvVar is a short-lived display-only opt-in for incident
+//     triage on a workstation; persistent sinks still redact so the
+//     audit trail keeps its compliance contract.
+//   - disableEnvVar is a deliberate, permanent operator decision —
+//     used by deployments where every downstream sink already lives
+//     inside the same trust boundary (e.g. a single-tenant local
+//     install used purely for prompt-engineering debugging) and
+//     redacted placeholders would only obstruct the work.
+//
+// The unconditional-redaction contract documented in OBSERVABILITY.md
+// is therefore explicitly violated when either disableEnvVar=1 or
+// the runtime override (SetDisableAll) is true. The CLI surfaces a
+// loud warning every time disable is flipped on, and configuration
+// loaders also log once per process so an operator cannot quietly
+// inherit a redaction-off install.
+const disableEnvVar = "DEFENSECLAW_DISABLE_REDACTION"
+
+// disableOverride mirrors the persisted Privacy.DisableRedaction
+// config flag at the redaction-package level, which is intentionally
+// dependency-free (importing internal/config would create a cycle).
+// The sidecar startup path calls SetDisableAll(cfg.Privacy.
+// DisableRedaction) so a config-only toggle survives restarts
+// without operators having to remember the env-var name.
+//
+// Reads use atomic.Bool so the redaction hot path stays lock-free
+// and the test suite can flip the override per-test without races.
+var disableOverride atomic.Bool
+
+// SetDisableAll flips the global redaction kill-switch. Intended
+// for a single call from the sidecar's Load()-result wiring; tests
+// may toggle it under t.Cleanup. When true, EVERY ForSink* and
+// Reveal-respecting helper short-circuits to the raw value — the
+// strongest opt-out we offer.
+//
+// Always pair config-driven activation with a clearly logged warning
+// in the load / flip path so the runtime state is auditable.
+func SetDisableAll(v bool) { disableOverride.Store(v) }
+
+// DisableAll reports the current state of the global override. Read
+// path is hot (consulted by every ForSink* call) so it stays
+// inlined and lock-free.
+func DisableAll() bool {
+	if disableOverride.Load() {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(disableEnvVar))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
 
 // hashPrefixHex is the number of leading hex characters of SHA-256
 // preserved in the placeholder. 8 hex chars (32 bits) is enough to
@@ -119,15 +199,19 @@ func String(s string) string {
 	return ForSinkString(s)
 }
 
-// ForSinkString is the Reveal-bypassing variant of String. Always
-// returns the redacted placeholder regardless of the reveal flag.
-// Use for anything destined for SQLite / Splunk / OTel / webhooks /
-// HTTP responses to remote callers.
+// ForSinkString is the Reveal-bypassing variant of String. Returns
+// the redacted placeholder regardless of the reveal flag, UNLESS
+// the global “DisableAll“ override is on — in which case the raw
+// value is returned. Use for anything destined for SQLite / Splunk
+// / OTel / webhooks / HTTP responses to remote callers.
 //
 // Idempotent: a value already shaped like a redaction placeholder is
 // returned unchanged so layered helpers don't lose the original hash
 // or length on a second pass.
 func ForSinkString(s string) string {
+	if DisableAll() {
+		return s
+	}
 	if s == "" {
 		return "<empty>"
 	}
@@ -182,7 +266,9 @@ func Entity(value string) string {
 }
 
 // ForSinkEntity is the Reveal-bypassing variant of Entity. Idempotent
-// over its own placeholder shape.
+// over its own placeholder shape. The global DisableAll override
+// short-circuits before any masking decision so the raw value is
+// emitted unchanged.
 //
 // The first-rune preview is only included for values long enough
 // that a single character cannot be a meaningful fraction of the
@@ -191,6 +277,9 @@ func Entity(value string) string {
 // leading `A` of a 6-byte value like `AB4FGH` narrows the search
 // space for an attacker who controls adjacent log rows.
 func ForSinkEntity(value string) string {
+	if DisableAll() {
+		return value
+	}
 	if value == "" {
 		return "<empty>"
 	}
@@ -223,8 +312,13 @@ func MessageContent(content string) string {
 }
 
 // ForSinkMessageContent is the Reveal-bypassing variant of
-// MessageContent. Idempotent.
+// MessageContent. Idempotent. Honours the global DisableAll
+// override so deployments that opt out of redaction see full
+// user-prompt / model-response payloads end-to-end.
 func ForSinkMessageContent(content string) string {
+	if DisableAll() {
+		return content
+	}
 	if content == "" {
 		return "<empty>"
 	}
@@ -248,12 +342,18 @@ func Reason(reason string) string {
 	return ForSinkReason(reason)
 }
 
-// ForSinkReason is the Reveal-bypassing variant of Reason.
+// ForSinkReason is the Reveal-bypassing variant of Reason. The
+// global DisableAll override returns the raw verdict reason
+// untouched — useful when an operator needs to see exactly what
+// literal a guardrail rule matched on.
 //
 // Idempotent: if the input has already been through redaction (i.e.
 // contains "<redacted" markers and no other content), it is returned
 // unchanged.
 func ForSinkReason(reason string) string {
+	if DisableAll() {
+		return reason
+	}
 	if reason == "" {
 		return ""
 	}
@@ -565,8 +665,14 @@ func Evidence(content string, matchStart, matchEnd int) string {
 }
 
 // ForSinkEvidence is the Reveal-bypassing variant of Evidence.
-// Idempotent over its own placeholder shape.
+// Idempotent over its own placeholder shape. When the global
+// DisableAll override is on, the raw evidence window is returned
+// unchanged so operators can see exactly what payload the engine
+// matched against.
 func ForSinkEvidence(content string, matchStart, matchEnd int) string {
+	if DisableAll() {
+		return content
+	}
 	if content == "" {
 		return "<empty>"
 	}

@@ -329,7 +329,7 @@ func TestExecuteActionMenuItem_MCPDispatch(t *testing.T) {
 	m.mcps.filtered = m.mcps.items
 	seen := map[string]bool{}
 	for _, status := range []string{"blocked", "allowed", "active", ""} {
-		for _, a := range MCPActions(status) {
+		for _, a := range MCPActions(status, "openclaw") {
 			seen[a.Key] = true
 		}
 	}

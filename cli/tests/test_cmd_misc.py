@@ -57,7 +57,12 @@ class TestStatusCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("DefenseClaw Status", result.output)
         self.assertIn("Environment:", result.output)
-        self.assertIn("Scanners:", result.output)
+        # Section headers in `status` switched from a colon-suffix
+        # ("Scanners:") to an underline-divider style ("Scanners\n  ────────")
+        # to match the rest of the CLI wizard pattern. We assert on
+        # the underlined heading (without colon) so this lock-in
+        # survives a future ANSI-coloring tweak.
+        self.assertIn("Scanners", result.output)
         self.assertIn("Sidecar:", result.output)
         self.assertIn("not running", result.output)
 
@@ -713,6 +718,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("--o11y", result.output)
         self.assertIn("--logs", result.output)
+        self.assertIn("--enterprise", result.output)
+        self.assertIn("--hec-endpoint", result.output)
+        self.assertIn("--skip-test", result.output)
         self.assertIn("--accept-splunk-license", result.output)
 
     def test_setup_splunk_o11y_non_interactive(self):
@@ -766,6 +774,137 @@ class TestSetupSplunkCommand(unittest.TestCase):
             obj=self.app,
         )
         self.assertNotEqual(result.exit_code, 0)
+
+    @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge")
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker")
+    @patch("defenseclaw.commands.cmd_setup._ensure_splunk_license_acceptance")
+    def test_setup_splunk_enterprise_non_interactive(
+        self, mock_license, mock_preflight, mock_bootstrap,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        endpoint = "https://splunk.example.com:8088/services/collector/event"
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.probe_splunk_hec",
+            return_value=(True, "HEC responded 200 OK"),
+        ) as mock_probe:
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk",
+                    "--enterprise",
+                    "--hec-endpoint", endpoint,
+                    "--hec-token", "hec-token",
+                    "--index", "defenseclaw",
+                    "--non-interactive",
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Splunk Enterprise configured (HEC)", result.output)
+        self.assertIn("Live HEC probe:", result.output)
+        self.assertIn("HEC responded 200 OK", result.output)
+        mock_probe.assert_called_once_with(
+            self.tmp_dir,
+            "splunk-enterprise-splunk-example-com",
+            timeout=10.0,
+        )
+        mock_license.assert_not_called()
+        mock_preflight.assert_not_called()
+        mock_bootstrap.assert_not_called()
+
+        self.assertTrue(self.app.cfg.splunk.enabled)
+        self.assertEqual(self.app.cfg.splunk.hec_endpoint, endpoint)
+        self.assertEqual(self.app.cfg.splunk.hec_token_env, "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+
+        with open(os.path.join(self.tmp_dir, ".env")) as f:
+            dotenv = f.read()
+        self.assertIn("DEFENSECLAW_SPLUNK_HEC_TOKEN=hec-token", dotenv)
+
+        with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
+            cfg = f.read()
+        self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
+        self.assertIn("kind: splunk_hec", cfg)
+        self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
+        self.assertIn("verify_tls: true", cfg)
+
+    def test_setup_splunk_enterprise_skip_test(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        endpoint = "https://splunk.example.com:8088/services/collector/event"
+        with patch("defenseclaw.commands.cmd_setup_observability.probe_splunk_hec") as mock_probe:
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk",
+                    "--enterprise",
+                    "--hec-endpoint", endpoint,
+                    "--hec-token", "hec-token",
+                    "--skip-test",
+                    "--non-interactive",
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Live HEC probe skipped.", result.output)
+        mock_probe.assert_not_called()
+
+    def test_setup_splunk_enterprise_probe_warning_is_best_effort(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        endpoint = "https://splunk.example.com:8088/services/collector/event"
+        with patch(
+            "defenseclaw.commands.cmd_setup_observability.probe_splunk_hec",
+            return_value=(False, "HTTP 401 Unauthorized check token/index permissions"),
+        ):
+            result = self.runner.invoke(
+                setup,
+                [
+                    "splunk",
+                    "--enterprise",
+                    "--hec-endpoint", endpoint,
+                    "--hec-token", "hec-token",
+                    "--non-interactive",
+                ],
+                obj=self.app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn(
+            "warning: HTTP 401 Unauthorized check token/index permissions",
+            result.output,
+        )
+
+    def test_setup_splunk_enterprise_requires_endpoint(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--enterprise", "--hec-token", "hec-token", "--non-interactive"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--hec-endpoint is required", result.output)
+
+    @patch.dict(os.environ, {}, clear=False)
+    def test_setup_splunk_enterprise_requires_token(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        os.environ.pop("DEFENSECLAW_SPLUNK_HEC_TOKEN", None)
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--enterprise",
+                "--hec-endpoint", "https://splunk.example.com:8088/services/collector/event",
+                "--non-interactive",
+            ],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--hec-token required", result.output)
 
     def test_setup_splunk_logs_non_interactive_requires_license_flag(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -863,6 +1002,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
             "n",           # Enable O11y?
             "y",           # Enable local logs?
             "n",           # Accept Splunk license?
+            "n",           # Enable Enterprise?
         ]) + "\n"
 
         result = self.runner.invoke(
@@ -956,6 +1096,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
             "y",           # Metrics?
             "n",           # Logs?
             "n",           # Enable local?
+            "n",           # Enable Enterprise?
         ]) + "\n"
 
         result = self.runner.invoke(

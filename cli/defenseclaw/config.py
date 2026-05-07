@@ -22,22 +22,60 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import platform
 import subprocess
+import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from defenseclaw import connector_paths
+
+# Back-compat re-exports — internal-but-imported-by-tests helpers that
+# moved to connector_paths in S4.1. Tests in cli/tests/test_config.py
+# and runtime call sites in cmd_init.py still import them from
+# defenseclaw.config; keeping the aliases avoids touching unrelated test
+# files (and avoids breaking the public surface that other plugins
+# already depend on).
+#
+# noqa: F401 alone is not enough — ruff's import-sort autofix (I001) will
+# silently drop aliased imports that aren't referenced inside the
+# module body (because UI-level "imported but unused" rules treat the
+# alias as the dead name). We expose every alias as a module-level
+# attribute below so the autofix can no longer prune them, and we list
+# them in __all__ for explicit re-export semantics.
+from defenseclaw.connector_paths import MCPServerEntry  # noqa: F401
+from defenseclaw.connector_paths import (
+    _dedup as _dedup,
+)
+from defenseclaw.connector_paths import (
+    _parse_mcp_servers_dict as _parse_mcp_servers_dict,
+)
+from defenseclaw.connector_paths import (  # noqa: F401
+    _read_mcp_servers_from_openclaw_json as _read_mcp_servers_from_file,
+)
+from defenseclaw.connector_paths import (  # noqa: F401
+    _read_openclaw_json as _read_openclaw_config,
+)
+
 _log = logging.getLogger(__name__)
+_privacy_disable_redaction_warned = False
 
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
+VALID_DEPLOYMENT_MODES = {
+    "managed_enterprise",
+    "unmanaged_byod",
+    "ci_cd",
+    "sandboxed",
+    "server",
+    "saas",
+}
 
 
 def _home() -> Path:
@@ -97,6 +135,19 @@ def detect_environment() -> str:
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
     return "linux"
+
+
+def _validate_deployment_mode(mode: str) -> str:
+    mode = (mode or "").strip()
+    if not mode:
+        return ""
+    if mode not in VALID_DEPLOYMENT_MODES:
+        raise ValueError(
+            f"config: deployment_mode={mode!r} is invalid "
+            "(allowed: managed_enterprise, unmanaged_byod, "
+            "ci_cd, sandboxed, server, saas)"
+        )
+    return mode
 
 
 _sandbox_mode_cache: bool | None = None
@@ -164,14 +215,12 @@ def openclaw_bin() -> str:
 # Dataclasses — same YAML keys as Go structs
 # ---------------------------------------------------------------------------
 
-@dataclass
-class MCPServerEntry:
-    name: str = ""
-    command: str = ""
-    args: list[str] = field(default_factory=list)
-    env: dict[str, str] = field(default_factory=dict)
-    url: str = ""
-    transport: str = ""
+# MCPServerEntry now lives in defenseclaw.connector_paths so any caller
+# that imported it from defenseclaw.config keeps working — see the
+# `from defenseclaw.connector_paths import MCPServerEntry` re-export
+# at the top of this module. Keeping the dataclass next to the
+# connector-aware MCP readers means there's exactly one schema across
+# the four supported agent frameworks.
 
 
 @dataclass
@@ -673,6 +722,58 @@ class PluginActionsConfig:
 
 
 @dataclass
+class AssetRuntimeDetectionConfig:
+    enabled: bool = True
+    terminal_commands: bool = True
+    unknown_terminal_mcp: str = "observe"
+
+
+@dataclass
+class AssetPolicyRule:
+    name: str = ""
+    connector: str = ""
+    reason: str = ""
+    url: str = ""
+    command: str = ""
+    args_prefix: list[str] = field(default_factory=list)
+    transport: str = ""
+    source_path_contains: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AssetTypePolicy:
+    default: str = "allow"
+    registry_required: bool = False
+    registry: list[AssetPolicyRule] = field(default_factory=list)
+    allowed: list[AssetPolicyRule] = field(default_factory=list)
+    denied: list[AssetPolicyRule] = field(default_factory=list)
+    runtime_detection: AssetRuntimeDetectionConfig = field(default_factory=AssetRuntimeDetectionConfig)
+
+
+def _default_runtime_asset_type_policy() -> AssetTypePolicy:
+    return AssetTypePolicy()
+
+
+def _default_nonruntime_asset_type_policy() -> AssetTypePolicy:
+    return AssetTypePolicy(
+        runtime_detection=AssetRuntimeDetectionConfig(
+            enabled=False,
+            terminal_commands=False,
+            unknown_terminal_mcp="observe",
+        ),
+    )
+
+
+@dataclass
+class AssetPolicyConfig:
+    enabled: bool = False
+    mode: str = "observe"
+    mcp: AssetTypePolicy = field(default_factory=_default_runtime_asset_type_policy)
+    skill: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+    plugin: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+
+
+@dataclass
 class FirewallConfig:
     config_file: str = ""
     rules_file: str = ""
@@ -687,6 +788,14 @@ class JudgeConfig:
     pii_prompt: bool = True
     pii_completion: bool = True
     tool_injection: bool = True
+    # ``exfil`` runs a dedicated data-exfiltration judge that asks the
+    # LLM whether a prompt is trying to read or exfiltrate sensitive
+    # files / credentials / secrets. Distinct from the injection judge
+    # (which asks "are you overriding my instructions?") and the PII
+    # judge (which only fires on substring PII). Mirrors the Go-side
+    # ``JudgeConfig.Exfil`` field — round-tripped through ``config.yaml``
+    # so the operator's choice survives a process restart.
+    exfil: bool = True
     timeout: float = 30.0
     # LLM overrides the top-level ``llm:`` block for the LLM judge.
     # Prefer ``Config.resolve_llm("guardrail.judge")`` over reading this
@@ -741,6 +850,12 @@ class WebhookConfig:
 
 
 @dataclass
+class HILTConfig:
+    enabled: bool = False
+    min_severity: str = "HIGH"
+
+
+@dataclass
 class GuardrailConfig:
     enabled: bool = False
     mode: str = "observe"           # observe | action
@@ -779,6 +894,73 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
+    connector: str = ""  # empty => fall back to claw.mode; otherwise openclaw | zeptoclaw | claudecode | codex
+    hilt: HILTConfig = field(default_factory=HILTConfig)
+    # ``codex_enforcement_enabled`` gates the proxy-redirect /
+    # blocking path for the Codex connector. Default ``False`` means
+    # codex talks DIRECTLY to its native upstream — observability
+    # runs via three independent channels (hooks → /api/v1/codex/hook,
+    # ``[otel]`` exporter → /v1/logs+/v1/metrics, notify bridge →
+    # /api/v1/codex/notify) but the proxy is NOT in the data path
+    # and no ``openai_base_url``/reserved-id rewrite is performed.
+    # Flipping to ``True`` re-engages the existing guardrail path
+    # (proxy bind + reserved-id strip + subprocess sandbox); the
+    # enforcement code stays intact behind this flag for that
+    # workflow. Mirrors ``GuardrailConfig.CodexEnforcementEnabled``
+    # in internal/config/config.go.
+    codex_enforcement_enabled: bool = False
+    # ``claudecode_enforcement_enabled`` is the parallel flag for
+    # the Claude Code connector. Default ``False`` means claude code
+    # talks DIRECTLY to api.anthropic.com; observability runs via
+    # hooks (settings.json hook entries) and the native OTel stack —
+    # including ``OTEL_LOG_RAW_API_BODIES=file:`` which writes the
+    # full Messages API request/response JSON to disk alongside a
+    # ``body_ref`` pointer in each event. Flipping to ``True`` re-
+    # engages ``ANTHROPIC_BASE_URL`` env override and the subprocess
+    # sandbox. Mirrors
+    # ``GuardrailConfig.ClaudeCodeEnforcementEnabled``.
+    claudecode_enforcement_enabled: bool = False
+    # ``hook_fail_mode`` is the operator-chosen response-layer fail
+    # mode for every generated hook (codex-hook, claude-code-hook,
+    # inspect-*). Two values are supported:
+    #
+    #   - ``"open"`` (default): when the gateway answers with a 4xx,
+    #     malformed JSON, or a missing action field, hooks ALLOW the
+    #     tool/prompt with a stderr warning and a record in
+    #     ``$DEFENSECLAW_HOME/logs/hook-failures.jsonl``. A
+    #     misbehaving gateway that bricks every agent interaction is
+    #     strictly worse UX than a brief observability gap.
+    #
+    #   - ``"closed"``: the same response-layer failures BLOCK the
+    #     tool/prompt. Choose when you'd rather take the agent
+    #     offline than miss a policy decision (regulated workflows
+    #     where every prompt MUST be inspected).
+    #
+    # Transport-layer failures (gateway unreachable / 5xx) are
+    # handled separately by each hook's ``fail_unreachable`` helper
+    # and ALWAYS allow unless the operator opts into strict
+    # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
+    # regardless of this field's value. Mirrors
+    # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
+    hook_fail_mode: str = "open"
+
+
+@dataclass
+class PrivacyConfig:
+    """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
+
+    ``disable_redaction`` is the persistent kill-switch documented in
+    the Go redaction package: when True the sidecar bypasses every
+    ForSink* helper at startup, including persistent sinks (audit DB,
+    OTel logs, Splunk HEC, webhooks). It violates the
+    unconditional-redaction contract documented in OBSERVABILITY.md
+    by design — only enable on single-tenant installs where every
+    downstream sink lives inside the same trust boundary.
+    The CLI emits a warning on flip, and config loaders emit a
+    once-per-process warning when they observe it.
+    """
+
+    disable_redaction: bool = False
 
 
 @dataclass
@@ -797,6 +979,10 @@ class Config:
     plugin_dir: str = ""
     policy_dir: str = ""
     environment: str = ""
+    tenant_id: str = ""
+    workspace_id: str = ""
+    deployment_mode: str = ""
+    discovery_source: str = ""
     claw: ClawConfig = field(default_factory=ClawConfig)
     inspect_llm: InspectLLMConfig = field(default_factory=InspectLLMConfig)
     cisco_ai_defense: CiscoAIDefenseConfig = field(default_factory=CiscoAIDefenseConfig)
@@ -811,49 +997,68 @@ class Config:
     skill_actions: SkillActionsConfig = field(default_factory=SkillActionsConfig)
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
     plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
+    asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
+    privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
     def claw_home_dir(self) -> str:
         return _expand(self.claw.home_dir)
 
+    def active_connector(self) -> str:
+        """Return the canonical connector name for this config.
+
+        Mirrors ``Config.activeConnector`` in claw.go: precedence is
+        ``guardrail.connector`` → ``claw.mode`` → ``"openclaw"``,
+        whitespace-trimmed and lowercased. Public so cmd_doctor /
+        cmd_uninstall can answer "which framework is this install
+        running against?" without recomputing the rule.
+        """
+        if self.guardrail.connector.strip():
+            return connector_paths.normalize(self.guardrail.connector)
+        if self.claw.mode.strip():
+            return connector_paths.normalize(self.claw.mode)
+        return "openclaw"
+
     def skill_dirs(self) -> list[str]:
-        home = self.claw_home_dir()
-        dirs: list[str] = []
-        oc = _read_openclaw_config(self.claw.config_file)
-        workspace = os.path.join(home, "workspace")
-        if oc:
-            ws = oc.get("agents", {}).get("defaults", {}).get("workspace", "")
-            if ws:
-                workspace = _expand(ws)
-            dirs.append(os.path.join(workspace, "skills"))
-            for d in oc.get("skills", {}).get("load", {}).get("extraDirs", []):
-                dirs.append(_expand(d))
-        else:
-            dirs.append(os.path.join(workspace, "skills"))
-        dirs.append(os.path.join(home, "skills"))
-        return _dedup(dirs)
+        """Return skill directories for the active connector.
+
+        Polymorphic — when ``guardrail.connector`` is set, the
+        connector-specific layout (e.g. ``~/.codex/skills``) is
+        returned; otherwise falls back to OpenClaw paths derived
+        from ``claw.home_dir`` and ``claw.config_file``.
+        """
+        return connector_paths.skill_dirs(
+            self.active_connector(),
+            openclaw_home=self.claw.home_dir,
+            openclaw_config=self.claw.config_file,
+        )
 
     def plugin_dirs(self) -> list[str]:
-        """Return plugin directories for the active claw mode.
+        """Return plugin/extension directories for the active connector.
 
-        For OpenClaw, plugins (extensions) live under claw_home/extensions.
+        See :meth:`skill_dirs` for dispatch semantics.
         """
-        home = self.claw_home_dir()
-        return [os.path.join(home, "extensions")]
+        return connector_paths.plugin_dirs(
+            self.active_connector(),
+            openclaw_home=self.claw.home_dir,
+        )
 
     def mcp_servers(self) -> list[MCPServerEntry]:
-        """Return MCP servers from openclaw.json mcp.servers.
+        """Return MCP server registrations for the active connector.
 
-        Tries ``openclaw config get mcp.servers`` first (safe, schema-
-        validated).  Falls back to reading the file directly when the CLI
-        is unavailable or returns an error (OpenClaw < 2026.3.24).
+        For OpenClaw the lookup prefers ``openclaw config get
+        mcp.servers`` and falls back to a direct
+        ``openclaw.json`` parse (with ``sudo -u sandbox`` prefix when
+        running standalone-sandbox mode).
         """
-        servers = _read_mcp_servers_via_cli()
-        if servers is not None:
-            return servers
-        return _read_mcp_servers_from_file(self.claw.config_file)
+        return connector_paths.mcp_servers(
+            self.active_connector(),
+            openclaw_config=self.claw.config_file,
+            openclaw_bin_resolver=openclaw_bin,
+            openclaw_cmd_prefix=openclaw_cmd_prefix(),
+        )
 
     def installed_skill_candidates(self, skill_name: str) -> list[str]:
         name = skill_name
@@ -976,98 +1181,6 @@ class Config:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _read_openclaw_config(config_file: str) -> dict[str, Any] | None:
-    path = _expand(config_file)
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-
-
-def _read_mcp_servers_via_cli() -> list[MCPServerEntry] | None:
-    """Read mcp.servers via ``openclaw config get``.  Returns None on failure."""
-    try:
-        prefix = openclaw_cmd_prefix()
-        result = subprocess.run(
-            [*prefix, openclaw_bin(), "config", "get", "mcp.servers"],
-            capture_output=True, text=True, timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        return _parse_mcp_servers_json(result.stdout)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
-
-
-def _read_mcp_servers_from_file(config_file: str) -> list[MCPServerEntry]:
-    """Fallback: parse mcp.servers directly from openclaw.json."""
-    path = _expand(config_file)
-    try:
-        with open(path) as f:
-            raw = f.read()
-    except OSError:
-        return []
-
-    data: dict[str, Any] | None = None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        try:
-            import json5  # type: ignore[import-untyped]
-            data = json5.loads(raw)
-        except Exception:
-            return []
-
-    if not isinstance(data, dict):
-        return []
-
-    servers = data.get("mcp", {}).get("servers")
-    if not isinstance(servers, dict):
-        return []
-
-    return _parse_mcp_servers_dict(servers)
-
-
-def _parse_mcp_servers_json(text: str) -> list[MCPServerEntry]:
-    text = text.strip()
-    if not text:
-        return []
-    try:
-        servers = json.loads(text)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(servers, dict):
-        return []
-    return _parse_mcp_servers_dict(servers)
-
-
-def _parse_mcp_servers_dict(servers: dict[str, Any]) -> list[MCPServerEntry]:
-    entries: list[MCPServerEntry] = []
-    for name, cfg in servers.items():
-        if not isinstance(cfg, dict):
-            continue
-        entries.append(MCPServerEntry(
-            name=name,
-            command=cfg.get("command", ""),
-            args=cfg.get("args", []),
-            env=cfg.get("env", {}),
-            url=cfg.get("url", ""),
-            transport=cfg.get("transport", ""),
-        ))
-    return entries
-
-
-def _dedup(paths: list[str]) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for p in paths:
-        if p not in seen:
-            seen.add(p)
-            out.append(p)
-    return out
-
-
 def _llm_is_empty(d: dict[str, Any] | None) -> bool:
     if not d:
         return True
@@ -1124,7 +1237,22 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         # after a load/save cycle.
         if wh.get("name", "") == "":
             wh.pop("name", None)
+    # Mirror Go's ``yaml:"privacy,omitempty"`` — drop the block
+    # entirely when it carries only defaults so existing configs
+    # without a ``privacy:`` block stay byte-identical after a
+    # load/save round-trip. The block reappears the moment any
+    # field flips off-default (e.g. ``disable_redaction: true``).
+    privacy = d.get("privacy")
+    if isinstance(privacy, dict) and not any(privacy.values()):
+        d.pop("privacy", None)
+    if d.get("asset_policy") == _default_asset_policy_dict():
+        d.pop("asset_policy", None)
     return d
+
+
+def _default_asset_policy_dict() -> dict[str, Any]:
+    from dataclasses import asdict
+    return asdict(AssetPolicyConfig())
 
 
 def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
@@ -1286,6 +1414,75 @@ def _merge_plugin_actions(raw: dict[str, Any] | None) -> PluginActionsConfig:
     )
 
 
+def _merge_asset_policy(raw: dict[str, Any] | None) -> AssetPolicyConfig:
+    if not isinstance(raw, dict):
+        return AssetPolicyConfig()
+    return AssetPolicyConfig(
+        enabled=bool(raw.get("enabled", False)),
+        mode=str(raw.get("mode", "observe") or "observe"),
+        mcp=_merge_asset_type_policy(raw.get("mcp"), runtime=True),
+        skill=_merge_asset_type_policy(raw.get("skill"), runtime=False),
+        plugin=_merge_asset_type_policy(raw.get("plugin"), runtime=False),
+    )
+
+
+def _merge_asset_type_policy(raw: dict[str, Any] | None, *, runtime: bool) -> AssetTypePolicy:
+    if not isinstance(raw, dict):
+        base = AssetTypePolicy()
+    else:
+        base = AssetTypePolicy(
+            default=str(raw.get("default", "allow") or "allow"),
+            registry_required=bool(raw.get("registry_required", False)),
+            registry=_merge_asset_rules(raw.get("registry")),
+            allowed=_merge_asset_rules(raw.get("allowed")),
+            denied=_merge_asset_rules(raw.get("denied")),
+            runtime_detection=_merge_asset_runtime_detection(raw.get("runtime_detection")),
+        )
+    if not runtime:
+        base.runtime_detection = AssetRuntimeDetectionConfig(
+            enabled=False,
+            terminal_commands=False,
+            unknown_terminal_mcp="observe",
+        )
+    return base
+
+
+def _merge_asset_runtime_detection(raw: dict[str, Any] | None) -> AssetRuntimeDetectionConfig:
+    if not isinstance(raw, dict):
+        return AssetRuntimeDetectionConfig()
+    return AssetRuntimeDetectionConfig(
+        enabled=bool(raw.get("enabled", True)),
+        terminal_commands=bool(raw.get("terminal_commands", True)),
+        unknown_terminal_mcp=str(raw.get("unknown_terminal_mcp", "observe") or "observe"),
+    )
+
+
+def _merge_asset_rules(raw: Any) -> list[AssetPolicyRule]:
+    if not isinstance(raw, list):
+        return []
+    rules: list[AssetPolicyRule] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        args_prefix = entry.get("args_prefix", [])
+        if not isinstance(args_prefix, list):
+            args_prefix = []
+        source_path_contains = entry.get("source_path_contains", [])
+        if not isinstance(source_path_contains, list):
+            source_path_contains = []
+        rules.append(AssetPolicyRule(
+            name=str(entry.get("name", "") or ""),
+            connector=str(entry.get("connector", "") or ""),
+            reason=str(entry.get("reason", "") or ""),
+            url=str(entry.get("url", "") or ""),
+            command=str(entry.get("command", "") or ""),
+            args_prefix=[str(v) for v in args_prefix],
+            transport=str(entry.get("transport", "") or ""),
+            source_path_contains=[str(v) for v in source_path_contains],
+        ))
+    return rules
+
+
 def _merge_cisco_ai_defense(raw: dict[str, Any] | None) -> CiscoAIDefenseConfig:
     if not raw:
         return CiscoAIDefenseConfig()
@@ -1308,6 +1505,7 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
         pii_prompt=raw.get("pii_prompt", True),
         pii_completion=raw.get("pii_completion", True),
         tool_injection=raw.get("tool_injection", True),
+        exfil=raw.get("exfil", True),
         timeout=raw.get("timeout", 30.0),
         llm=_merge_llm(raw.get("llm")),
         model=raw.get("model", ""),
@@ -1321,6 +1519,9 @@ def _merge_judge(raw: dict[str, Any] | None) -> JudgeConfig:
 def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConfig:
     if not raw:
         return GuardrailConfig()
+    hilt_raw = raw.get("hilt")
+    if hilt_raw is None:
+        hilt_raw = raw.get("hitl")
     return GuardrailConfig(
         enabled=raw.get("enabled", False),
         mode=raw.get("mode", "observe"),
@@ -1341,6 +1542,36 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         detection_strategy_tool_call=raw.get("detection_strategy_tool_call", ""),
         judge_sweep=raw.get("judge_sweep", True),
         rule_pack_dir=raw.get("rule_pack_dir", ""),
+        connector=raw.get("connector", ""),
+        hilt=_merge_hilt(hilt_raw),
+        codex_enforcement_enabled=raw.get("codex_enforcement_enabled", False),
+        claudecode_enforcement_enabled=raw.get("claudecode_enforcement_enabled", False),
+        hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
+    )
+
+
+def _normalize_hook_fail_mode(value: Any) -> str:
+    """Coerce a config-loaded value to one of the canonical hook fail-mode
+    sentinels the gateway understands.
+
+    Mirrors ``normalizeHookFailMode`` in
+    ``internal/gateway/connector/subprocess.go``. Anything other than
+    the explicit ``"closed"`` sentinel collapses to ``"open"`` so a
+    typo in config.yaml never accidentally puts the agent into
+    fail-closed mode — silently fail-open is strictly safer than
+    silently fail-closed for response-layer failures.
+    """
+    if isinstance(value, str) and value.strip().lower() == "closed":
+        return "closed"
+    return "open"
+
+
+def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
+    if not raw:
+        return HILTConfig()
+    return HILTConfig(
+        enabled=bool(raw.get("enabled", False)),
+        min_severity=str(raw.get("min_severity", "HIGH") or "HIGH").upper(),
     )
 
 
@@ -1534,6 +1765,49 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
 
 
+def _warn_disable_redaction_config(cfg: Config) -> None:
+    """Emit the persistent redaction kill-switch warning once per process.
+
+    Colors the prefix and verb yellow when stderr is a TTY so the
+    operator notices it among the rest of a busy install log. Falls
+    back to plain text on non-TTY (CI logs, ``script``, ``script -a``,
+    redirected stderr) so build tooling that pattern-matches against
+    the message keeps working unchanged. We deliberately do NOT
+    obey ``NO_COLOR`` here because this warning is high-severity —
+    everyone should see it visibly highlighted when they have a TTY,
+    and ``NO_COLOR`` users have a plain-text fallback either way.
+    """
+    global _privacy_disable_redaction_warned
+    if not cfg.privacy.disable_redaction or _privacy_disable_redaction_warned:
+        return
+    _privacy_disable_redaction_warned = True
+
+    # Yellow + bold prefix, yellow body. On non-TTY we drop the
+    # ANSI codes entirely so the existing pattern-matchers in
+    # tests/CI keep working. ``click.style`` honors NO_COLOR
+    # implicitly, but for this single high-severity warning we
+    # also want it visible to TTY users who set NO_COLOR for OTHER
+    # reasons (e.g. screen readers that prefer cleaner panels) —
+    # so we manually gate on isatty only.
+    try:
+        is_tty = sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        is_tty = False
+    if is_tty:
+        prefix = "\x1b[1;33m⚠ warning:\x1b[0m \x1b[33m"
+        suffix = "\x1b[0m"
+    else:
+        prefix, suffix = "warning: ", ""
+
+    print(
+        f"{prefix}privacy.disable_redaction=true — ALL sinks (audit DB, "
+        f"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED prompts, "
+        f"judge bodies, and verdict reasons. Disable in shared/multi-tenant "
+        f"deployments via `defenseclaw config set privacy.disable_redaction false`.{suffix}",
+        file=sys.stderr,
+    )
+
+
 def load() -> Config:
     """Load config from ~/.defenseclaw/config.yaml, applying defaults."""
     data_dir = str(default_data_path())
@@ -1594,6 +1868,10 @@ def load() -> Config:
         plugin_dir=raw.get("plugin_dir", os.path.join(data_dir, "plugins")),
         policy_dir=raw.get("policy_dir", os.path.join(data_dir, "policies")),
         environment=raw.get("environment", detect_environment()),
+        tenant_id=raw.get("tenant_id", ""),
+        workspace_id=raw.get("workspace_id", ""),
+        deployment_mode=_validate_deployment_mode(raw.get("deployment_mode", "")),
+        discovery_source=raw.get("discovery_source", ""),
         claw=ClawConfig(
             mode=raw.get("claw", {}).get("mode", "openclaw"),
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
@@ -1666,11 +1944,28 @@ def load() -> Config:
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
         plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
+        asset_policy=_merge_asset_policy(raw.get("asset_policy")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
+        privacy=_merge_privacy(raw.get("privacy")),
     )
     _migrate_llm_fields(cfg)
+    _warn_disable_redaction_config(cfg)
     _warn_plaintext_secrets(cfg)
     return cfg
+
+
+def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
+    """Build a :class:`PrivacyConfig` from the YAML ``privacy:`` block.
+
+    Defaults match the Go side (``disable_redaction: false``) so a
+    config without the block keeps the historical
+    redact-by-default contract.
+    """
+    if not isinstance(raw, dict):
+        return PrivacyConfig()
+    return PrivacyConfig(
+        disable_redaction=bool(raw.get("disable_redaction", False)),
+    )
 
 
 def default_config() -> Config:
@@ -1683,6 +1978,7 @@ def default_config() -> Config:
         plugin_dir=os.path.join(data_dir, "plugins"),
         policy_dir=os.path.join(data_dir, "policies"),
         environment=detect_environment(),
+        asset_policy=AssetPolicyConfig(),
         scanners=ScannersConfig(
             codeguard=os.path.join(data_dir, "codeguard-rules"),
         ),

@@ -180,8 +180,8 @@ func TestInsertJudgeResponse_OversizedBodyTruncated(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows=%d", len(rows))
 	}
-	if len(rows[0].Raw) <= MaxJudgeRawBytes {
-		// Stored body should be <= cap + marker overhead.
+	if len(rows[0].Raw) > MaxJudgeRawBytes+80 {
+		t.Fatalf("body exceeds cap plus marker overhead: got=%d", len(rows[0].Raw))
 	}
 	if len(rows[0].Raw) >= len(big) {
 		t.Fatalf("body not truncated: got=%d, source=%d", len(rows[0].Raw), len(big))

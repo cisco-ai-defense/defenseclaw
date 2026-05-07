@@ -8,12 +8,13 @@ INSTALL_DIR := $(HOME)/.local/bin
 PLUGIN_DIR  := extensions/defenseclaw
 DC_EXT_DIR  := $(HOME)/.defenseclaw/extensions/defenseclaw
 OC_EXT_DIR  := $(HOME)/.openclaw/extensions/defenseclaw
+RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 
 DIST_DIR    := dist
 
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install test cli-test cli-test-cov gateway-test tui-test go-test-cov \
+        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
@@ -65,13 +66,26 @@ path:
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
 quickstart:
-	@if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
+	@connector="$${CONNECTOR:-codex}"; \
+	profile="$${PROFILE:-observe}"; \
+	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
 		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
+	elif [ "$$connector" = "none" ]; then \
+		echo "CONNECTOR=none set — skipping first-run setup"; \
+		echo "  Run later: defenseclaw init"; \
 	elif [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
-		"$(INSTALL_DIR)/defenseclaw" quickstart --non-interactive --yes \
+		"$(INSTALL_DIR)/defenseclaw" init --non-interactive --yes \
+			--connector "$$connector" \
+			--profile "$$profile" \
+			--scanner-mode "$${SCANNER_MODE:-local}" \
+			--no-start-gateway --verify \
 			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
-		"$(VENV)/bin/defenseclaw" quickstart --non-interactive --yes \
+		"$(VENV)/bin/defenseclaw" init --non-interactive --yes \
+			--connector "$$connector" \
+			--profile "$$profile" \
+			--scanner-mode "$${SCANNER_MODE:-local}" \
+			--no-start-gateway --verify \
 			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 	else \
 		echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
@@ -135,12 +149,16 @@ build: pycli gateway plugin
 	@echo ""
 	@echo "Run 'make install' to install all components."
 
-install: cli-install gateway-install plugin-install
+install: cli-install gateway-install maybe-openclaw-plugin-install
 	@echo ""
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
-	@echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"
+	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
+	else \
+		echo "  • OpenClaw plugin skipped (set CONNECTOR=openclaw to install it)"; \
+	fi
 	@echo ""
 	@echo "Next steps:"
 	@echo "  source $(VENV)/bin/activate"
@@ -157,6 +175,13 @@ install: cli-install gateway-install plugin-install
 		echo "Sandbox mode (Linux only):"; \
 		echo "  On a Linux host, use 'defenseclaw init --sandbox' to set up"; \
 		echo "  openshell-sandbox standalone mode with network isolation."; \
+	fi
+
+maybe-openclaw-plugin-install:
+	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
+		$(MAKE) plugin-install; \
+	else \
+		echo "Skipping OpenClaw plugin install (CONNECTOR=$${CONNECTOR:-codex})."; \
 	fi
 
 # ---------------------------------------------------------------------------
@@ -179,13 +204,80 @@ dev-pycli: pycli
 	@echo "  source $(VENV)/bin/activate"
 	@echo "  defenseclaw --help"
 
-gateway:
+gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY) ./cmd/defenseclaw
 	@echo "Built $(GATEWAY)"
 	@echo "  Run with: ./$(GATEWAY)"
 	@echo "  Check status: ./$(GATEWAY) status"
 
-gateway-cross:
+# sync-openclaw-extension copies the runtime files of the DefenseClaw
+# OpenClaw plugin into internal/gateway/connector/openclaw_extension so
+# //go:embed picks them up at build time. Running it each build keeps the
+# embedded tree in lockstep with extensions/defenseclaw/ — no separate
+# install step required to enable inspection.
+#
+# The copy preserves the directory layout under dist/ (policy/,
+# scanners/plugin_scanner/, etc.) because dist/index.js imports siblings
+# by relative path. Flattening the tree silently breaks plugin load.
+#
+# Best-effort: a fresh clone has no extensions/defenseclaw/dist/ until
+# `make plugin` runs. Forcing every gateway build to first run npm
+# would block non-OpenClaw operators (zeptoclaw, codex, claude code)
+# who don't need the plugin at all. Instead we drop a placeholder file
+# so //go:embed has at least one entry, and the OpenClaw connector
+# detects the placeholder at runtime and returns a clear error when
+# `Setup` is called for OpenClaw without a built plugin. Operators who
+# actually want OpenClaw run `make extensions` (or `make plugin`) first.
+sync-openclaw-extension:
+	@set -e; \
+	embed_dir=internal/gateway/connector/openclaw_extension; \
+	plugin_dist=$(PLUGIN_DIR)/dist; \
+	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
+	  if [ -f "$$embed_dir/.placeholder" ] || [ ! -d "$$embed_dir" ] \
+	      || [ -z "$$(ls -A "$$embed_dir" 2>/dev/null | grep -v '^\.placeholder$$' || true)" ]; then \
+	    mkdir -p "$$embed_dir"; \
+	    printf '%s\n' "OpenClaw extension not built." \
+	      "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+	      > "$$embed_dir/.placeholder"; \
+	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
+	  else \
+	    echo "  • OpenClaw extension dist/ missing — keeping the previously synced tree under $$embed_dir/"; \
+	  fi; \
+	  exit 0; \
+	fi; \
+	rm -rf "$$embed_dir"; \
+	mkdir -p "$$embed_dir/node_modules"; \
+	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
+	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
+	if command -v rsync >/dev/null 2>&1; then \
+	  rsync -a \
+	    --exclude='__tests__' --exclude='*.d.ts' --exclude='*.d.ts.map' --exclude='*.js.map' \
+	    $(PLUGIN_DIR)/dist/ "$$embed_dir/dist/"; \
+	else \
+	  mkdir -p "$$embed_dir/dist"; \
+	  (cd $(PLUGIN_DIR)/dist && find . -name "*.js" -not -path "*/__tests__/*" -print0 \
+	    | while IFS= read -r -d '' f; do \
+	        mkdir -p "../../../$$embed_dir/dist/$$(dirname "$$f")"; \
+	        cp "$$f" "../../../$$embed_dir/dist/$$f"; \
+	      done); \
+	fi; \
+	for dep in js-yaml argparse; do \
+	  if [ -d "$(PLUGIN_DIR)/node_modules/$$dep" ]; then \
+	    cp -R "$(PLUGIN_DIR)/node_modules/$$dep" "$$embed_dir/node_modules/"; \
+	  fi; \
+	done; \
+	echo "  • Synced OpenClaw extension → $$embed_dir/"
+
+# extensions — explicit, opt-in build of the OpenClaw TypeScript plugin
+# followed by an embed sync. Only OpenClaw operators need this; the
+# gateway itself builds without it (sync-openclaw-extension drops a
+# placeholder that the OpenClaw connector detects at runtime). Use this
+# target whenever you change anything under extensions/defenseclaw/ and
+# want the change baked into the next gateway binary.
+extensions: plugin sync-openclaw-extension
+	@echo "  • OpenClaw extension is built and embedded — rebuild the gateway with 'make gateway'"
+
+gateway-cross: sync-openclaw-extension
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
@@ -310,17 +402,22 @@ cli-test:
 cli-test-cov:
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
-gateway-test:
+gateway-test: sync-openclaw-extension
 	go test -race ./internal/gateway/ ./internal/tui/ ./test/... -v
 
 tui-test:
 	go test -race -count=1 ./internal/tui/ -v
 
-go-test-cov:
+go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
 
 ts-test:
-	cd $(PLUGIN_DIR) && npx vitest run
+	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cd $(PLUGIN_DIR) && \
+		if [ ! -x node_modules/.bin/vitest ]; then \
+			NODE_ENV=development npm ci --include=dev; \
+		fi && \
+		npx --no-install vitest run
 
 rego-test:
 	PATH="$(GOBIN):$(PATH)" opa test policies/rego/ -v
@@ -374,16 +471,16 @@ lint: py-lint go-lint
 	$(VENV)/bin/python -m py_compile cli/defenseclaw/main.py
 
 py-lint:
-	$(VENV)/bin/ruff check cli/defenseclaw/
+	$(RUFF) check cli/defenseclaw/
 
-go-lint:
+go-lint: sync-openclaw-extension
 	@# gofmt drift is the #1 review comment on every PR, so fail fast
 	@# on it before running the heavier analyzers.
-	@unformatted=$$(gofmt -l . 2>/dev/null); \
+	@unformatted=$$(gofmt -l $$(git ls-files '*.go') 2>/dev/null); \
 	if [ -n "$$unformatted" ]; then \
 		echo "gofmt: the following files are not formatted:"; \
 		echo "$$unformatted" | sed 's/^/  /'; \
-		echo "Run 'gofmt -w .' to fix."; \
+		echo "Run 'gofmt -w \$$(git ls-files '*.go')' to fix."; \
 		exit 1; \
 	fi
 	@tmp=$$(mktemp); \
@@ -431,6 +528,9 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
+	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
+	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
+	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
 	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
 	@rm -rf cli/defenseclaw/_data/local_observability_stack
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
@@ -439,9 +539,9 @@ _bundle-data:
 	cp policies/*.yaml cli/defenseclaw/_data/policies/
 	cp policies/openshell/*.rego cli/defenseclaw/_data/policies/openshell/
 	cp policies/openshell/*.yaml cli/defenseclaw/_data/policies/openshell/
-	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/default
-	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/strict
-	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/permissive
+	cp -r policies/guardrail/default cli/defenseclaw/_data/policies/guardrail/
+	cp -r policies/guardrail/strict cli/defenseclaw/_data/policies/guardrail/
+	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
 	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/

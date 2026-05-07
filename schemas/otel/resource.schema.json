@@ -36,6 +36,23 @@
       "enum": ["macos", "dgx-spark", "linux"],
       "description": "Detected runtime environment."
     },
+    "tenant.id": {
+      "type": "string",
+      "description": "Tenant identifier when configured."
+    },
+    "workspace.id": {
+      "type": "string",
+      "description": "Workspace identifier when configured."
+    },
+    "deployment.mode": {
+      "type": "string",
+      "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"],
+      "description": "Deployment mode when configured."
+    },
+    "discovery.source": {
+      "type": "string",
+      "description": "Discovery source when configured."
+    },
     "host.name": {
       "type": "string",
       "description": "OS hostname."
@@ -50,19 +67,29 @@
       "enum": ["darwin", "linux"],
       "description": "Operating system (runtime.GOOS)."
     },
+    "deployment.mode": {
+      "type": "string",
+      "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"],
+      "description": "Deployment mode when configured."
+    },
     "defenseclaw.claw.mode": {
       "type": "string",
-      "enum": ["openclaw", "nemoclaw", "opencode", "codex"],
-      "description": "Active agent framework mode."
+      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", ""],
+      "description": "Active agent framework connector. Matches Connector.Name() in internal/gateway/connector. Empty string is permitted while no connector has been picked yet (fresh install before `defenseclaw setup connector`). Legacy values 'nemoclaw' and 'opencode' were never emitted by a released gateway; they were placeholders that became 'zeptoclaw' and 'claudecode' respectively, and have been dropped from the enum."
     },
     "defenseclaw.claw.home_dir": {
       "type": "string",
-      "description": "Resolved home directory of the active claw framework.",
-      "examples": ["/home/user/.openclaw"]
+      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex.",
+      "examples": [
+        "/home/user/.openclaw",
+        "/home/user/.zeptoclaw",
+        "/home/user/.claude",
+        "/home/user/.codex"
+      ]
     },
     "defenseclaw.device.id": {
       "type": "string",
-      "description": "Hex-encoded SHA-256 fingerprint of the Ed25519 device public key."
+      "description": "Hex-encoded SHA-256 fingerprint of the DefenseClaw Ed25519 device public key. This is DefenseClaw pairing identity, not a host hardware UUID or generic endpoint identifier."
     },
     "defenseclaw.gateway.host": {
       "type": "string",

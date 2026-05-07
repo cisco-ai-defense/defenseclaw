@@ -87,6 +87,7 @@ func TestLoadVerdicts_ReadsAndFiltersByAction(t *testing.T) {
 		`{"ts":"2026-04-16T12:00:00Z","event_type":"verdict","severity":"INFO","verdict":{"stage":"final","action":"allow","reason":"clean"}}`,
 		`{"ts":"2026-04-16T12:00:01Z","event_type":"verdict","severity":"MEDIUM","verdict":{"stage":"final","action":"alert","reason":"pii-med"}}`,
 		`{"ts":"2026-04-16T12:00:02Z","event_type":"verdict","severity":"HIGH","verdict":{"stage":"final","action":"block","reason":"pii-hi"}}`,
+		`{"ts":"2026-04-16T12:00:02Z","event_type":"verdict","severity":"HIGH","verdict":{"stage":"final","action":"confirm","reason":"hilt"}}`,
 		`# this line is not JSON and must be skipped`,
 		``,
 		`{"ts":"2026-04-16T12:00:03Z","event_type":"judge","severity":"MEDIUM","judge":{"kind":"injection","action":"alert"}}`,
@@ -98,11 +99,11 @@ func TestLoadVerdicts_ReadsAndFiltersByAction(t *testing.T) {
 	p := &LogsPanel{}
 	p.source = logSourceVerdicts
 
-	// No filter: keep all 4 parseable events (3 verdicts + 1 judge).
+	// No filter: keep all 5 parseable events (4 verdicts + 1 judge).
 	p.verdictAction = ""
 	p.loadVerdicts(path)
-	if got := len(p.verdicts); got != 4 {
-		t.Fatalf("no-filter verdicts=%d want 4: %+v", got, p.verdicts)
+	if got := len(p.verdicts); got != 5 {
+		t.Fatalf("no-filter verdicts=%d want 5: %+v", got, p.verdicts)
 	}
 
 	// block filter: keep only rows whose .action == "block". Both
@@ -120,6 +121,15 @@ func TestLoadVerdicts_ReadsAndFiltersByAction(t *testing.T) {
 	}
 	if got := len(p.verdicts); got != 1 {
 		t.Fatalf("filtered row count=%d want 1 (only the block verdict)", got)
+	}
+
+	p.verdictAction = "confirm"
+	p.loadVerdicts(path)
+	if got := len(p.verdicts); got != 1 {
+		t.Fatalf("confirm-filter row count=%d want 1", got)
+	}
+	if p.verdicts[0].action != "confirm" {
+		t.Fatalf("confirm filter selected action=%q want confirm", p.verdicts[0].action)
 	}
 }
 
@@ -161,6 +171,59 @@ func TestLoadVerdicts_MissingFilePopulatesError(t *testing.T) {
 	}
 }
 
+func TestLoadVerdicts_RoutesOTELAndCodexRowsToOTELSource(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gateway.jsonl")
+	content := strings.Join([]string{
+		`{"ts":"2026-04-16T12:00:00Z","event_type":"lifecycle","severity":"INFO","lifecycle":{"subsystem":"telemetry","transition":"sent","details":{"action":"otel.ingest.logs","records":"2"}}}`,
+		`{"ts":"2026-04-16T12:00:01Z","event_type":"activity","severity":"INFO","activity":{"actor":"codex","action":"codex.notify.agent-turn-complete","target_type":"session","target_id":"abc"}}`,
+		`{"ts":"2026-04-16T12:00:02Z","event_type":"verdict","severity":"HIGH","verdict":{"stage":"final","action":"block","reason":"pii"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	p := &LogsPanel{source: logSourceVerdicts}
+	p.loadVerdicts(path)
+	if got := len(p.verdicts); got != 1 {
+		t.Fatalf("verdict rows=%d want 1: %+v", got, p.verdicts)
+	}
+	if got := len(p.otelRows); got != 2 {
+		t.Fatalf("otel rows=%d want 2: %+v", got, p.otelRows)
+	}
+	verdictText := strings.Join(p.lines[logSourceVerdicts], "\n")
+	if strings.Contains(verdictText, "otel.ingest") || strings.Contains(verdictText, "codex.notify") {
+		t.Fatalf("Verdicts source leaked telemetry rows:\n%s", verdictText)
+	}
+	otelText := strings.Join(p.lines[logSourceOTEL], "\n")
+	for _, needle := range []string{"OTEL", "CODEX", "otel.ingest.logs", "codex.notify.agent-turn-complete"} {
+		if !strings.Contains(otelText, needle) {
+			t.Fatalf("OTEL source missing %q:\n%s", needle, otelText)
+		}
+	}
+}
+
+func TestSelectedOTELRow_RespectsSearchFilter(t *testing.T) {
+	p := &LogsPanel{source: logSourceOTEL, height: 24, width: 80}
+	p.otelRows = []verdictRow{
+		{eventType: "lifecycle", lifecycleDetails: map[string]string{"action": "otel.ingest.logs"}},
+		{eventType: "activity", activityAct: "codex.notify.agent-turn-complete"},
+	}
+	p.lines[logSourceOTEL] = []string{
+		"OTEL INFO action=otel.ingest.logs",
+		"CODEX INFO action=codex.notify.agent-turn-complete",
+	}
+	p.searchText = "codex.notify"
+
+	got := p.SelectedOTELRow()
+	if got == nil {
+		t.Fatal("SelectedOTELRow returned nil with a matching row")
+	}
+	if got.activityAct != "codex.notify.agent-turn-complete" {
+		t.Fatalf("selected action=%q want codex notify row", got.activityAct)
+	}
+}
+
 func TestCycleVerdictAction_RotatesThroughAllThenWrapsToEmpty(t *testing.T) {
 	p := &LogsPanel{}
 	// Start at default empty -> first cycle must land on "block".
@@ -173,12 +236,16 @@ func TestCycleVerdictAction_RotatesThroughAllThenWrapsToEmpty(t *testing.T) {
 		t.Fatalf("step2=%q want alert", p.verdictAction)
 	}
 	p.cycleVerdictAction()
+	if p.verdictAction != "confirm" {
+		t.Fatalf("step3=%q want confirm", p.verdictAction)
+	}
+	p.cycleVerdictAction()
 	if p.verdictAction != "allow" {
-		t.Fatalf("step3=%q want allow", p.verdictAction)
+		t.Fatalf("step4=%q want allow", p.verdictAction)
 	}
 	p.cycleVerdictAction()
 	if p.verdictAction != "" {
-		t.Fatalf("step4=%q want empty (wrap)", p.verdictAction)
+		t.Fatalf("step5=%q want empty (wrap)", p.verdictAction)
 	}
 }
 
@@ -290,6 +357,7 @@ func TestSelectedVerdict_ReturnsLastWhenCursorAtBottom(t *testing.T) {
 	got := p.SelectedVerdict()
 	if got == nil {
 		t.Fatal("unexpected nil")
+		return
 	}
 	// Default selection is the most recent event (last in slice).
 	if got.action != "block" {
@@ -321,6 +389,7 @@ func TestSelectedVerdict_RespectsSearchFilter(t *testing.T) {
 	got := p.SelectedVerdict()
 	if got == nil {
 		t.Fatal("SelectedVerdict returned nil with a matching row")
+		return
 	}
 	if got.action != "alert" {
 		t.Fatalf("search filter selected action=%q want alert (the "+
@@ -354,6 +423,7 @@ func TestSelectedVerdict_RespectsPresetFilter(t *testing.T) {
 	got := p.SelectedVerdict()
 	if got == nil {
 		t.Fatal("SelectedVerdict returned nil under errors filter")
+		return
 	}
 	if got.action != "block" {
 		t.Fatalf("errors filter selected action=%q want block", got.action)

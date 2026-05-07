@@ -36,21 +36,9 @@ func TestSetupSections_EveryInteractiveFieldHasHint(t *testing.T) {
 	p := NewSetupPanel(nil, &config.Config{}, nil)
 	p.loadSections()
 
-	// These keys map to list-based editors (Audit Sinks, Webhooks,
-	// OTel headers/resource attrs) where the editing happens via a
-	// dedicated sub-panel. The summary row is rendered as a header
-	// and therefore doesn't need a per-field Hint.
-	listEditors := map[string]bool{
-		"otel.headers.summary":  true,
-		"otel.resource.summary": true,
-	}
-
 	for _, sec := range p.sections {
 		for _, f := range sec.Fields {
 			if f.Kind == "header" {
-				continue
-			}
-			if listEditors[f.Key] {
 				continue
 			}
 			if strings.TrimSpace(f.Hint) == "" {
@@ -73,6 +61,48 @@ func TestSetupSections_EverySectionHasSummary(t *testing.T) {
 		if strings.TrimSpace(sec.Summary) == "" {
 			t.Errorf("section %q missing Summary — add one-line orientation in loadSections()", sec.Name)
 		}
+	}
+}
+
+func TestSetupConfigSectionTabsWrapAndHitTest(t *testing.T) {
+	p := SetupPanel{
+		width:         34,
+		height:        24,
+		mode:          setupModeConfig,
+		activeSection: 0,
+		activeLine:    0,
+		scroll:        3,
+		sections: []configSection{
+			{Name: "General", Summary: "summary", Fields: []configField{{Label: "A", Kind: "string"}}},
+			{Name: "Agent", Summary: "summary", Fields: []configField{{Label: "B", Kind: "string"}}},
+			{Name: "Privacy", Summary: "summary", Fields: []configField{{Label: "C", Kind: "string"}}},
+			{Name: "Connector Hooks", Summary: "summary", Fields: []configField{{Label: "D", Kind: "string"}}},
+			{Name: "OpenTelemetry", Summary: "summary", Fields: []configField{{Label: "E", Kind: "string"}}},
+		},
+	}
+
+	rows := p.configSectionTabRows()
+	if len(rows) < 2 {
+		t.Fatalf("expected wrapped section tabs, got %d row(s): %+v", len(rows), rows)
+	}
+
+	target := rows[1][0]
+	p.handleConfigClick(target.start, 3)
+	if p.activeSection != target.index {
+		t.Fatalf("click on wrapped tab selected section %d, want %d", p.activeSection, target.index)
+	}
+	if p.scroll != 0 {
+		t.Fatalf("section tab click should reset scroll, got %d", p.scroll)
+	}
+
+	fieldY := p.configFieldsStartY()
+	if fieldY <= 4 {
+		t.Fatalf("field start y=%d did not account for wrapped tabs + summary", fieldY)
+	}
+	p.activeLine = -1
+	p.handleConfigClick(0, fieldY)
+	if p.activeLine != 0 {
+		t.Fatalf("field click selected activeLine=%d want 0", p.activeLine)
 	}
 }
 
@@ -116,6 +146,7 @@ func TestSetupSections_GatewayExposesNewFields(t *testing.T) {
 	}
 	if gateway == nil {
 		t.Fatal("Gateway section missing")
+		return
 	}
 
 	want := map[string]bool{

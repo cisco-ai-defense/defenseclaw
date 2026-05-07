@@ -33,9 +33,11 @@ from defenseclaw.commands.cmd_audit import audit
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.commands.cmd_config import config_cmd
 from defenseclaw.commands.cmd_doctor import doctor
+from defenseclaw.commands.cmd_guardrail import guardrail
 from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.commands.cmd_mcp import mcp
+from defenseclaw.commands.cmd_migrations import migrations_cmd
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
@@ -51,11 +53,17 @@ from defenseclaw.commands.cmd_upgrade import upgrade
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 
-SKIP_LOAD_COMMANDS = {"init", "quickstart", "sandbox", "tui", "uninstall", "reset", "version"}
+SKIP_LOAD_COMMANDS = {
+    "init", "migrations", "quickstart", "sandbox", "tui",
+    "uninstall", "reset", "version",
+}
 
 # Commands that may legitimately run before config.yaml exists or while
 # it is being rewritten. The auto-validate hook below skips them to
 # avoid bricking recovery workflows when the file is temporarily bad.
+# ``migrations`` joins the recovery set because operators reach for it
+# precisely when something on disk is wrong; refusing to run because
+# config didn't validate would defeat its purpose.
 SKIP_AUTO_VALIDATE = SKIP_LOAD_COMMANDS | {"config", "keys", "doctor", "upgrade", "version"}
 
 
@@ -153,8 +161,10 @@ cli.add_command(codeguard)
 cli.add_command(tool)
 cli.add_command(tui)
 cli.add_command(doctor)
+cli.add_command(guardrail)
 cli.add_command(sandbox)
 cli.add_command(upgrade)
+cli.add_command(migrations_cmd, "migrations")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
 cli.add_command(settings_cmd, "settings")
@@ -164,11 +174,12 @@ cli.add_command(version_cmd, "version")
 
 
 def _ensure_codeguard_skill(cfg) -> None:
-    """Install CodeGuard skill if OpenClaw appeared since last init."""
+    """Install CodeGuard skill if the agent appeared since last init."""
     try:
         from defenseclaw.codeguard_skill import ensure_codeguard_skill
 
-        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file)
+        connector = getattr(cfg.guardrail, "connector", "") or ""
+        ensure_codeguard_skill(cfg.claw_home_dir(), cfg.claw.config_file, connector)
     except Exception:
         pass
 

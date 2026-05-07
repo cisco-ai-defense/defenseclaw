@@ -4,12 +4,13 @@ These helpers intentionally mirror the admission ordering used by the Go
 gateway/watcher:
 
 1. Explicit block list entries override everything.
-2. Explicit allow list entries override policy and skip scan/enforcement.
-3. Policy-managed allow entries (for example first-party bundles) may bypass
+2. Asset policy can block denied/unregistered/default-denied assets.
+3. Explicit allow list entries skip scan/enforcement after asset policy.
+4. Policy-managed allow entries (for example first-party bundles) may bypass
    scan depending on the active policy data.
-4. If no scan result exists yet, the active policy decides whether scanning is
+5. If no scan result exists yet, the active policy decides whether scanning is
    required.
-5. Once a scan result exists, the effective per-target action mapping decides
+6. Once a scan result exists, the effective per-target action mapping decides
    whether the result is rejected or only warned.
 """
 
@@ -81,6 +82,13 @@ def evaluate_admission(
     target_type: str,
     name: str,
     source_path: str = "",
+    connector: str = "",
+    url: str = "",
+    command: str = "",
+    args: list[str] | None = None,
+    transport: str = "",
+    runtime_surface: str = "cli",
+    asset_policy: Any | None = None,
     scan_result: Any | None = None,
     action_entry: Any | None = None,
     fallback_actions: Any | None = None,
@@ -88,13 +96,29 @@ def evaluate_admission(
 ) -> AdmissionDecision:
     """Evaluate admission for a target using active policy data when available.
 
-    Explicit allow/block entries from the store are always treated as manual
-    overrides. Policy-managed allow entries from ``first_party_allow_list`` are
+    Explicit block entries always win. Explicit allow entries skip scanning
+    after asset policy has had a chance to enforce admin deny/default-deny
+    controls. Policy-managed allow entries from ``first_party_allow_list`` are
     still subject to the policy's ``allow_list_bypass_scan`` setting.
     """
     blocked_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the block list")
     if pe.is_blocked(target_type, name):
         return AdmissionDecision("blocked", blocked_reason, source="manual-block")
+
+    asset_decision = evaluate_asset_policy(
+        asset_policy,
+        target_type=target_type,
+        name=name,
+        connector=connector,
+        source_path=source_path,
+        url=url,
+        command=command,
+        args=args or [],
+        transport=transport,
+        runtime_surface=runtime_surface,
+    )
+    if asset_decision.verdict == "blocked":
+        return asset_decision
 
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
     if pe.is_allowed(target_type, name):
@@ -137,6 +161,158 @@ def evaluate_admission(
         return AdmissionDecision("rejected", detail, action=action, source="scan-rejected")
 
     return AdmissionDecision("warning", detail, action=action, source="scan-warning")
+
+
+def evaluate_asset_policy(
+    asset_policy: Any | None,
+    *,
+    target_type: str,
+    name: str,
+    connector: str = "",
+    source_path: str = "",
+    url: str = "",
+    command: str = "",
+    args: list[str] | None = None,
+    transport: str = "",
+    runtime_surface: str = "cli",
+) -> AdmissionDecision:
+    if not getattr(asset_policy, "enabled", False):
+        return AdmissionDecision("allowed", "asset policy disabled", source="asset-policy-disabled")
+
+    policy = getattr(asset_policy, target_type, None)
+    if policy is None:
+        return AdmissionDecision("allowed", "asset policy unsupported target", source="asset-policy-unsupported")
+
+    rule_args = args or []
+    if rule := _find_asset_rule(
+        getattr(policy, "denied", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is denied by asset policy"
+        return _asset_policy_block_or_observe(asset_policy, reason, "asset-policy-deny")
+
+    if rule := _find_asset_rule(
+        getattr(policy, "allowed", []),
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+    ):
+        reason = getattr(rule, "reason", "") or f"{target_type} {name!r} is explicitly allowed"
+        return AdmissionDecision("allowed", reason, source="asset-policy-allow")
+
+    registry = getattr(policy, "registry", [])
+    registered = _find_asset_rule(
+        registry,
+        name,
+        connector,
+        source_path,
+        url,
+        command,
+        rule_args,
+        transport,
+    ) is not None
+    if registry and registered:
+        return AdmissionDecision("allowed", f"{target_type} {name!r} is registered", source="asset-policy-registry")
+
+    if getattr(policy, "registry_required", False):
+        return _asset_policy_block_or_observe(
+            asset_policy,
+            f"{target_type} {name!r} is not in the approved registry",
+            "asset-policy-registry-required",
+        )
+
+    if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
+        return _asset_policy_block_or_observe(
+            asset_policy,
+            f"{target_type} {name!r} is denied by default asset policy",
+            "asset-policy-default-deny",
+        )
+
+    return AdmissionDecision(
+        "allowed",
+        f"{target_type} {name!r} allowed by default asset policy",
+        source="asset-policy-default-allow",
+    )
+
+
+def _asset_policy_block_or_observe(asset_policy: Any, reason: str, source: str) -> AdmissionDecision:
+    if str(getattr(asset_policy, "mode", "observe")).strip().lower() == "action":
+        return AdmissionDecision("blocked", reason, source=source)
+    return AdmissionDecision("allowed", reason, source=source + "-observe")
+
+
+def _find_asset_rule(
+    rules: list[Any],
+    name: str,
+    connector: str,
+    source_path: str,
+    url: str,
+    command: str,
+    args: list[str],
+    transport: str,
+) -> Any | None:
+    for rule in rules:
+        if _asset_rule_matches(rule, name, connector, source_path, url, command, args, transport):
+            return rule
+    return None
+
+
+def _asset_rule_matches(
+    rule: Any,
+    name: str,
+    connector: str,
+    source_path: str,
+    url: str,
+    command: str,
+    args: list[str],
+    transport: str,
+) -> bool:
+    constrained = False
+    if getattr(rule, "name", ""):
+        constrained = True
+        if str(rule.name).strip().lower() != name.strip().lower():
+            return False
+    if getattr(rule, "connector", ""):
+        constrained = True
+        if str(rule.connector).strip().lower() != connector.strip().lower():
+            return False
+    if getattr(rule, "url", ""):
+        constrained = True
+        if str(rule.url).strip() != url.strip():
+            return False
+    if getattr(rule, "command", ""):
+        constrained = True
+        if os.path.basename(str(rule.command).strip()) != os.path.basename(command.strip()):
+            return False
+    prefix = getattr(rule, "args_prefix", []) or []
+    if prefix:
+        constrained = True
+        if len(args) < len(prefix):
+            return False
+        for idx, want in enumerate(prefix):
+            if str(want).strip() != str(args[idx]).strip():
+                return False
+    if getattr(rule, "transport", ""):
+        constrained = True
+        if str(rule.transport).strip().lower() != transport.strip().lower():
+            return False
+    needles = getattr(rule, "source_path_contains", []) or []
+    if needles:
+        constrained = True
+        normalized = source_path.replace("\\", "/").lower()
+        if not any(str(needle).replace("\\", "/").lower() in normalized for needle in needles):
+            return False
+    return constrained
 
 
 def effective_action_for(

@@ -164,14 +164,6 @@ func applyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 	base.OllamaPorts = unionInts(base.OllamaPorts, overlay.OllamaPorts)
 }
 
-func lowerStrings(in []string) []string {
-	out := make([]string, len(in))
-	for i, s := range in {
-		out[i] = lower(s)
-	}
-	return out
-}
-
 // sanitizeDomains trims, lower-cases, and filters a slice of
 // operator-supplied domain entries. Mirrors the TS
 // applyProviderRegistry validation so a hand-edited overlay cannot

@@ -82,6 +82,12 @@ type HealthSnapshot struct {
 	Telemetry SubsystemHealth  `json:"telemetry"`
 	Sinks     SubsystemHealth  `json:"sinks"`
 	Sandbox   *SubsystemHealth `json:"sandbox,omitempty"`
+	// Connector mirrors gateway.ConnectorHealth: which agent
+	// framework (openclaw / zeptoclaw / claudecode / codex) is
+	// currently active in the sidecar, plus the live counters.
+	// Nil when no connector has been initialised yet — the TUI
+	// falls back to cfg.Claw.Mode in that case.
+	Connector *ConnectorHealth `json:"connector,omitempty"`
 }
 
 // SubsystemHealth mirrors a single subsystem from /health.
@@ -92,14 +98,26 @@ type SubsystemHealth struct {
 	Details   map[string]interface{} `json:"details,omitempty"`
 }
 
+// ConnectorHealth mirrors gateway.ConnectorHealth. Field names and
+// JSON tags must stay in sync with internal/gateway/health.go::ConnectorHealth
+// or the TUI will silently drop the block on parse.
+type ConnectorHealth struct {
+	Name               string `json:"name"`
+	State              string `json:"state"`
+	Since              string `json:"since,omitempty"`
+	ToolInspectionMode string `json:"tool_inspection_mode,omitempty"`
+	SubprocessPolicy   string `json:"subprocess_policy,omitempty"`
+	Requests           int64  `json:"requests"`
+	Errors             int64  `json:"errors"`
+	ToolInspections    int64  `json:"tool_inspections"`
+	ToolBlocks         int64  `json:"tool_blocks"`
+	SubprocessBlocks   int64  `json:"subprocess_blocks"`
+}
+
 type healthUpdateMsg struct {
 	Health *HealthSnapshot
 	Err    error
 }
-
-// refreshTickMsg is an alias for the periodic refresh tick used by tests
-// and SLO instrumentation (same handler as refreshMsg).
-type refreshTickMsg = refreshMsg
 
 // Model is the root Bubbletea model for the unified TUI.
 type Model struct {
@@ -120,13 +138,19 @@ type Model struct {
 	activity  ActivityPanel
 	tools     ToolsPanel
 	setup     SetupPanel
+	firstRun  FirstRunPanel
 
 	// Overlays
 	detail     DetailModal
 	palette    PaletteModel
 	actionMenu ActionMenu
-	mcpSetForm MCPSetForm
-	helpOpen   bool
+
+	mcpSetForm     MCPSetForm
+	modePicker     ModePickerModal
+	redactionModal RedactionToggleModal
+	uninstallModal UninstallModal
+
+	helpOpen bool
 
 	// Persistent command input
 	cmdInput      textinput.Model
@@ -160,6 +184,7 @@ type Model struct {
 type Deps struct {
 	Store           *audit.Store
 	Config          *config.Config
+	FirstRun        bool
 	OpenshellBinary string
 	AnchorName      string
 	Version         string
@@ -194,22 +219,26 @@ func New(deps Deps) Model {
 	ti.SetStyles(s)
 
 	m := Model{
-		overview:   NewOverviewPanel(theme, deps.Config, deps.Version),
-		alerts:     NewAlertsPanel(deps.Store, dataDir),
-		skills:     NewSkillsPanel(deps.Store),
-		mcps:       NewMCPsPanel(deps.Store),
-		plugins:    NewPluginsPanel(theme, deps.Store),
-		inventory:  NewInventoryPanel(theme, executor, deps.Store),
-		policy:     NewPolicyPanel(theme, deps.Config),
-		logs:       NewLogsPanel(theme, deps.Config),
-		auditHist:  NewAuditPanel(theme, deps.Store),
-		activity:   NewActivityPanel(theme, dataDir),
-		tools:      NewToolsPanel(deps.Store),
-		setup:      NewSetupPanel(theme, deps.Config, executor),
-		detail:     NewDetailModal(),
-		palette:    NewPaletteModel(theme, registry, executor),
-		actionMenu: NewActionMenu(theme),
-		mcpSetForm: NewMCPSetForm(),
+		overview:       NewOverviewPanel(theme, deps.Config, deps.Version),
+		alerts:         NewAlertsPanel(deps.Store, dataDir),
+		skills:         NewSkillsPanel(deps.Store),
+		mcps:           NewMCPsPanel(deps.Store),
+		plugins:        NewPluginsPanel(theme, deps.Store),
+		inventory:      NewInventoryPanel(theme, executor, deps.Store),
+		policy:         NewPolicyPanel(theme, deps.Config),
+		logs:           NewLogsPanel(theme, deps.Config),
+		auditHist:      NewAuditPanel(theme, deps.Store),
+		activity:       NewActivityPanel(theme, dataDir),
+		tools:          NewToolsPanel(deps.Store),
+		setup:          NewSetupPanel(theme, deps.Config, executor),
+		firstRun:       NewFirstRunPanel(theme, deps.FirstRun),
+		detail:         NewDetailModal(),
+		palette:        NewPaletteModel(theme, registry, executor),
+		actionMenu:     NewActionMenu(theme),
+		mcpSetForm:     NewMCPSetForm(),
+		modePicker:     NewModePickerModal(theme),
+		redactionModal: NewRedactionToggleModal(theme),
+		uninstallModal: NewUninstallModal(theme),
 
 		cmdInput: ti,
 
@@ -224,6 +253,13 @@ func New(deps Deps) Model {
 
 		isDark:  true,
 		focused: true,
+	}
+	// Push the configured connector immediately so the first paint
+	// of any data panel shows the right "Source: …" banner before
+	// /health has had time to round-trip.
+	m.propagateConnector()
+	if deps.FirstRun {
+		m.activePanel = PanelSetup
 	}
 	return m
 }
@@ -243,6 +279,22 @@ func (m Model) Init() tea.Cmd {
 	)
 }
 
+// propagateConnector pushes the active connector name (preferring the
+// live /health connector block, falling back to cfg.Claw.Mode) to
+// every data-listing panel so their "Source: …" banners stay in sync
+// with what the gateway is actually routing for.
+func (m *Model) propagateConnector() {
+	mode := ""
+	if m.cfg != nil {
+		mode = string(m.cfg.Claw.Mode)
+	}
+	name := ActiveConnectorName(m.health, mode)
+	m.skills.SetConnector(name)
+	m.mcps.SetConnector(name)
+	m.plugins.SetConnector(name)
+	m.inventory.SetConnector(name)
+}
+
 // isDoctorCommand reports whether the display-name passed to
 // CommandExecutor.Execute corresponds to a `defenseclaw doctor`
 // invocation. We match on the prefix rather than exact string so
@@ -251,6 +303,16 @@ func (m Model) Init() tea.Cmd {
 func isDoctorCommand(cmd string) bool {
 	cmd = strings.TrimSpace(cmd)
 	return cmd == "doctor" || strings.HasPrefix(cmd, "doctor ")
+}
+
+func isInitCommand(cmd string) bool {
+	cmd = strings.TrimSpace(cmd)
+	return cmd == "init first-run" || cmd == "init" || strings.HasPrefix(cmd, "init ")
+}
+
+func isSetupCommand(cmd string) bool {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	return cmd == "setup" || strings.HasPrefix(cmd, "setup ")
 }
 
 // doctorCacheLoadedMsg carries either a successfully-loaded
@@ -345,6 +407,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.health = msg.Health
 		}
 		m.overview.SetHealth(m.health)
+		m.propagateConnector()
 		return m, nil
 
 	case CommandStartMsg:
@@ -395,6 +458,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// regardless of the exit code.
 		if isDoctorCommand(msg.Command) {
 			postCmds = append(postCmds, m.loadDoctorCacheCmd())
+		}
+		if msg.ExitCode == 0 && isInitCommand(msg.Command) {
+			if err := m.reloadRuntimeAfterInit(); err != nil {
+				m.toasts.Push(ToastError, "init reload failed: "+err.Error())
+			} else {
+				m.firstRun.active = false
+				m.activePanel = PanelOverview
+				m.toasts.Push(ToastSuccess, "First-run setup complete")
+				postCmds = append(postCmds, m.pollHealth(), m.loadDoctorCacheCmd())
+			}
+		} else if msg.ExitCode == 0 && isSetupCommand(msg.Command) {
+			if err := m.reloadConfigAfterSetupCommand(); err != nil {
+				m.toasts.Push(ToastError, "config reload failed: "+err.Error())
+			} else {
+				m.toasts.Push(ToastInfo, "Config reloaded from disk")
+				postCmds = append(postCmds, m.pollHealth())
+			}
 		}
 		if len(postCmds) > 0 {
 			return m, tea.Batch(postCmds...)
@@ -549,6 +629,9 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		m.detail.Hide()
 		return m, nil
 	}
+	if m.modePicker.IsVisible() || m.redactionModal.IsVisible() || m.uninstallModal.IsVisible() {
+		return m, nil
+	}
 	// If a panel has an in-panel overlay/form/editor open, don't let
 	// a click on the tab strip above silently flip panels out from
 	// underneath it — the user is clearly focused on the overlay
@@ -700,6 +783,13 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 					cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
 					m.activePanel = PanelActivity
 					return m, cmd
+				case "m":
+					// Mirror the keyboard handler: open the picker
+					// pre-focused on the active connector.
+					m.modePicker.Show(m.activeConnectorForPicker())
+					return m, nil
+				case "R":
+					return m.showRedactionModal()
 				case "p":
 					m.activePanel = PanelPolicy
 				case "l":
@@ -708,6 +798,8 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 					cmd := m.executor.Execute("defenseclaw", []string{"upgrade", "--yes"}, "upgrade")
 					m.activePanel = PanelActivity
 					return m, cmd
+				case "X":
+					return m.showUninstallModal()
 				case "?":
 					m.helpOpen = true
 				}
@@ -970,12 +1062,8 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 		// click.
 		if idx, ok := m.logs.LogRowHitTest(relY); ok {
 			m.logs.SetCursor(idx)
-			if m.logs.source == logSourceVerdicts {
-				if row := m.logs.SelectedVerdict(); row != nil {
-					pairs := verdictDetailPairs(*row)
-					m.detail.SetSize(m.width, m.height)
-					m.detail.Show(fmt.Sprintf("Gateway event — %s", strings.ToUpper(row.eventType)), pairs)
-				}
+			if row := m.selectedStructuredLogRow(); row != nil {
+				m.openStructuredLogDetail(*row)
 			}
 			return m, nil
 		}
@@ -1030,6 +1118,25 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "enter", "q":
 			m.detail.Hide()
+		}
+		return m, nil
+	}
+
+	if m.redactionModal.IsVisible() {
+		return m.handleRedactionModalKey(msg)
+	}
+	if m.uninstallModal.IsVisible() {
+		return m.handleUninstallModalKey(msg)
+	}
+
+	if m.firstRun.Active() {
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
+		runCmd, binary, args, displayName := m.firstRun.HandleKey(msg)
+		if runCmd {
+			m.activePanel = PanelActivity
+			return m, m.executor.Execute(binary, args, displayName)
 		}
 		return m, nil
 	}
@@ -1102,6 +1209,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case "/":
+		if m.activePanel == PanelLogs {
+			return m.handlePanelKey(msg)
+		}
 		return m.startFilter()
 
 	// Number keys switch panels
@@ -1718,6 +1828,16 @@ func (m Model) handleAuditKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// The mode-picker overlay consumes its own keys when visible. We
+	// route here BEFORE any other Overview shortcut so e.g. typing 'o'
+	// inside the modal selects OpenClaw instead of being interpreted as
+	// a panel-level shortcut. Esc/enter close-or-confirm semantics
+	// live with the picker; everything else is forwarded as cursor
+	// motion or hotkey jump.
+	if m.modePicker.IsVisible() {
+		return m.handleModePickerKey(msg)
+	}
+
 	switch msg.String() {
 	case "s":
 		cmd := m.executor.Execute("defenseclaw", []string{"skill", "scan", "--all"}, "scan skill --all")
@@ -1735,6 +1855,15 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
 		m.activePanel = PanelActivity
 		return m, cmd
+	case "m":
+		// Open the connector switcher pre-focused on the currently
+		// active mode. ActiveConnectorName is the same resolver used
+		// for the SERVICES "Agent" row, so the picker and the
+		// dashboard agree on which entry is "active".
+		m.modePicker.Show(m.activeConnectorForPicker())
+		return m, nil
+	case "R":
+		return m.showRedactionModal()
 	case "p":
 		m.activePanel = PanelPolicy
 	case "l":
@@ -1743,8 +1872,191 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		cmd := m.executor.Execute("defenseclaw", []string{"upgrade", "--yes"}, "upgrade")
 		m.activePanel = PanelActivity
 		return m, cmd
+	case "X":
+		return m.showUninstallModal()
 	}
 	return m, nil
+}
+
+// handleModePickerKey runs while the connector picker overlay is
+// open. The contract:
+//
+//   - esc / q: close without changing anything
+//   - enter:   dispatch `defenseclaw setup mode <wire> --yes` and
+//     switch to the Activity panel so the user can watch the
+//     restart progress (mirrors how [s] / [d] / [u] behave)
+//   - up / k:  cursor up
+//   - down / j cursor down
+//   - o/z/c/k: hotkey jump to the matching row, then confirm — one
+//     keystroke is enough because muscle memory is the
+//     whole point of the picker
+func (m Model) handleModePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.modePicker.Hide()
+		return m, nil
+	case "up", "k":
+		m.modePicker.CursorUp()
+		return m, nil
+	case "down", "j":
+		m.modePicker.CursorDown()
+		return m, nil
+	case "enter":
+		return m.confirmModePicker()
+	}
+	// Hotkey jump + auto-confirm. We deliberately accept *only* the
+	// four documented hotkeys here; other letters fall through to a
+	// no-op so a stray keystroke can't surprise-switch the connector.
+	if r := []rune(msg.String()); len(r) == 1 {
+		if m.modePicker.SelectByHotkey(r[0]) {
+			return m.confirmModePicker()
+		}
+	}
+	return m, nil
+}
+
+// handleRedactionModalKey runs while the [R]-from-Logs overlay is
+// open. The contract:
+//
+//   - esc / q: close without changing anything
+//   - enter:   dispatch `defenseclaw setup redaction <on|off> --yes`
+//     and switch to the Activity panel so the operator
+//     watches the restart progress.
+//
+// Any other key is a no-op so a stray keystroke can't accidentally
+// flip privacy state. Hotkey shortcuts (e.g. "y" = yes) are
+// deliberately NOT supported here — the modal exists to make the
+// privacy implications unambiguous and rushing past it on a single
+// letter undermines the whole point.
+func (m Model) handleRedactionModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.redactionModal.Hide()
+		return m, nil
+	case "enter":
+		return m.confirmRedactionToggle()
+	}
+	return m, nil
+}
+
+func (m Model) showRedactionModal() (tea.Model, tea.Cmd) {
+	m.redactionModal.SetSize(m.width, m.height)
+	m.redactionModal.Show(redactionDisabledForLogsBadge())
+	return m, nil
+}
+
+func (m Model) handleUninstallModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.uninstallModal.Hide()
+		return m, nil
+	case "up", "k":
+		m.uninstallModal.CursorUp()
+		return m, nil
+	case "down", "j":
+		m.uninstallModal.CursorDown()
+		return m, nil
+	case "enter":
+		return m.confirmUninstall()
+	}
+	if r := []rune(msg.String()); len(r) == 1 {
+		if m.uninstallModal.SelectByHotkey(r[0]) {
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m Model) showUninstallModal() (tea.Model, tea.Cmd) {
+	m.uninstallModal.SetSize(m.width, m.height)
+	m.uninstallModal.Show()
+	return m, nil
+}
+
+func uninstallArgsForOption(option UninstallOption) ([]string, string) {
+	switch option {
+	case UninstallKeepData:
+		return []string{"uninstall", "--yes"}, "uninstall --yes"
+	case UninstallWipeData:
+		return []string{"uninstall", "--all", "--yes"}, "uninstall --all --yes"
+	default:
+		return []string{"uninstall", "--dry-run"}, "uninstall dry-run"
+	}
+}
+
+func (m Model) confirmUninstall() (tea.Model, tea.Cmd) {
+	args, displayName := uninstallArgsForOption(m.uninstallModal.Selected())
+	m.uninstallModal.Hide()
+	m.activePanel = PanelActivity
+	return m, m.executor.Execute("defenseclaw", args, displayName)
+}
+
+// confirmRedactionToggle dispatches the chosen redaction action
+// through the Python CLI and switches to the Activity panel so the
+// user sees the gateway restart output. We always pass --yes
+// because the modal IS the confirmation step — the consent prompt
+// in cmd_setup.py exists for non-TUI invocations.
+//
+// We also flip the in-process redaction.SetDisableAll override
+// IMMEDIATELY so the Logs panel "RAW" badge updates before the
+// sidecar finishes restarting. The badge tracks operator INTENT
+// (which is what the modal captured); the actual gateway.log
+// content catches up a moment later when the new sidecar boots
+// with applyPrivacyConfig.
+func (m Model) confirmRedactionToggle() (tea.Model, tea.Cmd) {
+	action := m.redactionModal.DesiredAction()
+	m.redactionModal.Hide()
+
+	// Mirror the about-to-be-persisted state in this process so the
+	// Logs panel badge flips immediately. Order matters here: we
+	// flip BEFORE spawning the subprocess because the executor is
+	// async and the badge would otherwise lag by however long the
+	// gateway restart takes.
+	switch action {
+	case "off":
+		applyTUIRedactionOverride(true)
+	case "on":
+		applyTUIRedactionOverride(false)
+	}
+
+	cmd := m.executor.Execute(
+		"defenseclaw",
+		[]string{"setup", "redaction", action, "--yes"},
+		"setup redaction "+action,
+	)
+	m.activePanel = PanelActivity
+	return m, cmd
+}
+
+// confirmModePicker dispatches the chosen mode through the Python
+// CLI and switches to the Activity panel so the user sees the
+// restart output. We always pass --yes because the modal IS the
+// confirmation step — there's no point asking again.
+func (m Model) confirmModePicker() (tea.Model, tea.Cmd) {
+	wire := m.modePicker.Selected()
+	m.modePicker.Hide()
+	if wire == "" {
+		return m, nil
+	}
+	cmd := m.executor.Execute(
+		"defenseclaw",
+		[]string{"setup", "mode", wire, "--yes"},
+		"setup mode "+wire,
+	)
+	m.activePanel = PanelActivity
+	return m, cmd
+}
+
+// activeConnectorForPicker resolves the connector name we want to
+// pre-highlight in the picker. Mirrors ActiveConnectorName's
+// resolution order so the SERVICES "Agent" row and the picker's
+// "(active)" badge always agree on which connector is live.
+func (m Model) activeConnectorForPicker() string {
+	mode := ""
+	if m.cfg != nil {
+		mode = string(m.cfg.Claw.Mode)
+	}
+	return ActiveConnectorName(m.health, mode)
 }
 
 func (m Model) handleAlertsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1944,7 +2256,7 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				{"Reason", sel.Reason},
 			}
 			m.actionMenu.SetSize(m.width, m.height)
-			m.actionMenu.Show(sel.URL, sel.Status, info, MCPActions(sel.Status))
+			m.actionMenu.Show(sel.URL, sel.Status, info, MCPActions(sel.Status, m.mcps.ActiveConnector()))
 		}
 	case "b":
 		// Pre-P0-#5 this called ToggleBlock() which mutated the
@@ -2084,15 +2396,30 @@ func (m Model) handleToolsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
-	// On the Verdicts source, Enter opens a detail modal for the
+
+	// Redaction-toggle modal owns the keyboard while visible. Handled
+	// BEFORE every other Logs-panel shortcut so e.g. typing "R" inside
+	// the modal doesn't re-open it, and Esc/Enter close-or-confirm
+	// instead of being interpreted as panel shortcuts (Enter would
+	// otherwise open a Verdicts detail modal underneath).
+	if m.redactionModal.IsVisible() {
+		return m.handleRedactionModalKey(msg)
+	}
+	// `R` (uppercase — lowercase is reserved for "regex search later"
+	// and stays untouched) opens the redaction kill-switch modal.
+	// Available regardless of the active log source because every
+	// source (Gateway / Verdicts / OTEL / Watchdog) shares the redaction
+	// pipeline; flipping the switch affects them uniformly.
+	if key == "R" && !m.logs.searching {
+		return m.showRedactionModal()
+	}
+	// On structured log sources, Enter opens a detail modal for the
 	// most-recent visible event. We intercept before handing the
 	// key to the panel so the panel's own "search entry" path
 	// doesn't swallow Enter while searching is inactive.
-	if key == "enter" && !m.logs.searching && m.logs.source == logSourceVerdicts {
-		if row := m.logs.SelectedVerdict(); row != nil {
-			pairs := verdictDetailPairs(*row)
-			m.detail.SetSize(m.width, m.height)
-			m.detail.Show(fmt.Sprintf("Gateway event — %s", strings.ToUpper(row.eventType)), pairs)
+	if key == "enter" && !m.logs.searching {
+		if row := m.selectedStructuredLogRow(); row != nil {
+			m.openStructuredLogDetail(*row)
 			return m, nil
 		}
 	}
@@ -2100,7 +2427,7 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// with the raw log line so operators can copy-paste without
 	// truncation. The Verdicts branch above already handles its
 	// source because its modal is richer (structured kv pairs).
-	if key == "enter" && !m.logs.searching && m.logs.source != logSourceVerdicts {
+	if key == "enter" && !m.logs.searching && m.logs.source != logSourceVerdicts && m.logs.source != logSourceOTEL {
 		if line := m.logs.SelectedRawLine(); line != "" {
 			m.detail.SetSize(m.width, m.height)
 			m.detail.Show(fmt.Sprintf("%s log line", logSourceNames[m.logs.source]), [][2]string{{"Line", line}})
@@ -2132,6 +2459,26 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.logs, cmd = m.logs.Update(msg)
 	return m, cmd
+}
+
+func (m Model) selectedStructuredLogRow() *verdictRow {
+	switch m.logs.source {
+	case logSourceVerdicts:
+		return m.logs.SelectedVerdict()
+	case logSourceOTEL:
+		return m.logs.SelectedOTELRow()
+	default:
+		return nil
+	}
+}
+
+func (m *Model) openStructuredLogDetail(row verdictRow) {
+	title := "Gateway event"
+	if m.logs.source == logSourceOTEL {
+		title = "OTEL event"
+	}
+	m.detail.SetSize(m.width, m.height)
+	m.detail.Show(fmt.Sprintf("%s — %s", title, strings.ToUpper(row.eventType)), verdictDetailPairs(row))
 }
 
 // judgeResponsesDetailPairs formats a slice of audit.JudgeResponse
@@ -2464,6 +2811,11 @@ func (m Model) View() tea.View {
 		return m.tuiShellView("Loading DefenseClaw TUI...")
 	}
 
+	if m.firstRun.Active() {
+		m.firstRun.SetSize(m.width, m.height)
+		return m.tuiShellView(m.firstRun.View())
+	}
+
 	// Help overlay
 	if m.helpOpen {
 		return m.tuiShellView(m.renderHelp())
@@ -2472,6 +2824,28 @@ func (m Model) View() tea.View {
 	// Action menu overlay
 	if m.actionMenu.IsVisible() {
 		return m.tuiShellView(m.actionMenu.View())
+	}
+
+	// Mode picker overlay (Overview [m]). Drawn here so it occupies
+	// the same screen real estate as the help / action overlays
+	// instead of competing with the underlying Overview panel for
+	// clicks and re-paints.
+	if m.modePicker.IsVisible() {
+		m.modePicker.SetSize(m.width, m.height)
+		return m.tuiShellView(m.modePicker.View())
+	}
+
+	// Redaction kill-switch overlay (Logs [R]). Same overlay-instead-
+	// of-inline rationale as the mode picker — the modal is a
+	// blocking confirmation, not a side-panel widget.
+	if m.redactionModal.IsVisible() {
+		m.redactionModal.SetSize(m.width, m.height)
+		return m.tuiShellView(m.redactionModal.View())
+	}
+
+	if m.uninstallModal.IsVisible() {
+		m.uninstallModal.SetSize(m.width, m.height)
+		return m.tuiShellView(m.uninstallModal.View())
 	}
 
 	// Detail modal
@@ -2568,6 +2942,60 @@ func (m *Model) refresh() {
 	m.lastRefresh = time.Now()
 }
 
+func (m *Model) reloadRuntimeAfterInit() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	store, err := audit.NewStore(cfg.AuditDB)
+	if err != nil {
+		return err
+	}
+	if err := store.Init(); err != nil {
+		store.Close()
+		return err
+	}
+	if m.store != nil {
+		m.store.Close()
+	}
+	m.store = store
+	m.cfg = cfg
+	dataDir := cfg.DataDir
+	m.overview = NewOverviewPanel(m.theme, cfg, m.version)
+	m.alerts = NewAlertsPanel(store, dataDir)
+	m.skills = NewSkillsPanel(store)
+	m.mcps = NewMCPsPanel(store)
+	m.plugins = NewPluginsPanel(m.theme, store)
+	m.inventory = NewInventoryPanel(m.theme, m.executor, store)
+	m.policy = NewPolicyPanel(m.theme, cfg)
+	m.logs = NewLogsPanel(m.theme, cfg)
+	m.auditHist = NewAuditPanel(m.theme, store)
+	m.tools = NewToolsPanel(store)
+	m.setup = NewSetupPanel(m.theme, cfg, m.executor)
+	m.activity.dataDir = dataDir
+	m.resizePanels()
+	m.propagateConnector()
+	m.refresh()
+	return nil
+}
+
+func (m *Model) reloadConfigAfterSetupCommand() error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	m.cfg = cfg
+	m.overview.cfg = cfg
+	m.overview.SetHealth(m.health)
+	m.policy.cfg = cfg
+	m.logs.dataDir = cfg.DataDir
+	m.setup.SetConfig(cfg)
+	m.activity.dataDir = cfg.DataDir
+	m.propagateConnector()
+	m.refresh()
+	return nil
+}
+
 func (m Model) exportAuditJSON(path string) error {
 	if m.store == nil {
 		return fmt.Errorf("audit store not available")
@@ -2619,6 +3047,7 @@ func (m *Model) resizePanels() {
 	m.tools.SetSize(m.width, panelH)
 	m.detail.SetSize(m.width, m.height)
 	m.actionMenu.SetSize(m.width, m.height)
+	m.firstRun.SetSize(m.width, m.height)
 	m.logs.SetSize(m.width, panelH)
 	m.activity.SetSize(m.width, panelH)
 }
@@ -2976,6 +3405,7 @@ func (m Model) renderHelp() string {
 			{"/", "Search"},
 			{"e", "Errors only"},
 			{"w", "Warnings+"},
+			{"R", "Open redaction on/off confirmation"},
 			{"G / g", "Jump to end / start"},
 		}},
 		{"Policy Panel (7)", [][2]string{
@@ -2991,10 +3421,13 @@ func (m Model) renderHelp() string {
 			{"s", "Scan all skills"},
 			{"d", "Run doctor"},
 			{"g", "Setup guardrail"},
+			{"m", "Switch connector mode"},
+			{"R", "Open redaction on/off confirmation"},
 			{"p", "Go to Policy"},
 			{"i", "Go to Inventory"},
 			{"l", "Go to Logs"},
 			{"u", "Upgrade"},
+			{"X", "Uninstall DefenseClaw"},
 		}},
 	}
 

@@ -65,7 +65,7 @@ homebrew_casks:
     # populate via `gh release create` immediately after this step.
     url:
       template: "https://github.com/cisco-ai-defense/defenseclaw/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
-    skip_upload: auto
+    skip_upload: "true"
     name: defenseclaw
     homepage: "https://github.com/cisco-ai-defense/defenseclaw"
     description: "Enterprise governance layer for OpenClaw"

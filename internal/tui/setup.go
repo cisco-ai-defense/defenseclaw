@@ -73,8 +73,8 @@ var wizardDescriptions = [wizardCount]string{
 	"Configure MCP scanner analyzers and which components to scan (prompts, resources, instructions).",
 	"Configure gateway connection settings (host, port, TLS, auto-approve, reconnect parameters).",
 	"Configure LLM guardrail proxy (mode, model, scanner mode, judge settings).",
-	"Configure Splunk HEC integration for SIEM (endpoint, token, index, source).",
-	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
+	"Configure Splunk HEC integration for SIEM (local bridge or remote Enterprise endpoint).",
+	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Splunk Enterprise, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
 	"Configure chat/incident notifier webhooks (Slack, PagerDuty, Webex, generic HMAC). Distinct from the observability HTTP JSONL audit-log forwarder. Shells out to `setup webhook add`.",
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
 }
@@ -95,7 +95,7 @@ var wizardHowTo = [wizardCount]string{
 		"Tip: scan_instructions catches malicious server-side directives that prompts/resources miss.",
 	// Gateway
 	"Runs: defenseclaw setup gateway\n" +
-		"What you'll need: host + port the gateway should bind, TLS preference, OPENCLAW_GATEWAY_TOKEN env.\n" +
+		"What you'll need: host + port the gateway should bind, TLS preference, DEFENSECLAW_GATEWAY_TOKEN env.\n" +
 		"Tip: for non-loopback hosts, TLS is auto-enabled — supply a cert path or turn skip-verify on for dev only.",
 	// Guardrail
 	"Runs: defenseclaw setup guardrail\n" +
@@ -103,8 +103,8 @@ var wizardHowTo = [wizardCount]string{
 		"Tip: start in 'observe' mode to measure false positives before flipping to 'action'.",
 	// Splunk
 	"Runs: defenseclaw setup splunk\n" +
-		"What you'll need: HEC endpoint (https://…:8088), HEC token env var, index name.\n" +
-		"Tip: this adds a Splunk HEC entry to audit_sinks[] — the old single splunk.* block is deprecated.",
+		"What you'll need: for Enterprise, HEC endpoint + token; for local, Docker and Splunk terms acceptance.\n" +
+		"Tip: --enterprise writes audit_sinks[] only; --logs starts the local bridge.",
 	// Observability
 	"Runs: defenseclaw setup observability add <preset>\n" +
 		"What you'll need: vendor realm/region, ingest token env var, optional service.name/environment overrides.\n" +
@@ -129,6 +129,7 @@ var wizardHowTo = [wizardCount]string{
 var observabilityPresets = [][2]string{
 	{"splunk-o11y", "Splunk Observability Cloud"},
 	{"splunk-hec", "Splunk HEC"},
+	{"splunk-enterprise", "Splunk Enterprise HEC"},
 	{"datadog", "Datadog"},
 	{"honeycomb", "Honeycomb"},
 	{"newrelic", "New Relic"},
@@ -168,6 +169,12 @@ type configField struct {
 	Hint string
 }
 
+type setupSectionTabHit struct {
+	index int
+	start int
+	end   int
+}
+
 // wizardFormField defines a single field in a wizard setup form.
 type wizardFormField struct {
 	Label    string
@@ -203,6 +210,18 @@ type SetupPanel struct {
 	// on the next keystroke so it doesn't linger after the user
 	// fixes the issue.
 	wizFormError string
+
+	// wizFormReveal flips the password-kind render path from the
+	// mask (``****abcd``) to the raw underlying value so operators
+	// can sanity-check API keys, tokens, and env-resolved secrets
+	// without leaving the TUI. Toggled with Ctrl+T (only surfaced
+	// in the help line when the active form actually has a
+	// password-kind field). Reset to ``false`` whenever a form is
+	// opened, closed, or rebuilt (preset/whtype change) so a
+	// reveal never silently persists across forms — the operator
+	// must opt-in each time, which keeps the default screen-share
+	// safe.
+	wizFormReveal bool
 
 	// Wizard output terminal (shows command output after form submission)
 	wizRunning bool
@@ -342,30 +361,67 @@ func (p *SetupPanel) loadSections() {
 			},
 		},
 		{
-			Name:    "Claw",
-			Summary: "Which agent framework DefenseClaw defends (skill/MCP directory resolution derives from this).",
-			Help: "Currently only 'openclaw' is supported; future modes (nemoclaw, opencode, claudecode) will " +
-				"change where skills/MCPs are discovered. Changing this without also migrating content will orphan scans.",
+			Name:    "Agent",
+			Summary: "Logical agent identity used for aggregation, webhooks, and enterprise reporting.",
+			Help:    "ID is stable and machine-readable; Name is display-only. Leave blank for anonymous/local-only installs.",
 			Fields: []configField{
-				{Label: "Mode", Key: "claw.mode", Kind: "string", Value: string(c.Claw.Mode),
-					Hint: "openclaw (default). Controls skill/MCP dir resolution — see internal/config/claw.go."},
-				{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir,
-					Hint: "Override for ~/.openclaw/. Leave empty to use the OS default."},
-				{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile,
-					Hint: "Path to openclaw.json (for per-user skill_dir overrides)."},
+				{Label: "Agent ID", Key: "agent.id", Kind: "string", Value: c.Agent.ID,
+					Hint: "Stable lower-kebab-case identity for this defended agent/deployment."},
+				{Label: "Agent Name", Key: "agent.name", Kind: "string", Value: c.Agent.Name,
+					Hint: "Human-readable display name shown in TUI, webhooks, and event metadata."},
 			},
 		},
 		{
+			Name:    "Privacy",
+			Summary: "Redaction and privacy controls for audit DB, OTel, Splunk, webhooks, and terminal logs.",
+			Help: "Redaction is ON by default. Disabling it persists raw prompts/evidence to every configured sink. " +
+				"Use the Logs [R] modal or `setup redaction` command for the audited restart flow.",
+			Fields: []configField{
+				{Label: "Disable Redaction", Key: "privacy.disable_redaction", Kind: "bool", Value: fmt.Sprintf("%v", c.Privacy.DisableRedaction),
+					Hint: "true stores raw content in all sinks. Only use inside a single trusted boundary."},
+			},
+		},
+		{
+			Name:    "Claw",
+			Summary: "Which agent framework DefenseClaw defends (skill/MCP directory resolution derives from this).",
+			Help: "Controls where skills/MCPs are discovered. " +
+				"Changing this without also migrating content will orphan scans.",
+			Fields: []configField{
+				{Label: "Mode", Key: "claw.mode", Kind: "choice",
+					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex"},
+					Value:   string(c.Claw.Mode),
+					Hint:    "Active agent framework: openclaw, zeptoclaw, claudecode (Claude Code), codex. Drives skill/MCP/plugin path resolution — see internal/config/claw.go."},
+				{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir,
+					Hint: "Override for the connector's home directory (~/.openclaw, ~/.claude, ~/.codex, ~/.zeptoclaw). Leave empty to use the OS default."},
+				{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile,
+					Hint: "Path to the connector's primary config file (openclaw.json for OpenClaw; ignored for connectors that locate their own config)."},
+			},
+		},
+		{
+			Name:    "Agent Hooks",
+			Summary: "Codex and Claude Code hook policy: when scans run, fail behavior, and watched paths.",
+			Help:    "mode controls hook behavior; fail_mode=open lets the agent continue if DefenseClaw is unavailable, closed blocks.",
+			Fields: append(agentHookFields("Claude Code", "claude_code", c.ClaudeCode),
+				agentHookFields("Codex", "codex", c.Codex)...),
+		},
+		{
+			Name:    "Connector Hooks",
+			Summary: "Advanced connector_hooks map for current and future agent connectors.",
+			Help: "These per-connector hook rows override or extend top-level connector blocks. " +
+				"Use them for ZeptoClaw, OpenClaw, and future connectors without waiting for a dedicated section.",
+			Fields: connectorHookMapFields(c),
+		},
+		{
 			Name:    "Gateway",
-			Summary: "Sidecar WebSocket gateway: where OpenClaw connects, TLS/auth, API bind, reconnect tuning.",
-			Help: "gateway.port is the WebSocket OpenClaw connects to; api_port is the local REST sidecar. " +
+			Summary: "Sidecar WebSocket gateway: where the active agent connects, TLS/auth, API bind, reconnect tuning.",
+			Help: "gateway.port is the WebSocket the agent (OpenClaw / ZeptoClaw / Claude Code / Codex) dials; api_port is the local REST sidecar. " +
 				"Leave host=localhost for embedded runs — change only when running the gateway on a different box. " +
 				"Token *env* keeps secrets out of YAML; device_key_file is the persistent machine identity.",
 			Fields: []configField{
 				{Label: "Host", Key: "gateway.host", Kind: "string", Value: c.Gateway.Host,
 					Hint: "Where clients reach the gateway. 127.0.0.1/localhost disables TLS enforcement."},
 				{Label: "Port", Key: "gateway.port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.Port),
-					Hint: "WebSocket port (default 9090). Must match the value OpenClaw/agent hosts dial."},
+					Hint: "WebSocket port (default 9090). Must match the value the active agent dials."},
 				{Label: "API Port", Key: "gateway.api_port", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.APIPort),
 					Hint: "REST sidecar port (default 9099). Used by the CLI/TUI to issue commands."},
 				{Label: "API Bind", Key: "gateway.api_bind", Kind: "string", Value: c.Gateway.APIBind,
@@ -383,7 +439,9 @@ func (p *SetupPanel) loadSections() {
 				{Label: "Approval Timeout (s)", Key: "gateway.approval_timeout_s", Kind: "int", Value: fmt.Sprintf("%d", c.Gateway.ApprovalTimeout),
 					Hint: "How long the gateway waits for an operator approval before failing closed (seconds)."},
 				{Label: "Token Env", Key: "gateway.token_env", Kind: "string", Value: c.Gateway.TokenEnv,
-					Hint: "Env var NAME holding the gateway auth token (default OPENCLAW_GATEWAY_TOKEN). Not the secret itself — the value lives in ~/.defenseclaw/.env under this name."},
+					Hint: "Env var NAME holding the gateway auth token (default DEFENSECLAW_GATEWAY_TOKEN). Not the secret itself — the value lives in ~/.defenseclaw/.env under this name."},
+				{Label: "Token (redacted)", Key: "gateway.token", Kind: "password", Value: c.Gateway.Token,
+					Hint: "Inline gateway token. Prefer Token Env so shared secrets stay out of config.yaml."},
 				{Label: "Device Key File", Key: "gateway.device_key_file", Kind: "string", Value: c.Gateway.DeviceKeyFile,
 					Hint: "Path to the per-machine private key used to derive master secrets (default ~/.defenseclaw/device.key)."},
 			},
@@ -401,9 +459,29 @@ func (p *SetupPanel) loadSections() {
 				{Label: "Enabled", Key: "guardrail.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Enabled),
 					Hint: "Master switch. Off = gateway passes LLM traffic through without inspection."},
 				{Label: "Mode", Key: "guardrail.mode", Kind: "choice", Value: c.Guardrail.Mode, Options: []string{"observe", "action"},
-					Hint: "observe=log only (no blocking); action=return block_message on hit."},
+					Hint: "observe=log only (no blocking); action=return block_message on hit. " +
+						"Flipping this is also the right moment to revisit Hook Fail Mode (next field) — " +
+						"action-mode posture often pairs with a stricter response-layer fail mode."},
+				{Label: "Hook Fail Mode", Key: "guardrail.hook_fail_mode", Kind: "choice", Value: c.Guardrail.EffectiveHookFailMode(), Options: []string{"open", "closed"},
+					Hint: "What generated hooks (codex-hook, claude-code-hook, inspect-*) do when the gateway returns a 4xx, malformed JSON, or missing action. " +
+						"open=allow the tool/prompt and log to ~/.defenseclaw/logs/hook-failures.jsonl (recommended); closed=block. " +
+						"Transport failures (gateway unreachable / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."},
 				{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"},
 					Hint: "local=regex+judge only; remote=Cisco AI Defense only; both=chained (local then remote)."},
+				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw"},
+					Hint: "Connector adapter used by the guardrail sidecar. Blank follows claw.mode/backward-compatible defaults."},
+				{Label: "Allow Empty Providers", Key: "guardrail.allow_empty_providers", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.AllowEmptyProviders),
+					Hint: "Let the sidecar boot when no upstream LLM providers are detected. Useful only for tests/stubs."},
+				{Label: "Allow Unknown LLM Domains", Key: "guardrail.allow_unknown_llm_domains", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.AllowUnknownLLMDomains),
+					Hint: "Permit unknown LLM-looking hosts. Keep off in production so the proxy fails closed."},
+				{Label: "Human Approval", Key: "guardrail.hilt.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.HILT.Enabled),
+					Hint: "Ask before supported high-risk actions in action mode. Defaults off; strict blocks still win."},
+				{Label: "Approval Min Severity", Key: "guardrail.hilt.min_severity", Kind: "choice", Value: hiltMinSeverityValue(c.Guardrail.HILT.MinSeverity), Options: []string{"HIGH", "MEDIUM", "LOW", "CRITICAL"},
+					Hint: "Minimum severity that can become a human approval prompt when Human Approval is on."},
+				{Label: "Codex Enforcement", Key: "guardrail.codex_enforcement_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.CodexEnforcementEnabled),
+					Hint: "Put Codex traffic in the blocking proxy path. Off keeps Codex in observe mode."},
+				{Label: "Claude Code Enforcement", Key: "guardrail.claudecode_enforcement_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.ClaudeCodeEnforcementEnabled),
+					Hint: "Put Claude Code traffic in the blocking proxy path. Off keeps hooks/OTel in observe mode."},
 				{Label: "Host", Key: "guardrail.host", Kind: "string", Value: c.Guardrail.Host,
 					Hint: "Bind address for the proxy. Defaults to 127.0.0.1 (avoids ::1 vs 127.0.0.1 dial issues on macOS)."},
 				{Label: "Port", Key: "guardrail.port", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Port),
@@ -418,6 +496,21 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Env var NAME holding the upstream API key. Proxy reads the value at request time; leave blank to inherit llm.api_key_env (DEFENSECLAW_LLM_KEY)."},
 				{Label: "API Base", Key: "guardrail.api_base", Kind: "string", Value: c.Guardrail.APIBase,
 					Hint: "Upstream API URL. Leave blank for each provider's default."},
+				{Label: "── Guardrail LLM Override ──", Kind: "header"},
+				{Label: "Provider", Key: "guardrail.llm.provider", Kind: "string", Value: c.Guardrail.LLM.Provider,
+					Hint: "Optional provider override for proxied traffic. Blank inherits Unified LLM."},
+				{Label: "Model", Key: "guardrail.llm.model", Kind: "string", Value: c.Guardrail.LLM.Model,
+					Hint: "Optional model override for proxied traffic. Blank inherits Unified LLM / guardrail.model."},
+				{Label: "API Key Env", Key: "guardrail.llm.api_key_env", Kind: "string", Value: c.Guardrail.LLM.APIKeyEnv,
+					Hint: "Env var NAME for the guardrail upstream key. Blank inherits llm.api_key_env."},
+				{Label: "API Key (redacted)", Key: "guardrail.llm.api_key", Kind: "password", Value: c.Guardrail.LLM.APIKey,
+					Hint: "Inline guardrail upstream key. Prefer API Key Env so secrets stay out of config.yaml."},
+				{Label: "Base URL", Key: "guardrail.llm.base_url", Kind: "string", Value: c.Guardrail.LLM.BaseURL,
+					Hint: "Optional local/proxy endpoint for proxied upstream calls."},
+				{Label: "Timeout (s)", Key: "guardrail.llm.timeout", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.LLM.Timeout),
+					Hint: "Per-request timeout for proxied upstream calls. 0 inherits default."},
+				{Label: "Max Retries", Key: "guardrail.llm.max_retries", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.LLM.MaxRetries),
+					Hint: "Retry count for proxied upstream calls. 0 inherits default."},
 				{Label: "Block Message", Key: "guardrail.block_message", Kind: "string", Value: c.Guardrail.BlockMessage,
 					Hint: "Response text returned when a request is blocked (action mode)."},
 				{Label: "Stream Buffer", Key: "guardrail.stream_buffer_bytes", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.StreamBufferBytes),
@@ -454,10 +547,27 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Total time budget across primary + fallback judges. Must exceed Judge Timeout."},
 				{Label: "Fallbacks", Key: "guardrail.judge.fallbacks", Kind: "string", Value: strings.Join(c.Guardrail.Judge.Fallbacks, ","),
 					Hint: "CSV of backup judge models (tried in order on timeout/failure)."},
+				{Label: "── Judge LLM Override ──", Kind: "header"},
+				{Label: "Provider", Key: "guardrail.judge.llm.provider", Kind: "string", Value: c.Guardrail.Judge.LLM.Provider,
+					Hint: "Optional provider override for judge calls. Blank inherits Unified LLM."},
+				{Label: "Model", Key: "guardrail.judge.llm.model", Kind: "string", Value: c.Guardrail.Judge.LLM.Model,
+					Hint: "Optional model override for judge calls. Blank inherits Unified LLM / judge.model."},
+				{Label: "API Key Env", Key: "guardrail.judge.llm.api_key_env", Kind: "string", Value: c.Guardrail.Judge.LLM.APIKeyEnv,
+					Hint: "Env var NAME for judge calls. Blank inherits llm.api_key_env."},
+				{Label: "API Key (redacted)", Key: "guardrail.judge.llm.api_key", Kind: "password", Value: c.Guardrail.Judge.LLM.APIKey,
+					Hint: "Inline judge key. Prefer API Key Env so secrets stay out of config.yaml."},
+				{Label: "Base URL", Key: "guardrail.judge.llm.base_url", Kind: "string", Value: c.Guardrail.Judge.LLM.BaseURL,
+					Hint: "Optional local/proxy endpoint for judge calls."},
+				{Label: "Timeout (s)", Key: "guardrail.judge.llm.timeout", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Judge.LLM.Timeout),
+					Hint: "Per-request timeout for judge LLM calls. 0 inherits default."},
+				{Label: "Max Retries", Key: "guardrail.judge.llm.max_retries", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Judge.LLM.MaxRetries),
+					Hint: "Retry count for judge LLM calls. 0 inherits default."},
 				// Judge Categories
 				{Label: "── Judge Categories ──", Kind: "header"},
 				{Label: "Injection", Key: "guardrail.judge.injection", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Injection),
 					Hint: "Detect prompt-injection attempts via the judge (recommended: ON)."},
+				{Label: "Exfiltration", Key: "guardrail.judge.exfil", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.Exfil),
+					Hint: "Detect attempts to read or exfiltrate secrets, credentials, files, or system data."},
 				{Label: "PII", Key: "guardrail.judge.pii", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PII),
 					Hint: "Master PII toggle. Use pii_prompt/pii_completion for fine-grained control."},
 				{Label: "PII (Prompt)", Key: "guardrail.judge.pii_prompt", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.Judge.PIIPrompt),
@@ -507,26 +617,45 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Submit artifact hashes to VirusTotal. Needs virustotal_api_key_env."},
 				{Label: "VirusTotal Key Env", Key: "scanners.skill_scanner.virustotal_api_key_env", Kind: "string", Value: c.Scanners.SkillScanner.VirusTotalKeyEnv,
 					Hint: "Env var NAME holding the VirusTotal API key (default VIRUSTOTAL_API_KEY). Not the secret itself — the value lives in ~/.defenseclaw/.env under this name."},
+				{Label: "VirusTotal API Key (redacted)", Key: "scanners.skill_scanner.virustotal_api_key", Kind: "password", Value: c.Scanners.SkillScanner.VirusTotalKey,
+					Hint: "Inline VirusTotal key. Prefer VirusTotal Key Env so secrets stay out of config.yaml."},
 				{Label: "Use AI Defense", Key: "scanners.skill_scanner.use_aidefense", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseAIDefense),
 					Hint: "Chain Cisco AI Defense cloud scan. Configure in the Cisco AI Defense section."},
-				{Label: "── MCP Scanner ──", Kind: "header"},
-				{Label: "Binary", Key: "scanners.mcp_scanner.binary", Kind: "string", Value: c.Scanners.MCPScanner.Binary,
-					Hint: "Path/name of the mcp-scanner executable."},
-				{Label: "Analyzers", Key: "scanners.mcp_scanner.analyzers", Kind: "string", Value: c.Scanners.MCPScanner.Analyzers,
-					Hint: "CSV of analyzer IDs (e.g. 'yara,trigger,llm'). Blank=built-in defaults."},
-				{Label: "Scan Prompts", Key: "scanners.mcp_scanner.scan_prompts", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanPrompts),
-					Hint: "Scan MCP prompt templates for injection/PII."},
-				{Label: "Scan Resources", Key: "scanners.mcp_scanner.scan_resources", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanResources),
-					Hint: "Scan MCP resource contents (data returned by tools)."},
-				{Label: "Scan Instructions", Key: "scanners.mcp_scanner.scan_instructions", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanInstructions),
-					Hint: "Scan server-provided instructions for malicious directives."},
-				{Label: "── Plugin / CodeGuard ──", Kind: "header"},
-				{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner,
-					Hint: "Command to scan OpenClaw TS plugins (defaults to built-in)."},
-				{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard,
-					Hint: "Command for the CodeGuard skill (code-review). See 'codeguard' wizard."},
 			},
 		},
+	}
+	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
+		llmOverrideFields("Skill Scanner", "scanners.skill_scanner.llm", c.Scanners.SkillScanner.LLM)...)
+	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
+		[]configField{
+			{Label: "── MCP Scanner ──", Kind: "header"},
+			{Label: "Binary", Key: "scanners.mcp_scanner.binary", Kind: "string", Value: c.Scanners.MCPScanner.Binary,
+				Hint: "Path/name of the mcp-scanner executable."},
+			{Label: "Analyzers", Key: "scanners.mcp_scanner.analyzers", Kind: "string", Value: c.Scanners.MCPScanner.Analyzers,
+				Hint: "CSV of analyzer IDs (e.g. 'yara,trigger,llm'). Blank=built-in defaults."},
+			{Label: "Scan Prompts", Key: "scanners.mcp_scanner.scan_prompts", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanPrompts),
+				Hint: "Scan MCP prompt templates for injection/PII."},
+			{Label: "Scan Resources", Key: "scanners.mcp_scanner.scan_resources", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanResources),
+				Hint: "Scan MCP resource contents (data returned by tools)."},
+			{Label: "Scan Instructions", Key: "scanners.mcp_scanner.scan_instructions", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.MCPScanner.ScanInstructions),
+				Hint: "Scan server-provided instructions for malicious directives."},
+		}...)
+	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
+		llmOverrideFields("MCP Scanner", "scanners.mcp_scanner.llm", c.Scanners.MCPScanner.LLM)...)
+	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
+		[]configField{
+			{Label: "── Plugin / CodeGuard ──", Kind: "header"},
+			{Label: "Plugin Scanner", Key: "scanners.plugin_scanner", Kind: "string", Value: c.Scanners.PluginScanner,
+				Hint: "Command to scan plugins for the active connector (defaults to built-in plugin scanner — handles OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins)."},
+		}...)
+	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
+		llmOverrideFields("Plugin Scanner", "scanners.plugin_llm", c.Scanners.PluginScannerLLM)...)
+	p.sections[len(p.sections)-1].Fields = append(p.sections[len(p.sections)-1].Fields,
+		[]configField{
+			{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard,
+				Hint: "Command for the CodeGuard skill (code-review). See 'codeguard' wizard."},
+		}...)
+	p.sections = append(p.sections, []configSection{
 		// P2-#9: Gateway inline watcher/watchdog live alongside the
 		// gateway address settings — they're part of the same
 		// process but logically distinct sub-concerns. Kept as a
@@ -542,7 +671,7 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Master switch for all watchers."},
 				{Label: "── Skill ──", Kind: "header"},
 				{Label: "Enabled", Key: "gateway.watcher.skill.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.Enabled),
-					Hint: "Watch skill directories (~/.openclaw/skills, workspace/skills)."},
+					Hint: "Watch skill directories for the active connector (e.g. ~/.openclaw/skills, ~/.claude/skills, ~/.codex/skills, ~/.zeptoclaw/skills, plus workspace/<connector>/skills)."},
 				{Label: "Take Action", Key: "gateway.watcher.skill.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.Skill.TakeAction),
 					Hint: "Re-apply enforcement (block/quarantine) on changes. Off = scan-and-log only."},
 				{Label: "Dirs", Key: "gateway.watcher.skill.dirs", Kind: "string", Value: strings.Join(c.Gateway.Watcher.Skill.Dirs, ","),
@@ -556,7 +685,7 @@ func (p *SetupPanel) loadSections() {
 					Hint: "CSV of extra plugin directories."},
 				{Label: "── MCP ──", Kind: "header"},
 				{Label: "Take Action", Key: "gateway.watcher.mcp.take_action", Kind: "bool", Value: fmt.Sprintf("%v", c.Gateway.Watcher.MCP.TakeAction),
-					Hint: "Re-apply enforcement when an MCP server config changes (~/.openclaw/mcp.json)."},
+					Hint: "Re-apply enforcement when an MCP server config changes — file watched depends on connector (openclaw.json, ~/.claude/settings.json, .mcp.json, ~/.zeptoclaw/config.json)."},
 			},
 		},
 		{
@@ -603,8 +732,8 @@ func (p *SetupPanel) loadSections() {
 			Name: "OTel",
 			Summary: "OpenTelemetry exporter config (traces + logs + metrics). " +
 				"Use the Observability wizard for guided setup.",
-			Help: "endpoint accepts http(s):// or grpc://. Headers + resource attributes are read-only " +
-				"here — edit ~/.defenseclaw/config.yaml directly or via the wizard.",
+			Help: "endpoint accepts http(s):// or grpc://. Headers and resource attributes use CSV key=value syntax; " +
+				"use the Observability wizard for vendor defaults and live test probes.",
 			Fields: otelFields(c),
 		},
 		// Actions matrix: three parallel 5×3 tables that drive the
@@ -627,7 +756,7 @@ func (p *SetupPanel) loadSections() {
 		},
 		{
 			Name:    "Plugin Actions",
-			Summary: "Per-severity response matrix for OpenClaw TS plugins.",
+			Summary: "Per-severity response matrix for plugins from the active connector (OpenClaw TS plugins, Claude Code plugins, Codex plugins, ZeptoClaw plugins).",
 			Help:    "Same shape as Skill Actions. Governs the plugin_dir admission gate.",
 			Fields:  actionMatrixFields("plugin_actions", c.PluginActions),
 		},
@@ -701,20 +830,15 @@ func (p *SetupPanel) loadSections() {
 			},
 		},
 		// Cisco AI Defense: cloud-hosted prompt/response moderation.
-		// The timeout + endpoint knobs are straightforward, but
-		// enabled_rules is a server-provisioned allow-list that
-		// operators cannot edit inline — the list comes from the
-		// Cisco AI Defense console. We render it read-only and the
-		// api_key is always read-only in the TUI: operators rotate it
-		// via `defenseclaw config set cisco_ai_defense.api_key_env …`
-		// or keychain, never by typing a live bearer into the config
-		// form.
+		// First-run and doctor only probe it when scanner_mode is
+		// remote|both, but enterprise operators still need the full
+		// endpoint/key/rule surface available in the setup TUI.
 		{
 			Name: "Cisco AI Defense",
 			Summary: "Cloud-hosted prompt/response moderation. Enable via the Guardrail wizard " +
 				"(scanner_mode=remote|both).",
-			Help: "api_key and enabled_rules come from the AI Defense console and are read-only here. " +
-				"Rotate keys via `defenseclaw config set cisco_ai_defense.api_key_env …` or your keychain.",
+			Help: "Prefer API Key Env for production so bearer material lives in ~/.defenseclaw/.env/keychain, " +
+				"not config.yaml. Live probing runs from first-run/doctor when remote scanning is enabled.",
 			Fields: ciscoAIDefenseFields(c),
 		},
 		// Firewall: Packet Filter (pf) or nft anchor paths used by
@@ -730,7 +854,7 @@ func (p *SetupPanel) loadSections() {
 				"would orphan active rules. Edit ~/.defenseclaw/config.yaml directly if you need to migrate hosts.",
 			Fields: firewallFields(c),
 		},
-	}
+	}...)
 	for si := range p.sections {
 		for fi := range p.sections[si].Fields {
 			p.sections[si].Fields[fi].Original = p.sections[si].Fields[fi].Value
@@ -954,6 +1078,7 @@ func (p *SetupPanel) showWizardForm(idx int) {
 	p.wizFormScroll = 0
 	p.wizFormError = ""
 	p.wizRunIdx = idx
+	p.wizFormReveal = false
 }
 
 func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string, string) {
@@ -989,6 +1114,14 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 		p.wizFormFields = nil
 		p.wizFormError = ""
 		p.wizRunIdx = -1
+		p.wizFormReveal = false
+	case "ctrl+t":
+		// Reveal/hide masked password-kind fields. No-op when the
+		// active form has no password fields so the keystroke
+		// doesn't silently consume in surprising contexts.
+		if p.wizardFormHasPasswordField() {
+			p.wizFormReveal = !p.wizFormReveal
+		}
 	case "up", "k":
 		if p.wizFormCursor > 0 {
 			p.wizFormCursor--
@@ -1051,6 +1184,7 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 				next := f.Options[(cur+1)%len(f.Options)]
 				p.wizFormFields = observabilityWizardFields(next)
 				p.wizFormCursor = 0
+				p.wizFormReveal = false
 			}
 		case "whtype":
 			// Same behaviour as "preset" but rebuilds via
@@ -1067,6 +1201,7 @@ func (p *SetupPanel) handleFormKey(msg tea.KeyPressMsg) (bool, string, []string,
 				next := f.Options[(cur+1)%len(f.Options)]
 				p.wizFormFields = webhookWizardFields(next)
 				p.wizFormCursor = 0
+				p.wizFormReveal = false
 			}
 		default:
 			p.wizFormEditing = true
@@ -1110,6 +1245,7 @@ func (p *SetupPanel) submitWizardForm() (bool, string, []string, string) {
 
 	p.wizFormActive = false
 	p.wizFormFields = nil
+	p.wizFormReveal = false
 	p.wizardStatus[idx] = "running..."
 	p.wizRunning = true
 	p.wizOutput = []string{fmt.Sprintf("-- Running %s Setup (non-interactive) --", name), ""}
@@ -1135,6 +1271,20 @@ func (p *SetupPanel) missingRequiredFields() []string {
 		}
 	}
 	return missing
+}
+
+// wizardFormHasPasswordField reports whether the active wizard form
+// contains any masked-render field. Used to gate the Ctrl+T reveal
+// keystroke and the corresponding help-line hint so neither appears
+// in forms with nothing to reveal (e.g. plain bool/choice wizards
+// where Ctrl+T would be a confusing no-op).
+func (p *SetupPanel) wizardFormHasPasswordField() bool {
+	for _, f := range p.wizFormFields {
+		if f.Kind == "password" {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *SetupPanel) buildWizardArgs(idx int) []string {
@@ -1230,6 +1380,14 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 
 		switch f.Kind {
 		case "bool":
+			if idx == wizardGuardrail && (f.Flag == "--human-approval" || f.Flag == "--disable-redaction") {
+				if f.Value == "yes" && f.Flag != "" {
+					base = append(base, f.Flag)
+				} else if f.Value == "no" && f.NoFlag != "" {
+					base = append(base, f.NoFlag)
+				}
+				continue
+			}
 			// Bool defaults match the CLI's defaults, so we only
 			// need to send the toggle when the user changed it.
 			if f.Value == f.Default {
@@ -1433,6 +1591,9 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 	judgeBaseDefault := ""
 	port := ""
 	blockMsg := ""
+	hiltEnabled := "no"
+	hiltMinSeverity := "HIGH"
+	redactionDisabled := "no"
 	ciscoEndpoint := ""
 	ciscoKeyEnv := ""
 	ciscoTimeout := ""
@@ -1452,6 +1613,13 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 			port = fmt.Sprintf("%d", g.Port)
 		}
 		blockMsg = g.BlockMessage
+		if g.HILT.Enabled {
+			hiltEnabled = "yes"
+		}
+		hiltMinSeverity = hiltMinSeverityValue(g.HILT.MinSeverity)
+		if p.cfg.Privacy.DisableRedaction {
+			redactionDisabled = "yes"
+		}
 
 		// Resolve rule pack from dir path
 		if g.RulePackDir != "" {
@@ -1538,6 +1706,12 @@ func (p *SetupPanel) guardrailWizardFields() []wizardFormField {
 		{Label: "API Key Env", Flag: "--cisco-api-key-env", Kind: "string", Value: ciscoKeyEnv, Hint: "Env var holding Cisco API key"},
 		{Label: "Timeout (ms)", Flag: "--cisco-timeout-ms", Kind: "int", Value: ciscoTimeout, Hint: "Cisco AI Defense timeout"},
 
+		// ─── Advanced ───
+		{Label: "Advanced", Kind: "section"},
+		{Label: "Human Approval", Flag: "--human-approval", NoFlag: "--no-human-approval", Kind: "bool", Default: hiltEnabled, Value: hiltEnabled, Hint: "Ask before HIGH+ risky actions when connector support is available"},
+		{Label: "Approval Min Severity", Flag: "--hilt-min-severity", Kind: "choice", Options: []string{"HIGH", "MEDIUM", "LOW", "CRITICAL"}, Value: hiltMinSeverity, Default: hiltMinSeverity, Hint: "Minimum severity that asks for human approval when enabled"},
+		{Label: "Disable Redaction", Flag: "--disable-redaction", NoFlag: "--enable-redaction", Kind: "bool", Default: redactionDisabled, Value: redactionDisabled, Hint: "Debug only: writes raw prompt/log content to local and forwarded sinks"},
+
 		// ─── Post-Setup ───
 		{Label: "Post-Setup", Kind: "section"},
 		{Label: "Restart After", Flag: "--restart", NoFlag: "--no-restart", Kind: "bool", Default: "yes", Value: "yes"},
@@ -1601,8 +1775,12 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 		return []wizardFormField{
 			{Label: "Enable O11y", Flag: "--o11y", Kind: "bool", Default: "no", Value: "no", Hint: "Splunk Observability Cloud (OTLP)"},
 			{Label: "Enable Local Logs", Flag: "--logs", Kind: "bool", Default: "no", Value: "no", Hint: "Local Splunk via Docker (HEC)"},
+			{Label: "Enable Enterprise", Flag: "--enterprise", Kind: "bool", Default: "no", Value: "no", Hint: "Remote Splunk Enterprise HEC endpoint + token"},
 			{Label: "Realm", Flag: "--realm", Kind: "string", Hint: "O11y realm (e.g. us1, us0, eu0)"},
 			{Label: "Access Token", Flag: "--access-token", Kind: "string", Hint: "Splunk O11y access token"},
+			{Label: "HEC Endpoint", Flag: "--hec-endpoint", Kind: "string", Hint: "Remote HEC URL (https://host:8088/services/collector/event)"},
+			{Label: "HEC Token", Flag: "--hec-token", Kind: "password", Hint: "Remote Splunk Enterprise HEC token"},
+			{Label: "Skip HEC Test", Flag: "--skip-test", Kind: "bool", Default: "no", Value: "no", Hint: "Skip the live Enterprise HEC probe after setup"},
 			{Label: "App Name", Flag: "--app-name", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
 			{Label: "Traces", Flag: "--traces", NoFlag: "--no-traces", Kind: "bool", Default: "yes", Value: "yes"},
 			{Label: "Metrics", Flag: "--metrics", NoFlag: "--no-metrics", Kind: "bool", Default: "yes", Value: "yes"},
@@ -1689,6 +1867,14 @@ func observabilityWizardFields(presetID string) []wizardFormField {
 			wizardFormField{Label: "Sourcetype", Flag: "--sourcetype", Kind: "string", Default: "_json", Value: "_json"},
 			wizardFormField{Label: "Verify TLS", Flag: "--verify-tls", NoFlag: "--no-verify-tls", Kind: "bool", Default: "no", Value: "no"},
 			wizardFormField{Label: "HEC Token", Flag: "--token", Kind: "password", Hint: "Splunk HEC token (leave blank if already in $DEFENSECLAW_SPLUNK_HEC_TOKEN)"},
+		)
+	case "splunk-enterprise":
+		fields = append(fields,
+			wizardFormField{Label: "Endpoint", Flag: "--endpoint", Kind: "string", Required: true, Hint: "https://host:8088/services/collector/event"},
+			wizardFormField{Label: "Index", Flag: "--index", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
+			wizardFormField{Label: "Source", Flag: "--source", Kind: "string", Default: "defenseclaw", Value: "defenseclaw"},
+			wizardFormField{Label: "Sourcetype", Flag: "--sourcetype", Kind: "string", Default: "_json", Value: "_json"},
+			wizardFormField{Label: "HEC Token", Flag: "--token", Kind: "password", Hint: "Splunk Enterprise HEC token (leave blank if already in $DEFENSECLAW_SPLUNK_HEC_TOKEN)"},
 		)
 	case "datadog":
 		fields = append(fields,
@@ -1844,6 +2030,77 @@ func (p *SetupPanel) handleWizardClick(x, y int) (bool, string, []string, string
 	return false, "", nil, ""
 }
 
+func (p *SetupPanel) configSectionTabRows() [][]setupSectionTabHit {
+	if len(p.sections) == 0 {
+		return nil
+	}
+	maxWidth := p.width
+	if maxWidth <= 0 {
+		maxWidth = 80
+	}
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
+
+	var rows [][]setupSectionTabHit
+	var row []setupSectionTabHit
+	cursor := 0
+	for i, sec := range p.sections {
+		w := lipgloss.Width(sec.Name) + 2
+		sep := 0
+		if len(row) > 0 {
+			sep = 1
+		}
+		if len(row) > 0 && cursor+sep+w > maxWidth {
+			rows = append(rows, row)
+			row = nil
+			cursor = 0
+			sep = 0
+		}
+		start := cursor + sep
+		row = append(row, setupSectionTabHit{
+			index: i,
+			start: start,
+			end:   start + w,
+		})
+		cursor = start + w
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func (p *SetupPanel) configSectionTabLineCount() int {
+	rows := p.configSectionTabRows()
+	if len(rows) == 0 {
+		return 1
+	}
+	return len(rows)
+}
+
+func (p *SetupPanel) configSectionTabHit(x, y int) (int, bool) {
+	rowIdx := y - 2
+	rows := p.configSectionTabRows()
+	if rowIdx < 0 || rowIdx >= len(rows) {
+		return 0, false
+	}
+	for _, hit := range rows[rowIdx] {
+		if x >= hit.start && x < hit.end {
+			return hit.index, true
+		}
+	}
+	return 0, false
+}
+
+func (p *SetupPanel) configFieldsStartY() int {
+	y := 2 + p.configSectionTabLineCount() + 1
+	if sec := p.currentSection(); sec != nil && sec.Summary != "" {
+		y += 2
+	}
+	return y
+}
+
 func (p *SetupPanel) handleConfigClick(x, y int) (bool, string, []string, string) {
 	// Row 0: mode tabs
 	if y == 0 {
@@ -1853,24 +2110,20 @@ func (p *SetupPanel) handleConfigClick(x, y int) (bool, string, []string, string
 		return false, "", nil, ""
 	}
 
-	// Row 2: section tabs
-	if y == 2 {
-		cursor := 0
-		for i, sec := range p.sections {
-			w := lipgloss.Width(sec.Name) + 2
-			if x >= cursor && x < cursor+w+1 {
-				p.activeSection = i
-				p.activeLine = p.firstEditableLine()
-				p.scroll = 0
-				return false, "", nil, ""
-			}
-			cursor += w + 1
-		}
+	// Row 2..N: wrapped section tabs.
+	if idx, ok := p.configSectionTabHit(x, y); ok {
+		p.activeSection = idx
+		p.activeLine = p.firstEditableLine()
+		p.scroll = 0
+		return false, "", nil, ""
+	}
+	if y >= 2 && y < p.configFieldsStartY() {
 		return false, "", nil, ""
 	}
 
-	// Row 4+: config fields
-	fieldY := y - 4
+	// Config fields start after mode tabs, wrapped section tabs,
+	// their spacer row, and the optional section summary.
+	fieldY := y - p.configFieldsStartY()
 	if fieldY >= 0 && p.activeSection < len(p.sections) {
 		idx := p.scroll + fieldY
 		sec := &p.sections[p.activeSection]
@@ -1934,7 +2187,7 @@ func (p *SetupPanel) HandleMouseMotion(x, y int) {
 	}
 
 	if p.mode == setupModeConfig {
-		fieldY := y - 4
+		fieldY := y - p.configFieldsStartY()
 		if fieldY >= 0 && p.activeSection < len(p.sections) {
 			idx := p.scroll + fieldY
 			sec := p.sections[p.activeSection]
@@ -2025,9 +2278,46 @@ func (p *SetupPanel) RevertConfig() error {
 	if err != nil {
 		return err
 	}
+	p.SetConfig(newCfg)
+	return nil
+}
+
+// SetConfig replaces the editor's config snapshot and rebuilds the
+// visible fields while preserving the active section when possible.
+func (p *SetupPanel) SetConfig(newCfg *config.Config) {
+	activeName := ""
+	if p.activeSection >= 0 && p.activeSection < len(p.sections) {
+		activeName = p.sections[p.activeSection].Name
+	}
+
 	p.cfg = newCfg
 	p.loadSections()
-	return nil
+
+	if activeName != "" {
+		for i, sec := range p.sections {
+			if sec.Name == activeName {
+				p.activeSection = i
+				break
+			}
+		}
+	}
+	if p.activeSection >= len(p.sections) {
+		p.activeSection = 0
+	}
+	if p.activeSection < 0 {
+		p.activeSection = 0
+	}
+	if sec := p.currentSection(); sec != nil {
+		if p.activeLine >= len(sec.Fields) {
+			p.activeLine = len(sec.Fields) - 1
+		}
+		if p.activeLine < 0 {
+			p.activeLine = p.firstEditableLine()
+		}
+		if p.scroll >= len(sec.Fields) {
+			p.scroll = 0
+		}
+	}
 }
 
 // GetConfig returns the current config pointer held by the setup panel.
@@ -2236,15 +2526,28 @@ func (p *SetupPanel) renderWizardForm() string {
 				}
 				val = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213")).Render(label)
 			case "password":
-				// Secret-like field: render a mask so the value
-				// doesn't leak into TUI screen recordings or bug
-				// reports. The underlying CLI still sees the
+				// Secret-like field: render a mask by default so the
+				// value doesn't leak into TUI screen recordings or
+				// bug reports. The underlying CLI still sees the
 				// plaintext value via --token.
-				if f.Value == "" {
+				//
+				// When the operator explicitly toggles reveal mode
+				// (Ctrl+T) we render the raw value in a yellow,
+				// italic style so the unmasked state is visually
+				// loud — the goal is to make accidental
+				// over-the-shoulder leaks obvious, not silent.
+				switch {
+				case f.Value == "":
 					val = dim.Render("(empty)")
-				} else if len(f.Value) <= 4 {
+				case p.wizFormReveal:
+					revealed := lipgloss.NewStyle().
+						Foreground(lipgloss.Color("220")).
+						Italic(true).
+						Render(f.Value)
+					val = revealed + " " + dim.Render("(revealed — Ctrl+T to hide)")
+				case len(f.Value) <= 4:
 					val = dim.Render("****")
-				} else {
+				default:
 					val = dim.Render("****" + f.Value[len(f.Value)-4:])
 				}
 			default:
@@ -2284,7 +2587,20 @@ func (p *SetupPanel) renderWizardForm() string {
 	runBtn := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("34")).Padding(0, 2)
 	b.WriteString("  " + runBtn.Render("Ctrl+R  Run Setup"))
 	b.WriteString("\n\n")
-	b.WriteString("  " + dim.Render("[Enter/Space] Toggle/Edit  [Up/Down] Navigate  [Ctrl+R] Run  [Esc] Cancel"))
+	helpLine := "[Enter/Space] Toggle/Edit  [Up/Down] Navigate  [Ctrl+R] Run  [Esc] Cancel"
+	// Only surface the reveal hint when the active form actually
+	// has a masked field — otherwise the keystroke is a confusing
+	// no-op and the help line stays cluttered. The hint flips its
+	// label to reflect the current state ("Reveal" vs. "Hide") so
+	// the operator always knows what Ctrl+T will do next.
+	if p.wizardFormHasPasswordField() {
+		if p.wizFormReveal {
+			helpLine += "  [Ctrl+T] Hide secrets"
+		} else {
+			helpLine += "  [Ctrl+T] Reveal secrets"
+		}
+	}
+	b.WriteString("  " + dim.Render(helpLine))
 	b.WriteString("\n")
 
 	return b.String()
@@ -2432,16 +2748,21 @@ func (p *SetupPanel) renderConfigEditor() string {
 	activeTabStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
 	inactiveTabStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Padding(0, 1)
 
-	var tabs []string
-	for i, sec := range p.sections {
-		if i == p.activeSection {
-			tabs = append(tabs, activeTabStyle.Render(sec.Name))
-		} else {
-			tabs = append(tabs, inactiveTabStyle.Render(sec.Name))
+	rows := p.configSectionTabRows()
+	for _, row := range rows {
+		var tabs []string
+		for _, hit := range row {
+			sec := p.sections[hit.index]
+			if hit.index == p.activeSection {
+				tabs = append(tabs, activeTabStyle.Render(sec.Name))
+			} else {
+				tabs = append(tabs, inactiveTabStyle.Render(sec.Name))
+			}
 		}
+		b.WriteString(strings.Join(tabs, " "))
+		b.WriteString("\n")
 	}
-	b.WriteString(strings.Join(tabs, " "))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	if p.activeSection < 0 || p.activeSection >= len(p.sections) {
 		return b.String()
@@ -2467,6 +2788,9 @@ func (p *SetupPanel) renderConfigEditor() string {
 	// original p.height-8 baseline and just pay for the extra
 	// summary/help/hint rows we now render.
 	extraFooter := 2 // hint row + blank spacer above it
+	if rows := p.configSectionTabLineCount(); rows > 1 {
+		extraFooter += rows - 1
+	}
 	if sec.Summary != "" {
 		extraFooter += 2
 	}
@@ -2608,7 +2932,8 @@ func otelFields(c *config.Config) []configField {
 			Hint: "Skip TLS verification. Dev only — never in prod."},
 		{Label: "TLS CA Cert", Key: "otel.tls.ca_cert", Kind: "string", Value: c.OTel.TLS.CACert,
 			Hint: "Path to a CA bundle for TLS verification (PEM)."},
-		{Label: "Headers (read-only)", Key: "otel.headers.summary", Kind: "header", Value: fmtOTelHeaders(c.OTel.Headers)},
+		{Label: "Headers", Key: "otel.headers", Kind: "string", Value: fmtOTelHeaders(c.OTel.Headers),
+			Hint: "CSV key=value pairs sent with OTLP requests. Use env-backed setup flows for bearer/vendor secrets."},
 
 		{Label: "── Traces ──", Kind: "header"},
 		{Label: "Enabled", Key: "otel.traces.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.OTel.Traces.Enabled),
@@ -2659,7 +2984,8 @@ func otelFields(c *config.Config) []configField {
 			Hint: "In-memory buffer size before drops start. Raise on high-throughput hosts."},
 
 		{Label: "── Resource ──", Kind: "header"},
-		{Label: "Attributes (read-only)", Key: "otel.resource.summary", Kind: "header", Value: fmtOTelResource(c.OTel.Resource.Attributes)},
+		{Label: "Attributes", Key: "otel.resource.attributes", Kind: "string", Value: fmtOTelResource(c.OTel.Resource.Attributes),
+			Hint: "CSV key=value resource attributes such as service.name=defenseclaw-sidecar, deployment.environment=prod."},
 	}
 	return f
 }
@@ -2717,35 +3043,127 @@ func fmtTristateBool(b *bool) string {
 	return "false"
 }
 
-// ciscoAIDefenseFields builds the Cisco AI Defense read-only section.
-// api_key is always masked (whether it's set via the direct field or
-// resolved from the env) because the TUI is not the right place to
-// compare shared secrets — edit via `defenseclaw config set` or your
-// keychain. enabled_rules is rendered as a single comma-joined line
-// so the operator can spot mis-provisioned allow-lists at a glance
-// without opening the YAML.
-func ciscoAIDefenseFields(c *config.Config) []configField {
-	keyState := "(unset)"
-	if c.CiscoAIDefense.APIKey != "" {
-		keyState = "(configured inline — redacted)"
-	} else if c.CiscoAIDefense.APIKeyEnv != "" {
-		if c.CiscoAIDefense.ResolvedAPIKey() != "" {
-			keyState = fmt.Sprintf("(resolved from $%s)", c.CiscoAIDefense.APIKeyEnv)
-		} else {
-			keyState = fmt.Sprintf("($%s not set)", c.CiscoAIDefense.APIKeyEnv)
+func agentHookModeValue(mode string) string {
+	if mode == "telemetry" {
+		return "observe"
+	}
+	return mode
+}
+
+func hiltMinSeverityValue(severity string) string {
+	switch strings.ToUpper(strings.TrimSpace(severity)) {
+	case "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		return strings.ToUpper(strings.TrimSpace(severity))
+	default:
+		return "HIGH"
+	}
+}
+
+func agentHookFields(label, prefix string, h config.AgentHookConfig) []configField {
+	return []configField{
+		{Label: "── " + label + " ──", Kind: "header"},
+		{Label: "Enabled", Key: prefix + ".enabled", Kind: "bool", Value: fmt.Sprintf("%v", h.Enabled),
+			Hint: label + " hooks master switch."},
+		{Label: "Mode", Key: prefix + ".mode", Kind: "choice", Options: []string{"", "observe", "enforce"}, Value: agentHookModeValue(h.Mode),
+			Hint: "Hook operating mode. Blank inherits connector defaults."},
+		{Label: "Fail Mode", Key: prefix + ".fail_mode", Kind: "choice", Options: []string{"", "open", "closed"}, Value: h.FailMode,
+			Hint: "open=continue if DefenseClaw is unreachable; closed=block on hook failure."},
+		{Label: "Scan on Session Start", Key: prefix + ".scan_on_session_start", Kind: "bool", Value: fmt.Sprintf("%v", h.ScanOnSessionStart),
+			Hint: "Run inventory/scanner checks when an agent session begins."},
+		{Label: "Scan on Stop", Key: prefix + ".scan_on_stop", Kind: "bool", Value: fmt.Sprintf("%v", h.ScanOnStop),
+			Hint: "Run checks when an agent session stops."},
+		{Label: "Scan Paths", Key: prefix + ".scan_paths", Kind: "string", Value: strings.Join(h.ScanPaths, ","),
+			Hint: "CSV of extra paths scanned by connector hooks."},
+		{Label: "Component Scan Interval (min)", Key: prefix + ".component_scan_interval_minutes", Kind: "int", Value: fmt.Sprintf("%d", h.ComponentScanIntervalMinutes),
+			Hint: "Minimum minutes between repeated component scans. 0=use default."},
+	}
+}
+
+func connectorHookMapFields(c *config.Config) []configField {
+	names := []string{"codex", "claudecode", "zeptoclaw", "openclaw"}
+	seen := map[string]bool{}
+	if c.ConnectorHooks != nil {
+		for name := range c.ConnectorHooks {
+			if strings.TrimSpace(name) != "" {
+				names = append(names, name)
+			}
 		}
 	}
+	sort.Strings(names)
+
+	var out []configField
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		hook := config.AgentHookConfig{}
+		if c.ConnectorHooks != nil {
+			hook = c.ConnectorHooks[name]
+		}
+		out = append(out, agentHookFields(connectorHookLabel(name), "connector_hooks."+name, hook)...)
+	}
+	return out
+}
+
+func connectorHookLabel(name string) string {
+	switch name {
+	case "codex":
+		return "Codex"
+	case "claudecode":
+		return "Claude Code"
+	case "zeptoclaw":
+		return "ZeptoClaw"
+	case "openclaw":
+		return "OpenClaw"
+	}
+	if name == "" {
+		return "Connector"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
+func llmOverrideFields(label, prefix string, llm config.LLMConfig) []configField {
+	providers := []string{"", "anthropic", "openai", "openrouter", "azure", "gemini", "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai", "ollama", "vllm", "lm_studio"}
+	return []configField{
+		{Label: "── " + label + " LLM Override ──", Kind: "header"},
+		{Label: "Provider", Key: prefix + ".provider", Kind: "choice", Options: providers, Value: llm.Provider,
+			Hint: "Optional provider override. Blank inherits the Unified LLM provider."},
+		{Label: "Model", Key: prefix + ".model", Kind: "string", Value: llm.Model,
+			Hint: "Optional provider/model override. Blank inherits the Unified LLM model."},
+		{Label: "API Key Env", Key: prefix + ".api_key_env", Kind: "string", Value: llm.APIKeyEnv,
+			Hint: "Env var NAME for this component only. Blank inherits llm.api_key_env."},
+		{Label: "API Key (redacted)", Key: prefix + ".api_key", Kind: "password", Value: llm.APIKey,
+			Hint: "Inline component key. Prefer API Key Env so secrets stay out of config.yaml."},
+		{Label: "Base URL", Key: prefix + ".base_url", Kind: "string", Value: llm.BaseURL,
+			Hint: "Optional local/proxy endpoint for this component."},
+		{Label: "Timeout (s)", Key: prefix + ".timeout", Kind: "int", Value: fmt.Sprintf("%d", llm.Timeout),
+			Hint: "Per-request timeout. 0 inherits the Unified LLM/default timeout."},
+		{Label: "Max Retries", Key: prefix + ".max_retries", Kind: "int", Value: fmt.Sprintf("%d", llm.MaxRetries),
+			Hint: "Retry count for this component. 0 inherits default."},
+	}
+}
+
+// ciscoAIDefenseFields builds the Cisco AI Defense section. The API key
+// is editable but rendered as password so the value never leaks in the
+// panel. APIKeyEnv remains the preferred production path because it keeps
+// bearer material outside config.yaml.
+func ciscoAIDefenseFields(c *config.Config) []configField {
 	rules := "(none)"
 	if len(c.CiscoAIDefense.EnabledRules) > 0 {
 		rules = strings.Join(c.CiscoAIDefense.EnabledRules, ", ")
 	}
 	return []configField{
-		{Label: "Endpoint", Key: "cisco_ai_defense.endpoint", Kind: "header", Value: c.CiscoAIDefense.Endpoint},
-		{Label: "API Key", Key: "cisco_ai_defense.api_key", Kind: "header", Value: keyState},
-		{Label: "API Key Env", Key: "cisco_ai_defense.api_key_env", Kind: "header", Value: c.CiscoAIDefense.APIKeyEnv},
-		{Label: "Timeout (ms)", Key: "cisco_ai_defense.timeout_ms", Kind: "header", Value: fmt.Sprintf("%d", c.CiscoAIDefense.TimeoutMs)},
-		{Label: "Enabled Rules", Key: "cisco_ai_defense.enabled_rules", Kind: "header", Value: rules},
-		{Label: "How to edit", Key: "cisco_ai_defense.hint", Kind: "header", Value: "set via `defenseclaw config set cisco_ai_defense.*` or the Cisco AI Defense console (enabled_rules)"},
+		{Label: "Endpoint", Key: "cisco_ai_defense.endpoint", Kind: "string", Value: c.CiscoAIDefense.Endpoint,
+			Hint: "Cisco AI Defense API endpoint used for remote/both scanner mode."},
+		{Label: "API Key (redacted)", Key: "cisco_ai_defense.api_key", Kind: "password", Value: c.CiscoAIDefense.APIKey,
+			Hint: "Inline Cisco key. Prefer API Key Env so secrets stay out of config.yaml."},
+		{Label: "API Key Env", Key: "cisco_ai_defense.api_key_env", Kind: "string", Value: c.CiscoAIDefense.APIKeyEnv,
+			Hint: "Env var NAME holding the Cisco AI Defense key, usually CISCO_AI_DEFENSE_API_KEY."},
+		{Label: "Timeout (ms)", Key: "cisco_ai_defense.timeout_ms", Kind: "int", Value: fmt.Sprintf("%d", c.CiscoAIDefense.TimeoutMs),
+			Hint: "HTTP timeout for Cisco AI Defense probes and scans."},
+		{Label: "Enabled Rules", Key: "cisco_ai_defense.enabled_rules", Kind: "string", Value: rules,
+			Hint: "CSV of cloud rules to request. Leave blank to use the service/account default."},
 	}
 }
 

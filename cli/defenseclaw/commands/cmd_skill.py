@@ -30,6 +30,7 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -183,14 +184,37 @@ def _list_skills_via_sidecar(app: AppContext) -> dict[str, Any] | None:
 
 
 def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get the full skill list — tries sidecar API first, then local binary."""
+    """Get the full skill list, dispatching on the active connector.
+
+    For ``openclaw`` (the historical default) we keep the sidecar →
+    CLI fallback chain. For Codex / Claude Code / ZeptoClaw we walk
+    the connector-specific skill directories via
+    :func:`defenseclaw.skill_list.list_skills` (S4.4 adapter).
+
+    The returned shape stays ``{"skills": [...]}`` — same as
+    ``openclaw skills list --json`` — so every downstream caller in
+    this module continues to work unchanged.
+    """
     if app is not None:
+        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        if connector != "openclaw":
+            from defenseclaw.skill_list import list_skills as _adapter_list
+            return {"skills": _adapter_list(app.cfg)}
+
+        # OpenClaw: prefer the live sidecar — it sees runtime state
+        # the static CLI doesn't (recently-toggled skills, etc.).
         result = _list_skills_via_sidecar(app)
         if result is not None:
             return result
 
     out = _run_openclaw("skills", "list", "--json")
     if out is None:
+        # Last-ditch fallback: walk the OpenClaw filesystem layout so
+        # `defenseclaw skill list` doesn't go silent when the
+        # `openclaw` binary isn't on PATH (sandbox installs, CI, etc.).
+        if app is not None and hasattr(app.cfg, "skill_dirs"):
+            from defenseclaw.skill_list import list_skills as _adapter_list
+            return {"skills": _adapter_list(app.cfg, prefer_cli=False)}
         return None
     try:
         return json.loads(out)
@@ -199,8 +223,21 @@ def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] 
 
 
 def _get_openclaw_skill_info(name: str, app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get info for a single skill — tries sidecar first, then local binary."""
+    """Get info for a single skill.
+
+    For OpenClaw, prefers the sidecar → CLI fallback chain. For
+    other connectors, walks the connector-specific skill
+    directories — there is no per-connector ``info`` subcommand.
+    """
     if app is not None:
+        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        if connector != "openclaw":
+            from defenseclaw.skill_list import list_skills as _adapter_list
+            for s in _adapter_list(app.cfg):
+                if s.get("name") == name:
+                    return s
+            return None
+
         full = _list_skills_via_sidecar(app)
         if full is not None:
             for s in full.get("skills", []):
@@ -318,7 +355,7 @@ def _skill_display_name(s: dict[str, Any]) -> str:
 @click.option("--json", "as_json", is_flag=True, help="Output merged skill list as JSON")
 @pass_ctx
 def list_skills(app: AppContext, as_json: bool) -> None:
-    """List all OpenClaw skills with their latest scan severity."""
+    """List all skills for the active connector with their latest scan severity."""
 
     oc_list = _list_openclaw_skills_full(app)
     skills = oc_list.get("skills", []) if oc_list else []
@@ -326,44 +363,67 @@ def list_skills(app: AppContext, as_json: bool) -> None:
     scan_map = _build_scan_map(app.store)
     actions_map = _build_actions_map(app.store)
 
-    if not skills and not actions_map and not scan_map:
+    # The ``actions`` and ``scan_results`` tables are connector-untagged in
+    # the shared audit DB (see cli/defenseclaw/db.py). Phantom rows from
+    # those maps were historically OpenClaw-owned, so injecting them on a
+    # non-OpenClaw connector (codex, claudecode, zeptoclaw) would surface
+    # skills that the active framework does not actually have on disk —
+    # which is exactly the leak users were seeing in the Skills tab. Only
+    # surface phantoms when the active connector is OpenClaw; for the
+    # other connectors, the connector-aware filesystem walk
+    # (skill_list.list_skills → cfg.skill_dirs()) is the source of truth.
+    show_audit_phantoms = (
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+    ) == "openclaw"
+
+    if not skills and (not show_audit_phantoms or (not actions_map and not scan_map)):
         if as_json:
             click.echo("[]")
             return
-        click.echo("No skills found. Is openclaw installed?")
+        connector = (
+            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        )
+        if connector == "openclaw":
+            click.echo(ux.dim("No skills found. Is openclaw installed?"))
+        else:
+            click.echo(
+                f"No skills found for connector={connector!r} "
+                f"{ux.dim('(checked the connector-specific skill directories).')}",
+            )
         return
 
     known_names = {s.get("name", "") for s in skills}
 
-    for name, ae in actions_map.items():
-        if name not in known_names:
-            skills.append({
-                "name": name,
-                "description": "",
-                "emoji": "",
-                "eligible": False,
-                "disabled": ae.actions.runtime == "disable",
-                "blockedByAllowlist": False,
-                "source": "enforcement",
-                "bundled": False,
-                "homepage": "",
-            })
-            known_names.add(name)
+    if show_audit_phantoms:
+        for name, ae in actions_map.items():
+            if name not in known_names:
+                skills.append({
+                    "name": name,
+                    "description": "",
+                    "emoji": "",
+                    "eligible": False,
+                    "disabled": ae.actions.runtime == "disable",
+                    "blockedByAllowlist": False,
+                    "source": "enforcement",
+                    "bundled": False,
+                    "homepage": "",
+                })
+                known_names.add(name)
 
-    for name in scan_map:
-        if name not in known_names:
-            skills.append({
-                "name": name,
-                "description": "",
-                "emoji": "",
-                "eligible": False,
-                "disabled": False,
-                "blockedByAllowlist": False,
-                "source": "scan-history",
-                "bundled": False,
-                "homepage": "",
-            })
-            known_names.add(name)
+        for name in scan_map:
+            if name not in known_names:
+                skills.append({
+                    "name": name,
+                    "description": "",
+                    "emoji": "",
+                    "eligible": False,
+                    "disabled": False,
+                    "blockedByAllowlist": False,
+                    "source": "scan-history",
+                    "bundled": False,
+                    "homepage": "",
+                })
+                known_names.add(name)
 
     if as_json:
         _print_skill_list_json(skills, scan_map, actions_map)
@@ -565,8 +625,8 @@ def scan(
     scan_dir = scan_path
     if not scan_dir:
         info = _get_openclaw_skill_info(target, app)
-        if info and info.get("baseDir"):
-            scan_dir = info["baseDir"]
+        if info and _skill_info_path(info):
+            scan_dir = _skill_info_path(info) or ""
         else:
             resolved = _resolve_path(app, target)
             if resolved:
@@ -591,11 +651,22 @@ def scan(
         raise SystemExit(2)
 
     if pe.is_allowed("skill", name):
-        click.echo(f"ALLOWED (skip scan): {name}")
+        click.echo(ux._style(f"ALLOWED (skip scan): {name}", fg="green"))
         return
 
-    if not as_json:
-        click.echo(f"[scan] skill-scanner -> {scan_dir}")
+    from defenseclaw.commands import _scan_ui
+
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+    ctx = _scan_ui.ScanContext.for_skill(
+        connector=connector,
+        paths=[scan_dir],
+        as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=1)
 
     try:
         result = scanner.scan(scan_dir)
@@ -609,7 +680,31 @@ def scan(
     if as_json:
         click.echo(result.to_json())
     else:
+        # Per-target glyph line (S6.3 — shared scan UX) sits above the
+        # existing detailed Skill / Target / Duration / Findings block
+        # so the new summary numbers tie back to a clear verdict.
+        if result.is_clean():
+            _scan_ui.render_per_target_status(
+                ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+            )
+        else:
+            _scan_ui.render_per_target_status(
+                ctx,
+                target=name,
+                verdict=_scan_ui.VERDICT_BLOCKED,
+                detail=f"max severity: {result.max_severity()}",
+                findings=len(result.findings),
+            )
+        click.echo()
         _print_result(name, result)
+        _scan_ui.render_summary(
+            ctx,
+            clean=1 if result.is_clean() else 0,
+            blocked=0 if result.is_clean() else 1,
+            errored=0,
+            total=1,
+            duration_ms=int(result.duration.total_seconds() * 1000),
+        )
         from defenseclaw.commands import hint
         if result.is_clean():
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
@@ -645,6 +740,8 @@ def _apply_scan_enforcement(
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
+        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        asset_policy=app.cfg.asset_policy,
     )
 
     if decision.verdict == "allowed":
@@ -709,6 +806,7 @@ def _enable_skill_via_gateway(app: AppContext, skill_name: str) -> bool:
 
 
 def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False) -> None:
+    from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
 
     oc_list = _list_openclaw_skills_full(app)
@@ -719,35 +817,32 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
 
     pe = PolicyEngine(app.store)
     verdicts = []
+    errors = 0
+
+    connector = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+
+    # Build the target list up front so we can render an accurate
+    # preamble (count + sources) before the first scanner run.
+    targets: list[tuple[str, str]] = []  # (name, base_dir)
+    sources: list[str] = []
 
     if skill_names:
-        if not as_json:
-            click.echo(f"[scan] found {len(skill_names)} skills to scan\n")
         for name in skill_names:
             info = _get_openclaw_skill_info(name, app)
-            if not info or not info.get("baseDir"):
+            base_dir = _skill_info_path(info) if info else ""
+            if not base_dir:
                 click.echo(f"[scan] warning: no baseDir for {name}", err=True)
                 continue
-            base_dir = info["baseDir"]
-            if not as_json:
-                click.echo(f"[scan] skill-scanner -> {base_dir}")
-            try:
-                result = scanner.scan(base_dir)
-                if app.logger:
-                    app.logger.log_scan(result)
-                verdicts.append({"name": name, "result": result})
-                if as_json:
-                    click.echo(result.to_json())
-                else:
-                    _print_result(name, result)
-                    click.echo()
-                if not result.is_clean() and enforce:
-                    _apply_scan_enforcement(app, pe, name, base_dir, result)
-            except Exception as exc:
-                click.echo(f"[scan] error scanning {name}: {exc}", err=True)
+            targets.append((name, base_dir))
+        sources = sorted({os.path.dirname(p) for _, p in targets if p})
     else:
         # Fall back to directory scan
         dirs = app.cfg.skill_dirs()
+        sources = list(dirs)
         for skill_dir in dirs:
             if not os.path.isdir(skill_dir):
                 continue
@@ -755,41 +850,71 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
                 path = os.path.join(skill_dir, entry)
                 if not os.path.isdir(path):
                     continue
-                if not as_json:
-                    click.echo(f"[scan] skill-scanner -> {path}")
-                try:
-                    result = scanner.scan(path)
-                    if app.logger:
-                        app.logger.log_scan(result)
-                    verdicts.append({"name": entry, "result": result})
-                    if as_json:
-                        click.echo(result.to_json())
-                    else:
-                        _print_result(entry, result)
-                        click.echo()
-                    if not result.is_clean() and enforce:
-                        _apply_scan_enforcement(app, pe, entry, path, result)
-                except Exception as exc:
-                    click.echo(f"  Error: {exc}")
+                targets.append((entry, path))
 
-        if not verdicts:
+        if not targets:
             click.echo("No skills found in configured directories:")
             for d in (dirs if dirs else []):
                 click.echo(f"  {d}")
             return
 
+    ctx = _scan_ui.ScanContext.for_skill(
+        connector=connector, paths=sources, as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=len(targets))
+
+    import time
+    started = time.monotonic()
+
+    for name, base_dir in targets:
+        try:
+            result = scanner.scan(base_dir)
+            if app.logger:
+                app.logger.log_scan(result)
+            verdicts.append({"name": name, "result": result})
+            if as_json:
+                click.echo(result.to_json())
+            else:
+                if result.is_clean():
+                    _scan_ui.render_per_target_status(
+                        ctx, target=name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                    )
+                else:
+                    _scan_ui.render_per_target_status(
+                        ctx,
+                        target=name,
+                        verdict=_scan_ui.VERDICT_BLOCKED,
+                        detail=f"max severity: {result.max_severity()}",
+                        findings=len(result.findings),
+                    )
+            if not result.is_clean() and enforce:
+                _apply_scan_enforcement(app, pe, name, base_dir, result)
+        except Exception as exc:
+            errors += 1
+            if not as_json:
+                _scan_ui.render_per_target_status(
+                    ctx,
+                    target=name,
+                    verdict=_scan_ui.VERDICT_ERROR,
+                    detail=str(exc),
+                )
+            else:
+                click.echo(f"[scan] error scanning {name}: {exc}", err=True)
+
     if not as_json and verdicts:
         clean = sum(1 for v in verdicts if v["result"].is_clean())
-        rejected = sum(
-            1 for v in verdicts
-            if not v["result"].is_clean()
-            and (app.cfg.skill_actions.should_disable(v["result"].max_severity())
-                 or app.cfg.skill_actions.should_quarantine(v["result"].max_severity()))
+        blocked = len(verdicts) - clean
+        duration_ms = int((time.monotonic() - started) * 1000)
+        _scan_ui.render_summary(
+            ctx,
+            clean=clean,
+            blocked=blocked,
+            errored=errors,
+            total=len(verdicts) + errors,
+            duration_ms=duration_ms,
         )
-        warnings = len(verdicts) - clean - rejected
-        click.echo(f"Summary: {clean} clean, {warnings} warnings, {rejected} rejected")
         from defenseclaw.commands import hint
-        if rejected:
+        if blocked:
             hint("View alerts:       defenseclaw alerts")
         else:
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
@@ -805,6 +930,16 @@ def _resolve_path(app: AppContext, target: str) -> str | None:
     return None
 
 
+def _skill_info_path(info: dict[str, Any] | None) -> str:
+    if not info:
+        return ""
+    for key in ("baseDir", "path", "filePath"):
+        value = info.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Option 2: Remote scan via sidecar API
 # ---------------------------------------------------------------------------
@@ -818,7 +953,7 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
     client = _sidecar_client(app)
 
     if not as_json:
-        click.echo(f"[scan] remote skill-scanner via sidecar -> {target}")
+        click.echo(ux.dim(f"[scan] remote skill-scanner via sidecar -> {target}"))
 
     try:
         data = client.scan_skill(target=target, name=name)
@@ -832,12 +967,12 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
 
     findings = data.get("findings") or data.get("Findings") or []
     max_sev = data.get("max_severity", "INFO")
-    click.echo(f"  Skill:    {name}")
-    click.echo(f"  Target:   {target} (remote)")
-    click.echo(f"  Findings: {len(findings)}")
+    click.echo(f"  {ux._style('Skill:', fg='bright_black', bold=True)}    {name}")
+    click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {target} {ux.dim('(remote)')}")
+    click.echo(f"  {ux._style('Findings:', fg='bright_black', bold=True)} {len(findings)}")
 
     if not findings:
-        click.secho("  Verdict:  CLEAN", fg="green")
+        ux.ok("Verdict:  CLEAN", indent="  ")
     else:
         color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(max_sev, "white")
         sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
@@ -848,13 +983,14 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
         breakdown = ", ".join(
             f"{counts[s]} {s.lower()}" for s in sev_order if s in counts
         )
-        click.secho(f"  Verdict:  {max_sev} ({breakdown})", fg=color)
+        verdict_txt = f"Verdict:  {max_sev} ({breakdown})"
+        click.echo(f"  {ux._style(verdict_txt, fg=color, bold=True)}")
         click.echo()
         for f in findings:
             sev = f.get("severity") or f.get("Severity") or "INFO"
             title = f.get("title") or f.get("Title") or ""
             sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(sev, "white")
-            click.secho(f"    [{sev}]", fg=sev_color, nl=False)
+            click.echo(f"    {ux._style(f'[{sev}]', fg=sev_color, bold=True)}", nl=False)
             click.echo(f" {title}")
 
 
@@ -1158,13 +1294,13 @@ def _safe_tar_extract(
 
 
 def _print_result(name: str, result) -> None:
-    click.echo(f"  Skill:    {name}")
-    click.echo(f"  Target:   {result.target}")
-    click.echo(f"  Duration: {result.duration.total_seconds():.2f}s")
-    click.echo(f"  Findings: {len(result.findings)}")
+    click.echo(f"  {ux._style('Skill:', fg='bright_black', bold=True)}    {name}")
+    click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}   {result.target}")
+    click.echo(f"  {ux._style('Duration:', fg='bright_black', bold=True)} {result.duration.total_seconds():.2f}s")
+    click.echo(f"  {ux._style('Findings:', fg='bright_black', bold=True)} {len(result.findings)}")
 
     if result.is_clean():
-        click.secho("  Verdict:  CLEAN", fg="green")
+        ux.ok("Verdict:  CLEAN", indent="  ")
     else:
         sev = result.max_severity()
         color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow"}.get(sev, "white")
@@ -1175,19 +1311,20 @@ def _print_result(name: str, result) -> None:
         breakdown = ", ".join(
             f"{counts[s]} {s.lower()}" for s in sev_order if s in counts
         )
-        click.secho(f"  Verdict:  {sev} ({breakdown})", fg=color)
+        verdict_txt = f"Verdict:  {sev} ({breakdown})"
+        click.echo(f"  {ux._style(verdict_txt, fg=color, bold=True)}")
         click.echo()
         for f in result.findings:
             sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(f.severity, "white")
-            click.secho(f"    [{f.severity}]", fg=sev_color, nl=False)
+            click.echo(f"    {ux._style(f'[{f.severity}]', fg=sev_color, bold=True)}", nl=False)
             click.echo(f" {f.title}")
             if f.location:
-                click.echo(f"      Location: {f.location}")
+                click.echo(f"      {ux.dim('Location:')} {f.location}")
             if f.description:
                 desc = f.description[:120] + "..." if len(f.description) > 120 else f.description
                 click.echo(f"      {desc}")
             if f.remediation:
-                click.echo(f"      Fix: {f.remediation}")
+                click.echo(f"      {ux.dim('Fix:')} {f.remediation}")
 
 
 # ---------------------------------------------------------------------------
@@ -1569,31 +1706,33 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
         return
 
     # Text output
-    click.echo(f"Skill:       {info_map.get('name', skill_name)}")
+    click.echo(f"{ux.bold('Skill:')}       {info_map.get('name', skill_name)}")
     if info_map.get("description"):
-        click.echo(f"Description: {info_map['description']}")
+        click.echo(f"{ux.bold('Description:')} {info_map['description']}")
     if info_map.get("source"):
-        click.echo(f"Source:      {info_map['source']}")
+        click.echo(f"{ux.bold('Source:')}      {info_map['source']}")
     if info_map.get("baseDir"):
-        click.echo(f"Path:        {info_map['baseDir']}")
+        click.echo(f"{ux.bold('Path:')}        {info_map['baseDir']}")
     if info_map.get("filePath"):
-        click.echo(f"File:        {info_map['filePath']}")
-    click.echo(f"Eligible:    {info_map.get('eligible', False)}")
-    click.echo(f"Bundled:     {info_map.get('bundled', False)}")
+        click.echo(f"{ux.bold('File:')}        {info_map['filePath']}")
+    click.echo(f"{ux.bold('Eligible:')}    {info_map.get('eligible', False)}")
+    click.echo(f"{ux.bold('Bundled:')}     {info_map.get('bundled', False)}")
     if info_map.get("homepage"):
-        click.echo(f"Homepage:    {info_map['homepage']}")
+        click.echo(f"{ux.bold('Homepage:')}    {info_map['homepage']}")
 
     scan_data = info_map.get("scan")
     if scan_data:
         click.echo()
-        click.echo("Last Scan:")
+        click.echo(ux.bold("Last Scan:"))
         if scan_data.get("clean"):
-            click.secho("  Verdict:  CLEAN", fg="green")
+            ux.ok("Verdict:  CLEAN", indent="  ")
         else:
             n = scan_data.get("total_findings", 0)
             sev = scan_data.get("max_severity", "INFO")
-            click.echo(f"  Verdict:  {n} {sev} findings")
-        click.echo(f"  Target:   {scan_data.get('target', '')}")
+            click.echo(
+                f"  {ux.bold('Verdict:')}  {n} {ux._style(sev, fg='yellow', bold=True)} findings"
+            )
+        click.echo(f"  {ux.bold('Target:')}   {scan_data.get('target', '')}")
 
     actions_data = info_map.get("actions")
     if actions_data:
@@ -1601,7 +1740,7 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
         state = ActionState.from_dict(actions_data)
         if not state.is_empty():
             click.echo()
-            click.echo(f"Actions:     {state.summary()}")
+            click.echo(f"{ux.bold('Actions:')}     {state.summary()}")
 
 
 # ---------------------------------------------------------------------------
@@ -1637,6 +1776,8 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         name=skill_name,
         source_path=name,
         fallback_actions=app.cfg.skill_actions,
+        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        asset_policy=app.cfg.asset_policy,
     )
 
     if pre_decision.verdict == "blocked":
@@ -1695,6 +1836,8 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
+        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        asset_policy=app.cfg.asset_policy,
     )
 
     if post_decision.verdict == "allowed":

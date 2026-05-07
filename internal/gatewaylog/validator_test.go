@@ -102,6 +102,18 @@ func TestValidator_AcceptsValidVerdict(t *testing.T) {
 	}
 }
 
+func TestValidator_AcceptsGuardrailRuntimeActions(t *testing.T) {
+	v := newRepoValidator(t)
+
+	for _, action := range []string{"allow", "warn", "alert", "confirm", "block"} {
+		e := validVerdict()
+		e.Verdict.Action = action
+		if err := v.Validate(e); err != nil {
+			t.Fatalf("valid verdict action %q rejected: %v", action, err)
+		}
+	}
+}
+
 func TestValidator_AcceptsValidError(t *testing.T) {
 	v := newRepoValidator(t)
 	e := Event{
@@ -117,6 +129,66 @@ func TestValidator_AcceptsValidError(t *testing.T) {
 	}
 	if err := v.Validate(e); err != nil {
 		t.Fatalf("valid error event rejected: %v", err)
+	}
+}
+
+func TestValidator_AcceptsLLMEvents(t *testing.T) {
+	v := newRepoValidator(t)
+	exitCode := 0
+	events := []Event{
+		{
+			Timestamp:     time.Now().UTC(),
+			EventType:     EventLLMPrompt,
+			Severity:      SeverityInfo,
+			SchemaVersion: 7,
+			Direction:     DirectionPrompt,
+			Model:         "gpt-4o",
+			Provider:      "openai",
+			UserID:        "alice",
+			AgentType:     "codex",
+			LLMPrompt: &LLMPromptPayload{
+				PromptID: "prompt-1",
+				Prompt:   "hello",
+				Source:   "codex",
+			},
+		},
+		{
+			Timestamp:     time.Now().UTC(),
+			EventType:     EventLLMResponse,
+			Severity:      SeverityInfo,
+			SchemaVersion: 7,
+			Direction:     DirectionCompletion,
+			Model:         "gpt-4o",
+			Provider:      "openai",
+			LLMResponse: &LLMResponsePayload{
+				ResponseID:      "response-1",
+				ReplyToPromptID: "prompt-1",
+				Response:        "hello back",
+				Source:          "codex",
+			},
+		},
+		{
+			Timestamp:     time.Now().UTC(),
+			EventType:     EventToolInvocation,
+			Severity:      SeverityInfo,
+			SchemaVersion: 7,
+			Direction:     DirectionToolCall,
+			ToolName:      "shell",
+			ToolID:        "call-1",
+			Tool: &ToolPayload{
+				ToolCallID: "call-1",
+				Phase:      "result",
+				Tool:       "shell",
+				ToolOutput: "ok",
+				ExitCode:   &exitCode,
+				Source:     "codex",
+			},
+		},
+	}
+	for _, e := range events {
+		if err := v.Validate(e); err != nil {
+			t.Fatalf("%s event rejected: %v", e.EventType, err)
+		}
 	}
 }
 

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -181,11 +182,18 @@ func (d *DeviceIdentity) RepairPairing(sandboxHome string) error {
 		createdAt = nowMs
 	}
 
+	// Platform must match what the connect handshake reports
+	// (client.go uses runtime.GOOS); otherwise OpenClaw flags this as
+	// `metadata-upgrade` ("device identity changed and must be re-approved")
+	// on every reconnect and the gateway link gets stuck in NOT_PAIRED.
+	// See gateway-rooted regression: hardcoding "linux" here while
+	// connecting from darwin produced an infinite RECONNECTING loop
+	// even with a valid paired.json entry.
 	paired[d.DeviceID] = map[string]interface{}{
 		"deviceId":       d.DeviceID,
 		"publicKey":      d.PublicKeyBase64URL(),
 		"displayName":    "defenseclaw-sidecar",
-		"platform":       "linux",
+		"platform":       runtime.GOOS,
 		"deviceFamily":   existing["deviceFamily"],
 		"clientId":       "gateway-client",
 		"clientMode":     "backend",

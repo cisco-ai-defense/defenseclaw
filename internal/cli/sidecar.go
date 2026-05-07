@@ -18,12 +18,9 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"os/signal"
-	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -40,20 +37,10 @@ var (
 	sidecarPort  int
 )
 
-var statusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show health of the running sidecar's subsystems",
-	Long: `Query the sidecar's REST API to display the health of all three subsystems:
-gateway connection, skill watcher, and API server.
-
-The sidecar must be running for this command to work.`,
-	RunE: runSidecarStatus,
-}
-
 func init() {
 	rootCmd.Flags().StringVar(&sidecarToken, "token", "",
 		"DEPRECATED: gateway auth token. Passing secrets on the command line exposes them to ps/procfs. "+
-			"Use OPENCLAW_GATEWAY_TOKEN env or gateway.token in config instead.")
+			"Use DEFENSECLAW_GATEWAY_TOKEN env or gateway.token in config instead.")
 	// Hide from default help so we don't advertise the insecure path, but
 	// keep it working so existing scripts don't break. We emit a one-line
 	// deprecation warning at runtime when it's actually used.
@@ -62,7 +49,6 @@ func init() {
 	}
 	rootCmd.Flags().StringVar(&sidecarHost, "host", "", "Gateway host (default: from config)")
 	rootCmd.Flags().IntVar(&sidecarPort, "port", 0, "Gateway port (default: from config)")
-	rootCmd.AddCommand(statusCmd)
 }
 
 func runSidecar(_ *cobra.Command, _ []string) error {
@@ -70,7 +56,7 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
 				"Secrets on argv are visible to any local user via ps(1) / /proc/<pid>/cmdline. "+
-				"Set OPENCLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
+				"Set DEFENSECLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
 		cfg.Gateway.Token = sidecarToken
 	}
 	if sidecarHost != "" {
@@ -228,92 +214,6 @@ func sidecarDiagEnabled() bool {
 		return true
 	}
 	return false
-}
-
-func runSidecarStatus(_ *cobra.Command, _ []string) error {
-	bind := "127.0.0.1"
-	if cfg.Gateway.APIBind != "" {
-		bind = cfg.Gateway.APIBind
-	} else if cfg.OpenShell.IsStandalone() && cfg.Guardrail.Host != "" && cfg.Guardrail.Host != "localhost" {
-		bind = cfg.Guardrail.Host
-	}
-	addr := fmt.Sprintf("http://%s:%d/health", bind, cfg.Gateway.APIPort)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(addr)
-	if err != nil {
-		fmt.Println("Sidecar Status: NOT RUNNING")
-		fmt.Printf("  Could not reach %s\n", addr)
-		fmt.Println("  Start the sidecar with: defenseclaw-gateway start")
-		return fmt.Errorf("sidecar unreachable")
-	}
-	defer resp.Body.Close()
-
-	var snap gateway.HealthSnapshot
-	if err := json.NewDecoder(resp.Body).Decode(&snap); err != nil {
-		return fmt.Errorf("sidecar status: parse response: %w", err)
-	}
-
-	uptime := time.Duration(snap.UptimeMs) * time.Millisecond
-
-	fmt.Println("DefenseClaw Sidecar Health")
-	fmt.Println("══════════════════════════")
-	fmt.Printf("  Started:  %s\n", snap.StartedAt.Format(time.RFC3339))
-	fmt.Printf("  Uptime:   %s\n", formatDuration(uptime))
-	fmt.Println()
-
-	printSubsystem("Gateway", snap.Gateway)
-	printSubsystem("Watcher", snap.Watcher)
-	printSubsystem("API", snap.API)
-	printSubsystem("Guardrail", snap.Guardrail)
-	printSubsystem("Telemetry", snap.Telemetry)
-	printSubsystem("Sinks", snap.Sinks)
-	if snap.Sandbox != nil {
-		printSubsystem("Sandbox", *snap.Sandbox)
-	}
-
-	return nil
-}
-
-func printSubsystem(name string, h gateway.SubsystemHealth) {
-	stateStr := strings.ToUpper(string(h.State))
-	fmt.Printf("  %-10s %s", name+":", stateStr)
-	if !h.Since.IsZero() {
-		fmt.Printf(" (since %s)", h.Since.Format(time.RFC3339))
-	}
-	fmt.Println()
-
-	if h.LastError != "" {
-		fmt.Printf("             last error: %s\n", h.LastError)
-	}
-	if len(h.Details) > 0 {
-		keys := make([]string, 0, len(h.Details))
-		for k := range h.Details {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			if strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") {
-				continue
-			}
-			fmt.Printf("             %s: %v\n", k, h.Details[k])
-		}
-	}
-	fmt.Println()
-}
-
-func formatDuration(d time.Duration) string {
-	hours := int(d.Hours())
-	mins := int(d.Minutes()) % 60
-	secs := int(d.Seconds()) % 60
-
-	if hours > 0 {
-		return fmt.Sprintf("%dh %dm %ds", hours, mins, secs)
-	}
-	if mins > 0 {
-		return fmt.Sprintf("%dm %ds", mins, secs)
-	}
-	return fmt.Sprintf("%ds", secs)
 }
 
 func tokenStatus(token string) string {

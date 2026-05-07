@@ -180,6 +180,9 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev.AgentName == "" {
 		ev.AgentName = id.AgentName
 	}
+	if ev.AgentType == "" {
+		ev.AgentType = id.AgentType
+	}
 	if ev.AgentInstanceID == "" {
 		ev.AgentInstanceID = id.AgentInstanceID
 	}
@@ -216,7 +219,37 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 		cp.Cause = redaction.ForSinkString(cp.Cause)
 		e.Error = &cp
 	}
-	w.Emit(e)
+	if p := e.LLMPrompt; p != nil {
+		cp := *p
+		if cp.Prompt != "" {
+			cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
+		}
+		if cp.RawRequestBody != "" {
+			cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+		}
+		e.LLMPrompt = &cp
+	}
+	if r := e.LLMResponse; r != nil {
+		cp := *r
+		if cp.Response != "" {
+			cp.Response = redaction.ForSinkMessageContent(cp.Response)
+		}
+		if cp.RawResponseBody != "" {
+			cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+		}
+		e.LLMResponse = &cp
+	}
+	if t := e.Tool; t != nil {
+		cp := *t
+		if cp.ToolInput != "" {
+			cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
+		}
+		if cp.ToolOutput != "" {
+			cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+		}
+		e.Tool = &cp
+	}
+	w.EmitContext(ctx, e)
 }
 
 // emitVerdict records a single guardrail-pipeline stage decision.
@@ -233,6 +266,13 @@ func emitVerdict(
 	categories []string,
 	latencyMs int64,
 ) {
+	// Plan B6 / S0.10: VerdictPayload.Reason is documented as
+	// "short, redacted" but the redactor pipeline DOES legitimately
+	// receive raw-secret strings on the way in (the redaction layer
+	// strips them in-place before the wire emit). Scrub assertion
+	// would fight that path; the canary lives only on the egress
+	// shape where no caller has any legitimate reason to pass a
+	// credential prefix. See emitEgress in this file.
 	emitEvent(ctx, gatewaylog.Event{
 		EventType: gatewaylog.EventVerdict,
 		Severity:  severity,
@@ -467,6 +507,14 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	if len(p.Reason) > 512 {
 		p.Reason = p.Reason[:512]
 	}
+	// Plan B6 / S0.10: defense-in-depth scrub guard. The egress
+	// schema is structurally key-free (no APIKey field) but a
+	// future refactor that accidentally lands a credential in
+	// TargetHost / TargetPath / Reason should crash CI before
+	// shipping a leak. In production we log and continue — the
+	// canary fires once, the operator reads the warning, and the
+	// follow-up fix lands without an outage.
+	redaction.MustAssertNoCredentials(p.TargetHost, p.TargetPath, p.Reason)
 	// BodyShape is a known enum — reject anything else so a
 	// malformed TS client cannot inject arbitrary strings into the
 	// downstream contract. validEgressBranch / validEgressDecision

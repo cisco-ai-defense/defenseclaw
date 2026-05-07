@@ -16,51 +16,54 @@
 
 """Tests for defenseclaw.config — environment detection, load, save, claw-mode paths."""
 
+import contextlib
+import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import defenseclaw.config as config_mod
 from defenseclaw.config import (
-    CiscoAIDefenseConfig,
-    Config,
-    ClawConfig,
     DEFAULT_OPENSHELL_VERSION,
     DEFAULT_SANDBOX_HOME,
+    AssetPolicyConfig,
+    AssetPolicyRule,
+    CiscoAIDefenseConfig,
+    ClawConfig,
+    Config,
     GatewayConfig,
-    GatewayWatcherConfig,
-    GatewayWatcherSkillConfig,
+    GatewayWatcherPluginConfig,
+    GuardrailConfig,
     InspectLLMConfig,
     MCPScannerConfig,
-    GatewayWatcherPluginConfig,
-    PluginActionsConfig,
-    GuardrailConfig,
     OpenShellConfig,
+    PluginActionsConfig,
     SeverityAction,
     SkillActionsConfig,
     SkillScannerConfig,
-    WebhookConfig,
     WatchConfig,
+    WebhookConfig,
     _dedup,
     _expand,
     _merge_cisco_ai_defense,
     _merge_gateway_watcher,
+    _merge_guardrail,
     _merge_inspect_llm,
     _merge_mcp_scanner,
     _merge_openshell,
     _merge_plugin_actions,
-    _merge_guardrail,
     _merge_severity_action,
     _merge_skill_actions,
     _merge_webhooks,
+    config_path,
     default_config,
     default_data_path,
-    config_path,
     detect_environment,
     load,
 )
@@ -82,6 +85,16 @@ class TestHelpers(unittest.TestCase):
 
     def test_dedup_empty(self):
         self.assertEqual(_dedup([]), [])
+
+    def test_validate_deployment_mode_empty_allowed(self):
+        self.assertEqual(config_mod._validate_deployment_mode(""), "")
+
+    def test_validate_deployment_mode_valid(self):
+        self.assertEqual(config_mod._validate_deployment_mode("managed_enterprise"), "managed_enterprise")
+
+    def test_validate_deployment_mode_invalid(self):
+        with self.assertRaises(ValueError):
+            config_mod._validate_deployment_mode("managed")
 
 
 class TestPaths(unittest.TestCase):
@@ -265,6 +278,14 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertFalse(mc.scan_resources)
         self.assertFalse(mc.scan_instructions)
 
+    def test_default_asset_policy_runtime_detection_scope(self):
+        cfg = default_config()
+        self.assertFalse(cfg.asset_policy.enabled)
+        self.assertTrue(cfg.asset_policy.mcp.runtime_detection.enabled)
+        self.assertTrue(cfg.asset_policy.mcp.runtime_detection.terminal_commands)
+        self.assertFalse(cfg.asset_policy.skill.runtime_detection.enabled)
+        self.assertFalse(cfg.asset_policy.plugin.runtime_detection.enabled)
+
 
 class TestConfigLoadSave(unittest.TestCase):
     def test_load_missing_config_returns_defaults(self):
@@ -273,6 +294,20 @@ class TestConfigLoadSave(unittest.TestCase):
             cfg = load()
             self.assertIsInstance(cfg, Config)
             self.assertEqual(cfg.claw.mode, "openclaw")
+
+    def test_load_missing_guardrail_connector_falls_back_to_claw_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / ".defenseclaw"
+            data_dir.mkdir()
+            (data_dir / "config.yaml").write_text(
+                "claw:\n  mode: codex\n"
+                "guardrail:\n  enabled: true\n  port: 4000\n",
+                encoding="utf-8",
+            )
+            with patch("defenseclaw.config.default_data_path", return_value=data_dir):
+                cfg = load()
+        self.assertEqual(cfg.guardrail.connector, "")
+        self.assertEqual(cfg.active_connector(), "codex")
 
     def test_save_and_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -330,6 +365,43 @@ class TestConfigLoadSave(unittest.TestCase):
 
             self.assertFalse(loaded.watch.rescan_enabled)
             self.assertEqual(loaded.watch.rescan_interval_min, 15)
+
+    def test_asset_policy_roundtrip(self):
+        import yaml
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                environment="linux",
+                asset_policy=AssetPolicyConfig(enabled=True, mode="action"),
+            )
+            cfg.asset_policy.mcp.registry_required = True
+            cfg.asset_policy.mcp.registry = [AssetPolicyRule(name="github", connector="codex")]
+            cfg.asset_policy.skill.default = "deny"
+            cfg.save()
+
+            config_file = os.path.join(tmpdir, "config.yaml")
+            with open(config_file) as f:
+                raw = yaml.safe_load(f)
+
+            self.assertTrue(raw["asset_policy"]["enabled"])
+            self.assertEqual(raw["asset_policy"]["mode"], "action")
+            self.assertTrue(raw["asset_policy"]["mcp"]["registry_required"])
+            self.assertEqual(raw["asset_policy"]["mcp"]["registry"][0]["name"], "github")
+            self.assertFalse(raw["asset_policy"]["skill"]["runtime_detection"]["enabled"])
+
+            with patch("defenseclaw.config.default_data_path") as mock_dp:
+                mock_dp.return_value = Path(tmpdir)
+                loaded = load()
+
+            self.assertTrue(loaded.asset_policy.enabled)
+            self.assertEqual(loaded.asset_policy.mode, "action")
+            self.assertTrue(loaded.asset_policy.mcp.registry_required)
+            self.assertEqual(loaded.asset_policy.mcp.registry[0].connector, "codex")
+            self.assertEqual(loaded.asset_policy.skill.default, "deny")
 
 
 class TestClawPaths(unittest.TestCase):
@@ -829,6 +901,31 @@ class TestConfigTopLevelSections(unittest.TestCase):
             self.assertEqual(cfg.inspect_llm.timeout, 30)
             self.assertIn("aidefense.security.cisco.com", cfg.cisco_ai_defense.endpoint)
 
+    def test_load_warns_once_when_redaction_disabled(self):
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_data = {
+                "data_dir": tmpdir,
+                "privacy": {"disable_redaction": True},
+            }
+            with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
+                yaml.dump(config_data, f)
+
+            stderr = io.StringIO()
+            with (
+                patch("defenseclaw.config.default_data_path") as mock_dp,
+                patch.object(config_mod, "_privacy_disable_redaction_warned", False),
+                contextlib.redirect_stderr(stderr),
+            ):
+                mock_dp.return_value = Path(tmpdir)
+                config_mod.load()
+                config_mod.load()
+
+            output = stderr.getvalue()
+            self.assertEqual(output.count("privacy.disable_redaction=true"), 1)
+            self.assertIn("UNREDACTED prompts", output)
+
     def test_guardrail_config_has_no_cisco_ai_defense(self):
         """GuardrailConfig no longer nests CiscoAIDefenseConfig."""
         from defenseclaw.config import GuardrailConfig
@@ -871,6 +968,15 @@ class TestGuardrailHostField(unittest.TestCase):
     def test_merge_guardrail_none(self):
         gc = _merge_guardrail(None, "/tmp")
         self.assertEqual(gc.host, "localhost")
+
+    def test_merge_guardrail_hilt_defaults_and_alias(self):
+        default_gc = _merge_guardrail({}, "/tmp")
+        self.assertFalse(default_gc.hilt.enabled)
+        self.assertEqual(default_gc.hilt.min_severity, "HIGH")
+
+        aliased = _merge_guardrail({"hitl": {"enabled": True, "min_severity": "medium"}}, "/tmp")
+        self.assertTrue(aliased.hilt.enabled)
+        self.assertEqual(aliased.hilt.min_severity, "MEDIUM")
 
 
 class TestOpenShellModeField(unittest.TestCase):

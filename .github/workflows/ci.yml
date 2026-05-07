@@ -22,6 +22,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
       - run: make go-lint
 
   go-test:
@@ -32,6 +38,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
       - run: make go-test-cov
       - uses: actions/upload-artifact@v4
         with:
@@ -50,6 +62,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
       - run: make gateway-cross GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }}
       - uses: actions/upload-artifact@v4
         with:
@@ -85,6 +103,9 @@ jobs:
       # (the latest as of this commit) still pins python-dotenv==1.2.1.
       # CVE-2026-28684: python-dotenv 1.2.1 — pulled in only via out-of-process
       # Python scanner subprocesses, not linked into the gateway.
+      # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip version is
+      # released. No fix version available as of 2026-04-24. pip is only used
+      # by pip-audit itself, not by DefenseClaw at runtime.
       # TODO: Remove --ignore-vuln CVE-2026-3219 once a fixed pip is released.
       # CVE-2026-3219: pip's interpretation conflict with concatenated tar/ZIP
       # archives. Medium severity; impacts only attacker-supplied package
@@ -139,6 +160,19 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
       - uses: astral-sh/setup-uv@v4
-      - run: make pycli
+      - run: make plugin
+      # dev-pycli installs the [dev] group (pytest, jsonschema, ruff)
+      # which `make test → cli-test` indirectly needs at import time:
+      # several cli/tests/*.py files use pytest fixtures/parametrize
+      # and `python -m unittest discover` aborts on the first failed
+      # import. The non-dev `make pycli` target only installs runtime
+      # deps and broke this job after the S4.1/S4.2 connector_paths
+      # tests landed.
+      - run: make dev-pycli
       - run: make test

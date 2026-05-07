@@ -30,13 +30,65 @@ import urllib.request
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
-_PASS = click.style("PASS", fg="green", bold=True)
-_FAIL = click.style("FAIL", fg="red", bold=True)
-_WARN = click.style("WARN", fg="yellow", bold=True)
-_SKIP = click.style("SKIP", fg="bright_black")
+# Doctor status markers, recomputed per emission so the per-call
+# TTY/NO_COLOR gate in ``ux._color_enabled`` takes effect. Caching at
+# module load froze the gate to whatever the import-time stdout was —
+# fine for normal runs, broken for tests that monkey-patch stdout
+# between invocations and for ``--json-output`` runs that toggle
+# ``_json_mode`` part-way through a process.
+_DOCTOR_MARKERS: dict[str, tuple[str, str]] = {
+    "pass": ("✓", "green"),
+    "fail": ("✗", "red"),
+    "warn": ("⚠", "yellow"),
+    "skip": ("-", "bright_black"),
+}
+
+
+def _doctor_subsection(title: str) -> None:
+    """Print a doctor sub-section divider.
+
+    Format: blank line, then ``  ── <title> ──`` with the title bold
+    and the box-drawing dashes dimmed in TTY mode. Plain mode keeps
+    the legacy uncolored layout so cron logs and log shippers see
+    the same byte stream they always have.
+    """
+    click.echo()
+    if ux._color_enabled():
+        click.echo(
+            "  "
+            + ux.dim("──")
+            + " "
+            + ux._style(title, fg="cyan", bold=True)
+            + " "
+            + ux.dim("──")
+        )
+    else:
+        click.echo(f"  ── {title} ──")
+
+
+def _doctor_marker(tag: str) -> str:
+    """Return the inline marker for ``tag`` (``pass``/``fail``/...).
+
+    Color-on: ``✓`` (or matching glyph) painted in the tag's color.
+    Color-off: legacy 4-char verb in square brackets (``[PASS]``,
+    ``[FAIL]``, ...) so screen scrapers that grep doctor output for
+    ``[PASS]`` keep working unchanged. The width difference between
+    the two formats is intentional and documented — interactive
+    sessions get a tighter glyph, CI logs get a wider verb.
+    """
+    glyph, fg = _DOCTOR_MARKERS.get(tag, ("?", "white"))
+    if ux._color_enabled():
+        return ux._style(glyph, fg=fg, bold=True)
+    # Plain mode → legacy "[VERB]" so existing log pattern matchers
+    # (and any cron job that splits on `[FAIL]`) keep matching.
+    verb = {"pass": "PASS", "fail": "FAIL", "warn": "WARN", "skip": "SKIP"}.get(
+        tag, tag.upper()
+    )
+    return f"[{verb}]"
 
 
 class _DoctorResult:
@@ -143,11 +195,20 @@ _json_mode = False
 
 def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = None) -> None:
     if not _json_mode:
-        icons = {"pass": _PASS, "fail": _FAIL, "warn": _WARN, "skip": _SKIP}
-        icon = icons.get(tag, tag)
-        line = f"  [{icon}] {label}"
+        marker = _doctor_marker(tag)
+        # Marker + label form the row's primary signal. We bold the
+        # label only when color is on so plain-text output keeps its
+        # legacy width. Detail text is intentionally NOT dimmed —
+        # operators read paths, ports, and HTTP codes from there.
+        if ux._color_enabled():
+            line = f"  {marker} {ux.bold(label)}"
+        else:
+            line = f"  {marker} {label}"
         if detail:
-            line += f"  —  {detail}"
+            # Em-dash separator dims so it visually recedes between
+            # the bold label and the detail value without losing the
+            # connection between the two halves.
+            line += "  " + ux.dim("—") + f"  {detail}"
         click.echo(line)
     if r is not None:
         r.record(tag, label, detail)
@@ -202,6 +263,39 @@ def _check_config(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Config file", cfg.data_dir + "/config.yaml", r=r)
     else:
         _emit("fail", "Config file", "not found — run 'defenseclaw init'", r=r)
+
+
+def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
+    guardrail = getattr(cfg, "guardrail", None)
+    hilt = getattr(guardrail, "hilt", None)
+    if not bool(getattr(hilt, "enabled", False)):
+        _emit("pass", "Human approval", "disabled (default)", r=r)
+        return
+
+    min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
+    mode = (getattr(guardrail, "mode", "") or "observe").lower()
+    if mode != "action":
+        _emit("warn", "Human approval", f"enabled at {min_sev}, but guardrail.mode is observe", r=r)
+        return
+
+    if connector == "openclaw":
+        _emit("pass", "Human approval", f"OpenClaw prompts supported at {min_sev}+", r=r)
+    elif connector == "claudecode":
+        _emit("pass", "Human approval", f"Claude Code PreToolUse ask supported at {min_sev}+", r=r)
+    elif connector == "codex":
+        _emit(
+            "warn", "Human approval",
+            "Codex uses native PermissionRequest prompts only; PreToolUse ask is unsupported",
+            r=r,
+        )
+    elif connector == "zeptoclaw":
+        _emit(
+            "warn", "Human approval",
+            "ZeptoClaw has no native before-tool hook; unsupported confirmations alert only",
+            r=r,
+        )
+    else:
+        _emit("warn", "Human approval", f"connector {connector!r} support is unknown", r=r)
 
 
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
@@ -302,7 +396,29 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                             )
                             stale_hint_printed = True
                     else:
-                        _emit("skip", f"  └─ {sub}", "disabled (reported by sidecar)", r=r)
+                        # When the sidecar published a `details.summary`
+                        # (today: gateway standalone-mode short-circuit
+                        # in runGatewayLoop), surface it instead of the
+                        # generic "disabled (reported by sidecar)".
+                        # Otherwise an operator reading doctor output
+                        # has no way to tell apart "intentionally
+                        # disabled" from "broken but the sidecar
+                        # quietly gave up". Falls back to the generic
+                        # message when no summary is published, so
+                        # other subsystems (telemetry / sandbox / …)
+                        # are unaffected.
+                        details_obj = info.get("details") or {}
+                        summary = ""
+                        if isinstance(details_obj, dict):
+                            raw = details_obj.get("summary")
+                            if isinstance(raw, str):
+                                summary = raw.strip()
+                        detail_msg = (
+                            f"disabled — {summary}"
+                            if summary
+                            else "disabled (reported by sidecar)"
+                        )
+                        _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
         except (json.JSONDecodeError, TypeError):
@@ -320,9 +436,79 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
 
 
+def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
+    settings_path = os.path.expanduser("~/.claude/settings.json")
+    if not os.path.isfile(settings_path):
+        _emit("fail", "Claude Code hooks", f"{settings_path} not found", r=r)
+        return
+    try:
+        with open(settings_path, encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        _emit("fail", "Claude Code hooks", f"cannot read {settings_path}: {exc}", r=r)
+        return
+    hooks = settings.get("hooks", {})
+    if not hooks:
+        _emit("fail", "Claude Code hooks", "no hooks registered in settings.json", r=r)
+        return
+    dc_hooks = 0
+    for _event, entries in hooks.items():
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            hook_list = entry.get("hooks", []) if isinstance(entry, dict) else []
+            for h in hook_list:
+                cmd = h.get("command", "") if isinstance(h, dict) else ""
+                if "defenseclaw" in cmd or "claude-code-hook" in cmd:
+                    dc_hooks += 1
+    if dc_hooks > 0:
+        _emit("pass", "Claude Code hooks", f"{dc_hooks} DefenseClaw hook(s) registered", r=r)
+    else:
+        _emit("fail", "Claude Code hooks", "no DefenseClaw hooks found in settings.json", r=r)
+
+
+def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
+    hook_dir = os.path.join(cfg.data_dir, "hooks")
+    hook_script = os.path.join(hook_dir, "codex-hook.sh")
+    if os.path.isfile(hook_script):
+        _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
+    else:
+        _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
+
+
+def _check_zeptoclaw_config(cfg, r: _DoctorResult) -> None:
+    config_path = os.path.expanduser("~/.zeptoclaw/config.json")
+    if not os.path.isfile(config_path):
+        _emit("fail", "ZeptoClaw config", f"{config_path} not found", r=r)
+        return
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            zcfg = json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        _emit("fail", "ZeptoClaw config", f"cannot read {config_path}: {exc}", r=r)
+        return
+    providers = zcfg.get("providers", {})
+    proxy_count = 0
+    for name, prov in providers.items():
+        if not isinstance(prov, dict):
+            continue
+        api_base = prov.get("api_base", "")
+        if "defenseclaw" in api_base or "/c/zeptoclaw" in api_base:
+            proxy_count += 1
+    if proxy_count > 0:
+        _emit("pass", "ZeptoClaw config", f"{proxy_count} provider(s) routed through proxy", r=r)
+    else:
+        _emit("fail", "ZeptoClaw config", "no providers routed through DefenseClaw proxy", r=r)
+
+
 def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     if not cfg.guardrail.enabled:
         _emit("skip", "Guardrail proxy", "disabled", r=r)
+        return
+
+    closed_detail = _guardrail_proxy_intentionally_closed(cfg)
+    if closed_detail:
+        _emit("pass", "Guardrail proxy", closed_detail, r=r)
         return
 
     if not cfg.guardrail.model:
@@ -339,6 +525,23 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}", r=r)
     else:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
+
+
+def _guardrail_proxy_intentionally_closed(cfg) -> str:
+    """Return a detail string when the proxy port is expected to be closed.
+
+    Codex and Claude Code default to observability-only mode: hooks and
+    native OTel feed DefenseClaw, but the agent talks directly to its
+    upstream provider. In that mode port 4000 is deliberately unbound, so
+    doctor must not report a hard proxy failure.
+    """
+    connector = _active_connector(cfg)
+    gc = cfg.guardrail
+    if connector == "codex" and not getattr(gc, "codex_enforcement_enabled", False):
+        return "observability-only for Codex — proxy port intentionally closed"
+    if connector == "claudecode" and not getattr(gc, "claudecode_enforcement_enabled", False):
+        return "observability-only for Claude Code — proxy port intentionally closed"
+    return ""
 
 
 def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
@@ -396,23 +599,21 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     if not api_key:
         _emit("fail", "LLM API key", f"{env_name} not set (checked env + {dotenv_path})", r=r)
         return
-    # Route by *provider prefix* (the segment before the first "/"). The
-    # env-name prefix is a last-resort fallback ONLY used when the model
-    # string is empty or has no provider prefix — routing on env name can
-    # easily misfire (e.g. an operator reusing ANTHROPIC_API_KEY to hold a
-    # bearer token for a proxy). Provider prefixes come from OpenClaw's
-    # model registry; see https://docs.openclaw.ai/providers/.
-    provider = ""
-    if "/" in model:
+    # Route by the resolved provider prefix first. A bare Bedrock model
+    # with ``provider: bedrock`` is valid config; treating the bare model
+    # id as the provider made doctor say it "cannot verify" Bedrock keys.
+    # Env-name fallback remains last-resort only for empty provider/model
+    # configs so a misleading variable name cannot override an explicit
+    # provider.
+    provider = llm.provider_prefix()
+    if not provider and "/" in model:
         provider = model.split("/", 1)[0].lower()
-    elif model:
-        provider = model.lower()
 
     if provider == "anthropic":
         _verify_anthropic(api_key, r, model)
     elif provider == "openai":
         _verify_openai(api_key, r)
-    elif provider == "bedrock":
+    elif provider in ("bedrock", "amazon-bedrock"):
         _verify_bedrock(api_key, r)
     elif provider == "" and env_name.startswith("ANTHROPIC"):
         # Model string missing — fall back to env name prefix.
@@ -424,7 +625,7 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
     else:
         _emit(
             "pass", "LLM API key",
-            f"{env_name} is set (cannot verify provider '{model}')", r=r,
+            f"{env_name} is set (cannot verify provider '{provider or model}')", r=r,
         )
 
 
@@ -661,7 +862,7 @@ def _check_observability(cfg, r: _DoctorResult) -> None:
         return
 
     for d in destinations:
-        label_kind = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
+        label_kind = _destination_label_kind(d, PRESETS)
         label = f"{d.name} ({label_kind})"
 
         if not d.enabled:
@@ -715,14 +916,66 @@ def _probe_otel_destination(cfg, d, r: _DoctorResult) -> None:
         _emit("warn", label, f"{host}:{port} not reachable: {exc}", r=r)
 
 
+# HEC internal reply codes from Splunk docs — used to surface
+# actionable diagnostics instead of the raw HTTP status code.
+# Source: https://help.splunk.com/en/splunk-enterprise/get-started/get-data-in/10.2/get-data-with-http-event-collector/troubleshoot-http-event-collector
+_HEC_CODES = {
+    0:  "success",
+    1:  "token is disabled — enable it in Splunk HEC settings",
+    2:  "no authorization — token is required",
+    3:  "invalid authorization header format",
+    4:  "invalid token — check the token value in your config",
+    5:  "no data in request",
+    6:  "invalid data format",
+    7:  "incorrect index — the index does not exist in Splunk",
+    9:  "server busy — Splunk HEC is overloaded",
+    10: "data channel missing",
+    11: "invalid data channel",
+    12: "event field is required",
+    13: "event field cannot be blank",
+    17: "HEC is healthy",
+    18: "HEC unhealthy — queues are full",
+}
+
+
+def _parse_hec_response(body: str) -> tuple[int | None, str]:
+    """Parse a Splunk HEC JSON response body.
+
+    Returns (hec_code, human_readable_message). hec_code is None when
+    the body is not valid HEC JSON (e.g. a load balancer error page).
+    """
+    try:
+        obj = json.loads(body)
+    except (ValueError, TypeError):
+        return None, body[:120] if body else ""
+    hec_code = obj.get("code")
+    text = obj.get("text", "")
+    if hec_code is None:
+        return None, text or body[:120]
+    human = _HEC_CODES.get(hec_code)
+    if human:
+        return hec_code, human
+    return hec_code, text or f"HEC code {hec_code}"
+
+
 def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
-    """HEC probe: POST a single test event with the resolved token."""
+    """HEC probe: POST a minimal test event and surface actionable diagnostics.
+
+    Interprets both the HTTP status code and the Splunk HEC JSON reply
+    code in the response body so operators see specific failure reasons
+    (wrong index, disabled token, server busy, etc.) rather than a
+    generic HTTP status.
+    """
+    label = f"{d.name} ({_splunk_hec_label_kind(d)})"
     endpoint, token = _resolve_audit_sink_endpoint_and_token(cfg, d)
     if not endpoint or not token:
-        _emit("fail", f"{d.name} (Splunk HEC)", "endpoint or token missing", r=r)
+        _emit("fail", label, "endpoint or token missing — set splunk_hec.token_env in config", r=r)
         return
 
-    code, body = _http_probe(
+    # Warn if the token is stored inline rather than via token_env.
+    _check_splunk_token_posture(cfg, d, label, r)
+
+    http_code, body = _http_probe(
         endpoint,
         method="POST",
         headers={
@@ -733,15 +986,97 @@ def _probe_splunk_hec(cfg, d, r: _DoctorResult) -> None:
         timeout=10.0,
     )
 
-    label = f"{d.name} (Splunk HEC)"
-    if code == 200:
-        _emit("pass", label, endpoint, r=r)
-    elif code in (401, 403):
-        _emit("fail", label, f"authentication failed (HTTP {code})", r=r)
-    elif code == 0:
-        _emit("warn", label, f"unreachable: {body[:100]}", r=r)
-    else:
-        _emit("warn", label, f"HTTP {code}", r=r)
+    if http_code == 200:
+        hec_code, msg = _parse_hec_response(body)
+        if hec_code is not None and hec_code not in (0, 17):
+            _emit("warn", label, f"unexpected HEC response on 200: {msg}", r=r)
+        else:
+            _emit("pass", label, endpoint, r=r)
+        return
+
+    hec_code, hec_msg = _parse_hec_response(body)
+
+    if http_code in (401, 403):
+        if hec_code == 1:
+            _emit("fail", label, "token is disabled — enable the HEC token in Splunk", r=r)
+        elif hec_code == 4:
+            _emit("fail", label, "invalid token — verify splunk_hec.token_env points to the correct value", r=r)
+        elif hec_code in (2, 3):
+            _emit("fail", label, f"authorization error: {hec_msg}", r=r)
+        else:
+            _emit("fail", label, f"authentication failed (HTTP {http_code}): {hec_msg}", r=r)
+        return
+
+    if http_code == 400:
+        if hec_code == 7:
+            index_hint = f" (configured index: {d.index!r})" if getattr(d, "index", None) else ""
+            msg = f"incorrect index{index_hint} — create the index in Splunk or update splunk_hec.index"
+            _emit("fail", label, msg, r=r)
+        else:
+            _emit("fail", label, f"bad request: {hec_msg}", r=r)
+        return
+
+    if http_code in (503, 429):
+        if hec_code == 18:
+            _emit("warn", label, "Splunk HEC queues are full — indexer may be overloaded", r=r)
+        elif hec_code == 9:
+            _emit("warn", label, "Splunk HEC server busy — consider reducing flush frequency", r=r)
+        else:
+            _emit("warn", label, f"HEC temporarily unavailable (HTTP {http_code}): {hec_msg}", r=r)
+        return
+
+    if http_code == 0:
+        if any(kw in body.lower() for kw in ("ssl", "certificate", "tls")):
+            _emit("fail", label, f"TLS error — check verify_tls setting and endpoint certificate: {body[:120]}", r=r)
+        else:
+            _emit("warn", label, f"unreachable: {body[:120]}", r=r)
+        return
+
+    _emit("warn", label, f"HTTP {http_code}: {hec_msg or body[:120]}", r=r)
+
+
+def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
+    """Warn if the HEC token is stored inline in config rather than via token_env.
+
+    Splunk's own best practices recommend against storing HEC tokens in
+    configuration files. This check surfaces that posture issue during
+    doctor so operators are nudged toward token_env before it becomes a
+    security finding.
+    """
+    import os
+
+    from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+    try:
+        doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
+    except Exception:
+        return
+    sinks = doc.get("audit_sinks") or []
+    for sink in sinks:
+        if not isinstance(sink, dict) or sink.get("name") != d.name:
+            continue
+        sub = sink.get("splunk_hec") or {}
+        if isinstance(sub, dict) and sub.get("token") and not sub.get("token_env"):
+            _emit(
+                "warn",
+                label,
+                "HEC token is stored inline in config — use token_env to reference an "
+                "environment variable instead (see Splunk HEC security best practices)",
+                r=r,
+            )
+        return
+
+def _destination_label_kind(d, presets) -> str:
+    if d.kind == "splunk_hec":
+        return _splunk_hec_label_kind(d)
+    if d.preset_id in presets:
+        return presets[d.preset_id].display_name
+    return d.kind
+
+
+def _splunk_hec_label_kind(d) -> str:
+    if d.preset_id == "splunk-enterprise":
+        return "Splunk Enterprise (HEC)"
+    return "Splunk HEC"
 
 
 def _probe_otlp_logs(cfg, d, r: _DoctorResult) -> None:
@@ -957,42 +1292,63 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 
     if not json_out:
         click.echo()
-        click.echo("DefenseClaw Doctor")
-        click.echo("══════════════════")
+        click.echo(ux._style("DefenseClaw Doctor", fg="cyan", bold=True))
+        click.echo(ux._style("══════════════════", fg="cyan"))
         click.echo()
 
     _check_config(cfg, r)
     _check_audit_db(cfg, r)
+
+    # S6.5 — surface the active connector + its configured paths
+    # before any scanner runs. Operators routinely point doctor at a
+    # config that *thinks* it's running on (say) Codex but actually
+    # has stale openclaw.json paths under .openclaw/extensions; a
+    # per-connector inventory pass catches that drift.
     if not json_out:
-        click.echo()
-        click.echo("  ── Scanners ──")
+        _doctor_subsection("Connector")
+    active_connector = _active_connector(cfg)
+    _check_connector_inventory(cfg, active_connector, r)
+    # S7.5 — surface inactive-connector residue (backup files / hook
+    # scripts left over from a previous connector). Without this check
+    # operators who switch connectors via 'defenseclaw setup guardrail
+    # --agent <new>' get a silent half-state where the old adapter's
+    # config patches are still on disk.
+    _check_connector_residue(cfg, active_connector, r)
+
+    if not json_out:
+        _doctor_subsection("Scanners")
     _check_scanners(cfg, r)
+    _check_scan_coverage(cfg, r)
+
     if not json_out:
-        click.echo()
-        click.echo("  ── Services ──")
+        _doctor_subsection("Services")
     _check_sidecar(cfg, r)
-    _check_openclaw_gateway(cfg, r)
+    if active_connector == "openclaw":
+        _check_openclaw_gateway(cfg, r)
+    elif active_connector == "claudecode":
+        _check_claudecode_hooks(cfg, r)
+    elif active_connector == "codex":
+        _check_codex_hooks(cfg, r)
+    elif active_connector == "zeptoclaw":
+        _check_zeptoclaw_config(cfg, r)
+    _check_hilt_support(cfg, active_connector, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
-        click.echo()
-        click.echo("  ── Credentials ──")
+        _doctor_subsection("Credentials")
     _check_llm_api_key(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
     _check_registry_credentials(cfg, r)
     if not json_out:
-        click.echo()
-        click.echo("  ── Observability ──")
+        _doctor_subsection("Observability")
     _check_observability(cfg, r)
     if not json_out:
-        click.echo()
-        click.echo("  ── Webhooks ──")
+        _doctor_subsection("Webhooks")
     _check_webhooks(cfg, r)
 
     if do_fix:
         if not json_out:
-            click.echo()
-            click.echo("  ── Auto-fix ──")
+            _doctor_subsection("Auto-fix")
         _run_fixers(cfg, r, assume_yes=assume_yes, json_out=json_out)
 
     # Persist the cached snapshot before exit so the Go TUI (and any
@@ -1005,23 +1361,26 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     if json_out:
         click.echo(json.dumps(r.to_dict(), indent=2))
     else:
-        click.echo()
-        click.echo("  ── Summary ──")
+        _doctor_subsection("Summary")
         parts = []
         if r.passed:
-            parts.append(click.style(f"{r.passed} passed", fg="green"))
+            parts.append(ux._style(f"{r.passed} passed", fg="green", bold=True))
         if r.failed:
-            parts.append(click.style(f"{r.failed} failed", fg="red"))
+            parts.append(ux._style(f"{r.failed} failed", fg="red", bold=True))
         if r.warned:
-            parts.append(click.style(f"{r.warned} warnings", fg="yellow"))
+            parts.append(ux._style(f"{r.warned} warnings", fg="yellow", bold=True))
         if r.skipped:
-            parts.append(click.style(f"{r.skipped} skipped", dim=True))
+            parts.append(ux._style(f"{r.skipped} skipped", fg="bright_black"))
         click.echo("  " + ", ".join(parts))
         click.echo()
 
     if r.failed:
         if not json_out:
-            click.echo("  Fix the failures above, then re-run: defenseclaw doctor")
+            # Surface the remediation hint in yellow — it's the
+            # primary call-to-action when doctor fails. We use
+            # ``ux.warn`` rather than ``ux.err`` because the line
+            # itself isn't a failure; the failures above are.
+            ux.warn("Fix the failures above, then re-run: defenseclaw doctor", indent="  ")
             click.echo()
         raise SystemExit(1)
 
@@ -1075,15 +1434,16 @@ def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> N
     """Run each fixer in sequence, narrating what changed.
 
     Fixers are intentionally *small* and independent — none of them
-    restart the sidecar or mutate openclaw.json beyond what setup
+    restart the sidecar or mutate connector configs beyond what setup
     already would. Anything that needs a full re-patch is deferred to
     the human.
     """
     fixers = [
         ("stale gateway PID file",   _fix_stale_pid),
-        ("OpenClaw gateway token",   _fix_openclaw_token),
+        ("gateway token",            _fix_gateway_token),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
-        ("pristine openclaw.json backup", _fix_pristine_backup),
+        ("pristine config backup",   _fix_pristine_backup),
+        ("connector residue",        _fix_connector_residue),
     ]
 
     for title, fn in fixers:
@@ -1097,6 +1457,230 @@ def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> N
             r.record(tag, f"fix: {title}", detail)
         else:
             _emit(tag, f"fix: {title}", detail=detail, r=r)
+
+
+def _active_connector(cfg) -> str:
+    """Return the active connector name in lowercase.
+
+    Prefer the unified ``Config.active_connector()`` from S4.1 — it
+    handles the legacy ``guardrail.connector`` field plus the
+    ``claw.mode`` fallback the same way the rest of the CLI does.
+    Falls back to ``"openclaw"`` for older configs that predate the
+    method.
+    """
+    if hasattr(cfg, "active_connector"):
+        try:
+            return (cfg.active_connector() or "openclaw").lower()
+        except Exception:
+            pass
+    return (getattr(getattr(cfg, "guardrail", None), "connector", "")
+            or "openclaw").lower()
+
+
+_CONNECTOR_LABELS = {
+    "openclaw": "OpenClaw",
+    "claudecode": "Claude Code",
+    "codex": "Codex",
+    "zeptoclaw": "ZeptoClaw",
+}
+
+
+def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
+    """Surface the active connector and the directories it points at.
+
+    Each connector has its own conventions for where skills, plugins,
+    and MCP server registrations live. ``Config.skill_dirs()`` /
+    ``plugin_dirs()`` / ``mcp_servers()`` are now polymorphic per
+    connector (S4.1), so this check makes that mapping visible to the
+    operator: if Codex is active but skill_dirs() still points at
+    ``~/.openclaw/skills``, that's a config bug doctor should flag.
+    """
+    label = _CONNECTOR_LABELS.get(connector, connector)
+    if connector not in _CONNECTOR_LABELS:
+        _emit(
+            "warn", "Active connector",
+            f"unknown connector {connector!r} — known: "
+            + ", ".join(sorted(_CONNECTOR_LABELS)),
+            r=r,
+        )
+    else:
+        _emit("pass", "Active connector", label, r=r)
+
+    # Skill dirs.
+    try:
+        sdirs = cfg.skill_dirs() if hasattr(cfg, "skill_dirs") else []
+    except Exception as exc:
+        _emit("warn", "Skill paths", f"could not enumerate: {exc}", r=r)
+        sdirs = []
+    if sdirs:
+        existing = sum(1 for d in sdirs if os.path.isdir(d))
+        detail = f"{existing}/{len(sdirs)} present — " + ", ".join(sdirs)
+        if existing == 0:
+            _emit("warn", "Skill paths", detail, r=r)
+        else:
+            _emit("pass", "Skill paths", detail, r=r)
+    else:
+        _emit("skip", "Skill paths", f"no skill dirs configured for {label}", r=r)
+
+    # Plugin dirs.
+    try:
+        pdirs = cfg.plugin_dirs() if hasattr(cfg, "plugin_dirs") else []
+    except Exception as exc:
+        _emit("warn", "Plugin paths", f"could not enumerate: {exc}", r=r)
+        pdirs = []
+    if pdirs:
+        existing = sum(1 for d in pdirs if os.path.isdir(d))
+        detail = f"{existing}/{len(pdirs)} present — " + ", ".join(pdirs)
+        if existing == 0:
+            _emit("warn", "Plugin paths", detail, r=r)
+        else:
+            _emit("pass", "Plugin paths", detail, r=r)
+    else:
+        _emit("skip", "Plugin paths", f"no plugin dirs configured for {label}", r=r)
+
+    # MCP servers.
+    try:
+        servers = cfg.mcp_servers() if hasattr(cfg, "mcp_servers") else []
+    except Exception as exc:
+        _emit("warn", "MCP servers", f"could not enumerate: {exc}", r=r)
+        servers = []
+    count = len(servers)
+    if count:
+        names = ", ".join(s.name for s in servers[:5])
+        more = f" (+{count - 5} more)" if count > 5 else ""
+        _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
+    else:
+        _emit("skip", "MCP servers", "no MCP servers registered", r=r)
+
+
+# Maps connector name → list of *expected* artifact filenames (relative
+# to data_dir) that Connector.Setup writes. When the active connector
+# is X but data_dir contains Y's artifacts, that's residue from a prior
+# install and Connector.Teardown was never invoked for Y.
+#
+# OpenClaw can leave either the old ``<openclaw.json>.pristine`` backup
+# next to its config or a managed backup under connector_backups/, so it
+# is handled separately by :func:`_check_connector_residue`.
+_CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
+    "claudecode": (
+        "claudecode_backup.json",
+        os.path.join("connector_backups", "claudecode", "settings.json.json"),
+    ),
+    "codex": (
+        "codex_backup.json",
+        "codex_config_backup.json",
+        os.path.join("connector_backups", "codex", "config.toml.json"),
+    ),
+    "zeptoclaw": (
+        "zeptoclaw_backup.json",
+        os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
+    ),
+}
+_OPENCLAW_RESIDUE_ARTIFACTS: tuple[str, ...] = (
+    os.path.join("connector_backups", "openclaw", "openclaw.json.json"),
+)
+
+
+def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
+    """Detect leftover artifacts from connectors that aren't active.
+
+    Each connector's ``Setup`` writes a pristine backup of the agent
+    framework's config plus (for some connectors) hook scripts and env
+    files. ``Teardown`` removes them. When an operator switches
+    connectors without first running ``defenseclaw guardrail disable``
+    (or the gateway crashes mid-handoff), we end up with the *prior*
+    connector's residue on disk.
+
+    This check walks every known connector that isn't the active one
+    and emits a WARN listing any artifact still present. The matching
+    fixer (``fix: connector residue``) calls
+    ``defenseclaw-gateway connector teardown --connector <name>`` for
+    each residual connector to clean it up via the canonical sentinel.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        _emit("skip", "Connector residue", "no data dir configured", r=r)
+        return
+
+    # Build the inactive set explicitly so unknown active connectors
+    # (plugins) don't accidentally suppress residue detection.
+    inactive = [
+        name for name in _CONNECTOR_RESIDUE_ARTIFACTS
+        if name != active.lower()
+    ]
+
+    found: list[tuple[str, str]] = []  # (connector_name, full_path)
+    for name in inactive:
+        for filename in _CONNECTOR_RESIDUE_ARTIFACTS[name]:
+            full = os.path.join(data_dir, filename)
+            if os.path.isfile(full):
+                found.append((name, full))
+
+    # OpenClaw's pristine backup is its only residue marker and lives
+    # next to openclaw.json, not under data_dir. Only flag it when
+    # OpenClaw is *not* the active connector.
+    if active.lower() != "openclaw":
+        for filename in _OPENCLAW_RESIDUE_ARTIFACTS:
+            full = os.path.join(data_dir, filename)
+            if os.path.isfile(full):
+                found.append(("openclaw", full))
+        oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
+        oc_path = os.path.expanduser(oc_path)
+        if oc_path:
+            pristine = oc_path + ".pristine"
+            if os.path.isfile(pristine):
+                found.append(("openclaw", pristine))
+
+    if not found:
+        _emit(
+            "pass", "Connector residue",
+            "no leftover artifacts from inactive connectors", r=r,
+        )
+        return
+
+    # Group residue by connector for a readable message — operators
+    # need to see "Codex left X behind" not just a flat path list.
+    by_conn: dict[str, list[str]] = {}
+    for name, path in found:
+        by_conn.setdefault(name, []).append(path)
+    parts = []
+    for name in sorted(by_conn):
+        paths = ", ".join(by_conn[name])
+        parts.append(f"{name}: {paths}")
+    detail = (
+        "found residue from inactive connectors — "
+        + "; ".join(parts)
+        + ". Run 'defenseclaw doctor --fix' to invoke "
+        "'defenseclaw-gateway connector teardown' for each, or "
+        "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
+    )
+    _emit("warn", "Connector residue", detail, r=r)
+
+
+def _check_scan_coverage(cfg, r: _DoctorResult) -> None:
+    """Advertise what each scanner will check.
+
+    Mirrors the bullet list rendered by ``_scan_ui.render_preamble``
+    so operators see the *same* category contract from doctor as
+    they see when they actually run the scanner. Anything we can't
+    look up via :func:`_scan_ui.categories_for` falls through as
+    SKIP — the helper is the source of truth.
+    """
+    del cfg  # unused: categories are static per component
+    from defenseclaw.commands import _scan_ui
+
+    for component in _scan_ui.supported_components():
+        cats = _scan_ui.categories_for(component)
+        label = _scan_ui._COMPONENT_LABELS.get(  # type: ignore[attr-defined]
+            component, (component, component + "s"),
+        )[0]
+        if cats:
+            _emit(
+                "pass", f"Scanner coverage ({label})",
+                "; ".join(cats), r=r,
+            )
+        else:
+            _emit("skip", f"Scanner coverage ({label})", "no categories registered", r=r)
 
 
 def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
@@ -1139,29 +1723,38 @@ def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("fail", f"could not remove {pid_file}: {exc}")
 
 
-def _fix_openclaw_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Re-sync OPENCLAW_GATEWAY_TOKEN from openclaw.json."""
-    from defenseclaw.commands.cmd_setup import (
-        _detect_openclaw_gateway_token,
-        _save_secret_to_dotenv,
-    )
+def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Re-sync gateway token from the active connector's config."""
+    active_connector = _active_connector(cfg)
 
-    token = _detect_openclaw_gateway_token(cfg.claw.config_file)
-    if not token:
-        return ("skip", "no token in openclaw.json")
+    if active_connector == "openclaw":
+        from defenseclaw.commands.cmd_setup import (
+            _detect_openclaw_gateway_token,
+            _save_secret_to_dotenv,
+        )
+        token = _detect_openclaw_gateway_token(cfg.claw.config_file)
+        if not token:
+            return ("skip", "no token in openclaw.json")
+        env_var = "OPENCLAW_GATEWAY_TOKEN"
+        current = os.environ.get(env_var, "")
+        if current == token:
+            return ("skip", "token already in sync")
+        if not assume_yes and not click.confirm(
+            f"    Update {env_var} in ~/.defenseclaw/.env from OpenClaw?",
+            default=True,
+        ):
+            return ("skip", "declined by user")
+        _save_secret_to_dotenv(env_var, token, cfg.data_dir)
+        return ("pass", f"{env_var} updated from openclaw.json")
 
-    current = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-    if current == token:
-        return ("skip", "token already in sync")
-
-    if not assume_yes and not click.confirm(
-        "    Update OPENCLAW_GATEWAY_TOKEN in ~/.defenseclaw/.env from OpenClaw?",
-        default=True,
-    ):
-        return ("skip", "declined by user")
-
-    _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", token, cfg.data_dir)
-    return ("pass", "OPENCLAW_GATEWAY_TOKEN updated from openclaw.json")
+    env_var = "DEFENSECLAW_GATEWAY_TOKEN"
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    if not os.path.isfile(dotenv_path):
+        return ("skip", f"no .env at {dotenv_path}")
+    current = os.environ.get(env_var, "")
+    if current:
+        return ("skip", f"{env_var} already set")
+    return ("skip", f"connector {active_connector} — set {env_var} manually if needed")
 
 
 def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
@@ -1191,29 +1784,116 @@ def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
 
 
 def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
-    """Capture a pristine backup of openclaw.json if one isn't recorded yet.
+    """Capture a pristine backup of the active connector's config if one
+    isn't recorded yet.
 
-    This runs on every ``doctor --fix`` so operators who installed
-    DefenseClaw before the backup index existed can retroactively
-    create one. It never *overwrites* an existing entry.
+    For openclaw: backs up openclaw.json via the guardrail module.
+    For other connectors: checks for their respective backup files in
+    the data directory.
     """
     del assume_yes  # unused: capturing a snapshot is always safe
-    from defenseclaw.guardrail import (
-        pristine_backup_path,
-        record_pristine_backup,
-    )
+    active_connector = _active_connector(cfg)
 
-    oc_path = cfg.claw.config_file
-    if not oc_path:
-        return ("skip", "no openclaw.json configured")
-    if not os.path.isfile(os.path.expanduser(oc_path)):
-        return ("skip", "openclaw.json not present")
+    if active_connector == "openclaw":
+        from defenseclaw.guardrail import (
+            pristine_backup_path,
+            record_pristine_backup,
+        )
+        oc_path = cfg.claw.config_file
+        if not oc_path:
+            return ("skip", "no openclaw.json configured")
+        if not os.path.isfile(os.path.expanduser(oc_path)):
+            return ("skip", "openclaw.json not present")
+        existing = pristine_backup_path(oc_path, cfg.data_dir)
+        if existing:
+            return ("skip", f"already captured at {existing}")
+        created = record_pristine_backup(oc_path, cfg.data_dir)
+        if created:
+            return ("pass", f"captured pristine backup at {created}")
+        return ("warn", "could not capture backup (permissions?)")
 
-    existing = pristine_backup_path(oc_path, cfg.data_dir)
-    if existing:
-        return ("skip", f"already captured at {existing}")
+    backup_names = _CONNECTOR_RESIDUE_ARTIFACTS.get(active_connector)
+    if not backup_names:
+        return ("skip", f"no backup strategy for connector {active_connector}")
+    for backup_name in backup_names:
+        backup_path = os.path.join(cfg.data_dir, backup_name)
+        if os.path.isfile(backup_path):
+            return ("skip", f"backup exists at {backup_path}")
+    return ("skip", "no backup found — run `defenseclaw setup guardrail` to create one")
 
-    created = record_pristine_backup(oc_path, cfg.data_dir)
-    if created:
-        return ("pass", f"captured pristine backup at {created}")
-    return ("warn", "could not capture backup (permissions?)")
+
+def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Run ``defenseclaw-gateway connector teardown`` for every inactive
+    connector that still has artifacts on disk.
+
+    Inactive-connector residue is detected with the same logic as
+    :func:`_check_connector_residue`, then this fixer shells out to the
+    S7.2 sentinel for each residual connector. The sentinel is the
+    canonical place to do this — ``Connector.Teardown`` knows about
+    hook scripts, env files, and config patches that the residue check
+    can't reasonably enumerate. We never call the OpenClaw Python
+    helpers here because the gateway sentinel handles every connector
+    uniformly.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        return ("skip", "no data dir configured")
+
+    active = _active_connector(cfg)
+    inactive_residue: list[str] = []
+    for name, artifacts in _CONNECTOR_RESIDUE_ARTIFACTS.items():
+        if name == active:
+            continue
+        if any(os.path.isfile(os.path.join(data_dir, f)) for f in artifacts):
+            inactive_residue.append(name)
+
+    if active != "openclaw":
+        if any(os.path.isfile(os.path.join(data_dir, f)) for f in _OPENCLAW_RESIDUE_ARTIFACTS):
+            inactive_residue.append("openclaw")
+        oc_path = getattr(getattr(cfg, "claw", None), "config_file", "") or ""
+        oc_path = os.path.expanduser(oc_path)
+        if oc_path and os.path.isfile(oc_path + ".pristine"):
+            inactive_residue.append("openclaw")
+
+    if not inactive_residue:
+        return ("skip", "no inactive-connector residue detected")
+
+    inactive_residue = sorted(set(inactive_residue))
+
+    if not assume_yes and not click.confirm(
+        f"    Run 'defenseclaw-gateway connector teardown' for "
+        f"{', '.join(inactive_residue)}?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    gw = shutil.which("defenseclaw-gateway")
+    if not gw:
+        return ("warn",
+                "defenseclaw-gateway not on PATH — install the binary and re-run")
+
+    cleaned: list[str] = []
+    failed: list[str] = []
+    import subprocess as _sub
+    for name in inactive_residue:
+        try:
+            proc = _sub.run(
+                [gw, "connector", "teardown", "--connector", name],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, _sub.TimeoutExpired) as exc:
+            failed.append(f"{name}: {exc}")
+            continue
+        if proc.returncode == 0:
+            cleaned.append(name)
+        else:
+            err = (proc.stderr or proc.stdout or "").strip().splitlines()
+            tail = err[-1] if err else f"rc={proc.returncode}"
+            failed.append(f"{name}: {tail}")
+
+    if cleaned and not failed:
+        return ("pass", f"teardown ran for: {', '.join(cleaned)}")
+    if cleaned and failed:
+        return ("warn",
+                f"partial: cleaned={','.join(cleaned)}; failed={'; '.join(failed)}")
+    return ("warn", f"teardown failed: {'; '.join(failed)}")

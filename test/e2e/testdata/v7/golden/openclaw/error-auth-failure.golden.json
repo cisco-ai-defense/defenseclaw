@@ -1,0 +1,15 @@
+{
+  "binary_version": "\u003cstripped\u003e",
+  "content_hash": "\u003cstripped\u003e",
+  "error": {
+    "code": "AUTH_INVALID_TOKEN",
+    "message": "failed",
+    "subsystem": "auth"
+  },
+  "event_type": "error",
+  "generation": 1,
+  "schema_version": 7,
+  "severity": "HIGH",
+  "sidecar_instance_id": "\u003cstripped\u003e",
+  "ts": "2000-01-01T00:00:00Z"
+}

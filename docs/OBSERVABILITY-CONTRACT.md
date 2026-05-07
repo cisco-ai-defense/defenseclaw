@@ -154,7 +154,7 @@ Complete enumeration (must match `AllSubsystems()`):
 
 Complete enumeration (must match `AllActions()`):
 
-`init`, `stop`, `ready`, `scan`, `scan-start`, `rescan`, `rescan-start`, `block`, `allow`, `warn`, `quarantine`, `restore`, `disable`, `enable`, `deploy`, `drift`, `network-egress-blocked`, `network-egress-allowed`, `guardrail-block`, `guardrail-warn`, `guardrail-allow`, `approval-request`, `approval-granted`, `approval-denied`, `tool-call`, `tool-result`, `config-update`, `policy-update`, `policy-reload`, `action`, `acknowledge-alerts`, `dismiss-alerts`, `webhook-delivered`, `webhook-failed`, `sink-failure`, `sink-restored`, `alert`
+`init`, `stop`, `ready`, `scan`, `scan-start`, `rescan`, `rescan-start`, `block`, `allow`, `warn`, `quarantine`, `restore`, `disable`, `enable`, `deploy`, `drift`, `network-egress-blocked`, `network-egress-allowed`, `guardrail-block`, `guardrail-warn`, `guardrail-allow`, `approval-request`, `approval-granted`, `approval-denied`, `tool-call`, `tool-result`, `config-update`, `policy-update`, `policy-reload`, `action`, `acknowledge-alerts`, `dismiss-alerts`, `webhook-delivered`, `webhook-failed`, `sink-failure`, `sink-restored`, `alert`, `otel.ingest.logs`, `otel.ingest.metrics`, `otel.ingest.traces`, `otel.ingest.malformed`, `codex.notify`, `codex.notify.agent-turn-complete`, `codex.notify.malformed`
 
 ---
 

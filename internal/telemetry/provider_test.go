@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -121,6 +122,189 @@ func TestDisabledProvider_StartToolSpan_NoPanic(t *testing.T) {
 	}
 	if ctx == nil {
 		t.Error("context should not be nil")
+	}
+}
+
+func TestStartToolSpan_RawArgsOnlyWhenRedactionDisabled(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartToolSpan(context.Background(), "shell", "running",
+		json.RawMessage(`{"secret":"abc123"}`), false, "", "builtin", "",
+		ToolSpanContext{})
+	p.EndToolSpan(span, 0, 0, time.Now(), "shell", "builtin")
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	if _, ok := attrByKey(spans[0].Attributes, "defenseclaw.tool.args"); ok {
+		t.Fatal("raw tool args were exported while redaction was enabled")
+	}
+
+	redaction.SetDisableAll(true)
+	p, exp = newTracingProvider(t)
+	_, span = p.StartToolSpan(context.Background(), "shell", "running",
+		json.RawMessage(`{"secret":"abc123"}`), false, "", "builtin", "",
+		ToolSpanContext{})
+	p.EndToolSpan(span, 0, 0, time.Now(), "shell", "builtin")
+	spans = exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d raw-mode spans, want 1", len(spans))
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.tool.args"); !ok || got.AsString() != `{"secret":"abc123"}` {
+		t.Fatalf("raw tool args attr = %q ok=%v, want exact JSON", got.AsString(), ok)
+	}
+}
+
+func TestStartToolSpan_EmitsSessionToolPolicyCorrelation(t *testing.T) {
+	p, exp := newTracingProvider(t)
+	attachTraceTestResourceContext(t, p)
+	_, span := p.StartToolSpan(context.Background(), "shell", "running",
+		json.RawMessage(`{"cmd":"rg -n observed_agent_session ."}`), false, "", "builtin", "",
+		ToolSpanContext{
+			ToolID:         "tool-123",
+			SessionID:      "session-123",
+			RunID:          "run-123",
+			DestinationApp: "builtin",
+			PolicyID:       "policy-allow-shell",
+			AgentName:      "codex",
+			AgentID:        "openai_codex",
+		})
+	p.EndToolSpan(span, 0, 0, time.Now(), "shell", "builtin")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+
+	for key, want := range map[string]string{
+		"gen_ai.tool.call.id":         "tool-123",
+		"gen_ai.conversation.id":      "session-123",
+		"defenseclaw.run.id":          "run-123",
+		"defenseclaw.destination.app": "builtin",
+		"defenseclaw.policy.id":       "policy-allow-shell",
+		"gen_ai.agent.name":           "codex",
+		"gen_ai.agent.id":             "openai_codex",
+		"gen_ai.operation.name":       "execute_tool",
+		"gen_ai.tool.name":            "shell",
+	} {
+		got, ok := attrByKey(spans[0].Attributes, key)
+		if !ok || got.AsString() != want {
+			t.Fatalf("%s = %q ok=%v, want %q", key, got.AsString(), ok, want)
+		}
+	}
+	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
+}
+
+func TestStartAgentSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
+	p, exp := newTracingProvider(t)
+	attachTraceTestResourceContext(t, p)
+
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+	p.EndAgentSpan(span, "")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+
+	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
+	if got, ok := attrByKey(spans[0].Attributes, "gen_ai.agent.type"); !ok || got.AsString() != "codex" {
+		t.Fatalf("gen_ai.agent.type=%q ok=%v want codex", got.AsString(), ok)
+	}
+}
+
+func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
+	p, exp := newTracingProvider(t)
+	attachTraceTestResourceContext(t, p)
+
+	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 2048, 0.1)
+	p.EndLLMSpan(span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+
+	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
+}
+
+func TestStartApprovalSpan_RawCommandOnlyWhenRedactionDisabled(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartApprovalSpan(context.Background(), "approval-1", "/usr/bin/curl",
+		[]string{"-H", "Authorization: Bearer secret"}, "/tmp/work",
+		ToolSpanContext{})
+	p.EndApprovalSpan(span, "approved", "ok", false, false)
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	for _, key := range []string{"defenseclaw.approval.command", "defenseclaw.approval.argv", "defenseclaw.approval.cwd"} {
+		if _, ok := attrByKey(spans[0].Attributes, key); ok {
+			t.Fatalf("%s exported while redaction was enabled", key)
+		}
+	}
+
+	redaction.SetDisableAll(true)
+	p, exp = newTracingProvider(t)
+	_, span = p.StartApprovalSpan(context.Background(), "approval-1", "/usr/bin/curl",
+		[]string{"-H", "Authorization: Bearer secret"}, "/tmp/work",
+		ToolSpanContext{})
+	p.EndApprovalSpan(span, "approved", "ok", false, false)
+	spans = exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d raw-mode spans, want 1", len(spans))
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.approval.command"); !ok || got.AsString() != "/usr/bin/curl" {
+		t.Fatalf("raw command attr = %q ok=%v, want /usr/bin/curl", got.AsString(), ok)
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.approval.argv"); !ok {
+		t.Fatal("raw argv attr missing in raw mode")
+	} else if argv := got.AsStringSlice(); len(argv) != 2 || argv[1] != "Authorization: Bearer secret" {
+		t.Fatalf("raw argv attr = %#v, want original argv", argv)
+	}
+	if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.approval.cwd"); !ok || got.AsString() != "/tmp/work" {
+		t.Fatalf("raw cwd attr = %q ok=%v, want /tmp/work", got.AsString(), ok)
+	}
+}
+
+func TestStartAgentSpan_EmitsRunID(t *testing.T) {
+	gatewaylog.SetProcessRunID("run-agent-123")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+	p.EndAgentSpan(span, "")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	got, ok := attrByKey(spans[0].Attributes, "defenseclaw.run.id")
+	if !ok || got.AsString() != "run-agent-123" {
+		t.Fatalf("defenseclaw.run.id=%q ok=%v want run-agent-123", got.AsString(), ok)
+	}
+}
+
+func TestStartLLMSpan_EmitsRunID(t *testing.T) {
+	gatewaylog.SetProcessRunID("run-llm-123")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
+	p, exp := newTracingProvider(t)
+	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 1024, 0.2)
+	p.EndLLMSpan(span, "gpt-5.5", 12, 34, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex")
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	got, ok := attrByKey(spans[0].Attributes, "defenseclaw.run.id")
+	if !ok || got.AsString() != "run-llm-123" {
+		t.Fatalf("defenseclaw.run.id=%q ok=%v want run-llm-123", got.AsString(), ok)
 	}
 }
 
@@ -802,6 +986,34 @@ func TestBuildResource_DefaultServiceName(t *testing.T) {
 	t.Error("service.name attribute not found")
 }
 
+func TestBuildResource_AgentWatchContextAttributes(t *testing.T) {
+	cfg := disabledCfg()
+	cfg.TenantID = "tenant-a"
+	cfg.WorkspaceID = "workspace-1"
+	cfg.DeploymentMode = "standalone"
+	cfg.DiscoverySource = "registry"
+
+	res := buildResource(cfg, "1.0.0")
+	got := map[string]string{}
+	iter := res.Iter()
+	for iter.Next() {
+		kv := iter.Attribute()
+		got[string(kv.Key)] = kv.Value.AsString()
+	}
+
+	for key, want := range map[string]string{
+		"tenant.id":              "tenant-a",
+		"workspace.id":           "workspace-1",
+		"deployment.environment": "test",
+		"deployment.mode":        "standalone",
+		"discovery.source":       "registry",
+	} {
+		if got[key] != want {
+			t.Errorf("%s=%q, want %q", key, got[key], want)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // OTel metric verification tests — ensure guardrail metrics are actually
 // recorded with the correct instruments and attribute values.
@@ -828,6 +1040,7 @@ func TestRecordGuardrailEvaluation_EmitsMetric(t *testing.T) {
 	found := findCounter(rm, "defenseclaw.guardrail.evaluations")
 	if found == nil {
 		t.Fatal("metric defenseclaw.guardrail.evaluations not found")
+		return
 	}
 
 	sum, ok := found.Data.(metricdata.Sum[int64])
@@ -866,6 +1079,7 @@ func TestRecordGuardrailLatency_EmitsMetric(t *testing.T) {
 	found := findHistogram(rm, "defenseclaw.guardrail.latency")
 	if found == nil {
 		t.Fatal("metric defenseclaw.guardrail.latency not found")
+		return
 	}
 
 	hist, ok := found.Data.(metricdata.Histogram[float64])
@@ -911,6 +1125,7 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	found := findHistogram(rm, "gen_ai.client.token.usage")
 	if found == nil {
 		t.Fatal("metric gen_ai.client.token.usage not found")
+		return
 	}
 
 	hist, ok := found.Data.(metricdata.Histogram[float64])
@@ -1026,6 +1241,7 @@ func TestRecordPolicyEvaluation_EmitsMetric(t *testing.T) {
 	found := findCounter(rm, "defenseclaw.policy.evaluations")
 	if found == nil {
 		t.Fatal("metric defenseclaw.policy.evaluations not found")
+		return
 	}
 
 	sum, ok := found.Data.(metricdata.Sum[int64])
@@ -1069,6 +1285,7 @@ func TestRecordPolicyLatency_EmitsMetric(t *testing.T) {
 	found := findHistogram(rm, "defenseclaw.policy.latency")
 	if found == nil {
 		t.Fatal("metric defenseclaw.policy.latency not found")
+		return
 	}
 
 	hist, ok := found.Data.(metricdata.Histogram[float64])
@@ -1110,6 +1327,7 @@ func TestRecordPolicyReload_EmitsMetric(t *testing.T) {
 	found := findCounter(rm, "defenseclaw.policy.reloads")
 	if found == nil {
 		t.Fatal("metric defenseclaw.policy.reloads not found")
+		return
 	}
 
 	sum, ok := found.Data.(metricdata.Sum[int64])
@@ -1185,6 +1403,7 @@ func TestStartEndPolicySpan_RecordsAttributes(t *testing.T) {
 	evalMetric := findCounter(rm, "defenseclaw.policy.evaluations")
 	if evalMetric == nil {
 		t.Fatal("EndPolicySpan should also record policy.evaluations metric")
+		return
 	}
 }
 
@@ -1252,6 +1471,7 @@ func TestEndPolicySpan_NilSpan_StillRecordsMetrics(t *testing.T) {
 	evalMetric := findCounter(rm, "defenseclaw.policy.evaluations")
 	if evalMetric == nil {
 		t.Fatal("EndPolicySpan(nil) should still record policy.evaluations metric")
+		return
 	}
 }
 

@@ -25,6 +25,7 @@ import json
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.provenance import stamp_aibom_inventory
 
@@ -68,7 +69,7 @@ def scan(app: AppContext, as_json: bool, summary_only: bool, categories: str | N
         cats = {c.strip().lower() for c in categories.split(",") if c.strip()}
 
     if not as_json:
-        click.echo("Scanning live OpenClaw environment …", err=True)
+        click.echo(ux.dim("Scanning live OpenClaw environment …"), err=True)
     inv = build_claw_aibom(app.cfg, live=True, categories=cats)
 
     enrich_with_policy(
@@ -82,7 +83,11 @@ def scan(app: AppContext, as_json: bool, summary_only: bool, categories: str | N
 
     errors = inv.get("errors", [])
     if errors:
-        click.echo(f"Warning: {len(errors)} openclaw command(s) failed", err=True)
+        msg = f"Warning: {len(errors)} openclaw command(s) failed"
+        if as_json:
+            click.echo(ux._style(msg, fg="yellow", bold=True), err=True)
+        else:
+            ux.warn(f"{len(errors)} openclaw command(s) failed")
 
     if as_json:
         stamp_aibom_inventory(inv, app.cfg)

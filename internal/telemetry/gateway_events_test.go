@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	metricdata "go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/trace"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
@@ -91,6 +92,43 @@ func TestRenderGatewayBody_IsValidJSONWithPayload(t *testing.T) {
 	}
 }
 
+func TestRenderGatewayBody_IncludesLLMContentPayload(t *testing.T) {
+	exitCode := 0
+	e := gatewaylog.Event{
+		EventType: gatewaylog.EventToolInvocation,
+		Severity:  gatewaylog.SeverityInfo,
+		SessionID: "sess-1",
+		UserID:    "alice",
+		AgentType: "codex",
+		Provider:  "openai",
+		Model:     "gpt-5.5",
+		Tool: &gatewaylog.ToolPayload{
+			ToolCallID:      "tool-1",
+			Phase:           "result",
+			Tool:            "shell",
+			ToolInput:       `{"cmd":"echo raw"}`,
+			ToolOutput:      "raw tool output",
+			ExitCode:        &exitCode,
+			ReplyToPromptID: "prompt-1",
+		},
+	}
+
+	body := renderGatewayBody(e)
+	var parsed gatewaylog.Event
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		t.Fatalf("body not JSON: %v (%s)", err, body)
+	}
+	if parsed.Tool == nil {
+		t.Fatalf("tool payload missing from OTel body: %s", body)
+	}
+	if parsed.Tool.ToolInput != e.Tool.ToolInput || parsed.Tool.ToolOutput != e.Tool.ToolOutput {
+		t.Fatalf("tool content lost in OTel body: %+v", parsed.Tool)
+	}
+	if parsed.Tool.ReplyToPromptID != "prompt-1" || parsed.UserID != "alice" || parsed.AgentType != "codex" {
+		t.Fatalf("correlation envelope lost in OTel body: %+v", parsed)
+	}
+}
+
 // TestEmitGatewayEvent_VerdictLogAttributes verifies every top-level
 // envelope field + verdict-specific attribute lands on the OTel log
 // record. This is the contract receivers (Splunk/Loki/Grafana)
@@ -124,7 +162,7 @@ func TestEmitGatewayEvent_VerdictLogAttributes(t *testing.T) {
 	if got := attrValue(rec, "defenseclaw.gateway.event_type"); got != "verdict" {
 		t.Fatalf("event_type attr=%q", got)
 	}
-	if got := attrValue(rec, "defenseclaw.run_id"); got != "run-1" {
+	if got := attrValue(rec, "defenseclaw.run.id"); got != "run-1" {
 		t.Fatalf("run_id attr=%q", got)
 	}
 	if got := attrValue(rec, "defenseclaw.llm.model"); got != "gpt-4" {
@@ -180,6 +218,45 @@ func TestEmitGatewayEvent_LifecycleAttributes(t *testing.T) {
 	}
 	if got := attrValue(rec, "defenseclaw.lifecycle.transition"); got != "init" {
 		t.Fatalf("lifecycle.transition=%q", got)
+	}
+}
+
+func TestEmitGatewayEventWithContext_PropagatesTraceContext(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("TraceIDFromHex: %v", err)
+	}
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	if err != nil {
+		t.Fatalf("SpanIDFromHex: %v", err)
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	p.EmitGatewayEventWithContext(ctx, gatewaylog.Event{
+		EventType: gatewaylog.EventLifecycle,
+		Severity:  gatewaylog.SeverityInfo,
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem: "gateway", Transition: "trace-linked",
+		},
+	})
+
+	rec := exp.snapshot()[0]
+	if got := rec.TraceID(); got != traceID {
+		t.Fatalf("record trace id=%s want %s", got.String(), traceID.String())
+	}
+	if got := rec.SpanID(); got != spanID {
+		t.Fatalf("record span id=%s want %s", got.String(), spanID.String())
+	}
+	if got := rec.TraceFlags(); got != trace.FlagsSampled {
+		t.Fatalf("record trace flags=%v want %v", got, trace.FlagsSampled)
 	}
 }
 
@@ -290,12 +367,20 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 		TraceID:           "trace-contract",
 		AgentID:           "agent-contract",
 		AgentName:         "openclaw",
+		AgentType:         "coding-agent",
 		AgentInstanceID:   "inst-contract",
 		SidecarInstanceID: "sidecar-pinned-on-event",
+		UserID:            "user-contract",
+		UserName:          "alice",
 		PolicyID:          "policy-contract",
 		DestinationApp:    "destapp-contract",
 		ToolName:          "tool-name-contract",
 		ToolID:            "tool-id-contract",
+		TenantID:          "tenant-contract",
+		WorkspaceID:       "workspace-contract",
+		Environment:       "prod",
+		DeploymentMode:    "managed",
+		DiscoverySource:   "registry",
 		SchemaVersion:     7,
 		ContentHash:       "hash-contract",
 		Generation:        42,
@@ -312,18 +397,26 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 
 	// String-typed envelope slots — assertAttrString both proves
 	// the key is present AND that the value round-tripped.
-	assertAttrString(t, rec, "defenseclaw.run_id", "run-contract")
+	assertAttrString(t, rec, "defenseclaw.run.id", "run-contract")
 	assertAttrString(t, rec, "defenseclaw.request_id", "req-contract")
-	assertAttrString(t, rec, "defenseclaw.session_id", "sess-contract")
+	assertAttrString(t, rec, "gen_ai.conversation.id", "sess-contract")
 	assertAttrString(t, rec, "defenseclaw.trace_id", "trace-contract")
-	assertAttrString(t, rec, "defenseclaw.agent_id", "agent-contract")
-	assertAttrString(t, rec, "defenseclaw.agent_name", "openclaw")
+	assertAttrString(t, rec, "gen_ai.agent.id", "agent-contract")
+	assertAttrString(t, rec, "gen_ai.agent.name", "openclaw")
+	assertAttrString(t, rec, "gen_ai.agent.type", "coding-agent")
 	assertAttrString(t, rec, "defenseclaw.agent_instance_id", "inst-contract")
 	assertAttrString(t, rec, "defenseclaw.sidecar_instance_id", "sidecar-pinned-on-event")
+	assertAttrString(t, rec, "defenseclaw.user_id", "user-contract")
+	assertAttrString(t, rec, "defenseclaw.user_name", "alice")
 	assertAttrString(t, rec, "defenseclaw.policy_id", "policy-contract")
 	assertAttrString(t, rec, "defenseclaw.destination_app", "destapp-contract")
 	assertAttrString(t, rec, "defenseclaw.tool_name", "tool-name-contract")
-	assertAttrString(t, rec, "defenseclaw.tool_id", "tool-id-contract")
+	assertAttrString(t, rec, "gen_ai.tool.call.id", "tool-id-contract")
+	assertAttrString(t, rec, "tenant.id", "tenant-contract")
+	assertAttrString(t, rec, "workspace.id", "workspace-contract")
+	assertAttrString(t, rec, "deployment.environment", "prod")
+	assertAttrString(t, rec, "deployment.mode", "managed")
+	assertAttrString(t, rec, "discovery.source", "registry")
 	assertAttrString(t, rec, "defenseclaw.content_hash", "hash-contract")
 	assertAttrString(t, rec, "defenseclaw.binary_version", "bin-contract")
 
@@ -358,6 +451,36 @@ func TestEmitGatewayEvent_NilPayloadDoesNotPanic(t *testing.T) {
 	})
 	if got := len(exp.snapshot()); got != 1 {
 		t.Fatalf("records=%d want 1 (envelope still emits on nil payload)", got)
+	}
+}
+
+func TestEmitGatewayEvent_LLMEventAttributes(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+	exitCode := 2
+	p.EmitGatewayEvent(gatewaylog.Event{
+		EventType: gatewaylog.EventToolInvocation,
+		Severity:  gatewaylog.SeverityInfo,
+		SessionID: "sess-llm",
+		ToolName:  "shell",
+		ToolID:    "call-1",
+		Tool: &gatewaylog.ToolPayload{
+			ToolCallID:      "call-1",
+			Phase:           "result",
+			TurnID:          "turn-1",
+			Tool:            "shell",
+			ExitCode:        &exitCode,
+			ReplyToPromptID: "prompt-1",
+			Source:          "codex",
+		},
+	})
+	rec := exp.snapshot()[0]
+	assertAttrString(t, rec, "defenseclaw.gateway.event_type", "tool_invocation")
+	assertAttrString(t, rec, "defenseclaw.tool.phase", "result")
+	assertAttrString(t, rec, "defenseclaw.tool.call_id", "call-1")
+	assertAttrString(t, rec, "defenseclaw.turn_id", "turn-1")
+	assertAttrString(t, rec, "defenseclaw.llm.reply_to_prompt_id", "prompt-1")
+	if got, ok := intAttrValue(rec, "defenseclaw.tool.exit_code"); !ok || got != 2 {
+		t.Fatalf("defenseclaw.tool.exit_code=%d ok=%v, want 2", got, ok)
 	}
 }
 

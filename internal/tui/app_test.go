@@ -27,6 +27,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func TestModelInitDoesNotQueueAutoInit(t *testing.T) {
@@ -89,6 +90,18 @@ func TestHandleKeyInventoryDigitsStayLocal(t *testing.T) {
 	}
 }
 
+func TestHandleKeySlashStartsLogsSearch(t *testing.T) {
+	model := New(Deps{Version: "test"})
+	model.activePanel = PanelLogs
+
+	next, _ := model.handleKey(digitKey("/"))
+	got := next.(Model)
+
+	if !got.logs.searching {
+		t.Fatal("slash on Logs panel must enter Logs search mode")
+	}
+}
+
 func TestHandleAuditKeyExportsJSON(t *testing.T) {
 	store := newTestAuditStore(t)
 	if err := store.LogEvent(audit.Event{
@@ -134,8 +147,81 @@ func TestHandleAuditKeyExportsJSON(t *testing.T) {
 	}
 }
 
+func TestCommandDoneSetupReloadsConfigEditor(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", tmp)
+	writeTestConfig := func(enabled bool) {
+		t.Helper()
+		body := "claw:\n  mode: openclaw\nguardrail:\n"
+		if enabled {
+			body += "  enabled: true\n  mode: action\n"
+		} else {
+			body += "  enabled: false\n  mode: observe\n"
+		}
+		if err := os.WriteFile(filepath.Join(tmp, config.DefaultConfigName), []byte(body), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	writeTestConfig(false)
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("initial config load: %v", err)
+	}
+	model := New(Deps{Config: cfg, Version: "test"})
+	model.activePanel = PanelSetup
+	model.setup.mode = setupModeConfig
+	model.setup.activeSection = setupSectionIndex(t, model.setup, "Guardrail")
+
+	if got := setupFieldValue(t, model.setup, "Guardrail", "guardrail.enabled"); got != "false" {
+		t.Fatalf("initial guardrail.enabled field = %q, want false", got)
+	}
+
+	writeTestConfig(true)
+	next, _ := model.Update(CommandDoneMsg{Command: "setup guardrail", ExitCode: 0})
+	gotModel := next.(Model)
+
+	if !gotModel.cfg.Guardrail.Enabled {
+		t.Fatal("model cfg was not reloaded after setup guardrail completed")
+	}
+	if got := setupFieldValue(t, gotModel.setup, "Guardrail", "guardrail.enabled"); got != "true" {
+		t.Fatalf("config editor guardrail.enabled field = %q, want true", got)
+	}
+	if gotModel.setup.sections[gotModel.setup.activeSection].Name != "Guardrail" {
+		t.Fatalf("setup editor active section = %q, want Guardrail",
+			gotModel.setup.sections[gotModel.setup.activeSection].Name)
+	}
+}
+
 func digitKey(text string) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Text: text, Code: []rune(text)[0]})
+}
+
+func setupSectionIndex(t *testing.T, p SetupPanel, name string) int {
+	t.Helper()
+	for i, sec := range p.sections {
+		if sec.Name == name {
+			return i
+		}
+	}
+	t.Fatalf("missing setup section %q", name)
+	return 0
+}
+
+func setupFieldValue(t *testing.T, p SetupPanel, sectionName, key string) string {
+	t.Helper()
+	for _, sec := range p.sections {
+		if sec.Name != sectionName {
+			continue
+		}
+		for _, field := range sec.Fields {
+			if field.Key == key {
+				return field.Value
+			}
+		}
+	}
+	t.Fatalf("missing setup field %s/%s", sectionName, key)
+	return ""
 }
 
 // TestGlobalQDoesNotQuit pins the user-visible contract that "q"

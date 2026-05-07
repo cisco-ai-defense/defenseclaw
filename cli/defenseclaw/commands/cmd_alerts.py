@@ -31,6 +31,7 @@ import json
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_ACK_ALERTS, ACTION_DISMISS_ALERTS
 from defenseclaw.context import AppContext, pass_ctx
 
@@ -215,51 +216,63 @@ def alerts(ctx: click.Context, limit: int, show_idx: int | None, tui: bool) -> N
 def _alerts_default(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None:
     """View security alerts as a table (legacy ``defenseclaw alerts``)."""
     if not app.store:
-        click.echo("No audit store available. Run 'defenseclaw init' first.")
+        ux.warn("No audit store available. Run 'defenseclaw init' first.")
         return
 
     alert_list = app.store.list_alerts(limit)
 
     if not alert_list:
-        click.echo("No alerts. All clear.")
+        ux.ok("No alerts. All clear.")
         return
 
     if show_idx is not None:
         if show_idx < 1 or show_idx > len(alert_list):
-            click.echo(f"error: alert #{show_idx} not found (1–{len(alert_list)})", err=True)
+            ux.err(f"alert #{show_idx} not found (1–{len(alert_list)})")
             raise SystemExit(1)
         e = alert_list[show_idx - 1]
-        sev_color = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}.get(e.severity, "white")
-        click.echo(f"Alert #{show_idx}")
-        click.echo("  Severity:  ", nl=False)
-        click.secho(e.severity, fg=sev_color)
-        click.echo(f"  Timestamp: {e.timestamp.strftime('%Y-%m-%d %H:%M:%S') if e.timestamp else ''}")
-        click.echo(f"  Action:    {e.action}")
+        sev_fg = {
+            "CRITICAL": "red",
+            "HIGH": "red",
+            "MEDIUM": "yellow",
+            "LOW": "cyan",
+            "INFO": "white",
+        }.get(e.severity, "bright_black")
+        click.echo(f"{ux.bold(f'Alert #{show_idx}')}")
+        click.echo(f"  {ux._style('Severity:', fg='bright_black', bold=True)}  ", nl=False)
+        click.echo(ux._style(e.severity, fg=sev_fg, bold=e.severity in ("CRITICAL", "HIGH")))
+        ts = e.timestamp.strftime("%Y-%m-%d %H:%M:%S") if e.timestamp else ""
+        click.echo(f"  {ux._style('Timestamp:', fg='bright_black', bold=True)} {ts}")
+        click.echo(f"  {ux._style('Action:', fg='bright_black', bold=True)}    {e.action}")
         if e.target:
-            click.echo(f"  Target:    {e.target}")
+            click.echo(f"  {ux._style('Target:', fg='bright_black', bold=True)}    {e.target}")
         if e.details:
             human = _humanize_details(e.details)
             if human:
-                click.echo(f"  Details:   {human}")
+                click.echo(f"  {ux._style('Details:', fg='bright_black', bold=True)}   {human}")
         kv_map = _kv(e.details or "")
         scanner_name = kv_map.get("scanner", "")
         if e.action == "scan" and scanner_name and e.target:
             findings = app.store.get_findings_for_target(e.target, scanner_name)
             if findings:
-                click.echo("  Findings:")
-                sev_colors = {"CRITICAL": "red", "HIGH": "red", "MEDIUM": "yellow", "LOW": "cyan"}
+                click.echo(f"  {ux.bold('Findings:')}")
                 for f in findings:
-                    color = sev_colors.get(f["severity"], "white")
-                    click.secho(f"    [{f['severity']}]", fg=color, nl=False)
+                    tag = f"[{f['severity']}]"
+                    sev_tag_fg = {
+                        "CRITICAL": "red",
+                        "HIGH": "red",
+                        "MEDIUM": "yellow",
+                        "LOW": "cyan",
+                        "INFO": "bright_black",
+                    }.get(f["severity"], "white")
+                    click.echo(f"    {ux._style(tag, fg=sev_tag_fg, bold=True)}", nl=False)
                     loc = f"  {f['location']}" if f["location"] else ""
                     click.echo(f" {f['title']}{loc}")
         return
 
     if tui:
-        click.echo(
-            "note: `defenseclaw alerts --tui` has been retired. "
+        ux.warn(
+            "`defenseclaw alerts --tui` has been retired. "
             "Launch `defenseclaw tui` and press 2 for the Alerts panel.",
-            err=True,
         )
 
     _render_table(alert_list, app.store)
@@ -291,7 +304,7 @@ def alerts_acknowledge(app: AppContext, severity: str) -> None:
             after=after,
             diff=[{"path": "/alerts", "op": "replace", "before": before, "after": after}],
         )
-    click.echo(f"Acknowledged {n} alert(s).")
+    ux.ok(f"Acknowledged {n} alert(s).")
 
 
 @alerts.command("dismiss")
@@ -320,4 +333,4 @@ def alerts_dismiss(app: AppContext, severity: str) -> None:
             after=after,
             diff=[{"path": "/alerts", "op": "replace", "before": before, "after": after}],
         )
-    click.echo(f"Dismissed {n} alert(s) from the active list.")
+    ux.ok(f"Dismissed {n} alert(s) from the active list.")

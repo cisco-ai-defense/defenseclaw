@@ -10,6 +10,7 @@ import subprocess
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.commands.cmd_init_sandbox import (
     _ensure_sudo_cache,
     _fix_data_dir_ownership,
@@ -36,18 +37,91 @@ def _sudo_read_json(path: str) -> dict | None:
 
 
 def restore_sandbox_ownership_if_needed(cfg) -> None:
-    """Restore sandbox ownership of .openclaw dir if running in standalone mode."""
+    """Restore sandbox ownership of the framework root dir if running in standalone mode.
+
+    Iterates over every framework root reported by
+    :func:`_sandbox_framework_roots` so non-OpenClaw connectors get the
+    same treatment if/when they're added to :data:`SUPPORTED_SANDBOX_CONNECTORS`.
+    """
     if not cfg.openshell.is_standalone():
         return
     sandbox_home = cfg.openshell.effective_sandbox_home()
-    oc_target = os.path.realpath(os.path.join(sandbox_home, ".openclaw"))
-    try:
-        subprocess.run(
-            [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", oc_target],
-            capture_output=True, check=False,
-        )
-    except FileNotFoundError:
-        pass
+    for root in _sandbox_framework_roots(cfg, sandbox_home):
+        target = os.path.realpath(root)
+        try:
+            subprocess.run(
+                [*_sudo_prefix(), "chown", "-R", "sandbox:sandbox", target],
+                capture_output=True, check=False,
+            )
+        except FileNotFoundError:
+            return
+
+
+# ---------------------------------------------------------------------------
+# Connector validation (S4.5)
+# ---------------------------------------------------------------------------
+
+# Connectors whose sandbox lifecycle DefenseClaw can drive end-to-end.
+# Currently only OpenClaw — Codex / Claude Code / ZeptoClaw don't expose a
+# headless server-mode binary that can be supervised by openshell-sandbox,
+# so we fail-fast rather than silently writing OpenClaw paths into their
+# config trees.
+SUPPORTED_SANDBOX_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
+
+
+def _resolve_active_connector(cfg) -> str:
+    """Return the active connector name, normalized to lowercase.
+
+    Mirrors :meth:`Config.active_connector` but tolerates older
+    in-process configs that haven't been migrated yet.
+    """
+    if hasattr(cfg, "active_connector") and callable(cfg.active_connector):
+        try:
+            return (cfg.active_connector() or "openclaw").lower()
+        except Exception:
+            pass
+    if hasattr(cfg, "guardrail") and hasattr(cfg.guardrail, "connector"):
+        return (cfg.guardrail.connector or "openclaw").strip().lower() or "openclaw"
+    return "openclaw"
+
+
+def _validate_sandbox_connector(cfg) -> None:
+    """Abort sandbox setup when the active connector isn't OpenClaw.
+
+    Raises a ``click.ClickException`` with a clear remediation message so
+    operators don't end up with a half-wired sandbox pointing at
+    ``$SANDBOX_HOME/.openclaw`` when they actually run Codex.
+    """
+    connector = _resolve_active_connector(cfg)
+    if connector in SUPPORTED_SANDBOX_CONNECTORS:
+        return
+    raise click.ClickException(
+        "Sandbox mode currently requires guardrail.connector=openclaw. "
+        f"Active connector is '{connector}'.\n\n"
+        "  Options:\n"
+        "    1. Switch to host mode for this connector: defenseclaw setup\n"
+        "    2. Set guardrail.connector=openclaw in ~/.defenseclaw/config.yaml\n"
+        "       and re-run 'defenseclaw sandbox setup'.\n\n"
+        "  Tracked under S4.5/F23 — Codex, Claude Code, and ZeptoClaw\n"
+        "  sandbox lifecycles will be added in a follow-up PR."
+    )
+
+
+def _sandbox_framework_roots(cfg, sandbox_home: str) -> list[str]:
+    """Return the directories the sandbox setup needs to chown / ACL.
+
+    For OpenClaw this is ``$SANDBOX_HOME/.openclaw``. The return value is
+    a list so future connectors can declare multiple roots
+    (e.g. ``$SANDBOX_HOME/.codex`` plus a shared cache dir) without
+    touching every callsite.
+    """
+    connector = _resolve_active_connector(cfg)
+    if connector == "openclaw":
+        return [os.path.join(sandbox_home, ".openclaw")]
+    # Non-OpenClaw connectors should never reach this code path — see
+    # _validate_sandbox_connector above. Returning [] keeps the
+    # iteration safe if a caller bypasses validation.
+    return []
 
 
 def _find_openclaw_binary() -> str:
@@ -151,6 +225,16 @@ def setup_sandbox(
         app.store = Store(app.cfg.audit_db)
         app.logger = Logger(app.store, app.cfg.splunk)
 
+    connector = (app.cfg.guardrail.connector or "openclaw").lower()
+    if connector != "openclaw" and not disable:
+        click.echo(
+            f"  ERROR: Sandbox setup currently requires the OpenClaw connector.\n"
+            f"  Active connector: {connector}\n"
+            f"  Change with: defenseclaw setup guardrail --connector openclaw",
+            err=True,
+        )
+        raise SystemExit(1)
+
     if disable:
         _ensure_sudo_cache()
         _disable_sandbox(app)
@@ -160,13 +244,23 @@ def setup_sandbox(
         click.echo("  ERROR: Sandbox mode requires Linux.", err=True)
         raise SystemExit(1)
 
+    # S4.5 — sandbox mode is OpenClaw-only today.
+    #
+    # Every helper below this point assumes ``$SANDBOX_HOME/.openclaw`` is the
+    # framework root, runs ``openclaw gateway run`` inside the sandbox, and
+    # patches ``openclaw.json``. Codex / Claude Code / ZeptoClaw don't have
+    # equivalents in their sandbox-friendly form yet, so failing fast here is
+    # safer than silently wiring DefenseClaw to write OpenClaw paths into a
+    # Codex-only host.
+    _validate_sandbox_connector(app.cfg)
+
     _ensure_sudo_cache()
 
     sandbox_home = sandbox_home or app.cfg.openshell.effective_sandbox_home()
     data_dir = app.cfg.data_dir
 
     click.echo()
-    click.echo("  Configuring sandbox mode ...")
+    ux.section("Configuring sandbox mode")
 
     # 1. Validate prerequisites
     _validate_sandbox_prerequisites(sandbox_home)
@@ -192,15 +286,17 @@ def setup_sandbox(
     app.cfg.claw.home_dir = os.path.join(sandbox_home, ".openclaw")
     app.cfg.claw.config_file = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
 
-    click.echo("    openshell.mode:       standalone")
-    click.echo(f"    openshell.sandbox_home: {sandbox_home}")
-    click.echo(f"    openshell.host_networking: {app.cfg.openshell.host_networking}")
-    click.echo(f"    gateway.host:         {sandbox_ip}")
+    click.echo(f"    {ux.bold('openshell.mode:')}       standalone")
+    click.echo(f"    {ux.bold('openshell.sandbox_home:')} {sandbox_home}")
+    click.echo(f"    {ux.bold('openshell.host_networking:')} {app.cfg.openshell.host_networking}")
+    click.echo(f"    {ux.bold('gateway.host:')}         {sandbox_ip}")
     if app.cfg.guardrail.enabled:
-        click.echo(f"    guardrail.host:       {host_ip}")
+        click.echo(f"    {ux.bold('guardrail.host:')}       {host_ip}")
     else:
-        click.echo("    guardrail:            disabled (use 'defenseclaw setup guardrail' to enable)")
-    click.echo(f"    claw.home_dir:        {app.cfg.claw.home_dir}")
+        click.echo(
+            f"    {ux.bold('guardrail:')}            disabled (use 'defenseclaw setup guardrail' to enable)"
+        )
+    click.echo(f"    {ux.bold('claw.home_dir:')}        {app.cfg.claw.home_dir}")
 
     # 3. Read OpenClaw config (token resolution deferred to after pairing — step 9b).
     oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
@@ -208,14 +304,16 @@ def setup_sandbox(
 
     # 4. Install policy template
     _install_policy_template(data_dir, policy)
-    click.echo(f"    policy template:      {policy}")
+    click.echo(f"    {ux.bold('policy template:')}      {policy}")
 
     # 5. Generate DNS resolv.conf (only when host networking is active)
     if app.cfg.openshell.host_networking:
         _generate_resolv_conf(data_dir, dns)
-        click.echo(f"    dns nameservers:      {dns}")
+        click.echo(f"    {ux.bold('dns nameservers:')}      {dns}")
     else:
-        click.echo("    dns:                  managed by openshell-sandbox (host networking disabled)")
+        click.echo(
+            f"    {ux.bold('dns:')}                  managed by openshell-sandbox (host networking disabled)"
+        )
 
     # 6. Patch sandbox-side OpenClaw config (port + bind + guardrail baseUrl)
     if oc_json is not None:
@@ -301,16 +399,13 @@ def setup_sandbox(
     #     scripts, config) should be owned by the invoking user.
     _fix_data_dir_ownership(data_dir)
 
-    click.echo()
-    click.echo("  ── Summary ───────────────────────────────────────────")
-    click.echo()
-    click.echo("  Sandbox mode configured successfully.")
-    click.echo()
+    ux.banner("Summary")
+    ux.ok("Sandbox mode configured successfully.")
 
     if installed:
-        click.echo("  ✓ Systemd units installed and daemon reloaded")
+        ux.ok("Systemd units installed and daemon reloaded")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Start the sandbox:")
         click.echo("       sudo systemctl start defenseclaw-sandbox.target")
         click.echo()
@@ -325,10 +420,10 @@ def setup_sandbox(
         click.echo(f"       {data_dir}/gateway.log")
         click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     elif has_systemd:
-        click.echo("  ⚠ Systemd units were generated but could not be installed automatically.")
-        click.echo(f"    Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
+        ux.warn("Systemd units were generated but could not be installed automatically.")
+        ux.subhead(f"Files are at: {data_dir}/systemd/ and {data_dir}/scripts/")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Install systemd units manually (requires root):")
         click.echo(f"       sudo cp {data_dir}/systemd/*.service /etc/systemd/system/")
         click.echo(f"       sudo cp {data_dir}/systemd/*.target /etc/systemd/system/")
@@ -351,9 +446,9 @@ def setup_sandbox(
         click.echo(f"       {data_dir}/gateway.log")
         click.echo(f"       {data_dir}/gateway.jsonl  (structured verdicts/judge/lifecycle)")
     else:
-        click.echo("  ℹ No systemd detected (container/minimal environment).")
+        ux.subhead("No systemd detected (container/minimal environment).")
         click.echo()
-        click.echo("  Next steps:")
+        ux.section("Next steps")
         click.echo("    1. Start the sandbox manually:")
         click.echo(f"       sudo {data_dir}/scripts/run-sandbox.sh")
         click.echo()
@@ -592,7 +687,7 @@ def _add_user_to_sandbox_group() -> None:
     )
     if result.returncode == 0:
         click.echo(f"    group membership:    {sudo_user} added to sandbox group")
-        msg = click.style("(log out and back in for this to take effect)", fg="green")
+        msg = ux.dim("(log out and back in for this to take effect)")
         click.echo(f"                         {msg}")
     else:
         click.echo(f"    group membership:    failed ({result.stderr.strip()})", err=True)

@@ -24,6 +24,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -103,6 +104,85 @@ class TestEvaluateAdmissionAllowed(_StoreTestBase):
                                target_type="plugin", name="defenseclaw")
         self.assertEqual(d.verdict, "allowed")
         self.assertEqual(d.source, "policy-allow")
+
+
+class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
+    def _asset_policy(self, *, mode="action", default="allow", registry_required=False,
+                      registry=None, allowed=None, denied=None):
+        target_policy = SimpleNamespace(
+            default=default,
+            registry_required=registry_required,
+            registry=registry or [],
+            allowed=allowed or [],
+            denied=denied or [],
+        )
+        return SimpleNamespace(
+            enabled=True,
+            mode=mode,
+            skill=target_policy,
+            mcp=target_policy,
+            plugin=target_policy,
+        )
+
+    def test_default_deny_blocks_before_scan(self):
+        policy = self._asset_policy(default="deny")
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="skill", name="unknown",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-default-deny")
+
+    def test_allow_overrides_default_deny_without_bypassing_scan(self):
+        policy = self._asset_policy(
+            default="deny",
+            allowed=[SimpleNamespace(name="trusted", connector="codex")],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="skill", name="trusted",
+            connector="codex",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_registry_required_blocks_unregistered(self):
+        policy = self._asset_policy(
+            registry_required=True,
+            registry=[SimpleNamespace(name="github")],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="rogue",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-registry-required")
+
+    def test_observe_mode_does_not_block_install_flow(self):
+        policy = self._asset_policy(mode="observe", default="deny")
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="plugin", name="unknown",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
+
+    def test_denied_rule_in_observe_mode_does_not_block_install_flow(self):
+        policy = self._asset_policy(
+            mode="observe",
+            denied=[SimpleNamespace(name="untrusted")],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="skill", name="untrusted",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "scan")
+        self.assertEqual(d.source, "scan-required")
 
 
 class TestEvaluateAdmissionFirstPartyProvenance(_StoreTestBase):

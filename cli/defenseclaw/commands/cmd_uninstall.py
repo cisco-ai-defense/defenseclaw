@@ -19,8 +19,23 @@
 Removes DefenseClaw artifacts from the system in a predictable,
 scriptable way so operators aren't left with a mess after evaluating
 the tool. ``reset`` is the "lose my data" button — it wipes
-``~/.defenseclaw`` but keeps the binaries and the OpenClaw plugin
-in place so ``defenseclaw quickstart`` can reinstall cleanly.
+``~/.defenseclaw`` but keeps the binaries and the agent framework's
+plugin in place so ``defenseclaw quickstart`` can reinstall cleanly.
+
+Connector polymorphism (S7.3)
+-----------------------------
+Removal of the agent framework's defenseclaw artifacts is delegated to
+``defenseclaw-gateway connector teardown`` — the canonical sentinel that
+each connector adapter implements (S7.2). This keeps the Python flow
+honest: it never has to know how Codex / Claude Code / ZeptoClaw
+configure themselves, which previously meant the OpenClaw teardown was
+the only one that worked.
+
+The Python side still owns OpenClaw-specific revert paths as a fallback
+for very old gateway binaries (pre-S7.2) where the ``connector teardown``
+subcommand is not available. The fallback only ever runs against
+OpenClaw, never against the other adapters — calling
+``restore_openclaw_config`` against a Codex install would corrupt it.
 """
 
 from __future__ import annotations
@@ -33,6 +48,31 @@ from dataclasses import dataclass
 import click
 
 from defenseclaw import config as config_module
+from defenseclaw import ux
+
+# Connectors whose teardown the Python CLI knows how to perform locally
+# without going through ``defenseclaw-gateway connector teardown``. This
+# is the conservative fallback path used when the gateway binary is too
+# old to expose the connector subcommand.
+_PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
+_CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
+    "openclaw": (
+        os.path.join("connector_backups", "openclaw", "openclaw.json.json"),
+    ),
+    "codex": (
+        "codex_backup.json",
+        "codex_config_backup.json",
+        os.path.join("connector_backups", "codex", "config.toml.json"),
+    ),
+    "claudecode": (
+        "claudecode_backup.json",
+        os.path.join("connector_backups", "claudecode", "settings.json.json"),
+    ),
+    "zeptoclaw": (
+        "zeptoclaw_backup.json",
+        os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
+    ),
+}
 
 
 @dataclass
@@ -47,6 +87,14 @@ class UninstallPlan:
     data_dir: str = ""
     openclaw_config_file: str = ""
     openclaw_home: str = ""
+    # connector is the active framework adapter resolved from config.
+    # connectors is the actual teardown sweep, which may include inactive
+    # adapters with leftover rollback markers.
+    connector: str = "openclaw"
+    # connectors is the full sweep set. It always includes the active
+    # connector unless OpenClaw was explicitly excluded, plus any inactive
+    # connector with rollback markers still present under data_dir.
+    connectors: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +108,11 @@ class UninstallPlan:
     is_flag=True,
     help="Additionally remove the defenseclaw + defenseclaw-gateway binaries from ~/.local/bin.",
 )
-@click.option("--keep-openclaw", is_flag=True, help="Do NOT revert ~/.openclaw/openclaw.json or remove the plugin.")
+@click.option(
+    "--keep-openclaw",
+    is_flag=True,
+    help="Do NOT revert OpenClaw config or remove its plugin; other connector teardown still runs.",
+)
 @click.option("--dry-run", is_flag=True, help="Show what would happen without touching the system.")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def uninstall_cmd(
@@ -77,14 +129,15 @@ def uninstall_cmd(
         revert_openclaw=not keep_openclaw,
         remove_plugin=not keep_openclaw,
     )
+    ux.banner("DefenseClaw Uninstall")
     _render_plan(plan, dry_run=dry_run)
 
     if dry_run:
-        click.echo("  (dry-run — nothing modified)")
+        ux.subhead("(dry-run — nothing modified)")
         return
 
     if not yes and not click.confirm("  Proceed?", default=False):
-        click.echo("  Cancelled.")
+        ux.subhead("Cancelled.")
         raise SystemExit(1)
 
     _execute_plan(plan)
@@ -109,21 +162,47 @@ def reset_cmd(yes: bool) -> None:
         revert_openclaw=True,
         remove_plugin=False,  # keep plugin around for quick re-enable
     )
+    ux.banner("DefenseClaw Reset")
     _render_plan(plan, dry_run=False)
 
     if not yes and not click.confirm(
         f"  This will DELETE {plan.data_dir}. Continue?", default=False
     ):
-        click.echo("  Cancelled.")
+        ux.subhead("Cancelled.")
         raise SystemExit(1)
 
     _execute_plan(plan)
-    click.echo("  ✓ Reset complete. Run 'defenseclaw quickstart' to reinstall.")
+    ux.ok("Reset complete. Run 'defenseclaw quickstart' to reinstall.")
 
 
 # ---------------------------------------------------------------------------
 # Planning + execution
 # ---------------------------------------------------------------------------
+
+def _resolve_active_connector(cfg) -> str:
+    """Return the active connector for ``cfg``, lowercased.
+
+    Mirrors :meth:`Config.active_connector` but tolerates older
+    in-process configs that haven't been migrated yet — the same
+    pattern used in :mod:`cmd_setup_sandbox`. We can't rely on
+    ``Config.active_connector`` existing because ``_build_plan`` is
+    called even when config loading raised.
+    """
+    if cfg is None:
+        return "openclaw"
+    if hasattr(cfg, "active_connector") and callable(cfg.active_connector):
+        try:
+            name = (cfg.active_connector() or "").strip().lower()
+            if name:
+                return name
+        except Exception:
+            pass
+    if hasattr(cfg, "guardrail") and hasattr(cfg.guardrail, "connector"):
+        name = (cfg.guardrail.connector or "").strip().lower()
+        if name:
+            return name
+    return "openclaw"
+
 
 def _build_plan(
     *,
@@ -139,6 +218,7 @@ def _build_plan(
     # rather than blocking the uninstall.
     openclaw_config_file = ""
     openclaw_home = ""
+    cfg = None
     try:
         cfg = config_module.load()
         openclaw_config_file = cfg.claw.config_file
@@ -146,6 +226,14 @@ def _build_plan(
     except Exception:
         openclaw_home = os.path.expanduser("~/.openclaw")
         openclaw_config_file = os.path.join(openclaw_home, "openclaw.json")
+
+    connector = _resolve_active_connector(cfg)
+    connectors = _teardown_connectors(
+        connector,
+        data_dir=data_dir,
+        openclaw_config_file=openclaw_config_file,
+        include_openclaw=revert_openclaw,
+    )
 
     return UninstallPlan(
         stop_gateway=True,
@@ -156,28 +244,82 @@ def _build_plan(
         data_dir=data_dir,
         openclaw_config_file=openclaw_config_file,
         openclaw_home=openclaw_home,
+        connector=connector,
+        connectors=connectors,
     )
 
 
+def _teardown_connectors(
+    active_connector: str,
+    *,
+    data_dir: str,
+    openclaw_config_file: str,
+    include_openclaw: bool,
+) -> tuple[str, ...]:
+    """Return connector names that uninstall should restore before cleanup.
+
+    Active connector state is necessary but not sufficient: operators can
+    switch connectors, crash during handoff, or lose active_connector.json.
+    Backup markers are the durable evidence that DefenseClaw touched an
+    agent-owned config file, so uninstall sweeps those inactive connectors
+    too before data/binary removal.
+    """
+    out: list[str] = []
+
+    def add(name: str) -> None:
+        name = (name or "").strip().lower()
+        if not name:
+            return
+        if name == "openclaw" and not include_openclaw:
+            return
+        if name not in out:
+            out.append(name)
+
+    add(active_connector)
+    for name, markers in _CONNECTOR_BACKUP_MARKERS.items():
+        for marker in markers:
+            if os.path.isfile(os.path.join(data_dir, marker)):
+                add(name)
+                break
+
+    if include_openclaw and openclaw_config_file:
+        pristine = _expand(openclaw_config_file) + ".pristine"
+        if os.path.isfile(pristine):
+            add("openclaw")
+
+    return tuple(out)
+
+
 def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
-    click.echo()
-    click.echo("  ── Uninstall plan ────────────────────────────────────")
-    click.echo()
-    click.echo(f"  • stop sidecar:        {'yes' if plan.stop_gateway else 'no'}")
-    click.echo(f"  • revert openclaw.json: {'yes' if plan.revert_openclaw else 'no'} "
-               f"({plan.openclaw_config_file})")
-    click.echo(f"  • remove plugin:        {'yes' if plan.remove_plugin else 'no'}")
-    click.echo(f"  • wipe {plan.data_dir}: {'yes' if plan.remove_data_dir else 'no'}")
-    click.echo(f"  • remove binaries:     {'yes' if plan.remove_binaries else 'no'}")
+    ux.banner("Uninstall plan")
+    click.echo(f"  • {ux.bold('active connector:')}    {plan.connector}")
+    display_connectors = plan.connectors or ((plan.connector,) if plan.revert_openclaw else ())
+    teardown = ", ".join(display_connectors) if display_connectors else "no"
+    click.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")
+    click.echo(f"  • {ux.bold('stop sidecar:')}        {'yes' if plan.stop_gateway else 'no'}")
+    if "openclaw" in display_connectors:
+        click.echo(
+            f"  • {ux.bold('revert openclaw.json:')} {'yes' if plan.revert_openclaw else 'no'} "
+            f"({plan.openclaw_config_file})"
+        )
+        click.echo(
+            f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}"
+        )
+    click.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    click.echo(f"  • {ux.bold('remove binaries:')}     {'yes' if plan.remove_binaries else 'no'}")
     click.echo()
 
 
 def _execute_plan(plan: UninstallPlan) -> None:
     if plan.stop_gateway:
         _stop_gateway()
-    if plan.revert_openclaw:
-        _revert_openclaw(plan)
+    if plan.connectors or plan.revert_openclaw:
+        _connector_teardown(plan)
     if plan.remove_plugin:
+        # Plugin removal is OpenClaw-specific. For other connectors the
+        # gateway sentinel teardown above already removed their hook
+        # scripts and config patches. This helper is idempotent and
+        # reports "not installed" when OpenClaw was never used.
         _remove_plugin(plan)
     if plan.remove_data_dir:
         _remove_data_dir(plan.data_dir)
@@ -188,17 +330,115 @@ def _execute_plan(plan: UninstallPlan) -> None:
 def _stop_gateway() -> None:
     gw = shutil.which("defenseclaw-gateway")
     if gw is None:
-        click.echo("  · sidecar not on PATH — nothing to stop")
+        ux.subhead("sidecar not on PATH — nothing to stop")
         return
     try:
         subprocess.run([gw, "stop"], capture_output=True, text=True, timeout=15)
-        click.echo("  ✓ sidecar stopped")
+        ux.ok("sidecar stopped")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-        click.echo(f"  ⚠ could not stop sidecar: {exc}")
+        ux.warn(f"could not stop sidecar: {exc}")
 
 
-def _revert_openclaw(plan: UninstallPlan) -> None:
-    """Restore openclaw.json, preferring the pristine backup if we have it."""
+def _gateway_supports_connector_teardown() -> bool:
+    """Return True iff the local ``defenseclaw-gateway`` exposes the
+    ``connector teardown`` subcommand introduced in S7.2.
+
+    Older binaries print a usage error that includes ``unknown command``
+    on stderr; the subprocess returncode is also non-zero. We detect
+    by asking for ``--help`` on the ``connector`` subcommand — which is
+    a non-destructive probe — and checking exit code + output.
+    """
+    gw = shutil.which("defenseclaw-gateway")
+    if gw is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [gw, "connector", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if proc.returncode != 0:
+        return False
+    combined = (proc.stdout or "") + (proc.stderr or "")
+    return "teardown" in combined and "list-backups" in combined
+
+
+def _connector_teardown(plan: UninstallPlan) -> None:
+    """Run connector teardown via the canonical sentinel, falling back
+    to the OpenClaw-specific Python helpers when the gateway binary
+    is too old (pre-S7.2) or the connector isn't OpenClaw.
+
+    For non-OpenClaw connectors the Python fallback path is **not**
+    safe — calling ``restore_openclaw_config`` against a Codex install
+    would corrupt it — so we hard-fail in that case with a clear
+    remediation pointing at the gateway upgrade path.
+    """
+    connectors = plan.connectors or (plan.connector,)
+    gateway_supported = _gateway_supports_connector_teardown()
+    for name in connectors:
+        if gateway_supported:
+            if _run_gateway_connector_teardown(name):
+                continue
+            ux.warn(
+                f"gateway connector teardown for {name} reported errors — "
+                "see output above"
+            )
+            if name != "openclaw":
+                raise click.ClickException(
+                    f"aborting uninstall: {name} teardown failed, so "
+                    "DefenseClaw will not remove data or binaries that may be "
+                    "needed to restore the agent configuration"
+                )
+
+        if name in _PYTHON_FALLBACK_CONNECTORS:
+            _revert_openclaw_python(plan)
+            continue
+
+        raise click.ClickException(
+            f"aborting uninstall: no Python fallback for connector '{name}'. "
+            "Upgrade defenseclaw-gateway to v0.7+ (introduces 'connector teardown') "
+            "and re-run 'defenseclaw uninstall'."
+        )
+
+
+def _run_gateway_connector_teardown(connector: str) -> bool:
+    """Invoke ``defenseclaw-gateway connector teardown --connector <name>``.
+
+    Returns True on success (rc == 0), False on any error. stdout/stderr
+    is forwarded to the operator so they can see exactly what each
+    adapter restored.
+    """
+    gw = shutil.which("defenseclaw-gateway")
+    if gw is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [gw, "connector", "teardown", "--connector", connector],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        ux.warn(f"gateway connector teardown failed to launch: {exc}")
+        return False
+    if proc.stdout:
+        for line in proc.stdout.splitlines():
+            click.echo(f"  {ux.dim('·')} {line}")
+    if proc.stderr and proc.returncode != 0:
+        for line in proc.stderr.splitlines():
+            click.echo(f"  {ux._style('⚠', fg='yellow', bold=True)} {line}")
+    if proc.returncode == 0:
+        ux.ok(f"{connector} teardown via gateway sentinel")
+        return True
+    return False
+
+
+def _revert_openclaw_python(plan: UninstallPlan) -> None:
+    """OpenClaw-specific revert path used as a fallback when the gateway
+    sentinel is unavailable. NOT safe for other connectors."""
     from defenseclaw.guardrail import (
         pristine_backup_path,
         restore_openclaw_config,
@@ -209,21 +449,21 @@ def _revert_openclaw(plan: UninstallPlan) -> None:
     if pristine:
         try:
             shutil.copy2(pristine, target)
-            click.echo(f"  ✓ restored {target} from pristine backup ({os.path.basename(pristine)})")
+            ux.ok(f"restored {target} from pristine backup ({os.path.basename(pristine)})")
             return
         except OSError as exc:
-            click.echo(f"  ⚠ pristine restore failed: {exc} — falling back to config edit")
+            ux.warn(f"pristine restore failed: {exc} — falling back to config edit")
 
     # Fall back to the surgical restore — removes our plugin registration
     # without rolling the file back to its exact prior state.
     try:
         ok = restore_openclaw_config(plan.openclaw_config_file, original_model="")
         if ok:
-            click.echo(f"  ✓ removed DefenseClaw entries from {plan.openclaw_config_file}")
+            ux.ok(f"removed DefenseClaw entries from {plan.openclaw_config_file}")
         else:
-            click.echo(f"  ⚠ could not revert {plan.openclaw_config_file} (missing or malformed)")
+            ux.warn(f"could not revert {plan.openclaw_config_file} (missing or malformed)")
     except Exception as exc:
-        click.echo(f"  ⚠ openclaw.json revert failed: {exc}")
+        ux.warn(f"openclaw.json revert failed: {exc}")
 
 
 def _remove_plugin(plan: UninstallPlan) -> None:
@@ -231,13 +471,13 @@ def _remove_plugin(plan: UninstallPlan) -> None:
 
     result = uninstall_openclaw_plugin(plan.openclaw_home)
     if result == "cli":
-        click.echo("  ✓ plugin uninstalled via openclaw CLI")
+        ux.ok("plugin uninstalled via openclaw CLI")
     elif result == "manual":
-        click.echo("  ✓ plugin directory removed")
+        ux.ok("plugin directory removed")
     elif result == "":
-        click.echo("  · plugin was not installed")
+        ux.subhead("plugin was not installed")
     else:
-        click.echo("  ⚠ plugin uninstall failed (check permissions)")
+        ux.warn("plugin uninstall failed (check permissions)")
 
 
 def _remove_data_dir(data_dir: str) -> None:
@@ -248,12 +488,12 @@ def _remove_data_dir(data_dir: str) -> None:
     # protects operators who set ``DEFENSECLAW_HOME`` to somewhere weird
     # like ``/`` or ``$HOME`` against a catastrophic rm -rf.
     if not data_dir or not os.path.isdir(data_dir):
-        click.echo(f"  · {data_dir} does not exist — skipping")
+        ux.subhead(f"{data_dir} does not exist — skipping")
         return
     # Disallow top-level / root-ish paths outright.
     resolved = os.path.realpath(data_dir)
     if resolved in ("/", os.path.expanduser("~"), os.path.realpath(os.path.expanduser("~"))):
-        click.echo(f"  ⚠ refusing to remove protected path {resolved}")
+        ux.warn(f"refusing to remove protected path {resolved}")
         return
     markers = ("config.yaml", "audit.db", ".env", "policies", "quarantine")
     if not any(os.path.exists(os.path.join(data_dir, m)) for m in markers):
@@ -264,9 +504,9 @@ def _remove_data_dir(data_dir: str) -> None:
         return
     try:
         shutil.rmtree(data_dir)
-        click.echo(f"  ✓ removed {data_dir}")
+        ux.ok(f"removed {data_dir}")
     except OSError as exc:
-        click.echo(f"  ⚠ failed to remove {data_dir}: {exc}")
+        ux.warn(f"failed to remove {data_dir}: {exc}")
 
 
 def _remove_binaries() -> None:
@@ -285,19 +525,19 @@ def _remove_binaries() -> None:
     ]
     for path in targets:
         if not os.path.lexists(path):
-            click.echo(f"  · {path} not installed")
+            click.echo(f"  {ux.dim('·')} {path} not installed")
             continue
         try:
             os.unlink(path)
-            click.echo(f"  ✓ removed {path}")
+            ux.ok(f"removed {path}")
         except OSError as exc:
-            click.echo(f"  ⚠ failed to remove {path}: {exc}")
+            ux.warn(f"failed to remove {path}: {exc}")
 
     # Clean up the pip-installed Python package symlink if operators
     # used ``pip install defenseclaw`` — we don't shell out to pip
     # because we can't be sure which environment they used.
-    click.echo(
-        "  · if you installed the Python CLI via pip, run "
+    ux.subhead(
+        "if you installed the Python CLI via pip, run "
         "'pip uninstall defenseclaw' manually"
     )
 

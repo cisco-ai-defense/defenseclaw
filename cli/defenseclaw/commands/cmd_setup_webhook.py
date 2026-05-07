@@ -45,6 +45,7 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import (
     DispatchResult,
@@ -234,10 +235,11 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
         click.echo(_json.dumps([_view_to_dict(v) for v in entries], indent=2))
         return
     if not entries:
-        click.echo("  No webhooks configured.")
-        click.echo("  Add one with: defenseclaw setup webhook add <type>")
+        ux.subhead("No webhooks configured.")
+        ux.subhead("Add one with: defenseclaw setup webhook add <type>")
         return
     click.echo()
+    ux.section("Webhooks")
     click.echo(f"  {'NAME':<32} {'TYPE':<10} {'ENABLED':<8} {'SEVERITY':<10} URL")
     click.echo(f"  {'-' * 32} {'-' * 10} {'-' * 8} {'-' * 10} {'-' * 40}")
     for v in entries:
@@ -269,21 +271,22 @@ def show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
         click.echo(_json.dumps(_view_to_dict(v), indent=2))
         return
     click.echo()
-    click.echo(f"  {v.name} [{v.type}] {'enabled' if v.enabled else 'disabled'}")
-    click.echo(f"    URL:            {v.url}")
+    state = ux._style("enabled", fg="green") if v.enabled else ux.dim("disabled")
+    click.echo(f"  {ux.bold(v.name)} [{v.type}] {state}")
+    click.echo(f"    {ux.dim('URL:')}            {v.url}")
     if v.secret_env:
-        click.echo(f"    Secret env:     {v.secret_env} (value not shown)")
+        click.echo(f"    {ux.dim('Secret env:')}     {v.secret_env} (value not shown)")
     if v.room_id:
-        click.echo(f"    Room ID:        {v.room_id}")
-    click.echo(f"    Min severity:   {v.min_severity}")
-    click.echo(f"    Events:         {', '.join(v.events) if v.events else '(all)'}")
-    click.echo(f"    Timeout:        {v.timeout_seconds}s")
+        click.echo(f"    {ux.dim('Room ID:')}        {v.room_id}")
+    click.echo(f"    {ux.dim('Min severity:')}   {v.min_severity}")
+    click.echo(f"    {ux.dim('Events:')}         {', '.join(v.events) if v.events else '(all)'}")
+    click.echo(f"    {ux.dim('Timeout:')}        {v.timeout_seconds}s")
     if v.cooldown_seconds is None:
-        click.echo("    Cooldown:       runtime default (300s)")
+        click.echo(f"    {ux.dim('Cooldown:')}       runtime default (300s)")
     elif v.cooldown_seconds == 0:
-        click.echo("    Cooldown:       disabled (every matching event delivered)")
+        click.echo(f"    {ux.dim('Cooldown:')}       disabled (every matching event delivered)")
     else:
-        click.echo(f"    Cooldown:       {v.cooldown_seconds}s")
+        click.echo(f"    {ux.dim('Cooldown:')}       {v.cooldown_seconds}s")
     click.echo()
 
 
@@ -394,9 +397,12 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     )
 
     click.echo()
-    click.echo(f"  Testing webhook {v.name} [{v.type}] -> {v.url}")
+    click.echo(
+        f"  {ux.bold('Testing webhook')} {ux.bold(v.name)} [{v.type}] "
+        f"{ux.dim('→')} {v.url}"
+    )
     if dry_run:
-        click.echo("  (dry-run) formatting only, no delivery")
+        ux.subhead("(dry-run) formatting only, no delivery")
 
     result: DispatchResult = send_synthetic(
         webhook_type=v.type,
@@ -409,22 +415,22 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
         preview_only=dry_run,
     )
 
-    click.echo(f"    Payload:        {result.payload_bytes} bytes")
-    click.echo(f"    Preview:        {result.request_body_preview[:160]}")
+    click.echo(f"    {ux.dim('Payload:')}        {result.payload_bytes} bytes")
+    click.echo(f"    {ux.dim('Preview:')}        {result.request_body_preview[:160]}")
     if result.request_headers:
-        click.echo("    Headers:")
+        click.echo(f"    {ux.bold('Headers:')}")
         for k, hv in sorted(result.request_headers.items()):
             click.echo(f"      {k}: {hv}")
     if dry_run:
-        click.echo("    Result:         dry-run OK")
+        ux.ok("Result:         dry-run OK", indent="    ")
     elif result.ok:
-        click.echo(f"    Result:         ok (HTTP {result.status_code})")
+        ux.ok(f"Result:         ok (HTTP {result.status_code})", indent="    ")
     else:
         detail = result.error or "unknown error"
         if result.status_code is not None:
-            click.echo(f"    Result:         fail (HTTP {result.status_code}): {detail}")
+            ux.err(f"Result:         fail (HTTP {result.status_code}): {detail}", indent="    ")
         else:
-            click.echo(f"    Result:         fail: {detail}")
+            ux.err(f"Result:         fail: {detail}", indent="    ")
     click.echo()
 
     # Log the outcome *before* possibly exiting non-zero so failed
@@ -501,14 +507,14 @@ def _view_to_dict(v: WebhookView) -> dict[str, Any]:
 
 def _print_write_result(result: WebhookWriteResult) -> None:
     click.echo()
-    mode = "(dry-run) " if result.dry_run else ""
-    click.echo(f"  {mode}Webhook {result.name!r} [{result.type}]")
+    mode = f"{ux.dim('(dry-run)')} " if result.dry_run else ""
+    click.echo(f"  {mode}{ux.bold('Webhook')} {result.name!r} [{result.type}]")
     if result.yaml_changes:
-        click.echo("  YAML changes:")
+        click.echo(f"  {ux.bold('YAML changes:')}")
         for line in result.yaml_changes:
-            click.echo(f"    - {line}")
+            click.echo(f"    {ux.dim('-')} {line}")
     if result.warnings:
-        click.echo("  Warnings:")
+        click.echo(f"  {ux.bold('Warnings:')}")
         for w in result.warnings:
-            click.echo(f"    ! {w}")
+            ux.warn(w, indent="    ")
     click.echo()

@@ -23,6 +23,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+func normalizeHookModeForSave(val string) string {
+	if strings.TrimSpace(val) == "telemetry" {
+		return "observe"
+	}
+	return val
+}
+
 // applyConfigField writes a single field value back to the Config struct
 // based on the dot-path key (e.g. "gateway.port").
 func applyConfigField(c *config.Config, key, val string) {
@@ -43,6 +50,12 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.PolicyDir = val
 	case "environment":
 		c.Environment = val
+	case "agent.id":
+		c.Agent.ID = val
+	case "agent.name":
+		c.Agent.Name = val
+	case "privacy.disable_redaction":
+		c.Privacy.DisableRedaction = boolVal
 	// Unified top-level llm: block — the single source of truth
 	// consumed by guardrail (Bifrost), MCP scanner, skill scanner,
 	// and plugin scanner via Config.ResolveLLM(...). Writes here
@@ -69,6 +82,35 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.LLM.Timeout = intVal
 	case "llm.max_retries":
 		c.LLM.MaxRetries = intVal
+
+	case "claude_code.enabled":
+		c.ClaudeCode.Enabled = boolVal
+	case "claude_code.mode":
+		c.ClaudeCode.Mode = normalizeHookModeForSave(val)
+	case "claude_code.fail_mode":
+		c.ClaudeCode.FailMode = val
+	case "claude_code.scan_on_session_start":
+		c.ClaudeCode.ScanOnSessionStart = boolVal
+	case "claude_code.scan_on_stop":
+		c.ClaudeCode.ScanOnStop = boolVal
+	case "claude_code.scan_paths":
+		c.ClaudeCode.ScanPaths = splitCSV(val)
+	case "claude_code.component_scan_interval_minutes":
+		c.ClaudeCode.ComponentScanIntervalMinutes = intVal
+	case "codex.enabled":
+		c.Codex.Enabled = boolVal
+	case "codex.mode":
+		c.Codex.Mode = normalizeHookModeForSave(val)
+	case "codex.fail_mode":
+		c.Codex.FailMode = val
+	case "codex.scan_on_session_start":
+		c.Codex.ScanOnSessionStart = boolVal
+	case "codex.scan_on_stop":
+		c.Codex.ScanOnStop = boolVal
+	case "codex.scan_paths":
+		c.Codex.ScanPaths = splitCSV(val)
+	case "codex.component_scan_interval_minutes":
+		c.Codex.ComponentScanIntervalMinutes = intVal
 
 	// Legacy v4 fallbacks. Still accepted from older TUI snapshots /
 	// config files; the load-time migration in config.load() copies
@@ -112,6 +154,8 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Gateway.ApprovalTimeout = intVal
 	case "gateway.token_env":
 		c.Gateway.TokenEnv = val
+	case "gateway.token":
+		c.Gateway.Token = val
 	case "gateway.device_key_file":
 		c.Gateway.DeviceKeyFile = val
 
@@ -120,8 +164,36 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Guardrail.Enabled = boolVal
 	case "guardrail.mode":
 		c.Guardrail.Mode = val
+	case "guardrail.hook_fail_mode":
+		// Normalize anything other than the canonical "closed"
+		// sentinel down to "open" — silently fail-open is strictly
+		// safer than silently fail-closed for response-layer
+		// failures, and a typo in the form input must never put the
+		// agent into a stricter posture than the operator intended.
+		// Mirrors normalizeHookFailMode in
+		// internal/gateway/connector/subprocess.go and
+		// _normalize_hook_fail_mode in cli/defenseclaw/config.py.
+		if strings.TrimSpace(val) == "closed" {
+			c.Guardrail.HookFailMode = "closed"
+		} else {
+			c.Guardrail.HookFailMode = "open"
+		}
 	case "guardrail.scanner_mode":
 		c.Guardrail.ScannerMode = val
+	case "guardrail.connector":
+		c.Guardrail.Connector = val
+	case "guardrail.allow_empty_providers":
+		c.Guardrail.AllowEmptyProviders = boolVal
+	case "guardrail.allow_unknown_llm_domains":
+		c.Guardrail.AllowUnknownLLMDomains = boolVal
+	case "guardrail.hilt.enabled":
+		c.Guardrail.HILT.Enabled = boolVal
+	case "guardrail.hilt.min_severity":
+		c.Guardrail.HILT.MinSeverity = strings.ToUpper(strings.TrimSpace(val))
+	case "guardrail.codex_enforcement_enabled":
+		c.Guardrail.CodexEnforcementEnabled = boolVal
+	case "guardrail.claudecode_enforcement_enabled":
+		c.Guardrail.ClaudeCodeEnforcementEnabled = boolVal
 	case "guardrail.host":
 		c.Guardrail.Host = val
 	case "guardrail.port":
@@ -136,6 +208,20 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Guardrail.APIKeyEnv = val
 	case "guardrail.api_base":
 		c.Guardrail.APIBase = val
+	case "guardrail.llm.provider":
+		c.Guardrail.LLM.Provider = val
+	case "guardrail.llm.model":
+		c.Guardrail.LLM.Model = val
+	case "guardrail.llm.api_key":
+		c.Guardrail.LLM.APIKey = val
+	case "guardrail.llm.api_key_env":
+		c.Guardrail.LLM.APIKeyEnv = val
+	case "guardrail.llm.base_url":
+		c.Guardrail.LLM.BaseURL = val
+	case "guardrail.llm.timeout":
+		c.Guardrail.LLM.Timeout = intVal
+	case "guardrail.llm.max_retries":
+		c.Guardrail.LLM.MaxRetries = intVal
 	case "guardrail.block_message":
 		c.Guardrail.BlockMessage = val
 	case "guardrail.retain_judge_bodies":
@@ -182,12 +268,28 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Guardrail.Judge.PIICompletion = boolVal
 	case "guardrail.judge.tool_injection":
 		c.Guardrail.Judge.ToolInjection = boolVal
+	case "guardrail.judge.exfil":
+		c.Guardrail.Judge.Exfil = boolVal
 	case "guardrail.judge.fallbacks":
 		if val == "" {
 			c.Guardrail.Judge.Fallbacks = nil
 		} else {
 			c.Guardrail.Judge.Fallbacks = strings.Split(val, ",")
 		}
+	case "guardrail.judge.llm.provider":
+		c.Guardrail.Judge.LLM.Provider = val
+	case "guardrail.judge.llm.model":
+		c.Guardrail.Judge.LLM.Model = val
+	case "guardrail.judge.llm.api_key":
+		c.Guardrail.Judge.LLM.APIKey = val
+	case "guardrail.judge.llm.api_key_env":
+		c.Guardrail.Judge.LLM.APIKeyEnv = val
+	case "guardrail.judge.llm.base_url":
+		c.Guardrail.Judge.LLM.BaseURL = val
+	case "guardrail.judge.llm.timeout":
+		c.Guardrail.Judge.LLM.Timeout = intVal
+	case "guardrail.judge.llm.max_retries":
+		c.Guardrail.Judge.LLM.MaxRetries = intVal
 
 	// Scanners — expanded for P2-#9 to cover every SkillScanner /
 	// MCPScanner / Plugin / CodeGuard field the YAML schema
@@ -214,8 +316,24 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Scanners.SkillScanner.UseVirusTotal = boolVal
 	case "scanners.skill_scanner.virustotal_api_key_env":
 		c.Scanners.SkillScanner.VirusTotalKeyEnv = val
+	case "scanners.skill_scanner.virustotal_api_key":
+		c.Scanners.SkillScanner.VirusTotalKey = val
 	case "scanners.skill_scanner.use_aidefense":
 		c.Scanners.SkillScanner.UseAIDefense = boolVal
+	case "scanners.skill_scanner.llm.provider":
+		c.Scanners.SkillScanner.LLM.Provider = val
+	case "scanners.skill_scanner.llm.model":
+		c.Scanners.SkillScanner.LLM.Model = val
+	case "scanners.skill_scanner.llm.api_key":
+		c.Scanners.SkillScanner.LLM.APIKey = val
+	case "scanners.skill_scanner.llm.api_key_env":
+		c.Scanners.SkillScanner.LLM.APIKeyEnv = val
+	case "scanners.skill_scanner.llm.base_url":
+		c.Scanners.SkillScanner.LLM.BaseURL = val
+	case "scanners.skill_scanner.llm.timeout":
+		c.Scanners.SkillScanner.LLM.Timeout = intVal
+	case "scanners.skill_scanner.llm.max_retries":
+		c.Scanners.SkillScanner.LLM.MaxRetries = intVal
 	case "scanners.mcp_scanner.binary":
 		c.Scanners.MCPScanner.Binary = val
 	case "scanners.mcp_scanner.analyzers":
@@ -226,8 +344,36 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Scanners.MCPScanner.ScanResources = boolVal
 	case "scanners.mcp_scanner.scan_instructions":
 		c.Scanners.MCPScanner.ScanInstructions = boolVal
+	case "scanners.mcp_scanner.llm.provider":
+		c.Scanners.MCPScanner.LLM.Provider = val
+	case "scanners.mcp_scanner.llm.model":
+		c.Scanners.MCPScanner.LLM.Model = val
+	case "scanners.mcp_scanner.llm.api_key":
+		c.Scanners.MCPScanner.LLM.APIKey = val
+	case "scanners.mcp_scanner.llm.api_key_env":
+		c.Scanners.MCPScanner.LLM.APIKeyEnv = val
+	case "scanners.mcp_scanner.llm.base_url":
+		c.Scanners.MCPScanner.LLM.BaseURL = val
+	case "scanners.mcp_scanner.llm.timeout":
+		c.Scanners.MCPScanner.LLM.Timeout = intVal
+	case "scanners.mcp_scanner.llm.max_retries":
+		c.Scanners.MCPScanner.LLM.MaxRetries = intVal
 	case "scanners.plugin_scanner":
 		c.Scanners.PluginScanner = val
+	case "scanners.plugin_llm.provider":
+		c.Scanners.PluginScannerLLM.Provider = val
+	case "scanners.plugin_llm.model":
+		c.Scanners.PluginScannerLLM.Model = val
+	case "scanners.plugin_llm.api_key":
+		c.Scanners.PluginScannerLLM.APIKey = val
+	case "scanners.plugin_llm.api_key_env":
+		c.Scanners.PluginScannerLLM.APIKeyEnv = val
+	case "scanners.plugin_llm.base_url":
+		c.Scanners.PluginScannerLLM.BaseURL = val
+	case "scanners.plugin_llm.timeout":
+		c.Scanners.PluginScannerLLM.Timeout = intVal
+	case "scanners.plugin_llm.max_retries":
+		c.Scanners.PluginScannerLLM.MaxRetries = intVal
 	case "scanners.codeguard":
 		c.Scanners.CodeGuard = val
 
@@ -273,6 +419,8 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.OTel.Protocol = val
 	case "otel.endpoint":
 		c.OTel.Endpoint = val
+	case "otel.headers":
+		c.OTel.Headers = parseKVCSV(val)
 	case "otel.tls.insecure":
 		c.OTel.TLS.Insecure = boolVal
 	case "otel.tls.ca_cert":
@@ -317,6 +465,8 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.OTel.Batch.ScheduledDelayMs = intVal
 	case "otel.batch.max_queue_size":
 		c.OTel.Batch.MaxQueueSize = intVal
+	case "otel.resource.attributes":
+		c.OTel.Resource.Attributes = parseKVCSV(val)
 
 	// Watch
 	case "watch.debounce_ms":
@@ -370,9 +520,20 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "inspect_llm.max_retries":
 		c.InspectLLM.MaxRetries = intVal
 
-		// Cisco AI Defense + Firewall are deliberately read-only in
-		// the TUI. Their rows use Kind=header so they are never
-		// routed here — see ciscoAIDefenseFields / firewallFields.
+	case "cisco_ai_defense.endpoint":
+		c.CiscoAIDefense.Endpoint = val
+	case "cisco_ai_defense.api_key":
+		c.CiscoAIDefense.APIKey = val
+	case "cisco_ai_defense.api_key_env":
+		c.CiscoAIDefense.APIKeyEnv = val
+	case "cisco_ai_defense.timeout_ms":
+		c.CiscoAIDefense.TimeoutMs = intVal
+	case "cisco_ai_defense.enabled_rules":
+		c.CiscoAIDefense.EnabledRules = splitCSV(val)
+
+		// Firewall is deliberately read-only in the TUI. Its rows
+		// use Kind=header so they are never routed here — see
+		// firewallFields.
 	}
 
 	// Actions matrices are handled with a dotted-prefix fallback
@@ -387,6 +548,43 @@ func applyConfigField(c *config.Config, key, val string) {
 		strings.HasPrefix(key, "plugin_actions.") {
 		applyActionsField(c, key, val)
 	}
+	if strings.HasPrefix(key, "connector_hooks.") {
+		applyConnectorHookField(c, key, val)
+	}
+}
+
+func applyConnectorHookField(c *config.Config, key, val string) {
+	parts := strings.Split(key, ".")
+	if len(parts) < 3 || strings.TrimSpace(parts[1]) == "" {
+		return
+	}
+	name := parts[1]
+	field := strings.Join(parts[2:], ".")
+	if c.ConnectorHooks == nil {
+		c.ConnectorHooks = map[string]config.AgentHookConfig{}
+	}
+	hook := c.ConnectorHooks[name]
+	boolVal := val == "true"
+	intVal, _ := strconv.Atoi(val)
+	switch field {
+	case "enabled":
+		hook.Enabled = boolVal
+	case "mode":
+		hook.Mode = normalizeHookModeForSave(val)
+	case "fail_mode":
+		hook.FailMode = val
+	case "scan_on_session_start":
+		hook.ScanOnSessionStart = boolVal
+	case "scan_on_stop":
+		hook.ScanOnStop = boolVal
+	case "scan_paths":
+		hook.ScanPaths = splitCSV(val)
+	case "component_scan_interval_minutes":
+		hook.ComponentScanIntervalMinutes = intVal
+	default:
+		return
+	}
+	c.ConnectorHooks[name] = hook
 }
 
 // applyActionsField writes back to the five-severity × three-action
@@ -459,6 +657,33 @@ func splitCSV(s string) []string {
 	for _, p := range parts {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func parseKVCSV(s string) map[string]string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	out := make(map[string]string)
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k != "" {
+			out[k] = v
 		}
 	}
 	if len(out) == 0 {

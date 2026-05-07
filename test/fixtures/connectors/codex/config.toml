@@ -1,0 +1,9 @@
+model_provider = "openai"
+
+[hooks]
+[hooks.pre_tool]
+[[hooks.pre_tool.matchers]]
+[[hooks.pre_tool.matchers.hooks]]
+type = "command"
+command = "/path/to/codex-hook.sh"
+timeout = 5

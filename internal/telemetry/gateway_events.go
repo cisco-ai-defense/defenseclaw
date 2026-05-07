@@ -47,6 +47,7 @@ func stampEnvelope(e *gatewaylog.Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = gatewaylog.SidecarInstanceID()
 	}
+	gatewaylog.StampAgentWatchContext(e)
 }
 
 // RecordGatewayEvent derives metric observations from a single
@@ -141,17 +142,27 @@ func (p *Provider) RecordGatewayEvent(e gatewaylog.Event) {
 // query the flat attributes for filtering and drill into body JSON
 // for details.
 func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
+	p.EmitGatewayEventWithContext(context.Background(), e)
+}
+
+// EmitGatewayEventWithContext maps a structured gatewaylog.Event onto an OTel
+// LogRecord while preserving the caller context so request-bound gateway logs
+// inherit native trace/span correlation from the active OTel span.
+func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog.Event) {
 	// v7 envelope: stamp provenance + sidecar_instance_id before
 	// any downstream tier observes the event. This is the Provider-
 	// side analogue of Writer.Emit's choke-point stamping; callers
 	// that bypass Writer.Emit (watcher, policy, capacity telemetry)
 	// still land on a fully-populated record.
 	stampEnvelope(&e)
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Volume counter fires unconditionally (one observation per Emit)
 	// so dashboards can compare emission rate against sink throughput.
 	// This is the single production wiring of RecordGatewayEventEmitted
 	// — see gatewaylog.Writer.WithFanout in sidecar.go.
-	p.RecordGatewayEventEmitted(context.Background(), string(e.EventType), string(e.Severity))
+	p.RecordGatewayEventEmitted(ctx, string(e.EventType), string(e.Severity))
 
 	if !p.Enabled() {
 		// Still record metrics even when log export is off — the meter
@@ -186,13 +197,13 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		log.String("defenseclaw.gateway.event_type", string(e.EventType)),
 	}
 	if e.RunID != "" {
-		attrs = append(attrs, log.String("defenseclaw.run_id", e.RunID))
+		attrs = append(attrs, log.String("defenseclaw.run.id", e.RunID))
 	}
 	if e.RequestID != "" {
 		attrs = append(attrs, log.String("defenseclaw.request_id", e.RequestID))
 	}
 	if e.SessionID != "" {
-		attrs = append(attrs, log.String("defenseclaw.session_id", e.SessionID))
+		attrs = append(attrs, log.String("gen_ai.conversation.id", e.SessionID))
 	}
 	if e.Provider != "" {
 		attrs = append(attrs, log.String("defenseclaw.llm.provider", e.Provider))
@@ -212,16 +223,25 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		attrs = append(attrs, log.String("defenseclaw.trace_id", e.TraceID))
 	}
 	if e.AgentID != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_id", e.AgentID))
+		attrs = append(attrs, log.String("gen_ai.agent.id", e.AgentID))
 	}
 	if e.AgentName != "" {
-		attrs = append(attrs, log.String("defenseclaw.agent_name", e.AgentName))
+		attrs = append(attrs, log.String("gen_ai.agent.name", e.AgentName))
+	}
+	if e.AgentType != "" {
+		attrs = append(attrs, log.String("gen_ai.agent.type", e.AgentType))
 	}
 	if e.AgentInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.agent_instance_id", e.AgentInstanceID))
 	}
 	if e.SidecarInstanceID != "" {
 		attrs = append(attrs, log.String("defenseclaw.sidecar_instance_id", e.SidecarInstanceID))
+	}
+	if e.UserID != "" {
+		attrs = append(attrs, log.String("defenseclaw.user_id", e.UserID))
+	}
+	if e.UserName != "" {
+		attrs = append(attrs, log.String("defenseclaw.user_name", e.UserName))
 	}
 	if e.PolicyID != "" {
 		attrs = append(attrs, log.String("defenseclaw.policy_id", e.PolicyID))
@@ -233,7 +253,22 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 		attrs = append(attrs, log.String("defenseclaw.tool_name", e.ToolName))
 	}
 	if e.ToolID != "" {
-		attrs = append(attrs, log.String("defenseclaw.tool_id", e.ToolID))
+		attrs = append(attrs, log.String("gen_ai.tool.call.id", e.ToolID))
+	}
+	if e.TenantID != "" {
+		attrs = append(attrs, log.String("tenant.id", e.TenantID))
+	}
+	if e.WorkspaceID != "" {
+		attrs = append(attrs, log.String("workspace.id", e.WorkspaceID))
+	}
+	if e.Environment != "" {
+		attrs = append(attrs, log.String("deployment.environment", e.Environment))
+	}
+	if e.DeploymentMode != "" {
+		attrs = append(attrs, log.String("deployment.mode", e.DeploymentMode))
+	}
+	if e.DiscoverySource != "" {
+		attrs = append(attrs, log.String("discovery.source", e.DiscoverySource))
 	}
 	// Provenance quartet — lets downstream consumers filter by config
 	// generation / schema version without scraping the JSON body.
@@ -305,10 +340,51 @@ func (p *Provider) EmitGatewayEvent(e gatewaylog.Event) {
 			attrs = append(attrs,
 				log.String("defenseclaw.diagnostic.component", d.Component))
 		}
+	case gatewaylog.EventLLMPrompt:
+		if p := e.LLMPrompt; p != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.llm.prompt_id", p.PromptID),
+				log.String("defenseclaw.llm.source", p.Source),
+			)
+			if p.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", p.TurnID))
+			}
+		}
+	case gatewaylog.EventLLMResponse:
+		if r := e.LLMResponse; r != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.llm.response_id", r.ResponseID),
+				log.String("defenseclaw.llm.reply_to_prompt_id", r.ReplyToPromptID),
+				log.String("defenseclaw.llm.source", r.Source),
+			)
+			if r.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", r.TurnID))
+			}
+			if len(r.FinishReasons) > 0 {
+				attrs = append(attrs, log.String("defenseclaw.llm.finish_reasons", strings.Join(r.FinishReasons, ",")))
+			}
+		}
+	case gatewaylog.EventToolInvocation:
+		if t := e.Tool; t != nil {
+			attrs = append(attrs,
+				log.String("defenseclaw.tool.phase", t.Phase),
+				log.String("defenseclaw.tool.call_id", t.ToolCallID),
+				log.String("defenseclaw.tool.source", t.Source),
+			)
+			if t.TurnID != "" {
+				attrs = append(attrs, log.String("defenseclaw.turn_id", t.TurnID))
+			}
+			if t.ReplyToPromptID != "" {
+				attrs = append(attrs, log.String("defenseclaw.llm.reply_to_prompt_id", t.ReplyToPromptID))
+			}
+			if t.ExitCode != nil {
+				attrs = append(attrs, log.Int("defenseclaw.tool.exit_code", *t.ExitCode))
+			}
+		}
 	}
 
 	rec.AddAttributes(attrs...)
-	p.logger.Emit(context.Background(), rec)
+	p.logger.Emit(ctx, rec)
 }
 
 // gatewaySeverityToOTel maps the gatewaylog severity enum onto the

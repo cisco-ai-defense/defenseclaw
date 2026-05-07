@@ -17,6 +17,7 @@
 package gatewaylog
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +37,7 @@ type Writer struct {
 	mu      sync.Mutex
 	jsonl   io.WriteCloser
 	pretty  io.Writer
-	fanout  []func(Event)
+	fanout  []func(context.Context, Event)
 	encoder *json.Encoder
 	closed  bool
 
@@ -127,6 +128,18 @@ func New(cfg Config) (*Writer, error) {
 // buffered channel. The canonical use case is mapping events onto
 // OTel LogRecords.
 func (w *Writer) WithFanout(fn func(Event)) {
+	if fn == nil {
+		return
+	}
+	w.WithFanoutContext(func(_ context.Context, e Event) {
+		fn(e)
+	})
+}
+
+// WithFanoutContext registers an additional per-event callback that receives
+// the caller context. Request-bound emitters should prefer this so downstream
+// OTel log fanout can preserve native trace/span context.
+func (w *Writer) WithFanoutContext(fn func(context.Context, Event)) {
 	if w == nil || fn == nil {
 		return
 	}
@@ -147,8 +160,17 @@ func (w *Writer) WithFanout(fn func(Event)) {
 // via a buffered channel). Under-mutex file/stderr writes keep the
 // JSONL tier strictly append-ordered per-emit.
 func (w *Writer) Emit(e Event) {
+	w.EmitContext(context.Background(), e)
+}
+
+// EmitContext writes a single event to every configured tier while preserving
+// the caller context for downstream fanout targets.
+func (w *Writer) EmitContext(ctx context.Context, e Event) {
 	if w == nil {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -176,6 +198,17 @@ func (w *Writer) Emit(e Event) {
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = SidecarInstanceID()
 	}
+	StampAgentWatchContext(&e)
+	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
+	// payload using the per-boot device-key-derived HMAC key. No-op
+	// when SetTelemetryHMACSeed has not been called (boot ordering
+	// race / unit tests) — the field stays empty and downstream
+	// auditors skip verification. Computed AFTER provenance stamping
+	// so the canonicalized bytes are stable across reboots that
+	// would otherwise advance Generation.
+	if e.PayloadHMAC == "" {
+		e.StampPayloadHMAC()
+	}
 
 	// Strict schema gate. Runs AFTER provenance/sidecar stamping so
 	// a missing provenance or sidecar_instance_id becomes a normal
@@ -192,7 +225,7 @@ func (w *Writer) Emit(e Event) {
 		}
 	}
 
-	var fanout []func(Event)
+	var fanout []func(context.Context, Event)
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -219,7 +252,7 @@ func (w *Writer) Emit(e Event) {
 		// Close cannot race with our iteration. The slice header
 		// is copied but the backing array is the same — fanout
 		// callbacks are append-only in WithFanout so this is safe.
-		fanout = make([]func(Event), len(w.fanout))
+		fanout = make([]func(context.Context, Event), len(w.fanout))
 		copy(fanout, w.fanout)
 	}
 	w.mu.Unlock()
@@ -232,7 +265,7 @@ func (w *Writer) Emit(e Event) {
 	// (or stderr) so operators can triage the offending callback.
 	pretty := w.pretty
 	for _, fn := range fanout {
-		safeFanout(fn, e, pretty)
+		safeFanout(ctx, fn, e, pretty)
 	}
 }
 
@@ -350,7 +383,7 @@ func truncate(s string, n int) string {
 // safeFanout invokes fn(e) with a recover() guard so a panic in
 // any downstream fanout target cannot unwind into Emit's caller
 // (which is always the guardrail hot path).
-func safeFanout(fn func(Event), e Event, pretty io.Writer) {
+func safeFanout(ctx context.Context, fn func(context.Context, Event), e Event, pretty io.Writer) {
 	defer func() {
 		if r := recover(); r != nil {
 			w := pretty
@@ -360,7 +393,7 @@ func safeFanout(fn func(Event), e Event, pretty io.Writer) {
 			fmt.Fprintf(w, "[gatewaylog] fanout panic: %v\n", r)
 		}
 	}()
-	fn(e)
+	fn(ctx, e)
 }
 
 // Close flushes and releases the underlying file handles. Safe to

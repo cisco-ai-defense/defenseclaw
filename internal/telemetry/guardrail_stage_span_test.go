@@ -42,8 +42,35 @@ func newTracingProvider(t *testing.T) (*Provider, *tracetest.InMemoryExporter) {
 	return p, exp
 }
 
+func attachTraceTestResourceContext(t *testing.T, p *Provider) {
+	t.Helper()
+	cfg := disabledCfg()
+	cfg.TenantID = "tenant-a"
+	cfg.WorkspaceID = "workspace-1"
+	cfg.DeploymentMode = "standalone"
+	cfg.DiscoverySource = "registry"
+	p.res = buildResource(cfg, "1.0.0")
+}
+
+func assertMirroredResourceJoinKeys(t *testing.T, attrs []attribute.KeyValue) {
+	t.Helper()
+	for key, want := range map[string]string{
+		"tenant.id":              "tenant-a",
+		"workspace.id":           "workspace-1",
+		"deployment.environment": "test",
+		"deployment.mode":        "standalone",
+		"discovery.source":       "registry",
+	} {
+		got, ok := attrByKey(attrs, key)
+		if !ok || got.AsString() != want {
+			t.Fatalf("%s=%q ok=%v, want %q", key, got.AsString(), ok, want)
+		}
+	}
+}
+
 func TestStartGuardrailStageSpan_OpensSpanWithStageAttrs(t *testing.T) {
 	p, exp := newTracingProvider(t)
+	attachTraceTestResourceContext(t, p)
 
 	ctx, span := p.StartGuardrailStageSpan(context.Background(), "regex_judge", "prompt", "gpt-4")
 	if span == nil {
@@ -88,6 +115,7 @@ func TestStartGuardrailStageSpan_OpensSpanWithStageAttrs(t *testing.T) {
 	if s.Status.Code != codes.Error {
 		t.Fatalf("status=%v want Error on block", s.Status.Code)
 	}
+	assertMirroredResourceJoinKeys(t, s.Attributes)
 }
 
 func TestEndGuardrailStageSpan_TruncatesLongReason(t *testing.T) {

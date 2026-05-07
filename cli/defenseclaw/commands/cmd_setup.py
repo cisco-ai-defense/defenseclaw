@@ -29,6 +29,12 @@ import subprocess
 
 import click
 
+# Tasteful TTY-aware color helpers. Imported as a module rather than
+# pulled name-by-name so the wizard call sites read like
+# ``ux.section("Hook fail mode")`` and the source of the color
+# convention is obvious to anybody auditing this file.
+from defenseclaw import ux
+from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
@@ -189,25 +195,25 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
         )
 
     if not legacy_summary:
-        click.echo("  Config already in v5 shape — nothing to migrate.")
+        ux.subhead("Config already in v5 shape — nothing to migrate.")
         # Still scrub the one-shot warning flag so a follow-up load
         # doesn't re-emit it in the same process.
         if hasattr(cfg, "_llm_migration_warned"):
             cfg._llm_migration_warned = False  # type: ignore[attr-defined]
         return
 
-    click.echo("  Legacy v4 LLM fields detected:")
+    ux.section("Legacy v4 LLM fields detected")
     for line in legacy_summary:
-        click.echo(f"    - {line}")
+        click.echo(f"    {ux.dim('-')} {line}")
     click.echo()
-    click.echo("  Unified llm: block (post-migration):")
+    ux.section("Unified llm: block (post-migration)")
     llm = cfg.llm
     click.echo(f"    provider={llm.provider!r}, model={llm.model!r}, api_key_env={llm.api_key_env!r}")
     click.echo(f"    base_url={llm.base_url!r}, timeout={llm.timeout}, max_retries={llm.max_retries}")
     click.echo()
 
     if dry_run:
-        click.echo("  --dry-run: no files modified.")
+        ux.subhead("--dry-run: no files modified.")
         return
 
     # Backup before we mutate. We use the app's configured data_dir
@@ -217,7 +223,7 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     if not no_backup and os.path.exists(cfg_path):
         backup_path = cfg_path + ".bak"
         shutil.copy2(cfg_path, backup_path)
-        click.echo(f"  Backed up {cfg_path} -> {backup_path}")
+        ux.ok(f"Backed up {cfg_path} -> {backup_path}")
 
     # Clear the legacy slots. This mirrors _clear_legacy_llm_fields()
     # but is kept inline so the command has no hidden behavior — an
@@ -241,7 +247,7 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     jc.api_base = ""
 
     cfg.save()
-    click.echo(f"  Wrote {cfg_path} (v5 shape).")
+    ux.ok(f"Wrote {cfg_path} (v5 shape).")
 
 
 # --------------------------------------------------------------------------
@@ -289,38 +295,35 @@ def setup_llm(app: AppContext, show: bool) -> None:
     if show:
         resolved = cfg.resolve_llm("")
         click.echo()
-        click.echo("  Unified LLM configuration")
-        click.echo("  ─────────────────────────")
-        click.echo(f"    provider:    {resolved.provider or '(unset)'}")
-        click.echo(f"    model:       {resolved.model or '(unset)'}")
+        ux.section("Unified LLM configuration")
+        click.echo(f"    {ux.dim('provider:')}    {resolved.provider or '(unset)'}")
+        click.echo(f"    {ux.dim('model:')}       {resolved.model or '(unset)'}")
         key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
         key_val = resolved.resolved_api_key()
         key_state = _mask(key_val) if key_val else "(not set)"
-        click.echo(f"    api_key_env: {key_env} = {key_state}")
+        click.echo(f"    {ux.dim('api_key_env:')} {key_env} = {key_state}")
         if resolved.base_url:
-            click.echo(f"    base_url:    {resolved.base_url}")
-        click.echo(f"    timeout:     {resolved.timeout}s")
-        click.echo(f"    max_retries: {resolved.max_retries}")
-        click.echo()
-        click.echo(
-            "  To change: run 'defenseclaw setup llm' without --show.",
+            click.echo(f"    {ux.dim('base_url:')}    {resolved.base_url}")
+        click.echo(f"    {ux.dim('timeout:')}     {resolved.timeout}s")
+        click.echo(f"    {ux.dim('max_retries:')} {resolved.max_retries}")
+        ux.subhead(
+            "To change: run 'defenseclaw setup llm' without --show.",
         )
         return
 
     click.echo()
-    click.echo("  Unified LLM configuration")
-    click.echo("  ─────────────────────────")
-    click.echo(
-        "  Every LLM-using component (guardrail judge, MCP scanner,"
+    ux.section("Unified LLM configuration")
+    ux.subhead(
+        "Every LLM-using component (guardrail judge, MCP scanner,"
     )
-    click.echo(
-        "  skill scanner, plugin scanner) resolves through this block"
+    ux.subhead(
+        "skill scanner, plugin scanner) resolves through this block"
     )
-    click.echo(
-        "  by default. Per-component overrides live under"
+    ux.subhead(
+        "by default. Per-component overrides live under"
     )
-    click.echo(
-        "  scanners.*.llm / guardrail.{llm,judge.llm}."
+    ux.subhead(
+        "scanners.*.llm / guardrail.{llm,judge.llm}."
     )
     click.echo()
     if llm.model:
@@ -331,36 +334,9 @@ def setup_llm(app: AppContext, show: bool) -> None:
     cfg.save()
 
     click.echo()
-    click.echo(f"  ✓ Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
+    ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
     click.echo()
-    click.echo("  Next: defenseclaw doctor       # verify the unified LLM is reachable")
-
-
-# Register `defenseclaw setup observability` (unified OTel + audit sinks).
-# Imported here rather than at module top so the subcommand surface can
-# grow without cluttering cmd_setup.py.
-from defenseclaw.commands.cmd_setup_observability import observability  # noqa: E402
-
-setup.add_command(observability)
-
-# Register `defenseclaw setup local-observability` (bundled
-# Prom/Loki/Tempo/Grafana stack driver). Mirrors the `setup splunk
-# --logs` pattern: preflights Docker, drives a docker-compose bridge,
-# and wires config.yaml to point the gateway at the local collector.
-from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
-    local_observability,
-)
-
-setup.add_command(local_observability)
-
-# Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
-# notifiers). Distinct from `setup observability add webhook` (generic
-# HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
-# disambiguation.
-from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
-
-setup.add_command(webhook)
-
+    ux.subhead("Next: defenseclaw doctor       # verify the unified LLM is reachable")
 
 
 @setup.command("skill-scanner")
@@ -439,7 +415,7 @@ def setup_skill_scanner(
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _check_virustotal, _DoctorResult
-        click.echo("  ── Verifying scanner configuration ──")
+        ux.section("Verifying scanner configuration")
         r = _DoctorResult()
         _check_scanners(app.cfg, r)
         _check_virustotal(app.cfg, r)
@@ -466,9 +442,8 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     """
     data_dir = cfg.data_dir
     click.echo()
-    click.echo("  Skill Scanner Configuration")
-    click.echo("  ────────────────────────────")
-    click.echo(f"  Binary: {sc.binary}")
+    ux.section("Skill Scanner Configuration")
+    click.echo(f"  {ux.dim('Binary:')} {sc.binary}")
     click.echo()
 
     sc.use_behavioral = click.confirm("  Enable behavioral analyzer (dataflow analysis)?", default=sc.use_behavioral)
@@ -878,7 +853,7 @@ def setup_mcp_scanner(
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_scanners, _DoctorResult
-        click.echo("  ── Verifying scanner configuration ──")
+        ux.section("Verifying scanner configuration")
         r = _DoctorResult()
         _check_scanners(app.cfg, r)
         click.echo()
@@ -904,9 +879,8 @@ def _interactive_mcp_setup(mc, cfg) -> None:
     aid = cfg.cisco_ai_defense
 
     click.echo()
-    click.echo("  MCP Scanner Configuration")
-    click.echo("  ──────────────────────────")
-    click.echo(f"  Binary: {mc.binary}")
+    ux.section("MCP Scanner Configuration")
+    click.echo(f"  {ux.dim('Binary:')} {mc.binary}")
     click.echo()
 
     mc.analyzers = click.prompt(
@@ -962,6 +936,142 @@ def _print_mcp_summary(mc, llm, aid) -> None:
     for section, key, val in rows:
         click.echo(f"    {section}.{key + ':':<22s} {val}")
     click.echo()
+
+
+# ---------------------------------------------------------------------------
+# setup rotate-token  (plan B5 / S0.5)
+# ---------------------------------------------------------------------------
+
+
+def _rotate_token_dotenv_path(app: AppContext) -> str:
+    """Resolve ~/.defenseclaw/.env relative to the configured DataDir."""
+    data_dir = app.cfg.data_dir or os.path.expanduser("~/.defenseclaw")
+    return os.path.join(data_dir, ".env")
+
+
+def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
+    """Rewrite the dotenv file with the new token, preserving every
+    other line. Atomic via os.replace; mode 0o600.
+
+    Mirrors internal/gateway/firstboot.go appendEnvLine semantics so a
+    Python-side rotation produces the same byte-shape on disk as the
+    Go-side first-boot synthesis.
+    """
+    parent = os.path.dirname(dotenv_path) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+
+    lines: list[str] = []
+    if os.path.exists(dotenv_path):
+        with open(dotenv_path, encoding="utf-8") as fh:
+            for raw in fh.read().splitlines():
+                stripped = raw.strip()
+                if stripped.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
+                    continue
+                lines.append(raw)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.append(f"DEFENSECLAW_GATEWAY_TOKEN={new_token}")
+    body = "\n".join(lines) + "\n"
+
+    tmp = dotenv_path + ".tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        os.write(fd, body.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # Belt-and-suspenders: chmod in case the umask widened the perms.
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, dotenv_path)
+
+
+def _rotate_token_run_gateway(args: list[str]) -> tuple[int, str, str]:
+    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr)."""
+    binary = shutil.which("defenseclaw-gateway")
+    if not binary:
+        raise click.ClickException(
+            "defenseclaw-gateway binary not found on PATH. Install it before running rotate-token "
+            "(the connector teardown/setup hooks need it to refresh hook scripts)."
+        )
+    proc = subprocess.run(
+        [binary, *args],
+        capture_output=True,
+        check=False,
+    )
+    return proc.returncode, proc.stdout.decode("utf-8", errors="replace"), proc.stderr.decode("utf-8", errors="replace")
+
+
+@setup.command("rotate-token")
+@click.option(
+    "--connector",
+    default=None,
+    help="Override the active connector (default: read from config).",
+)
+@click.option(
+    "--no-restart",
+    is_flag=True,
+    help="Skip the connector teardown/setup that refreshes hook .token files.",
+)
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Skip the confirmation prompt and rotate immediately.",
+)
+@pass_ctx
+def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
+    """Rotate the DEFENSECLAW_GATEWAY_TOKEN.
+
+    Generates a new 32-byte CSPRNG hex token, rewrites
+    ~/.defenseclaw/.env atomically (mode 0o600), and refreshes the
+    per-connector hook scripts so they pick up the new token. The
+    operator must restart their agent (claude / codex / openclaw /
+    zeptoclaw) for the new credential to take effect.
+
+    Plan B5 / S0.5.
+    """
+    import secrets
+
+    dotenv_path = _rotate_token_dotenv_path(app)
+    if not yes:
+        click.confirm(
+            f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path}\n"
+            "and refresh hook scripts for the active connector. Continue?",
+            abort=True,
+        )
+
+    new_token = secrets.token_hex(32)
+    _rotate_token_atomic_write(dotenv_path, new_token)
+    ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
+
+    active = connector or (app.cfg.guardrail.connector if app.cfg.guardrail.connector else None)
+    if not active:
+        ux.subhead("(no active connector configured; skipping hook refresh)")
+        return
+
+    if no_restart:
+        ux.subhead("--no-restart specified; hook .token files were NOT refreshed.")
+        ux.subhead("Run `defenseclaw-gateway connector setup` manually to apply the new token.")
+        return
+
+    # Bounce the connector so the hook scripts pick up the new token.
+    click.echo(f"  {ux.dim('Refreshing hook scripts for')} connector={active!r}…")
+    rc1, _so, se = _rotate_token_run_gateway(["connector", "teardown"])
+    if rc1 != 0:
+        ux.warn(
+            "connector teardown returned non-zero; old hook scripts may persist.\n"
+            f"  stderr: {se.strip()}"
+        )
+    rc2, _so, se = _rotate_token_run_gateway(["connector", "setup"])
+    if rc2 != 0:
+        raise click.ClickException(
+            "connector setup failed after token rotation; the gateway may be in an inconsistent state.\n"
+            f"stderr: {se.strip()}"
+        )
+
+    ux.ok("Hook scripts refreshed.")
+    click.echo()
+    ux.subhead("Next step: restart the agent (claude / codex / openclaw / zeptoclaw) so")
+    ux.subhead("the new token is picked up by its inspect / hook subprocess invocations.")
 
 
 # ---------------------------------------------------------------------------
@@ -1038,7 +1148,7 @@ def setup_gateway(
 
     if verify:
         from defenseclaw.commands.cmd_doctor import _check_openclaw_gateway, _check_sidecar, _DoctorResult
-        click.echo("  ── Verifying gateway connectivity ──")
+        ux.section("Verifying gateway connectivity")
         r = _DoctorResult()
         _check_openclaw_gateway(app.cfg, r)
         _check_sidecar(app.cfg, r)
@@ -1054,8 +1164,7 @@ def setup_gateway(
 
 def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> None:
     click.echo()
-    click.echo("  Gateway Configuration (local)")
-    click.echo("  ─────────────────────────────")
+    ux.section("Gateway Configuration (local)")
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
@@ -1074,8 +1183,7 @@ def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> 
 
 def _interactive_gateway_remote(gw, data_dir: str) -> None:
     click.echo()
-    click.echo("  Gateway Configuration (remote)")
-    click.echo("  ──────────────────────────────")
+    ux.section("Gateway Configuration (remote)")
     click.echo()
 
     gw.host = click.prompt("  Gateway host", default=gw.host)
@@ -1156,15 +1264,373 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 
 
 # ---------------------------------------------------------------------------
+# Connector metadata (mirrors internal/gateway/connector/*.go)
+# ---------------------------------------------------------------------------
+
+_CONNECTOR_NAMES_FALLBACK = ["openclaw", "zeptoclaw", "claudecode", "codex"]
+
+
+def _fetch_connector_names(cfg=None) -> list[str]:
+    """Query the sidecar /v1/connectors endpoint for available connectors.
+
+    Falls back to the hardcoded list if the sidecar is unreachable.
+    """
+    import urllib.request
+
+    host = "127.0.0.1"
+    port = 0
+    if cfg and hasattr(cfg, "guardrail"):
+        host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+        port = getattr(cfg.guardrail, "port", 0) or 0
+    if not port:
+        return list(_CONNECTOR_NAMES_FALLBACK)
+    try:
+        url = f"http://{host}:{port}/v1/connectors"
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = _json.loads(resp.read())
+            names = [c.get("name") or c.get("id") for c in data.get("connectors", [])]
+            return [n for n in names if n] or list(_CONNECTOR_NAMES_FALLBACK)
+    except Exception:
+        return list(_CONNECTOR_NAMES_FALLBACK)
+
+
+_CONNECTOR_NAMES = _CONNECTOR_NAMES_FALLBACK
+_HILT_MIN_SEVERITIES = ["HIGH", "MEDIUM", "LOW", "CRITICAL"]
+
+_CONNECTOR_META: dict[str, dict[str, str]] = {
+    "openclaw": {
+        "label": "OpenClaw",
+        "description": "fetch interceptor + before_tool_call plugin",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "zeptoclaw": {
+        "label": "ZeptoClaw",
+        "description": "api_base redirect + proxy response-scan",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "claudecode": {
+        "label": "Claude Code",
+        "description": "env var + PreToolUse hook script",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+    "codex": {
+        "label": "Codex",
+        "description": "env var + hook script + response-scan",
+        "tool_mode": "both",
+        "subprocess_policy": "sandbox",
+    },
+}
+
+_CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
+    "openclaw": (
+        "~/.openclaw/openclaw.json plugin allow/load entries",
+        "~/.openclaw/extensions/defenseclaw/",
+        "~/.defenseclaw/hooks/ and subprocess policy files",
+    ),
+    "zeptoclaw": (
+        "~/.zeptoclaw/config.json providers.*.api_base",
+        "~/.zeptoclaw/config.json safety.allow_private_endpoints",
+        "~/.defenseclaw/hooks/ and subprocess policy files",
+    ),
+    "claudecode": (
+        "~/.claude/settings.json hooks",
+        "~/.claude/settings.json env OTEL_* / CLAUDE_CODE_ENABLE_TELEMETRY",
+        "Claude Code Project CodeGuard plugin (installed once and left enabled)",
+        "~/.defenseclaw/hooks/ and subprocess policy files",
+    ),
+    "codex": (
+        "~/.codex/config.toml hooks / features.codex_hooks",
+        "~/.codex/config.toml otel / notify",
+        "~/.codex/skills/software-security Project CodeGuard skill (installed once and left enabled)",
+        "~/.defenseclaw/hooks/ and notify bridge files",
+    ),
+}
+
+
+def _print_connector_mutation_notice(connector: str, *, switching_from: str | None = None) -> None:
+    """Tell operators which agent-owned files DefenseClaw will edit.
+
+    The Go connector setup stores hash-checked snapshots before touching
+    these files. On teardown, unchanged files are restored byte-for-byte;
+    drifted files fall back to removing only DefenseClaw-owned hooks,
+    OTel env, notify, plugin, and proxy entries.
+    """
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    prefix = f"  DefenseClaw will update {label} integration files"
+    if switching_from and switching_from != connector:
+        old = _CONNECTOR_META.get(switching_from, {}).get("label", switching_from)
+        prefix = f"  Switching from {old} first tears down its DefenseClaw integration, then updates {label}"
+    click.echo(prefix + ":")
+    for surface in _CONNECTOR_CHANGE_SURFACES.get(connector, ()):
+        click.echo(f"    - {surface}")
+    click.echo(
+        "  A hash-checked backup is stored before edits; teardown restores or surgically removes only "
+        "DefenseClaw-owned entries."
+    )
+
+
+def _read_picked_connector(data_dir: str | None) -> str | None:
+    """Read the connector hint written by ``scripts/install.sh``.
+
+    The installer records the operator's chosen connector at
+    ``<data_dir>/picked_connector`` (a single-line plaintext file) so
+    that subsequent CLI invocations can default to it without
+    re-prompting. We treat the file as advisory: the canonical runtime
+    value lives in ``guardrail.connector`` once setup has run, but the
+    hint lets the *first* `defenseclaw setup guardrail` after install
+    pick up the operator's intent.
+
+    The function is intentionally tolerant — a missing file, an
+    unreadable file, or an unrecognized value all yield ``None`` so
+    callers can fall through to detection / defaults.
+    """
+    if not data_dir:
+        return None
+    path = os.path.join(data_dir, "picked_connector")
+    try:
+        # Bound the read to defend against a tampered or accidentally
+        # huge file: the legitimate contents are a 4-10 byte connector
+        # name. We never interpret the file as code.
+        with open(path, encoding="utf-8") as fh:
+            raw = fh.read(64)
+    except OSError:
+        return None
+    name = raw.strip().lower()
+    if name in _CONNECTOR_NAMES:
+        return name
+    return None
+
+
+def _detect_connector(data_dir: str | None = None) -> str | None:
+    """Guess the active agent framework, preferring the install-time hint.
+
+    Resolution order:
+      1. ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
+         --connector ...``) — the operator's explicit choice at install
+         time.
+      2. Filesystem heuristics over the agent's own state directories
+         (``~/.claude``, ``~/.codex``, ``~/.zeptoclaw/config.json``).
+
+    Returns ``None`` when neither source is conclusive so the caller
+    can fall back to ``"openclaw"``.
+    """
+    picked = _read_picked_connector(data_dir)
+    if picked:
+        return picked
+    home = os.path.expanduser("~")
+    if os.path.isdir(os.path.join(home, ".claude")):
+        return "claudecode"
+    if os.path.isdir(os.path.join(home, ".codex")):
+        return "codex"
+    if os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")):
+        return "zeptoclaw"
+    return None
+
+
+def _select_connector_interactive(current: str, data_dir: str | None = None) -> str:
+    """Present a numbered menu and return the selected connector name.
+
+    ``data_dir`` is forwarded to ``_detect_connector`` so the install-time
+    ``picked_connector`` hint can seed the menu's default. We only
+    override ``current`` when it is empty or still the historical
+    fallback ("openclaw") — operators who already configured a non-
+    default connector should not see their choice silently flipped by
+    a leftover hint file.
+    """
+    detected = _detect_connector(data_dir)
+    default = current
+    if not default or default == "openclaw":
+        default = detected or "openclaw"
+    click.echo()
+    click.echo("  Which agent framework are you using?")
+    click.echo()
+    for i, name in enumerate(_CONNECTOR_NAMES, 1):
+        meta = _CONNECTOR_META[name]
+        marker = " *" if name == default else ""
+        click.echo(f"    {i}. {meta['label']:<14s} — {meta['description']}{marker}")
+    click.echo()
+    default_idx = _CONNECTOR_NAMES.index(default) + 1 if default in _CONNECTOR_NAMES else None
+    raw = click.prompt(
+        "  Selection",
+        type=click.IntRange(1, len(_CONNECTOR_NAMES)),
+        default=default_idx,
+    )
+    return _CONNECTOR_NAMES[raw - 1]
+
+
+def _print_connector_info(name: str) -> None:
+    """Print connector details after selection."""
+    meta = _CONNECTOR_META.get(name, {})
+    if not meta:
+        return
+    tool_mode = meta["tool_mode"]
+    if tool_mode == "both":
+        tool_display = "pre-execution + response-scan"
+    else:
+        tool_display = tool_mode
+    click.echo(f"    Connector:         {meta['label']} ({name})")
+    click.echo(f"    Tool inspection:   {tool_display}")
+    click.echo(f"    Subprocess policy: {meta['subprocess_policy']}")
+    click.echo()
+    _print_connector_mutation_notice(name)
+    if tool_mode == "response-scan":
+        click.echo()
+        click.secho(
+            f"    Warning: {meta['label']} does not support pre-execution tool hooks.",
+            fg="yellow",
+        )
+        click.echo(
+            "      Tool calls are scanned in LLM responses only (response-scan mode)."
+        )
+        click.echo(
+            "      DefenseClaw can block the response but cannot prevent individual"
+        )
+        click.echo(
+            "      tool execution if the response has already been delivered."
+        )
+
+
+def _hilt_support_note(connector: str) -> str:
+    """Return the operator-facing HILT support note for a connector."""
+    if connector == "openclaw":
+        return "OpenClaw supports DefenseClaw approval prompts for tool actions."
+    if connector == "claudecode":
+        return "Claude Code supports native PreToolUse ask prompts."
+    if connector == "codex":
+        return "Codex is partial: PermissionRequest prompts are native; PreToolUse ask is unsupported."
+    if connector == "zeptoclaw":
+        return "ZeptoClaw is partial: proxy-gated confirmations only; unsupported surfaces alert."
+    return "Support depends on the connector surface."
+
+
+def _configure_hilt_interactive(gc) -> None:
+    """Prompt for human approval settings from the guardrail advanced section."""
+    ux.section("Human Approval (HILT)")
+    if (gc.mode or "observe").lower() != "action":
+        ux.subhead("Human approval is action-mode only.")
+        ux.subhead("Current mode is observe, so approvals are inactive and no prompts will appear.")
+        return
+
+    connector = gc.connector or "openclaw"
+    ux.subhead(_hilt_support_note(connector))
+    ux.subhead("CRITICAL findings still block. HILT can confirm risky HIGH findings first.")
+    enabled = click.confirm("  Human approval for risky actions?", default=gc.hilt.enabled)
+    gc.hilt.enabled = enabled
+    if not enabled:
+        gc.hilt.min_severity = gc.hilt.min_severity or "HIGH"
+        return
+
+    default_min = (gc.hilt.min_severity or "HIGH").upper()
+    if default_min not in _HILT_MIN_SEVERITIES:
+        default_min = "HIGH"
+    gc.hilt.min_severity = click.prompt(
+        "  Approval minimum severity",
+        type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False),
+        default=default_min,
+    ).upper()
+
+
+def _configure_redaction_interactive(app: AppContext) -> None:
+    """Prompt for the persistent redaction kill-switch from Advanced setup."""
+    click.echo()
+    click.echo("  Redaction")
+    click.echo("  ─────────")
+    current_disabled = bool(app.cfg.privacy.disable_redaction)
+    if current_disabled:
+        click.secho(
+            "  Redaction is currently OFF: raw prompts, responses, judge bodies, "
+            "and verdict reasons may be persisted.",
+            fg="yellow",
+        )
+        keep_disabled = click.confirm("  Keep redaction disabled?", default=False)
+        app.cfg.privacy.disable_redaction = keep_disabled
+        if not keep_disabled:
+            click.echo("  ✓ Redaction will be re-enabled after restart.")
+        return
+
+    click.echo("  Redaction is ON by default and is recommended for normal operation.")
+    if not click.confirm("  Disable redaction for debugging?", default=False):
+        app.cfg.privacy.disable_redaction = False
+        return
+
+    click.secho(
+        "  Disabling redaction writes RAW content to audit DB, OTel logs, "
+        "Splunk/webhook sinks, and local logs.",
+        fg="yellow",
+    )
+    click.confirm("  I understand; disable redaction?", default=False, abort=True)
+    app.cfg.privacy.disable_redaction = True
+
+
+def _apply_guardrail_extra_options(
+    app: AppContext,
+    gc,
+    *,
+    rule_pack: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
+    disable_redaction: bool | None,
+) -> None:
+    """Apply guardrail options shared by the CLI and TUI non-interactive wizard."""
+
+    if rule_pack is not None:
+        policy_root = app.cfg.policy_dir or os.path.join(app.cfg.data_dir, "policies")
+        gc.rule_pack_dir = os.path.join(policy_root, "guardrail", rule_pack)
+    if human_approval is not None:
+        gc.hilt.enabled = bool(human_approval)
+    if hilt_min_severity is not None:
+        gc.hilt.min_severity = str(hilt_min_severity or "HIGH").upper()
+    elif not gc.hilt.min_severity:
+        gc.hilt.min_severity = "HIGH"
+    if disable_redaction is not None:
+        app.cfg.privacy.disable_redaction = bool(disable_redaction)
+
+
+def _connector_enforcement_flag(connector: str) -> str | None:
+    """Return the per-connector proxy/enforcement flag for native-hook connectors."""
+    if connector == "codex":
+        return "codex_enforcement_enabled"
+    if connector == "claudecode":
+        return "claudecode_enforcement_enabled"
+    return None
+
+
+def _set_connector_enforcement(gc, connector: str, enabled: bool) -> None:
+    flag = _connector_enforcement_flag(connector)
+    if flag:
+        setattr(gc, flag, bool(enabled))
+
+
+def _connector_enforcement_enabled(gc, connector: str) -> bool:
+    flag = _connector_enforcement_flag(connector)
+    return bool(getattr(gc, flag, False)) if flag else True
+
+
+# ---------------------------------------------------------------------------
 # setup guardrail
 # ---------------------------------------------------------------------------
 
 @setup.command("guardrail")
 @click.option("--disable", is_flag=True, help="Disable guardrail and revert OpenClaw config")
+# ``--connector`` is the canonical name (matches scripts/install.sh and
+# /v1/connectors). ``--agent`` is kept as an alias for backward
+# compatibility with existing scripts and docs. Both bind to the same
+# ``agent_name`` parameter; supplying both flags will simply use the
+# last one parsed by Click, which is consistent with Click's standard
+# behavior for aliased options.
+@click.option("--connector", "--agent", "agent_name",
+              type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False), default=None,
+              help="Agent framework connector (openclaw, claudecode, codex, zeptoclaw). "
+                   "Alias: --agent. Defaults to <data_dir>/picked_connector when set "
+                   "by the installer, else filesystem auto-detection, else openclaw.")
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None,
               help="Guardrail mode")
-@click.option("--scanner-mode", type=click.Choice(["local", "remote"]), default=None,
-              help="Scanner mode (local patterns or remote Cisco API)")
+@click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None,
+              help="Scanner mode (local patterns, remote Cisco API, or both)")
 @click.option("--cisco-endpoint", default=None, help="Cisco AI Defense API endpoint")
 @click.option("--cisco-api-key-env", default=None, help="Env var name holding Cisco AI Defense API key")
 @click.option("--cisco-timeout-ms", type=int, default=None, help="Cisco AI Defense timeout (ms)")
@@ -1174,9 +1640,18 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 @click.option("--detection-strategy",
               type=click.Choice(["regex_only", "regex_judge", "judge_first"]), default=None,
               help="Detection strategy (regex_only, regex_judge, judge_first)")
+@click.option("--rule-pack", type=click.Choice(["default", "strict", "permissive"]), default=None,
+              help="Guardrail rule-pack profile")
 @click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
 @click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
 @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key")
+@click.option("--human-approval/--no-human-approval", default=None,
+              help="Enable or disable human approval (HILT) for risky actions")
+@click.option("--hilt-min-severity",
+              type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False), default=None,
+              help="Minimum severity that asks for human approval")
+@click.option("--disable-redaction/--enable-redaction", default=None,
+              help="Disable or enable prompt/log redaction")
 @click.option("--restart/--no-restart", default=True,
               help="Restart gateway and openclaw after setup (default: on)")
 @click.option("--verify/--no-verify", default=True,
@@ -1187,10 +1662,12 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 def setup_guardrail(
     app: AppContext,
     disable: bool,
+    agent_name: str | None,
     guard_mode, guard_port,
     scanner_mode, cisco_endpoint, cisco_api_key_env, cisco_timeout_ms,
     block_message,
-    detection_strategy, judge_model, judge_api_base, judge_api_key_env,
+    detection_strategy, rule_pack, judge_model, judge_api_base, judge_api_key_env,
+    human_approval, hilt_min_severity, disable_redaction,
     restart: bool,
     verify: bool,
     non_interactive: bool,
@@ -1200,6 +1677,15 @@ def setup_guardrail(
     Routes all LLM traffic through the built-in Go guardrail proxy.
     Every prompt and response is inspected for prompt injection, secrets,
     PII, and data exfiltration patterns.
+
+    Use --connector (alias: --agent) to select the agent framework
+    connector (openclaw, claudecode, codex, zeptoclaw). The connector
+    determines how LLM traffic is intercepted, how tool calls are
+    inspected, and what subprocess enforcement policy is applied. When
+    omitted, the value defaults to the install-time hint at
+    ``<data_dir>/picked_connector`` (written by ``scripts/install.sh
+    --connector ...``), then to any previously saved choice in
+    ``guardrail.connector``, then to ``openclaw``.
 
     Two modes:
       observe — log findings, never block (default, recommended to start)
@@ -1220,7 +1706,31 @@ def setup_guardrail(
     aid = app.cfg.cisco_ai_defense
 
     if non_interactive:
+        # Connector resolution order in non-interactive mode:
+        #   1. explicit --connector / --agent flag (operator intent always wins)
+        #   2. existing gc.connector if already set to a non-default value
+        #      (preserves prior `setup guardrail` choice across re-runs)
+        #   3. <data_dir>/picked_connector hint written by install.sh
+        #      (operator intent at install time)
+        #   4. fallback to "openclaw" (historical default)
+        # We deliberately do NOT run filesystem auto-detect (the
+        # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
+        # those directories often pre-exist on developer workstations
+        # and would silently flip the connector behind the operator's
+        # back during scripted installs. Filesystem detection is only
+        # used in the interactive picker where the operator can see and
+        # confirm the suggested default.
+        if agent_name:
+            gc.connector = agent_name
+        elif not gc.connector or gc.connector == "openclaw":
+            picked = _read_picked_connector(getattr(app.cfg, "data_dir", None))
+            if picked:
+                gc.connector = picked
         gc.mode = guard_mode or gc.mode or "observe"
+        if gc.connector in ("codex", "claudecode") and (
+            guard_mode is not None or gc.mode == "action"
+        ):
+            _set_connector_enforcement(gc, gc.connector, True)
         gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
         if cisco_endpoint is not None:
             aid.endpoint = cisco_endpoint
@@ -1233,6 +1743,14 @@ def setup_guardrail(
             gc.block_message = block_message
         if detection_strategy is not None:
             gc.detection_strategy = detection_strategy
+        _apply_guardrail_extra_options(
+            app,
+            gc,
+            rule_pack=rule_pack,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            disable_redaction=disable_redaction,
+        )
         if judge_model is not None:
             gc.judge.model = judge_model
             gc.judge.enabled = True
@@ -1278,7 +1796,15 @@ def setup_guardrail(
                 gc.scanner_mode = "local"
                 click.echo("  ℹ Cisco AI Defense credentials not configured — using local scanner only")
     else:
-        _interactive_guardrail_setup(app, gc)
+        _interactive_guardrail_setup(app, gc, agent_name=agent_name)
+        _apply_guardrail_extra_options(
+            app,
+            gc,
+            rule_pack=rule_pack,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            disable_redaction=disable_redaction,
+        )
 
     if not gc.enabled:
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
@@ -1292,19 +1818,26 @@ def setup_guardrail(
 
     # --- Summary ---
     click.echo()
+    connector_label = _CONNECTOR_META.get(gc.connector or "openclaw", {}).get("label", gc.connector)
     rows = [
+        ("guardrail.connector", f"{connector_label} ({gc.connector})"),
         ("guardrail.mode", gc.mode),
         ("guardrail.port", str(gc.port)),
         ("guardrail.model", gc.model),
         ("guardrail.model_name", gc.model_name),
         ("guardrail.api_key_env", gc.api_key_env),
         ("guardrail.detection_strategy", gc.detection_strategy),
+        ("guardrail.rule_pack_dir", gc.rule_pack_dir),
     ]
     if gc.api_base:
         rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
     if gc.block_message:
         truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
         rows.append(("guardrail.block_message", truncated))
+    rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
+    rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
+    rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+    rows.append(("privacy.disable_redaction", str(bool(app.cfg.privacy.disable_redaction)).lower()))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
         rows.append(("guardrail.judge.model", gc.judge.model))
@@ -1320,18 +1853,27 @@ def setup_guardrail(
         rows.append(("cisco_ai_defense.endpoint", aid.endpoint))
         rows.append(("cisco_ai_defense.api_key_env", aid.api_key_env))
         rows.append(("cisco_ai_defense.timeout_ms", str(aid.timeout_ms)))
+    # Colored two-column rendering. ``ux.kv`` aligns and dims the
+    # key while keeping the value in the default fg so it pops out.
+    # Empty/missing values render as a dim em-dash so the row still
+    # tracks the column instead of looking truncated.
     for key, val in rows:
-        click.echo(f"    {key + ':':<30s} {val}")
+        ux.kv(key, val)
     click.echo()
 
     if warnings:
-        click.echo("  ── Warnings ──────────────────────────────────────────")
+        ux.section("Warnings", divider_char="─")
         for w in warnings:
-            click.echo(f"  ⚠ {w}")
+            ux.warn(w)
         click.echo()
 
     if restart:
-        _restart_services(app.cfg.data_dir, app.cfg.gateway.host, app.cfg.gateway.port)
+        _restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=gc.connector or "openclaw",
+        )
     else:
         click.echo("  Next steps:")
         click.echo("    Restart the defenseclaw sidecar for changes to take effect:")
@@ -1345,7 +1887,821 @@ def setup_guardrail(
     if app.logger:
         app.logger.log_action(
             "setup-guardrail", "config",
-            f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} model={gc.model}",
+            f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
+            f"model={gc.model} hilt={bool(gc.hilt.enabled)!s} "
+            f"disable_redaction={bool(app.cfg.privacy.disable_redaction)!s}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# setup codex / setup claude-code  —  observability-only aliases
+# ---------------------------------------------------------------------------
+#
+# These are thin wrappers around the existing observability-only branch
+# of ``setup guardrail``. They exist because operators who only want
+# telemetry (no traffic interception, no enforcement) currently have to
+# walk through the full ``setup guardrail`` wizard, answer "yes" to a
+# single confirm, and trust that the wizard does the right thing under
+# the hood. The aliases shortcut that:
+#
+#   defenseclaw setup codex          → observability-only for Codex
+#   defenseclaw setup claude-code    → observability-only for Claude Code
+#
+# Both commands also flip ``claw.mode`` so the rest of the CLI/TUI
+# (skill scanner, MCP scanner, plugin scanner, overview panels) reads
+# from the matching connector's source-of-truth files (``~/.codex`` or
+# ``~/.claude``) instead of OpenClaw's default ``~/.openclaw`` layout.
+# Without this flip, ``defenseclaw scan skills`` after ``setup codex``
+# would scan ``~/.openclaw/skills`` and miss every Codex skill — a
+# foot-gun we explicitly want to close.
+#
+# Enforcement (proxy data path, blocking) stays disabled. Operators who
+# later want to engage enforcement edit
+# ``guardrail.codex_enforcement_enabled`` /
+# ``guardrail.claudecode_enforcement_enabled`` in ~/.defenseclaw/config.yaml
+# and restart the gateway — see docs/OBSERVABILITY.md §9.
+
+# Stable hint filename used by ``defenseclaw setup guardrail`` and
+# ``defenseclaw quickstart`` to default the connector picker after a
+# fresh install. Mirrors the ``picked_connector`` constant baked into
+# scripts/install.sh — keeping these in sync means re-running the
+# alias commands here updates the hint just like the installer would.
+_PICKED_CONNECTOR_FILENAME = "picked_connector"
+
+
+def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
+    """Persist *connector* as the install-time picked-connector hint.
+
+    Writes ``<data_dir>/picked_connector`` atomically (tmp file +
+    ``os.replace``). Failures are non-fatal and surface as a warning —
+    a stale hint never blocks setup, it only affects the *default*
+    selected by future ``defenseclaw setup guardrail`` invocations.
+
+    The bound on contents is intentional: the file is one short word
+    (``codex`` / ``claudecode`` / ``openclaw`` / ``zeptoclaw``) and
+    ``_read_picked_connector`` rejects anything outside ``_CONNECTOR_NAMES``,
+    so even a corrupted write can never escalate to remote code paths.
+    """
+    if not data_dir:
+        return
+    if connector not in _CONNECTOR_NAMES:
+        return
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+        path = os.path.join(data_dir, _PICKED_CONNECTOR_FILENAME)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(connector + "\n")
+        os.replace(tmp, path)
+    except OSError as exc:
+        click.echo(
+            f"  ⚠ Failed to update picked_connector hint: {exc}",
+            err=True,
+        )
+
+
+def _apply_connector_observability_only(
+    app: AppContext,
+    *,
+    connector: str,
+    restart: bool,
+) -> bool:
+    """Pin DefenseClaw to *connector* in observability-only mode.
+
+    Idempotent: running twice yields the same on-disk state. The
+    function:
+
+      1. Sets ``guardrail.connector`` and ``claw.mode`` to *connector*
+         so the active-connector resolver
+         (``Config.active_connector``) returns *connector* even if a
+         future ``guardrail.enabled = false`` toggle is applied.
+      2. Disables the matching enforcement flag
+         (``gc.codex_enforcement_enabled`` / ``gc.claudecode_enforcement_enabled``)
+         so the Go gateway's ``Connector.Setup()`` skips proxy
+         binding, openai_base_url / ANTHROPIC_BASE_URL rewriting, and
+         the subprocess-policy enforcement that come bundled with
+         "guardrail" mode for these connectors.
+      3. Sets ``gc.enabled=True``, ``gc.mode='observe'``,
+         ``gc.scanner_mode='local'``, ``gc.detection_strategy='regex_only'``
+         — sensible defaults so the YAML stays loadable if the
+         operator later flips enforcement on. The Go gateway never
+         reads these in observability mode.
+      4. Persists config.yaml and writes the
+         ``<data_dir>/picked_connector`` hint.
+      5. When ``restart`` is true, bounces the gateway so its
+         ``Connector.Setup()`` wires hooks + native OTel exporter +
+         (codex only) the notify bridge against the running sidecar.
+
+    Returns True on success, False on any persistence error.
+    """
+    if connector not in ("codex", "claudecode"):
+        click.echo(
+            f"  ✗ observability-only mode is only supported for "
+            f"codex/claudecode (got {connector!r})",
+            err=True,
+        )
+        return False
+
+    cfg = app.cfg
+    gc = cfg.guardrail
+
+    cfg.claw.mode = connector
+    gc.connector = connector
+    gc.enabled = True
+    gc.mode = "observe"
+    gc.scanner_mode = "local"
+    gc.port = gc.port or 4000
+    gc.detection_strategy = "regex_only"
+    gc.detection_strategy_completion = "regex_only"
+    gc.judge.enabled = False
+
+    if connector == "codex":
+        gc.codex_enforcement_enabled = False
+    else:
+        gc.claudecode_enforcement_enabled = False
+
+    try:
+        cfg.save()
+        click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    except OSError as exc:
+        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        return False
+
+    _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
+    click.echo(f"  ✓ Active connector set to {connector!r} (claw.mode={connector})")
+
+    _write_guardrail_runtime(cfg.data_dir, gc)
+
+    if restart:
+        click.echo()
+        click.echo("  Restarting gateway to wire connector telemetry...")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=connector,
+        )
+        click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-connector-observability",
+            "config",
+            f"connector={connector} mode=observability_only enforcement=disabled",
+        )
+
+    return True
+
+
+def _print_connector_observability_banner(connector: str) -> None:
+    label = _CONNECTOR_META[connector]["label"]
+    enforcement_flag = (
+        "codex_enforcement_enabled"
+        if connector == "codex"
+        else "claudecode_enforcement_enabled"
+    )
+    click.echo()
+    click.echo(f"  DefenseClaw — {label} observability setup")
+    click.echo("  ─────────────────────────────────────────────────────────")
+    click.echo()
+    click.echo(f"  This wires {label} telemetry into DefenseClaw WITHOUT")
+    click.echo("  inserting a proxy in the data path. No traffic is")
+    click.echo("  intercepted, no requests are blocked.")
+    click.echo()
+    click.echo("  Telemetry channels:")
+    click.echo(
+        "    • Hooks      — tool calls, prompt-submit, agent stop "
+        f"→ /api/v1/{connector}/hook"
+    )
+    click.echo(
+        "    • Native OTel — model + token counts, raw API bodies "
+        "→ /v1/logs and /v1/metrics"
+    )
+    if connector == "codex":
+        click.echo(
+            "    • Notify     — agent-turn-complete events "
+            "→ /api/v1/codex/notify"
+        )
+    click.echo()
+    click.echo(f"  To later turn enforcement on, set guardrail.{enforcement_flag}=true")
+    click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+    click.echo()
+    _print_connector_mutation_notice(connector)
+    click.echo()
+
+
+def _print_observability_summary(connector: str, cfg=None) -> None:
+    """One-screen summary surfaced after a successful alias run."""
+    label = _CONNECTOR_META[connector]["label"]
+    click.echo()
+    click.echo("  Summary")
+    click.echo("  ───────")
+    rows = [
+        ("connector", f"{label} ({connector})"),
+        ("claw.mode", connector),
+        ("guardrail.enabled", "true (observability-only)"),
+        ("guardrail.mode", "observe"),
+        ("enforcement", "disabled"),
+    ]
+    for k, v in rows:
+        click.echo(f"    {k + ':':<22s} {v}")
+    click.echo()
+    print_redaction_status_hint(cfg)
+    click.echo()
+    click.echo("  Next steps:")
+    click.echo(
+        "    • Verify gateway picked up the new connector: "
+        "defenseclaw-gateway status"
+    )
+    click.echo(
+        "    • Optionally launch the bundled local stack: "
+        "defenseclaw setup local-observability up"
+    )
+    click.echo(
+        f"    • Tail audit events for the new connector: "
+        f"defenseclaw audit tail --connector {connector}"
+    )
+    click.echo()
+    click.echo("  To revert and restore direct LLM access:")
+    click.echo("    defenseclaw setup guardrail --disable")
+    click.echo()
+
+
+def _local_observability_already_up(data_dir: str) -> bool:
+    """Best-effort check: are the bundled stack containers already running?
+
+    We probe the Grafana port — the cheapest signal that ``setup
+    local-observability up`` has run successfully. False positives are
+    benign (we'll just call ``up`` again, which is idempotent), but we
+    err on "skip the auto-up" when uncertain so we don't shadow a
+    pre-existing operator-managed stack.
+    """
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(0.25)
+            return s.connect_ex(("127.0.0.1", 3000)) == 0
+    except OSError:
+        return False
+
+
+def _maybe_bring_up_local_stack(app: AppContext, *, auto: bool) -> None:
+    """Optionally bootstrap the bundled local OTel stack.
+
+    Honours ``--with-local-stack`` (auto=True) by invoking the existing
+    ``local_observability up`` Click command in-process. We never run
+    it in non-interactive mode without an explicit flag — Docker
+    starts are heavyweight, can fail noisily, and we don't want a
+    quick ``setup codex --non-interactive`` to hang for 30s in CI.
+    """
+    if not auto:
+        return
+
+    if _local_observability_already_up(app.cfg.data_dir):
+        click.echo(
+            "  ✓ Local observability stack already reachable on :3000 "
+            "(skipping `up`)"
+        )
+        return
+
+    try:
+        from defenseclaw.commands.cmd_setup_local_observability import (
+            up_cmd,
+        )
+    except ImportError as exc:
+        click.echo(
+            f"  ⚠ Could not load local-observability bridge: {exc}",
+            err=True,
+        )
+        return
+
+    click.echo()
+    click.echo("  Bringing up bundled local observability stack...")
+    ctx = click.get_current_context()
+    try:
+        ctx.invoke(
+            up_cmd,
+            timeout=180,
+            no_wait=False,
+            no_config=False,
+            endpoint=None,
+            signals="traces,metrics,logs",
+            service_name="defenseclaw",
+            with_audit_sink=True,
+        )
+    except SystemExit:
+        # ``up_cmd`` raises SystemExit(1) on Docker preflight failure.
+        # Don't propagate — observability mode is still useful without
+        # the local stack (operators can target a remote SIEM via
+        # ``defenseclaw setup observability add ...``). Just warn.
+        click.echo(
+            "  ⚠ Local stack failed to start; continuing without it. "
+            "Re-run `defenseclaw setup local-observability up` after "
+            "fixing Docker.",
+            err=True,
+        )
+
+
+def _setup_observability_alias(
+    app: AppContext,
+    *,
+    connector: str,
+    yes: bool,
+    restart: bool,
+    with_local_stack: bool,
+) -> None:
+    """Shared body for ``setup codex`` and ``setup claude-code``.
+
+    Splitting this out (rather than calling each Click command from
+    the other) keeps the wiring linear: each Click command parses its
+    own flags, then defers to this helper for the actual work.
+    """
+    if connector not in ("codex", "claudecode"):
+        raise click.ClickException(
+            f"unsupported connector for observability alias: {connector!r}"
+        )
+
+    _print_connector_observability_banner(connector)
+
+    if not yes:
+        if not click.confirm(
+            f"  Configure DefenseClaw for {_CONNECTOR_META[connector]['label']} "
+            "observability now?",
+            default=True,
+        ):
+            click.echo("  Aborted — no changes made.")
+            return
+
+    ok = _apply_connector_observability_only(
+        app, connector=connector, restart=restart,
+    )
+    if not ok:
+        raise click.ClickException(
+            f"failed to configure {connector} observability — see errors above"
+        )
+
+    _maybe_bring_up_local_stack(app, auto=with_local_stack)
+    _print_observability_summary(connector, app.cfg)
+
+
+@setup.command("codex")
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Skip the confirmation prompt (non-interactive).",
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after applying changes "
+        "(needed so the connector's hook scripts + OTel block are wired)."
+    ),
+)
+@click.option(
+    "--with-local-stack/--no-local-stack", default=False, show_default=True,
+    help=(
+        "Also bring up the bundled Prom/Loki/Tempo/Grafana stack via "
+        "`defenseclaw setup local-observability up` once config is saved."
+    ),
+)
+@pass_ctx
+def setup_codex(app: AppContext, yes: bool, restart: bool, with_local_stack: bool) -> None:
+    """Configure DefenseClaw for Codex observability (no enforcement).
+
+    Alias for the observability-only path of ``setup guardrail`` with
+    ``--connector codex``. Pins ``claw.mode=codex`` so the TUI, skill
+    scanner, MCP scanner, and plugin scanner read from ``~/.codex/``
+    instead of the OpenClaw default layout.
+
+    Wires three telemetry channels at gateway boot:
+
+    \b
+      • Hooks   — SessionStart / UserPromptSubmit / PreToolUse /
+                  PostToolUse / PermissionRequest / Stop events
+      • OTel    — native Codex log + metric exporter pointing at the
+                  gateway's /v1/logs and /v1/metrics
+      • Notify  — agent-turn-complete webhooks via the bundled
+                  notify-bridge.sh shim
+
+    No proxy listener binds; Codex talks directly to its native
+    upstream. Enforcement code stays in place behind
+    ``guardrail.codex_enforcement_enabled`` — flip to ``true`` and
+    restart the gateway to re-engage the proxy.
+    """
+    _setup_observability_alias(
+        app,
+        connector="codex",
+        yes=yes,
+        restart=restart,
+        with_local_stack=with_local_stack,
+    )
+
+
+@setup.command("claude-code")
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Skip the confirmation prompt (non-interactive).",
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after applying changes "
+        "(needed so the connector's hook scripts + OTel env vars are wired)."
+    ),
+)
+@click.option(
+    "--with-local-stack/--no-local-stack", default=False, show_default=True,
+    help=(
+        "Also bring up the bundled Prom/Loki/Tempo/Grafana stack via "
+        "`defenseclaw setup local-observability up` once config is saved."
+    ),
+)
+@pass_ctx
+def setup_claude_code(
+    app: AppContext, yes: bool, restart: bool, with_local_stack: bool,
+) -> None:
+    """Configure DefenseClaw for Claude Code observability (no enforcement).
+
+    Alias for the observability-only path of ``setup guardrail`` with
+    ``--connector claudecode``. Pins ``claw.mode=claudecode`` so the
+    TUI, skill scanner, MCP scanner, and plugin scanner read from
+    ``~/.claude/`` instead of the OpenClaw default layout.
+
+    Wires two telemetry channels at gateway boot:
+
+    \b
+      • Hooks — PreToolUse / PostToolUse / UserPromptSubmit / Stop /
+                PermissionRequest events via Claude Code's hook system
+      • OTel  — native Claude Code OTel exporter (env-driven) pointing
+                at the gateway's /v1/logs and /v1/metrics
+
+    No proxy listener binds; Claude Code talks directly to its native
+    upstream. Enforcement code stays in place behind
+    ``guardrail.claudecode_enforcement_enabled`` — flip to ``true`` and
+    restart the gateway to re-engage the proxy.
+    """
+    _setup_observability_alias(
+        app,
+        connector="claudecode",
+        yes=yes,
+        restart=restart,
+        with_local_stack=with_local_stack,
+    )
+
+
+# Connectors that go through the DefenseClaw proxy (port 4000) and
+# therefore support the full guardrail enforcement surface (block,
+# observe, scanner_mode, judge, etc.). The complement set
+# {codex, claudecode} is observability-only — they talk directly to
+# their native upstream and DefenseClaw collects telemetry via
+# hook scripts and OTel without sitting in the data path.
+_GUARDRAIL_SUPPORTING_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+_OBSERVABILITY_ONLY_CONNECTORS = frozenset({"codex", "claudecode"})
+
+
+def _apply_connector_mode_switch(
+    app: AppContext,
+    *,
+    new_connector: str,
+    restart: bool,
+) -> bool:
+    """Switch the active claw connector with smart guardrail inheritance.
+
+    Inheritance rules (intentionally asymmetric — the user wants
+    "switch fast, don't surprise me"):
+
+      • openclaw ↔ zeptoclaw
+            Inherit the current ``guardrail.*`` config verbatim. Both
+            connectors run the same proxy-mode pipeline so whatever
+            ``mode`` / ``scanner_mode`` / ``judge`` / etc. was set
+            stays set. Only ``claw.mode`` and ``guardrail.connector``
+            change.
+
+      • {openclaw|zeptoclaw} → {codex|claudecode}
+            Switch to observability-only template via
+            ``_apply_connector_observability_only``: the proxy stops
+            binding, the Go gateway wires hook scripts + OTel
+            exporter, and the matching ``*_enforcement_enabled`` flag
+            is forced to false. Existing ``mode`` / scanner /  judge
+            settings stay on disk so flipping back later restores the
+            previous posture.
+
+      • {codex|claudecode} → {openclaw|zeptoclaw}
+            Treat as a "guardrail-supporting but don't auto-block"
+            switch: enable guardrail in observe mode so the proxy
+            binds and we collect telemetry, but never turn enforcement
+            on without an explicit ``defenseclaw setup guardrail`` run.
+            This matches the user's stated intent ("only observability
+            and no guardrails when switching between
+            zeptoclaw/openclaw and codex/claude code") while keeping
+            the proxy listener live, since openclaw/zeptoclaw require
+            it to function.
+
+      • {codex|claudecode} ↔ {codex|claudecode}
+            Both observability-only — apply the destination's
+            template so the right enforcement flag is cleared and the
+            ``connector`` field is realigned.
+
+    Returns True on success, False on persistence error.
+    """
+    cfg = app.cfg
+    gc = cfg.guardrail
+    prev = (cfg.claw.mode or "openclaw").strip().lower()
+    if prev not in _CONNECTOR_NAMES:
+        prev = "openclaw"
+
+    if new_connector not in _CONNECTOR_NAMES:
+        ux.err(
+            f"unknown connector {new_connector!r} — "
+            f"expected one of {sorted(_CONNECTOR_NAMES)}",
+        )
+        return False
+
+    if prev == new_connector:
+        click.echo(
+            f"  • Already on {_CONNECTOR_META[new_connector]['label']} "
+            f"({new_connector}) — nothing to change."
+        )
+        # Persisting the picked-connector hint is still cheap and
+        # idempotent; do it so a reinstall sees the right default.
+        _write_picked_connector_hint(getattr(cfg, "data_dir", None), new_connector)
+        return True
+
+    # Branch on the destination kind. Source kind only matters for
+    # the third bullet above (recover guardrail state when leaving
+    # observability-only).
+    if new_connector in _OBSERVABILITY_ONLY_CONNECTORS:
+        click.echo(
+            f"  Switching {_CONNECTOR_META[prev]['label']} → "
+            f"{_CONNECTOR_META[new_connector]['label']} "
+            f"(observability-only — proxy disabled)"
+        )
+        _print_connector_mutation_notice(new_connector, switching_from=prev)
+        return _apply_connector_observability_only(
+            app, connector=new_connector, restart=restart,
+        )
+
+    # Destination is openclaw or zeptoclaw.
+    cfg.claw.mode = new_connector
+    gc.connector = new_connector
+
+    if prev in _GUARDRAIL_SUPPORTING_CONNECTORS:
+        # openclaw ↔ zeptoclaw: pure inheritance. We only re-pin
+        # claw.mode + guardrail.connector. ``gc.enabled``, ``gc.mode``,
+        # ``gc.scanner_mode``, judge config, ports, block message —
+        # all left exactly as the operator configured them.
+        click.echo(
+            f"  Switching {_CONNECTOR_META[prev]['label']} → "
+            f"{_CONNECTOR_META[new_connector]['label']} "
+            f"(inheriting current guardrail config)"
+        )
+    else:
+        # codex/claudecode → openclaw/zeptoclaw: the proxy needs to
+        # bind so guardrail traffic flows, but we deliberately leave
+        # enforcement off (mode=observe). Operators who want enforce
+        # mode run ``defenseclaw setup guardrail`` next.
+        click.echo(
+            f"  Switching {_CONNECTOR_META[prev]['label']} → "
+            f"{_CONNECTOR_META[new_connector]['label']} "
+            f"(observe-only — run `defenseclaw setup guardrail` "
+            f"to enable enforcement)"
+        )
+        gc.enabled = True
+        gc.mode = "observe"
+        if not gc.port:
+            gc.port = 4000
+        if not gc.scanner_mode:
+            gc.scanner_mode = "local"
+        if not gc.detection_strategy:
+            gc.detection_strategy = "regex_only"
+        if not gc.detection_strategy_completion:
+            gc.detection_strategy_completion = "regex_only"
+        # Don't auto-enable judge — that's an opt-in toggle that
+        # implies an LLM API call per inspection. Leave whatever was
+        # there.
+
+    _print_connector_mutation_notice(new_connector, switching_from=prev)
+
+    try:
+        cfg.save()
+        click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+    except OSError as exc:
+        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        return False
+
+    _write_picked_connector_hint(getattr(cfg, "data_dir", None), new_connector)
+    click.echo(
+        f"  ✓ Active connector set to {new_connector!r} "
+        f"(claw.mode={new_connector})"
+    )
+
+    # Refresh the runtime guardrail snapshot so the gateway picks up
+    # connector + mode without restarting when the operator chooses
+    # --no-restart. Restart still required for a different connector
+    # because OpenClawConnector.Setup / ZeptoClawConnector.Setup runs
+    # at boot only, but the runtime snapshot keeps the proxy honest
+    # in the meantime.
+    if hasattr(cfg, "data_dir"):
+        _write_guardrail_runtime(cfg.data_dir, gc)
+
+    if restart:
+        click.echo()
+        click.echo("  Restarting gateway to wire connector hooks + OTel...")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=new_connector,
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-connector-mode",
+            "config",
+            f"from={prev} to={new_connector}",
+        )
+    return True
+
+
+@setup.command("mode")
+@click.argument(
+    "connector",
+    type=click.Choice(
+        sorted(("openclaw", "zeptoclaw", "codex", "claudecode")),
+        case_sensitive=False,
+    ),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after switching. The gateway "
+        "selects its connector at boot only, so a switch without "
+        "restart leaves the previous connector handling traffic "
+        "until the next bounce."
+    ),
+)
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Reserved for symmetry with other setup commands; this command "
+         "is non-interactive by default and never prompts.",
+)
+@pass_ctx
+def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> None:
+    """Switch the active claw connector with smart guardrail inheritance.
+
+    \b
+    Inheritance rules:
+      openclaw ↔ zeptoclaw         inherit current guardrail config
+      → codex / claudecode         observability-only (proxy off)
+      from codex / claudecode      observe-only (proxy on, no enforce)
+
+    The TUI Overview's [m] action calls this command directly.
+
+    Examples:
+
+    \b
+        defenseclaw setup mode openclaw
+        defenseclaw setup mode codex --no-restart
+    """
+    _ = yes  # reserved
+    connector = connector.strip().lower()
+    ok = _apply_connector_mode_switch(
+        app, new_connector=connector, restart=restart,
+    )
+    if not ok:
+        raise click.ClickException(
+            f"failed to switch to {connector!r} — see errors above"
+        )
+
+
+@setup.command("redaction")
+@click.argument(
+    "action",
+    type=click.Choice(("on", "off", "status"), case_sensitive=False),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after toggling. The redaction "
+        "kill-switch is read at sidecar boot, so a flip without "
+        "restart leaves the previous state in effect for the running "
+        "process. Use --no-restart only when the sidecar is offline."
+    ),
+)
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help="Skip the interactive confirmation prompt when turning "
+         "redaction off. Required for non-TTY callers (TUI, scripts).",
+)
+@pass_ctx
+def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> None:
+    """Persistently enable or disable PII / prompt redaction.
+
+    \b
+    DefenseClaw redacts user prompts, judge bodies, evidence
+    windows, and verdict reasons by default before they reach any
+    sink (stderr, audit DB, OTel logs, Splunk HEC, webhooks). For
+    single-tenant lab installs that need to see raw content
+    end-to-end (prompt-engineering debugging, false-positive
+    triage), this command flips the persistent kill-switch
+    documented in OBSERVABILITY.md.
+
+    \b
+    WARNING: when redaction is OFF, the audit DB and every
+    downstream telemetry sink will store raw PII. Only use this in
+    deployments where every sink lives inside the same trust
+    boundary as the sidecar.
+
+    \b
+    Examples:
+      defenseclaw setup redaction status
+      defenseclaw setup redaction off --yes
+      defenseclaw setup redaction on
+    """
+    action = action.strip().lower()
+    cfg = app.cfg
+    current = bool(cfg.privacy.disable_redaction)
+
+    if action == "status":
+        env_override = os.environ.get("DEFENSECLAW_DISABLE_REDACTION", "").strip().lower()
+        env_on = env_override in {"1", "true", "yes", "on"}
+        ux.section("Redaction state")
+        click.echo(
+            f"    {ux.dim('config (privacy.disable_redaction):')} "
+            f"{'OFF (raw passthrough)' if current else 'ON (redacted)'}"
+        )
+        click.echo(
+            f"    {ux.dim('env (DEFENSECLAW_DISABLE_REDACTION):')} "
+            f"{'set (' + env_override + ')' if env_override else '(unset)'}"
+        )
+        effective = current or env_on
+        click.echo(
+            f"    {ux.dim('effective at sidecar boot:')} "
+            f"{'OFF — raw content will be persisted to ALL sinks' if effective else 'ON — placeholders only'}"
+        )
+        return
+
+    desired = action == "off"  # off = disable_redaction = True
+    if desired == current:
+        state = "OFF" if current else "ON"
+        click.echo(f"  • Redaction is already {state}; nothing to change.")
+        return
+
+    if desired and not yes:
+        # Loud, multi-line warning so the operator can't miss the
+        # privacy implications of the flip. Click.confirm reads
+        # from stdin; CI / TUI callers pass --yes to bypass.
+        click.echo()
+        ux.warn("TURNING REDACTION OFF")
+        click.echo()
+        ux.subhead("This will persistently disable PII redaction in the sidecar.")
+        ux.subhead(
+            "After restart, EVERY sink (audit DB, OTel logs, Splunk HEC,"
+        )
+        ux.subhead(
+            "webhooks, gateway.log) will receive UNREDACTED prompts,"
+        )
+        ux.subhead(
+            "judge bodies, evidence windows, and verdict reasons."
+        )
+        click.echo()
+        ux.subhead("Only proceed if every downstream sink lives inside the")
+        ux.subhead("same trust boundary as this install.")
+        click.echo()
+        click.confirm("  Disable redaction?", abort=True)
+
+    cfg.privacy.disable_redaction = desired
+
+    try:
+        cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise click.ClickException("config save failed") from exc
+
+    new_state = "OFF (raw passthrough)" if desired else "ON (redacted)"
+    ux.ok(f"privacy.disable_redaction set to {desired!s}")
+    ux.ok(f"Redaction state on next sidecar boot: {new_state}")
+
+    if restart:
+        ux.subhead(
+            "Restarting gateway so the redaction state takes effect..."
+        )
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        ux.warn(
+            "Skipped restart (--no-restart). The running sidecar still "
+            "enforces the previous redaction state. Restart manually:"
+        )
+        ux.subhead("   defenseclaw-gateway restart")
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-redaction-toggle",
+            "config",
+            f"disable_redaction={desired!s}",
         )
 
 
@@ -1354,159 +2710,225 @@ def execute_guardrail_setup(
     *,
     save_config: bool = True,
 ) -> tuple[bool, list[str]]:
-    """Run guardrail setup steps 0–7.
+    """Run guardrail setup steps.
 
     Returns (success, warnings).  When *save_config* is False the caller
     is responsible for calling ``app.cfg.save()`` (used by ``init`` which
     saves once at the end).
-    """
-    from defenseclaw.guardrail import (
-        _derive_master_key,
-        install_openclaw_plugin,
-        patch_openclaw_config,
-    )
 
+    All connector-specific setup (plugin install, config patching, hook
+    scripts, subprocess shims/sandbox) is handled by the Go gateway's
+    ``Connector.Setup()`` at sidecar startup. This function only persists
+    the Python-side config and writes the guardrail runtime JSON.
+    """
     gc = app.cfg.guardrail
     warnings: list[str] = []
+    connector_name = gc.connector or "openclaw"
 
-    standalone = app.cfg.openshell.is_standalone()
-
-    # --- Pre-flight checks ---
-    if not standalone:
-        claw_cfg_file = app.cfg.claw.config_file
-        oc_config_path = (
-            os.path.expanduser(claw_cfg_file) if claw_cfg_file.startswith("~/") else claw_cfg_file
-        )
-        if not os.path.isfile(oc_config_path):
-            click.echo(f"  ✗ OpenClaw config not found: {app.cfg.claw.config_file}")
-            click.echo("    Make sure OpenClaw is installed and initialized.")
-            click.echo("    Expected location: ~/.openclaw/openclaw.json")
-            return False, warnings
-
-    # No model validation — the fetch interceptor scans all models automatically.
     click.echo()
 
-    click.echo("  ✓ Guardrail proxy is built into the Go binary (no Python deps)")
-
-    if standalone:
-        click.echo("  ⚠ Sandbox mode: skipping OpenClaw plugin install and config patch")
-        click.echo("    Run 'defenseclaw sandbox setup' to install the guardrail plugin into the sandbox")
+    meta = _CONNECTOR_META.get(connector_name, {})
+    if meta:
+        tool_mode = meta["tool_mode"]
+        if tool_mode == "both":
+            tool_display = "pre-execution + response-scan"
+        else:
+            tool_display = tool_mode
+        ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
+        ux.ok(f"Tool inspection: {tool_display}")
+        ux.ok(f"Subprocess policy: {meta['subprocess_policy']}")
     else:
-        # --- Step 1: Install OpenClaw plugin ---
-        plugin_source = _find_plugin_source()
-        if plugin_source:
-            openclaw_home = app.cfg.claw.home_dir
-            method, cli_error = install_openclaw_plugin(plugin_source, openclaw_home)
-            if method == "cli":
-                click.echo("  ✓ OpenClaw plugin installed (via openclaw CLI)")
-            elif method == "manual":
-                click.echo("  ✓ OpenClaw plugin installed to extensions/")
-            elif method == "error":
-                click.echo(f"  ✗ OpenClaw plugin installation failed: {cli_error}")
-                warnings.append(
-                    "Plugin not installed — tool interception will not work. "
-                    "Try: make plugin-install && defenseclaw setup guardrail"
-                )
-            else:
-                click.echo("  ⚠ OpenClaw plugin not built — run 'make plugin && make plugin-install'")
-                warnings.append(
-                    "Plugin not built — tool interception will not work. "
-                    "Build with: make plugin && make plugin-install"
-                )
-        else:
-            click.echo("  ⚠ OpenClaw plugin not found at ~/.defenseclaw/extensions/")
-            warnings.append(
-                "Plugin not found — run 'make plugin-install' to stage it, "
-                "then re-run setup"
-            )
+        ux.ok(f"Connector: {connector_name} (plugin)")
 
-        # --- Step 2: Patch OpenClaw config ---
-        master_key = _derive_master_key(app.cfg.gateway.device_key_file)
+    ux.ok("Connector setup will run automatically when the gateway starts")
 
-        prev_model = patch_openclaw_config(
-            openclaw_config_file=app.cfg.claw.config_file,
-            model_name=gc.model_name,
-            proxy_port=gc.port,
-            master_key=master_key,
-            original_model=gc.original_model,
-            guardrail_host=gc.host or "localhost",
-            data_dir=app.cfg.data_dir,
-        )
-        if prev_model is not None:
-            click.echo(f"  ✓ OpenClaw config patched: {app.cfg.claw.config_file}")
-            if prev_model and not gc.original_model:
-                gc.original_model = prev_model
-        else:
-            click.echo(f"  ✗ Failed to patch OpenClaw config: {app.cfg.claw.config_file}")
-            click.echo("    File may be malformed or unreadable. Check the JSON syntax.")
-            warnings.append(
-                "OpenClaw config not patched — LLM traffic will not be routed through the guardrail. "
-                f"Fix {app.cfg.claw.config_file} and re-run setup"
-            )
-
-    # --- Step 3: Save DefenseClaw config ---
+    # --- Save DefenseClaw config ---
     if save_config:
         try:
             app.cfg.save()
-            click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
+            ux.ok("Config saved to ~/.defenseclaw/config.yaml")
         except OSError as exc:
-            click.echo(f"  ✗ Failed to save config: {exc}")
+            ux.err(f"Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
 
-    if gc.original_model:
-        click.echo(f"  ✓ Original model saved for revert: {gc.original_model}")
-
-    # --- Step 4: Auto-detect Azure endpoints and write to .env ---
-    # No provider API keys needed — the fetch interceptor reads them from
-    # OpenClaw's auth-profiles.json at runtime. Azure endpoints are the
-    # exception: they're customer-specific URLs we detect from openclaw.json
-    # and write to .env so the proxy knows where to forward Azure requests.
-    from defenseclaw.guardrail import detect_azure_endpoints
-    azure_endpoints = detect_azure_endpoints(app.cfg.claw.config_file)
-    if azure_endpoints:
-        dotenv_path = os.path.join(app.cfg.data_dir, ".env")
-        existing_dotenv = _load_dotenv(dotenv_path)
-        # Write the first Azure endpoint as AZURE_OPENAI_ENDPOINT
-        first_name, first_url = next(iter(azure_endpoints.items()))
-        existing_dotenv["AZURE_OPENAI_ENDPOINT"] = first_url
-        _write_dotenv(dotenv_path, existing_dotenv)
-        click.echo(f"  ✓ Azure endpoint saved: {first_url[:60]}...")
-
-    # --- Step 5: Write guardrail_runtime.json ---
+    # --- Write guardrail_runtime.json ---
     _write_guardrail_runtime(app.cfg.data_dir, gc)
 
-    # --- Step 6: Sandbox-specific setup (plugin + iptables scripts) ---
-    if standalone:
-        click.echo()
-        click.echo(click.style(
-            "  ** Re-run 'defenseclaw sandbox setup' to install the guardrail plugin "
-            "and restart the sandbox. **", fg="yellow",
-        ))
-    else:
-        from defenseclaw.commands.cmd_setup_sandbox import restore_sandbox_ownership_if_needed
-        restore_sandbox_ownership_if_needed(app.cfg)
+    # --- Mirror HILT into the OPA Rego data file ---
+    # The prompt-side guardrail verdict is computed by Rego, which reads
+    # `hilt.enabled` from policies/rego/data.json — NOT from config.yaml.
+    # Keeping the wizard's `gc.hilt` in sync with that file is what makes
+    # `confirm` actually surface on HIGH-severity prompt findings.
+    _sync_guardrail_hilt_to_opa(app.cfg.policy_dir, gc)
 
     return True, warnings
 
 
-def _interactive_guardrail_setup(app: AppContext, gc) -> None:
+def _prompt_hook_fail_mode(gc) -> None:
+    """Interactive prompt that sets ``gc.hook_fail_mode`` to "open" or
+    "closed" based on operator input.
 
+    Centralized so every entry point (initial setup, mode change,
+    observability-only flow) emits the same wording and the same
+    default-selection rule. The current value drives the default so
+    operators who answer the prompt in past invocations don't have
+    their explicit choice silently rotated by a subsequent mode flip.
+    """
+    ux.section("Hook fail mode")
+    ux.subhead("How hooks behave when the gateway answers but the answer is bad")
+    ux.subhead("(4xx, malformed JSON, missing action).")
     click.echo()
-    click.echo("  LLM Guardrail Setup")
-    click.echo("  ────────────────────")
+    click.echo(
+        "    " + ux.bold("[1] open  ")
+        + " — allow the tool/prompt and log the failure "
+        + ux.dim("(recommended)")
+    )
+    click.echo("                 " + ux.dim("A misbehaving gateway won't brick your agent."))
+    click.echo(
+        "    " + ux.bold("[2] closed")
+        + " — block the tool/prompt on any gateway error"
+    )
+    click.echo("                 " + ux.dim("Choose for regulated workflows where every"))
+    click.echo("                 " + ux.dim("prompt MUST be inspected."))
     click.echo()
-    click.echo("  Scans every LLM prompt and response for:")
-    click.echo("    • Prompt injection and jailbreak attempts")
-    click.echo("    • Secrets, API keys, and credentials")
-    click.echo("    • PII leakage (names, emails, SSNs, credit cards)")
-    click.echo("    • Data exfiltration patterns")
+    click.echo(
+        "  " + ux.dim(
+            "Note: a fully unreachable gateway always allows unless "
+            "DEFENSECLAW_STRICT_AVAILABILITY=1 is set in the agent's "
+            "environment, regardless of this choice."
+        )
+    )
+    current_fail = (getattr(gc, "hook_fail_mode", "") or "open").lower()
+    fail_default = "2" if current_fail == "closed" else "1"
+    fail_choice = click.prompt(
+        "  Select hook fail mode", type=click.Choice(["1", "2"]), default=fail_default,
+    )
+    gc.hook_fail_mode = "open" if fail_choice == "1" else "closed"
+
+
+def _interactive_guardrail_setup(
+    app: AppContext, gc, *, agent_name: str | None = None,
+) -> None:
+    # Snapshot the entry-point ``gc.enabled`` BEFORE any prompt mutates
+    # it. The wizard flips ``gc.enabled = True`` after the operator
+    # confirms enabling, which means by the time we reach the fail-mode
+    # prompt block below the live value no longer tells us whether we
+    # are configuring this guardrail for the first time. Without this
+    # snapshot the previous ``not bool(gc.mode)`` heuristic was dead
+    # code (mode defaults to "observe", never empty) and a fresh-install
+    # operator who accepted the default observe mode would never be
+    # asked about hook_fail_mode — directly contradicting the
+    # operator-defined fail-mode contract.
+    was_initial_setup = not bool(gc.enabled)
+
+    ux.section("LLM Guardrail Setup")
     click.echo()
+    click.echo("  " + ux.bold("Scans every LLM prompt and response for:"))
+    click.echo("    • " + ux.dim("Prompt injection and jailbreak attempts"))
+    click.echo("    • " + ux.dim("Secrets, API keys, and credentials"))
+    click.echo("    • " + ux.dim("PII leakage (names, emails, SSNs, credit cards)"))
+    click.echo(
+        "    • " + ux.dim(
+            "Data exfiltration: credential-file reads (/etc/passwd, "
+            "~/.ssh, ~/.aws), out-of-band channels"
+        )
+    )
+    click.echo()
+
+    # --- Step 0: Connector selection ---
+    if agent_name and agent_name in _CONNECTOR_META:
+        gc.connector = agent_name
+    else:
+        gc.connector = _select_connector_interactive(
+            gc.connector or "openclaw",
+            data_dir=getattr(app.cfg, "data_dir", None),
+        )
+    click.echo()
+    _print_connector_info(gc.connector)
+    click.echo()
+
+    # Codex and Claude Code have two valid setup modes. Their default
+    # aliases (`setup codex`, `setup claude-code`) stay observability-only,
+    # but the guardrail wizard must also expose the full guardrail path so
+    # operators can choose action mode and HILT without hand-editing YAML.
+    if gc.connector in ("codex", "claudecode"):
+        proxy_port = gc.port or 4000
+        label = _CONNECTOR_META.get(gc.connector, {}).get("label", gc.connector)
+        click.echo("  ┌──────────────────────────────────────────────────────────────┐")
+        click.echo("  │  Connector integration mode                                  │")
+        click.echo("  └──────────────────────────────────────────────────────────────┘")
+        click.echo()
+        click.echo(f"  {label} can run in either mode:")
+        click.echo()
+        click.echo("    [1] observability-only — hooks + OTel, direct native upstream, no blocking")
+        click.echo("    [2] guardrail setup    — hooks + OTel + proxy path; choose observe/action next")
+        click.echo()
+        default_choice = "2" if (
+            _connector_enforcement_enabled(gc, gc.connector) or gc.mode == "action"
+        ) else "1"
+        integration_choice = click.prompt(
+            "  Select integration mode",
+            type=click.Choice(["1", "2"]),
+            default=default_choice,
+        )
+        if integration_choice == "1":
+            click.echo()
+            click.echo("  Observability-only mode")
+            click.echo("  ───────────────────────")
+            click.echo("  Codex / Claude Code talk DIRECTLY to their native upstream;")
+            click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
+            click.echo()
+            click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")
+            click.echo("      UserPromptSubmit, Stop, PermissionRequest) → /api/v1/<connector>/hook")
+            click.echo("    • OTel: native exporter writes structured logs + metrics")
+            click.echo("      (raw API bodies, model + token counts) to /v1/logs and /v1/metrics")
+            click.echo("    • Notify: agent-turn-complete events (codex only) → /api/v1/codex/notify")
+            click.echo()
+            if not click.confirm("  Enable observability for " + gc.connector + "?", default=True):
+                gc.enabled = False
+                return
+
+            # Sensible "if-you-ever-flip-enforcement-on" defaults so the
+            # config.yaml stays loadable. The Go gateway never reads these
+            # fields when enforcement is off — they live as forward-looking
+            # state for the operator who later wants to switch modes.
+            gc.enabled = True
+            gc.mode = "observe"
+            gc.scanner_mode = "local"
+            gc.port = proxy_port
+            gc.judge.enabled = False
+            gc.detection_strategy = "regex_only"
+            gc.detection_strategy_completion = "regex_only"
+            _set_connector_enforcement(gc, gc.connector, False)
+
+            # Observability-only generates the same hook scripts as the
+            # full guardrail flow (codex-hook.sh / claude-code-hook.sh
+            # both render ``FAIL_MODE`` from this field), so we must
+            # surface the choice on first-time setup. Skipping it here
+            # would leave operators with no opportunity to set
+            # ``hook_fail_mode`` until they discover
+            # ``defenseclaw guardrail fail-mode``.
+            if was_initial_setup:
+                _prompt_hook_fail_mode(gc)
+
+            click.echo()
+            click.echo("  ✓ Observability mode enabled (no traffic interception)")
+            click.echo("  ✓ Hooks + OTel + notify telemetry will be wired automatically at gateway boot")
+            click.echo()
+            return
+
+        _set_connector_enforcement(gc, gc.connector, True)
+        click.echo()
+        click.echo("  ✓ Guardrail setup selected; hooks + OTel stay enabled.")
 
     model_name = gc.model_name or gc.model or ""
     if model_name:
         click.echo(f"  Detected LLM:  {model_name}")
     proxy_port = gc.port or 4000
-    click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
+    if gc.connector in ("codex", "claudecode"):
+        click.echo(f"  Proxy port:    {proxy_port} (enabled for this connector setup)")
+    else:
+        click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
     click.echo()
 
     if not click.confirm("  Enable guardrail?", default=True):
@@ -1515,21 +2937,72 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
 
     gc.enabled = True
 
-    click.echo()
-    click.echo("  Enforcement mode:")
-    click.echo("    [1] observe — log and alert only, never block (recommended to start)")
-    click.echo("    [2] action  — block requests that match security policies")
+    ux.section("Enforcement mode")
+    click.echo(
+        "    " + ux.bold("[1] observe") + " — log and alert only, never block "
+        + ux.dim("(recommended to start)")
+    )
+    click.echo("    " + ux.bold("[2] action ") + " — block requests that match security policies")
     current_mode = gc.mode or "observe"
     mode_default = "1" if current_mode == "observe" else "2"
     mode_choice = click.prompt(
         "  Select mode", type=click.Choice(["1", "2"]), default=mode_default,
     )
-    gc.mode = "observe" if mode_choice == "1" else "action"
+    new_mode = "observe" if mode_choice == "1" else "action"
+    mode_changed = new_mode != current_mode
+    gc.mode = new_mode
 
-    click.echo()
-    click.echo("  Scanner engine:")
-    click.echo("    [1] local  — built-in pattern matching, no network calls (fastest)")
-    click.echo("    [2] remote — Cisco AI Defense cloud API (higher accuracy, requires API key)")
+    # Hook fail-mode prompt. Asked on initial setup OR when the
+    # operator just flipped between observe and action — those are
+    # the moments where the operator is actively making policy-
+    # posture decisions and most likely to want to revisit the
+    # response-layer fallback. Otherwise we leave the existing value
+    # alone (operator can change it later via
+    # `defenseclaw guardrail fail-mode <open|closed>`).
+    #
+    # ``was_initial_setup`` is sampled at the very top of this function
+    # (snapshot of ``gc.enabled`` before the wizard flips it true) — we
+    # cannot use the live ``gc.mode`` value here because the dataclass
+    # default is "observe" rather than empty, which made the previous
+    # detection dead code on every realistic fresh install.
+    if was_initial_setup or mode_changed:
+        _prompt_hook_fail_mode(gc)
+
+    # Human-In-the-Loop (HILT). Hoisted out of the "Configure
+    # advanced options?" branch so operators see the question on
+    # every guardrail setup that *can* fire approvals — i.e.,
+    # action mode. The previous wiring buried HILT under an opt-in
+    # "advanced" gate (default N), which meant first-time users
+    # who walked through the wizard never got asked unless they
+    # already knew HILT existed and discovered it from docs.
+    #
+    # Skipped when ``gc.mode == "observe"``: HILT only fires in
+    # action mode, so prompting in observe mode is just noise that
+    # misleads operators about what their answer does. Their
+    # previously-saved ``gc.hilt`` block stays intact for the day
+    # they later flip to action via this same wizard or via
+    # ``defenseclaw setup mode``.
+    #
+    # ``_configure_hilt_interactive`` itself emits the
+    # action-mode-only short-circuit message when called outside
+    # action mode — but we deliberately avoid calling it for
+    # observe so the wizard stays terse for the (common) observe-
+    # mode operator. The verbose "this is action-only" message
+    # was useful when the call lived under "Advanced options" and
+    # the operator had explicitly opted in; here, asking and
+    # immediately printing "never mind" would feel like a bug.
+    if gc.mode == "action":
+        _configure_hilt_interactive(gc)
+
+    ux.section("Scanner engine")
+    click.echo(
+        "    " + ux.bold("[1] local ") + "  — built-in pattern matching, no network calls "
+        + ux.dim("(fastest)")
+    )
+    click.echo(
+        "    " + ux.bold("[2] remote") + "  — Cisco AI Defense cloud API "
+        + ux.dim("(higher accuracy, requires API key)")
+    )
     sm_current = gc.scanner_mode or "local"
     if sm_current == "both":
         sm_current = "local"
@@ -1540,9 +3013,7 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
     gc.scanner_mode = "local" if sm_choice == "1" else "remote"
 
     if gc.scanner_mode in ("remote", "both"):
-        click.echo()
-        click.echo("  Cisco AI Defense Configuration")
-        click.echo("  ──────────────────────────────")
+        ux.section("Cisco AI Defense Configuration")
         aid = app.cfg.cisco_ai_defense
         aid.endpoint = click.prompt(
             "  API endpoint", default=aid.endpoint,
@@ -1564,22 +3035,38 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
     gc.port = proxy_port
 
     # --- LLM Judge section ---
+    ux.section("LLM Judge (reduces false positives)")
+    ux.subhead("Uses an LLM to verify detections and catch novel attacks.")
+    ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
     click.echo()
-    click.echo("  LLM Judge (reduces false positives)")
-    click.echo("  ────────────────────────────────────")
-    click.echo("  Uses an LLM to verify detections and catch novel attacks.")
-    click.echo("  Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
+    click.echo("  " + ux.bold("Three judge kinds run on every prompt when enabled:"))
+    click.echo("    • " + ux.dim("injection — overrides / jailbreaks (kind=injection)"))
+    click.echo("    • " + ux.dim("pii       — names, emails, SSNs, secrets (kind=pii)"))
+    click.echo(
+        "    • " + ux.dim(
+            "exfil     — credential-file reads & out-of-band channels (kind=exfil)"
+        )
+    )
+    click.echo("  " + ux.dim("Tool calls additionally run the tool_injection judge."))
     click.echo()
 
     enable_judge = click.confirm("  Enable LLM judge?", default=gc.judge.enabled)
     gc.judge.enabled = enable_judge
 
     if enable_judge:
-        click.echo()
-        click.echo("  Detection strategy:")
-        click.echo("    [1] regex_only  — regex patterns only, no LLM calls (fastest)")
-        click.echo("    [2] regex_judge — regex triages, LLM verifies ambiguous matches (recommended)")
-        click.echo("    [3] judge_first — LLM runs primary detection, regex as safety net (most accurate)")
+        ux.section("Detection strategy")
+        click.echo(
+            "    " + ux.bold("[1] regex_only ") + " — regex patterns only, no LLM calls "
+            + ux.dim("(fastest)")
+        )
+        click.echo(
+            "    " + ux.bold("[2] regex_judge") + " — regex triages, LLM verifies ambiguous matches "
+            + ux.dim("(recommended)")
+        )
+        click.echo(
+            "    " + ux.bold("[3] judge_first") + " — LLM runs primary detection, regex as safety net "
+            + ux.dim("(most accurate)")
+        )
         strategy_map = {"1": "regex_only", "2": "regex_judge", "3": "judge_first"}
         current_strat = gc.detection_strategy or "regex_judge"
         strat_default = {"regex_only": "1", "regex_judge": "2", "judge_first": "3"}.get(current_strat, "2")
@@ -1692,6 +3179,13 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
         gc.judge.pii = True
         gc.judge.pii_prompt = True
         gc.judge.pii_completion = True
+        # Data-exfiltration judge runs alongside injection + PII on
+        # every prompt. It exists because polite-tone /etc/passwd-shaped
+        # prompts slip through the injection judge ("not adversarial
+        # phrasing") and the PII judge ("no literal PII emitted yet").
+        # Audit rows for this judge appear with kind=exfil and follow
+        # the same retention / redaction rules as the other kinds.
+        gc.judge.exfil = True
 
         # Completion-side strategy defaults to regex_only (no judge latency)
         if not getattr(gc, "detection_strategy_completion", None):
@@ -1738,104 +3232,163 @@ def _interactive_guardrail_setup(app: AppContext, gc) -> None:
                 gc.block_message = click.prompt("  Block message", default=gc.block_message or "")
             else:
                 gc.block_message = ""
+        # NOTE: HILT was previously asked here. As of the
+        # always-ask-when-action change it lives inline in
+        # ``_interactive_guardrail_setup`` right after the hook
+        # fail-mode prompt, so we don't double-prompt under
+        # advanced. Operators who want to revisit HILT specifically
+        # can re-run ``defenseclaw setup guardrail`` (no flag
+        # needed) and walk through to the action-mode block.
+        _configure_redaction_interactive(app)
 
 
 
 def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
-    from defenseclaw.guardrail import restore_openclaw_config, uninstall_openclaw_plugin
-
-    standalone = app.cfg.openshell.is_standalone()
+    connector_name = gc.connector or "openclaw"
+    meta = _CONNECTOR_META.get(connector_name, {})
 
     click.echo()
     click.echo("  Disabling LLM guardrail...")
-    warnings: list[str] = []
-
-    if standalone:
-        click.echo("  ⚠ Sandbox mode: skipping OpenClaw config restore and plugin removal")
-        click.echo("    Run 'defenseclaw sandbox setup' to remove the guardrail plugin from the sandbox")
-    else:
-        # Remove defenseclaw plugin entries from openclaw.json
-        if restore_openclaw_config(app.cfg.claw.config_file, gc.original_model):
-            click.echo(f"  ✓ OpenClaw plugin removed from: {app.cfg.claw.config_file}")
-        else:
-            click.echo(f"  ✗ Could not update OpenClaw config: {app.cfg.claw.config_file}")
-            warnings.append(f"Manually remove defenseclaw from plugins.allow in {app.cfg.claw.config_file}")
-
-        # Uninstall OpenClaw plugin
-        openclaw_home = app.cfg.claw.home_dir
-        result = uninstall_openclaw_plugin(openclaw_home)
-        if result == "cli":
-            click.echo("  ✓ OpenClaw plugin uninstalled (via openclaw CLI)")
-        elif result == "manual":
-            click.echo("  ✓ OpenClaw plugin removed from extensions/")
-        elif result == "error":
-            ext_dir = os.path.join(os.path.expanduser(openclaw_home), "extensions", "defenseclaw")
-            click.echo(f"  ✗ Could not remove OpenClaw plugin at {ext_dir}")
-            warnings.append(f"Manually delete: rm -rf {ext_dir}")
-        else:
-            click.echo("  ✓ OpenClaw plugin not installed (nothing to remove)")
+    if meta:
+        click.echo(f"  Connector: {meta.get('label', connector_name)} ({connector_name})")
 
     gc.enabled = False
 
     try:
         app.cfg.save()
-        click.echo("  ✓ Config saved")
-        if standalone:
-            click.echo()
-            click.echo(click.style(
-                "  ** Re-run 'defenseclaw sandbox setup' to remove the guardrail plugin "
-                "and restart the sandbox. **", fg="yellow",
-            ))
+        click.echo("  ✓ Config saved (guardrail.enabled = false)")
     except OSError as exc:
         click.echo(f"  ✗ Failed to save config: {exc}")
-        warnings.append("Config not saved — guardrail may re-enable on next run")
+        click.echo("    Guardrail may re-enable on next run")
 
-    if warnings:
-        click.echo()
-        click.echo("  ── Manual steps required ─────────────────────────────")
-        for w in warnings:
-            click.echo(f"  ⚠ {w}")
-
-    # Restart OpenClaw so it reloads without the plugin — this stops the
-    # fetch interceptor immediately. Plugin was already uninstalled above.
+    # Restart the gateway so it runs conn.Teardown() — the sidecar checks
+    # guardrail.enabled on boot and calls Teardown instead of Setup when
+    # disabled. This restores agent configs (hooks, api_base, plugins,
+    # shims) to their pre-DefenseClaw state.
     click.echo()
-    click.echo("  Restarting OpenClaw gateway to unload the plugin...")
-    try:
-        result = subprocess.run(
-            ["openclaw", "gateway", "restart"],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            click.echo("  ✓ OpenClaw gateway restarted — traffic flows directly to providers")
-        else:
-            click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
-            click.echo("    Run manually: openclaw gateway restart")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        click.echo("  ⚠ Could not restart OpenClaw gateway automatically")
-        click.echo("    Run manually: openclaw gateway restart")
+    click.echo("  Restarting gateway to run connector teardown...")
+    _restart_services(
+        app.cfg.data_dir,
+        app.cfg.gateway.host,
+        app.cfg.gateway.port,
+        connector=connector_name,
+    )
+    click.echo(f"  ✓ {meta.get('label', connector_name)} connector teardown complete")
     click.echo()
 
     if app.logger:
-        app.logger.log_action("setup-guardrail", "config", "disabled")
+        app.logger.log_action("setup-guardrail", "config", f"disabled connector={connector_name}")
 
 
 def _write_guardrail_runtime(data_dir: str, gc) -> None:
-    """Write guardrail_runtime.json so the Python guardrail module can hot-reload settings."""
+    """Write guardrail_runtime.json so the gateway can hot-reload settings.
+
+    Carries every guardrail field whose runtime change should not require
+    a full sidecar restart. The Go side polls this file with a short TTL
+    (see ``GuardrailProxy.reloadRuntimeConfig``) and applies each known
+    key to the live inspector.
+
+    The HILT block is included so an operator who edits
+    ``config.yaml`` (or runs ``defenseclaw config set
+    guardrail.hilt.enabled ...``) and then re-runs the wizard or restart
+    helper has their HILT view pushed into the running gateway via the
+    same hot-reload path the rest of the runtime uses. Without this, the
+    inspector's HILT cache (set once in ``NewGuardrailProxy``) would
+    drift out of sync with ``config.yaml`` until the next bounce — the
+    same SSOT staleness pattern the input.hilt change was meant to
+    eliminate.
+    """
     import json
 
     runtime_file = os.path.join(data_dir, "guardrail_runtime.json")
+    hilt = getattr(gc, "hilt", None)
     payload = {
         "mode": gc.mode,
         "scanner_mode": gc.scanner_mode,
         "block_message": gc.block_message,
+        "hilt_enabled": bool(getattr(hilt, "enabled", False)),
+        "hilt_min_severity": (
+            (getattr(hilt, "min_severity", "") or "HIGH").upper()
+        ),
     }
     try:
         os.makedirs(data_dir, exist_ok=True)
         with open(runtime_file, "w") as f:
             json.dump(payload, f)
-        click.echo(f"  ✓ Guardrail runtime config written to {runtime_file}")
+        ux.ok(f"Guardrail runtime config written to {runtime_file}")
     except OSError as exc:
-        click.echo(f"  ⚠ Failed to write runtime config: {exc}")
+        ux.warn(f"Failed to write runtime config: {exc}")
+
+
+def _sync_guardrail_hilt_to_opa(policy_dir: str, gc) -> None:
+    """Mirror ``gc.hilt`` into the OPA Rego data.json the gateway evaluates.
+
+    NOTE (architecture): As of the input.hilt SSOT change, the Go gateway
+    now passes ``cfg.Guardrail.HILT`` directly into ``policy.GuardrailInput``
+    so the Rego policy reads ``input.hilt.{enabled,min_severity}`` and
+    ``config.yaml`` is the single source of truth for the gateway path.
+    See ``internal/gateway/guardrail.go`` (``SetHILTConfig`` / ``hiltInput``)
+    and ``policies/rego/guardrail.rego`` (``_hilt := input.hilt if {...}
+    else := object.get(data.guardrail, "hilt", {})``).
+
+    This helper is now a **fallback** that keeps non-gateway callers
+    (direct ``opa eval`` invocations, integration tests that build a
+    ``GuardrailInput`` without HILT, third-party tooling) consistent with
+    the wizard's view of HILT. The gateway no longer DEPENDS on it for
+    correctness, but mirroring the value here costs nothing and avoids
+    confusing operators who introspect ``data.json`` directly.
+
+    The HILT toggle has two consumers:
+
+    1. The Go inspector reads ``cfg.Guardrail.HILT`` from ``config.yaml``
+       and injects it into the Rego ``input`` (the gateway path — primary).
+    2. The Rego ``defenseclaw.guardrail`` policy falls back to
+       ``data.guardrail.hilt`` from ``policies/rego/data.json`` when the
+       caller does not populate ``input.hilt`` (legacy / test path).
+
+    Operator-facing wizards (``defenseclaw init``, ``defenseclaw setup
+    guardrail``) persist (1) via ``config.yaml`` and mirror to (2) via
+    this helper as defense-in-depth. The helper is intentionally narrow:
+    it ONLY mirrors the ``guardrail.hilt`` block, leaving thresholds,
+    patterns, severity_mappings, etc. owned by ``defenseclaw policy
+    activate`` (which calls ``_sync_opa_data`` in ``cmd_policy``). That
+    keeps the wizard from accidentally clobbering activated-policy state.
+    """
+    import json
+
+    if gc is None or getattr(gc, "hilt", None) is None:
+        return
+
+    data_json = os.path.join(policy_dir, "rego", "data.json")
+    if not os.path.isfile(data_json):
+        return
+
+    try:
+        with open(data_json) as f:
+            opa_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        click.echo(f"  ⚠ Failed to read {data_json}: {exc}")
+        return
+
+    desired = {
+        "enabled": bool(gc.hilt.enabled),
+        "min_severity": (gc.hilt.min_severity or "HIGH").upper(),
+    }
+    guardrail_block = opa_data.setdefault("guardrail", {})
+    if guardrail_block.get("hilt") == desired:
+        return
+
+    guardrail_block["hilt"] = desired
+    try:
+        with open(data_json, "w") as f:
+            json.dump(opa_data, f, indent=2)
+            f.write("\n")
+        click.echo(
+            f"  ✓ HILT synced to OPA: enabled={desired['enabled']} "
+            f"min_severity={desired['min_severity']}"
+        )
+    except OSError as exc:
+        click.echo(f"  ⚠ Failed to write {data_json}: {exc}")
 
 
 def _print_guardrail_summary(gc, openclaw_config_file: str, *, restart: bool = False) -> None:
@@ -1908,15 +3461,56 @@ def _is_pid_alive(pid_file: str) -> bool:
         return False
 
 
-def _restart_services(data_dir: str, oc_host: str = "127.0.0.1", oc_port: int = 18789) -> None:
-    """Restart defenseclaw-gateway and verify openclaw gateway health."""
-    click.echo("  Restarting services...")
-    click.echo("  ──────────────────────")
+def _restart_services(
+    data_dir: str,
+    oc_host: str = "127.0.0.1",
+    oc_port: int = 18789,
+    connector: str = "openclaw",
+) -> None:
+    """Restart defenseclaw-gateway and, when OpenClaw is the selected
+    connector, restart the OpenClaw gateway too so it picks up the
+    freshly-registered defenseclaw plugin. Other connectors manage
+    their own processes; defenseclaw-gateway is the only process we
+    always need to bounce."""
+    ux.section("Restarting services")
 
     _restart_defense_gateway(data_dir)
-    _check_openclaw_gateway(oc_host, oc_port)
+
+    if connector == "openclaw":
+        _restart_openclaw_gateway()
+        _check_openclaw_gateway(oc_host, oc_port)
+    else:
+        ux.subhead(
+            f"{connector} connector: traffic will route through defenseclaw-gateway proxy."
+        )
 
     click.echo()
+
+
+def _restart_openclaw_gateway() -> None:
+    """Ask OpenClaw to restart its gateway service so the updated
+    plugin registration (written by OpenClawConnector.Setup) takes
+    effect. No-op when the `openclaw` CLI isn't on PATH — operators
+    using a non-standard OpenClaw install can restart manually."""
+    click.echo("  openclaw-gateway: restarting...", nl=False)
+    try:
+        result = subprocess.run(
+            ["openclaw", "gateway", "restart"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            click.echo(" ✓")
+        else:
+            click.echo(" ✗")
+            err = (result.stderr or result.stdout or "").strip()
+            if err:
+                for line in err.splitlines()[:3]:
+                    click.echo(f"    {line}")
+    except FileNotFoundError:
+        click.echo(" ✗ (openclaw CLI not found)")
+        click.echo("    Install OpenClaw or restart its gateway manually.")
+    except subprocess.TimeoutExpired:
+        click.echo(" ✗ (timed out)")
 
 
 def _restart_defense_gateway(data_dir: str, *, start_if_stopped: bool = True) -> None:
@@ -2047,7 +3641,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
     recovery_timeout = 60
     poll_interval = 3
 
-    click.echo("  openclaw gateway: monitoring...", nl=False)
+    click.echo("  agent gateway: monitoring...", nl=False)
 
     start = time.monotonic()
 
@@ -2062,7 +3656,7 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
     if not healthy:
         click.echo(" not running")
         click.echo("    Gateway did not respond within 30s.")
-        click.echo("    Start manually: openclaw gateway")
+        click.echo("    Start manually: defenseclaw-gateway start")
         return
 
     # Phase 2 — confirm stability for stable_window seconds
@@ -2099,8 +3693,8 @@ def _check_openclaw_gateway(host: str = "127.0.0.1", port: int = 18789) -> None:
         elapsed = int(time.monotonic() - start)
         click.echo(f" ✗ (unhealthy after {elapsed}s)")
         click.echo("    Gateway did not recover after config-triggered restart.")
-        click.echo("    Check: openclaw gateway status")
-        click.echo("    Logs: ~/.openclaw/logs/gateway.err.log")
+        click.echo("    Check: defenseclaw-gateway status")
+        click.echo("    Logs: ~/.defenseclaw/logs/gateway.err.log")
 
 
 def _looks_like_secret(value: str) -> bool:
@@ -2128,7 +3722,7 @@ def _prompt_env_var_name(default: str) -> str:
 
 def _print_gateway_summary(gw) -> None:
     click.echo()
-    click.echo("  Saved to ~/.defenseclaw/config.yaml")
+    ux.ok("Saved to ~/.defenseclaw/config.yaml")
     click.echo()
 
     resolved = gw.resolved_token()
@@ -2140,16 +3734,19 @@ def _print_gateway_summary(gw) -> None:
     ]
 
     for key, val in rows:
-        click.echo(f"    gateway.{key + ':':<12s} {val}")
+        label = (f"gateway.{key}:").ljust(20)
+        click.echo(
+            f"    {ux._style(label, fg='bright_black', bold=True)} {val}"
+        )
     click.echo()
 
     if resolved:
-        click.echo("  Start the sidecar with:")
-        click.echo("    defenseclaw-gateway")
+        ux.subhead("Start the sidecar with:")
+        ux.subhead("  defenseclaw-gateway")
     else:
-        click.echo("  Start the sidecar with:")
-        click.echo("    defenseclaw-gateway")
-        click.echo("  (local mode — ensure OpenClaw is running on this machine)")
+        ux.subhead("Start the sidecar with:")
+        ux.subhead("  defenseclaw-gateway")
+        ux.subhead("(local mode — ensure OpenClaw is running on this machine)")
     click.echo()
 
 
@@ -2173,13 +3770,24 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
               help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
 @click.option("--logs", "enable_logs", is_flag=True, default=False,
               help="Enable local Splunk via Docker (HEC logs + dashboards, Free mode)")
+@click.option("--enterprise", "enable_enterprise", is_flag=True, default=False,
+              help="Enable remote Splunk Enterprise via HEC endpoint + token")
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
 @click.option("--access-token", default=None, help="Splunk O11y access token")
+@click.option("--hec-endpoint", default=None,
+              help="Remote Splunk Enterprise HEC endpoint")
+@click.option("--hec-token", default=None,
+              help="Remote Splunk Enterprise HEC token")
 @click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
-@click.option("--index", "logs_index", default=None, help="HEC index for --logs (default: defenseclaw_local)")
-@click.option("--source", "logs_source", default=None, help="HEC source for --logs (default: defenseclaw)")
+@click.option("--index", "logs_index", default=None,
+              help=(
+                  "HEC index for --logs/--enterprise "
+                  "(default: defenseclaw_local for local, defenseclaw for enterprise)"
+              ))
+@click.option("--source", "logs_source", default=None,
+              help="HEC source for --logs/--enterprise (default: defenseclaw)")
 @click.option("--sourcetype", "logs_sourcetype", default=None,
-              help="HEC sourcetype for --logs (default: defenseclaw:json)")
+              help="HEC sourcetype for --logs/--enterprise (default: defenseclaw:json for local, _json for enterprise)")
 @click.option("--traces/--no-traces", "enable_traces", default=None,
               help="Enable/disable trace export (O11y)")
 @click.option("--metrics/--no-metrics", "enable_metrics", default=None,
@@ -2189,6 +3797,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 @click.option("--disable", is_flag=True, help="Disable Splunk integration(s)")
 @click.option("--accept-splunk-license", is_flag=True,
               help="Acknowledge the Splunk General Terms for local Splunk enablement")
+@click.option("--skip-test", is_flag=True,
+              help="Skip the live HEC probe after remote Splunk Enterprise setup")
 @click.option("--show-credentials", is_flag=True, help="Show Splunk Web login credentials")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
@@ -2196,8 +3806,11 @@ def setup_splunk(
     app: AppContext,
     enable_o11y: bool,
     enable_logs: bool,
+    enable_enterprise: bool,
     realm: str | None,
     access_token: str | None,
+    hec_endpoint: str | None,
+    hec_token: str | None,
     app_name: str | None,
     logs_index: str | None,
     logs_source: str | None,
@@ -2207,12 +3820,13 @@ def setup_splunk(
     enable_logs_export: bool | None,
     disable: bool,
     accept_splunk_license: bool,
+    skip_test: bool,
     show_credentials: bool,
     non_interactive: bool,
 ) -> None:
     """Configure Splunk integration for DefenseClaw.
 
-    Two independent pipelines are available:
+    Three independent pipelines are available:
 
     \b
       --o11y   Splunk Observability Cloud (traces + metrics via OTLP HTTP)
@@ -2221,6 +3835,11 @@ def setup_splunk(
       --logs   Local Splunk (Docker, HEC logs + dashboards)
                Starts the bundled profile in Splunk Free mode from day 1.
                Requires Docker.
+    \b
+      --enterprise
+               Remote Splunk Enterprise HEC endpoint + token.
+               No Docker, local bridge, or Splunk-side automation.
+               Sends one best-effort HEC probe unless --skip-test is set.
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
@@ -2229,19 +3848,23 @@ def setup_splunk(
         return
 
     if disable:
-        _disable_splunk(app, enable_o11y, enable_logs, non_interactive)
+        _disable_splunk(app, enable_o11y, enable_logs, enable_enterprise, non_interactive)
         return
 
-    if not enable_o11y and not enable_logs and not non_interactive:
-        _interactive_splunk_setup(app, realm, access_token, app_name)
+    if not enable_o11y and not enable_logs and not enable_enterprise and not non_interactive:
+        _interactive_splunk_setup(app, realm, access_token, app_name, skip_test=skip_test)
         return
 
-    if not enable_o11y and not enable_logs and non_interactive:
-        click.echo("  error: specify --o11y, --logs, or both with --non-interactive", err=True)
+    if not enable_o11y and not enable_logs and not enable_enterprise and non_interactive:
+        click.echo(
+            "  error: specify --o11y, --logs, --enterprise, or a combination with --non-interactive",
+            err=True,
+        )
         raise SystemExit(1)
 
     did_o11y = False
     did_logs = False
+    did_enterprise = False
 
     if enable_o11y:
         _setup_o11y(app, realm or "us1", access_token, app_name or "defenseclaw",
@@ -2260,7 +3883,20 @@ def setup_splunk(
             sourcetype=logs_sourcetype,
         )
 
-    if not did_o11y and not did_logs:
+    if enable_enterprise:
+        _setup_enterprise(
+            app,
+            hec_endpoint=hec_endpoint,
+            hec_token=hec_token,
+            index=logs_index,
+            source=logs_source,
+            sourcetype=logs_sourcetype,
+            non_interactive=non_interactive,
+            skip_test=skip_test,
+        )
+        did_enterprise = True
+
+    if not did_o11y and not did_logs and not did_enterprise:
         return
 
     # Note: no app.cfg.save() here — the observability writer invoked
@@ -2271,7 +3907,9 @@ def setup_splunk(
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
-    _print_splunk_next_steps(did_o11y, did_logs)
+    print_redaction_status_hint(app.cfg)
+    click.echo()
+    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
 
     if app.logger:
         parts: list[str] = []
@@ -2279,6 +3917,8 @@ def setup_splunk(
             parts.append("o11y=enabled")
         if did_logs:
             parts.append("logs=enabled")
+        if did_enterprise:
+            parts.append("enterprise=enabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
 
 
@@ -2291,12 +3931,14 @@ def _interactive_splunk_setup(
     realm: str | None,
     access_token: str | None,
     app_name: str | None,
+    *,
+    skip_test: bool = False,
 ) -> None:
     click.echo()
     click.echo("  Splunk Integration Setup")
     click.echo("  ────────────────────────")
     click.echo()
-    click.echo("  DefenseClaw supports two Splunk pipelines. You can enable one or both.")
+    click.echo("  DefenseClaw supports three Splunk pipelines. You can enable any combination.")
     click.echo()
     click.echo("  1. Splunk Observability Cloud (O11y)")
     click.echo("     Sends traces + metrics + logs via OTLP HTTP directly to Splunk cloud.")
@@ -2307,9 +3949,14 @@ def _interactive_splunk_setup(
     click.echo("     Audit events are sent via HEC. Includes pre-built dashboards for DefenseClaw.")
     click.echo("     Requires Docker.")
     click.echo()
+    click.echo("  3. Splunk Enterprise (Remote HEC)")
+    click.echo("     Sends audit events to an existing Splunk Enterprise HEC endpoint.")
+    click.echo("     Requires only a HEC endpoint and HEC token.")
+    click.echo()
 
     did_o11y = False
     did_logs = False
+    did_enterprise = False
 
     if click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False):
         _interactive_o11y(app, realm, access_token, app_name)
@@ -2319,7 +3966,11 @@ def _interactive_splunk_setup(
     if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
         did_logs = _interactive_logs(app)
 
-    if not did_o11y and not did_logs:
+    if click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False):
+        _interactive_enterprise(app, skip_test=skip_test)
+        did_enterprise = True
+
+    if not did_o11y and not did_logs and not did_enterprise:
         click.echo()
         click.echo("  No Splunk pipelines enabled. Run again to configure.")
         return
@@ -2331,7 +3982,9 @@ def _interactive_splunk_setup(
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
-    _print_splunk_next_steps(did_o11y, did_logs)
+    print_redaction_status_hint(app.cfg)
+    click.echo()
+    _print_splunk_next_steps(did_o11y, did_logs, did_enterprise)
 
     if app.logger:
         parts = []
@@ -2339,6 +3992,8 @@ def _interactive_splunk_setup(
             parts.append("o11y=enabled")
         if did_logs:
             parts.append("logs=enabled")
+        if did_enterprise:
+            parts.append("enterprise=enabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
 
 
@@ -2386,6 +4041,21 @@ def _prompt_splunk_token(current: str | None) -> str:
     return current or env_val
 
 
+def _prompt_splunk_hec_token(current: str | None) -> str:
+    env_val = os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    if current:
+        hint = _mask(current)
+    elif env_val:
+        hint = f"from env: {_mask(env_val)}"
+    else:
+        hint = "(not set)"
+
+    val = click.prompt(f"  HEC token [{hint}]", default="", show_default=False, hide_input=True)
+    if val:
+        return val
+    return current or env_val
+
+
 def _interactive_logs(app: AppContext) -> bool:
     click.echo()
     click.echo("  Local Splunk")
@@ -2407,6 +4077,36 @@ def _interactive_logs(app: AppContext) -> bool:
     _apply_logs_config(app, index=index, source=source, sourcetype=sourcetype,
                        bootstrap_bridge=True)
     return True
+
+
+def _interactive_enterprise(app: AppContext, *, skip_test: bool = False) -> None:
+    click.echo()
+    click.echo("  Splunk Enterprise")
+    click.echo("  ─────────────────")
+    click.echo()
+
+    endpoint = click.prompt(
+        "  HEC endpoint",
+        default="https://splunk.example.com:8088/services/collector/event",
+    )
+    token = _prompt_splunk_hec_token(None)
+    if not token:
+        click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
+        raise SystemExit(1)
+    index = click.prompt("  Index name", default="defenseclaw")
+    source = click.prompt("  Source", default="defenseclaw")
+    sourcetype = click.prompt("  Sourcetype", default="_json")
+
+    sink_name = _apply_enterprise_config(
+        app,
+        endpoint=endpoint,
+        token=token,
+        index=index,
+        source=source,
+        sourcetype=sourcetype,
+    )
+    click.echo("  Splunk Enterprise configured (HEC)")
+    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 # ---------------------------------------------------------------------------
@@ -2474,6 +4174,55 @@ def _setup_logs(
     )
     click.echo("  Local Splunk configured (Free mode from day 1)")
     return True
+
+
+def _setup_enterprise(
+    app: AppContext,
+    *,
+    hec_endpoint: str | None,
+    hec_token: str | None,
+    index: str | None = None,
+    source: str | None = None,
+    sourcetype: str | None = None,
+    non_interactive: bool,
+    skip_test: bool = False,
+) -> None:
+    endpoint = (hec_endpoint or "").strip()
+    if not endpoint:
+        if non_interactive:
+            click.echo(
+                "  error: --hec-endpoint is required with --enterprise --non-interactive",
+                err=True,
+            )
+            raise SystemExit(1)
+        endpoint = click.prompt(
+            "  HEC endpoint",
+            default="https://splunk.example.com:8088/services/collector/event",
+        )
+
+    token = hec_token or os.environ.get("DEFENSECLAW_SPLUNK_HEC_TOKEN", "")
+    if not token and non_interactive:
+        click.echo(
+            "  error: --hec-token required (or set DEFENSECLAW_SPLUNK_HEC_TOKEN env var)",
+            err=True,
+        )
+        raise SystemExit(1)
+    if not token:
+        token = _prompt_splunk_hec_token(None)
+    if not token:
+        click.echo("  error: HEC token is required for Splunk Enterprise", err=True)
+        raise SystemExit(1)
+
+    sink_name = _apply_enterprise_config(
+        app,
+        endpoint=endpoint,
+        token=token,
+        index=index or "defenseclaw",
+        source=source or "defenseclaw",
+        sourcetype=sourcetype or "_json",
+    )
+    click.echo("  Splunk Enterprise configured (HEC)")
+    _maybe_probe_enterprise_hec(app, sink_name, skip_test=skip_test)
 
 
 def _print_splunk_license_notice() -> None:
@@ -2619,6 +4368,65 @@ def _apply_logs_config(
     _reload_cfg_from_data_dir(app)
 
 
+def _apply_enterprise_config(
+    app: AppContext,
+    *,
+    endpoint: str,
+    token: str,
+    index: str,
+    source: str,
+    sourcetype: str,
+) -> str:
+    """Configure a remote Splunk Enterprise HEC sink.
+
+    This is intentionally config-only: no Docker preflight, local bridge
+    bootstrap, Splunk license prompt, or Splunk-side token/index creation.
+    """
+    from defenseclaw.observability import apply_preset
+
+    try:
+        result = apply_preset(
+            "splunk-enterprise",
+            {
+                "endpoint": endpoint,
+                "index": index,
+                "source": source,
+                "sourcetype": sourcetype,
+            },
+            app.cfg.data_dir,
+            enabled=True,
+            secret_value=token or None,
+        )
+    except ValueError as exc:
+        click.echo(f"  error: {exc}", err=True)
+        raise SystemExit(2) from exc
+    _reload_cfg_from_data_dir(app)
+    return result.name
+
+
+def _maybe_probe_enterprise_hec(
+    app: AppContext,
+    sink_name: str,
+    *,
+    skip_test: bool,
+) -> None:
+    if skip_test:
+        click.echo("  Live HEC probe skipped.")
+        return
+
+    from defenseclaw.commands.cmd_setup_observability import probe_splunk_hec
+
+    click.echo("  Live HEC probe:")
+    try:
+        ok, message = probe_splunk_hec(app.cfg.data_dir, sink_name, timeout=10.0)
+    except OSError as exc:
+        ok, message = False, str(exc)
+    if ok:
+        click.echo(f"    {message}")
+    else:
+        click.echo(f"    warning: {message}")
+
+
 def _reload_cfg_from_data_dir(app: AppContext) -> None:
     """Reload ``app.cfg`` from ``app.cfg.data_dir``.
 
@@ -2744,13 +4552,26 @@ def _port_in_use(port: int) -> bool:
 # Disable
 # ---------------------------------------------------------------------------
 
+def _is_local_splunk_destination(dest) -> bool:
+    return _is_local_hec_endpoint(str(getattr(dest, "endpoint", "") or ""))
+
+
+def _is_local_hec_endpoint(endpoint: str) -> bool:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(endpoint if "://" in endpoint else f"https://{endpoint}")
+    host = (parsed.hostname or "").lower()
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
 def _disable_splunk(
     app: AppContext,
     o11y_only: bool,
     logs_only: bool,
+    enterprise_only: bool,
     non_interactive: bool,
 ) -> None:
-    disable_both = not o11y_only and not logs_only
+    disable_both = not o11y_only and not logs_only and not enterprise_only
 
     click.echo()
     click.echo("  Disabling Splunk integration...")
@@ -2767,27 +4588,37 @@ def _disable_splunk(
             pass
         click.echo("    Splunk O11y (OTLP): disabled")
 
-    if disable_both or logs_only:
-        # Find every splunk_hec audit sink and flip enabled=false. The
-        # legacy Config.splunk dataclass hydrates from the first enabled
-        # one, so the gateway will see it as disabled on next load.
+    if disable_both or logs_only or enterprise_only:
+        # Find splunk_hec audit sinks and flip enabled=false. The legacy
+        # Config.splunk dataclass hydrates from the first enabled one, so
+        # the gateway will see it as disabled on next load.
         dests = list_destinations(app.cfg.data_dir)
-        disabled_any = False
+        disabled_local = False
+        disabled_enterprise = False
         for d in dests:
             if d.kind == "splunk_hec" and d.enabled:
+                is_local = _is_local_splunk_destination(d)
+                if not disable_both:
+                    if logs_only and not is_local:
+                        continue
+                    if enterprise_only and is_local:
+                        continue
                 try:
                     set_destination_enabled(d.name, False, app.cfg.data_dir)
-                    disabled_any = True
+                    if is_local:
+                        disabled_local = True
+                    else:
+                        disabled_enterprise = True
                 except ValueError:
                     continue
-        if disabled_any:
-            click.echo("    Splunk Enterprise (HEC): disabled")
-        else:
-            # Still report a "disabled" status so operators (and CI
-            # smoke-tests) can grep for it; the parenthetical clarifies
-            # there was nothing to flip.
-            click.echo("    Splunk Enterprise (HEC): disabled (no active sinks found)")
-        _stop_bridge(app.cfg.data_dir)
+        if disable_both or logs_only:
+            suffix = "" if disabled_local else " (no active local sinks found)"
+            click.echo(f"    Local Splunk (HEC): disabled{suffix}")
+        if disable_both or enterprise_only:
+            suffix = "" if disabled_enterprise else " (no active Enterprise sinks found)"
+            click.echo(f"    Splunk Enterprise (HEC): disabled{suffix}")
+        if disable_both or logs_only:
+            _stop_bridge(app.cfg.data_dir)
 
     # Refresh in-memory cfg so callers (and tests) see the YAML state
     # the writer just produced.
@@ -2802,6 +4633,8 @@ def _disable_splunk(
             parts.append("o11y=disabled")
         if disable_both or logs_only:
             parts.append("logs=disabled")
+        if disable_both or enterprise_only:
+            parts.append("enterprise=disabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
 
 
@@ -2871,7 +4704,8 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo()
 
     if sc.enabled:
-        click.echo("  Splunk Enterprise (HEC):")
+        hec_label = "Local Splunk (HEC)" if _is_local_hec_endpoint(sc.hec_endpoint) else "Splunk Enterprise (HEC)"
+        click.echo(f"  {hec_label}:")
         click.echo("    Status:      enabled")
         click.echo(f"    HEC:         {sc.hec_endpoint}")
         click.echo(f"    Index:       {sc.index}")
@@ -2884,7 +4718,7 @@ def _print_splunk_status(app: AppContext) -> None:
         click.echo()
 
 
-def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
+def _print_splunk_next_steps(did_o11y: bool, did_logs: bool, did_enterprise: bool = False) -> None:
     click.echo("  Next steps:")
     click.echo("    1. Start (or restart) the DefenseClaw sidecar:")
     click.echo("       defenseclaw-gateway restart")
@@ -2893,16 +4727,35 @@ def _print_splunk_next_steps(did_o11y: bool, did_logs: bool) -> None:
         click.echo("       Log in with admin / the password from setup output above.")
         click.echo("       To view credentials later: defenseclaw setup splunk --show-credentials")
         click.echo("    3. Validate data in local Splunk")
+    if did_enterprise:
+        step = "3" if did_logs else "2"
+        click.echo(f"    {step}. Validate data in Splunk Enterprise")
+        click.echo("       index=<configured index> source=defenseclaw")
     click.echo()
     click.echo("  To disable:")
-    if did_o11y and did_logs:
+    if did_o11y and did_logs and did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable                 # all")
+        click.echo("    defenseclaw setup splunk --disable --o11y          # O11y only")
+        click.echo("    defenseclaw setup splunk --disable --logs          # local only")
+        click.echo("    defenseclaw setup splunk --disable --enterprise    # Enterprise only")
+    elif did_o11y and did_logs:
         click.echo("    defenseclaw setup splunk --disable            # both")
         click.echo("    defenseclaw setup splunk --disable --o11y     # O11y only")
         click.echo("    defenseclaw setup splunk --disable --logs     # local only")
+    elif did_o11y and did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable                 # both")
+        click.echo("    defenseclaw setup splunk --disable --o11y          # O11y only")
+        click.echo("    defenseclaw setup splunk --disable --enterprise    # Enterprise only")
+    elif did_logs and did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable                 # both")
+        click.echo("    defenseclaw setup splunk --disable --logs          # local only")
+        click.echo("    defenseclaw setup splunk --disable --enterprise    # Enterprise only")
     elif did_o11y:
         click.echo("    defenseclaw setup splunk --disable --o11y")
     elif did_logs:
         click.echo("    defenseclaw setup splunk --disable --logs")
+    elif did_enterprise:
+        click.echo("    defenseclaw setup splunk --disable --enterprise")
 
 
 def _show_splunk_credentials(data_dir: str) -> None:

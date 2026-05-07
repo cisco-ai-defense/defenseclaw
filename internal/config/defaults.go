@@ -32,6 +32,26 @@ const (
 	EnvLinux    Environment = "linux"
 )
 
+type DeploymentMode string
+
+const (
+	DeploymentModeManagedEnterprise DeploymentMode = "managed_enterprise"
+	DeploymentModeUnmanagedBYOD     DeploymentMode = "unmanaged_byod"
+	DeploymentModeCICD              DeploymentMode = "ci_cd"
+	DeploymentModeSandboxed         DeploymentMode = "sandboxed"
+	DeploymentModeServer            DeploymentMode = "server"
+	DeploymentModeSaaS              DeploymentMode = "saas"
+)
+
+var validDeploymentModes = map[string]struct{}{
+	string(DeploymentModeManagedEnterprise): {},
+	string(DeploymentModeUnmanagedBYOD):     {},
+	string(DeploymentModeCICD):              {},
+	string(DeploymentModeSandboxed):         {},
+	string(DeploymentModeServer):            {},
+	string(DeploymentModeSaaS):              {},
+}
+
 const (
 	DefaultDataDirName = ".defenseclaw"
 	DefaultAuditDBName = "audit.db"
@@ -71,9 +91,11 @@ func DetectEnvironment() Environment {
 }
 
 // DefaultSkillWatchPaths returns skill directories for the default claw mode.
-// Prefer SkillDirsForMode when a config is available.
+// Prefer Config.SkillDirsForConnector when a config is available;
+// this fallback always uses the OpenClaw layout because we don't
+// know the active framework here.
 func DefaultSkillWatchPaths() []string {
-	return SkillDirsForMode(ClawOpenClaw, "")
+	return SkillDirsForOpenClaw("")
 }
 
 func DefaultConfig() *Config {
@@ -83,9 +105,10 @@ func DefaultConfig() *Config {
 		DataDir:       dataDir,
 		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
 		QuarantineDir: filepath.Join(dataDir, "quarantine"),
-		PluginDir:     filepath.Join(dataDir, "plugins"),
+		PluginDir:     "",
 		PolicyDir:     filepath.Join(dataDir, "policies"),
 		Environment:   string(DetectEnvironment()),
+		AssetPolicy:   DefaultAssetPolicy(),
 		Claw: ClawConfig{
 			Mode:       clawMode,
 			HomeDir:    "~/.openclaw",
@@ -143,7 +166,12 @@ func DefaultConfig() *Config {
 				PIIPrompt:     true,
 				PIICompletion: true,
 				ToolInjection: true,
+				Exfil:         true,
 				Timeout:       30.0,
+			},
+			HILT: HILTConfig{
+				Enabled:     false,
+				MinSeverity: "HIGH",
 			},
 		},
 		// AuditSinks is empty by default — operators opt in to forwarding
