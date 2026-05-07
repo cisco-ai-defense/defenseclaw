@@ -1,0 +1,95 @@
+{
+  "providers": [
+    {
+      "name": "anthropic",
+      "domains": ["api.anthropic.com"],
+      "profile_id": "anthropic:default",
+      "env_keys": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"]
+    },
+    {
+      "name": "openrouter",
+      "domains": ["openrouter.ai"],
+      "profile_id": "openrouter:default",
+      "env_keys": ["OPENROUTER_API_KEY"]
+    },
+    {
+      "name": "openai",
+      "domains": ["api.openai.com"],
+      "profile_id": "openai:default",
+      "env_keys": ["OPENAI_API_KEY"]
+    },
+    {
+      "name": "openai-codex",
+      "domains": ["chatgpt.com/backend-api"],
+      "profile_id": null,
+      "env_keys": []
+    },
+    {
+      "name": "groq",
+      "domains": ["api.groq.com"],
+      "profile_id": "groq:default",
+      "env_keys": ["GROQ_API_KEY"]
+    },
+    {
+      "name": "mistral",
+      "domains": ["api.mistral.ai"],
+      "profile_id": "mistral:default",
+      "env_keys": ["MISTRAL_API_KEY"]
+    },
+    {
+      "name": "cohere",
+      "domains": ["api.cohere.com", "api.cohere.ai"],
+      "profile_id": "cohere:default",
+      "env_keys": ["COHERE_API_KEY"]
+    },
+    {
+      "name": "deepseek",
+      "domains": ["api.deepseek.com"],
+      "profile_id": "deepseek:default",
+      "env_keys": ["DEEPSEEK_API_KEY"]
+    },
+    {
+      "name": "perplexity",
+      "domains": ["api.perplexity.ai"],
+      "profile_id": "perplexity:default",
+      "env_keys": ["PERPLEXITY_API_KEY"]
+    },
+    {
+      "name": "together",
+      "domains": ["api.together.xyz"],
+      "profile_id": "together:default",
+      "env_keys": ["TOGETHER_API_KEY"]
+    },
+    {
+      "name": "xai",
+      "domains": ["api.x.ai"],
+      "profile_id": "xai:default",
+      "env_keys": ["XAI_API_KEY"]
+    },
+    {
+      "name": "vertex",
+      "domains": ["aiplatform.googleapis.com"],
+      "profile_id": null,
+      "env_keys": []
+    },
+    {
+      "name": "azure",
+      "domains": ["openai.azure.com"],
+      "profile_id": "azure:default",
+      "env_keys": ["AZURE_OPENAI_API_KEY"]
+    },
+    {
+      "name": "gemini",
+      "domains": ["generativelanguage.googleapis.com", "googleapis.com/v1/projects"],
+      "profile_id": "google:default",
+      "env_keys": ["GOOGLE_API_KEY", "GEMINI_API_KEY"]
+    },
+    {
+      "name": "bedrock",
+      "domains": ["bedrock-runtime."],
+      "profile_id": null,
+      "env_keys": []
+    }
+  ],
+  "ollama_ports": [11434]
+}
