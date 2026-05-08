@@ -26,7 +26,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
@@ -63,32 +65,35 @@ type agentHookResponse struct {
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			if a.otel != nil {
-				a.otel.RecordConnectorHookInvocation(r.Context(), connectorName, "unknown", "rejected", "method", 0)
-			}
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "method", 0)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
 		if err != nil {
-			if a.otel != nil {
-				a.otel.RecordConnectorHookInvocation(r.Context(), connectorName, "unknown", "rejected", "invalid_json", 0)
-			}
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
 
 		req := normalizeAgentHookRequest(connectorName, payload)
 		if req.HookEventName == "" {
-			if a.otel != nil {
-				a.otel.RecordConnectorHookInvocation(r.Context(), connectorName, "unknown", "rejected", "missing_event", 0)
-			}
+			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
 			return
 		}
 		req.CWD = sanitizeHookCWD(req.CWD)
 		ctx := enrichAgentHookContext(r.Context(), req)
+
+		// Emit the LLM event (prompt/tool/response) BEFORE the
+		// evaluator runs. Mirrors handleClaudeCodeHook /
+		// handleCodexHook ordering: the audit/event log captures
+		// what the agent attempted regardless of whether the
+		// evaluation later blocks it. This is what brings
+		// hermes/cursor/windsurf/geminicli/copilot to LLM-event
+		// parity with claudecode/codex.
+		a.emitAgentHookLLMEvent(ctx, req, b)
 
 		t0 := time.Now()
 		resp := a.evaluateAgentHook(ctx, req)
@@ -118,12 +123,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
 		}
 
-		if a.logger != nil {
-			details := fmt.Sprintf("action=%s raw_action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-				resp.Action, resp.RawAction, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-			details = appendRawTelemetryDetails(details, "raw_payload", b)
-			_ = a.logger.LogActionCtx(ctx, connectorName+"-hook", req.HookEventName, details)
-		}
+		details := fmt.Sprintf("action=%s raw_action=%s severity=%s mode=%s would_block=%v elapsed=%s",
+			resp.Action, resp.RawAction, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
+		details = appendRawTelemetryDetails(details, "raw_payload", b)
+		a.logConnectorHookAudit(ctx, connectorName, req.HookEventName, details)
 
 		a.writeJSON(w, http.StatusOK, resp)
 	}
@@ -325,19 +328,168 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	}
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	var assetDecisions []runtimeAssetDecision
 	switch {
 	case isPromptLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt"})
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result"})
+		// Asset policy still runs on result-shaped events so a
+		// PostToolUse referencing an unregistered MCP server gets
+		// captured in audit / would-block telemetry. mergeAssetDecision
+		// handles the "non-enforceable event" case by downgrading to
+		// would-block automatically.
+		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	case isGenericToolInspectionEvent(req.HookEventName):
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: req.ToolName, Args: req.ToolArgs, Direction: "tool_call"})
+		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
 	rawAction := normalizeCodexAction(verdict.Action)
+	rawActionBeforeAssets := rawAction
 	caps := a.hookCapabilities(req.ConnectorName)
 	action, wouldBlock := mapHookAction(rawAction, mode, req.HookEventName, caps)
-	return agentHookResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock, caps)
+	severity := verdict.Severity
+	reason := verdict.Reason
+	findings := verdict.Findings
+
+	// Fold runtime asset-policy verdicts into the hook verdict.
+	// mergeAssetDecision handles "this event is not enforceable"
+	// by returning advisory-only changes (action stays allow,
+	// rawAction promoted to block, wouldBlock=true). For events
+	// the connector itself does not declare blockable, we further
+	// downgrade through mapHookAction so we never tell the agent
+	// to block on a surface it cannot honor.
+	for _, asset := range assetDecisions {
+		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
+			asset.decision, true, asset.targetType, req.HookEventName,
+			action, rawAction, severity, reason, findings,
+		)
+		if mergedAction == "block" {
+			capable, capableWouldBlock := mapHookAction("block", mode, req.HookEventName, caps)
+			if capable != "block" {
+				mergedAction = capable
+				if capableWouldBlock {
+					assetWouldBlock = true
+				}
+			}
+		}
+		action = mergedAction
+		rawAction = mergedRawAction
+		severity = mergedSeverity
+		reason = mergedReason
+		findings = mergedFindings
+		if assetWouldBlock {
+			wouldBlock = true
+		}
+	}
+
+	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
+		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock)
+	}
+	return agentHookResponseFor(req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+}
+
+// collectAgentHookAssetDecisions runs the runtime asset-policy
+// evaluators (MCP + skill) for a hook-only-connector event and
+// returns the matched blocking verdicts. Non-blocking matches and
+// non-matches return as zero entries; the caller folds the results
+// into the hook decision via mergeAssetDecision.
+//
+// The MCP and skill probes are derived from the same payload —
+// req.Payload, req.ToolName, req.ToolArgs — that the upstream event
+// log already covers, so no additional information leaves the
+// process. tool_input is derived from ToolArgs lazily because the
+// asset probes need a typed map view (ServerName / Command / args)
+// that the raw json.RawMessage does not provide directly.
+func (a *APIServer) collectAgentHookAssetDecisions(ctx context.Context, req agentHookRequest) []runtimeAssetDecision {
+	var out []runtimeAssetDecision
+	if decision, matched := a.agentHookMCPAssetDecision(ctx, req); matched {
+		out = append(out, runtimeAssetDecision{targetType: "mcp", decision: decision})
+	}
+	if decision, matched := a.agentHookSkillAssetDecision(ctx, req); matched {
+		out = append(out, runtimeAssetDecision{targetType: "skill", decision: decision})
+	}
+	return out
+}
+
+func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHookRequest) (config.AssetPolicyDecision, bool) {
+	toolInput := decodeAgentHookToolInput(req.ToolArgs)
+	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
+	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
+}
+
+func (a *APIServer) agentHookSkillAssetDecision(ctx context.Context, req agentHookRequest) (config.AssetPolicyDecision, bool) {
+	toolInput := decodeAgentHookToolInput(req.ToolArgs)
+	probe := skillProbeFromFields(req.ToolName, toolInput, req.Payload)
+	return a.evaluateRuntimeSkillAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
+}
+
+// decodeAgentHookToolInput decodes ToolArgs into a generic map so
+// the asset-policy probe helpers can pull command / arguments /
+// nested fields. Returns nil on malformed JSON; callers tolerate
+// a nil map (the probe falls back to tool-name / payload heuristics).
+func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// dispatchAgentHookNotification mirrors dispatchClaudeCodeHookNotification
+// / dispatchCodexHookNotification but for the five generic hook-only
+// connectors. Same routing contract:
+//
+//   - action=="block"                                → notifier.OnBlock
+//   - rawAction=="block" + (wouldBlock || action!=block) → OnWouldBlock
+//   - action=="confirm" || rawAction=="confirm"      → OnApprovalPending
+//
+// Reason is run through redaction.ForSinkReason before display so a
+// regex-match verdict carrying echoed user content (PII / secrets)
+// does not land verbatim on the OS toast. Connector is taken from
+// req.ConnectorName so the subtitle reads e.g. "DefenseClaw hermes
+// PreToolUse" — operators paging through toasts can attribute each
+// one to a specific framework without opening the audit log.
+func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
+	if a == nil || a.notifier == nil {
+		return
+	}
+	target := strings.TrimSpace(req.ToolName)
+	if target == "" {
+		target = req.HookEventName
+	}
+	safeReason := string(redaction.ForSinkReason(reason))
+	switch {
+	case action == "block":
+		a.notifier.OnBlock(notifier.BlockEvent{
+			Source:    notifier.SourceHook,
+			Target:    target,
+			Reason:    safeReason,
+			Severity:  severity,
+			Connector: req.ConnectorName,
+			Event:     req.HookEventName,
+		})
+	case rawAction == "block" && (wouldBlock || action != "block"):
+		a.notifier.OnWouldBlock(notifier.BlockEvent{
+			Source:    notifier.SourceHook,
+			Target:    target,
+			Reason:    safeReason,
+			Severity:  severity,
+			Connector: req.ConnectorName,
+			Event:     req.HookEventName,
+		})
+	case action == "confirm" || rawAction == "confirm":
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:  fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:   safeReason,
+			Severity: severity,
+			Source:   notifier.SourceHook,
+		})
+	}
 }
 
 func (a *APIServer) agentHookEnabled(name string) bool {
@@ -464,7 +616,7 @@ func agentHookResponseFor(req agentHookRequest, action, rawAction, severity, rea
 }
 
 func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional string, caps connector.HookCapability) map[string]interface{} {
-	reason = reasonOrDefaultGeneric(req.ConnectorName, reason)
+	reason = connectorReason(req.ConnectorName, action, req.ToolName, reason)
 	switch req.ConnectorName {
 	case "hermes":
 		if action == "block" {
@@ -555,6 +707,56 @@ func reasonOrDefaultGeneric(connectorName, reason string) string {
 		return reason
 	}
 	return fmt.Sprintf("Blocked by DefenseClaw %s policy.", connectorName)
+}
+
+// connectorReason renders the user-facing reason string surfaced by
+// the per-connector hook_output JSON. Cursor and Copilot pass the
+// "permission.user_message" / "permissionDecisionReason" verbatim
+// to the operator (chat surface or modal), so a bare upstream reason
+// like "matched policy: deny-rm-rf" is too terse to be actionable.
+//
+// When the upstream verdict already provides a sentence-shape reason
+// we pass it through unchanged — operators have invested effort in
+// crafting their policy reasons and we should not paper over them.
+// We only synthesize a default when reason is empty, and the default
+// is action-aware:
+//
+//   - block:                "DefenseClaw blocked <tool>. Run 'defenseclaw mcp list' / 'skill list' to review approved assets."
+//   - confirm (ask):        "DefenseClaw needs your approval before <tool> can run."
+//   - alert/allow_with_warn:"DefenseClaw flagged <tool> with a warning."
+//   - allow / fallback:     "Allowed by DefenseClaw <connector> policy."
+//
+// The wording is short on purpose — "permissionDecisionReason"
+// renders inside an OS-level approval prompt where long sentences
+// get truncated. tool may be empty (e.g. UserPromptSubmit-class
+// events); in that case we fall back to a tool-agnostic phrase.
+func connectorReason(connectorName, action, tool, reason string) string {
+	if r := strings.TrimSpace(reason); r != "" {
+		return r
+	}
+	tool = strings.TrimSpace(tool)
+	switch action {
+	case "block":
+		if tool == "" {
+			return "DefenseClaw blocked this action. Run `defenseclaw mcp list` or `skill list` to review approved assets."
+		}
+		return fmt.Sprintf("DefenseClaw blocked %s. Run `defenseclaw mcp list` or `skill list` to review approved assets.", tool)
+	case "confirm":
+		if tool == "" {
+			return "DefenseClaw needs your approval before this action can run."
+		}
+		return fmt.Sprintf("DefenseClaw needs your approval before %s can run.", tool)
+	case "alert", "allow_with_warning":
+		if tool == "" {
+			return "DefenseClaw flagged this action with a warning."
+		}
+		return fmt.Sprintf("DefenseClaw flagged %s with a warning.", tool)
+	default:
+		if connectorName != "" {
+			return fmt.Sprintf("Allowed by DefenseClaw %s policy.", connectorName)
+		}
+		return "Allowed by DefenseClaw policy."
+	}
 }
 
 func eventIn(event string, events []string) bool {

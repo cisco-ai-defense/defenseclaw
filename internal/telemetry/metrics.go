@@ -2653,10 +2653,10 @@ func (p *Provider) RecordCodexNotify(ctx context.Context, kind, status, result s
 // body and labels separately and we don't want to balloon the
 // chunk store with verbose summaries.
 //
-// signal: logs|metrics|traces. source: registered connector name|unknown.
-// result: ok|malformed. records is the leaf-record count the
-// summarizer produced; bodyBytes is the request size; summary
-// is the human-readable summary line the audit row also stores.
+// signal: logs|metrics|traces|hook. source: registered connector name|unknown.
+// result: ok|malformed|rejected. records is the leaf-record count the
+// summarizer produced; bodyBytes is the request size; summary is the
+// human-readable summary line the audit row also stores.
 func (p *Provider) EmitConnectorTelemetryLog(ctx context.Context, signal, source, result string, records, bodyBytes int64, summary string) {
 	if !p.LogsEnabled() {
 		return
@@ -2665,7 +2665,7 @@ func (p *Provider) EmitConnectorTelemetryLog(ctx context.Context, signal, source
 	now := time.Now()
 	rec.SetTimestamp(now)
 	rec.SetObservedTimestamp(now)
-	if result == "malformed" {
+	if result != "" && result != "ok" {
 		rec.SetSeverity(otellog.SeverityWarn)
 		rec.SetSeverityText("WARN")
 	} else {
@@ -2682,6 +2682,9 @@ func (p *Provider) EmitConnectorTelemetryLog(ctx context.Context, signal, source
 	rec.AddAttributes(
 		otellog.String("event.name", eventName),
 		otellog.String("event.domain", "defenseclaw.connector"),
+		otellog.String("defenseclaw.connector.source", source),
+		otellog.String("defenseclaw.connector.signal", signal),
+		otellog.String("defenseclaw.connector.result", result),
 		otellog.String("defenseclaw.otel.ingest.signal", signal),
 		otellog.String("defenseclaw.otel.ingest.source", source),
 		otellog.String("defenseclaw.otel.ingest.result", result),
@@ -2715,6 +2718,7 @@ func (p *Provider) EmitCodexNotifyLog(ctx context.Context, kind, status, result,
 	rec.AddAttributes(
 		otellog.String("event.name", "defenseclaw.codex.notify"),
 		otellog.String("event.domain", "defenseclaw.connector"),
+		otellog.String("defenseclaw.connector.source", "codex"),
 		otellog.String("defenseclaw.codex.notify.type", kind),
 		otellog.String("defenseclaw.codex.notify.status", status),
 		otellog.String("defenseclaw.codex.notify.result", result),

@@ -133,11 +133,53 @@ func (p *PaletteModel) MatchCount() int {
 	return len(p.matches)
 }
 
+func (p *PaletteModel) InlineHeight() int {
+	if len(p.matches) == 0 {
+		return 0
+	}
+	n := len(p.matches)
+	if n > 8 {
+		n = 8
+	}
+	return n + 1 // selected argv preview
+}
+
+func (p *PaletteModel) SelectVisibleMatch(row int) bool {
+	if row < 0 {
+		return false
+	}
+	maxItems := len(p.matches)
+	if maxItems > 8 {
+		maxItems = 8
+	}
+	if row >= maxItems {
+		return false
+	}
+	p.cursor = row
+	return true
+}
+
+func (p *PaletteModel) IntentForSelected(origin string) (CommandIntent, error) {
+	if p.cursor < 0 || p.cursor >= len(p.matches) {
+		return CommandIntent{}, fmt.Errorf("no command selected")
+	}
+	entry := &p.registry[p.matches[p.cursor].Index]
+	extra := ""
+	input := strings.TrimSpace(p.input)
+	if strings.HasPrefix(input, entry.TUIName) {
+		extra = strings.TrimSpace(input[len(entry.TUIName):])
+	}
+	return CommandIntentFromEntry(entry, extra, origin)
+}
+
 // Execute runs the matched command and returns a tea.Cmd.
 func (p *PaletteModel) Execute() (tea.Cmd, error) {
 	entry, extra := MatchCommand(p.input, p.registry)
 	if entry == nil {
 		return nil, nil
+	}
+	if entry.NeedsArg && strings.TrimSpace(extra) == "" {
+		return nil, fmt.Errorf("%s needs %s", entry.TUIName, entry.ArgHint)
 	}
 
 	args, err := buildCLIArgs(entry, extra)
@@ -206,11 +248,22 @@ func (p *PaletteModel) renderMatches(width int) string {
 			name += " " + entry.ArgHint
 		}
 
-		line := fmt.Sprintf("   %-30s %s", name, p.theme.Dimmed.Render(desc))
+		intent := NewCommandIntent(entry.CLIBinary, entry.CLIArgs, entry.TUIName, entry.Category, "palette")
+		badge := fmt.Sprintf("[%s/%s]", entry.Category, intent.Risk)
+		line := fmt.Sprintf("   %-30s %-20s %s", name, badge, p.theme.Dimmed.Render(desc))
 		if i == p.cursor {
 			line = SelectedStyle.Width(width).Render(line)
 		}
 		b.WriteString(line + "\n")
+	}
+	if p.cursor >= 0 && p.cursor < len(p.matches) {
+		entry := p.registry[p.matches[p.cursor].Index]
+		intent := NewCommandIntent(entry.CLIBinary, entry.CLIArgs, entry.TUIName, entry.Category, "palette")
+		hint := "   argv: " + intent.MaskedCommandLine()
+		if entry.NeedsArg {
+			hint += "  needs: " + entry.ArgHint
+		}
+		b.WriteString(p.theme.Dimmed.Render(truncateStr(hint, width-2)) + "\n")
 	}
 
 	return b.String()

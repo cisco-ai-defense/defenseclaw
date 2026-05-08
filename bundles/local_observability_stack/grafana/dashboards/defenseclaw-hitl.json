@@ -8,7 +8,7 @@
   "links": [
     {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                                  "icon": "external link", "targetBlank": false},
     {"title": "Verdicts",         "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}&${connector:queryparam}&var-action=confirm",                                       "icon": "external link", "targetBlank": false},
-    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}&${connector:queryparam}",                                                        "icon": "external link", "targetBlank": false},
+    {"title": "Hook Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}&${connector:queryparam}",                                                        "icon": "external link", "targetBlank": false},
     {"title": "Connector detail", "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}&${connector:queryparam}",                                                  "icon": "external link", "targetBlank": false},
     {"title": "Policy decisions", "type": "link", "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",                                                                          "icon": "external link", "targetBlank": false}
   ],
@@ -49,7 +49,7 @@
       "description": "verdict_action=confirm: the verdict that asks DefenseClaw to step up to a human. Sum of all stages.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(increase(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\", destination_app=~\"$connector\"}[1h])) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\"}[1h])) or vector(0)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
     },
     {
@@ -107,7 +107,7 @@
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 5, "w": 24, "h": 6},
       "targets": [
-        {"expr": "sum(increase(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\", destination_app=~\"$connector\"}[1h]))", "legendFormat": "1. confirm verdicts", "refId": "A", "instant": true},
+        {"expr": "sum(increase(defenseclaw_inspect_evaluations_total{action=\"confirm\"}[1h]))", "legendFormat": "1. confirm verdicts", "refId": "A", "instant": true},
         {"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_requested\"}[1h]))", "legendFormat": "2a. chat HILT requested", "refId": "B", "instant": true},
         {"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_approved\"}[1h]))", "legendFormat": "3a. chat HILT approved", "refId": "C", "instant": true},
         {"expr": "sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_denied\"}[1h]))", "legendFormat": "3b. chat HILT denied", "refId": "D", "instant": true},
@@ -238,7 +238,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 40, "w": 24, "h": 10},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | action=~\"approval_requested|approval_approved|approval_denied|approval_timeout|hilt_unsupported\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} |~ \"approval_|hilt_unsupported\" | json | __error__=\"\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
     {
@@ -247,7 +247,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 50, "w": 24, "h": 10},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | action=~\"gateway-approval-requested|gateway-approval-approved|gateway-approval-granted|gateway-approval-denied|gateway-approval-pending\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} |~ \"gateway-approval\" | json | __error__=\"\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

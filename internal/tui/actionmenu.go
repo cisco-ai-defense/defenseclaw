@@ -19,6 +19,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"charm.land/lipgloss/v2"
 )
 
 // ActionItem represents a single action in the contextual menu.
@@ -92,6 +94,27 @@ func (m *ActionMenu) CursorDown() {
 	if m.cursor < len(m.actions)-1 {
 		m.cursor++
 	}
+}
+
+// ActionAt returns the action key under a terminal coordinate, using the
+// same boxed layout as View. It also moves the keyboard cursor to the
+// clicked row so mouse and keyboard state stay in sync.
+func (m *ActionMenu) ActionAt(x, y int) (string, bool) {
+	if !m.visible {
+		return "", false
+	}
+	view := m.View()
+	rect := newClickBox("menu", 0, 0, lipgloss.Width(view), lipgloss.Height(view))
+	if !rect.contains(x, y) {
+		return "", false
+	}
+	actionStartY := 4 // border + top padding + title + separator
+	idx := y - actionStartY
+	if idx < 0 || idx >= len(m.actions) {
+		return "", true
+	}
+	m.cursor = idx
+	return m.actions[idx].Key, true
 }
 
 // View renders the action menu.

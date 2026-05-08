@@ -43,7 +43,13 @@
     "tenant_id":        { "type": ["string", "null"], "description": "Logical tenancy boundary for hosted/SaaS deployments. Populated from config tenant_id when set." },
     "workspace_id":     { "type": ["string", "null"], "description": "Sub-tenant workspace, organization, or team scope. Populated from config workspace_id when set." },
     "environment":      { "type": ["string", "null"], "description": "Deployment environment. Populated from config environment when set." },
-    "deployment_mode":  { "type": ["string", "null"], "description": "Sidecar deployment mode such as standalone, managed, edge, or ci. Populated from config deployment_mode when set." },
+    "deployment_mode":  {
+      "anyOf": [
+        { "type": "string", "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"] },
+        { "type": "null" }
+      ],
+      "description": "Sidecar deployment mode. Populated from config deployment_mode when set."
+    },
     "discovery_source": { "type": ["string", "null"], "description": "How the monitored agent or tool was discovered. Populated from config discovery_source when set." },
 
     "verdict":         { "$ref": "#/$defs/VerdictPayload" },

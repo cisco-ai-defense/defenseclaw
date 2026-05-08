@@ -30,7 +30,7 @@
       "targetBlank": false
     },
     {
-      "title": "Connectors",
+      "title": "Hook Connectors",
       "type": "link",
       "url": "/d/defenseclaw-connectors?${__url_time_range}",
       "icon": "external link",

@@ -18,9 +18,9 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "links": [
-    {"title": "Connectors",         "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}",                                "icon": "external link", "targetBlank": false},
+    {"title": "Hook Connectors",     "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}",                                "icon": "external link", "targetBlank": false},
     {"title": "Connector detail",   "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}",                          "icon": "external link", "targetBlank": false},
-    {"title": "Security",           "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}",                                  "icon": "external link", "targetBlank": false},
+    {"title": "Guardrail Evals",    "type": "link", "url": "/d/defenseclaw-security?${__url_time_range}",                                  "icon": "external link", "targetBlank": false},
     {"title": "HITL",               "type": "link", "url": "/d/defenseclaw-hitl?${__url_time_range}",                                      "icon": "external link", "targetBlank": false},
     {"title": "Findings",           "type": "link", "url": "/d/defenseclaw-findings?${__url_time_range}",                                  "icon": "external link", "targetBlank": false},
     {"title": "Policy decisions",   "type": "link", "url": "/d/defenseclaw-policy-decisions?${__url_time_range}",                          "icon": "external link", "targetBlank": false},
@@ -29,7 +29,7 @@
     {"title": "AI discovery",       "type": "link", "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",                              "icon": "external link", "targetBlank": false},
     {"title": "Reliability",        "type": "link", "url": "/d/defenseclaw-reliability?${__url_time_range}",                               "icon": "external link", "targetBlank": false},
     {"title": "Runtime",            "type": "link", "url": "/d/defenseclaw-runtime?${__url_time_range}",                                   "icon": "external link", "targetBlank": false},
-    {"title": "Traffic",            "type": "link", "url": "/d/defenseclaw-traffic?${__url_time_range}",                                   "icon": "external link", "targetBlank": false}
+    {"title": "Proxy & LLM Guard", "type": "link", "url": "/d/defenseclaw-traffic?${__url_time_range}",                                   "icon": "external link", "targetBlank": false}
   ],
   "liveNow": false,
   "templating": {"list": []},
@@ -52,7 +52,7 @@
       "description": "Guardrail verdicts emitted per minute across every stage.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total[5m])) * 60 or vector(0)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value", "graphMode": "area"}
     },
     {
@@ -61,7 +61,7 @@
       "description": "Verdict=block rate. A non-zero value means DefenseClaw is actively denying traffic — open Security to see which stage and reason.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"block\"}[5m])) * 60 or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\"}[5m])) * 60 or vector(0)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}, {"color": "orange", "value": 5}, {"color": "red", "value": 30}]}, "links": [{"title": "Open Security dashboard", "url": "/d/defenseclaw-security?${__url_time_range}&var-action=block"}]}}
     },
@@ -71,7 +71,7 @@
       "description": "Share of verdicts that asked the user for explicit confirmation. This is the chat-HILT handoff signal — every confirm should land as approved/denied/timeout in HITL.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_gateway_verdicts_total{verdict_action=\"confirm\"}[5m])) / clamp_min(sum(rate(defenseclaw_gateway_verdicts_total[5m])), 0.0001)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\"}[5m])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total[5m])), 0.0001)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "background", "graphMode": "area"},
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.05}, {"color": "red", "value": 0.2}]}, "links": [{"title": "Open HITL dashboard", "url": "/d/defenseclaw-hitl?${__url_time_range}"}]}}
     },
@@ -198,37 +198,66 @@
       "fieldConfig": {"defaults": {"links": [{"title": "Open Connectors dashboard", "url": "/d/defenseclaw-connectors?${__url_time_range}"}]}}
     },
 
-    {"type": "row", "title": "Traffic + guardrail", "gridPos": {"x": 0, "y": 23, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "Event flow (all connectors)", "gridPos": {"x": 0, "y": 23, "w": 24, "h": 1}, "collapsed": false},
     {
       "type": "timeseries",
-      "title": "Verdicts by action",
-      "description": "Stacked verdict decisions. A wedge of 'block' > 10% usually means a policy is too aggressive or the caller is probing.",
+      "title": "Gateway events / sec by type",
+      "description": "All gateway event types (tool_invocation, lifecycle, egress, llm_prompt, llm_response, verdict, judge, error, scan). This is the canonical 'what is DefenseClaw seeing' panel.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 24, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total[$__rate_interval]))", "legendFormat": "{{verdict_action}}", "refId": "A"}],
-      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}, "links": [{"title": "Open Security dashboard", "url": "/d/defenseclaw-security?${__url_time_range}&var-action=${__field.labels.verdict_action}"}]}}
+      "targets": [{"expr": "sum by (event_type) (rate(defenseclaw_gateway_events_emitted_total[$__rate_interval]))", "legendFormat": "{{event_type}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Audit events / sec by action",
+      "description": "Total audit records written by action type: claude-code-hook, otel.ingest.logs, otel.ingest.metrics.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "targets": [{"expr": "sum by (action) (rate(defenseclaw_audit_events_total[$__rate_interval]))", "legendFormat": "{{action}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}}}
+    },
+
+    {"type": "row", "title": "Guardrail evaluations", "gridPos": {"x": 0, "y": 32, "w": 24, "h": 1}, "collapsed": false},
+    {
+      "type": "timeseries",
+      "title": "Evaluations by action",
+      "description": "Stacked guardrail decisions. A wedge of 'block' > 10% usually means a policy is too aggressive or the caller is probing.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 0, "y": 33, "w": 8, "h": 8},
+      "targets": [{"expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total[$__rate_interval]))", "legendFormat": "{{action}}", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}, "links": [{"title": "Open Security dashboard", "url": "/d/defenseclaw-security?${__url_time_range}&var-action=${__field.labels.action}"}]}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Runtime alerts / sec",
+      "description": "Runtime alerts (dangerous-command, guardrail-flag, guardrail-block, prompt-injection, data-exfiltration, content-violation, codeguard-finding). Non-zero means a security-relevant event is occurring.",
+      "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+      "gridPos": {"x": 8, "y": 33, "w": 8, "h": 8},
+      "targets": [{"expr": "sum by (alert_type, alert_severity) (rate(defenseclaw_alert_count_total[$__rate_interval]))", "legendFormat": "{{alert_type}} [{{alert_severity}}]", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "cps", "custom": {"fillOpacity": 20}}}
     },
     {
       "type": "timeseries",
       "title": "Guardrail latency (p50/p95/p99)",
       "description": "Per-scanner guardrail latency quantiles. Investigate if p99 > 500 ms.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 24, "w": 12, "h": 8},
+      "gridPos": {"x": 16, "y": 33, "w": 8, "h": 8},
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum(rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
-        {"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
-        {"expr": "histogram_quantile(0.99, sum(rate(defenseclaw_guardrail_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99", "refId": "p99"}
+        {"expr": "histogram_quantile(0.50, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "refId": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99", "refId": "p99"}
       ],
       "fieldConfig": {"defaults": {"unit": "ms"}}
     },
 
-    {"type": "row", "title": "Findings + errors", "gridPos": {"x": 0, "y": 32, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "Findings + errors", "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1}, "collapsed": false},
     {
       "type": "timeseries",
       "title": "Scan findings by severity",
       "description": "All findings (skill, MCP, plugin) stacked by severity. Click a series to drill into Findings.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 0, "y": 33, "w": 12, "h": 8},
+      "gridPos": {"x": 0, "y": 42, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (severity) (rate(defenseclaw_scan_findings_total[$__rate_interval]))", "legendFormat": "{{severity}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 20}, "links": [{"title": "Open Findings dashboard", "url": "/d/defenseclaw-findings?${__url_time_range}&var-severity=${__field.labels.severity}"}]}}
     },
@@ -237,18 +266,18 @@
       "title": "Gateway errors by subsystem / code",
       "description": "Stacked structured errors. Each (subsystem, code) pair is a stable enum — no cardinality explosion.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
-      "gridPos": {"x": 12, "y": 33, "w": 12, "h": 8},
+      "gridPos": {"x": 12, "y": 42, "w": 12, "h": 8},
       "targets": [{"expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))", "legendFormat": "{{error_subsystem}} / {{error_code}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps"}}
     },
 
-    {"type": "row", "title": "Recent events (Loki)", "gridPos": {"x": 0, "y": 41, "w": 24, "h": 1}, "collapsed": false},
+    {"type": "row", "title": "Recent events (Loki)", "gridPos": {"x": 0, "y": 50, "w": 24, "h": 1}, "collapsed": false},
     {
       "type": "logs",
       "title": "All gateway events",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
-      "gridPos": {"x": 0, "y": 42, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | line_format \"{{.defenseclaw_gateway_event_type}} | {{.defenseclaw_verdict_action}}{{.defenseclaw_judge_action}}{{.defenseclaw_error_code}} | {{__line__}}\"", "refId": "A"}],
+      "gridPos": {"x": 0, "y": 51, "w": 24, "h": 12},
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | line_format \"{{.event_type}} | severity={{.severity}} | {{__line__}}\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     },
 
@@ -277,7 +306,7 @@
       "description": "Open a row's log details to inspect prompt, response, tool input, and tool output fields. When redaction is enabled those fields remain sanitized.",
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 63, "w": 24, "h": 12},
-      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=~\"llm_prompt|llm_response|tool_invocation\" | line_format \"{{.defenseclaw_gateway_event_type}} | user={{.defenseclaw_user_id}} name={{.defenseclaw_user_name}} | agent={{.defenseclaw_agent_type}}/{{.defenseclaw_agent_name}} | model={{.defenseclaw_llm_model}} | session={{.defenseclaw_session_id}} | prompt={{.defenseclaw_llm_prompt_id}} response={{.defenseclaw_llm_response_id}} tool={{.defenseclaw_tool_call_id}} | {{__line__}}\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=~\"tool_invocation|llm_prompt|llm_response\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

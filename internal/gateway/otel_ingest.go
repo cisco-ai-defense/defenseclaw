@@ -186,6 +186,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		// validated the credential.
 		source = "unknown"
 	}
+	source = normalizeConnectorTelemetrySource(source)
 	ctx := r.Context()
 	if id := agentIdentityForOTLPSource(source); id != (AgentIdentity{}) {
 		ctx = ContextWithAgentIdentity(ctx, id)
@@ -336,6 +337,19 @@ func agentIdentityForOTLPSource(source string) AgentIdentity {
 		}
 	}
 	return id
+}
+
+func normalizeConnectorTelemetrySource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return strings.ToLower(strings.TrimSpace(source))
+	case "claude-code", "claude_code":
+		return "claudecode"
+	case "gemini-cli", "gemini_cli", "gemini":
+		return "geminicli"
+	default:
+		return "unknown"
+	}
 }
 
 func enrichOTLPIngestSpan(ctx context.Context, sessionID string) {
@@ -1209,7 +1223,7 @@ func parseOTLPPathToken(path string) (token string, source string, ok bool) {
 	default:
 		return "", "", false
 	}
-	source = strings.ToLower(strings.TrimSpace(parts[1]))
+	source = normalizeConnectorTelemetrySource(parts[1])
 	token = strings.TrimSpace(parts[2])
 	if decoded, err := url.PathUnescape(token); err == nil {
 		token = decoded

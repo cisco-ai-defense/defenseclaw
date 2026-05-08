@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"go.opentelemetry.io/otel"
@@ -75,6 +76,9 @@ func TestOTLPIngest_Logs_AcceptsValidPayload(t *testing.T) {
 }
 
 func TestOTLPIngest_Logs_EnrichesHTTPSpanWithConversationID(t *testing.T) {
+	gatewaylog.SetProcessRunID("run-otlp-123")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSyncer(exp),
@@ -127,6 +131,7 @@ func TestOTLPIngest_Logs_EnrichesHTTPSpanWithConversationID(t *testing.T) {
 	for key, want := range map[string]string{
 		"gen_ai.conversation.id": "session-123",
 		"gen_ai.agent.type":      "codex",
+		"defenseclaw.run.id":     "run-otlp-123",
 	} {
 		got, ok := attrByKey(s.Attributes, key)
 		if !ok || got.AsString() != want {

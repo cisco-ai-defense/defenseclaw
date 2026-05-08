@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -63,6 +64,7 @@ type APIServer struct {
 	scannerCfg  *config.Config
 	otel        *telemetry.Provider
 	hilt        *HILTApprovalManager
+	notifier    *notifier.Dispatcher
 	aiDiscovery *inventory.ContinuousDiscoveryService
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
@@ -97,8 +99,19 @@ func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 	a.hilt = m
 }
 
+// SetAIDiscoveryService wires the continuous AI discovery service so
+// the API can answer /v1/ai/* endpoints from a live store. Safe to
+// call with nil — endpoint handlers short-circuit on a nil service.
 func (a *APIServer) SetAIDiscoveryService(svc *inventory.ContinuousDiscoveryService) {
 	a.aiDiscovery = svc
+}
+
+// SetNotifier wires the user-session OS notifier dispatcher used by
+// the hook handlers to surface block / would-block / approval-pending
+// events. Safe to call with nil — the dispatcher's methods short-
+// circuit on nil so callers do not need to guard each emission site.
+func (a *APIServer) SetNotifier(n *notifier.Dispatcher) {
+	a.notifier = n
 }
 
 func (a *APIServer) connectorName() string {

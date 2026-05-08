@@ -19,7 +19,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -53,13 +52,20 @@ const (
 	// tab navigation. Re-ordering would silently change muscle
 	// memory for every operator — don't do it without a migration.
 	PanelTools
-	// PanelAIVisibility shares the no-numeric-shortcut convention
+	// PanelAIDiscovery shares the no-numeric-shortcut convention
 	// PanelTools established. We deliberately insert it BEFORE
 	// PanelSetup (which must keep mapping to '0') and after
 	// PanelTools so the digit-key bindings 1–9 and 0 are all
 	// preserved. Reach it with the dedicated 'V' shortcut, the
 	// command palette, or tab navigation.
-	PanelAIVisibility
+	PanelAIDiscovery
+	// PanelRegistries surfaces external skill / MCP catalog sources
+	// registered via `defenseclaw registry add`. Same convention as
+	// PanelTools — letter-only ('R') shortcut so we don't shift the
+	// existing 1–9 / 0 numeric bindings. Sources / Entries / Approved
+	// sub-tabs render the on-disk index.json verdicts cached by
+	// cli/defenseclaw/registries/cache.py.
+	PanelRegistries
 	PanelSetup
 	panelCount
 )
@@ -67,7 +73,7 @@ const (
 var panelNames = [panelCount]string{
 	"Overview", "Alerts", "Skills", "MCPs", "Plugins",
 	"Inventory", "Policy", "Logs", "Audit", "Activity", "Tools",
-	"AI Visibility", "Setup",
+	"AI Discovery", "Registries", "Setup",
 }
 
 const refreshInterval = 5 * time.Second
@@ -134,30 +140,34 @@ type Model struct {
 	height      int
 
 	// Panels (stubs that will be filled in later phases)
-	overview  OverviewPanel
-	alerts    AlertsPanel
-	skills    SkillsPanel
-	mcps      MCPsPanel
-	plugins   PluginsPanel
-	inventory InventoryPanel
-	policy    PolicyPanel
-	logs      LogsPanel
-	auditHist AuditPanel
-	activity  ActivityPanel
-	tools     ToolsPanel
-	aiVisib   AIVisibilityPanel
-	setup     SetupPanel
-	firstRun  FirstRunPanel
+	overview   OverviewPanel
+	alerts     AlertsPanel
+	skills     SkillsPanel
+	mcps       MCPsPanel
+	plugins    PluginsPanel
+	inventory  InventoryPanel
+	policy     PolicyPanel
+	logs       LogsPanel
+	auditHist  AuditPanel
+	activity   ActivityPanel
+	tools      ToolsPanel
+	aiVisib    AIDiscoveryPanel
+	registries RegistriesPanel
+	setup      SetupPanel
+	firstRun   FirstRunPanel
 
 	// Overlays
 	detail     DetailModal
 	palette    PaletteModel
 	actionMenu ActionMenu
 
-	mcpSetForm     MCPSetForm
-	modePicker     ModePickerModal
-	redactionModal RedactionToggleModal
-	uninstallModal UninstallModal
+	mcpSetForm         MCPSetForm
+	modePicker         ModePickerModal
+	redactionModal     RedactionToggleModal
+	notificationsModal NotificationsToggleModal
+	uninstallModal     UninstallModal
+	commandPreview     CommandPreviewModal
+	configDiffModal    ConfigDiffModal
 
 	helpOpen bool
 
@@ -178,11 +188,13 @@ type Model struct {
 	toasts ToastManager
 
 	// State
-	health      *HealthSnapshot
-	commandsRun int
-	version     string
-	spinFrame   int
-	lastRefresh time.Time
+	health       *HealthSnapshot
+	doctorCache  *DoctorCache
+	restartQueue RestartQueue
+	commandsRun  int
+	version      string
+	spinFrame    int
+	lastRefresh  time.Time
 
 	// v2 terminal state
 	isDark  bool
@@ -228,27 +240,29 @@ func New(deps Deps) Model {
 	ti.SetStyles(s)
 
 	m := Model{
-		overview:       NewOverviewPanel(theme, deps.Config, deps.Version),
-		alerts:         NewAlertsPanel(deps.Store, dataDir),
-		skills:         NewSkillsPanel(deps.Store),
-		mcps:           NewMCPsPanel(deps.Store),
-		plugins:        NewPluginsPanel(theme, deps.Store),
-		inventory:      NewInventoryPanel(theme, executor, deps.Store),
-		policy:         NewPolicyPanel(theme, deps.Config),
-		logs:           NewLogsPanel(theme, deps.Config),
-		auditHist:      NewAuditPanel(theme, deps.Store),
-		activity:       NewActivityPanel(theme, dataDir),
-		tools:          NewToolsPanel(deps.Store),
-		aiVisib:        NewAIVisibilityPanel(),
-		setup:          NewSetupPanel(theme, deps.Config, executor),
-		firstRun:       NewFirstRunPanel(theme, deps.FirstRun),
-		detail:         NewDetailModal(),
-		palette:        NewPaletteModel(theme, registry, executor),
-		actionMenu:     NewActionMenu(theme),
-		mcpSetForm:     NewMCPSetForm(),
-		modePicker:     NewModePickerModal(theme),
-		redactionModal: NewRedactionToggleModal(theme),
-		uninstallModal: NewUninstallModal(theme),
+		overview:           NewOverviewPanel(theme, deps.Config, deps.Version),
+		alerts:             NewAlertsPanel(deps.Store, dataDir),
+		skills:             NewSkillsPanel(deps.Store),
+		mcps:               NewMCPsPanel(deps.Store),
+		plugins:            NewPluginsPanel(theme, deps.Store),
+		inventory:          NewInventoryPanel(theme, executor, deps.Store),
+		policy:             NewPolicyPanel(theme, deps.Config),
+		logs:               NewLogsPanel(theme, deps.Config),
+		auditHist:          NewAuditPanel(theme, deps.Store),
+		activity:           NewActivityPanel(theme, dataDir),
+		tools:              NewToolsPanel(deps.Store),
+		aiVisib:            NewAIDiscoveryPanel(),
+		registries:         NewRegistriesPanel(deps.Config, executor),
+		setup:              NewSetupPanel(theme, deps.Config, executor),
+		firstRun:           NewFirstRunPanel(theme, deps.FirstRun),
+		detail:             NewDetailModal(),
+		palette:            NewPaletteModel(theme, registry, executor),
+		actionMenu:         NewActionMenu(theme),
+		mcpSetForm:         NewMCPSetForm(),
+		modePicker:         NewModePickerModal(theme),
+		redactionModal:     NewRedactionToggleModal(theme),
+		notificationsModal: NewNotificationsToggleModal(theme),
+		uninstallModal:     NewUninstallModal(theme),
 
 		cmdInput: ti,
 
@@ -268,6 +282,7 @@ func New(deps Deps) Model {
 	// of any data panel shows the right "Source: …" banner before
 	// /health has had time to round-trip.
 	m.propagateConnector()
+	m.syncSetupDerivedState()
 	if deps.FirstRun {
 		m.activePanel = PanelSetup
 	}
@@ -286,6 +301,7 @@ func (m Model) Init() tea.Cmd {
 		// the Overview panel can render status immediately
 		// without waiting for the user to manually re-run doctor.
 		m.loadDoctorCacheCmd(),
+		m.loadCredentialSnapshotCmd(),
 		// Prime the Overview's "DISCOVERED AI AGENTS" box on boot
 		// so first-paint matches what the next slow-refresh tick
 		// would show — without this, the box would remain empty
@@ -308,6 +324,134 @@ func (m *Model) propagateConnector() {
 	m.mcps.SetConnector(name)
 	m.plugins.SetConnector(name)
 	m.inventory.SetConnector(name)
+	m.propagateRegistryAttribution()
+}
+
+// activeConnectorName returns the resolved connector identifier
+// the model uses for connector-aware visibility decisions (e.g.
+// hiding the Plugins panel for non-OpenClaw connectors). Mirrors
+// propagateConnector's resolution order so visibility checks and
+// per-panel banners always agree on which framework is live.
+func (m Model) activeConnectorName() string {
+	mode := ""
+	if m.cfg != nil {
+		mode = string(m.cfg.Claw.Mode)
+	}
+	return ActiveConnectorName(m.health, mode)
+}
+
+// panelHidden reports whether *p* should be excluded from the tab
+// bar and from Tab/Shift-Tab cycling. Today only the Plugins panel
+// is connector-gated — DefenseClaw plugins are an OpenClaw-only
+// concept (G4); for any other connector showing the Plugins tab
+// would just lead to an empty list and operator confusion. The
+// digit shortcut "5" remains mapped to PanelPlugins so muscle
+// memory does not break, but the keyboard handler turns it into a
+// no-op when the panel is hidden.
+func (m Model) panelHidden(p int) bool {
+	if p != PanelPlugins {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(m.activeConnectorName()), "openclaw")
+}
+
+// nextVisiblePanel returns the closest non-hidden panel from *cur*
+// in *step* direction (+1 = forward, -1 = backward), wrapping at
+// the panelCount boundary. Used by Tab / Shift+Tab so cycling skips
+// connector-gated panels (Plugins on non-OpenClaw connectors). The
+// loop is bounded by panelCount; if every panel is hidden we
+// return *cur* unchanged so the model remains in a renderable
+// state (this is a defensive belt-and-braces guard — the only
+// connector-gated panel today is Plugins, so at least Overview
+// always remains visible).
+func (m Model) nextVisiblePanel(cur, step int) int {
+	if step == 0 {
+		return cur
+	}
+	for i := 0; i < panelCount; i++ {
+		cur = (cur + step + panelCount) % panelCount
+		if !m.panelHidden(cur) {
+			return cur
+		}
+	}
+	return cur
+}
+
+// renderOpenClawOnlyNotice paints the placeholder shown when the
+// operator reaches a connector-gated panel (today: Plugins) on a
+// non-OpenClaw connector via the command palette or stale muscle
+// memory. We deliberately stay short and explicit — the alternative
+// is silently rendering an empty list, which makes operators wonder
+// whether the gateway is broken.
+func renderOpenClawOnlyNotice(panelName, connector string, width, height int) string {
+	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
+	bodyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	dimStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	display := strings.TrimSpace(connector)
+	if display == "" {
+		display = "this connector"
+	}
+	header := headerStyle.Render("DefenseClaw plugins are an OpenClaw-only concept")
+	body := bodyStyle.Render(
+		"The " + panelName + " panel is hidden because the active connector is " + display + ".",
+	)
+	hint := dimStyle.Render(
+		"Switch to the OpenClaw connector (Setup → Mode) to install or manage plugins.",
+	)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("62")).
+		Padding(1, 2).
+		Width(min(width-4, 80))
+	if height < 3 {
+		height = 3
+	}
+	return box.Render(header + "\n\n" + body + "\n\n" + hint)
+}
+
+// propagateRegistryAttribution rebuilds the per-panel "name -> registry
+// source id" maps used to render the "registry:<id>" badge on Skills /
+// MCPs rows and the "Approved by" line in detail view. Built fresh
+// from cfg.AssetPolicy.{Skill,MCP}.Registry every time cfg changes —
+// the registry list mutates on every `registry sync` / `approve` /
+// `reject`, and a stale map would silently mis-attribute. The
+// indirection through SetRegistryAttribution keeps the panels free of
+// any direct config dependency, which makes them cheap to test.
+func (m *Model) propagateRegistryAttribution() {
+	if m.cfg == nil {
+		m.skills.SetRegistryAttribution(nil)
+		m.mcps.SetRegistryAttribution(nil)
+		return
+	}
+	skillAttr := registryAttributionFromRules(m.cfg.AssetPolicy.Skill.Registry)
+	mcpAttr := registryAttributionFromRules(m.cfg.AssetPolicy.MCP.Registry)
+	m.skills.SetRegistryAttribution(skillAttr)
+	m.mcps.SetRegistryAttribution(mcpAttr)
+}
+
+// registryAttributionFromRules walks an asset_policy registry list
+// and returns a name -> source-id map for every rule whose Reason
+// matches the "registry:<id>" provenance tag. Rules with no name or
+// a non-registry reason (e.g. operator-authored allow-list entries)
+// are skipped so the badge surfaces *only* registry-promoted assets.
+// Returns nil when the input is empty so the caller can pass the
+// result straight to SetRegistryAttribution(nil).
+func registryAttributionFromRules(rules []config.AssetPolicyRule) map[string]string {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(rules))
+	for _, rule := range rules {
+		sid := config.ParseRegistrySourceID(rule.Reason)
+		if sid == "" || rule.Name == "" {
+			continue
+		}
+		out[rule.Name] = sid
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // isDoctorCommand reports whether the display-name passed to
@@ -330,6 +474,16 @@ func isSetupCommand(cmd string) bool {
 	return cmd == "setup" || strings.HasPrefix(cmd, "setup ")
 }
 
+func isKeysCommand(cmd string) bool {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	return cmd == "keys" || strings.HasPrefix(cmd, "keys ")
+}
+
+func isRestartCommand(cmd string) bool {
+	cmd = strings.ToLower(strings.TrimSpace(cmd))
+	return cmd == "restart" || strings.Contains(cmd, "restart")
+}
+
 // doctorCacheLoadedMsg carries either a successfully-loaded
 // DoctorCache or a soft load error. We always include both so the
 // Update handler can decide whether to toast the error — a
@@ -338,6 +492,11 @@ func isSetupCommand(cmd string) bool {
 type doctorCacheLoadedMsg struct {
 	Cache *DoctorCache
 	Err   error
+}
+
+type credentialSnapshotMsg struct {
+	Rows []CredentialRow
+	Err  error
 }
 
 // loadDoctorCacheCmd produces a tea.Cmd that reads the on-disk
@@ -353,6 +512,23 @@ func (m *Model) loadDoctorCacheCmd() tea.Cmd {
 		c, err := LoadDoctorCache(dataDir)
 		return doctorCacheLoadedMsg{Cache: c, Err: err}
 	}
+}
+
+func (m Model) loadCredentialSnapshotCmd() tea.Cmd {
+	return func() tea.Msg {
+		cmd := exec.Command(resolveDefenseclawBin(), "keys", "list", "--json")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return credentialSnapshotMsg{Err: fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))}
+		}
+		rows, parseErr := ParseCredentialRows(out)
+		return credentialSnapshotMsg{Rows: rows, Err: parseErr}
+	}
+}
+
+func (m *Model) syncSetupDerivedState() {
+	m.setup.SetRestartQueue(m.restartQueue)
+	m.setup.SetReadinessChecks(BuildReadinessChecks(m.cfg, m.health, m.doctorCache, m.setup.CredentialRows(), m.restartQueue))
 }
 
 func tickSpin() tea.Cmd {
@@ -393,7 +569,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.toasts.Tick()
 		cmds = append(cmds, tickRefresh())
 		cmds = append(cmds, m.pollHealth())
-		// When the AI Visibility tab is foregrounded, poll the
+		// When the AI Discovery tab is foregrounded, poll the
 		// sidecar on the FAST tick (5s) too -- the discovery scan
 		// itself only re-runs every ai_discovery.scan_interval_min
 		// minutes, but the GET is cheap and an operator with the
@@ -401,7 +577,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (e.g. a Codex session starting / stopping). We keep the
 		// 30s slow tick for everyone ELSE so the gateway isn't
 		// hammered when the panel isn't visible.
-		if m.activePanel == PanelAIVisibility {
+		if m.activePanel == PanelAIDiscovery {
 			cmds = append(cmds, m.pollAIUsage())
 		}
 		return m, tea.Batch(cmds...)
@@ -436,10 +612,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.Err != nil {
 			m.health = nil
 		} else {
+			if m.restartQueue.Pending && m.restartQueue.LastStartedAt != "" && msg.Health != nil &&
+				msg.Health.StartedAt != "" && msg.Health.StartedAt != m.restartQueue.LastStartedAt {
+				m.restartQueue = RestartQueue{}
+				m.toasts.Push(ToastSuccess, "Gateway restart detected")
+			}
 			m.health = msg.Health
 		}
 		m.overview.SetHealth(m.health)
 		m.propagateConnector()
+		m.syncSetupDerivedState()
 		return m, nil
 
 	case aiUsageUpdateMsg:
@@ -451,10 +633,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the "ai discovery offline" placeholder during a normal
 		// `defenseclaw-gateway restart`.
 		//
-		// Both the Overview AI box AND the dedicated AI Visibility
+		// Both the Overview AI box AND the dedicated AI Discovery
 		// panel feed off the same snapshot -- we fan-out here so
 		// the gateway endpoint is hit ONCE per tick instead of
-		// twice. The AI Visibility panel rebuilds its dedup'd row
+		// twice. The AI Discovery panel rebuilds its dedup'd row
 		// cache inside SetSnapshot so the next View() call sees
 		// fresh rows immediately.
 		if msg.Err == nil {
@@ -465,7 +647,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case CommandStartMsg:
 		m.commandsRun++
-		m.activity.AddEntry(msg.Command)
+		m.activity.AddEntryWithMeta(msg.Command, msg.Meta)
 		return m, nil
 
 	case CommandOutputMsg:
@@ -476,7 +658,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case CommandDoneMsg:
-		m.activity.FinishEntry(msg.ExitCode, msg.Duration)
+		meta := msg.Meta
+		meta.Cancelled = msg.Cancelled
+		meta.SuggestedNextAction = suggestedNextAction(msg.Command, msg.ExitCode)
+		m.activity.FinishEntryWithMeta(msg.ExitCode, msg.Duration, meta)
 		m.refresh()
 		if m.setup.IsWizardRunning() {
 			m.setup.WizardFinished(msg.ExitCode)
@@ -511,6 +696,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// regardless of the exit code.
 		if isDoctorCommand(msg.Command) {
 			postCmds = append(postCmds, m.loadDoctorCacheCmd())
+			m.activity.UpdateLatestMeta(func(meta *CommandResultMeta) { meta.DoctorCacheRefreshed = true })
+		}
+		if isKeysCommand(msg.Command) {
+			postCmds = append(postCmds, m.loadCredentialSnapshotCmd())
 		}
 		if msg.ExitCode == 0 && isInitCommand(msg.Command) {
 			if err := m.reloadRuntimeAfterInit(); err != nil {
@@ -525,13 +714,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := m.reloadConfigAfterSetupCommand(); err != nil {
 				m.toasts.Push(ToastError, "config reload failed: "+err.Error())
 			} else {
+				m.activity.UpdateLatestMeta(func(meta *CommandResultMeta) { meta.ConfigReloaded = true })
 				m.toasts.Push(ToastInfo, "Config reloaded from disk")
 				postCmds = append(postCmds, m.pollHealth())
 			}
 		}
+		if msg.ExitCode == 0 && isRestartCommand(msg.Command) {
+			m.restartQueue = RestartQueue{}
+			m.setup.SetRestartQueue(m.restartQueue)
+			m.activity.UpdateLatestMeta(func(meta *CommandResultMeta) { meta.RestartCompleted = true })
+		}
 		if len(postCmds) > 0 {
 			return m, tea.Batch(postCmds...)
 		}
+		m.syncSetupDerivedState()
 		return m, nil
 
 	case doctorCacheLoadedMsg:
@@ -545,7 +741,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.toasts.Push(ToastError, fmt.Sprintf("doctor cache: %v", msg.Err))
 			return m, nil
 		}
+		m.doctorCache = msg.Cache
 		m.overview.SetDoctorCache(msg.Cache)
+		m.syncSetupDerivedState()
+		return m, nil
+
+	case credentialSnapshotMsg:
+		m.setup.SetCredentialSnapshot(msg.Rows, time.Now(), msg.Err)
+		if msg.Err != nil {
+			m.toasts.Push(ToastWarn, "credentials: "+msg.Err.Error())
+		}
+		m.syncSetupDerivedState()
 		return m, nil
 
 	case InventoryLoadedMsg:
@@ -675,14 +881,74 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.actionMenu.IsVisible() {
-		m.actionMenu.Hide()
+		key, inside := m.actionMenu.ActionAt(x, y)
+		if key != "" {
+			m.actionMenu.Hide()
+			return m.executeActionMenuItem(key)
+		}
+		if !inside {
+			m.actionMenu.Hide()
+		}
+		return m, nil
+	}
+	if m.commandPreview.Active {
+		switch m.commandPreview.ClickAction(x, y, m.width, m.height, m.theme) {
+		case "run":
+			return m.handleCommandPreviewKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+		case "cancel":
+			return m.handleCommandPreviewKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+		}
+		return m, nil
+	}
+	if m.configDiffModal.Active {
+		switch m.configDiffModal.ClickAction(x, y, m.width, m.height, m.theme) {
+		case "save":
+			return m.handleConfigDiffKey(tea.KeyPressMsg{Code: tea.KeyEnter})
+		case "cancel":
+			return m.handleConfigDiffKey(tea.KeyPressMsg{Code: tea.KeyEscape})
+		}
 		return m, nil
 	}
 	if m.detail.IsVisible() {
 		m.detail.Hide()
 		return m, nil
 	}
-	if m.modePicker.IsVisible() || m.redactionModal.IsVisible() || m.uninstallModal.IsVisible() {
+	if m.modePicker.IsVisible() {
+		_, inside := m.modePicker.ChoiceAt(x, y)
+		if !inside {
+			m.modePicker.Hide()
+			return m, nil
+		}
+		if y >= 4 && y < 4+len(modePickerChoices) {
+			return m.confirmModePicker()
+		}
+		return m, nil
+	}
+	if m.redactionModal.IsVisible() {
+		switch m.redactionModal.ClickAction(x, y) {
+		case "confirm":
+			return m.confirmRedactionToggle()
+		case "cancel":
+			m.redactionModal.Hide()
+		}
+		return m, nil
+	}
+	if m.notificationsModal.IsVisible() {
+		switch m.notificationsModal.ClickAction(x, y) {
+		case "confirm":
+			return m.confirmNotificationsToggle()
+		case "cancel":
+			m.notificationsModal.Hide()
+		}
+		return m, nil
+	}
+	if m.uninstallModal.IsVisible() {
+		switch m.uninstallModal.ClickAction(x, y) {
+		case "run":
+			return m.confirmUninstall()
+		case "cancel":
+			m.uninstallModal.Hide()
+		}
 		return m, nil
 	}
 	// If a panel has an in-panel overlay/form/editor open, don't let
@@ -704,8 +970,16 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	// Click on command-palette rows while the input is focused.
+	if m.cmdInputFocus && m.palette.Active && m.palette.MatchCount() > 0 {
+		row := y - m.paletteStartY()
+		if m.palette.SelectVisibleMatch(row) {
+			return m.executePaletteMouseSelection()
+		}
+	}
+
 	// Click on input bar row
-	if y == m.height-3 {
+	if y == m.inputBarY() {
 		if !m.cmdInputFocus {
 			m.cmdInputFocus = true
 			cmd := m.cmdInput.Focus()
@@ -732,7 +1006,11 @@ func (m Model) handleMouseWheel(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 	// Don't scroll the panel underneath a modal or in-panel overlay —
 	// it's jarring to scroll (and invalidate cursor positions)
 	// invisibly while a YAML viewer or form is covering the list.
-	if m.helpOpen || m.actionMenu.IsVisible() || m.detail.IsVisible() || m.panelExclusive() {
+	if m.helpOpen || m.actionMenu.IsVisible() || m.detail.IsVisible() ||
+		m.commandPreview.Active || m.configDiffModal.Active ||
+		m.modePicker.IsVisible() || m.redactionModal.IsVisible() ||
+		m.notificationsModal.IsVisible() || m.uninstallModal.IsVisible() ||
+		m.panelExclusive() {
 		return m, nil
 	}
 	switch mouse.Button {
@@ -821,21 +1099,16 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 			if key := m.overview.QuickActionHitTest(x); key != "" {
 				switch key {
 				case "s":
-					cmd := m.executor.Execute("defenseclaw", []string{"skill", "scan", "--all"}, "scan skill --all")
-					m.activePanel = PanelActivity
-					return m, cmd
+					return m.runCommand("defenseclaw", []string{"skill", "scan", "--all"}, "scan skill --all", "overview")
 				case "d":
-					cmd := m.executor.Execute("defenseclaw", []string{"doctor"}, "doctor")
-					m.activePanel = PanelActivity
-					return m, cmd
+					return m.runCommand("defenseclaw", []string{"doctor"}, "doctor", "overview")
 				case "i":
 					if cmd := m.switchPanel(PanelInventory); cmd != nil {
 						return m, cmd
 					}
 				case "g":
-					cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
-					m.activePanel = PanelActivity
-					return m, cmd
+					intent := NewCommandIntent("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail", "setup", "overview")
+					return m.runCommandIntent(intent)
 				case "m":
 					// Mirror the keyboard handler: open the picker
 					// pre-focused on the active connector.
@@ -843,14 +1116,15 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 					return m, nil
 				case "R":
 					return m.showRedactionModal()
+				case "N":
+					return m.showNotificationsModal()
 				case "p":
 					m.activePanel = PanelPolicy
 				case "l":
 					m.activePanel = PanelLogs
 				case "u":
-					cmd := m.executor.Execute("defenseclaw", []string{"upgrade", "--yes"}, "upgrade")
-					m.activePanel = PanelActivity
-					return m, cmd
+					intent := NewCommandIntent("defenseclaw", []string{"upgrade", "--yes"}, "upgrade", "other", "overview")
+					return m.runCommandIntent(intent)
 				case "X":
 					return m.showUninstallModal()
 				case "?":
@@ -905,6 +1179,14 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 			m.skills.SetCursor(idx)
 		}
 	case PanelMCPs:
+		if m.mcpSetForm.IsActive() {
+			submit, bin, args, display := m.mcpSetForm.HandleMouseClick(x, relY)
+			if submit {
+				m.mcpSetForm.Close()
+				return m.runCommand(bin, args, display, "mcps")
+			}
+			return m, nil
+		}
 		headerLines := 3
 		if m.mcps.FilterText() != "" {
 			headerLines++
@@ -1041,6 +1323,36 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 		if entryIdx >= 0 && entryIdx < m.activity.Count() {
 			m.activity.SetCursor(entryIdx)
 		}
+	case PanelTools:
+		headerLines := 3
+		idx := relY - headerLines + m.tools.ScrollOffset()
+		if idx >= 0 && idx < m.tools.FilteredCount() {
+			if m.tools.CursorAt() == idx {
+				m.tools.ToggleDetail()
+			} else {
+				m.tools.SetCursor(idx)
+			}
+		}
+	case PanelAIDiscovery:
+		if m.aiVisib.IsDetailOpen() {
+			m.aiVisib.ToggleDetail()
+			return m, nil
+		}
+		if relY == 0 {
+			return m, nil
+		}
+		headerLines := 3 // border/header/table header
+		if m.aiVisib.FilterText() != "" || m.aiVisib.IsFiltering() {
+			headerLines++
+		}
+		idx := relY - headerLines + m.aiVisib.ScrollOffset()
+		if idx >= 0 && idx < len(m.aiVisib.FilteredRows()) {
+			if m.aiVisib.CursorAt() == idx {
+				m.aiVisib.ToggleDetail()
+			} else {
+				m.aiVisib.SetCursor(idx)
+			}
+		}
 	case PanelPolicy:
 		if relY == 0 {
 			if tab := m.policy.SubTabHitTest(x); tab >= 0 {
@@ -1050,14 +1362,29 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 		}
 		bin, args, name := m.policy.HandleMouseClick(x, relY)
 		if bin != "" {
-			m.activePanel = PanelActivity
-			return m, m.executor.Execute(bin, args, name)
+			return m.runCommand(bin, args, name, "policy")
+		}
+	case PanelRegistries:
+		if relY == 0 {
+			if tab := m.registries.TabHitTest(x); tab >= 0 {
+				m.registries.SetTab(tab)
+				m.registries.Refresh()
+			}
+			return m, nil
+		}
+		idx := relY - 3
+		if idx >= 0 && idx < m.registries.RowCount() {
+			m.registries.SetCursor(idx)
 		}
 	case PanelSetup:
 		run, bin, args, name := m.setup.HandleMouseClick(x, relY)
+		switch m.setup.TakeMouseAction() {
+		case "refresh-credentials":
+			return m, m.loadCredentialSnapshotCmd()
+		}
 		if run && bin != "" {
-			m.activePanel = PanelActivity
-			return m, m.executor.Execute(bin, args, name)
+			intent := NewCommandIntent(bin, args, name, "setup", "setup")
+			return m.runCommandIntent(intent)
 		}
 	case PanelLogs:
 		if relY == 0 {
@@ -1161,6 +1488,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.commandPreview.Active {
+		return m.handleCommandPreviewKey(msg)
+	}
+
+	if m.configDiffModal.Active {
+		return m.handleConfigDiffKey(msg)
+	}
+
 	// Action menu takes priority
 	if m.actionMenu.IsVisible() {
 		return m.handleActionMenuKey(msg)
@@ -1178,6 +1513,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.redactionModal.IsVisible() {
 		return m.handleRedactionModalKey(msg)
 	}
+	if m.notificationsModal.IsVisible() {
+		return m.handleNotificationsModalKey(msg)
+	}
 	if m.uninstallModal.IsVisible() {
 		return m.handleUninstallModalKey(msg)
 	}
@@ -1188,8 +1526,7 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		runCmd, binary, args, displayName := m.firstRun.HandleKey(msg)
 		if runCmd {
-			m.activePanel = PanelActivity
-			return m, m.executor.Execute(binary, args, displayName)
+			return m.runCommand(binary, args, displayName, "first-run")
 		}
 		return m, nil
 	}
@@ -1237,6 +1574,24 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handlePanelKey(msg)
 	}
 
+	if m.activePanel == PanelSetup && m.setup.InWizardMode() &&
+		m.setup.readinessFocused && (msg.String() == "tab" || msg.String() == "shift+tab") {
+		return m.handlePanelKey(msg)
+	}
+
+	if m.activePanel == PanelSetup {
+		switch msg.String() {
+		case "S", "R", "G", "C", "r":
+			return m.handlePanelKey(msg)
+		}
+	}
+	if msg.String() == "R" {
+		switch m.activePanel {
+		case PanelOverview, PanelLogs, PanelSkills, PanelMCPs:
+			return m.handlePanelKey(msg)
+		}
+	}
+
 	switch msg.String() {
 	case "ctrl+c":
 		// Ctrl+C is the only global quit key now. "q" used to also
@@ -1277,6 +1632,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "4":
 		m.activePanel = PanelMCPs
 	case "5":
+		// Plugins is connector-gated (G4): DefenseClaw plugins are
+		// OpenClaw-only. For any other active connector the panel
+		// is hidden from the tab bar and the digit shortcut is a
+		// silent no-op so muscle-memory keystrokes don't drop the
+		// operator into an empty panel.
+		if m.panelHidden(PanelPlugins) {
+			return m, nil
+		}
 		if cmd := m.switchPanel(PanelPlugins); cmd != nil {
 			return m, cmd
 		}
@@ -1301,25 +1664,36 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case "V":
-		// AI Visibility -- 'V' for "Visibility" since 'A' is
-		// already taken by Alerts (panel 2). Uppercase to match
-		// the convention PanelTools established (see 'T' above).
+		// AI Discovery -- the 'V' shortcut is preserved from the
+		// panel's previous "AI Visibility" label so existing
+		// muscle memory (and palette/help docs) keeps working;
+		// 'D' would have collided with future drill-down keys.
 		// We force a poll on entry so the panel never paints an
 		// empty table just because the slow tick hasn't fired
 		// yet; pollAIUsage is idempotent and cheap.
-		m.activePanel = PanelAIVisibility
+		m.activePanel = PanelAIDiscovery
 		return m, m.pollAIUsage()
+	case "R":
+		// Registries panel uses the same letter-only convention as
+		// Tools (see PanelRegistries comment). Mnemonic: 'R' for
+		// Registries; uppercase to avoid clashing with lowercase 'r'
+		// (refresh / reject) used by various sub-panels. Skills and
+		// MCPs panels also bind 'R' to "open Registries filtered to
+		// the highlighted entry" — see registries_links.go.
+		if cmd := m.switchPanel(PanelRegistries); cmd != nil {
+			return m, cmd
+		}
 
 	case "tab":
 		if m.activePanel == PanelPolicy {
 			return m.handlePolicyKey(msg)
 		}
-		m.activePanel = (m.activePanel + 1) % panelCount
+		m.activePanel = m.nextVisiblePanel(m.activePanel, +1)
 	case "shift+tab":
 		if m.activePanel == PanelPolicy {
 			return m.handlePolicyKey(msg)
 		}
-		m.activePanel = (m.activePanel - 1 + panelCount) % panelCount
+		m.activePanel = m.nextVisiblePanel(m.activePanel, -1)
 
 	default:
 		return m.handlePanelKey(msg)
@@ -1336,6 +1710,10 @@ func (m Model) panelOwnsDigitShortcut(key string) bool {
 		return key >= "1" && key <= "4"
 	case PanelActivity:
 		return key == "1" || key == "2"
+	case PanelLogs:
+		return key >= "1" && key <= "8"
+	case PanelRegistries:
+		return key >= "1" && key <= "3"
 	default:
 		return false
 	}
@@ -1361,7 +1739,7 @@ func (m Model) panelExclusive() bool {
 		return m.plugins.IsDetailOpen()
 	case PanelTools:
 		return m.tools.IsDetailOpen()
-	case PanelAIVisibility:
+	case PanelAIDiscovery:
 		return m.aiVisib.IsDetailOpen()
 	case PanelAlerts:
 		return m.alerts.IsDetailOpen()
@@ -1387,7 +1765,7 @@ func (m Model) isFilterActive() bool {
 		return m.mcps.IsFiltering()
 	case PanelAudit:
 		return m.auditHist.IsFiltering()
-	case PanelAIVisibility:
+	case PanelAIDiscovery:
 		return m.aiVisib.IsFiltering()
 	}
 	return false
@@ -1403,7 +1781,7 @@ func (m Model) startFilter() (tea.Model, tea.Cmd) {
 		m.mcps.StartFilter()
 	case PanelAudit:
 		m.auditHist.StartFilter()
-	case PanelAIVisibility:
+	case PanelAIDiscovery:
 		m.aiVisib.StartFilter()
 	}
 	return m, nil
@@ -1422,7 +1800,7 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.mcps.ClearFilter()
 		case PanelAudit:
 			m.auditHist.ClearFilter()
-		case PanelAIVisibility:
+		case PanelAIDiscovery:
 			m.aiVisib.ClearFilter()
 		}
 	case "enter":
@@ -1435,7 +1813,7 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.mcps.StopFilter()
 		case PanelAudit:
 			m.auditHist.StopFilter()
-		case PanelAIVisibility:
+		case PanelAIDiscovery:
 			m.aiVisib.StopFilter()
 		}
 	case "backspace":
@@ -1460,7 +1838,7 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			if len(f) > 0 {
 				m.auditHist.SetFilter(f[:len(f)-1])
 			}
-		case PanelAIVisibility:
+		case PanelAIDiscovery:
 			f := m.aiVisib.FilterText()
 			if len(f) > 0 {
 				m.aiVisib.SetFilter(f[:len(f)-1])
@@ -1477,7 +1855,7 @@ func (m Model) handleFilterKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.mcps.SetFilter(m.mcps.FilterText() + key)
 			case PanelAudit:
 				m.auditHist.SetFilter(m.auditHist.FilterText() + key)
-			case PanelAIVisibility:
+			case PanelAIDiscovery:
 				m.aiVisib.SetFilter(m.aiVisib.FilterText() + key)
 			}
 		}
@@ -1496,24 +1874,136 @@ func (m Model) handleActionMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		sel := m.actionMenu.SelectedAction()
 		if sel != nil {
-			cmd := m.executeActionMenuItem(sel.Key)
 			m.actionMenu.Hide()
-			return m, cmd
+			return m.executeActionMenuItem(sel.Key)
 		}
 	default:
 		key := msg.String()
 		for _, action := range m.actionMenu.actions {
 			if action.Key == key {
-				cmd := m.executeActionMenuItem(key)
 				m.actionMenu.Hide()
-				return m, cmd
+				return m.executeActionMenuItem(key)
 			}
 		}
 	}
 	return m, nil
 }
 
-func (m Model) executeActionMenuItem(key string) tea.Cmd {
+func (m Model) runCommand(binary string, args []string, displayName, origin string) (Model, tea.Cmd) {
+	intent := NewCommandIntent(binary, args, displayName, inferCommandCategory(args), origin)
+	return m.runCommandIntent(intent)
+}
+
+func (m Model) runCommandIntent(intent CommandIntent) (Model, tea.Cmd) {
+	intent = intent.Normalized()
+	if m.executor.IsRunning() {
+		m.toasts.Push(ToastWarn, "Another command is running — wait or press Ctrl+C first")
+		return m, nil
+	}
+	if intent.NeedsConfirmation() {
+		m.commandPreview = CommandPreviewModal{Active: true, Intent: intent}
+		return m, nil
+	}
+	m.activePanel = PanelActivity
+	return m, m.executor.ExecuteIntent(intent)
+}
+
+func (m Model) handleCommandPreviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		intent := m.commandPreview.Intent
+		m.commandPreview = CommandPreviewModal{}
+		if intent.Origin == "setup" && m.setup.IsWizardRunning() {
+			m.setup.WizardFinished(130)
+		}
+		if intent.DisplayName != "" {
+			m.activity.AddEntryWithMeta("cancelled "+intent.MaskedDisplayName(), intent.Meta(time.Now()))
+			m.activity.FinishEntryWithMeta(130, 0, CommandResultMeta{Cancelled: true, SuggestedNextAction: "command cancelled"})
+		}
+		return m, nil
+	case "enter":
+		intent := m.commandPreview.Intent
+		m.commandPreview = CommandPreviewModal{}
+		m.activePanel = PanelActivity
+		return m, m.executor.ExecuteIntent(intent)
+	}
+	return m, nil
+}
+
+func (m Model) handleConfigDiffKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.configDiffModal = ConfigDiffModal{}
+		return m, nil
+	case "enter":
+		return m.confirmConfigDiffSave()
+	}
+	return m, nil
+}
+
+func (m Model) confirmConfigDiffSave() (tea.Model, tea.Cmd) {
+	m.configDiffModal = ConfigDiffModal{}
+	actPath, cleanup, err := m.setup.AuditActivityTempFile()
+	if cleanup == nil {
+		cleanup = func() {}
+	}
+	if err != nil {
+		m.toasts.Push(ToastError, err.Error())
+		return m, nil
+	}
+	defer cleanup()
+	if err := m.setup.SaveConfig(); err != nil {
+		m.toasts.Push(ToastError, "Config save failed: "+err.Error())
+		return m, nil
+	}
+	m.cfg = m.setup.GetConfig()
+	m.queueRestart("config saved from TUI")
+	m.activity.AddEntryWithMeta("config save", CommandResultMeta{
+		Origin:     "setup-config",
+		Category:   "setup",
+		Risk:       CommandRiskSetup,
+		MaskedArgv: []string{"tui", "config", "save"},
+		StartedAt:  time.Now(),
+	})
+	m.activity.AppendOutput("Saved config.yaml")
+	m.activity.AppendOutput("Queued one gateway restart")
+	m.activity.FinishEntryWithMeta(0, 0, CommandResultMeta{
+		Origin:              "setup-config",
+		Category:            "setup",
+		Risk:                CommandRiskSetup,
+		MaskedArgv:          []string{"tui", "config", "save"},
+		FinishedAt:          time.Now(),
+		SuggestedNextAction: "restart gateway when ready",
+		ConfigReloaded:      true,
+	})
+	if actPath != "" {
+		c := exec.Command(resolveDefenseclawBin(), "audit", "log-activity", "--payload-file", actPath)
+		out, err := c.CombinedOutput()
+		if err != nil {
+			m.toasts.Push(ToastWarn, fmt.Sprintf("audit log-activity: %v %s", err, strings.TrimSpace(string(out))))
+		}
+	}
+	m.toasts.Push(ToastSuccess, "Config saved — restart queued")
+	m.syncSetupDerivedState()
+	return m, nil
+}
+
+func (m *Model) queueRestart(reason string) {
+	lastStarted := ""
+	if m.health != nil {
+		lastStarted = m.health.StartedAt
+	}
+	if m.restartQueue.Pending {
+		if !strings.Contains(m.restartQueue.Reason, reason) {
+			m.restartQueue.Reason += "; " + reason
+		}
+	} else {
+		m.restartQueue = RestartQueue{Pending: true, Reason: reason, QueuedAt: time.Now(), LastStartedAt: lastStarted}
+	}
+	m.setup.SetRestartQueue(m.restartQueue)
+}
+
+func (m Model) executeActionMenuItem(key string) (Model, tea.Cmd) {
 	switch m.activePanel {
 	case PanelSkills:
 		// All skill mutations route through `defenseclaw skill <verb>
@@ -1523,38 +2013,38 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		// pre-P0-#4 ToggleBlock path that bypassed the CLI entirely).
 		sel := m.skills.Selected()
 		if sel == nil {
-			return nil
+			return m, nil
 		}
 		switch key {
 		case "s":
-			return m.executor.Execute("defenseclaw", []string{"skill", "scan", sel.Name}, "scan skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "scan", sel.Name}, "scan skill "+sel.Name, "action-menu")
 		case "i":
-			return m.executor.Execute("defenseclaw", []string{"skill", "info", sel.Name}, "info skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "info", sel.Name}, "info skill "+sel.Name, "action-menu")
 		case "b":
-			return m.executor.Execute("defenseclaw", []string{"skill", "block", sel.Name}, "block skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "block", sel.Name}, "block skill "+sel.Name, "action-menu")
 		case "a":
-			return m.executor.Execute("defenseclaw", []string{"skill", "allow", sel.Name}, "allow skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "allow", sel.Name}, "allow skill "+sel.Name, "action-menu")
 		case "u":
-			return m.executor.Execute("defenseclaw", []string{"skill", "unblock", sel.Name}, "unblock skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "unblock", sel.Name}, "unblock skill "+sel.Name, "action-menu")
 		case "d":
-			return m.executor.Execute("defenseclaw", []string{"skill", "disable", sel.Name}, "disable skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "disable", sel.Name}, "disable skill "+sel.Name, "action-menu")
 		case "e":
-			return m.executor.Execute("defenseclaw", []string{"skill", "enable", sel.Name}, "enable skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "enable", sel.Name}, "enable skill "+sel.Name, "action-menu")
 		case "q":
-			return m.executor.Execute("defenseclaw", []string{"skill", "quarantine", sel.Name}, "quarantine skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "quarantine", sel.Name}, "quarantine skill "+sel.Name, "action-menu")
 		case "r":
-			return m.executor.Execute("defenseclaw", []string{"skill", "restore", sel.Name}, "restore skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "restore", sel.Name}, "restore skill "+sel.Name, "action-menu")
 		case "n":
 			// `skill install` fetches from ClawHub (or local path if
 			// the CLI resolves it there). The TUI side doesn't need
 			// to care — we just pass the name and let cmd_skill.py
 			// decide.
-			return m.executor.Execute("defenseclaw", []string{"skill", "install", sel.Name}, "install skill "+sel.Name)
+			return m.runCommand("defenseclaw", []string{"skill", "install", sel.Name}, "install skill "+sel.Name, "action-menu")
 		}
 	case PanelMCPs:
 		sel := m.mcps.Selected()
 		if sel == nil {
-			return nil
+			return m, nil
 		}
 		// Every key surfaced by MCPActions() must map to a CLI
 		// verb or the action menu will render "Info" as a button
@@ -1563,17 +2053,17 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		// the CLI doesn't have a per-server inspect command yet.
 		switch key {
 		case "s":
-			return m.executor.Execute("defenseclaw", []string{"mcp", "scan", sel.URL}, "scan mcp "+sel.URL)
+			return m.runCommand("defenseclaw", []string{"mcp", "scan", sel.URL}, "scan mcp "+sel.URL, "action-menu")
 		case "i":
-			return m.executor.Execute("defenseclaw", []string{"mcp", "list"}, "list mcp")
+			return m.runCommand("defenseclaw", []string{"mcp", "list"}, "list mcp", "action-menu")
 		case "b":
-			return m.executor.Execute("defenseclaw", []string{"mcp", "block", sel.URL}, "block mcp "+sel.URL)
+			return m.runCommand("defenseclaw", []string{"mcp", "block", sel.URL}, "block mcp "+sel.URL, "action-menu")
 		case "a":
-			return m.executor.Execute("defenseclaw", []string{"mcp", "allow", sel.URL}, "allow mcp "+sel.URL)
+			return m.runCommand("defenseclaw", []string{"mcp", "allow", sel.URL}, "allow mcp "+sel.URL, "action-menu")
 		case "u":
-			return m.executor.Execute("defenseclaw", []string{"mcp", "unblock", sel.URL}, "unblock mcp "+sel.URL)
+			return m.runCommand("defenseclaw", []string{"mcp", "unblock", sel.URL}, "unblock mcp "+sel.URL, "action-menu")
 		case "x":
-			return m.executor.Execute("defenseclaw", []string{"mcp", "unset", sel.URL}, "unset mcp "+sel.URL)
+			return m.runCommand("defenseclaw", []string{"mcp", "unset", sel.URL}, "unset mcp "+sel.URL, "action-menu")
 		}
 	case PanelPlugins:
 		// All plugin mutations route through the defenseclaw
@@ -1583,7 +2073,7 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		// CLI is the single source of truth.
 		sel := m.plugins.Selected()
 		if sel == nil {
-			return nil
+			return m, nil
 		}
 		// Prefer plugin name for user-facing commands since the
 		// CLI's block/allow/disable/enable/quarantine/restore
@@ -1596,29 +2086,29 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		}
 		switch key {
 		case "s":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "scan", name}, "scan plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "scan", name}, "scan plugin "+name, "action-menu")
 		case "i":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "info", name}, "info plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "info", name}, "info plugin "+name, "action-menu")
 		case "b":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "block", name}, "block plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "block", name}, "block plugin "+name, "action-menu")
 		case "a":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "allow", name}, "allow plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "allow", name}, "allow plugin "+name, "action-menu")
 		case "u":
 			// "Unblock" in the action menu maps to `plugin allow`
 			// because that is the CLI verb that clears the block
 			// list and (if needed) re-enables the runtime (see
 			// cmd_plugin.allow → pe.allow + _enable_plugin_via_gateway).
-			return m.executor.Execute("defenseclaw", []string{"plugin", "allow", name}, "unblock plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "allow", name}, "unblock plugin "+name, "action-menu")
 		case "d":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "disable", name}, "disable plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "disable", name}, "disable plugin "+name, "action-menu")
 		case "e":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "enable", name}, "enable plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "enable", name}, "enable plugin "+name, "action-menu")
 		case "q":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "quarantine", name}, "quarantine plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "quarantine", name}, "quarantine plugin "+name, "action-menu")
 		case "r":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "restore", name}, "restore plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "restore", name}, "restore plugin "+name, "action-menu")
 		case "x":
-			return m.executor.Execute("defenseclaw", []string{"plugin", "remove", name}, "remove plugin "+name)
+			return m.runCommand("defenseclaw", []string{"plugin", "remove", name}, "remove plugin "+name, "action-menu")
 		}
 	case PanelTools:
 		// Tools mutations route through `defenseclaw tool` so the
@@ -1629,7 +2119,7 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		// strip the scope or we'll end up editing the global row.
 		sel := m.tools.Selected()
 		if sel == nil {
-			return nil
+			return m, nil
 		}
 		target := sel.TargetName
 		if target == "" {
@@ -1638,20 +2128,22 @@ func (m Model) executeActionMenuItem(key string) tea.Cmd {
 		display := target
 		switch key {
 		case "i":
-			return m.executor.Execute("defenseclaw", []string{"tool", "status", target}, "info tool "+display)
+			return m.runCommand("defenseclaw", []string{"tool", "status", target}, "info tool "+display, "action-menu")
 		case "b":
-			return m.executor.Execute("defenseclaw", []string{"tool", "block", target}, "block tool "+display)
+			return m.runCommand("defenseclaw", []string{"tool", "block", target}, "block tool "+display, "action-menu")
 		case "a":
-			return m.executor.Execute("defenseclaw", []string{"tool", "allow", target}, "allow tool "+display)
+			return m.runCommand("defenseclaw", []string{"tool", "allow", target}, "allow tool "+display, "action-menu")
 		case "u":
-			return m.executor.Execute("defenseclaw", []string{"tool", "unblock", target}, "unblock tool "+display)
+			return m.runCommand("defenseclaw", []string{"tool", "unblock", target}, "unblock tool "+display, "action-menu")
 		}
 	}
-	return nil
+	return m, nil
 }
 
 func (m Model) handleCmdInputKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
 	case "esc":
 		m.cmdInputFocus = false
 		m.cmdInput.Blur()
@@ -1680,6 +2172,9 @@ func (m Model) handleCmdInputKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if input == "" {
 			return m, nil
 		}
+		if next, handled, cmd := m.handleLocalPaletteAlias(input); handled {
+			return next, cmd
+		}
 		entry, extra := MatchCommand(input, m.registry)
 		if entry == nil {
 			m.toasts.Push(ToastWarn, "Unknown command: "+input)
@@ -1690,21 +2185,16 @@ func (m Model) handleCmdInputKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.activePanel = PanelActivity
 			return m, nil
 		}
-		args, err := buildCLIArgs(entry, extra)
+		intent, err := CommandIntentFromEntry(entry, extra, "palette")
 		if err != nil {
 			m.toasts.Push(ToastWarn, "Invalid command arguments: "+err.Error())
 			m.activity.AddEntry("? " + input)
-			m.activity.AppendOutput("Invalid command arguments: " + err.Error())
+			m.activity.AppendOutput("Command needs more input: " + err.Error())
 			m.activity.FinishEntry(1, 0)
 			m.activePanel = PanelActivity
 			return m, nil
 		}
-		displayName := entry.TUIName
-		if extra != "" {
-			displayName += " " + extra
-		}
-		m.activePanel = PanelActivity
-		return m, m.executor.Execute(entry.CLIBinary, args, displayName)
+		return m.runCommandIntent(intent)
 	}
 
 	// Forward all other keys to the textinput, then sync palette
@@ -1721,25 +2211,66 @@ func (m Model) handlePaletteKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		input := m.palette.input
-		cmd, err := m.palette.Execute()
 		m.palette.Close()
+		if next, handled, cmd := m.handleLocalPaletteAlias(input); handled {
+			return next, cmd
+		}
+		entry, extra := MatchCommand(input, m.registry)
+		if entry == nil {
+			return m, nil
+		}
+		intent, err := CommandIntentFromEntry(entry, extra, "palette")
 		if err != nil {
 			m.toasts.Push(ToastWarn, "Invalid command arguments: "+err.Error())
 			m.activity.AddEntry("? " + strings.TrimSpace(input))
-			m.activity.AppendOutput("Invalid command arguments: " + err.Error())
+			m.activity.AppendOutput("Command needs more input: " + err.Error())
 			m.activity.FinishEntry(1, 0)
 			m.activePanel = PanelActivity
 			return m, nil
 		}
-		if cmd != nil {
-			m.activePanel = PanelActivity
-			return m, cmd
-		}
-		return m, nil
+		return m.runCommandIntent(intent)
 	default:
 		m.palette.HandleKey(msg)
 		return m, nil
 	}
+}
+
+func (m Model) executePaletteMouseSelection() (tea.Model, tea.Cmd) {
+	selected := m.palette.SelectedName()
+	intent, err := m.palette.IntentForSelected("palette")
+	m.cmdInputFocus = false
+	m.cmdInput.Blur()
+	m.cmdInput.SetValue("")
+	m.palette.Close()
+	if selected != "" {
+		if next, handled, cmd := m.handleLocalPaletteAlias(selected); handled {
+			return next, cmd
+		}
+	}
+	if err != nil {
+		label := strings.TrimSpace(selected)
+		if label == "" {
+			label = "palette selection"
+		}
+		m.toasts.Push(ToastWarn, "Invalid command arguments: "+err.Error())
+		m.activity.AddEntry("? " + label)
+		m.activity.AppendOutput("Command needs more input: " + err.Error())
+		m.activity.FinishEntry(1, 0)
+		m.activePanel = PanelActivity
+		return m, nil
+	}
+	return m.runCommandIntent(intent)
+}
+
+func (m Model) handleLocalPaletteAlias(input string) (Model, bool, tea.Cmd) {
+	switch strings.ToLower(strings.TrimSpace(input)) {
+	case "open setup", "setup tab", "readiness", "setup readiness":
+		m.activePanel = PanelSetup
+		m.setup.FocusReadiness()
+		m.syncSetupDerivedState()
+		return m, true, nil
+	}
+	return m, false, nil
 }
 
 func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1766,21 +2297,23 @@ func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleActivityKey(msg)
 	case PanelTools:
 		return m.handleToolsKey(msg)
-	case PanelAIVisibility:
-		return m.handleAIVisibilityKey(msg)
+	case PanelAIDiscovery:
+		return m.handleAIDiscoveryKey(msg)
+	case PanelRegistries:
+		return m.handleRegistriesKey(msg)
 	case PanelSetup:
 		return m.handleSetupKey(msg)
 	}
 	return m, nil
 }
 
-// handleAIVisibilityKey routes keys for the AI Visibility panel.
+// handleAIDiscoveryKey routes keys for the AI Discovery panel.
 // j/k for cursor, Enter for the per-signal drill-down, r for an
 // immediate poll, Esc to close detail or clear an applied filter.
 // Filter-as-you-type is handled by the global handleFilterKey path
 // (see isFilterActive / startFilter additions below) so the muscle
 // memory matches Skills / MCPs / Alerts.
-func (m Model) handleAIVisibilityKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleAIDiscoveryKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
 		m.aiVisib.CursorDown()
@@ -1815,10 +2348,48 @@ func (m Model) handlePolicyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, pending
 	}
 	if bin != "" {
-		m.activePanel = PanelActivity
-		return m, m.executor.Execute(bin, args, name)
+		return m.runCommand(bin, args, name, "policy")
 	}
 	return m, nil
+}
+
+// handleRegistriesKey routes panel-local keystrokes for the
+// Registries panel. The panel itself decides which keys it owns (1/2/3
+// tabs, r refresh, s/S sync, a/x approve/reject, d delete) and
+// returns the argv we should hand to the shared CommandExecutor for
+// any mutation. j/k/up/down stay here so list navigation lines up
+// with every other panel.
+func (m Model) handleRegistriesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "j", "down":
+		m.registries.CursorDown()
+		return m, nil
+	case "k", "up":
+		m.registries.CursorUp()
+		return m, nil
+	case "pgdown":
+		m.registries.ScrollBy(10)
+		return m, nil
+	case "pgup":
+		m.registries.ScrollBy(-10)
+		return m, nil
+	}
+	handled, label, args, hint := m.registries.HandleKey(key)
+	if !handled {
+		return m, nil
+	}
+	if hint != "" {
+		m.toasts.Push(ToastInfo, hint)
+	}
+	if label == "" || len(args) == 0 {
+		return m, nil
+	}
+	if m.executor.IsRunning() {
+		m.toasts.Push(ToastWarn, "Another command is running — wait or press Ctrl+C first")
+		return m, nil
+	}
+	return m.runCommand("defenseclaw", args, label, "registries")
 }
 
 func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1829,32 +2400,32 @@ func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// and 'S' would unexpectedly save pending config changes).
 	if !m.setup.editing && !m.setup.IsFormActive() && !m.setup.IsWizardRunning() && len(m.setup.wizOutput) == 0 && !m.setup.IsEditorActive() {
 		switch key {
+		case "r":
+			if m.setup.InWizardMode() {
+				return m, m.loadCredentialSnapshotCmd()
+			}
 		case "S":
 			if m.setup.HasChanges() {
-				actPath, _, err := m.setup.AuditActivityTempFile()
-				if err != nil {
-					m.toasts.Push(ToastError, err.Error())
+				if errs := m.setup.ValidationErrors(); len(errs) > 0 {
+					m.toasts.Push(ToastError, "Fix config validation: "+errs[0])
 					return m, nil
 				}
-				if err := m.setup.SaveConfig(); err != nil {
-					if actPath != "" {
-						_ = os.Remove(actPath)
-					}
-					m.toasts.Push(ToastError, "Config save failed: "+err.Error())
-					return m, nil
-				}
-				m.cfg = m.setup.GetConfig()
-				m.toasts.Push(ToastSuccess, "Config saved — restarting gateway to apply changes…")
-				if actPath != "" {
-					c := exec.Command("defenseclaw", "audit", "log-activity", "--payload-file", actPath)
-					out, err := c.CombinedOutput()
-					if err != nil {
-						m.toasts.Push(ToastWarn, fmt.Sprintf("audit log-activity: %v %s", err, strings.TrimSpace(string(out))))
-					}
-					_ = os.Remove(actPath)
-				}
-				m.activePanel = PanelActivity
-				return m, m.executor.Execute("defenseclaw-gateway", []string{"restart"}, "restart (config changed)")
+				m.configDiffModal = ConfigDiffModal{Active: true, Diff: m.setup.ConfigDiff()}
+				return m, nil
+			}
+			return m, nil
+		case "G":
+			if m.restartQueue.Pending {
+				intent := NewCommandIntent("defenseclaw-gateway", []string{"restart"}, "restart", "daemon", "restart-queue")
+				return m.runCommandIntent(intent)
+			}
+			return m, nil
+		case "C":
+			if m.restartQueue.Pending {
+				m.restartQueue = RestartQueue{}
+				m.setup.SetRestartQueue(m.restartQueue)
+				m.syncSetupDerivedState()
+				m.toasts.Push(ToastInfo, "Restart queue cleared")
 			}
 			return m, nil
 		case "R":
@@ -1862,6 +2433,7 @@ func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				m.toasts.Push(ToastError, "Config revert failed: "+err.Error())
 			} else {
 				m.cfg = m.setup.GetConfig()
+				m.syncSetupDerivedState()
 				m.toasts.Push(ToastInfo, "Config reverted from disk")
 			}
 			return m, nil
@@ -1878,7 +2450,16 @@ func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.setup.WizardFinished(-1)
 			m.toasts.Push(ToastWarn, "Another command is running — wait or press Ctrl+C first")
 		} else {
-			cmds = append(cmds, m.executor.Execute(binary, args, displayName))
+			category := inferCommandCategory(args)
+			if binary == "defenseclaw-gateway" {
+				category = "daemon"
+			}
+			intent := NewCommandIntent(binary, args, displayName, category, "setup")
+			next, cmd := m.runCommandIntent(intent)
+			m = next
+			if cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 	}
 	if len(cmds) > 0 {
@@ -1899,7 +2480,7 @@ func (m Model) handleActivityKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 					m.toasts.Push(ToastWarn, "Cannot rerun command: "+err.Error())
 					return m, nil
 				}
-				return m, m.executor.Execute(entry.CLIBinary, args, last)
+				return m.runCommand(entry.CLIBinary, args, last, "activity-rerun")
 			}
 		}
 	default:
@@ -1951,21 +2532,16 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "s":
-		cmd := m.executor.Execute("defenseclaw", []string{"skill", "scan", "--all"}, "scan skill --all")
-		m.activePanel = PanelActivity
-		return m, cmd
+		return m.runCommand("defenseclaw", []string{"skill", "scan", "--all"}, "scan skill --all", "overview")
 	case "d":
-		cmd := m.executor.Execute("defenseclaw", []string{"doctor"}, "doctor")
-		m.activePanel = PanelActivity
-		return m, cmd
+		return m.runCommand("defenseclaw", []string{"doctor"}, "doctor", "overview")
 	case "i":
 		if cmd := m.switchPanel(PanelInventory); cmd != nil {
 			return m, cmd
 		}
 	case "g":
-		cmd := m.executor.Execute("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail")
-		m.activePanel = PanelActivity
-		return m, cmd
+		intent := NewCommandIntent("defenseclaw", []string{"setup", "guardrail"}, "setup guardrail", "setup", "overview")
+		return m.runCommandIntent(intent)
 	case "m":
 		// Open the connector switcher pre-focused on the currently
 		// active mode. ActiveConnectorName is the same resolver used
@@ -1975,14 +2551,15 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "R":
 		return m.showRedactionModal()
+	case "N":
+		return m.showNotificationsModal()
 	case "p":
 		m.activePanel = PanelPolicy
 	case "l":
 		m.activePanel = PanelLogs
 	case "u":
-		cmd := m.executor.Execute("defenseclaw", []string{"upgrade", "--yes"}, "upgrade")
-		m.activePanel = PanelActivity
-		return m, cmd
+		intent := NewCommandIntent("defenseclaw", []string{"upgrade", "--yes"}, "upgrade", "other", "overview")
+		return m.runCommandIntent(intent)
 	case "X":
 		return m.showUninstallModal()
 	}
@@ -1993,7 +2570,7 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // open. The contract:
 //
 //   - esc / q: close without changing anything
-//   - enter:   dispatch `defenseclaw setup mode <wire> --yes` and
+//   - enter:   dispatch `defenseclaw setup <connector> --yes` and
 //     switch to the Activity panel so the user can watch the
 //     restart progress (mirrors how [s] / [d] / [u] behave)
 //   - up / k:  cursor up
@@ -2016,7 +2593,7 @@ func (m Model) handleModePickerKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.confirmModePicker()
 	}
 	// Hotkey jump + auto-confirm. We deliberately accept *only* the
-	// four documented hotkeys here; other letters fall through to a
+	// documented connector hotkeys here; other letters fall through to a
 	// no-op so a stray keystroke can't surprise-switch the connector.
 	if r := []rune(msg.String()); len(r) == 1 {
 		if m.modePicker.SelectByHotkey(r[0]) {
@@ -2054,6 +2631,75 @@ func (m Model) showRedactionModal() (tea.Model, tea.Cmd) {
 	m.redactionModal.SetSize(m.width, m.height)
 	m.redactionModal.Show(redactionDisabledForLogsBadge())
 	return m, nil
+}
+
+// handleNotificationsModalKey runs while the [N]-from-Overview/Logs
+// overlay is open. The contract mirrors the redaction modal:
+//
+//   - esc / q: close without changing anything
+//   - enter:   dispatch `defenseclaw setup notifications <on|off> --yes`
+//     and switch to the Activity panel so the operator
+//     watches the restart progress.
+//
+// Hotkeys (e.g. "y") are deliberately not supported so a stray
+// keystroke can't flip the dispatcher state in either direction.
+func (m Model) handleNotificationsModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.notificationsModal.Hide()
+		return m, nil
+	case "enter":
+		return m.confirmNotificationsToggle()
+	}
+	return m, nil
+}
+
+// showNotificationsModal opens the [N]-from-Overview/Logs overlay
+// pre-populated with the cached “notifications.enabled“ state.
+//
+// We read the flag from the loaded config (m.cfg) rather than
+// re-shelling out to “defenseclaw setup notifications status“
+// because the TUI is already config-aware and a subprocess for a
+// boolean read would add latency to a keystroke. If config is nil
+// (test harness) the modal opens against a default-false state,
+// matching what a fresh install on a non-darwin host would see.
+func (m Model) showNotificationsModal() (tea.Model, tea.Cmd) {
+	enabled := false
+	if m.cfg != nil {
+		enabled = m.cfg.Notifications.Enabled
+	}
+	m.notificationsModal.SetSize(m.width, m.height)
+	m.notificationsModal.Show(enabled)
+	return m, nil
+}
+
+// confirmNotificationsToggle dispatches the chosen action through
+// the Python CLI. Unlike confirmRedactionToggle there is no
+// in-process state to flip first — the dispatcher is constructed
+// once at sidecar boot from cfg.Notifications, so the toast
+// behaviour catches up when the gateway restarts (which the CLI
+// command does for us via _restart_services + the auto-restart
+// hook). We always pass --yes because the modal is the
+// confirmation step.
+//
+// We deliberately do NOT optimistically mutate m.cfg before the
+// subprocess returns. The successful-completion path runs through
+// reloadConfigAfterSetupCommand (see Update's commandFinishedMsg
+// branch), which re-reads config.yaml and rebuilds the in-memory
+// snapshot from disk. A subprocess failure leaves the in-memory
+// cfg untouched, so reopening the modal still reflects ground
+// truth instead of an aspirational state that the CLI never wrote.
+func (m Model) confirmNotificationsToggle() (tea.Model, tea.Cmd) {
+	action := m.notificationsModal.DesiredAction()
+	m.notificationsModal.Hide()
+
+	cmd := m.executor.Execute(
+		"defenseclaw",
+		[]string{"setup", "notifications", action, "--yes"},
+		"setup notifications "+action,
+	)
+	m.activePanel = PanelActivity
+	return m, cmd
 }
 
 func (m Model) handleUninstallModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -2139,8 +2785,8 @@ func (m Model) confirmRedactionToggle() (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// confirmModePicker dispatches the chosen mode through the Python
-// CLI and switches to the Activity panel so the user sees the
+// confirmModePicker dispatches full connector setup through the
+// Python CLI and switches to the Activity panel so the user sees the
 // restart output. We always pass --yes because the modal IS the
 // confirmation step — there's no point asking again.
 func (m Model) confirmModePicker() (tea.Model, tea.Cmd) {
@@ -2149,13 +2795,12 @@ func (m Model) confirmModePicker() (tea.Model, tea.Cmd) {
 	if wire == "" {
 		return m, nil
 	}
-	cmd := m.executor.Execute(
-		"defenseclaw",
-		[]string{"setup", "mode", wire, "--yes"},
-		"setup mode "+wire,
-	)
-	m.activePanel = PanelActivity
-	return m, cmd
+	args, displayName := connectorSetupCommandForMode(wire)
+	if len(args) == 0 {
+		return m, nil
+	}
+	intent := NewCommandIntent("defenseclaw", args, displayName, "setup", "mode-picker")
+	return m.runCommandIntent(intent)
 }
 
 // activeConnectorForPicker resolves the connector name we want to
@@ -2301,9 +2946,7 @@ func (m Model) handleSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// shell user would. Prior to P0-#4 this called
 		// m.skills.ToggleBlock() which bypassed all three.
 		if sel := m.skills.Selected(); sel != nil {
-			cmd := m.executor.Execute("defenseclaw", []string{"skill", "block", sel.Name}, "block skill "+sel.Name)
-			m.activePanel = PanelActivity
-			return m, cmd
+			return m.runCommand("defenseclaw", []string{"skill", "block", sel.Name}, "block skill "+sel.Name, "skills")
 		}
 	case "a":
 		// 'a' is always "allow" (block-list → allow-list → active is
@@ -2311,15 +2954,11 @@ func (m Model) handleSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// operator wants to unblock without allow-listing they can
 		// use 'u' from the action menu.
 		if sel := m.skills.Selected(); sel != nil {
-			cmd := m.executor.Execute("defenseclaw", []string{"skill", "allow", sel.Name}, "allow skill "+sel.Name)
-			m.activePanel = PanelActivity
-			return m, cmd
+			return m.runCommand("defenseclaw", []string{"skill", "allow", sel.Name}, "allow skill "+sel.Name, "skills")
 		}
 	case "s":
 		if sel := m.skills.Selected(); sel != nil {
-			cmd := m.executor.Execute("defenseclaw", []string{"skill", "scan", sel.Name}, "scan skill "+sel.Name)
-			m.activePanel = PanelActivity
-			return m, cmd
+			return m.runCommand("defenseclaw", []string{"skill", "scan", sel.Name}, "scan skill "+sel.Name, "skills")
 		}
 	case "r":
 		// 'r' now re-runs `defenseclaw skill list --json` rather
@@ -2328,6 +2967,19 @@ func (m Model) handleSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// in memory, which is why operators kept seeing stale
 		// data after an out-of-process `defenseclaw skill …`.
 		return m, m.skills.LoadCmd()
+	case "R":
+		// Cross-link to Registries panel — when the highlighted
+		// skill was promoted from a registry source (Reason starts
+		// with "registry:"), jump straight to the Entries tab
+		// filtered to that name. Otherwise switch to the panel
+		// without a filter so the operator can browse sources.
+		if sel := m.skills.Selected(); sel != nil {
+			m.registries.FocusEntry("skill", sel.Name)
+		}
+		if cmd := m.switchPanel(PanelRegistries); cmd != nil {
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -2342,8 +2994,7 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		submit, bin, args, display := m.mcpSetForm.HandleKey(msg.String())
 		if submit {
 			m.mcpSetForm.Close()
-			m.activePanel = PanelActivity
-			return m, m.executor.Execute(bin, args, display)
+			return m.runCommand(bin, args, display, "mcps")
 		}
 		return m, nil
 	}
@@ -2377,9 +3028,7 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// the shell. Now every mutation routes through the Python
 		// CLI, which is the single source of truth for policy.
 		if sel := m.mcps.Selected(); sel != nil {
-			cmd := m.executor.Execute("defenseclaw", []string{"mcp", "block", sel.URL}, "block mcp "+sel.URL)
-			m.activePanel = PanelActivity
-			return m, cmd
+			return m.runCommand("defenseclaw", []string{"mcp", "block", sel.URL}, "block mcp "+sel.URL, "mcps")
 		}
 	case "a":
 		// 'a' always means "allow". The old "only if blocked"
@@ -2388,15 +3037,11 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// not an unblock-and-stop. Unblock is still reachable via
 		// 'u' in the action menu.
 		if sel := m.mcps.Selected(); sel != nil {
-			cmd := m.executor.Execute("defenseclaw", []string{"mcp", "allow", sel.URL}, "allow mcp "+sel.URL)
-			m.activePanel = PanelActivity
-			return m, cmd
+			return m.runCommand("defenseclaw", []string{"mcp", "allow", sel.URL}, "allow mcp "+sel.URL, "mcps")
 		}
 	case "s":
 		if sel := m.mcps.Selected(); sel != nil {
-			cmd := m.executor.Execute("defenseclaw", []string{"mcp", "scan", sel.URL}, "scan mcp "+sel.URL)
-			m.activePanel = PanelActivity
-			return m, cmd
+			return m.runCommand("defenseclaw", []string{"mcp", "scan", sel.URL}, "scan mcp "+sel.URL, "mcps")
 		}
 	case "n", "+":
 		// Open the MCP Set form. The form owns its own state and
@@ -2409,6 +3054,20 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// catalog from the CLI instead of re-filtering the
 		// already-loaded rows.
 		return m, m.mcps.LoadCmd()
+	case "R":
+		// Cross-link to Registries panel — same rationale as the
+		// Skills handler. We pass the URL as the entry name because
+		// MCPs in the registry adapter pipeline are keyed by URL or
+		// command depending on transport. The panel's FocusEntry
+		// performs a best-effort name match and falls back to an
+		// unfiltered view when nothing matches.
+		if sel := m.mcps.Selected(); sel != nil {
+			m.registries.FocusEntry("mcp", sel.URL)
+		}
+		if cmd := m.switchPanel(PanelRegistries); cmd != nil {
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -2429,9 +3088,7 @@ func (m Model) handlePluginsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openPluginDetail()
 	case "s":
 		if sel := m.plugins.Selected(); sel != nil {
-			cmd := m.executor.Execute("defenseclaw", []string{"plugin", "scan", sel.ID}, "scan plugin "+sel.ID)
-			m.activePanel = PanelActivity
-			return m, cmd
+			return m.runCommand("defenseclaw", []string{"plugin", "scan", sel.ID}, "scan plugin "+sel.ID, "plugins")
 		}
 	case "o":
 		// Open the contextual action menu. Parity with Skills/MCPs
@@ -2516,6 +3173,9 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.redactionModal.IsVisible() {
 		return m.handleRedactionModalKey(msg)
 	}
+	if m.notificationsModal.IsVisible() {
+		return m.handleNotificationsModalKey(msg)
+	}
 	// `R` (uppercase — lowercase is reserved for "regex search later"
 	// and stays untouched) opens the redaction kill-switch modal.
 	// Available regardless of the active log source because every
@@ -2523,6 +3183,13 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// pipeline; flipping the switch affects them uniformly.
 	if key == "R" && !m.logs.searching {
 		return m.showRedactionModal()
+	}
+	// `N` is the same shape: opens the notifications toggle modal
+	// from anywhere on the Logs panel that's not in search mode.
+	// The notifications dispatcher operates orthogonally to the
+	// redaction pipeline so flipping it doesn't affect log content.
+	if key == "N" && !m.logs.searching {
+		return m.showNotificationsModal()
 	}
 	// On structured log sources, Enter opens a detail modal for the
 	// most-recent visible event. We intercept before handing the
@@ -2954,9 +3621,26 @@ func (m Model) View() tea.View {
 		return m.tuiShellView(m.redactionModal.View())
 	}
 
+	// Desktop-notifications toggle overlay ([N]). Mirrors the
+	// redaction modal pattern — a blocking confirmation rather
+	// than an inline switch, so a stray keystroke can't flip the
+	// dispatcher state.
+	if m.notificationsModal.IsVisible() {
+		m.notificationsModal.SetSize(m.width, m.height)
+		return m.tuiShellView(m.notificationsModal.View())
+	}
+
 	if m.uninstallModal.IsVisible() {
 		m.uninstallModal.SetSize(m.width, m.height)
 		return m.tuiShellView(m.uninstallModal.View())
+	}
+
+	if m.commandPreview.Active {
+		return m.tuiShellView(m.commandPreview.View(m.width, m.height, m.theme))
+	}
+
+	if m.configDiffModal.Active {
+		return m.tuiShellView(m.configDiffModal.View(m.width, m.height, m.theme))
 	}
 
 	// Detail modal
@@ -2979,13 +3663,7 @@ func (m Model) View() tea.View {
 	if m.toasts.HasToasts() {
 		toastLines = len(m.toasts.items) + 1
 	}
-	paletteLines := 0
-	if m.cmdInputFocus && m.palette.Active && m.palette.MatchCount() > 0 {
-		paletteLines = m.palette.MatchCount()
-		if paletteLines > 8 {
-			paletteLines = 8
-		}
-	}
+	paletteLines := m.visiblePaletteLines()
 	usedLines := 5 + toastLines + paletteLines
 	contentLines := lipgloss.Height(panelContent)
 	availableLines := m.height - usedLines
@@ -3000,6 +3678,7 @@ func (m Model) View() tea.View {
 
 	// Inline autocomplete dropdown (when command input is focused)
 	if m.cmdInputFocus && m.palette.Active && m.palette.MatchCount() > 0 {
+		b.WriteString("\n")
 		b.WriteString(m.palette.InlineView(m.width))
 	}
 
@@ -3020,6 +3699,32 @@ func (m Model) View() tea.View {
 	b.WriteString(m.renderStatusStrip())
 
 	return m.tuiShellView(b.String())
+}
+
+func (m Model) visibleToastLines() int {
+	if !m.toasts.HasToasts() {
+		return 0
+	}
+	return len(m.toasts.items) + 1
+}
+
+func (m Model) visiblePaletteLines() int {
+	if m.cmdInputFocus && m.palette.Active && m.palette.MatchCount() > 0 {
+		return m.palette.InlineHeight()
+	}
+	return 0
+}
+
+func (m Model) inputBarY() int {
+	y := m.height - 3 - m.visibleToastLines() - m.visiblePaletteLines()
+	if y < 1 {
+		return 1
+	}
+	return y
+}
+
+func (m Model) paletteStartY() int {
+	return m.inputBarY() + 1
 }
 
 func (m *Model) refresh() {
@@ -3082,11 +3787,13 @@ func (m *Model) reloadRuntimeAfterInit() error {
 	m.logs = NewLogsPanel(m.theme, cfg)
 	m.auditHist = NewAuditPanel(m.theme, store)
 	m.tools = NewToolsPanel(store)
+	m.registries = NewRegistriesPanel(cfg, m.executor)
 	m.setup = NewSetupPanel(m.theme, cfg, m.executor)
 	m.activity.dataDir = dataDir
 	m.resizePanels()
 	m.propagateConnector()
 	m.refresh()
+	m.syncSetupDerivedState()
 	return nil
 }
 
@@ -3104,6 +3811,7 @@ func (m *Model) reloadConfigAfterSetupCommand() error {
 	m.activity.dataDir = cfg.DataDir
 	m.propagateConnector()
 	m.refresh()
+	m.syncSetupDerivedState()
 	return nil
 }
 
@@ -3143,6 +3851,11 @@ func (m *Model) switchPanel(panel int) tea.Cmd {
 		// jumping in via 'T' sees fresh rows even if the periodic
 		// refresh hasn't fired yet.
 		m.tools.Refresh()
+	case PanelRegistries:
+		// Registries reads from cfg + on-disk index files; both
+		// are cheap so we re-read on every panel entry to avoid
+		// stale rows after a sync.
+		m.registries.Refresh()
 	}
 	return nil
 }
@@ -3157,6 +3870,7 @@ func (m *Model) resizePanels() {
 	m.mcps.SetSize(m.width, panelH)
 	m.tools.SetSize(m.width, panelH)
 	m.aiVisib.SetSize(m.width, panelH)
+	m.registries.SetSize(m.width, panelH)
 	m.detail.SetSize(m.width, m.height)
 	m.actionMenu.SetSize(m.width, m.height)
 	m.firstRun.SetSize(m.width, m.height)
@@ -3238,7 +3952,7 @@ func (m Model) buildSystemState() SystemState {
 		if m.auditHist.IsFiltering() {
 			state.FilterActive = m.auditHist.FilterText()
 		}
-	case PanelAIVisibility:
+	case PanelAIDiscovery:
 		if m.aiVisib.IsFiltering() {
 			state.FilterActive = m.aiVisib.FilterText()
 		}
@@ -3271,6 +3985,14 @@ func (m Model) renderHeader() string {
 
 	var rendered []string
 	for i, label := range tabs {
+		// G4: hidden panels (e.g. Plugins on non-OpenClaw
+		// connectors) are still indexed in the labels slice so
+		// digit shortcuts stay stable; we just skip rendering
+		// them in the tab bar so operators don't see a panel
+		// they cannot meaningfully use.
+		if m.panelHidden(i) {
+			continue
+		}
 		if i == m.activePanel {
 			rendered = append(rendered, activeStyle.Render(label))
 		} else {
@@ -3383,6 +4105,9 @@ func (m Model) renderActivePanel() string {
 		}
 		return m.mcps.View()
 	case PanelPlugins:
+		if m.panelHidden(PanelPlugins) {
+			return renderOpenClawOnlyNotice("Plugins", m.activeConnectorName(), m.width, m.height-5)
+		}
 		return m.plugins.View(m.width, m.height-5)
 	case PanelInventory:
 		return m.inventory.View(m.width, m.height-5)
@@ -3396,8 +4121,10 @@ func (m Model) renderActivePanel() string {
 		return m.activity.View()
 	case PanelTools:
 		return m.tools.View()
-	case PanelAIVisibility:
+	case PanelAIDiscovery:
 		return m.aiVisib.View(m.width, m.height-5)
+	case PanelRegistries:
+		return m.registries.View(m.width, m.height-5)
 	case PanelSetup:
 		return m.setup.View(m.width, m.height-5)
 	default:

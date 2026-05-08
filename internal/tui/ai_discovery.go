@@ -25,7 +25,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// AI Visibility panel — the in-TUI counterpart of `defenseclaw agent
+// AI Discovery panel — the in-TUI counterpart of `defenseclaw agent
 // usage`. The Overview tab already hosts a "DISCOVERED AI AGENTS"
 // box; this dedicated panel is the high-fidelity drill-down: the
 // full grouped table, per-component identity / presence, evidence
@@ -65,7 +65,7 @@ import (
 //     on transient fetch errors, so a `defenseclaw-gateway restart`
 //     does NOT make the panel flap.
 
-// aiVisibilityRow is the dedup'd, render-friendly form of a group
+// aiDiscoveryRow is the dedup'd, render-friendly form of a group
 // of AISignals that share (state, product, vendor, ecosystem,
 // name). The slice of underlying signals is kept so the detail
 // overlay can drill into per-instance evidence (basenames,
@@ -81,7 +81,7 @@ import (
 // Code installed saw 7 near-identical rows; post-normalization
 // they see one row tagged "via 7 channels" and can drill in for
 // the per-detector breakdown.
-type aiVisibilityRow struct {
+type aiDiscoveryRow struct {
 	State     string
 	Product   string
 	Vendor    string
@@ -118,11 +118,11 @@ type aiVisibilityRow struct {
 	Signals []AIUsageSignal
 }
 
-// AIVisibilityPanel renders the AI discovery snapshot as a deduped,
+// AIDiscoveryPanel renders the AI discovery snapshot as a deduped,
 // searchable, drill-downable table. Mirrors SkillsPanel's filter
 // pattern (filter / filtering / Apply / IsFiltering) so the global
 // `/` filter router in app.go picks it up via the same switch arms.
-type AIVisibilityPanel struct {
+type AIDiscoveryPanel struct {
 	snapshot *AIUsageSnapshot
 
 	// Materialized state -- recomputed whenever snapshot or filter
@@ -130,8 +130,8 @@ type AIVisibilityPanel struct {
 	// and filtered (the substring-filtered subset View() iterates)
 	// so toggling / clearing the filter does NOT require re-walking
 	// the raw signals.
-	rows     []aiVisibilityRow
-	filtered []aiVisibilityRow
+	rows     []aiDiscoveryRow
+	filtered []aiDiscoveryRow
 
 	cursor int
 	width  int
@@ -148,7 +148,7 @@ type AIVisibilityPanel struct {
 	// pointer so a refresh that re-orders rows mid-overlay does
 	// not change what the operator is looking at.
 	detailOpen bool
-	detailRow  *aiVisibilityRow
+	detailRow  *aiDiscoveryRow
 
 	// scroll is the top-of-view offset into filtered. We let the
 	// renderer compute it from cursor/height instead of tracking
@@ -157,40 +157,40 @@ type AIVisibilityPanel struct {
 	// every cursor mutation.
 }
 
-// NewAIVisibilityPanel returns a fresh, empty panel. The first
+// NewAIDiscoveryPanel returns a fresh, empty panel. The first
 // SetSnapshot call (driven by aiUsageUpdateMsg in app.go) populates
 // rows; until then View() renders the offline placeholder so an
 // operator landing on the panel before the first poll completes
 // gets a clear "loading…" state instead of a confusing empty table.
-func NewAIVisibilityPanel() AIVisibilityPanel {
-	return AIVisibilityPanel{}
+func NewAIDiscoveryPanel() AIDiscoveryPanel {
+	return AIDiscoveryPanel{}
 }
 
 // SetSnapshot replaces the cached snapshot and rebuilds the row
 // cache. nil clears the panel (the Overview offline placeholder
 // is mirrored here -- "sidecar offline / discovery disabled").
-func (p *AIVisibilityPanel) SetSnapshot(s *AIUsageSnapshot) {
+func (p *AIDiscoveryPanel) SetSnapshot(s *AIUsageSnapshot) {
 	p.snapshot = s
 	p.rebuild()
 }
 
 // Snapshot returns the current snapshot for tests / overlays.
-func (p *AIVisibilityPanel) Snapshot() *AIUsageSnapshot { return p.snapshot }
+func (p *AIDiscoveryPanel) Snapshot() *AIUsageSnapshot { return p.snapshot }
 
 // Rows returns the deduped rows pre-filter. Exposed for tests.
-func (p *AIVisibilityPanel) Rows() []aiVisibilityRow { return p.rows }
+func (p *AIDiscoveryPanel) Rows() []aiDiscoveryRow { return p.rows }
 
 // FilteredRows returns the post-filter rows the table renders.
 // Exposed for tests so they can assert the search behaviour without
 // parsing the rendered string.
-func (p *AIVisibilityPanel) FilteredRows() []aiVisibilityRow { return p.filtered }
+func (p *AIDiscoveryPanel) FilteredRows() []aiDiscoveryRow { return p.filtered }
 
 // Filter accessors mirror SkillsPanel so handleFilterKey works.
-func (p *AIVisibilityPanel) FilterText() string { return p.filter }
-func (p *AIVisibilityPanel) IsFiltering() bool  { return p.filtering }
-func (p *AIVisibilityPanel) StartFilter()       { p.filtering = true }
-func (p *AIVisibilityPanel) StopFilter()        { p.filtering = false }
-func (p *AIVisibilityPanel) ClearFilter() {
+func (p *AIDiscoveryPanel) FilterText() string { return p.filter }
+func (p *AIDiscoveryPanel) IsFiltering() bool  { return p.filtering }
+func (p *AIDiscoveryPanel) StartFilter()       { p.filtering = true }
+func (p *AIDiscoveryPanel) StopFilter()        { p.filtering = false }
+func (p *AIDiscoveryPanel) ClearFilter() {
 	p.filter = ""
 	p.filtering = false
 	p.applyFilter()
@@ -198,7 +198,7 @@ func (p *AIVisibilityPanel) ClearFilter() {
 
 // SetFilter replaces the substring filter and re-applies. Empty
 // filter is the "show everything" sentinel.
-func (p *AIVisibilityPanel) SetFilter(f string) {
+func (p *AIDiscoveryPanel) SetFilter(f string) {
 	p.filter = f
 	p.applyFilter()
 }
@@ -207,12 +207,12 @@ func (p *AIVisibilityPanel) SetFilter(f string) {
 // is active. Used by panelExclusive in app.go so digit keys are
 // routed to the panel (close-on-Esc) instead of switching tabs
 // while the overlay is up.
-func (p *AIVisibilityPanel) IsDetailOpen() bool { return p.detailOpen }
+func (p *AIDiscoveryPanel) IsDetailOpen() bool { return p.detailOpen }
 
 // ToggleDetail opens/closes the per-row drill-down. When opening
 // we snapshot the row at the current cursor; if the cursor is out
 // of range (empty filtered list) the call is a no-op.
-func (p *AIVisibilityPanel) ToggleDetail() {
+func (p *AIDiscoveryPanel) ToggleDetail() {
 	if p.detailOpen {
 		p.detailOpen = false
 		p.detailRow = nil
@@ -227,7 +227,7 @@ func (p *AIVisibilityPanel) ToggleDetail() {
 }
 
 // SetSize is called by the root Model on WindowSize messages.
-func (p *AIVisibilityPanel) SetSize(w, h int) {
+func (p *AIDiscoveryPanel) SetSize(w, h int) {
 	p.width = w
 	p.height = h
 }
@@ -235,16 +235,48 @@ func (p *AIVisibilityPanel) SetSize(w, h int) {
 // CursorUp / CursorDown move the highlight; they intentionally do
 // NOT trigger a re-poll -- the table only changes when the slow /
 // panel-active tick brings in a new snapshot.
-func (p *AIVisibilityPanel) CursorUp() {
+func (p *AIDiscoveryPanel) CursorUp() {
 	if p.cursor > 0 {
 		p.cursor--
 	}
 }
 
-func (p *AIVisibilityPanel) CursorDown() {
+func (p *AIDiscoveryPanel) CursorDown() {
 	if p.cursor < len(p.filtered)-1 {
 		p.cursor++
 	}
+}
+
+func (p *AIDiscoveryPanel) SetCursor(i int) {
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(p.filtered) {
+		i = len(p.filtered) - 1
+	}
+	if i < 0 {
+		i = 0
+	}
+	p.cursor = i
+}
+
+func (p *AIDiscoveryPanel) CursorAt() int { return p.cursor }
+
+func (p *AIDiscoveryPanel) ScrollOffset() int {
+	visible := p.height - 6
+	if visible < 5 {
+		visible = 5
+	}
+	if visible > len(p.filtered) {
+		visible = len(p.filtered)
+	}
+	if visible <= 0 {
+		return 0
+	}
+	if p.cursor >= visible {
+		return p.cursor - visible + 1
+	}
+	return 0
 }
 
 // rebuild collapses the snapshot's signals into deduped rows. The
@@ -255,7 +287,7 @@ func (p *AIVisibilityPanel) CursorDown() {
 // operator switching between `agent usage` (CLI default) and
 // this panel sees the SAME row count and the SAME aggregated
 // categories/detectors per row.
-func (p *AIVisibilityPanel) rebuild() {
+func (p *AIDiscoveryPanel) rebuild() {
 	p.rows = nil
 	if p.snapshot == nil {
 		p.applyFilter()
@@ -264,7 +296,7 @@ func (p *AIVisibilityPanel) rebuild() {
 	type rowKey struct {
 		state, product, vendor, ecosystem, name, version string
 	}
-	groups := make(map[rowKey]*aiVisibilityRow, len(p.snapshot.Signals))
+	groups := make(map[rowKey]*aiDiscoveryRow, len(p.snapshot.Signals))
 	order := make([]rowKey, 0, len(p.snapshot.Signals))
 
 	for _, sig := range p.snapshot.Signals {
@@ -286,7 +318,7 @@ func (p *AIVisibilityPanel) rebuild() {
 		}
 		row, ok := groups[k]
 		if !ok {
-			row = &aiVisibilityRow{
+			row = &aiDiscoveryRow{
 				State:     sig.State,
 				Product:   sig.Product,
 				Vendor:    sig.Vendor,
@@ -339,7 +371,7 @@ func (p *AIVisibilityPanel) rebuild() {
 		// signature name + " ×N" instead.
 	}
 
-	out := make([]aiVisibilityRow, 0, len(order))
+	out := make([]aiDiscoveryRow, 0, len(order))
 	for _, k := range order {
 		out = append(out, *groups[k])
 	}
@@ -389,7 +421,7 @@ func stateWeight(state string) int {
 // substring match against every column we render. Cursor is clamped
 // so a search that drops the current row keeps the highlight inside
 // the visible set.
-func (p *AIVisibilityPanel) applyFilter() {
+func (p *AIDiscoveryPanel) applyFilter() {
 	if p.filter == "" {
 		p.filtered = p.rows
 	} else {
@@ -432,9 +464,9 @@ func (p *AIVisibilityPanel) applyFilter() {
 //   - Footer hint with key bindings
 //
 // When the detail overlay is open we replace the table with the
-// per-signal drill-down -- handleAIVisibilityKey sends Esc to
+// per-signal drill-down -- handleAIDiscoveryKey sends Esc to
 // ToggleDetail, restoring the table.
-func (p *AIVisibilityPanel) View(width, height int) string {
+func (p *AIDiscoveryPanel) View(width, height int) string {
 	// Always honor SetSize over the inline arg if it was called;
 	// width/height fall back to whatever the caller passed when
 	// the panel hasn't been sized yet (e.g. tests).
@@ -464,7 +496,7 @@ func (p *AIVisibilityPanel) View(width, height int) string {
 				"Waiting for the first poll of /api/v1/ai-usage…\n" +
 				"If this stays blank: ensure the gateway is running and that\n" +
 				"DEFENSECLAW_GATEWAY_TOKEN matches the configured token.")
-		return border.Render("AI Visibility\n\n" + hint)
+		return border.Render("AI Discovery\n\n" + hint)
 	}
 
 	if p.detailOpen && p.detailRow != nil {
@@ -499,7 +531,7 @@ func (p *AIVisibilityPanel) View(width, height int) string {
 	return border.Render(b.String())
 }
 
-func (p *AIVisibilityPanel) renderHeader() string {
+func (p *AIDiscoveryPanel) renderHeader() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("87")).
 		Render("AI VISIBILITY")
 	s := p.snapshot.Summary
@@ -531,7 +563,7 @@ func (p *AIVisibilityPanel) renderHeader() string {
 	return title + "  " + strings.Join(parts, "  ")
 }
 
-func (p *AIVisibilityPanel) renderFooter() string {
+func (p *AIDiscoveryPanel) renderFooter() string {
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	if p.detailOpen {
 		return dim.Render("Esc close detail · j/k scroll signals")
@@ -554,7 +586,7 @@ func (p *AIVisibilityPanel) renderFooter() string {
 // The previous renderer used padRight only -- which silently
 // expanded the column when content overflowed and left adjacent
 // rows visibly drifting against the header.
-func (p *AIVisibilityPanel) renderTable(width int) string {
+func (p *AIDiscoveryPanel) renderTable(width int) string {
 	// Column widths sized to the 95th-percentile of observed
 	// values across Anthropic / OpenAI / DefenseClaw / Vercel /
 	// Anysphere catalogs (sum 184 + 10 separators = 194 chars).
@@ -702,7 +734,7 @@ func (p *AIVisibilityPanel) renderTable(width int) string {
 // The CLI's `agent usage --detail` is the analogue; this view
 // keeps to the most operator-relevant fields so the box fits
 // without horizontal scroll.
-func (p *AIVisibilityPanel) renderDetail(width int) string {
+func (p *AIDiscoveryPanel) renderDetail(width int) string {
 	r := *p.detailRow
 	hdrStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("87"))
 	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))

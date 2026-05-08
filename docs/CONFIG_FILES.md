@@ -62,6 +62,59 @@ active rule-pack directory. This is separate from `defenseclaw policy activate`
 and controls which `judge/*.yaml`, `sensitive_tools.yaml`, and
 `suppressions.yaml` files the sidecar loads.
 
+The `registries:` block holds external skill / MCP catalog sources
+managed by `defenseclaw registry add` / `edit` / `remove`. Each entry
+mirrors `internal/config/registries.go::RegistrySource` and
+`cli/defenseclaw/config.py::RegistrySource`. See
+[`docs/REGISTRIES.md`](./REGISTRIES.md) for the full pipeline.
+
+```yaml
+registries:
+  sources:
+    - id: corp-skills
+      kind: http_yaml         # clawhub | smithery | skills_sh | http_yaml | http_json | git | file
+      url: https://catalog.example.com/skills.yaml
+      content: skill          # skill | mcp | both
+      auth_env: DEFENSECLAW_REGISTRY_TOKEN  # NAME of env var holding the token
+      enabled: true
+      # auto_sync / sync_interval_hours are RESERVED for v2.
+      # No scheduler reads them today — run `defenseclaw registry
+      # sync --all` (or wire it into cron / systemd-timer) for now.
+      auto_sync: false
+      sync_interval_hours: 24
+    - id: skills-sh-public
+      kind: skills_sh         # https://skills.sh public catalog
+      url: ""                 # empty == curated/official view; or 'all-time' / 'trending' / 'hot'
+      content: skill
+      enabled: true
+```
+
+Sync runs persist verdicts to
+`~/.defenseclaw/registries/<id>/index.json` and auto-promote clean
+entries into `asset_policy.{skill,mcp}.registry` with
+`Reason="registry:<id>"` so admission can attribute the rule back to
+its source.
+
+> **Note on `auto_sync`** — This field is persisted but **not yet
+> honoured at runtime**. There is no in-process scheduler that
+> periodically calls `registry sync` today; setting `auto_sync: true`
+> only preserves the bit for a future release. Until then, schedule
+> `defenseclaw registry sync --all` from cron / a systemd timer / your
+> CI loop.
+
+---
+
+### `~/.defenseclaw/registries/<source-id>/`
+
+Per-registry on-disk cache, populated by `defenseclaw registry sync`:
+
+| File | Purpose |
+|------|---------|
+| `index.json` | Per-entry verdicts (status, severity, approved/rejected). Read by the Python CLI's `registry entries` / `registry show` and by the TUI's Registries panel. |
+| `manifest.yaml` | Raw fetched manifest bytes, kept for forensic inspection (diff what the publisher served vs what made it through the validator). |
+
+Both files are written atomically (temp + rename, mode 0o600).
+
 ---
 
 ### `~/.defenseclaw/policies/guardrail/<profile>/`
@@ -326,3 +379,105 @@ webhooks:
 | **Set by** | `defenseclaw setup webhook` (preferred) or operator via `config.yaml`. |
 | **Read by** | **Go sidecar** at startup via `config.Load()`. **Python CLI** via `config.load()` (round-trips the cooldown tri-state, read-only for display). |
 | **Effect** | When enabled, the `WebhookDispatcher` in `internal/gateway/webhook.go` sends structured JSON payloads to each endpoint when enforcement events (block, drift, guardrail-block, …) occur. Retries up to 3 times with exponential backoff on transient failures (5xx, network errors); 4xx are treated as permanent. |
+
+## Desktop Notifications Config
+
+> **Local-only.** `notifications.*` fires user-session OS toasts
+> (macOS `osascript`, Linux `notify-send`) for blocks and pending HITL
+> approvals. It is **not** an audit sink and **not** a remote
+> notification channel — for chat / incident routing use `webhooks[]`
+> above, and for downstream forwarding see
+> [docs/OBSERVABILITY.md](OBSERVABILITY.md).
+
+The `notifications` block in `config.yaml` controls a single
+in-process dispatcher (`internal/gateway/notifier`) that surfaces a
+desktop toast whenever:
+
+1. A hook (Claude Code, Codex), the guardrail proxy, or asset policy
+   **blocks** a tool call.
+2. The same component **would have blocked** the call but is in
+   observe / would-block mode.
+3. A **Human-in-the-Loop approval** is pending in the chat / TUI
+   (informational only — clicking the notification does not approve
+   anything; the operator still replies in the existing surface).
+
+The dispatcher applies a global token-bucket rate limit, an LRU
+dedup window, and a per-category / per-source filter so it can be
+dialed down without losing every signal.
+
+### CLI
+
+Use `defenseclaw setup notifications` to flip the master switch.
+Defaults are platform-conditional: **on** on darwin (every macOS
+user already has Notification Center running) and **off**
+elsewhere (Linux operators opt in explicitly so a `notify-send`
+that fails on a headless box does not fire on every block):
+
+```bash
+# One-shot Y/n onboarding prompt (defaults to Yes):
+defenseclaw setup notifications
+
+# Direct toggles
+defenseclaw setup notifications on
+defenseclaw setup notifications off --yes
+defenseclaw setup notifications status
+
+# Apply immediately to the running sidecar (the dispatcher is
+# constructed once at boot from notifications.*, so a flip without
+# --restart leaves the previous state in effect for the live process).
+defenseclaw setup notifications on --restart
+```
+
+Per-category and per-source fields are exposed via
+`defenseclaw setup notifications-set <slot> <on|off>` so you can
+silence one surface (e.g. asset-policy blocks) without flipping the
+master switch:
+
+```bash
+# Categories
+defenseclaw setup notifications-set block_enforced off
+defenseclaw setup notifications-set block_would_block on
+defenseclaw setup notifications-set hitl_approval on
+
+# Sources (dotted form or short alias)
+defenseclaw setup notifications-set sources.hook off
+defenseclaw setup notifications-set guardrail off
+defenseclaw setup notifications-set asset_policy off
+```
+
+Throttle fields (`dedup_window`, `max_per_minute`) remain config-only
+— flip them in `config.yaml` and restart the gateway.
+
+### YAML
+
+```yaml
+notifications:
+  enabled: true              # master switch (default: true on darwin, false elsewhere)
+  block_enforced: true       # action-mode block events
+  block_would_block: true    # observe-mode "would have blocked" events
+  hitl_approval: true        # informational toasts for pending approvals
+  sources:
+    hook: true               # claude_code_hook + codex_hook decisions
+    guardrail: true          # GuardrailProxy verdicts
+    asset_policy: true       # asset_policy_runtime decisions
+  dedup_window: 30s          # default 30s; "" / 0s falls back to default
+  max_per_minute: 12         # default 12; 0 falls back to default
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `true` on darwin, `false` elsewhere | Master switch (see `config.DefaultNotificationsEnabled` / Python `_default_notifications_enabled`). When `false` the dispatcher is short-circuited and no other field has any effect. |
+| `block_enforced` | bool | `true` | Surface a toast for action-mode blocks (`action == "block"`). |
+| `block_would_block` | bool | `true` | Surface a toast for observe-mode would-block events (verdict was a block but the runtime mode degraded it to alert). |
+| `hitl_approval` | bool | `true` | Surface an **informational** toast at the start of `HILTApprovalManager.Request`. The notification has no buttons; the operator replies in chat / TUI as today. |
+| `sources.hook` | bool | `true` | Allow notifications from `evaluateClaudeCodeHook` / `evaluateCodexHook`. |
+| `sources.guardrail` | bool | `true` | Allow notifications from `GuardrailProxy` block / would-block branches. |
+| `sources.asset_policy` | bool | `true` | Allow notifications from `evaluateRuntimeMCPAssetPolicy` / `evaluateRuntimeSkillAssetPolicy`. |
+| `dedup_window` | duration | `30s` | LRU dedup window keyed on `sha256(category|source|target|reason)`. Identical events seen inside the window are suppressed. Empty string or `0s` resolves to the default. |
+| `max_per_minute` | int | `12` | Global token-bucket cap across **all** categories. When exhausted, the dispatcher emits a single roll-up toast per minute (`"DefenseClaw suppressed N notifications"`) and silently drops the rest until the bucket refills. `0` resolves to the default. |
+
+| | |
+|---|---|
+| **Set by** | `defenseclaw setup notifications` (preferred) or operator via `config.yaml`. |
+| **Read by** | **Go sidecar** at startup via `config.Load()` → `notifier.New(cfg.Notifications)` (wired into hooks, proxy, asset runtime, and `HILTApprovalManager`). **Python CLI** via `config.load()` for round-trip preservation; the Python side does not emit notifications itself. |
+| **Effect** | The dispatcher fires `internal/notify.SendNotification` in a goroutine so request latency is unaffected. On macOS this calls `osascript` (`display notification … with title …`); on Linux it calls `notify-send`; on unsupported platforms it falls back to a structured stderr log line. State (dedup LRU + token bucket) is per-process and resets on gateway restart. |

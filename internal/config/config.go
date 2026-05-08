@@ -180,6 +180,7 @@ type Config struct {
 	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
 	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
+	Registries      RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
 	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
 	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
 	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
@@ -188,10 +189,11 @@ type Config struct {
 	// It supports an arbitrary number of named sinks of any registered
 	// kind (splunk_hec, otlp_logs, http_jsonl). Legacy `splunk:` keys are
 	// detected at Load() and emit a hard migration error.
-	AuditSinks  []AuditSink       `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
-	Webhooks    []WebhookConfig   `mapstructure:"webhooks"         yaml:"webhooks"`
-	Privacy     PrivacyConfig     `mapstructure:"privacy"          yaml:"privacy,omitempty"`
-	AIDiscovery AIDiscoveryConfig `mapstructure:"ai_discovery"    yaml:"ai_discovery,omitempty"`
+	AuditSinks    []AuditSink         `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
+	Webhooks      []WebhookConfig     `mapstructure:"webhooks"         yaml:"webhooks"`
+	Privacy       PrivacyConfig       `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AIDiscovery   AIDiscoveryConfig   `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
+	Notifications NotificationsConfig `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 }
 
 // PrivacyConfig groups privacy/redaction toggles. Today it carries
@@ -1444,6 +1446,14 @@ func Load() (*Config, error) {
 
 	migrateConfig(&cfg)
 	warnDisableRedactionConfig(&cfg)
+	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
+
+	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
 
 	for i := range cfg.AuditSinks {
 		if err := cfg.AuditSinks[i].Validate(); err != nil {
@@ -1472,6 +1482,39 @@ func Load() (*Config, error) {
 		}
 		return nil, err
 	}
+
+	// Validate registry source kind/content shapes. The Python CLI
+	// is the authoritative writer for ``registries.sources`` (it
+	// drives ``defenseclaw registry add/edit``), but any operator
+	// hand-edit of config.yaml lands in the Go gateway too and a
+	// typo'd ``kind: htttp_yaml`` should fail loud at startup
+	// rather than be silently accepted and bypass admission. We
+	// keep the check additive: empty kind/content is tolerated for
+	// upgrade-in-place from older configs.
+	for i := range cfg.Registries.Sources {
+		src := &cfg.Registries.Sources[i]
+		if src.Kind != "" && !IsKnownRegistryKind(src.Kind) {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "registry_kind_invalid")
+			}
+			return nil, fmt.Errorf(
+				"config: registries.sources[%d] (id=%q): unknown kind %q "+
+					"(want one of %v)",
+				i, src.ID, src.Kind, KnownRegistryKinds,
+			)
+		}
+		if src.Content != "" && !IsKnownRegistryContent(src.Content) {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "registry_content_invalid")
+			}
+			return nil, fmt.Errorf(
+				"config: registries.sources[%d] (id=%q): unknown content %q "+
+					"(want one of %v)",
+				i, src.ID, src.Content, KnownRegistryContentTypes,
+			)
+		}
+	}
+
 	if cfg.OpenShell.IsStandalone() {
 		cfg.Gateway.SandboxHome = cfg.OpenShell.EffectiveSandboxHome()
 	}
@@ -1882,6 +1925,32 @@ func warnPlaintextSecrets(cfg *Config) {
 	}
 }
 
+func validateDeploymentMode(mode string) error {
+	mode = normalizeDeploymentMode(mode)
+	if mode == "" {
+		return nil
+	}
+	if _, ok := validDeploymentModes[mode]; ok {
+		return nil
+	}
+	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)", mode)
+}
+
+func normalizeDeploymentMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "managed":
+		return string(DeploymentModeManagedEnterprise)
+	case "standalone":
+		return string(DeploymentModeUnmanagedBYOD)
+	case "ci":
+		return string(DeploymentModeCICD)
+	case "edge":
+		return string(DeploymentModeServer)
+	default:
+		return strings.TrimSpace(mode)
+	}
+}
+
 func (c *Config) Save() error {
 	configFile := filepath.Join(c.DataDir, DefaultConfigName)
 
@@ -2148,6 +2217,21 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("gateway.watchdog.enabled", true)
 	viper.SetDefault("gateway.watchdog.interval", 30)
 	viper.SetDefault("gateway.watchdog.debounce", 2)
+
+	// User-session OS notifications. Master switch defaults to true
+	// on darwin and false elsewhere — see DefaultNotificationsEnabled
+	// in notifications.go for the rationale. Sub-toggles default ON
+	// so a single yes-answer (or the macOS auto-opt-in) gives full
+	// coverage; operators dial down by flipping individual fields.
+	viper.SetDefault("notifications.enabled", DefaultNotificationsEnabled)
+	viper.SetDefault("notifications.block_enforced", true)
+	viper.SetDefault("notifications.block_would_block", true)
+	viper.SetDefault("notifications.hitl_approval", true)
+	viper.SetDefault("notifications.sources.hook", true)
+	viper.SetDefault("notifications.sources.guardrail", true)
+	viper.SetDefault("notifications.sources.asset_policy", true)
+	viper.SetDefault("notifications.dedup_window", NotificationsDefaultDedupWindow)
+	viper.SetDefault("notifications.max_per_minute", NotificationsDefaultMaxPerMinute)
 
 	viper.SetDefault("otel.enabled", false)
 	viper.SetDefault("otel.protocol", "")

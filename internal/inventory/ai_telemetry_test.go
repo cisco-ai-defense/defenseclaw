@@ -21,6 +21,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // TestGroupSignalsForRollup_DedupesByLowercaseEcosystemName confirms the
@@ -573,4 +575,73 @@ func (c *capturingWriter) events() []gatewaylog.Event {
 	out := make([]gatewaylog.Event, len(c.out))
 	copy(out, c.out)
 	return out
+}
+
+// TestEmitGatewayEvents_StampsCorrelationFromContext pins the G1
+// invariant: AI discovery rows in gateway.jsonl carry the same
+// run_id, trace_id, and sidecar_instance_id as request-scoped
+// gateway events. Before the EmitContext switch, emitGatewayEvents
+// called Emit() (background ctx) and skipped the per-emit trace
+// stamping the writer applies — so an operator pivoting from a
+// discovery span in Tempo could not find the corresponding envelope
+// row in Loki/Splunk by trace_id. This test fails if either:
+//
+//   1. emitGatewayEvents drops the caller's ctx (regression to Emit).
+//   2. The writer stops auto-stamping run_id / trace_id from ctx.
+func TestEmitGatewayEvents_StampsCorrelationFromContext(t *testing.T) {
+	// Cannot t.Parallel(): mutates package-wide gatewaylog state.
+	gatewaylog.SetProcessRunID("test-run-corr")
+	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
+	gatewaylog.SetSidecarInstanceID("test-sidecar-corr")
+	t.Cleanup(func() { gatewaylog.SetSidecarInstanceID("") })
+
+	captured := newCapturingWriter(t)
+	svc := &ContinuousDiscoveryService{
+		events: captured.writer,
+		opts:   AIDiscoveryOptions{DisableRedaction: true},
+	}
+	signals := []AISignal{evidenceSignal("a", "pypi", "openai", "1.40.0", "ws-1", AIStateNew, "process")}
+	report := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "scan-corr"},
+		Signals: signals,
+	}
+	tp := sdktrace.NewTracerProvider()
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+	ctx, span := tp.Tracer("test").Start(context.Background(), "discovery-test")
+	defer span.End()
+	wantTrace := span.SpanContext().TraceID().String()
+
+	svc.emitGatewayEvents(ctx, report, componentRollupSnapshot{})
+
+	events := captured.events()
+	if len(events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(events))
+	}
+	got := events[0]
+	if got.RunID != "test-run-corr" {
+		t.Errorf("RunID = %q; want test-run-corr (writer.EmitContext should default from gatewaylog.ProcessRunID())", got.RunID)
+	}
+	if got.TraceID != wantTrace {
+		t.Errorf("TraceID = %q; want %q (extracted from caller's active span)", got.TraceID, wantTrace)
+	}
+	if got.SidecarInstanceID != "test-sidecar-corr" {
+		t.Errorf("SidecarInstanceID = %q; want test-sidecar-corr", got.SidecarInstanceID)
+	}
+}
+
+// TestSetSpanResourceContext_NilProviderSafe confirms that the
+// public wrapper added in G1 tolerates a nil receiver. The
+// ContinuousDiscoveryService is constructible without a telemetry
+// provider in tests; the same call site exists in production when
+// EmitOTel is off, and a panic there would brick discovery on the
+// process for that scan window.
+func TestSetSpanResourceContext_NilProviderSafe(t *testing.T) {
+	t.Parallel()
+	var p *telemetry.Provider
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("nil receiver panicked: %v", r)
+		}
+	}()
+	p.SetSpanResourceContext(trace.SpanFromContext(context.Background()))
 }

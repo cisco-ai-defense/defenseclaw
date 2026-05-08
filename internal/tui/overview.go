@@ -476,7 +476,7 @@ func (p *OverviewPanel) renderServicesBox(w int) string {
 		{"API", "api"},
 		{"Sinks", "sinks"},
 		{"Telemetry", "telemetry"},
-		{"AI Visibility", "ai_discovery"},
+		{"AI Discovery", "ai_discovery"},
 		{"Sandbox", "sandbox"},
 	}
 
@@ -1334,6 +1334,7 @@ func (p *OverviewPanel) renderQuickActions(width int) string {
 		key.Render("[p]") + dim.Render(" Policy"),
 		key.Render("[l]") + dim.Render(" Logs"),
 		key.Render("[R]") + dim.Render(" Redaction"),
+		key.Render("[N]") + dim.Render(" Notify"),
 		key.Render("[u]") + dim.Render(" Upgrade"),
 		dangerKey.Render("[X]") + dangerText.Render(" Uninstall"),
 		key.Render("[?]") + dim.Render(" Help"),
@@ -1361,6 +1362,7 @@ var quickActionDefs = []struct {
 	{"p", 10}, // "[p] Policy"
 	{"l", 8},  // "[l] Logs"
 	{"R", 13}, // "[R] Redaction"
+	{"N", 10}, // "[N] Notify"
 	{"u", 11}, // "[u] Upgrade"
 	{"X", 13}, // "[X] Uninstall"
 	{"?", 8},  // "[?] Help"

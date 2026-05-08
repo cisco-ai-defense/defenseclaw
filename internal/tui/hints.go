@@ -83,18 +83,18 @@ func (h *HintEngine) HintForPanel(panel int, state SystemState) string {
 		return h.activityHint(state)
 	case PanelTools:
 		return h.toolsHint(state)
-	case PanelAIVisibility:
-		return h.aiVisibilityHint(state)
+	case PanelAIDiscovery:
+		return h.aiDiscoveryHint(state)
 	default:
 		return "Press : or Ctrl+K to open the command palette. Press ? for help."
 	}
 }
 
-// aiVisibilityHint surfaces the most useful next action for the
-// AI Visibility panel. We special-case the filter-active branch
+// aiDiscoveryHint surfaces the most useful next action for the
+// AI Discovery panel. We special-case the filter-active branch
 // because operators frequently leave a filter applied and forget,
 // then wonder why the row count looks wrong.
-func (h *HintEngine) aiVisibilityHint(state SystemState) string {
+func (h *HintEngine) aiDiscoveryHint(state SystemState) string {
 	if state.FilterActive != "" {
 		return fmt.Sprintf("Filtered to: %s. Esc clears the filter, / changes it.", state.FilterActive)
 	}

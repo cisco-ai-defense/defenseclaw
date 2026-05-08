@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
@@ -57,6 +58,7 @@ type Sidecar struct {
 	hilt        *HILTApprovalManager
 	webhooks    *WebhookDispatcher
 	aiDiscovery *inventory.ContinuousDiscoveryService
+	osNotifier  *notifier.Dispatcher
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -157,10 +159,19 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 
 	notify := NewNotificationQueue()
 
+	// User-session OS notifier dispatcher. Constructed unconditionally
+	// so every block / approval site can call into it without nil
+	// checks; the dispatcher's master Enabled gate keeps it silent
+	// when the operator hasn't opted in (or is on a platform without
+	// a display server). The setup wizard flips Enabled=true after
+	// asking the user — see cli/defenseclaw/commands/cmd_setup.py.
+	osNotifier := notifier.New(cfg.Notifications)
+
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
 	router.SetGuardrailConfig(&cfg.Guardrail)
 	hilt := NewHILTApprovalManager(client, logger, otel)
+	hilt.SetNotifier(osNotifier)
 	router.SetHILTApprovalManager(hilt)
 	// Seed defaults for the observability contract so every span /
 	// audit row knows which agent (framework mode) and policy
@@ -261,7 +272,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// verdicts / judge latency / errors for free — no extra
 	// config required when telemetry.enabled is true.
 	if otel != nil && otel.Enabled() {
-		events.WithFanout(otel.EmitGatewayEvent)
+		events.WithFanoutContext(otel.EmitGatewayEventWithContext)
 		// Route schema-violation drops into the Prometheus counter
 		// so operators can alert on the metric directly without
 		// scraping gateway.jsonl for EventError rows.
@@ -391,6 +402,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		webhooks:    webhooks,
 		hilt:        hilt,
 		aiDiscovery: aiDiscovery,
+		osNotifier:  osNotifier,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 		events:      events,
@@ -1326,6 +1338,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
+		proxy.SetNotifier(s.osNotifier)
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -1660,6 +1673,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api.SetOTelProvider(s.otel)
 	api.SetHILTApprovalManager(s.hilt)
 	api.SetAIDiscoveryService(s.aiDiscovery)
+	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}

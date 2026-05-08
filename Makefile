@@ -1,6 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.2.0
+VERSION     := 0.5.0
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
@@ -17,8 +17,49 @@ DIST_DIR    := dist
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage \
+        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync \
+        set-version \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
+
+# ---------------------------------------------------------------------------
+# Version stamping
+# ---------------------------------------------------------------------------
+# The git tag is the canonical source of truth on a release; the workflow
+# invokes `scripts/stamp-version.sh "$TAG"` directly. Local devs who want
+# to pre-stage a version (e.g. for a manual smoke test of `make dist`)
+# can use this target as a friendly wrapper.
+#
+#   make set-version VERSION=0.4.1
+#
+# Refuses to run without an explicit VERSION= override — the implicit
+# default of $(VERSION) would silently re-stamp the current pinned value.
+set-version:
+	@if [ -z "$(filter-out $(file < /dev/null),$(MAKEOVERRIDES))" ] || ! echo "$(MAKEOVERRIDES)" | grep -q 'VERSION='; then \
+		echo "usage: make set-version VERSION=X.Y.Z" >&2; \
+		exit 64; \
+	fi
+	@scripts/stamp-version.sh "$(VERSION)"
+
+# CI gate that fails when the four version sources disagree, catching
+# drift before it reaches a release artifact. Mirrors the contract
+# enforced by scripts/stamp-version.sh.
+check-version-sync:
+	@mk_ver=$$(grep -E '^VERSION[[:space:]]*:=' Makefile | head -1 | awk -F'=' '{gsub(/[[:space:]]/,"",$$2); print $$2}'); \
+	py_ver=$$(grep -E '^version[[:space:]]*=' pyproject.toml | head -1 | awk -F'"' '{print $$2}'); \
+	init_ver=$$(grep -E '^__version__[[:space:]]*=' cli/defenseclaw/__init__.py | head -1 | awk -F'"' '{print $$2}'); \
+	pkg_ver=$$(grep -E '^  "version":' extensions/defenseclaw/package.json | head -1 | awk -F'"' '{print $$4}'); \
+	if [ "$${mk_ver}" = "$${py_ver}" ] && [ "$${py_ver}" = "$${init_ver}" ] && [ "$${init_ver}" = "$${pkg_ver}" ]; then \
+		echo "version sync OK: $${mk_ver}"; \
+	else \
+		echo "version drift detected:" >&2; \
+		echo "  Makefile                         : $${mk_ver}" >&2; \
+		echo "  pyproject.toml                   : $${py_ver}" >&2; \
+		echo "  cli/defenseclaw/__init__.py      : $${init_ver}" >&2; \
+		echo "  extensions/defenseclaw/package.json: $${pkg_ver}" >&2; \
+		echo "" >&2; \
+		echo "fix with: make set-version VERSION=X.Y.Z" >&2; \
+		exit 1; \
+	fi
 
 # ---------------------------------------------------------------------------
 # `make all` — one-shot build → install → PATH → quickstart
@@ -557,8 +598,13 @@ dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-checksums
 	@echo "Test locally:"
 	@echo "  ./scripts/install.sh --local $(DIST_DIR)"
 	@echo ""
-	@echo "Upload to GitHub release:"
-	@echo "  gh release create v$(VERSION) $(DIST_DIR)/*"
+	@echo "Cut a release (preferred — atomic tag + assets, runs in CI):"
+	@echo "  Actions UI -> 'Release' workflow -> Run workflow -> enter $(VERSION)"
+	@echo "  Or from the CLI: git tag $(VERSION) && git push origin $(VERSION)"
+	@echo ""
+	@echo "  NOTE: tag must be bare X.Y.Z, no 'v' prefix — the release"
+	@echo "  workflow + scripts/install.sh + 'defenseclaw upgrade' all"
+	@echo "  resolve artifacts under https://github.com/.../releases/tag/X.Y.Z"
 
 dist-cli: _bundle-data
 	@mkdir -p $(DIST_DIR)

@@ -605,6 +605,12 @@ func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, sou
 			attribute.String("defenseclaw.ai.discovery.privacy_mode", s.opts.Mode),
 		),
 	)
+	// Mirror tenant/workspace/device join keys from the process
+	// resource onto the discovery span so backends that drop OTel
+	// resource on span rows still surface deployment context next
+	// to the trace — same parity guardrail spans get via
+	// telemetry.StartGuardrailStageSpan.
+	s.otel.SetSpanResourceContext(span)
 	defer span.End()
 
 	prev, prevErr := s.store.Load()
@@ -698,6 +704,7 @@ func (s *ContinuousDiscoveryService) scanSignals(ctx context.Context, full bool)
 		start := time.Now()
 		_, child := s.otel.Tracer().Start(ctx, "defenseclaw.ai.discovery.detector",
 			trace.WithAttributes(attribute.String("defenseclaw.ai.discovery.detector", name)))
+		s.otel.SetSpanResourceContext(child)
 		out, files, err := fn()
 		child.SetAttributes(attribute.Int("defenseclaw.ai.discovery.signals", len(out)))
 		if files > 0 {
@@ -1986,7 +1993,12 @@ func (s *ContinuousDiscoveryService) emitGatewayEvents(ctx context.Context, repo
 			StoreRawLocalPaths: opts.StoreRawLocalPaths,
 			Confidence:         snap.LookupSignal(sig),
 		})
-		s.events.Emit(gatewaylog.Event{
+		// EmitContext (not Emit) so the writer can stamp run_id /
+		// trace_id from the active discovery span — without this,
+		// AI-discovery rows in gateway.jsonl carry empty correlation
+		// fields and operators cannot pivot from a discovery span
+		// in Tempo to its envelope row in Loki/Splunk.
+		s.events.EmitContext(ctx, gatewaylog.Event{
 			EventType:   gatewaylog.EventAIDiscovery,
 			Severity:    gatewaylog.SeverityInfo,
 			AIDiscovery: payload,

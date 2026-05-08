@@ -27,13 +27,19 @@ import (
 
 var fallbackWriter io.Writer = os.Stderr
 
-func sendPlatform(title, message string) error {
-	// Use JSON encoding to safely escape all special characters (quotes,
-	// backslashes, newlines) for embedding in the AppleScript string literal.
-	// json.Marshal produces a quoted string with all metacharacters escaped;
-	// we use it directly as an AppleScript string value.
-	safeMsg, _ := json.Marshal(message)
-	safeTitle, _ := json.Marshal(title)
-	script := `display notification ` + string(safeMsg) + ` with title ` + string(safeTitle)
+// sendPlatform delivers the notification via osascript's
+// "display notification" verb. JSON encoding is used to safely escape
+// every field for embedding in the AppleScript string literals so
+// payload content (verdict reason, tool name, etc.) cannot break out
+// of the script — json.Marshal already produces a quoted string with
+// quotes, backslashes, and newlines escaped.
+func sendPlatform(n Notification) error {
+	body, _ := json.Marshal(n.Body)
+	title, _ := json.Marshal(n.Title)
+	script := "display notification " + string(body) + " with title " + string(title)
+	if n.Subtitle != "" {
+		subtitle, _ := json.Marshal(n.Subtitle)
+		script += " subtitle " + string(subtitle)
+	}
 	return exec.Command("osascript", "-e", script).Run()
 }

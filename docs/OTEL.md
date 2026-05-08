@@ -53,13 +53,13 @@ Set once at sidecar startup. Attached to every exported log, span, and metric.
 | `deployment.environment` | string | `macos` | `config.Environment` |
 | `tenant.id` | string | `tenant-a` | `config.tenant_id` when set |
 | `workspace.id` | string | `workspace-1` | `config.workspace_id` when set |
-| `deployment.mode` | string | `standalone` | `config.deployment_mode` when set |
+| `deployment.mode` | string | `managed_enterprise` | `config.deployment_mode` when set. Allowed values: `managed_enterprise`, `unmanaged_byod`, `ci_cd`, `sandboxed`, `server`, `saas` |
 | `discovery.source` | string | `registry` | `config.discovery_source` when set |
 | `host.name` | string | `dgx-spark-01` | `os.Hostname()` |
 | `host.arch` | string | `arm64` | `runtime.GOARCH` |
 | `os.type` | string | `darwin` | `runtime.GOOS` |
-| `defenseclaw.claw.mode` | string | Registered connector name, such as `openclaw`, `zeptoclaw`, `claudecode`, `codex`, `hermes`, `cursor`, `windsurf`, `geminicli`, or `copilot` (or `""` before connector setup) | `config.Claw.Mode` |
-| `defenseclaw.claw.home_dir` | string | Connector home/config root when the connector has one, such as `/home/user/.openclaw`, `/home/user/.zeptoclaw`, `/home/user/.claude`, `/home/user/.codex`, `/home/user/.hermes`, or `/home/user/.gemini` | resolved at startup |
+| `defenseclaw.claw.mode` | string | Registered connector name, such as `openclaw`, `zeptoclaw`, `claudecode`, `codex`, `hermes`, `cursor`, `windsurf`, `geminicli`, or `copilot` (or `""` before connector setup) | `config.ActiveConnector()` |
+| `defenseclaw.claw.home_dir` | string | Connector home/config root when the connector has one, such as `/home/user/.openclaw`, `/home/user/.zeptoclaw`, `/home/user/.claude`, `/home/user/.codex`, `/home/user/.hermes`, `/home/user/.cursor`, `/home/user/.codeium/windsurf`, `/home/user/.gemini`, or `/home/user/.copilot` | resolved at startup |
 | `defenseclaw.device.id` | string | `a1b2c3...` | DefenseClaw Ed25519 public-key fingerprint |
 | `defenseclaw.gateway.host` | string | `127.0.0.1` | `config.Gateway.Host` |
 | `defenseclaw.gateway.port` | int | `18789` | `config.Gateway.Port` |
@@ -804,6 +804,7 @@ schemas/otel/
   runtime-llm-span.schema.json
   runtime-approval-span.schema.json
   runtime-alert-event.schema.json
+  connector-telemetry-event.schema.json
   metrics.schema.json
 ```
 

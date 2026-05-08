@@ -348,7 +348,7 @@
       },
       "targets": [
         {
-          "expr": "topk(1, sum by (target) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"scan_finding\" [1h])))",
+          "expr": "topk(1, sum by (target) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" [1h])))",
           "refId": "A",
           "instant": true
         }
@@ -696,7 +696,7 @@
       },
       "targets": [
         {
-          "expr": "topk(20, sum by (target, rule_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"scan_finding\" | rule_id=~\"$rule_id\" [1h])))",
+          "expr": "topk(20, sum by (target, rule_id) (count_over_time({service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | rule_id=~\"$rule_id\" [1h])))",
           "refId": "A",
           "instant": true
         }
@@ -721,7 +721,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (verdict_stage, verdict_action) (increase(defenseclaw_gateway_verdicts_total[1h]))) and on() (sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id=~\"$rule_id\"}[1h])) > 0)",
+          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{action!=\"allow\"}[1h]))) and on() (sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id=~\"$rule_id\"}[1h])) > 0)",
           "instant": true,
           "format": "table",
           "refId": "A"
@@ -773,7 +773,7 @@
       "timeFrom": "1h",
       "targets": [
         {
-          "expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | defenseclaw_gateway_event_type=\"scan_finding\" | rule_id=~\"$rule_id\"",
+          "expr": "{service_namespace=~\"defenseclaw|ai-governance\"} | json | __error__=\"\" | event_type=\"scan_finding\" | rule_id=~\"$rule_id\"",
           "refId": "A"
         }
       ],

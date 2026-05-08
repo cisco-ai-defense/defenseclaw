@@ -68,6 +68,20 @@ _privacy_disable_redaction_warned = False
 DATA_DIR_NAME = ".defenseclaw"
 AUDIT_DB_NAME = "audit.db"
 CONFIG_FILE_NAME = "config.yaml"
+VALID_DEPLOYMENT_MODES = {
+    "managed_enterprise",
+    "unmanaged_byod",
+    "ci_cd",
+    "sandboxed",
+    "server",
+    "saas",
+}
+LEGACY_DEPLOYMENT_MODE_ALIASES = {
+    "managed": "managed_enterprise",
+    "standalone": "unmanaged_byod",
+    "ci": "ci_cd",
+    "edge": "server",
+}
 
 
 def _home() -> Path:
@@ -127,6 +141,20 @@ def detect_environment() -> str:
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
     return "linux"
+
+
+def _validate_deployment_mode(mode: str) -> str:
+    mode = (mode or "").strip()
+    if not mode:
+        return ""
+    mode = LEGACY_DEPLOYMENT_MODE_ALIASES.get(mode, mode)
+    if mode not in VALID_DEPLOYMENT_MODES:
+        raise ValueError(
+            f"config: deployment_mode={mode!r} is invalid "
+            "(allowed: managed_enterprise, unmanaged_byod, "
+            "ci_cd, sandboxed, server, saas)"
+        )
+    return mode
 
 
 _sandbox_mode_cache: bool | None = None
@@ -727,6 +755,14 @@ class AssetTypePolicy:
     allowed: list[AssetPolicyRule] = field(default_factory=list)
     denied: list[AssetPolicyRule] = field(default_factory=list)
     runtime_detection: AssetRuntimeDetectionConfig = field(default_factory=AssetRuntimeDetectionConfig)
+    # registry_empty_action mirrors the Go-side
+    # AssetTypePolicy.RegistryEmptyAction. When `registry_required`
+    # is on AND `registry` is empty, this controls admission:
+    # "deny" (default, fail-closed) / "warn" / "allow". The Python
+    # CLI doesn't make admission decisions but surfaces the field
+    # in `registry require` so operators see the implication of an
+    # empty list before the gateway starts denying traffic.
+    registry_empty_action: str = "deny"
 
 
 def _default_runtime_asset_type_policy() -> AssetTypePolicy:
@@ -750,6 +786,92 @@ class AssetPolicyConfig:
     mcp: AssetTypePolicy = field(default_factory=_default_runtime_asset_type_policy)
     skill: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
     plugin: AssetTypePolicy = field(default_factory=_default_nonruntime_asset_type_policy)
+
+
+# ---------------------------------------------------------------------------
+# Registries — external skill / MCP catalog sources that feed
+# ``asset_policy.{skill,mcp}.registry`` via the `defenseclaw registry sync`
+# pipeline. The block is round-tripped through load/save so operator-added
+# sources survive process restarts; the on-disk index lives separately
+# under ``~/.defenseclaw/registries/<id>/index.json`` (see
+# defenseclaw.registries.cache).
+# ---------------------------------------------------------------------------
+
+REGISTRY_KINDS: tuple[str, ...] = (
+    "clawhub",
+    "smithery",
+    "skills_sh",
+    "http_yaml",
+    "http_json",
+    "git",
+    "file",
+)
+"""Allow-list of recognised registry source kinds.
+
+Anything outside this set is rejected at validation time by both the
+CLI (``registry add --kind ...``) and the loader. Adding a new kind
+requires a matching adapter under ``cli/defenseclaw/registries/`` and a
+corresponding match in :func:`registries.adapters.dispatch`.
+"""
+
+REGISTRY_CONTENT_TYPES: tuple[str, ...] = ("skill", "mcp", "both")
+
+
+@dataclass
+class RegistrySource:
+    """One registry source entry inside ``registries.sources[]``.
+
+    Mirrors the Go-side ``internal/config.RegistrySource``. Field
+    semantics:
+
+    * ``id``                  — operator-chosen identifier (unique,
+                                kebab-case recommended). Used as the
+                                ``Reason: "registry:<id>"`` provenance
+                                tag on every promoted ``AssetPolicyRule``
+                                and as the cache directory name.
+    * ``kind``                — one of :data:`REGISTRY_KINDS`. Selects
+                                which adapter handles ``fetch()``.
+    * ``url``                 — manifest URL / git URL / local path.
+                                Empty for ``kind="clawhub"`` (uses the
+                                npm openclaw package by convention).
+    * ``content``             — declared content type — must be one of
+                                :data:`REGISTRY_CONTENT_TYPES`. Adapters
+                                that publish only one type (clawhub /
+                                smithery) ignore this field.
+    * ``auth_env``            — env var holding a bearer token, never
+                                the literal token. Empty disables auth.
+    * ``enabled``             — when False the source is preserved in
+                                config but skipped by ``sync --all``.
+    * ``auto_sync``           — RESERVED. Scheduled sync is not yet
+                                implemented; setting this to True today
+                                does NOT cause periodic ingest.
+                                Persisted so a v1 -> v2 operator config
+                                doesn't lose the bit. Run
+                                ``defenseclaw registry sync --all`` (or
+                                schedule it via cron) until the v2
+                                scheduler ships.
+    * ``sync_interval_hours`` — RESERVED. Paired with ``auto_sync``;
+                                ignored at runtime today.
+    * ``last_sync``           — ISO-8601 UTC timestamp; populated by
+                                the sync command on success.
+    * ``last_status``         — ``ok`` or ``error: <reason>``.
+    """
+
+    id: str = ""
+    kind: str = "http_yaml"
+    url: str = ""
+    content: str = "skill"
+    auth_env: str = ""
+    enabled: bool = True
+    auto_sync: bool = False
+    sync_interval_hours: int = 24
+    last_sync: str = ""
+    last_status: str = ""
+
+
+@dataclass
+class RegistriesConfig:
+    sources: list[RegistrySource] = field(default_factory=list)
 
 
 @dataclass
@@ -925,6 +1047,63 @@ class GuardrailConfig:
 
 
 @dataclass
+class NotificationSourceFilter:
+    """Per-source toggles for the user-session notifier dispatcher.
+
+    Mirrors :class:`config.NotificationSourceFilter` in
+    ``internal/config/notifications.go``. Defaults are all True so a
+    fresh ``notifications.enabled: true`` install reports every
+    block surface; operators dial down by flipping individual
+    sub-fields off.
+    """
+
+    hook: bool = True
+    guardrail: bool = True
+    asset_policy: bool = True
+
+
+def _default_notifications_enabled() -> bool:
+    """Mirror Go's ``config.DefaultNotificationsEnabled``.
+
+    Darwin is the only platform with a consumer-grade desktop
+    notification surface that every user already has running, so it
+    opts in by default. Every other OS waits for an explicit
+    ``defenseclaw setup notifications on`` opt-in. Implemented as a
+    free function (not a literal default) so the platform check is
+    evaluated at config-construction time, not module-import time —
+    important for unit tests that monkey-patch ``platform.system``.
+    """
+    return platform.system() == "Darwin"
+
+
+@dataclass
+class NotificationsConfig:
+    """User-session OS notifications. Mirrors internal/config.NotificationsConfig.
+
+    Master switch ``enabled`` defaults to ``True`` on darwin and
+    ``False`` elsewhere — same matrix as Go's
+    ``DefaultNotificationsEnabled``. ``defenseclaw setup
+    notifications`` (the single-prompt onboarding wizard) is still
+    the canonical opt-in path; operators dialing noise back down can
+    flip individual category / source / throttle fields.
+
+    Throttle defaults match the Go side
+    (``dedup_window=30s``, ``max_per_minute=12``); zero values are
+    interpreted as "use the default" rather than "no throttle".
+    """
+
+    enabled: bool = field(default_factory=_default_notifications_enabled)
+    block_enforced: bool = True
+    block_would_block: bool = True
+    hitl_approval: bool = True
+    sources: NotificationSourceFilter = field(default_factory=NotificationSourceFilter)
+    # Stored as the same string viper accepts on the Go side so the
+    # YAML round-trips through both ends without translation.
+    dedup_window: str = "30s"
+    max_per_minute: int = 12
+
+
+@dataclass
 class PrivacyConfig:
     """Privacy / redaction toggles. Mirrors internal/config.PrivacyConfig.
 
@@ -998,14 +1177,19 @@ class Config:
     mcp_actions: MCPActionsConfig = field(default_factory=MCPActionsConfig)
     plugin_actions: PluginActionsConfig = field(default_factory=PluginActionsConfig)
     asset_policy: AssetPolicyConfig = field(default_factory=AssetPolicyConfig)
+    registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
+    notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
     def claw_home_dir(self) -> str:
-        return _expand(self.claw.home_dir)
+        return connector_paths.connector_home(
+            self.active_connector(),
+            openclaw_home=self.claw.home_dir,
+        ) or _expand(self.claw.home_dir)
 
     def active_connector(self) -> str:
         """Return the canonical connector name for this config.
@@ -1248,9 +1432,32 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         d.pop("privacy", None)
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
+    # Mirror Go's ``yaml:"notifications,omitempty"`` — when the
+    # block is at full defaults (master switch off, every category /
+    # source still on, default throttles) drop it so legacy configs
+    # that never opted in stay byte-identical after a load/save
+    # round-trip. The block reappears the moment any field is
+    # touched (e.g. ``setup notifications`` flipping ``enabled:
+    # true``).
+    notifications = d.get("notifications")
+    if isinstance(notifications, dict) and notifications == _default_notifications_dict():
+        d.pop("notifications", None)
     if d.get("asset_policy") == _default_asset_policy_dict():
         d.pop("asset_policy", None)
+    # Drop the registries: block when no sources are configured so an
+    # operator-untouched config stays byte-identical after a load/save
+    # round-trip. The block reappears the moment any source is added.
+    registries = d.get("registries")
+    if isinstance(registries, dict):
+        sources = registries.get("sources") or []
+        if not sources:
+            d.pop("registries", None)
     return d
+
+
+def _default_notifications_dict() -> dict[str, Any]:
+    from dataclasses import asdict
+    return asdict(NotificationsConfig())
 
 
 def _default_asset_policy_dict() -> dict[str, Any]:
@@ -1445,6 +1652,9 @@ def _merge_asset_type_policy(raw: dict[str, Any] | None, *, runtime: bool) -> As
             allowed=_merge_asset_rules(raw.get("allowed")),
             denied=_merge_asset_rules(raw.get("denied")),
             runtime_detection=_merge_asset_runtime_detection(raw.get("runtime_detection")),
+            registry_empty_action=str(
+                raw.get("registry_empty_action", "deny") or "deny",
+            ).strip().lower(),
         )
     if not runtime:
         base.runtime_detection = AssetRuntimeDetectionConfig(
@@ -1463,6 +1673,78 @@ def _merge_asset_runtime_detection(raw: dict[str, Any] | None) -> AssetRuntimeDe
         terminal_commands=bool(raw.get("terminal_commands", True)),
         unknown_terminal_mcp=str(raw.get("unknown_terminal_mcp", "observe") or "observe"),
     )
+
+
+def _merge_registries(raw: Any) -> RegistriesConfig:
+    """Build a :class:`RegistriesConfig` from the YAML ``registries:`` block.
+
+    Unknown ``kind`` / ``content`` values are coerced to safe defaults
+    (``http_yaml`` / ``skill``) rather than raising — the loader has to
+    survive on best-effort because corrupted config files are recoverable
+    only if every other section still loads. The CLI's ``registry add``
+    flow validates strictly so user-driven entries always land in the
+    canonical shape.
+
+    Coercions are logged at WARNING via :mod:`logging` (also written
+    to stderr at startup) so a typo in ``kind:`` doesn't sit hidden
+    inside the loader; without the warning operators previously hit
+    cryptic "no entries returned" failures during sync because the
+    coerced ``http_yaml`` adapter would fetch the wrong URL shape.
+
+    Sources with an empty ``id`` are silently skipped — they cannot be
+    addressed by ``registry sync <id>`` anyway and would only confuse
+    downstream code.
+    """
+    if not isinstance(raw, dict):
+        return RegistriesConfig()
+    raw_sources = raw.get("sources")
+    if not isinstance(raw_sources, list):
+        return RegistriesConfig()
+    sources: list[RegistrySource] = []
+    seen_ids: set[str] = set()
+    for entry in raw_sources:
+        if not isinstance(entry, dict):
+            continue
+        sid = str(entry.get("id", "") or "").strip()
+        if not sid or sid in seen_ids:
+            continue
+        seen_ids.add(sid)
+        raw_kind = str(entry.get("kind", "http_yaml") or "http_yaml").strip()
+        kind = raw_kind.lower()
+        if kind not in REGISTRY_KINDS:
+            _log.warning(
+                "registries.sources[id=%r]: unknown kind %r; coercing to "
+                "'http_yaml'. Valid kinds: %s",
+                sid, raw_kind, ", ".join(REGISTRY_KINDS),
+            )
+            kind = "http_yaml"
+        raw_content = str(entry.get("content", "skill") or "skill").strip()
+        content = raw_content.lower()
+        if content not in REGISTRY_CONTENT_TYPES:
+            _log.warning(
+                "registries.sources[id=%r]: unknown content %r; coercing to "
+                "'skill'. Valid content types: %s",
+                sid, raw_content, ", ".join(REGISTRY_CONTENT_TYPES),
+            )
+            content = "skill"
+        sync_interval = entry.get("sync_interval_hours", 24)
+        try:
+            sync_interval_int = max(0, int(sync_interval))
+        except (TypeError, ValueError):
+            sync_interval_int = 24
+        sources.append(RegistrySource(
+            id=sid,
+            kind=kind,
+            url=str(entry.get("url", "") or ""),
+            content=content,
+            auth_env=str(entry.get("auth_env", "") or ""),
+            enabled=bool(entry.get("enabled", True)),
+            auto_sync=bool(entry.get("auto_sync", False)),
+            sync_interval_hours=sync_interval_int,
+            last_sync=str(entry.get("last_sync", "") or ""),
+            last_status=str(entry.get("last_status", "") or ""),
+        ))
+    return RegistriesConfig(sources=sources)
 
 
 def _merge_asset_rules(raw: Any) -> list[AssetPolicyRule]:
@@ -1878,7 +2160,7 @@ def load() -> Config:
         environment=raw.get("environment", detect_environment()),
         tenant_id=raw.get("tenant_id", ""),
         workspace_id=raw.get("workspace_id", ""),
-        deployment_mode=raw.get("deployment_mode", ""),
+        deployment_mode=_validate_deployment_mode(raw.get("deployment_mode", "")),
         discovery_source=raw.get("discovery_source", ""),
         claw=ClawConfig(
             mode=raw.get("claw", {}).get("mode", "openclaw"),
@@ -1953,9 +2235,11 @@ def load() -> Config:
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),
         plugin_actions=_merge_plugin_actions(raw.get("plugin_actions")),
         asset_policy=_merge_asset_policy(raw.get("asset_policy")),
+        registries=_merge_registries(raw.get("registries")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
         privacy=_merge_privacy(raw.get("privacy")),
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
+        notifications=_merge_notifications(raw.get("notifications")),
     )
     _migrate_llm_fields(cfg)
     _warn_disable_redaction_config(cfg)
@@ -1998,6 +2282,61 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         emit_otel=bool(raw.get("emit_otel", True)),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
+    )
+
+
+def _merge_notifications(raw: dict[str, Any] | None) -> NotificationsConfig:
+    """Build a :class:`NotificationsConfig` from the YAML ``notifications:`` block.
+
+    Defaults are platform-conditional for the master switch (true on
+    darwin, false elsewhere — see :func:`_default_notifications_enabled`)
+    and on for every category and source so that once an operator
+    opts in via ``defenseclaw setup notifications`` they immediately
+    see every block surface; tuning down is then a matter of
+    flipping the explicit per-category / per-source keys.
+
+    Throttle defaults (``dedup_window=30s``, ``max_per_minute=12``)
+    mirror :data:`NotificationsDefaultDedupWindow` /
+    :data:`NotificationsDefaultMaxPerMinute` in the Go config so a
+    YAML file written from either end loads identically on the
+    other.
+    """
+    defaults = NotificationsConfig()
+    if not isinstance(raw, dict):
+        return defaults
+
+    sources_raw = raw.get("sources")
+    if isinstance(sources_raw, dict):
+        sources = NotificationSourceFilter(
+            hook=bool(sources_raw.get("hook", defaults.sources.hook)),
+            guardrail=bool(sources_raw.get("guardrail", defaults.sources.guardrail)),
+            asset_policy=bool(
+                sources_raw.get("asset_policy", defaults.sources.asset_policy),
+            ),
+        )
+    else:
+        sources = NotificationSourceFilter()
+
+    dedup_raw = raw.get("dedup_window", defaults.dedup_window)
+    dedup_window = (
+        str(dedup_raw).strip() if dedup_raw not in (None, "") else defaults.dedup_window
+    )
+
+    try:
+        max_per_minute = int(raw.get("max_per_minute", defaults.max_per_minute))
+    except (TypeError, ValueError):
+        max_per_minute = defaults.max_per_minute
+    if max_per_minute < 0:
+        max_per_minute = defaults.max_per_minute
+
+    return NotificationsConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        block_enforced=bool(raw.get("block_enforced", defaults.block_enforced)),
+        block_would_block=bool(raw.get("block_would_block", defaults.block_would_block)),
+        hitl_approval=bool(raw.get("hitl_approval", defaults.hitl_approval)),
+        sources=sources,
+        dedup_window=dedup_window,
+        max_per_minute=max_per_minute,
     )
 
 

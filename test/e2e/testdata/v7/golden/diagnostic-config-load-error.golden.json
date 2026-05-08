@@ -7,6 +7,7 @@
   },
   "event_type": "diagnostic",
   "generation": 1,
+  "run_id": "\u003cstripped\u003e",
   "schema_version": 7,
   "severity": "INFO",
   "sidecar_instance_id": "\u003cstripped\u003e",

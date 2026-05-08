@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, NamedTuple
 
+from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
 from defenseclaw.models import ActionEntry, Finding, ScanResult
 
@@ -135,6 +136,7 @@ def build_claw_aibom(
         "memory": _parse_memory(cache.get("memory_status")) if "memory" in cats else [],
         "errors": errors,
     }
+    _attach_connector_paths(out, cfg, connector)
     out["summary"] = _build_summary(out)
     return out
 
@@ -455,11 +457,19 @@ def format_claw_aibom_human(
     console = Console(stderr=False)
     mode = "live" if inv.get("live") else "disk"
 
+    connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw")
+    title = "OpenClaw AIBOM" if connector.lower() == "openclaw" else f"{connector} AIBOM"
+    home = inv.get("connector_home") or inv.get("claw_home", "")
+    config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
+    primary_config = next((c for c in config_files if c), "")
     console.print()
-    console.print(f"[bold]OpenClaw AIBOM[/bold]  (source: {mode})")
-    console.print(f"  Config:    {inv.get('openclaw_config', '')}")
-    console.print(f"  Claw home: {inv.get('claw_home', '')}")
-    console.print(f"  Mode:      {inv.get('claw_mode', '')}")
+    console.print(f"[bold]{title}[/bold]  (source: {mode})")
+    if primary_config:
+        console.print(f"  Config:    {primary_config}")
+    if home:
+        console.print(f"  Home:      {home}")
+    if inv.get("claw_mode"):
+        console.print(f"  Mode:      {inv.get('claw_mode', '')}")
     console.print()
 
     _render_summary(console, inv)
@@ -475,6 +485,82 @@ def format_claw_aibom_human(
         _render_memory(console, inv.get("memory", []))
 
     _render_errors(console, inv.get("errors", []))
+
+
+# ---------------------------------------------------------------------------
+# Polymorphic-path attachment
+#
+# These keys ride alongside the historical ``openclaw_config`` /
+# ``claw_home`` for back-compat (existing TUI / Go consumers still
+# parse those). New consumers should prefer ``connector_home`` /
+# ``connector_config_files`` / ``connector_skill_dirs`` /
+# ``connector_plugin_dirs`` / ``connector_mcp_files`` because they
+# carry the right value for non-OpenClaw connectors instead of an
+# ``~/.openclaw`` fallback that confuses operators running the CLI
+# against e.g. Codex or Claude Code. See ``internal/tui/inventory.go``
+# for the renderer side that picks the polymorphic value when it's
+# present and falls back to the legacy keys otherwise.
+# ---------------------------------------------------------------------------
+
+def _attach_connector_paths(
+    out: dict[str, Any], cfg: Config, connector: str,
+) -> None:
+    """Populate ``connector_*`` polymorphic path fields on *out*.
+
+    Best-effort: any helper that raises is silently elided so a
+    misconfigured cfg never hijacks the inventory pipeline. The
+    legacy ``openclaw_config`` / ``claw_home`` keys remain populated
+    by the caller — this helper only ADDs polymorphic siblings.
+    """
+    try:
+        out["connector_home"] = connector_paths.connector_home(
+            connector,
+            openclaw_home=cfg.claw.home_dir,
+        )
+    except Exception:
+        out["connector_home"] = ""
+    try:
+        out["connector_config_files"] = connector_paths.connector_config_files(
+            connector,
+            openclaw_config=cfg.claw.config_file,
+            openclaw_home=cfg.claw.home_dir,
+        )
+    except Exception:
+        out["connector_config_files"] = []
+    try:
+        out["connector_skill_dirs"] = list(cfg.skill_dirs())
+    except Exception:
+        out["connector_skill_dirs"] = []
+    try:
+        out["connector_plugin_dirs"] = list(cfg.plugin_dirs())
+    except Exception:
+        out["connector_plugin_dirs"] = []
+    try:
+        out["connector_mcp_files"] = list(_collect_mcp_config_files(connector, cfg))
+    except Exception:
+        out["connector_mcp_files"] = []
+
+
+def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
+    """Return the on-disk MCP config files for *connector*.
+
+    Re-uses :func:`connector_paths.connector_config_files` and filters
+    for entries that look like an MCP-aware file. We err on the side of
+    "show what could be the source" — the renderer is read-only and
+    operators benefit from seeing both the existing file and the
+    expected location.
+    """
+    candidates = connector_paths.connector_config_files(
+        connector,
+        openclaw_config=cfg.claw.config_file,
+        openclaw_home=cfg.claw.home_dir,
+    )
+    out: list[str] = []
+    for path in candidates:
+        base = os.path.basename(path).lower()
+        if base.endswith(".json") or base.endswith(".toml") or base.endswith(".yaml") or base.endswith(".yml"):
+            out.append(path)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1686,6 +1772,7 @@ def _build_aibom_from_filesystem(
         "memory": memory,
         "errors": errors,
     }
+    _attach_connector_paths(out, cfg, connector)
     out["summary"] = _build_summary(out)
     return out
 

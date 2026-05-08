@@ -104,6 +104,12 @@ func (c *Config) activeConnector() string {
 	return "openclaw"
 }
 
+// ActiveConnector returns the resolved connector name for external packages
+// that need to stamp connector-scoped telemetry/resource attributes.
+func (c *Config) ActiveConnector() string {
+	return c.activeConnector()
+}
+
 // ReadMCPServers returns the MCP servers for the active connector.
 // When guardrail.connector is set, it dispatches to the connector-specific
 // reader. Falls back to the OpenClaw path for backward compatibility.
@@ -328,7 +334,38 @@ func (c *Config) InstalledSkillCandidates(skillName string) []string {
 
 // ClawHomeDir returns the resolved home directory for the active claw framework.
 func (c *Config) ClawHomeDir() string {
-	return expandPath(c.Claw.HomeDir)
+	return c.ConnectorHomeDir(c.activeConnector())
+}
+
+// ConnectorHomeDir returns the conventional home/config root for a connector.
+// OpenClaw uses the configured claw.home_dir; the hook-native connectors use
+// the vendor paths their setup and discovery flows write/read.
+func (c *Config) ConnectorHomeDir(connector string) string {
+	home, _ := os.UserHomeDir()
+
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "claudecode":
+		return filepath.Join(home, ".claude")
+	case "codex":
+		return filepath.Join(home, ".codex")
+	case "zeptoclaw":
+		return filepath.Join(home, ".zeptoclaw")
+	case "hermes":
+		return filepath.Join(home, ".hermes")
+	case "cursor":
+		return filepath.Join(home, ".cursor")
+	case "windsurf":
+		return filepath.Join(home, ".codeium", "windsurf")
+	case "geminicli":
+		return filepath.Join(home, ".gemini")
+	case "copilot":
+		return filepath.Join(home, ".copilot")
+	default:
+		if c == nil {
+			return expandPath("~/.openclaw")
+		}
+		return expandPath(c.Claw.HomeDir)
+	}
 }
 
 // dedup removes duplicate paths while preserving order.

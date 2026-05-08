@@ -127,6 +127,31 @@ from defenseclaw.commands.cmd_setup_provider import provider  # noqa: E402
 setup.add_command(provider)
 
 
+# Local LLM providers that run on-box and don't require an API key.
+# Kept in lockstep with _LOCAL_LLM_PROVIDERS in defenseclaw/config.py and
+# IsLocalProvider() in internal/config/config.go.
+_LOCAL_LLM_WIZARD_PROVIDERS = {"ollama", "vllm", "lm_studio", "lmstudio"}
+
+# Default base URLs for local providers so the wizard can offer a sane
+# prefill. Operators can still override to point at a shared LAN host.
+_LOCAL_LLM_DEFAULT_BASE_URL = {
+    "ollama":    "http://127.0.0.1:11434",
+    "vllm":      "http://127.0.0.1:8000/v1",
+    "lm_studio": "http://127.0.0.1:1234/v1",
+    "lmstudio":  "http://127.0.0.1:1234/v1",
+}
+
+# Provider choices offered in the wizard. Cloud providers first (most
+# operators), then local runtimes. The list is a superset of guardrail's
+# KNOWN_PROVIDERS so the wizard can configure Ollama/vLLM without edits
+# to that module.
+_WIZARD_LLM_PROVIDERS = [
+    "anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai",
+    "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai",
+    "ollama", "vllm", "lm_studio",
+]
+
+
 # --------------------------------------------------------------------------
 # `defenseclaw setup migrate-llm`
 # --------------------------------------------------------------------------
@@ -274,8 +299,45 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     default=False,
     help="Print the current unified LLM config and exit (no prompts).",
 )
+@click.option(
+    "--provider",
+    type=click.Choice(_WIZARD_LLM_PROVIDERS, case_sensitive=False),
+    default=None,
+    help="LLM provider to write non-interactively.",
+)
+@click.option("--model", default=None, help="LLM model id to write non-interactively.")
+@click.option(
+    "--api-key-env",
+    default=None,
+    help="Environment variable name holding the LLM API key.",
+)
+@click.option(
+    "--api-key",
+    default=None,
+    help="Secret value to persist into ~/.defenseclaw/.env under --api-key-env.",
+)
+@click.option("--base-url", default=None, help="Provider base URL override.")
+@click.option("--timeout", type=int, default=None, help="LLM timeout in seconds.")
+@click.option("--max-retries", type=int, default=None, help="LLM retry count.")
+@click.option(
+    "--non-interactive",
+    "--accept-defaults",
+    is_flag=True,
+    help="Use flags/current defaults instead of prompting.",
+)
 @pass_ctx
-def setup_llm(app: AppContext, show: bool) -> None:
+def setup_llm(
+    app: AppContext,
+    show: bool,
+    provider: str | None,
+    model: str | None,
+    api_key_env: str | None,
+    api_key: str | None,
+    base_url: str | None,
+    timeout: int | None,
+    max_retries: int | None,
+    non_interactive: bool,
+) -> None:
     """Configure the unified top-level ``llm:`` block.
 
     Prompts for provider, model, API key env var, and base URL, writing
@@ -309,6 +371,32 @@ def setup_llm(app: AppContext, show: bool) -> None:
         ux.subhead(
             "To change: run 'defenseclaw setup llm' without --show.",
         )
+        return
+
+    if non_interactive:
+        _configure_llm_non_interactive(
+            cfg,
+            cfg.data_dir,
+            provider=provider,
+            model=model,
+            api_key_env=api_key_env,
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        cfg.save()
+
+        click.echo()
+        ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
+        resolved = cfg.resolve_llm("")
+        key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+        key_state = _mask(os.environ.get(key_env, "")) if os.environ.get(key_env, "") else "(not set)"
+        ux.kv("llm.provider", resolved.provider or "(unset)")
+        ux.kv("llm.model", resolved.model or "(unset)")
+        ux.kv("llm.api_key_env", f"{key_env} = {key_state}")
+        if resolved.base_url:
+            ux.kv("llm.base_url", resolved.base_url)
         return
 
     click.echo()
@@ -350,7 +438,12 @@ def setup_llm(app: AppContext, show: bool) -> None:
               help="LLM provider (anthropic or openai)")
 @click.option("--llm-model", default=None, help="LLM model name")
 @click.option("--llm-consensus-runs", type=int, default=None, help="LLM consensus runs (0=disabled)")
-@click.option("--policy", default=None, help="Scan policy preset (strict, balanced, permissive)")
+@click.option(
+    "--policy",
+    default=None,
+    type=click.Choice(["strict", "balanced", "permissive", "none"], case_sensitive=False),
+    help="Scan policy preset (strict, balanced, permissive, none)",
+)
 @click.option("--lenient", is_flag=True, default=None, help="Tolerate malformed skills")
 @click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
@@ -398,7 +491,7 @@ def setup_skill_scanner(
         if llm_consensus_runs is not None:
             sc.llm_consensus_runs = llm_consensus_runs
         if policy is not None:
-            sc.policy = policy
+            sc.policy = "" if policy.lower() == "none" else policy.lower()
         if lenient is not None:
             sc.lenient = lenient
     else:
@@ -491,31 +584,6 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     sc.lenient = click.confirm("  Lenient mode (tolerate malformed skills)?", default=sc.lenient)
 
 
-# Local LLM providers that run on-box and don't require an API key.
-# Kept in lockstep with _LOCAL_LLM_PROVIDERS in defenseclaw/config.py and
-# IsLocalProvider() in internal/config/config.go.
-_LOCAL_LLM_WIZARD_PROVIDERS = {"ollama", "vllm", "lm_studio", "lmstudio"}
-
-# Default base URLs for local providers so the wizard can offer a sane
-# prefill. Operators can still override to point at a shared LAN host.
-_LOCAL_LLM_DEFAULT_BASE_URL = {
-    "ollama":    "http://127.0.0.1:11434",
-    "vllm":      "http://127.0.0.1:8000/v1",
-    "lm_studio": "http://127.0.0.1:1234/v1",
-    "lmstudio":  "http://127.0.0.1:1234/v1",
-}
-
-# Provider choices offered in the wizard. Cloud providers first (most
-# operators), then local runtimes. The list is a superset of guardrail's
-# KNOWN_PROVIDERS so the wizard can configure Ollama/vLLM without edits
-# to that module.
-_WIZARD_LLM_PROVIDERS = [
-    "anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai",
-    "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai",
-    "ollama", "vllm", "lm_studio",
-]
-
-
 def _configure_llm(cfg, data_dir: str) -> None:
     """Prompt for unified ``llm:`` settings (provider, model, API key).
 
@@ -604,6 +672,63 @@ def _configure_llm(cfg, data_dir: str) -> None:
     # inspect_llm → llm one-way when llm is empty, so leaving the old
     # block populated after a successful wizard run would round-trip a
     # redundant copy of the same values into YAML.
+    _clear_legacy_llm_fields(cfg)
+
+
+def _configure_llm_non_interactive(
+    cfg,
+    data_dir: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key_env: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
+) -> None:
+    """Apply unified ``llm:`` settings without prompting.
+
+    Secret values supplied through ``--api-key`` are written to the
+    env-backed ``.env`` store and never persisted into ``config.yaml``.
+    """
+    llm = cfg.llm
+    if provider is not None:
+        llm.provider = provider.strip().lower()
+    elif not llm.provider:
+        llm.provider = "anthropic"
+
+    if model is not None:
+        llm.model = model.strip()
+
+    is_local = llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS
+    if is_local:
+        llm.api_key = ""
+        llm.api_key_env = ""
+        if base_url is not None:
+            llm.base_url = base_url.strip()
+        elif not llm.base_url:
+            llm.base_url = _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
+    else:
+        env_name = (api_key_env or llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV).strip()
+        if not env_name:
+            env_name = DEFENSECLAW_LLM_KEY_ENV
+        if api_key:
+            _save_secret_to_dotenv(env_name, api_key, data_dir)
+        llm.api_key = ""
+        llm.api_key_env = env_name
+        if base_url is not None:
+            llm.base_url = base_url.strip()
+
+    if timeout is not None:
+        llm.timeout = timeout
+    elif not llm.timeout:
+        llm.timeout = 30
+    if max_retries is not None:
+        llm.max_retries = max_retries
+    elif not llm.max_retries:
+        llm.max_retries = 2
+
     _clear_legacy_llm_fields(cfg)
 
 
@@ -1383,7 +1508,7 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/ and subprocess policy files",
     ),
     "codex": (
-        "~/.codex/config.toml hooks / features.codex_hooks",
+        "~/.codex/config.toml hooks / features.hooks / hook trust state",
         "~/.codex/config.toml otel / notify",
         "Optional CodeGuard native skill only when explicitly installed",
         "~/.defenseclaw/hooks/ and notify bridge files",
@@ -2528,6 +2653,167 @@ _OBSERVABILITY_ONLY_CONNECTORS = frozenset({
 })
 
 
+def _setup_guardrail_connector_alias(
+    app: AppContext,
+    *,
+    connector: str,
+    yes: bool,
+    non_interactive: bool,
+    guard_mode: str | None,
+    scanner_mode: str | None,
+    cisco_endpoint: str | None,
+    cisco_api_key_env: str | None,
+    cisco_timeout_ms: int | None,
+    guard_port: int | None,
+    block_message: str | None,
+    detection_strategy: str | None,
+    rule_pack: str | None,
+    judge_model: str | None,
+    judge_api_base: str | None,
+    judge_api_key_env: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
+    disable_redaction: bool | None,
+    restart: bool,
+    verify: bool,
+) -> None:
+    """Run the full guardrail setup backend for a specific connector."""
+    if connector not in _GUARDRAIL_SUPPORTING_CONNECTORS:
+        raise click.ClickException(
+            f"{connector!r} is not a guardrail-capable connector"
+        )
+
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    click.echo()
+    click.echo(f"  DefenseClaw — {label} guardrail setup")
+    click.echo("  ─────────────────────────────────────────────────────────")
+    click.echo()
+    click.echo(f"  This pins claw.mode={connector} and guardrail.connector={connector},")
+    click.echo("  then runs the same non-interactive backend as `setup guardrail`.")
+    click.echo()
+
+    if not (yes or non_interactive):
+        if not click.confirm(f"  Configure {label} guardrail now?", default=True):
+            click.echo("  Aborted — no changes made.")
+            return
+
+    app.cfg.claw.mode = connector
+    app.cfg.guardrail.connector = connector
+    _write_picked_connector_hint(getattr(app.cfg, "data_dir", None), connector)
+
+    ctx = click.get_current_context()
+    ctx.invoke(
+        setup_guardrail,
+        disable=False,
+        agent_name=connector,
+        guard_mode=guard_mode,
+        guard_port=guard_port,
+        scanner_mode=scanner_mode,
+        cisco_endpoint=cisco_endpoint,
+        cisco_api_key_env=cisco_api_key_env,
+        cisco_timeout_ms=cisco_timeout_ms,
+        block_message=block_message,
+        detection_strategy=detection_strategy,
+        rule_pack=rule_pack,
+        judge_model=judge_model,
+        judge_api_base=judge_api_base,
+        judge_api_key_env=judge_api_key_env,
+        human_approval=human_approval,
+        hilt_min_severity=hilt_min_severity,
+        disable_redaction=disable_redaction,
+        restart=restart,
+        verify=verify,
+        non_interactive=True,
+    )
+
+
+def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
+    """Create ``defenseclaw setup openclaw|zeptoclaw`` aliases."""
+    label = _CONNECTOR_META[connector]["label"]
+
+    @click.command(
+        connector,
+        help=(
+            f"Configure DefenseClaw guardrail for {label}.\n\n"
+            "Pins claw.mode and guardrail.connector, then runs the "
+            "same backend as `defenseclaw setup guardrail --connector ...`."
+        ),
+        short_help=f"Configure {label} guardrail setup.",
+    )
+    @click.option("--yes", "-y", "yes", is_flag=True, help="Skip confirmation prompt.")
+    @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Alias for --yes.")
+    @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None, help="Guardrail mode.")
+    @click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None, help="Scanner mode.")
+    @click.option("--cisco-endpoint", default=None, help="Cisco AI Defense API endpoint.")
+    @click.option("--cisco-api-key-env", default=None, help="Env var name holding Cisco AI Defense API key.")
+    @click.option("--cisco-timeout-ms", type=int, default=None, help="Cisco AI Defense timeout (ms).")
+    @click.option("--port", "guard_port", type=int, default=None, help="Guardrail proxy port.")
+    @click.option("--block-message", default=None, help="Custom block message.")
+    @click.option("--detection-strategy", type=click.Choice(["regex_only", "regex_judge", "judge_first"]), default=None, help="Detection strategy.")
+    @click.option("--rule-pack", type=click.Choice(["default", "strict", "permissive"]), default=None, help="Guardrail rule-pack profile.")
+    @click.option("--judge-model", default=None, help="LLM judge model.")
+    @click.option("--judge-api-base", default=None, help="LLM judge API base URL.")
+    @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key.")
+    @click.option("--human-approval/--no-human-approval", default=None, help="Enable or disable human approval.")
+    @click.option("--hilt-min-severity", type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False), default=None, help="Minimum severity that asks for human approval.")
+    @click.option("--disable-redaction/--enable-redaction", default=None, help="Disable or enable prompt/log redaction.")
+    @click.option("--restart/--no-restart", default=True, show_default=True, help="Restart gateway after setup.")
+    @click.option("--verify/--no-verify", default=True, show_default=True, help="Run connectivity checks after setup.")
+    @pass_ctx
+    def _cmd(
+        app: AppContext,
+        yes: bool,
+        non_interactive: bool,
+        guard_mode: str | None,
+        scanner_mode: str | None,
+        cisco_endpoint: str | None,
+        cisco_api_key_env: str | None,
+        cisco_timeout_ms: int | None,
+        guard_port: int | None,
+        block_message: str | None,
+        detection_strategy: str | None,
+        rule_pack: str | None,
+        judge_model: str | None,
+        judge_api_base: str | None,
+        judge_api_key_env: str | None,
+        human_approval: bool | None,
+        hilt_min_severity: str | None,
+        disable_redaction: bool | None,
+        restart: bool,
+        verify: bool,
+    ) -> None:
+        _setup_guardrail_connector_alias(
+            app,
+            connector=connector,
+            yes=yes,
+            non_interactive=non_interactive,
+            guard_mode=guard_mode,
+            scanner_mode=scanner_mode,
+            cisco_endpoint=cisco_endpoint,
+            cisco_api_key_env=cisco_api_key_env,
+            cisco_timeout_ms=cisco_timeout_ms,
+            guard_port=guard_port,
+            block_message=block_message,
+            detection_strategy=detection_strategy,
+            rule_pack=rule_pack,
+            judge_model=judge_model,
+            judge_api_base=judge_api_base,
+            judge_api_key_env=judge_api_key_env,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            disable_redaction=disable_redaction,
+            restart=restart,
+            verify=verify,
+        )
+
+    _cmd.__name__ = f"setup_{connector}"
+    return _cmd
+
+
+for _guardrail_connector in ("openclaw", "zeptoclaw"):
+    setup.add_command(_make_guardrail_connector_setup_command(_guardrail_connector))
+
+
 def _apply_connector_mode_switch(
     app: AppContext,
     *,
@@ -2724,7 +3010,8 @@ def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> Non
       → hook/observability agents  observability-only (proxy off)
       from hook/observability      observe-only (proxy on, no enforce)
 
-    The TUI Overview's [m] action calls this command directly.
+    The TUI Overview's [m] action now runs full connector setup
+    aliases instead. This command remains the fast/scripted switch.
 
     Examples:
 
@@ -2874,6 +3161,335 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
             "config",
             f"disable_redaction={desired!s}",
         )
+
+
+@setup.command("notifications")
+@click.argument(
+    "action",
+    type=click.Choice(("on", "off", "status"), case_sensitive=False),
+    required=False,
+)
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help=(
+        "Skip the interactive confirmation prompt and accept the "
+        "default answer. Required for non-TTY callers (CI, scripts, "
+        "TUI shell-outs); without it the command may hang waiting "
+        "on stdin when invoked without an explicit on/off/status "
+        "argument."
+    ),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after toggling. The notification "
+        "dispatcher is built once at sidecar boot from "
+        "``notifications.*`` so a flip without restart leaves the "
+        "previous state in effect for the running process. Use "
+        "``--no-restart`` only when the sidecar is offline; the "
+        "``setup`` group's auto-restart hook will not double-bounce "
+        "the gateway because this command marks the restart as "
+        "handled."
+    ),
+)
+@pass_ctx
+def setup_notifications(
+    app: AppContext,
+    action: str | None,
+    yes: bool,
+    restart: bool,
+) -> None:
+    """Toggle user-session desktop notifications for blocks and HITL approvals.
+
+    \b
+    DefenseClaw can surface a desktop notification whenever a hook,
+    guardrail verdict, or asset policy blocks a tool call, or when a
+    Human-in-the-Loop approval is pending in the chat / TUI. The
+    notification is informational only — clicking it does not approve
+    or deny anything; the operator still replies in the existing
+    chat/CLI surface.
+    \b
+    With no argument this command is a one-shot Y/n onboarding
+    prompt:
+    \b
+      Show desktop notifications for blocks and approval requests? [Y/n]
+    \b
+    Use ``on`` / ``off`` to flip ``notifications.enabled`` directly,
+    and ``status`` to print the resolved configuration without
+    mutating it.
+    \b
+    Examples:
+      defenseclaw setup notifications
+      defenseclaw setup notifications on
+      defenseclaw setup notifications off --yes
+      defenseclaw setup notifications status
+    """
+    cfg = app.cfg
+    nc = cfg.notifications
+    current = bool(nc.enabled)
+
+    normalized = action.strip().lower() if action else None
+
+    if normalized == "status":
+        ux.section("Notifications state")
+        click.echo(
+            f"    {ux.dim('config (notifications.enabled):')} "
+            f"{'ON' if current else 'OFF'}"
+        )
+        click.echo(
+            f"    {ux.dim('block_enforced:')} {'on' if nc.block_enforced else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('block_would_block:')} {'on' if nc.block_would_block else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('hitl_approval:')} {'on' if nc.hitl_approval else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.hook:')} {'on' if nc.sources.hook else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.guardrail:')} "
+            f"{'on' if nc.sources.guardrail else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.asset_policy:')} "
+            f"{'on' if nc.sources.asset_policy else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('dedup_window:')} {nc.dedup_window or '30s'}"
+        )
+        click.echo(
+            f"    {ux.dim('max_per_minute:')} {nc.max_per_minute}"
+        )
+        return
+
+    if normalized in ("on", "off"):
+        desired = normalized == "on"
+    else:
+        # No explicit action -> interactive Y/n onboarding prompt.
+        # ``--yes`` short-circuits to the prompt's default (True).
+        if yes:
+            desired = True
+        else:
+            desired = click.confirm(
+                "  Show desktop notifications for blocks and approval requests?",
+                default=True,
+            )
+
+    if desired == current:
+        state = "ON" if current else "OFF"
+        click.echo(f"  • Notifications are already {state}; nothing to change.")
+        return
+
+    nc.enabled = desired
+
+    try:
+        cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise click.ClickException("config save failed") from exc
+
+    ux.ok(
+        f"notifications.enabled set to {desired!s} "
+        f"({'ON' if desired else 'OFF'})"
+    )
+
+    if restart:
+        ux.subhead(
+            "Restarting gateway so the notification dispatcher picks up the new state..."
+        )
+        # _restart_defense_gateway sets the per-context "restart
+        # already handled" flag, so the setup group's
+        # _auto_restart_sidecar_after_setup result callback won't
+        # bounce the gateway a second time after this one returns.
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        # Operator opted out of the restart explicitly; suppress the
+        # group-level auto-restart hook too so the operator sees one
+        # consistent "do it yourself" message instead of the hook
+        # contradicting us by bouncing the gateway anyway.
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        ux.warn(
+            "Skipped restart (--no-restart). The running sidecar still "
+            "uses the previous notification state. Restart manually:"
+        )
+        ux.subhead("   defenseclaw-gateway restart")
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-notifications-toggle",
+            "config",
+            f"enabled={desired!s}",
+        )
+
+
+# ``setup notifications`` is already a one-shot command (action is a
+# positional argument, not a subgroup) so we can't attach
+# ``set <key> <value>`` to it without breaking the existing
+# ``defenseclaw setup notifications on`` form. A flat sibling command
+# keeps the new surface discoverable (``setup --help`` lists it next
+# to ``notifications``) and avoids click's argument-vs-subcommand
+# parsing ambiguity.
+_NOTIFICATION_SLOTS: dict[str, tuple[str, str]] = {
+    # slot name (operator-typed)  ->  (object_path, attr)
+    # Categories (event types) live on the NotificationsConfig itself.
+    "block_enforced":     ("",        "block_enforced"),
+    "block_would_block":  ("",        "block_would_block"),
+    "hitl_approval":      ("",        "hitl_approval"),
+    # Sources live on the nested NotificationSourceFilter struct.
+    "sources.hook":       ("sources", "hook"),
+    "sources.guardrail":  ("sources", "guardrail"),
+    "sources.asset_policy": ("sources", "asset_policy"),
+    # Friendlier short forms for the source toggles. Keep both so
+    # ``--help`` callers and operators copying from ``status`` output
+    # land on a working invocation either way.
+    "hook":               ("sources", "hook"),
+    "guardrail":          ("sources", "guardrail"),
+    "asset_policy":       ("sources", "asset_policy"),
+}
+
+
+@setup.command("notifications-set")
+@click.argument(
+    "slot",
+    type=click.Choice(sorted(set(_NOTIFICATION_SLOTS.keys())), case_sensitive=False),
+)
+@click.argument(
+    "value",
+    type=click.Choice(("on", "off"), case_sensitive=False),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after the toggle. The notifier "
+        "dispatcher reads its filters at sidecar boot, so a flip "
+        "without restart leaves the running process on the previous "
+        "filter set."
+    ),
+)
+@pass_ctx
+def setup_notifications_set(
+    app: AppContext,
+    slot: str,
+    value: str,
+    restart: bool,
+) -> None:
+    """Toggle a single notifications category or source.
+
+    ``slot`` is one of the dotted paths below; ``value`` is ``on`` or
+    ``off``. The master switch (``notifications.enabled``) is left
+    alone — use ``defenseclaw setup notifications on/off`` for that.
+
+    \b
+    Categories (event types):
+      block_enforced       Real blocks (default: on).
+      block_would_block    Audit-mode blocks (default: on).
+      hitl_approval        Human-in-the-loop prompts (default: on).
+
+    \b
+    Sources (subsystem of origin):
+      sources.hook         Per-tool hooks (claude_code / codex / ...).
+      sources.guardrail    Guardrail verdicts.
+      sources.asset_policy Skill / MCP allow-list blocks.
+
+    \b
+    Examples:
+      defenseclaw setup notifications-set sources.hook off
+      defenseclaw setup notifications-set hitl_approval on --no-restart
+      defenseclaw setup notifications-set guardrail off  # short form
+    """
+    cfg = app.cfg
+    nc = cfg.notifications
+
+    obj_path, attr = _NOTIFICATION_SLOTS[slot.lower()]
+    target = nc if not obj_path else getattr(nc, obj_path)
+    current = bool(getattr(target, attr))
+    desired = value.lower() == "on"
+
+    if current == desired:
+        ux.subhead(
+            f"notifications.{slot} already {value.lower()}; nothing to change.",
+        )
+        return
+
+    setattr(target, attr, desired)
+    try:
+        cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise click.ClickException("config save failed") from exc
+
+    ux.ok(f"notifications.{slot} = {value.lower()}")
+    if not nc.enabled:
+        # The dispatcher checks the master switch first, so flipping a
+        # sub-toggle with the master OFF is harmless but invisible —
+        # surface that so operators don't think their change had no
+        # effect.
+        ux.warn(
+            "notifications.enabled is OFF — this toggle won't have any "
+            "user-visible effect until you run "
+            "`defenseclaw setup notifications on`.",
+        )
+
+    if restart:
+        ux.subhead("Restarting gateway so the dispatcher picks up the new filter…")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        ux.subhead(
+            "Skipped restart (--no-restart). Run `defenseclaw-gateway "
+            "restart` when ready.",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-notifications-set",
+            "config",
+            f"slot={slot} value={value.lower()}",
+        )
+
+
+# ``setup registry`` — discoverable shortcut that drops the operator
+# straight into the registry wizard. The full ``defenseclaw registry``
+# group remains the canonical surface for non-onboarding flows
+# (``add`` / ``edit`` / ``sync`` / ...); this wrapper exists so a
+# first-time operator working through ``defenseclaw setup --help``
+# doesn't have to know that registries live in their own top-level
+# group.
+@setup.command("registry")
+@click.pass_context
+def setup_registry(ctx: click.Context) -> None:
+    """Register an external skill / MCP catalog (interactive wizard).
+
+    Wraps ``defenseclaw registry wizard`` so first-run operators
+    discover the registry feature inside ``defenseclaw setup --help``.
+    For non-interactive usage and the full subcommand surface
+    (``add`` / ``edit`` / ``sync`` / ``approve`` / ``reject`` /
+    ``test`` / ``list`` / ``show`` / ``remove`` / ``require``), use
+    the top-level ``defenseclaw registry`` group directly.
+    """
+    # Lazy import to avoid pulling the registry HTTP / YAML deps into
+    # setup commands that don't need them, and to dodge a potential
+    # circular import (cmd_registry imports config -> ... -> setup
+    # in some lint configurations).
+    from defenseclaw.commands.cmd_registry import wizard_cmd
+
+    return ctx.invoke(wizard_cmd)
 
 
 def execute_guardrail_setup(

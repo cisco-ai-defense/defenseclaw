@@ -167,6 +167,109 @@ def _dedup(paths: list[str]) -> list[str]:
 # Public dispatchers
 # ---------------------------------------------------------------------------
 
+def connector_home(
+    connector: str | None,
+    *,
+    openclaw_home: str | None = None,
+) -> str:
+    """Return the on-disk home directory for *connector*.
+
+    Returned values are absolute, ``~/`` expanded paths so callers can
+    show them in inventory views without further normalization. The
+    OpenClaw branch defaults to ``~/.openclaw`` when *openclaw_home* is
+    None / empty, matching :func:`_openclaw_skill_dirs`. For unknown
+    connectors we return the empty string so the renderer falls back
+    to whatever per-component path it already has — the worst-case is
+    a missing label, never a wrong one.
+    """
+    name = normalize(connector)
+    home = str(Path.home())
+    if name == "claudecode":
+        return os.path.join(home, ".claude")
+    if name == "codex":
+        return os.path.join(home, ".codex")
+    if name == "zeptoclaw":
+        return os.path.join(home, ".zeptoclaw")
+    if name == "geminicli":
+        return os.path.join(home, ".gemini")
+    if name == "copilot":
+        return os.path.join(home, ".copilot")
+    if name == "cursor":
+        return os.path.join(home, ".cursor")
+    if name == "windsurf":
+        return os.path.join(home, ".codeium", "windsurf")
+    if name == "hermes":
+        return os.path.join(home, ".hermes")
+    if name == "openclaw":
+        if openclaw_home:
+            return _expand(openclaw_home)
+        return os.path.join(home, ".openclaw")
+    return ""
+
+
+def connector_config_files(
+    connector: str | None,
+    *,
+    openclaw_config: str | None = None,
+    openclaw_home: str | None = None,
+) -> list[str]:
+    """Return the documented config file paths for *connector*.
+
+    Lists the *expected* primary config files even when they don't
+    exist on disk yet — callers (inventory, doctor) want to show the
+    operator "this is where I'd look", not just "this exists right
+    now". Order is most-canonical first; deduplicated. Returns an
+    empty list for unknown connectors.
+    """
+    name = normalize(connector)
+    home = str(Path.home())
+    paths: list[str] = []
+    cwd = os.getcwd()
+    if name == "claudecode":
+        paths = [
+            os.path.join(home, ".claude", "settings.json"),
+            os.path.join(cwd, ".claude", "settings.json"),
+        ]
+    elif name == "codex":
+        paths = [
+            os.path.join(home, ".codex", "config.toml"),
+            os.path.join(cwd, ".mcp.json"),
+        ]
+    elif name == "zeptoclaw":
+        paths = [
+            os.path.join(home, ".zeptoclaw", "config.json"),
+            os.path.join(cwd, ".mcp.json"),
+        ]
+    elif name == "geminicli":
+        paths = [
+            os.path.join(home, ".gemini", "settings.json"),
+            os.path.join(cwd, ".gemini", "settings.json"),
+        ]
+    elif name == "copilot":
+        paths = [
+            os.path.join(home, ".copilot", "config.json"),
+            os.path.join(cwd, ".github", "copilot.json"),
+        ]
+    elif name == "cursor":
+        paths = [
+            os.path.join(home, ".cursor", "mcp.json"),
+            os.path.join(cwd, ".cursor", "mcp.json"),
+        ]
+    elif name == "windsurf":
+        paths = list(_windsurf_mcp_paths(home))
+    elif name == "hermes":
+        paths = [
+            os.path.join(home, ".hermes", "config.json"),
+            os.path.join(cwd, ".hermes", "config.json"),
+        ]
+    elif name == "openclaw":
+        if openclaw_config:
+            paths = [_expand(openclaw_config)]
+        else:
+            paths = [os.path.join(home, ".openclaw", "openclaw.json")]
+    return _dedup(paths)
+
+
 def skill_dirs(
     connector: str | None,
     *,

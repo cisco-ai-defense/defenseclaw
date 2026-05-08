@@ -37,7 +37,13 @@ const (
 )
 
 const (
-	wizardSkillScanner = iota
+	wizardConnectorSetup = iota
+	wizardCredentials
+	wizardLLM
+	wizardLocalObservability
+	wizardTokenRotation
+	wizardCustomProviders
+	wizardSkillScanner
 	wizardMCPScanner
 	wizardGateway
 	wizardGuardrail
@@ -45,15 +51,29 @@ const (
 	wizardObservability
 	wizardWebhook
 	wizardSandbox
+	// wizardRegistries (slot 9) registers a new external skill / MCP
+	// catalog source via `defenseclaw registry add --non-interactive`.
+	// The full management surface (sync / approve / reject / require) lives
+	// on the dedicated Registries panel — this wizard is intentionally
+	// just the discoverability hook for first-run users.
+	wizardRegistries
 	wizardCount
 )
 
 var wizardNames = [wizardCount]string{
+	"Connector Setup", "Credentials", "LLM", "Local OTel", "Token Rotation", "Custom Providers",
 	"Skill Scanner", "MCP Scanner", "Gateway",
 	"Guardrail", "Splunk", "Observability", "Webhooks", "Sandbox",
+	"Registries",
 }
 
 var wizardCommands = [wizardCount][]string{
+	{"setup"},
+	{"keys"},
+	{"setup", "llm"},
+	{"setup", "local-observability"},
+	{"setup", "rotate-token"},
+	{"setup", "provider"},
 	{"setup", "skill-scanner"},
 	{"setup", "mcp-scanner"},
 	{"setup", "gateway"},
@@ -66,9 +86,18 @@ var wizardCommands = [wizardCount][]string{
 	// "type" field. See buildWizardArgs + webhookWizardFields.
 	{"setup", "webhook", "add"},
 	{"sandbox", "setup"},
+	// Registries: the source id is injected positionally from the
+	// "id" field by buildWizardArgs.
+	{"registry", "add"},
 }
 
 var wizardDescriptions = [wizardCount]string{
+	"Run first-class setup for any connector. OpenClaw/ZeptoClaw use the guardrail backend; observability connectors use their setup aliases.",
+	"List, check, fill, or set env-backed credentials through the central credential registry.",
+	"Configure the unified LLM block non-interactively while storing supplied secret values in .env.",
+	"Start, stop, inspect, or reset the bundled local Prom/Loki/Tempo/Grafana observability stack.",
+	"Rotate DEFENSECLAW_GATEWAY_TOKEN and optionally refresh connector hook scripts.",
+	"Manage the custom provider overlay used for self-hosted or internal LLM endpoints.",
 	"Configure skill scanner analyzers (manifest, permissions, LLM, AI Defense, behavioral, trigger, VirusTotal).",
 	"Configure MCP scanner analyzers and which components to scan (prompts, resources, instructions).",
 	"Configure gateway connection settings (host, port, TLS, auto-approve, reconnect parameters).",
@@ -77,6 +106,7 @@ var wizardDescriptions = [wizardCount]string{
 	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Splunk Enterprise, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
 	"Configure chat/incident notifier webhooks (Slack, PagerDuty, Webex, generic HMAC). Distinct from the observability HTTP JSONL audit-log forwarder. Shells out to `setup webhook add`.",
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
+	"Register an external skill / MCP catalog source (corp HTTPS YAML, smithery.ai, skills.sh, ClawHub, git repo). The full management surface lives on the Registries panel; this wizard is for first-run discoverability.",
 }
 
 // wizardHowTo gives operators a quick "what this wizard will actually
@@ -85,6 +115,30 @@ var wizardDescriptions = [wizardCount]string{
 // than hard-coded in renderWizards) makes it easy to keep aligned with
 // the CLI command the wizard shells out to — see wizardCommands.
 var wizardHowTo = [wizardCount]string{
+	// Connector Setup
+	"Runs: defenseclaw setup <connector> --yes\n" +
+		"What you'll need: connector choice, restart preference, and guardrail mode/scanner mode for OpenClaw or ZeptoClaw.\n" +
+		"Tip: selecting the active connector re-runs its setup wizard so hooks and runtime files can be refreshed.",
+	// Credentials
+	"Runs: defenseclaw keys list --json / keys check / keys set / keys fill-missing\n" +
+		"What you'll need: env var name and secret value only when using the set action.\n" +
+		"Tip: secrets go into ~/.defenseclaw/.env via the credential registry, not config.yaml.",
+	// LLM
+	"Runs: defenseclaw setup llm --non-interactive\n" +
+		"What you'll need: provider, model, optional base URL, and an API key or env var for cloud providers.\n" +
+		"Tip: local providers (ollama/vllm/lm_studio) do not require an API key.",
+	// Local OTel
+	"Runs: defenseclaw setup local-observability <action>\n" +
+		"What you'll need: Docker for up/reset; no credentials required for local-only Grafana/Tempo/Loki.\n" +
+		"Tip: use status/url first if you only need to inspect the existing stack.",
+	// Token Rotation
+	"Runs: defenseclaw setup rotate-token --yes\n" +
+		"What you'll need: active connector name if overriding auto-detection.\n" +
+		"Tip: restart the active agent connector after rotating so hook subprocesses pick up the new token.",
+	// Custom Providers
+	"Runs: defenseclaw setup provider add|remove|list|show\n" +
+		"What you'll need: provider name and at least one domain for add/remove operations.\n" +
+		"Tip: store provider API keys as env vars and register only their env names here.",
 	// Skill Scanner
 	"Runs: defenseclaw setup skill-scanner\n" +
 		"What you'll need: (optional) LLM API key env var, VirusTotal API key env var, Cisco AI Defense API key.\n" +
@@ -117,6 +171,10 @@ var wizardHowTo = [wizardCount]string{
 	"Runs: defenseclaw sandbox setup\n" +
 		"What you'll need: OpenShell binary on PATH (Linux), optional sandbox home directory.\n" +
 		"Tip: macOS has no OpenShell — the wizard will skip runtime checks but still write policy YAML.",
+	// Registries
+	"Runs: defenseclaw registry add <id> --non-interactive\n" +
+		"What you'll need: a kebab-case source id, the source kind (clawhub / smithery / skills_sh / http_yaml / http_json / git / file), the manifest URL (or empty for clawhub/skills_sh defaults), and optionally an env var holding an auth token.\n" +
+		"Tip: Press 'y' on the Registries panel to run a sync immediately after the wizard exits.",
 }
 
 // observabilityPresets mirrors cli/defenseclaw/observability/presets.py::preset_choices().
@@ -194,10 +252,18 @@ type SetupPanel struct {
 	cfg      *config.Config
 	executor *CommandExecutor
 
-	mode         int // setupModeWizards or setupModeConfig
-	activeWizard int
-	wizardStatus [wizardCount]string
-	wizardHover  int // -1 = none hovered
+	mode             int // setupModeWizards or setupModeConfig
+	activeWizard     int
+	wizardStatus     [wizardCount]string
+	wizardHover      int // -1 = none hovered
+	readinessChecks  []ReadinessCheck
+	readinessCursor  int
+	readinessFocused bool
+	credentialRows   []CredentialRow
+	credentialCursor int
+	credentialLoaded time.Time
+	credentialErr    string
+	restartQueue     RestartQueue
 
 	// Wizard form (collects input before running --non-interactive)
 	wizFormActive  bool
@@ -262,6 +328,7 @@ type SetupPanel struct {
 	configHover   int // hovered field index, -1 = none
 
 	pendingFocusCmd tea.Cmd
+	mouseAction     string
 
 	width  int
 	height int
@@ -276,15 +343,16 @@ func NewSetupPanel(theme *Theme, cfg *config.Config, executor *CommandExecutor) 
 	ei.SetWidth(40)
 
 	p := SetupPanel{
-		theme:         theme,
-		cfg:           cfg,
-		executor:      executor,
-		editInput:     ei,
-		wizardHover:   -1,
-		configHover:   -1,
-		wizRunIdx:     -1,
-		sinkEditor:    NewSinkEditorModel(),
-		webhookEditor: NewWebhookEditorModel(),
+		theme:            theme,
+		cfg:              cfg,
+		executor:         executor,
+		editInput:        ei,
+		wizardHover:      -1,
+		configHover:      -1,
+		wizRunIdx:        -1,
+		readinessFocused: true,
+		sinkEditor:       NewSinkEditorModel(),
+		webhookEditor:    NewWebhookEditorModel(),
 	}
 	p.loadSections()
 	return p
@@ -297,6 +365,60 @@ func (p *SetupPanel) SetSize(w, h int) {
 	p.editInput.SetWidth(w/2 - 4)
 	p.sinkEditor.SetSize(w, h)
 	p.webhookEditor.SetSize(w, h)
+}
+
+func (p *SetupPanel) SetReadinessChecks(checks []ReadinessCheck) {
+	p.readinessChecks = checks
+	if p.readinessCursor >= len(p.readinessChecks) {
+		p.readinessCursor = len(p.readinessChecks) - 1
+	}
+	if p.readinessCursor < 0 {
+		p.readinessCursor = 0
+	}
+}
+
+func (p *SetupPanel) SetCredentialSnapshot(rows []CredentialRow, loadedAt time.Time, err error) {
+	p.credentialRows = rows
+	p.credentialLoaded = loadedAt
+	p.credentialErr = ""
+	if err != nil {
+		p.credentialErr = err.Error()
+	}
+	if p.credentialCursor >= len(p.credentialRows) {
+		p.credentialCursor = len(p.credentialRows) - 1
+	}
+	if p.credentialCursor < 0 {
+		p.credentialCursor = 0
+	}
+}
+
+func (p *SetupPanel) CredentialRows() []CredentialRow {
+	out := make([]CredentialRow, len(p.credentialRows))
+	copy(out, p.credentialRows)
+	return out
+}
+
+func (p *SetupPanel) SetRestartQueue(queue RestartQueue) {
+	p.restartQueue = queue
+}
+
+func (p *SetupPanel) TakeMouseAction() string {
+	action := p.mouseAction
+	p.mouseAction = ""
+	return action
+}
+
+func (p *SetupPanel) InWizardMode() bool {
+	return p.mode == setupModeWizards
+}
+
+func (p *SetupPanel) ActiveWizard() int {
+	return p.activeWizard
+}
+
+func (p *SetupPanel) FocusReadiness() {
+	p.mode = setupModeWizards
+	p.readinessFocused = true
 }
 
 func (p *SetupPanel) loadSections() {
@@ -379,6 +501,43 @@ func (p *SetupPanel) loadSections() {
 			Fields: []configField{
 				{Label: "Disable Redaction", Key: "privacy.disable_redaction", Kind: "bool", Value: fmt.Sprintf("%v", c.Privacy.DisableRedaction),
 					Hint: "true stores raw content in all sinks. Only use inside a single trusted boundary."},
+			},
+		},
+		// Desktop notifications: master switch + per-category +
+		// per-source + throttle. The [N] modal flips only `enabled`;
+		// dialing in the rest is what this section is for. Save +
+		// gateway restart is needed for any change to take effect
+		// because internal/gateway/notifier.New(cfg.Notifications)
+		// snapshots the config once at sidecar boot.
+		{
+			Name: "Notifications",
+			Summary: "User-session desktop toasts for blocks, would-blocks, and HITL approvals. " +
+				"Local-only — see webhooks[] for chat/incident routing.",
+			Help: "enabled is the master switch. Categories gate event types; sources gate the subsystem that emitted them. " +
+				"dedup_window collapses repeats; max_per_minute caps the global rate (excess rolled into one summary toast). " +
+				"Restart the gateway after editing — the dispatcher snapshots cfg at boot.",
+			Fields: []configField{
+				{Label: "Enabled", Key: "notifications.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Enabled),
+					Hint: "Master switch. Default: ON on macOS, OFF elsewhere. When false, every other field below is a no-op."},
+				{Label: "── Categories ──", Kind: "header"},
+				{Label: "Block (enforced)", Key: "notifications.block_enforced", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.BlockEnforced),
+					Hint: "Toast when a request is actually denied (mode=action, action=block)."},
+				{Label: "Block (would-block)", Key: "notifications.block_would_block", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.BlockWouldBlock),
+					Hint: "Toast for observe-mode 'would have blocked' verdicts. Useful while tuning policy; turn off once posture is stable."},
+				{Label: "HITL Approval", Key: "notifications.hitl_approval", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.HITLApproval),
+					Hint: "Informational toast when a HILT/confirm prompt is awaiting a user reply in chat / TUI. Click does NOT approve — operator still replies in chat."},
+				{Label: "── Sources ──", Kind: "header"},
+				{Label: "Source: Hook", Key: "notifications.sources.hook", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Sources.Hook),
+					Hint: "Allow notifications from claude_code_hook + codex_hook decisions."},
+				{Label: "Source: Guardrail", Key: "notifications.sources.guardrail", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Sources.Guardrail),
+					Hint: "Allow notifications from GuardrailProxy block / would-block branches (LLM egress proxy)."},
+				{Label: "Source: Asset Policy", Key: "notifications.sources.asset_policy", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Sources.AssetPolicy),
+					Hint: "Allow notifications from asset-policy runtime decisions (skill/MCP allow-list/deny-list)."},
+				{Label: "── Throttle ──", Kind: "header"},
+				{Label: "Dedup Window", Key: "notifications.dedup_window", Kind: "string", Value: fmtNotificationsDedupWindow(c.Notifications.DedupWindow),
+					Hint: "Duration string (e.g. '30s', '1m', '500ms'). Identical (category|source|target|reason) tuples seen inside the window are suppressed. Empty = use default (30s)."},
+				{Label: "Max Per Minute", Key: "notifications.max_per_minute", Kind: "int", Value: fmt.Sprintf("%d", c.Notifications.MaxPerMinute),
+					Hint: "Global rate cap across all categories. Excess collapses into one 'suppressed N notifications' toast per minute. 0 = use default (12)."},
 			},
 		},
 		{
@@ -599,8 +758,8 @@ func (p *SetupPanel) loadSections() {
 				{Label: "── Skill Scanner ──", Kind: "header"},
 				{Label: "Binary", Key: "scanners.skill_scanner.binary", Kind: "string", Value: c.Scanners.SkillScanner.Binary,
 					Hint: "Path/name of the skill-scanner executable (default 'skill-scanner' on $PATH)."},
-				{Label: "Policy", Key: "scanners.skill_scanner.policy", Kind: "choice", Value: c.Scanners.SkillScanner.Policy, Options: []string{"permissive", "strict", "observe"},
-					Hint: "strict=block MEDIUM+; permissive=block HIGH+; observe=log only."},
+				{Label: "Policy", Key: "scanners.skill_scanner.policy", Kind: "choice", Value: skillScannerPolicyValue(c.Scanners.SkillScanner.Policy), Options: []string{"strict", "balanced", "permissive", "none"},
+					Hint: "Matches setup skill-scanner --policy. none clears the explicit policy override."},
 				{Label: "Lenient", Key: "scanners.skill_scanner.lenient", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.Lenient),
 					Hint: "Downgrade findings by one severity (dev/testing use only)."},
 				{Label: "Use LLM", Key: "scanners.skill_scanner.use_llm", Kind: "bool", Value: fmt.Sprintf("%v", c.Scanners.SkillScanner.UseLLM),
@@ -655,9 +814,16 @@ func (p *SetupPanel) loadSections() {
 			{Label: "CodeGuard", Key: "scanners.codeguard", Kind: "string", Value: c.Scanners.CodeGuard,
 				Hint: "Command for the CodeGuard skill (code-review). See 'codeguard' wizard."},
 		}...)
+	p.sections = append(p.sections, configSection{
+		Name:    "Asset Policy",
+		Summary: "Registry requirements and default allow/deny behavior for skills, MCP servers, and plugins.",
+		Help: "registry_required=true means the asset must appear in asset_policy.<type>.registry, usually promoted from a registry sync. " +
+			"Mode observe records would-block decisions; action blocks them.",
+		Fields: assetPolicyFields(c),
+	})
 	p.sections = append(p.sections, []configSection{
 		{
-			Name:    "AI Visibility",
+			Name:    "AI Discovery",
 			Summary: "Continuous local discovery for supported and shadow AI usage.",
 			Help: "Enhanced mode scans metadata, package manifests, env var names, and shell history patterns. " +
 				"Outbound telemetry uses only hashes, basenames, categories, and bounded metadata.",
@@ -950,13 +1116,19 @@ func (p *SetupPanel) WizardAppendOutput(line string) {
 func (p *SetupPanel) WizardFinished(exitCode int) {
 	p.wizRunning = false
 	if p.wizRunIdx >= 0 && p.wizRunIdx < wizardCount {
-		if exitCode == 0 {
+		if exitCode == 130 {
+			p.wizardStatus[p.wizRunIdx] = "Cancelled"
+		} else if exitCode == 0 {
 			p.wizardStatus[p.wizRunIdx] = "Configured"
 		} else {
 			p.wizardStatus[p.wizRunIdx] = fmt.Sprintf("Failed (exit %d)", exitCode)
 		}
 	}
-	p.wizOutput = append(p.wizOutput, "", fmt.Sprintf("-- Setup finished (exit %d). Press Esc to return. --", exitCode))
+	if exitCode == 130 {
+		p.wizOutput = append(p.wizOutput, "", "-- Setup cancelled. Press Esc to return. --")
+	} else {
+		p.wizOutput = append(p.wizOutput, "", fmt.Sprintf("-- Setup finished (exit %d). Press Esc to return. --", exitCode))
+	}
 }
 
 // HandleKey processes key events. Returns (runCmd, binary, args, displayName).
@@ -1078,12 +1250,66 @@ func (p *SetupPanel) handleWizardOutputKey(key string) (bool, string, []string, 
 }
 
 func (p *SetupPanel) handleWizardKey(key string) (bool, string, []string, string) {
+	if p.readinessFocused {
+		switch key {
+		case "`":
+			p.mode = setupModeConfig
+			p.readinessFocused = false
+		case "down", "j":
+			if p.readinessCursor < len(p.readinessChecks)-1 {
+				p.readinessCursor++
+			} else {
+				p.readinessFocused = false
+			}
+		case "up", "k":
+			if p.readinessCursor > 0 {
+				p.readinessCursor--
+			}
+		case "right", "l", "tab":
+			p.readinessFocused = false
+		case "enter":
+			if p.readinessCursor >= 0 && p.readinessCursor < len(p.readinessChecks) {
+				ck := p.readinessChecks[p.readinessCursor]
+				if ck.Fix != nil && ck.Status != ReadinessPass {
+					return true, ck.Fix.Binary, ck.Fix.Args, ck.Fix.DisplayName
+				}
+			}
+		}
+		return false, "", nil, ""
+	}
+
+	if p.activeWizard == wizardCredentials {
+		switch key {
+		case "up", "k":
+			if len(p.credentialRows) > 0 && p.credentialCursor > 0 {
+				p.credentialCursor--
+				return false, "", nil, ""
+			}
+		case "down", "j":
+			if len(p.credentialRows) > 0 && p.credentialCursor < len(p.credentialRows)-1 {
+				p.credentialCursor++
+				return false, "", nil, ""
+			}
+		case "s":
+			p.showCredentialSetForm()
+			return false, "", nil, ""
+		case "f":
+			return true, "defenseclaw", []string{"keys", "fill-missing"}, "keys fill-missing"
+		case "c":
+			return true, "defenseclaw", []string{"keys", "check"}, "keys check"
+		}
+	}
+
 	switch key {
 	case "`":
 		p.mode = setupModeConfig
+	case "home":
+		p.readinessFocused = true
 	case "up", "k":
 		if p.activeWizard > 0 {
 			p.activeWizard--
+		} else {
+			p.readinessFocused = true
 		}
 	case "down", "j":
 		if p.activeWizard < wizardCount-1 {
@@ -1092,6 +1318,8 @@ func (p *SetupPanel) handleWizardKey(key string) (bool, string, []string, string
 	case "left", "h":
 		if p.activeWizard > 0 {
 			p.activeWizard--
+		} else {
+			p.readinessFocused = true
 		}
 	case "right", "l":
 		if p.activeWizard < wizardCount-1 {
@@ -1101,6 +1329,20 @@ func (p *SetupPanel) handleWizardKey(key string) (bool, string, []string, string
 		p.showWizardForm(p.activeWizard)
 	}
 	return false, "", nil, ""
+}
+
+func (p *SetupPanel) showCredentialSetForm() {
+	p.showWizardForm(wizardCredentials)
+	for i := range p.wizFormFields {
+		switch p.wizFormFields[i].Label {
+		case "Action":
+			p.wizFormFields[i].Value = "set"
+		case "Env Name":
+			if p.credentialCursor >= 0 && p.credentialCursor < len(p.credentialRows) {
+				p.wizFormFields[i].Value = p.credentialRows[p.credentialCursor].EnvName
+			}
+		}
+	}
 }
 
 func (p *SetupPanel) showWizardForm(idx int) {
@@ -1278,6 +1520,13 @@ func (p *SetupPanel) submitWizardForm() (bool, string, []string, string) {
 		}
 		return false, "", nil, ""
 	}
+	if idx == wizardCredentials && wizardFieldValue(p.wizFormFields, "Action") == "set" {
+		envName := wizardFieldValue(p.wizFormFields, "Env Name")
+		if LooksLikeSecretValue(envName) {
+			p.wizFormError = "Env Name looks like a secret value. Use an env var name such as DEFENSECLAW_LLM_KEY."
+			return false, "", nil, ""
+		}
+	}
 	p.wizFormError = ""
 
 	args := p.buildWizardArgs(idx)
@@ -1298,6 +1547,27 @@ func (p *SetupPanel) submitWizardForm() (bool, string, []string, string) {
 // always have a defined yes/no value; presets are always set).
 func (p *SetupPanel) missingRequiredFields() []string {
 	var missing []string
+	switch p.activeWizard {
+	case wizardCredentials:
+		if wizardFieldValue(p.wizFormFields, "Action") == "set" {
+			if wizardFieldValue(p.wizFormFields, "Env Name") == "" {
+				missing = append(missing, "Env Name")
+			}
+			if wizardFieldValue(p.wizFormFields, "Secret Value") == "" {
+				missing = append(missing, "Secret Value")
+			}
+		}
+	case wizardCustomProviders:
+		action := wizardFieldValue(p.wizFormFields, "Action")
+		if action == "add" || action == "remove" {
+			if wizardFieldValue(p.wizFormFields, "Name") == "" {
+				missing = append(missing, "Name")
+			}
+		}
+		if action == "add" && wizardFieldValue(p.wizFormFields, "Domains") == "" {
+			missing = append(missing, "Domains")
+		}
+	}
 	for _, f := range p.wizFormFields {
 		if !f.Required {
 			continue
@@ -1328,6 +1598,19 @@ func (p *SetupPanel) wizardFormHasPasswordField() bool {
 }
 
 func (p *SetupPanel) buildWizardArgs(idx int) []string {
+	switch idx {
+	case wizardConnectorSetup:
+		return p.buildConnectorSetupWizardArgs()
+	case wizardCredentials:
+		return p.buildCredentialsWizardArgs()
+	case wizardLocalObservability:
+		return p.buildLocalObservabilityWizardArgs()
+	case wizardTokenRotation:
+		return p.buildTokenRotationWizardArgs()
+	case wizardCustomProviders:
+		return p.buildCustomProvidersWizardArgs()
+	}
+
 	base := make([]string, len(wizardCommands[idx]))
 	copy(base, wizardCommands[idx])
 
@@ -1363,6 +1646,22 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 		}
 	}
 
+	// Registries: extract the source id from the "regid" picker and
+	// insert it positionally after ``add``. The CLI surface is
+	// ``defenseclaw registry add <id> ...``.
+	if idx == wizardRegistries {
+		regID := ""
+		for _, f := range p.wizFormFields {
+			if f.Kind == "regid" {
+				regID = strings.TrimSpace(f.Value)
+				break
+			}
+		}
+		if regID != "" {
+			base = append(base, regID)
+		}
+	}
+
 	base = append(base, "--non-interactive")
 
 	// For guardrail wizard, combine Provider + Model into
@@ -1388,8 +1687,8 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 
 	for _, f := range p.wizFormFields {
 		switch f.Kind {
-		case "section", "preset", "whtype":
-			// Section dividers are cosmetic; preset/whtype are
+		case "section", "preset", "whtype", "regid":
+			// Section dividers are cosmetic; preset/whtype/regid are
 			// already consumed as positionals above.
 			continue
 		}
@@ -1458,6 +1757,179 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 	}
 
 	return base
+}
+
+func wizardRawFieldValue(fields []wizardFormField, label string) string {
+	for _, f := range fields {
+		if f.Label == label {
+			return f.Value
+		}
+	}
+	return ""
+}
+
+func wizardFieldValue(fields []wizardFormField, label string) string {
+	return strings.TrimSpace(wizardRawFieldValue(fields, label))
+}
+
+func wizardBoolValue(fields []wizardFormField, label, fallback string) string {
+	v := strings.ToLower(wizardFieldValue(fields, label))
+	if v == "yes" || v == "no" {
+		return v
+	}
+	return fallback
+}
+
+func (p *SetupPanel) buildConnectorSetupWizardArgs() []string {
+	connector := wizardFieldValue(p.wizFormFields, "Connector")
+	args, _ := connectorSetupCommandForMode(connector)
+	if len(args) == 0 {
+		args, _ = connectorSetupCommandForMode("openclaw")
+		connector = "openclaw"
+	}
+
+	if isGuardrailSupporting(connector) {
+		if mode := wizardFieldValue(p.wizFormFields, "Guardrail Mode"); mode != "" {
+			args = append(args, "--mode", mode)
+		}
+		if scannerMode := wizardFieldValue(p.wizFormFields, "Scanner Mode"); scannerMode != "" {
+			args = append(args, "--scanner-mode", scannerMode)
+		}
+		if wizardBoolValue(p.wizFormFields, "Restart Gateway", "yes") == "no" {
+			args = append(args, "--no-restart")
+		}
+		if wizardBoolValue(p.wizFormFields, "Verify After Setup", "yes") == "no" {
+			args = append(args, "--no-verify")
+		}
+		return args
+	}
+
+	if wizardBoolValue(p.wizFormFields, "Restart Gateway", "yes") == "no" {
+		args = append(args, "--no-restart")
+	}
+	if wizardBoolValue(p.wizFormFields, "Local Stack", "no") == "yes" {
+		args = append(args, "--with-local-stack")
+	}
+	return args
+}
+
+func (p *SetupPanel) buildCredentialsWizardArgs() []string {
+	action := wizardFieldValue(p.wizFormFields, "Action")
+	switch action {
+	case "check":
+		return []string{"keys", "check"}
+	case "fill-missing":
+		return []string{"keys", "fill-missing"}
+	case "set":
+		envName := wizardFieldValue(p.wizFormFields, "Env Name")
+		secret := wizardRawFieldValue(p.wizFormFields, "Secret Value")
+		args := []string{"keys", "set"}
+		if envName != "" {
+			args = append(args, envName)
+		}
+		if secret != "" {
+			args = append(args, "--value", secret)
+		}
+		return args
+	default:
+		return []string{"keys", "list", "--json"}
+	}
+}
+
+func (p *SetupPanel) buildLocalObservabilityWizardArgs() []string {
+	action := wizardFieldValue(p.wizFormFields, "Action")
+	if action == "" {
+		action = "status"
+	}
+	args := []string{"setup", "local-observability", action}
+	switch action {
+	case "up":
+		if timeout := wizardFieldValue(p.wizFormFields, "Timeout"); timeout != "" && timeout != "180" {
+			args = append(args, "--timeout", timeout)
+		}
+		if wizardBoolValue(p.wizFormFields, "No Wait", "no") == "yes" {
+			args = append(args, "--no-wait")
+		}
+		if wizardBoolValue(p.wizFormFields, "No Config", "no") == "yes" {
+			args = append(args, "--no-config")
+		}
+		if signals := wizardFieldValue(p.wizFormFields, "Signals"); signals != "" && signals != "traces,metrics,logs" {
+			args = append(args, "--signals", signals)
+		}
+		if service := wizardFieldValue(p.wizFormFields, "Service Name"); service != "" && service != "defenseclaw" {
+			args = append(args, "--service-name", service)
+		}
+		if wizardBoolValue(p.wizFormFields, "Audit Sink", "yes") == "no" {
+			args = append(args, "--no-audit-sink")
+		}
+	case "reset":
+		if wizardBoolValue(p.wizFormFields, "Confirm Reset", "no") == "yes" {
+			args = append(args, "--yes")
+		}
+	case "logs":
+		if service := wizardFieldValue(p.wizFormFields, "Service"); service != "" {
+			args = append(args, "--service", service)
+		}
+		if wizardBoolValue(p.wizFormFields, "Follow", "no") == "yes" {
+			args = append(args, "--follow")
+		}
+	case "url":
+		if wizardBoolValue(p.wizFormFields, "JSON Output", "no") == "yes" {
+			args = append(args, "--json")
+		}
+	}
+	return args
+}
+
+func (p *SetupPanel) buildTokenRotationWizardArgs() []string {
+	args := []string{"setup", "rotate-token", "--yes"}
+	if connector := wizardFieldValue(p.wizFormFields, "Connector"); connector != "" {
+		args = append(args, "--connector", connector)
+	}
+	if wizardBoolValue(p.wizFormFields, "Refresh Hooks", "yes") == "no" {
+		args = append(args, "--no-restart")
+	}
+	return args
+}
+
+func (p *SetupPanel) buildCustomProvidersWizardArgs() []string {
+	action := wizardFieldValue(p.wizFormFields, "Action")
+	switch action {
+	case "add":
+		args := []string{"setup", "provider", "add"}
+		if name := wizardFieldValue(p.wizFormFields, "Name"); name != "" {
+			args = append(args, "--name", name)
+		}
+		for _, domain := range splitCSV(wizardFieldValue(p.wizFormFields, "Domains")) {
+			args = append(args, "--domain", domain)
+		}
+		for _, envKey := range splitCSV(wizardFieldValue(p.wizFormFields, "Env Keys")) {
+			args = append(args, "--env-key", envKey)
+		}
+		if profileID := wizardFieldValue(p.wizFormFields, "Profile ID"); profileID != "" {
+			args = append(args, "--profile-id", profileID)
+		}
+		for _, port := range splitCSV(wizardFieldValue(p.wizFormFields, "Ollama Ports")) {
+			args = append(args, "--ollama-port", port)
+		}
+		if wizardBoolValue(p.wizFormFields, "Reload Sidecar", "yes") == "no" {
+			args = append(args, "--no-reload")
+		}
+		return args
+	case "remove":
+		args := []string{"setup", "provider", "remove"}
+		if name := wizardFieldValue(p.wizFormFields, "Name"); name != "" {
+			args = append(args, "--name", name)
+		}
+		if wizardBoolValue(p.wizFormFields, "Reload Sidecar", "yes") == "no" {
+			args = append(args, "--no-reload")
+		}
+		return args
+	case "show":
+		return []string{"setup", "provider", "show"}
+	default:
+		return []string{"setup", "provider", "list"}
+	}
 }
 
 func (p *SetupPanel) handleConfigKey(msg tea.KeyPressMsg) (bool, string, []string, string) {
@@ -1606,6 +2078,65 @@ func (p *SetupPanel) currentField() *configField {
 		return nil
 	}
 	return &sec.Fields[p.activeLine]
+}
+
+func (p *SetupPanel) connectorSetupWizardFields() []wizardFormField {
+	connector := "openclaw"
+	mode := "observe"
+	scannerMode := "local"
+	if p.cfg != nil {
+		if active := strings.TrimSpace(string(p.cfg.Claw.Mode)); active != "" {
+			connector = active
+		}
+		if p.cfg.Guardrail.Mode != "" {
+			mode = p.cfg.Guardrail.Mode
+		}
+		if p.cfg.Guardrail.ScannerMode != "" {
+			scannerMode = p.cfg.Guardrail.ScannerMode
+		}
+	}
+	return []wizardFormField{
+		{Label: "Connector", Kind: "choice", Options: []string{"openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}, Value: connector, Default: connector, Required: true, Hint: "Connector setup target. Claude Code maps to `setup claude-code`."},
+		{Label: "Guardrail Mode", Kind: "choice", Options: []string{"observe", "action"}, Value: mode, Default: mode, Hint: "Used by OpenClaw/ZeptoClaw setup; ignored for observability-only connectors."},
+		{Label: "Scanner Mode", Kind: "choice", Options: []string{"local", "remote", "both"}, Value: scannerMode, Default: scannerMode, Hint: "Used by OpenClaw/ZeptoClaw setup; ignored for observability-only connectors."},
+		{Label: "Restart Gateway", Kind: "bool", Value: "yes", Default: "yes", Hint: "Restart gateway after setup so connector hooks/runtime files are rewired."},
+		{Label: "Local Stack", Kind: "bool", Value: "no", Default: "no", Hint: "For observability-only connectors, also run the bundled local observability stack."},
+		{Label: "Verify After Setup", Kind: "bool", Value: "yes", Default: "yes", Hint: "Run guardrail connectivity checks for OpenClaw/ZeptoClaw setup."},
+	}
+}
+
+func (p *SetupPanel) llmWizardFields() []wizardFormField {
+	provider := "anthropic"
+	model := ""
+	apiKeyEnv := config.DefenseClawLLMKeyEnv
+	baseURL := ""
+	timeout := "30"
+	maxRetries := "2"
+	if p.cfg != nil {
+		if p.cfg.LLM.Provider != "" {
+			provider = p.cfg.LLM.Provider
+		}
+		model = p.cfg.LLM.Model
+		if p.cfg.LLM.APIKeyEnv != "" {
+			apiKeyEnv = p.cfg.LLM.APIKeyEnv
+		}
+		baseURL = p.cfg.LLM.BaseURL
+		if p.cfg.LLM.Timeout > 0 {
+			timeout = fmt.Sprintf("%d", p.cfg.LLM.Timeout)
+		}
+		if p.cfg.LLM.MaxRetries > 0 {
+			maxRetries = fmt.Sprintf("%d", p.cfg.LLM.MaxRetries)
+		}
+	}
+	return []wizardFormField{
+		{Label: "Provider", Flag: "--provider", Kind: "choice", Options: []string{"anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai", "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai", "ollama", "vllm", "lm_studio"}, Value: provider, Default: provider, Required: true, Hint: "Cloud or local provider family."},
+		{Label: "Model", Flag: "--model", Kind: "string", Value: model, Default: model, Required: true, Hint: "Model id such as gpt-4o, claude-3-5-sonnet, or llama3.1."},
+		{Label: "API Key Env", Flag: "--api-key-env", Kind: "string", Value: apiKeyEnv, Default: apiKeyEnv, Hint: "Env var NAME holding the API key. Defaults to DEFENSECLAW_LLM_KEY."},
+		{Label: "API Key", Flag: "--api-key", Kind: "password", Hint: "Optional secret value. CLI writes it to .env and clears llm.api_key."},
+		{Label: "Base URL", Flag: "--base-url", Kind: "string", Value: baseURL, Default: baseURL, Hint: "Optional provider endpoint override for Azure/local/proxy deployments."},
+		{Label: "Timeout", Flag: "--timeout", Kind: "int", Value: timeout, Default: timeout, Hint: "LLM timeout in seconds."},
+		{Label: "Max Retries", Flag: "--max-retries", Kind: "int", Value: maxRetries, Default: maxRetries, Hint: "Retry count for LLM calls."},
+	}
 }
 
 // bifrostProviders returns the list of LLM providers supported by the Bifrost SDK.
@@ -1772,6 +2303,45 @@ func bifrostProviders() []string {
 // wizardFormDefs returns the form fields for a given wizard index.
 func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 	switch idx {
+	case wizardConnectorSetup:
+		return p.connectorSetupWizardFields()
+	case wizardCredentials:
+		return []wizardFormField{
+			{Label: "Action", Kind: "choice", Options: []string{"list", "check", "fill-missing", "set"}, Value: "list", Default: "list", Hint: "list uses `keys list --json`; set writes to env-backed .env storage."},
+			{Label: "Env Name", Kind: "string", Hint: "Credential environment variable name, e.g. DEFENSECLAW_LLM_KEY."},
+			{Label: "Secret Value", Kind: "password", Hint: "Only used by Action=set. Stored in ~/.defenseclaw/.env, not config.yaml."},
+		}
+	case wizardLLM:
+		return p.llmWizardFields()
+	case wizardLocalObservability:
+		return []wizardFormField{
+			{Label: "Action", Kind: "choice", Options: []string{"status", "url", "up", "logs", "down", "reset"}, Value: "status", Default: "status", Hint: "Choose which local-observability lifecycle command to run."},
+			{Label: "Timeout", Kind: "int", Value: "180", Default: "180", Hint: "Readiness wait budget for Action=up."},
+			{Label: "No Wait", Kind: "bool", Value: "no", Default: "no", Hint: "Skip readiness wait for Action=up."},
+			{Label: "No Config", Kind: "bool", Value: "no", Default: "no", Hint: "Start containers without writing config.yaml for Action=up."},
+			{Label: "Signals", Kind: "string", Value: "traces,metrics,logs", Default: "traces,metrics,logs", Hint: "Comma-separated OTel signals for Action=up."},
+			{Label: "Service Name", Kind: "string", Value: "defenseclaw", Default: "defenseclaw", Hint: "OTel service.name stamped for Action=up."},
+			{Label: "Audit Sink", Kind: "bool", Value: "yes", Default: "yes", Hint: "Add/refresh local OTLP audit sink for Action=up."},
+			{Label: "Confirm Reset", Kind: "bool", Value: "no", Default: "no", Hint: "Pass --yes for Action=reset, which wipes local stack volumes."},
+			{Label: "Service", Kind: "string", Hint: "Optional compose service for Action=logs."},
+			{Label: "Follow", Kind: "bool", Value: "no", Default: "no", Hint: "Stream logs until interrupted for Action=logs."},
+			{Label: "JSON Output", Kind: "bool", Value: "no", Default: "no", Hint: "Emit machine-readable URLs for Action=url."},
+		}
+	case wizardTokenRotation:
+		return []wizardFormField{
+			{Label: "Connector", Kind: "choice", Options: []string{"", "openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}, Value: "", Default: "", Hint: "Optional connector override. Blank uses the active guardrail connector."},
+			{Label: "Refresh Hooks", Kind: "bool", Value: "yes", Default: "yes", Hint: "Run connector teardown/setup so hook token files are refreshed."},
+		}
+	case wizardCustomProviders:
+		return []wizardFormField{
+			{Label: "Action", Kind: "choice", Options: []string{"list", "show", "add", "remove"}, Value: "list", Default: "list", Hint: "Choose provider overlay action."},
+			{Label: "Name", Kind: "string", Hint: "Provider name for add/remove."},
+			{Label: "Domains", Kind: "string", Hint: "Comma-separated domains or URLs for Action=add."},
+			{Label: "Env Keys", Kind: "string", Hint: "Comma-separated env var names holding provider API keys."},
+			{Label: "Profile ID", Kind: "string", Hint: "Optional OpenClaw auth profile id."},
+			{Label: "Ollama Ports", Kind: "string", Hint: "Comma-separated loopback ports for Ollama-style providers."},
+			{Label: "Reload Sidecar", Kind: "bool", Value: "yes", Default: "yes", Hint: "Call provider registry reload after add/remove."},
+		}
 	case wizardSkillScanner:
 		return []wizardFormField{
 			{Label: "Behavioral Analyzer", Flag: "--use-behavioral", Kind: "bool", Default: "no", Value: "no"},
@@ -1783,7 +2353,7 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 			{Label: "Trigger Analyzer", Flag: "--use-trigger", Kind: "bool", Default: "no", Value: "no"},
 			{Label: "VirusTotal Scanner", Flag: "--use-virustotal", Kind: "bool", Default: "no", Value: "no"},
 			{Label: "AI Defense Analyzer", Flag: "--use-aidefense", Kind: "bool", Default: "no", Value: "no"},
-			{Label: "Scan Policy", Flag: "--policy", Kind: "choice", Options: []string{"strict", "balanced", "permissive"}, Value: "balanced", Default: "balanced"},
+			{Label: "Scan Policy", Flag: "--policy", Kind: "choice", Options: []string{"strict", "balanced", "permissive", "none"}, Value: "balanced", Default: "balanced"},
 			{Label: "Lenient Mode", Flag: "--lenient", Kind: "bool", Default: "no", Value: "no", Hint: "Tolerate malformed skills"},
 			{Label: "Verify After Setup", Flag: "--verify", NoFlag: "--no-verify", Kind: "bool", Default: "yes", Value: "yes"},
 		}
@@ -1803,7 +2373,7 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 			{Label: "Host", Flag: "--host", Kind: "string", Default: "localhost", Value: "localhost"},
 			{Label: "Port", Flag: "--port", Kind: "int", Default: "9090", Value: "9090", Hint: "WebSocket port"},
 			{Label: "API Port", Flag: "--api-port", Kind: "int", Default: "9099", Value: "9099", Hint: "Sidecar REST API port"},
-			{Label: "Auth Token", Flag: "--token", Kind: "string", Hint: "Gateway auth token (remote only)"},
+			{Label: "Auth Token", Flag: "--token", Kind: "password", Hint: "Gateway auth token (remote only)"},
 			{Label: "SSM Param", Flag: "--ssm-param", Kind: "string", Hint: "AWS SSM parameter for token"},
 			{Label: "SSM Region", Flag: "--ssm-region", Kind: "string", Hint: "AWS region for SSM"},
 			{Label: "SSM Profile", Flag: "--ssm-profile", Kind: "string", Hint: "AWS CLI profile"},
@@ -1817,7 +2387,7 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 			{Label: "Enable Local Logs", Flag: "--logs", Kind: "bool", Default: "no", Value: "no", Hint: "Local Splunk via Docker (HEC)"},
 			{Label: "Enable Enterprise", Flag: "--enterprise", Kind: "bool", Default: "no", Value: "no", Hint: "Remote Splunk Enterprise HEC endpoint + token"},
 			{Label: "Realm", Flag: "--realm", Kind: "string", Hint: "O11y realm (e.g. us1, us0, eu0)"},
-			{Label: "Access Token", Flag: "--access-token", Kind: "string", Hint: "Splunk O11y access token"},
+			{Label: "Access Token", Flag: "--access-token", Kind: "password", Hint: "Splunk O11y access token"},
 			{Label: "HEC Endpoint", Flag: "--hec-endpoint", Kind: "string", Hint: "Remote HEC URL (https://host:8088/services/collector/event)"},
 			{Label: "HEC Token", Flag: "--hec-token", Kind: "password", Hint: "Remote Splunk Enterprise HEC token"},
 			{Label: "Skip HEC Test", Flag: "--skip-test", Kind: "bool", Default: "no", Value: "no", Hint: "Skip the live Enterprise HEC probe after setup"},
@@ -1836,6 +2406,8 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 		return observabilityWizardFields("splunk-o11y")
 	case wizardWebhook:
 		return webhookWizardFields("slack")
+	case wizardRegistries:
+		return registryWizardFields()
 	case wizardSandbox:
 		return []wizardFormField{
 			{Label: "Sandbox IP", Flag: "--sandbox-ip", Kind: "string", Default: "10.200.0.2", Value: "10.200.0.2"},
@@ -1979,6 +2551,82 @@ var webhookTypes = [][2]string{
 // Webex additionally requires “room-id“. These line up with
 // webhooks/writer.py::apply_webhook's server-side validation so the
 // TUI catches missing fields before the CLI ever runs.
+// registryKindOptions / registryContentOptions mirror REGISTRY_KINDS /
+// REGISTRY_CONTENT_TYPES in cli/defenseclaw/config.py and
+// internal/config/registries.go::KnownRegistryKinds. Drift would show
+// up as "kind X is not one of …" errors from the CLI — keep them in
+// strict lockstep.
+var registryKindOptions = []string{
+	"clawhub", "smithery", "skills_sh", "http_yaml", "http_json", "git", "file",
+}
+
+var registryContentOptions = []string{"skill", "mcp", "both"}
+
+// registryWizardFields builds the Registries wizard form. The form
+// shells out to `defenseclaw registry add <id> --non-interactive`
+// (the source id is injected positionally by buildWizardArgs from
+// the "regid" Kind field). Required=true is reserved for inputs the
+// CLI's --non-interactive path will reject as missing: the source
+// id, kind, content, and (for non-clawhub kinds) the manifest URL.
+//
+// auth_env carries the env var NAME, never the token itself — the
+// CLI's _validate_auth_env enforces the same rule, and the TUI hint
+// makes that contract obvious to operators who would otherwise paste
+// a literal token.
+func registryWizardFields() []wizardFormField {
+	return []wizardFormField{
+		{
+			Label:    "Source id",
+			Flag:     "", // positional — injected in buildWizardArgs
+			Kind:     "regid",
+			Value:    "corp-skills",
+			Default:  "corp-skills",
+			Required: true,
+			Hint:     "Kebab-case identifier; used as the asset_policy reason tag (registry:<id>).",
+		},
+		{
+			Label:    "Kind",
+			Flag:     "--kind",
+			Kind:     "choice",
+			Options:  registryKindOptions,
+			Value:    "http_yaml",
+			Default:  "http_yaml",
+			Required: true,
+			Hint:     "clawhub=npm openclaw, smithery=registry.smithery.ai, skills_sh=skills.sh public catalog, http_*=corporate manifest, git=clone-and-read.",
+		},
+		{
+			Label:    "Content",
+			Flag:     "--content",
+			Kind:     "choice",
+			Options:  registryContentOptions,
+			Value:    "skill",
+			Default:  "skill",
+			Required: true,
+			Hint:     "Filters which entries promote into asset_policy.{skill,mcp}.registry.",
+		},
+		{
+			Label: "Manifest URL",
+			Flag:  "--url",
+			Kind:  "string",
+			Hint:  "Required for http_yaml / http_json / git / file. Optional for clawhub (defaults to npmjs.org).",
+		},
+		{
+			Label: "Auth env (optional)",
+			Flag:  "--auth-env",
+			Kind:  "string",
+			Hint:  "Env var NAME holding a Bearer token. Never paste the token itself.",
+		},
+		{
+			Label:   "Enabled",
+			Flag:    "--enabled",
+			NoFlag:  "--disabled",
+			Kind:    "bool",
+			Default: "yes",
+			Value:   "yes",
+		},
+	}
+}
+
 func webhookWizardFields(channelType string) []wizardFormField {
 	typeOpts := make([]string, 0, len(webhookTypes))
 	for _, t := range webhookTypes {
@@ -2032,7 +2680,10 @@ func webhookWizardFields(channelType string) []wizardFormField {
 
 // HandleMouseClick processes mouse clicks relative to the panel. Returns same tuple as HandleKey.
 func (p *SetupPanel) HandleMouseClick(x, y int) (runCmd bool, binary string, args []string, displayName string) {
-	if p.wizFormActive || p.wizRunning || len(p.wizOutput) > 0 {
+	if p.wizFormActive {
+		return p.handleWizardFormClick(x, y)
+	}
+	if p.wizRunning || len(p.wizOutput) > 0 {
 		return false, "", nil, ""
 	}
 
@@ -2050,7 +2701,21 @@ func (p *SetupPanel) handleWizardClick(x, y int) (bool, string, []string, string
 		return false, "", nil, ""
 	}
 
-	if y == 2 {
+	if idx, ok := p.readinessCheckAtY(y); ok {
+		p.readinessFocused = true
+		p.readinessCursor = idx
+		if p.readinessFixHit(x, idx) {
+			ck := p.readinessChecks[idx]
+			if ck.Fix != nil && ck.Status != ReadinessPass {
+				return true, ck.Fix.Binary, ck.Fix.Args, ck.Fix.DisplayName
+			}
+		}
+		return false, "", nil, ""
+	}
+
+	tabsY := p.wizardTabsY()
+	if y == tabsY {
+		p.readinessFocused = false
 		cursor := 0
 		for i, name := range wizardNames {
 			w := lipgloss.Width(name) + 2
@@ -2063,11 +2728,272 @@ func (p *SetupPanel) handleWizardClick(x, y int) (bool, string, []string, string
 		return false, "", nil, ""
 	}
 
-	if y >= 4 && y <= 10 {
+	if p.activeWizard == wizardCredentials {
+		if idx, ok := p.credentialRowAtY(y); ok {
+			p.readinessFocused = false
+			p.credentialCursor = idx
+			return false, "", nil, ""
+		}
+		switch p.credentialActionAt(x, y) {
+		case "s":
+			p.readinessFocused = false
+			p.showCredentialSetForm()
+			return false, "", nil, ""
+		case "f":
+			p.readinessFocused = false
+			return true, "defenseclaw", []string{"keys", "fill-missing"}, "keys fill-missing"
+		case "c":
+			p.readinessFocused = false
+			return true, "defenseclaw", []string{"keys", "check"}, "keys check"
+		case "r":
+			p.readinessFocused = false
+			p.mouseAction = "refresh-credentials"
+			return false, "", nil, ""
+		}
+	}
+
+	configureY := p.wizardConfigureY()
+	if y >= configureY-1 && y <= configureY+1 {
+		p.readinessFocused = false
 		p.showWizardForm(p.activeWizard)
 	}
 
 	return false, "", nil, ""
+}
+
+func (p *SetupPanel) readinessFixHit(x, idx int) bool {
+	if idx < 0 || idx >= len(p.readinessChecks) {
+		return false
+	}
+	ck := p.readinessChecks[idx]
+	if ck.Fix == nil || ck.Status == ReadinessPass {
+		return false
+	}
+	fixStart := 2 + lipgloss.Width(string(ck.Status)) + 1 + 28 + 1 + lipgloss.Width(ck.Detail)
+	return x >= fixStart
+}
+
+func (p *SetupPanel) readinessLineCount() int {
+	if len(p.readinessChecks) == 0 {
+		return 2
+	}
+	return len(p.readinessChecks) + 2
+}
+
+func (p *SetupPanel) readinessCheckAtY(y int) (int, bool) {
+	if len(p.readinessChecks) == 0 {
+		return 0, false
+	}
+	rel := y - 2
+	if rel < 1 || rel > len(p.readinessChecks) {
+		return 0, false
+	}
+	return rel - 1, true
+}
+
+func (p *SetupPanel) wizardTabsY() int {
+	return 3 + p.readinessLineCount()
+}
+
+func (p *SetupPanel) credentialMatrixLineCount() int {
+	if p.credentialErr != "" {
+		return 2
+	}
+	if len(p.credentialRows) == 0 {
+		return 2
+	}
+	lines := 2 // title + header
+	maxRows := 8
+	if len(p.credentialRows) < maxRows {
+		maxRows = len(p.credentialRows)
+	}
+	lines += maxRows
+	if !p.credentialLoaded.IsZero() {
+		lines++
+	}
+	lines++ // action hint
+	return lines
+}
+
+func (p *SetupPanel) wizardConfigureY() int {
+	y := p.wizardTabsY() + 6
+	if p.activeWizard == wizardCredentials {
+		y += p.credentialMatrixLineCount() + 1
+	}
+	if howTo := wizardHowTo[p.activeWizard]; howTo != "" {
+		y += len(strings.Split(howTo, "\n")) + 1
+	}
+	return y + 2
+}
+
+func (p *SetupPanel) credentialMatrixStartY() int {
+	return p.wizardTabsY() + 6
+}
+
+func (p *SetupPanel) credentialRowAtY(y int) (int, bool) {
+	if p.activeWizard != wizardCredentials || len(p.credentialRows) == 0 || p.credentialErr != "" {
+		return 0, false
+	}
+	idx := y - (p.credentialMatrixStartY() + 2)
+	maxRows := 8
+	if len(p.credentialRows) < maxRows {
+		maxRows = len(p.credentialRows)
+	}
+	if idx < 0 || idx >= maxRows {
+		return 0, false
+	}
+	return idx, true
+}
+
+func (p *SetupPanel) credentialActionAt(x, y int) string {
+	if p.activeWizard != wizardCredentials || p.credentialErr != "" || len(p.credentialRows) == 0 {
+		return ""
+	}
+	actionY := p.credentialMatrixStartY() + p.credentialMatrixLineCount() - 1
+	if y != actionY {
+		return ""
+	}
+	boxes := []clickBox{
+		newClickBox("s", 2, actionY, 16, 1),
+		newClickBox("f", 20, actionY, 16, 1),
+		newClickBox("c", 38, actionY, 9, 1),
+		newClickBox("r", 49, actionY, 11, 1),
+	}
+	if id, ok := hitClickBox(boxes, x, y); ok {
+		return id
+	}
+	return ""
+}
+
+func (p *SetupPanel) handleWizardFormClick(x, y int) (bool, string, []string, string) {
+	if runY := p.wizardFormRunY(); y == runY && x >= 2 && x < 32 {
+		return p.submitWizardForm()
+	}
+	idx, ok := p.wizardFormFieldAtY(y)
+	if !ok {
+		return false, "", nil, ""
+	}
+	if idx < 0 || idx >= len(p.wizFormFields) {
+		return false, "", nil, ""
+	}
+	f := &p.wizFormFields[idx]
+	if f.Kind == "section" {
+		return false, "", nil, ""
+	}
+	p.wizFormError = ""
+	p.wizFormCursor = idx
+	if idx < p.wizFormScroll {
+		p.wizFormScroll = idx
+	}
+	visibleLines := p.wizardFormVisibleLines()
+	if idx >= p.wizFormScroll+visibleLines {
+		p.wizFormScroll = idx - visibleLines + 1
+	}
+	switch f.Kind {
+	case "bool":
+		if f.Value == "yes" {
+			f.Value = "no"
+		} else {
+			f.Value = "yes"
+		}
+		return false, "", nil, ""
+	case "choice":
+		cycleWizardFieldValue(f)
+		return false, "", nil, ""
+	case "preset":
+		cycleWizardFieldValue(f)
+		p.wizFormFields = observabilityWizardFields(f.Value)
+		p.wizFormCursor = 0
+		p.wizFormReveal = false
+		return false, "", nil, ""
+	case "whtype":
+		cycleWizardFieldValue(f)
+		p.wizFormFields = webhookWizardFields(f.Value)
+		p.wizFormCursor = 0
+		p.wizFormReveal = false
+		return false, "", nil, ""
+	default:
+		p.wizFormEditing = true
+		p.editInput.SetValue(f.Value)
+		p.pendingFocusCmd = p.editInput.Focus()
+		p.editInput.CursorEnd()
+		return false, "", nil, ""
+	}
+}
+
+func cycleWizardFieldValue(f *wizardFormField) {
+	if f == nil || len(f.Options) == 0 {
+		return
+	}
+	cur := 0
+	for i, o := range f.Options {
+		if o == f.Value {
+			cur = i
+			break
+		}
+	}
+	f.Value = f.Options[(cur+1)%len(f.Options)]
+}
+
+func (p *SetupPanel) wizardFormVisibleLines() int {
+	visibleLines := p.height - 8
+	if visibleLines < 5 {
+		visibleLines = 5
+	}
+	return visibleLines
+}
+
+func (p *SetupPanel) wizardFormFieldAtY(y int) (int, bool) {
+	if !p.wizFormActive {
+		return 0, false
+	}
+	visualY := 3
+	endIdx := p.wizFormScroll + p.wizardFormVisibleLines()
+	if endIdx > len(p.wizFormFields) {
+		endIdx = len(p.wizFormFields)
+	}
+	for i := p.wizFormScroll; i < endIdx; i++ {
+		f := p.wizFormFields[i]
+		if f.Kind == "section" && i > 0 {
+			if y == visualY {
+				return 0, false
+			}
+			visualY++
+		}
+		if y == visualY {
+			if f.Kind == "section" {
+				return 0, false
+			}
+			return i, true
+		}
+		visualY++
+	}
+	return 0, false
+}
+
+func (p *SetupPanel) wizardFormRunY() int {
+	if !p.wizFormActive {
+		return -1
+	}
+	visualY := 3
+	endIdx := p.wizFormScroll + p.wizardFormVisibleLines()
+	if endIdx > len(p.wizFormFields) {
+		endIdx = len(p.wizFormFields)
+	}
+	for i := p.wizFormScroll; i < endIdx; i++ {
+		if p.wizFormFields[i].Kind == "section" && i > 0 {
+			visualY++
+		}
+		visualY++
+	}
+	if p.wizFormCursor >= 0 && p.wizFormCursor < len(p.wizFormFields) && p.wizFormFields[p.wizFormCursor].Hint != "" {
+		visualY++
+	}
+	visualY++ // blank line before validation/run area
+	if p.wizFormError != "" {
+		visualY += 3
+	}
+	return visualY
 }
 
 func (p *SetupPanel) configSectionTabRows() [][]setupSectionTabHit {
@@ -2214,7 +3140,7 @@ func (p *SetupPanel) HandleMouseMotion(x, y int) {
 		return
 	}
 
-	if p.mode == setupModeWizards && y == 2 {
+	if p.mode == setupModeWizards && y == p.wizardTabsY() {
 		cursor := 0
 		for i, name := range wizardNames {
 			w := lipgloss.Width(name) + 2
@@ -2251,8 +3177,8 @@ func (p *SetupPanel) AuditActivityTempFile() (path string, cleanup func(), err e
 	for _, sec := range p.sections {
 		for _, f := range sec.Fields {
 			if f.Value != f.Original {
-				before[f.Key] = f.Original
-				after[f.Key] = f.Value
+				before[f.Key] = MaskConfigValue(f, f.Original)
+				after[f.Key] = MaskConfigValue(f, f.Value)
 			}
 		}
 	}
@@ -2286,6 +3212,40 @@ func (p *SetupPanel) AuditActivityTempFile() (path string, cleanup func(), err e
 	}
 	cleanup = func() { _ = os.Remove(path) }
 	return path, cleanup, nil
+}
+
+func (p *SetupPanel) ConfigDiff() []ConfigDiffEntry {
+	var out []ConfigDiffEntry
+	for _, sec := range p.sections {
+		for _, f := range sec.Fields {
+			if f.Value == f.Original {
+				continue
+			}
+			out = append(out, ConfigDiffEntry{
+				Key:    f.Key,
+				Before: MaskConfigValue(f, f.Original),
+				After:  MaskConfigValue(f, f.Value),
+				Secret: IsSecretConfigField(f),
+			})
+		}
+	}
+	return out
+}
+
+func (p *SetupPanel) ValidationErrors() []string {
+	var out []string
+	for _, sec := range p.sections {
+		for _, f := range sec.Fields {
+			if f.Kind == "header" {
+				continue
+			}
+			res := ValidateConfigField(f)
+			if res.Severity == ValidationError {
+				out = append(out, f.Key+": "+res.Message)
+			}
+		}
+	}
+	return out
 }
 
 // SaveConfig writes modified fields back to the config object and saves to disk.
@@ -2585,10 +3545,8 @@ func (p *SetupPanel) renderWizardForm() string {
 						Italic(true).
 						Render(f.Value)
 					val = revealed + " " + dim.Render("(revealed — Ctrl+T to hide)")
-				case len(f.Value) <= 4:
-					val = dim.Render("****")
 				default:
-					val = dim.Render("****" + f.Value[len(f.Value)-4:])
+					val = dim.Render(MaskSecret(f.Value))
 				}
 			default:
 				if f.Value == "" {
@@ -2658,6 +3616,11 @@ func (p *SetupPanel) renderWizardTerminal() string {
 	if p.wizRunning {
 		b.WriteString(cmdStyle.Render("$ defenseclaw setup " + strings.ToLower(wizName)))
 		b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render("running..."))
+		if p.wizScroll > 0 {
+			b.WriteString("  " + dim.Render(fmt.Sprintf("scrolled up %d", p.wizScroll)))
+		} else {
+			b.WriteString("  " + dim.Render("pinned to bottom"))
+		}
 	} else {
 		b.WriteString(cmdStyle.Render("$ defenseclaw setup "+strings.ToLower(wizName)) + "  " +
 			lipgloss.NewStyle().Foreground(lipgloss.Color("34")).Render("done"))
@@ -2712,6 +3675,8 @@ func (p *SetupPanel) renderWizards() string {
 	activeStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Padding(0, 1)
 	inactiveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Padding(0, 1)
 	hoverStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("97")).Padding(0, 1)
+	b.WriteString(p.renderReadiness())
+	b.WriteString("\n")
 
 	var tabs []string
 	for i, name := range wizardNames {
@@ -2736,6 +3701,11 @@ func (p *SetupPanel) renderWizards() string {
 
 	b.WriteString("  " + dim.Render(wizardDescriptions[p.activeWizard]))
 	b.WriteString("\n\n")
+
+	if p.activeWizard == wizardCredentials {
+		b.WriteString(p.renderCredentialMatrix())
+		b.WriteString("\n")
+	}
 
 	// "What this wizard does + what you'll need" block. Multi-line so
 	// each sub-bullet (Runs/Needs/Tip) renders on its own line, giving
@@ -2772,9 +3742,102 @@ func (p *SetupPanel) renderWizards() string {
 	b.WriteString("  " + cfgBtn)
 	b.WriteString("\n\n")
 
-	b.WriteString("  " + dim.Render("[Enter/Click] Configure  [Up/Down/Arrows] Switch  [`] Config Editor"))
+	b.WriteString("  " + dim.Render("[Enter/Click] Configure  [Home] Readiness  [Arrows] Switch  [`] Config Editor"))
 	b.WriteString("\n")
 
+	return b.String()
+}
+
+func (p *SetupPanel) renderReadiness() string {
+	var b strings.Builder
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252"))
+	b.WriteString(title.Render("  Setup Readiness"))
+	b.WriteString("\n")
+	if len(p.readinessChecks) == 0 {
+		b.WriteString("  " + dim.Render("No readiness snapshot yet. Next: run doctor or refresh credentials.") + "\n")
+		return b.String()
+	}
+	for i := 0; i < len(p.readinessChecks); i++ {
+		ck := p.readinessChecks[i]
+		marker := "  "
+		if p.readinessFocused && i == p.readinessCursor {
+			marker = "> "
+		}
+		status := string(ck.Status)
+		style := dim
+		switch ck.Status {
+		case ReadinessPass:
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
+		case ReadinessWarn:
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+		case ReadinessFail:
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+		}
+		fix := ""
+		if ck.Fix != nil && ck.Status != ReadinessPass {
+			fix = dim.Render("  fix: " + ck.Fix.MaskedDisplayName())
+		}
+		fmt.Fprintf(&b, "%s%s %-28s %s%s\n", marker, style.Render(status), ck.Title, dim.Render(ck.Detail), fix)
+	}
+	b.WriteString("  " + dim.Render("[Enter] run selected fix  [Right/Tab] wizards  [r] refresh credentials") + "\n")
+	return b.String()
+}
+
+func (p *SetupPanel) renderCredentialMatrix() string {
+	var b strings.Builder
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+	head := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("252"))
+	b.WriteString("  " + head.Render("Credential Matrix") + "\n")
+	if p.credentialErr != "" {
+		b.WriteString("  " + lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("keys list --json failed: "+p.credentialErr) + "\n")
+		return b.String()
+	}
+	if len(p.credentialRows) == 0 {
+		b.WriteString("  " + dim.Render("No credential snapshot loaded. Next: press r to refresh or c to run keys check.") + "\n")
+		return b.String()
+	}
+	fmt.Fprintf(&b, "  %-26s %-18s %-10s %-10s %s\n", "ENV", "FEATURE", "REQUIRED", "SOURCE", "STATUS")
+	maxRows := 8
+	if len(p.credentialRows) < maxRows {
+		maxRows = len(p.credentialRows)
+	}
+	for i := 0; i < maxRows; i++ {
+		row := p.credentialRows[i]
+		prefix := "  "
+		if i == p.credentialCursor {
+			prefix = "> "
+		}
+		req := row.Requirement
+		if req == "" {
+			req = "unknown"
+		}
+		source := row.Source
+		if source == "" {
+			source = "unset"
+		}
+		status := "missing"
+		statusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+		if row.Set {
+			status = "set"
+			statusStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("34"))
+		} else if req != "required" {
+			status = "unset"
+			statusStyle = dim
+		}
+		fmt.Fprintf(&b, "%s%-26s %-18s %-10s %-10s %s\n",
+			prefix,
+			truncateStr(row.EnvName, 26),
+			truncateStr(row.Feature, 18),
+			req,
+			source,
+			statusStyle.Render(status),
+		)
+	}
+	if !p.credentialLoaded.IsZero() {
+		b.WriteString("  " + dim.Render("loaded "+time.Since(p.credentialLoaded).Truncate(time.Second).String()+" ago") + "\n")
+	}
+	b.WriteString("  " + dim.Render("[s] set selected  [f] fill missing  [c] check  [r] refresh") + "\n")
 	return b.String()
 }
 
@@ -2821,6 +3884,15 @@ func (p *SetupPanel) renderConfigEditor() string {
 	// field hint below and in docs/CONFIG_FILES.md.
 	if sec.Summary != "" {
 		b.WriteString("  " + summaryFg.Render(sec.Summary) + "\n\n")
+	}
+	if p.restartQueue.Pending {
+		banner := lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("230")).
+			Background(lipgloss.Color("94")).
+			Padding(0, 1).
+			Render("Restart pending: " + p.restartQueue.Reason + "  [G] restart now  [C] clear")
+		b.WriteString("  " + banner + "\n\n")
 	}
 
 	// Help footer lines subtract from the visible field list height so
@@ -2885,7 +3957,7 @@ func (p *SetupPanel) renderConfigEditor() string {
 			}
 		case "password":
 			if val != "" {
-				styledVal = val
+				styledVal = dim.Render(MaskSecret(val))
 			} else {
 				styledVal = dim.Render("(empty)")
 			}
@@ -2893,7 +3965,12 @@ func (p *SetupPanel) renderConfigEditor() string {
 			if val == "" {
 				styledVal = dim.Render("(empty)")
 			} else {
-				styledVal = val
+				maskedVal := MaskConfigValue(f, val)
+				if maskedVal != val {
+					styledVal = dim.Render(maskedVal)
+				} else {
+					styledVal = val
+				}
 			}
 		}
 
@@ -2928,11 +4005,25 @@ func (p *SetupPanel) renderConfigEditor() string {
 	if hint != "" {
 		b.WriteString("  " + hintFg.Render(hint) + "\n\n")
 	}
+	if idx >= 0 && idx < len(sec.Fields) {
+		if validation := ValidateConfigField(sec.Fields[idx]); validation.Message != "" {
+			style := hintFg
+			if validation.Severity == ValidationError {
+				style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196"))
+			} else if validation.Severity == ValidationWarning {
+				style = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+			}
+			b.WriteString("  " + style.Render("Validation: "+validation.Message) + "\n\n")
+		}
+		if sec.Fields[idx].Kind != "header" {
+			b.WriteString("  " + dim.Render("Restart: queued on save when runtime settings change") + "\n\n")
+		}
+	}
 
 	// Action bar
 	actions := []string{"[`] Wizards", "[Arrows] Navigate", "[Enter/Click] Edit/Toggle"}
 	if p.HasChanges() {
-		actions = append(actions, changed.Render("[S] Save")+" [R] Revert")
+		actions = append(actions, changed.Render("[S] Review & Save")+" [R] Revert")
 	}
 	if !p.lastSaved.IsZero() {
 		ago := time.Since(p.lastSaved).Truncate(time.Second)
@@ -3102,6 +4193,13 @@ func hiltMinSeverityValue(severity string) string {
 	}
 }
 
+func skillScannerPolicyValue(policy string) string {
+	if strings.TrimSpace(policy) == "" {
+		return "none"
+	}
+	return strings.TrimSpace(policy)
+}
+
 func agentHookFields(label, prefix string, h config.AgentHookConfig) []configField {
 	return []configField{
 		{Label: "── " + label + " ──", Kind: "header"},
@@ -3185,6 +4283,63 @@ func llmOverrideFields(label, prefix string, llm config.LLMConfig) []configField
 		{Label: "Max Retries", Key: prefix + ".max_retries", Kind: "int", Value: fmt.Sprintf("%d", llm.MaxRetries),
 			Hint: "Retry count for this component. 0 inherits default."},
 	}
+}
+
+func assetPolicyDefaultValue(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "allow"
+	}
+	return strings.TrimSpace(v)
+}
+
+func assetPolicyEmptyActionValue(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "deny"
+	}
+	return strings.TrimSpace(v)
+}
+
+func assetPolicyRuntimeUnknownValue(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "observe"
+	}
+	return strings.TrimSpace(v)
+}
+
+func assetPolicyTypeFields(label, prefix string, p config.AssetTypePolicy, runtime bool) []configField {
+	fields := []configField{
+		{Label: "── " + label + " ──", Kind: "header"},
+		{Label: "Default", Key: prefix + ".default", Kind: "choice", Options: []string{"allow", "deny"}, Value: assetPolicyDefaultValue(p.Default),
+			Hint: "Fallback when no allowed/denied/registry rule matches this asset type."},
+		{Label: "Registry Required", Key: prefix + ".registry_required", Kind: "bool", Value: fmt.Sprintf("%v", p.RegistryRequired),
+			Hint: "Require an approved registry entry before allowing this asset type."},
+		{Label: "Empty Registry Action", Key: prefix + ".registry_empty_action", Kind: "choice", Options: []string{"deny", "allow"}, Value: assetPolicyEmptyActionValue(p.RegistryEmptyAction),
+			Hint: "Behavior when Registry Required is true but no registry entries exist."},
+	}
+	if runtime {
+		fields = append(fields,
+			configField{Label: "Runtime Detection", Key: prefix + ".runtime_detection.enabled", Kind: "bool", Value: fmt.Sprintf("%v", p.RuntimeDetection.Enabled),
+				Hint: "Detect runtime MCP usage from terminal commands and connector metadata."},
+			configField{Label: "Terminal Commands", Key: prefix + ".runtime_detection.terminal_commands", Kind: "bool", Value: fmt.Sprintf("%v", p.RuntimeDetection.TerminalCommands),
+				Hint: "Inspect terminal command surfaces for unknown MCP invocations."},
+			configField{Label: "Unknown Terminal MCP", Key: prefix + ".runtime_detection.unknown_terminal_mcp", Kind: "choice", Options: []string{"observe", "action"}, Value: assetPolicyRuntimeUnknownValue(p.RuntimeDetection.UnknownTerminalMCP),
+				Hint: "Posture for unknown MCP usage discovered from terminal command surfaces."},
+		)
+	}
+	return fields
+}
+
+func assetPolicyFields(c *config.Config) []configField {
+	fields := []configField{
+		{Label: "Enabled", Key: "asset_policy.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.AssetPolicy.Enabled),
+			Hint: "Master switch for install/runtime asset admission decisions."},
+		{Label: "Mode", Key: "asset_policy.mode", Kind: "choice", Options: []string{"observe", "action"}, Value: assetPolicyRuntimeUnknownValue(c.AssetPolicy.Mode),
+			Hint: "observe=log would-blocks; action=block according to policy decisions."},
+	}
+	fields = append(fields, assetPolicyTypeFields("Skill", "asset_policy.skill", c.AssetPolicy.Skill, false)...)
+	fields = append(fields, assetPolicyTypeFields("MCP", "asset_policy.mcp", c.AssetPolicy.MCP, true)...)
+	fields = append(fields, assetPolicyTypeFields("Plugin", "asset_policy.plugin", c.AssetPolicy.Plugin, false)...)
+	return fields
 }
 
 // ciscoAIDefenseFields builds the Cisco AI Defense section. The API key

@@ -70,11 +70,16 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 		nativeOTLP       bool
 		pluginsSupported bool
 	}{
-		{NewHermesConnector(), []string{"skill"}, false, true},
+		// Plugins.Supported is FALSE on every hook-only connector
+		// because DefenseClaw plugins are an OpenClaw-only concept
+		// (G4). The TUI Plugins panel hides itself for these
+		// connectors and `defenseclaw plugin list` prints an
+		// OpenClaw-only notice.
+		{NewHermesConnector(), []string{"skill"}, false, false},
 		{NewCursorConnector(), []string{"skill", "rule"}, false, false},
 		{NewWindsurfConnector(), []string{"rule"}, false, false},
-		{NewGeminiCLIConnector(), []string{"skill"}, true, true},
-		{NewCopilotConnector(), []string{"skill", "rule"}, true, true},
+		{NewGeminiCLIConnector(), []string{"skill"}, true, false},
+		{NewCopilotConnector(), []string{"skill", "rule"}, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {

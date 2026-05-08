@@ -225,7 +225,7 @@ func streamLLMEventMeta(r *EventRouter, sessionID, runID, provider, model, agent
 }
 
 func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequest, _ []string, rawPayload []byte) {
-	meta := hookLLMEventMeta("codex", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, req.AgentType, req.Payload)
+	meta := hookLLMEventMeta("codex", req.SessionID, req.TurnID, req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
 	switch req.HookEventName {
 	case "UserPromptSubmit":
 		meta.PromptID = hookPromptID("codex", req.SessionID, req.TurnID, req.Prompt, rawPayload)
@@ -234,10 +234,12 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	case "PreToolUse", "PermissionRequest":
 		meta.PromptID = firstNonEmpty(a.lastHookPromptIDForTurn("codex", req.SessionID, req.TurnID), a.lastHookPromptID("codex", req.SessionID), promptIDForTurn("codex", req.SessionID, req.TurnID))
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), codexToolName(req))
 		emitToolInvocationEvent(ctx, meta, "call", codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), "", nil)
 	case "PostToolUse":
 		meta.PromptID = firstNonEmpty(a.lastHookPromptIDForTurn("codex", req.SessionID, req.TurnID), a.lastHookPromptID("codex", req.SessionID), promptIDForTurn("codex", req.SessionID, req.TurnID))
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), codexToolName(req))
 		emitToolInvocationEvent(ctx, meta, "result", codexToolName(req), "", codexToolResponseString(req.ToolResponse), nil)
 	case "Stop":
 		if strings.TrimSpace(req.LastAssistantMessage) == "" {
@@ -249,8 +251,66 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	}
 }
 
+// emitAgentHookLLMEvent is the LLM-event emitter for the five
+// hook-only connectors (hermes, cursor, windsurf, geminicli,
+// copilot). It mirrors emitClaudeCodeHookLLMEvent /
+// emitCodexHookLLMEvent so a "give me every prompt and tool call"
+// query against the gateway log returns the same shape regardless
+// of which framework the operator is running.
+//
+// Source-of-truth mapping per HookEventName flavor:
+//
+//   - prompt-like   (UserPromptSubmit, beforeSubmitPrompt,
+//     pre_user_prompt, pre_llm_call, BeforeAgent,
+//     BeforeModel, ...)        → emitLLMPromptEvent
+//   - tool-call-like (PreToolUse, beforeShellExecution,
+//     beforeMCPExecution, BeforeTool,
+//     pre_run_command, ...)    → emitToolInvocationEvent("call")
+//   - result-like    (PostToolUse, AfterTool, postToolUseFailure,
+//     post_tool_call, after_*, ...)
+//     → emitToolInvocationEvent("result")
+//
+// The connector name doubles as the event Source so downstream
+// dashboards can split prompts/tools by framework. DestinationApp
+// follows the same hookToolDestinationApp helper claudecode/codex
+// use, which routes "mcp__server__tool" / explicit mcp_server_name
+// payload fields to "mcp:<server>" and other tools to "builtin".
+func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequest, rawPayload []byte) {
+	source := strings.TrimSpace(req.ConnectorName)
+	if source == "" {
+		return
+	}
+	model := payloadString(req.Payload, "model")
+	meta := hookLLMEventMeta(source, req.SessionID, req.TurnID, model, source, req.AgentID, req.AgentName, req.AgentType, req.Payload)
+	switch {
+	case isPromptLikeEvent(req.HookEventName):
+		prompt := req.Content
+		meta.PromptID = hookPromptID(source, req.SessionID, req.TurnID, prompt, rawPayload)
+		promptID := emitLLMPromptEvent(ctx, meta, prompt, rawPayload)
+		a.rememberHookPromptID(source, req.SessionID, req.TurnID, promptID)
+	case isGenericToolInspectionEvent(req.HookEventName):
+		meta.PromptID = firstNonEmpty(
+			a.lastHookPromptIDForTurn(source, req.SessionID, req.TurnID),
+			a.lastHookPromptID(source, req.SessionID),
+			promptIDForTurn(source, req.SessionID, req.TurnID),
+		)
+		meta.ToolID = req.TurnID
+		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
+		emitToolInvocationEvent(ctx, meta, "call", req.ToolName, stringFromJSONRaw(req.ToolArgs), "", nil)
+	case isResultLikeEvent(req.HookEventName):
+		meta.PromptID = firstNonEmpty(
+			a.lastHookPromptIDForTurn(source, req.SessionID, req.TurnID),
+			a.lastHookPromptID(source, req.SessionID),
+			promptIDForTurn(source, req.SessionID, req.TurnID),
+		)
+		meta.ToolID = req.TurnID
+		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
+		emitToolInvocationEvent(ctx, meta, "result", req.ToolName, "", req.Content, nil)
+	}
+}
+
 func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCodeHookRequest, _ []string, rawPayload []byte) {
-	meta := hookLLMEventMeta("claudecode", req.SessionID, "", req.Model, req.Source, req.AgentID, req.AgentType, req.Payload)
+	meta := hookLLMEventMeta("claudecode", req.SessionID, "", req.Model, req.Source, req.AgentID, payloadString(req.Payload, "agent_name"), req.AgentType, req.Payload)
 	switch req.HookEventName {
 	case "UserPromptSubmit", "UserPromptExpansion":
 		prompt := claudeCodePromptContent(req)
@@ -260,10 +320,12 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
 		meta.PromptID = a.lastHookPromptID("claudecode", req.SessionID)
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, claudeCodeToolName(req))
 		emitToolInvocationEvent(ctx, meta, "call", claudeCodeToolName(req), stringFromJSONRaw(claudeCodeToolArgs(req)), "", nil)
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
 		meta.PromptID = a.lastHookPromptID("claudecode", req.SessionID)
 		meta.ToolID = req.ToolUseID
+		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, claudeCodeToolName(req))
 		emitToolInvocationEvent(ctx, meta, "result", claudeCodeToolName(req), "", claudeCodeToolOutput(req), nil)
 	case "Stop", "SubagentStop", "SessionEnd":
 		if strings.TrimSpace(req.LastAssistantMessage) == "" {
@@ -275,7 +337,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 	}
 }
 
-func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, agentType string, payload map[string]interface{}) llmEventMeta {
+func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, agentName, agentType string, payload map[string]interface{}) llmEventMeta {
 	userID, userName := userFromHookPayload(payload)
 	provider := inferSystem("", model)
 	if provider == "unknown" {
@@ -288,11 +350,24 @@ func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, age
 		SessionID: sessionID,
 		TurnID:    turnID,
 		AgentID:   agentID,
-		AgentName: firstNonEmpty(agentID, agentType, source),
+		AgentName: firstNonEmpty(agentName, agentID, agentType, source),
 		AgentType: firstNonEmpty(agentType, source),
 		UserID:    userID,
 		UserName:  userName,
 	}
+}
+
+func hookToolDestinationApp(serverName, toolName string) string {
+	if server := strings.TrimSpace(serverName); server != "" {
+		return toolDestinationApp("mcp", server)
+	}
+	if server := serverFromMCPToolName(toolName); server != "" {
+		return toolDestinationApp("mcp", server)
+	}
+	if strings.TrimSpace(toolName) == "" {
+		return ""
+	}
+	return toolDestinationApp("builtin", "")
 }
 
 func (a *APIServer) rememberHookPromptID(source, sessionID, turnID, promptID string) {

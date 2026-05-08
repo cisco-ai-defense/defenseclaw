@@ -30,7 +30,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -71,34 +71,26 @@ type codexHookResponse struct {
 
 func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "method", 0)
-		}
+		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "method", 0)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
 	payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
 	if err != nil {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_json", 0)
-		}
+		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "invalid_json", 0)
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
 	var req codexHookRequest
 	if err := json.Unmarshal(b, &req); err != nil {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "invalid_payload", 0)
-		}
+		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "invalid_payload", int64(len(b)))
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Codex hook payload"})
 		return
 	}
 	req.Payload = payload
 	if req.HookEventName == "" {
-		if a.otel != nil {
-			a.otel.RecordConnectorHookInvocation(r.Context(), "codex", "unknown", "rejected", "missing_event", 0)
-		}
+		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "missing_event", int64(len(b)))
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
 		return
 	}
@@ -129,15 +121,16 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
 		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
 		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
+		a.otel.EmitConnectorTelemetryLog(ctx, "hook", "codex", "ok", 1, int64(len(b)),
+			fmt.Sprintf("source=hook connector=codex event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
+				req.HookEventName, codexToolName(req), resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
 	}
 
-	if a.logger != nil {
-		details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-			resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-		details = appendRawTelemetryDetails(details, "raw_payload", b)
-		details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-		_ = a.logger.LogActionCtx(ctx, "codex-hook", req.HookEventName, details)
-	}
+	details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
+		resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
+	details = appendRawTelemetryDetails(details, "raw_payload", b)
+	details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
+	a.logConnectorHookAudit(ctx, "codex", req.HookEventName, details)
 
 	a.writeJSON(w, http.StatusOK, resp)
 }
@@ -202,8 +195,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	}
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	assetDecision := config.AssetPolicyDecision{}
-	assetMatched := false
+	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnSessionStart) {
@@ -229,14 +221,24 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Args:      codexToolArgs(req),
 			Direction: "tool_call",
 		})
-		assetDecision, assetMatched = a.codexMCPAssetDecision(ctx, req)
+		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.codexSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "PostToolUse":
 		verdict = a.inspectMessageContent(&ToolInspectRequest{
 			Tool:      "message",
 			Content:   codexToolResponseString(req.ToolResponse),
 			Direction: "tool_result",
 		})
-		assetDecision, assetMatched = a.codexMCPAssetDecision(ctx, req)
+		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.codexSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "Stop":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("codex").ScanOnStop {
 			verdict = a.scanCodexChangedFiles(ctx, req)
@@ -244,6 +246,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	}
 
 	rawAction := normalizeCodexAction(verdict.Action)
+	rawActionBeforeAssets := rawAction
 	action := rawAction
 	wouldBlock := rawAction == "block" && mode != "action"
 	if mode != "action" && rawAction == "block" {
@@ -255,18 +258,64 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	if mode == "action" && rawAction == "confirm" {
 		action = "alert"
 	}
-	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
-		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
-	)
-	action = mergedAction
-	rawAction = mergedRawAction
-	verdict.Severity = mergedSeverity
-	verdict.Reason = mergedReason
-	verdict.Findings = mergedFindings
-	if assetWouldBlock {
-		wouldBlock = true
+	for _, asset := range assetDecisions {
+		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
+			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
+		)
+		action = mergedAction
+		rawAction = mergedRawAction
+		verdict.Severity = mergedSeverity
+		verdict.Reason = mergedReason
+		verdict.Findings = mergedFindings
+		if assetWouldBlock {
+			wouldBlock = true
+		}
+	}
+	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
+		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock)
 	}
 	return codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+}
+
+// dispatchCodexHookNotification mirrors the Claude Code path —
+// see dispatchClaudeCodeHookNotification for the routing contract,
+// including the redaction.ForSinkReason scrub on the reason string.
+func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
+	if a == nil || a.notifier == nil {
+		return
+	}
+	target := strings.TrimSpace(req.ToolName)
+	if target == "" {
+		target = req.HookEventName
+	}
+	safeReason := string(redaction.ForSinkReason(reason))
+	switch {
+	case action == "block":
+		a.notifier.OnBlock(notifier.BlockEvent{
+			Source:    notifier.SourceHook,
+			Target:    target,
+			Reason:    safeReason,
+			Severity:  severity,
+			Connector: "codex",
+			Event:     req.HookEventName,
+		})
+	case rawAction == "block" && (wouldBlock || action != "block"):
+		a.notifier.OnWouldBlock(notifier.BlockEvent{
+			Source:    notifier.SourceHook,
+			Target:    target,
+			Reason:    safeReason,
+			Severity:  severity,
+			Connector: "codex",
+			Event:     req.HookEventName,
+		})
+	case rawAction == "confirm":
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:  fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:   safeReason,
+			Severity: severity,
+			Source:   notifier.SourceHook,
+		})
+	}
 }
 
 // codexEnabled mirrors claudeCodeEnabled: selecting the codex connector

@@ -27,6 +27,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -67,6 +68,20 @@ func (p *Provider) setSpanResourceContext(span trace.Span) {
 	if attrs := p.resourceSpanContextAttrs(); len(attrs) > 0 {
 		span.SetAttributes(attrs...)
 	}
+}
+
+// SetSpanResourceContext mirrors the deployment / device join keys
+// from the process resource onto a span. Public wrapper around
+// setSpanResourceContext so callers outside this package (notably
+// internal/inventory/ai_discovery, which spans its own scan but does
+// not go through StartGuardrail*Span) can keep parity with guardrail
+// span attributes. Nil receiver / nil span are safe no-ops so call
+// sites do not need to guard each invocation.
+func (p *Provider) SetSpanResourceContext(span trace.Span) {
+	if p == nil {
+		return
+	}
+	p.setSpanResourceContext(span)
 }
 
 // EmitStartupSpan creates a short-lived span to verify the trace export pipeline
@@ -246,6 +261,9 @@ func (p *Provider) StartAgentSpan(
 	}
 	if agentID != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.id", agentID))
+	}
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
 	}
 	if inst := p.AgentInstanceID(); inst != "" {
 		span.SetAttributes(attribute.String("defenseclaw.agent.instance_id", inst))
@@ -576,6 +594,9 @@ func (p *Provider) StartLLMSpan(
 		attribute.Int("gen_ai.request.max_tokens", maxTokens),
 		attribute.Float64("gen_ai.request.temperature", temperature),
 	)
+	if runID := gatewaylog.ProcessRunID(); runID != "" {
+		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
+	}
 
 	return ctx, span
 }

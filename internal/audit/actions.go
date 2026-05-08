@@ -100,6 +100,8 @@ const (
 	ActionOTelIngestMetrics   Action = "otel.ingest.metrics"
 	ActionOTelIngestTraces    Action = "otel.ingest.traces"
 	ActionOTelIngestMalformed Action = "otel.ingest.malformed"
+	ActionConnectorHook       Action = "connector-hook"
+	ActionAssetPolicy         Action = "asset-policy"
 
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
@@ -163,6 +165,8 @@ func AllActions() []Action {
 		ActionOTelIngestMetrics,
 		ActionOTelIngestTraces,
 		ActionOTelIngestMalformed,
+		ActionConnectorHook,
+		ActionAssetPolicy,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,

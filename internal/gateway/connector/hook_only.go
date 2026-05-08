@@ -236,16 +236,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill"}
-		caps.Plugins = SurfaceCapability{
-			Supported:      true,
-			Scope:          "user",
-			ReadPaths:      []string{homePath(".hermes", "plugins"), filepath.Join(workspaceRoot(opts), ".hermes", "plugins")},
-			WritePaths:     []string{homePath(".hermes", "plugins")},
-			InstallTargets: []string{"plugin"},
-			RequiresOptIn:  true,
-			DiscoveryOnly:  true,
-			Notes:          []string{"Project .hermes/plugins is discovery-only until plugins.enabled is explicitly set."},
-		}
+		caps.Plugins = pluginsAreOpenClawOnly()
 		caps.Rules = unsupportedSurface("Hermes rules are not a separate documented local surface.")
 		caps.Agents = unsupportedSurface("Hermes subagent/agent asset locations are not installed by DefenseClaw v1.")
 	case "cursor":
@@ -275,7 +266,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill", "rule"}
-		caps.Plugins = unsupportedSurface("Cursor plugin/extension installation is not supported by this connector.")
+		caps.Plugins = pluginsAreOpenClawOnly()
 		caps.Agents = unsupportedSurface("Cursor subagent installation is not a documented local surface for this connector.")
 	case "windsurf":
 		caps.MCP = SurfaceCapability{
@@ -298,7 +289,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.CodeGuard.InstallTargets = []string{"rule"}
 		caps.CodeGuard.Notes = append(caps.CodeGuard.Notes, "Windsurf CodeGuard rule installation is available only when a documented/pre-existing rules path exists.")
 		caps.Skills = unsupportedSurface("Windsurf skills are not exposed as a documented local install surface.")
-		caps.Plugins = unsupportedSurface("Windsurf plugin/extension installation is explicitly unsupported in this connector matrix.")
+		caps.Plugins = pluginsAreOpenClawOnly()
 		caps.Agents = unsupportedSurface("Windsurf agent/subagent asset installation is not supported.")
 	case "geminicli":
 		caps.MCP = SurfaceCapability{
@@ -317,14 +308,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 		}
-		caps.Plugins = SurfaceCapability{
-			Supported:      true,
-			Scope:          "workspace,user",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".gemini", "extensions"), homePath(".gemini", "extensions")},
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".gemini", "extensions")},
-			InstallTargets: []string{"extension"},
-			RequiresOptIn:  true,
-		}
+		caps.Plugins = pluginsAreOpenClawOnly()
 		caps.Agents = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace,user",
@@ -378,13 +362,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
 		}
-		caps.Plugins = SurfaceCapability{
-			Supported:      true,
-			Scope:          "user",
-			InstallTargets: []string{"plugin"},
-			RequiresOptIn:  true,
-			Notes:          []string{"Copilot plugins are installed through the documented copilot plugin CLI flows, not by editing shell startup files."},
-		}
+		caps.Plugins = pluginsAreOpenClawOnly()
 		caps.Agents = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace,user",
@@ -665,6 +643,22 @@ func unsupportedSurface(note string) SurfaceCapability {
 		cap.Notes = []string{note}
 	}
 	return cap
+}
+
+// pluginsAreOpenClawOnly is the canonical "Plugins is an OpenClaw-only
+// capability" surface. Hook-only connectors (hermes, cursor, windsurf,
+// geminicli, copilot) advertise it so the TUI Plugins panel and the
+// `defenseclaw plugin list` CLI both have a single, consistent message
+// to surface to operators rather than silently doing nothing — or
+// worse, doing something that LOOKS connector-aware but ignores the
+// connector's actual extension model. The note is short on purpose:
+// the renderer typically shows it under a "DefenseClaw plugins are
+// OpenClaw-only" banner.
+func pluginsAreOpenClawOnly() SurfaceCapability {
+	return SurfaceCapability{
+		Supported: false,
+		Notes:     []string{"DefenseClaw plugins are an OpenClaw-only concept; this connector ships no plugin install surface."},
+	}
 }
 
 func cursorSkillPaths(opts SetupOpts) []string {

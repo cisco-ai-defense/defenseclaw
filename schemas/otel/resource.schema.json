@@ -47,6 +47,7 @@
     },
     "deployment.mode": {
       "type": "string",
+      "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"],
       "description": "Deployment mode when configured."
     },
     "discovery.source": {
@@ -74,7 +75,7 @@
     },
     "defenseclaw.claw.home_dir": {
       "type": "string",
-      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex, hermes uses ~/.hermes, cursor uses ~/.cursor, windsurf uses ~/.codeium/windsurf, geminicli uses ~/.gemini, and copilot is workspace-scoped under .github/hooks.",
+      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex, hermes uses ~/.hermes, cursor uses ~/.cursor, windsurf uses ~/.codeium/windsurf, geminicli uses ~/.gemini, and copilot uses ~/.copilot while workspace assets may live under .github/.",
       "examples": [
         "/home/user/.openclaw",
         "/home/user/.zeptoclaw",
@@ -84,7 +85,7 @@
         "/home/user/.cursor",
         "/home/user/.codeium/windsurf",
         "/home/user/.gemini",
-        "/home/user/project/.github/hooks"
+        "/home/user/.copilot"
       ]
     },
     "defenseclaw.device.id": {

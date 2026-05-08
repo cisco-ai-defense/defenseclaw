@@ -87,6 +87,20 @@ class TestHelpers(unittest.TestCase):
     def test_dedup_empty(self):
         self.assertEqual(_dedup([]), [])
 
+    def test_validate_deployment_mode_empty_allowed(self):
+        self.assertEqual(config_mod._validate_deployment_mode(""), "")
+
+    def test_validate_deployment_mode_valid(self):
+        self.assertEqual(config_mod._validate_deployment_mode("managed_enterprise"), "managed_enterprise")
+        self.assertEqual(config_mod._validate_deployment_mode("managed"), "managed_enterprise")
+        self.assertEqual(config_mod._validate_deployment_mode("standalone"), "unmanaged_byod")
+        self.assertEqual(config_mod._validate_deployment_mode("ci"), "ci_cd")
+        self.assertEqual(config_mod._validate_deployment_mode("edge"), "server")
+
+    def test_validate_deployment_mode_invalid(self):
+        with self.assertRaises(ValueError):
+            config_mod._validate_deployment_mode("freeform")
+
 
 class TestPaths(unittest.TestCase):
     def test_default_data_path(self):

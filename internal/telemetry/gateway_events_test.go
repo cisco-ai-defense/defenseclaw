@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/log"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	metricdata "go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/trace"
 
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
@@ -161,7 +162,7 @@ func TestEmitGatewayEvent_VerdictLogAttributes(t *testing.T) {
 	if got := attrValue(rec, "defenseclaw.gateway.event_type"); got != "verdict" {
 		t.Fatalf("event_type attr=%q", got)
 	}
-	if got := attrValue(rec, "defenseclaw.run_id"); got != "run-1" {
+	if got := attrValue(rec, "defenseclaw.run.id"); got != "run-1" {
 		t.Fatalf("run_id attr=%q", got)
 	}
 	if got := attrValue(rec, "defenseclaw.llm.model"); got != "gpt-4" {
@@ -217,6 +218,45 @@ func TestEmitGatewayEvent_LifecycleAttributes(t *testing.T) {
 	}
 	if got := attrValue(rec, "defenseclaw.lifecycle.transition"); got != "init" {
 		t.Fatalf("lifecycle.transition=%q", got)
+	}
+}
+
+func TestEmitGatewayEventWithContext_PropagatesTraceContext(t *testing.T) {
+	p, exp := newProviderWithLogCapture(t)
+
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("TraceIDFromHex: %v", err)
+	}
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	if err != nil {
+		t.Fatalf("SpanIDFromHex: %v", err)
+	}
+	sc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    traceID,
+		SpanID:     spanID,
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), sc)
+
+	p.EmitGatewayEventWithContext(ctx, gatewaylog.Event{
+		EventType: gatewaylog.EventLifecycle,
+		Severity:  gatewaylog.SeverityInfo,
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem: "gateway", Transition: "trace-linked",
+		},
+	})
+
+	rec := exp.snapshot()[0]
+	if got := rec.TraceID(); got != traceID {
+		t.Fatalf("record trace id=%s want %s", got.String(), traceID.String())
+	}
+	if got := rec.SpanID(); got != spanID {
+		t.Fatalf("record span id=%s want %s", got.String(), spanID.String())
+	}
+	if got := rec.TraceFlags(); got != trace.FlagsSampled {
+		t.Fatalf("record trace flags=%v want %v", got, trace.FlagsSampled)
 	}
 }
 
@@ -339,7 +379,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 		TenantID:          "tenant-contract",
 		WorkspaceID:       "workspace-contract",
 		Environment:       "prod",
-		DeploymentMode:    "managed",
+		DeploymentMode:    "managed_enterprise",
 		DiscoverySource:   "registry",
 		SchemaVersion:     7,
 		ContentHash:       "hash-contract",
@@ -357,7 +397,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 
 	// String-typed envelope slots — assertAttrString both proves
 	// the key is present AND that the value round-tripped.
-	assertAttrString(t, rec, "defenseclaw.run_id", "run-contract")
+	assertAttrString(t, rec, "defenseclaw.run.id", "run-contract")
 	assertAttrString(t, rec, "defenseclaw.request_id", "req-contract")
 	assertAttrString(t, rec, "gen_ai.conversation.id", "sess-contract")
 	assertAttrString(t, rec, "defenseclaw.trace_id", "trace-contract")
@@ -375,7 +415,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 	assertAttrString(t, rec, "tenant.id", "tenant-contract")
 	assertAttrString(t, rec, "workspace.id", "workspace-contract")
 	assertAttrString(t, rec, "deployment.environment", "prod")
-	assertAttrString(t, rec, "deployment.mode", "managed")
+	assertAttrString(t, rec, "deployment.mode", "managed_enterprise")
 	assertAttrString(t, rec, "discovery.source", "registry")
 	assertAttrString(t, rec, "defenseclaw.content_hash", "hash-contract")
 	assertAttrString(t, rec, "defenseclaw.binary_version", "bin-contract")

@@ -1713,7 +1713,8 @@ func isOTELLogRow(r verdictRow) bool {
 	if strings.HasPrefix(action, "otel.ingest.") ||
 		strings.HasPrefix(action, "codex.notify.") ||
 		action == "otel.ingest" ||
-		action == "codex.notify" {
+		action == "codex.notify" ||
+		action == "connector-hook" {
 		return true
 	}
 
@@ -1738,6 +1739,8 @@ func renderOTELLine(r verdictRow) string {
 	stream := "OTEL"
 	if strings.HasPrefix(strings.ToLower(action), "codex.notify") {
 		stream = "CODEX"
+	} else if strings.EqualFold(action, "connector-hook") {
+		stream = "HOOK"
 	}
 
 	switch r.eventType {

@@ -821,15 +821,17 @@ attributes worth indexing in your SIEM:
 
 | Field           | Type   | Meaning                                                                 |
 |-----------------|--------|-------------------------------------------------------------------------|
-| `action`        | enum   | One of `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
+| `action`        | enum   | One of `connector-hook`, `asset-policy`, `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
 | `actor`         | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
 | `details`       | string | Structured one-line summary: `signal=logs size=4096 bytes resources=2 logRecords=14 services=[codex=1,claudecode=1]`. |
 
-The matching gateway envelope events (`gateway-event-envelope.json`)
-add an `agent_telemetry` payload block (`event_type=agent_telemetry`)
-with `channel`, `source`, `result`, `records`, `bytes`, and notify
-fields. SIEM rules should join on `agent_telemetry.source` to break
-down telemetry rate per connector.
+The matching OTel connector log contract
+(`schemas/otel/connector-telemetry-event.schema.json`) carries
+`event.name=defenseclaw.otel.ingest`, `defenseclaw.hook.invocation`,
+or `defenseclaw.codex.notify` with connector `source`, `signal`,
+`result`, record count, bytes, and notify fields. SIEM rules should
+join on `defenseclaw.connector.source` to break down telemetry rate
+per connector.
 
 Continuous AI visibility uses the same envelope family with an
 `ai_discovery` payload block (`event_type=ai_discovery`). Index
@@ -869,6 +871,8 @@ Provisioned in `bundles/local_observability_stack/`:
   `connector:defenseclaw_otel_ingest_silence:seconds`,
   `connector:defenseclaw_codex_notify:rate5m`,
   `connector:defenseclaw_hooks:rate5m`,
+  `connector:defenseclaw_hook_invocations:rate5m`,
+  `connector:defenseclaw_hook_latency:p95_5m`,
   `connector:defenseclaw_otel_logs:rate5m`.
 
 - **Alerts** (`prometheus/rules/alerts.yml` →

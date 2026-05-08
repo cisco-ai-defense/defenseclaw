@@ -61,6 +61,11 @@ type mcpItem struct {
 	ServerURL string
 	Severity  string
 	Verdict   string
+	// RegistrySource is the id of the registry source whose
+	// asset_policy rule covers this MCP server. See the
+	// SkillsPanel docstring — same semantics. Empty when the
+	// server isn't registry-backed.
+	RegistrySource string
 }
 
 type MCPDetailInfo struct {
@@ -92,10 +97,30 @@ type MCPsPanel struct {
 	// "Source: …" banner so operators know which agent's MCP
 	// config their list reflects.
 	connector string
+
+	// registryByName maps an MCP server name (the value the audit
+	// store and asset_policy keys on) to its registry source id.
+	// Populated by SetRegistryAttribution. nil-safe.
+	registryByName map[string]string
 }
 
 // SetConnector updates the active connector for source labelling.
 func (p *MCPsPanel) SetConnector(name string) { p.connector = name }
+
+// SetRegistryAttribution replaces the in-memory map of MCP server
+// name -> registry source id used to render the "registry:<id>"
+// badge. Callers (app.go's propagateConnector / cfg-reload path)
+// build the map from cfg.AssetPolicy.MCP.Registry. nil-safe — pass
+// nil to clear all attributions.
+func (p *MCPsPanel) SetRegistryAttribution(attr map[string]string) {
+	p.registryByName = attr
+	for i := range p.items {
+		p.items[i].RegistrySource = attr[p.items[i].URL]
+	}
+	for i := range p.filtered {
+		p.filtered[i].RegistrySource = attr[p.filtered[i].URL]
+	}
+}
 
 // ActiveConnector returns the currently labelled connector name —
 // used by app.go to gate connector-specific UX (e.g. ZeptoClaw MCP
@@ -179,6 +204,11 @@ func (p *MCPsPanel) ApplyLoaded(msg MCPsLoadedMsg) {
 		return
 	}
 	p.items = msg.Items
+	if p.registryByName != nil {
+		for i := range p.items {
+			p.items[i].RegistrySource = p.registryByName[p.items[i].URL]
+		}
+	}
 	p.loaded = true
 	p.message = ""
 	p.applyFilter()
@@ -487,6 +517,9 @@ func (p *MCPsPanel) View() string {
 		}
 
 		line := fmt.Sprintf("%s%s %-22s %-10s %s %-18s", pointer, badge, name, transport, sev, actions)
+		if rb := registryBadge(item.RegistrySource); rb != "" {
+			line += " " + rb
+		}
 
 		if i == p.cursor {
 			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(p.width).Render(line)
@@ -577,6 +610,11 @@ func (p *MCPsPanel) renderDetail() string {
 	}
 	if info.Item.Command != "" {
 		d.WriteString(labelStyle.Render("  Command: ") + valStyle.Render(info.Item.Command) + "\n")
+	}
+	if info.Item.RegistrySource != "" {
+		d.WriteString(labelStyle.Render("  Approved by: ") +
+			valStyle.Render("registry:"+info.Item.RegistrySource) +
+			labelStyle.Render("   (press R for registry view)") + "\n")
 	}
 
 	if info.Action != nil {

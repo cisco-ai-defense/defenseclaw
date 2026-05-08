@@ -22,7 +22,7 @@ import (
 	"time"
 )
 
-// AI Visibility panel tests. These pin behavior the CLI tests
+// AI Discovery panel tests. These pin behavior the CLI tests
 // (cli/tests/test_cmd_agent_discover.py) also assert on, because
 // the two surfaces MUST agree -- an operator switching between
 // `defenseclaw agent usage` and the TUI panel should see the same
@@ -83,19 +83,19 @@ func itoaPad(i int) string {
 	return string(rune('0'+i/10)) + string(rune('0'+i%10))
 }
 
-func TestAIVisibility_NoSnapshot_ShowsOfflinePlaceholder(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_NoSnapshot_ShowsOfflinePlaceholder(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(120, 30)
 	out := p.View(120, 30)
 	// The placeholder should be self-explanatory and tell the
 	// operator what they need to do (start gateway / set token).
-	mustContain(t, out, "AI Visibility")
+	mustContain(t, out, "AI Discovery")
 	mustContain(t, out, "snapshot not yet available")
 	mustContain(t, out, "DEFENSECLAW_GATEWAY_TOKEN")
 }
 
-func TestAIVisibility_DedupsSignalsByComponent(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_DedupsSignalsByComponent(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 	p.SetSnapshot(aiSnapshotWithComponent(3, 0.91, 0.78))
 
@@ -112,8 +112,8 @@ func TestAIVisibility_DedupsSignalsByComponent(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_RenderShowsConfidenceColumns(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_RenderShowsConfidenceColumns(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(200, 40)
 	p.SetSnapshot(aiSnapshotWithComponent(3, 0.91, 0.78))
 	out := p.View(200, 40)
@@ -128,8 +128,8 @@ func TestAIVisibility_RenderShowsConfidenceColumns(t *testing.T) {
 	mustContain(t, out, " 3 ")
 }
 
-func TestAIVisibility_FilterFiltersAndPersistsAcrossRefresh(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_FilterFiltersAndPersistsAcrossRefresh(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 
 	now := time.Now()
@@ -176,8 +176,8 @@ func TestAIVisibility_FilterFiltersAndPersistsAcrossRefresh(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_FilterMatchesVendorAndDetector(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_FilterMatchesVendorAndDetector(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 
 	now := time.Now()
@@ -222,8 +222,8 @@ func TestAIVisibility_FilterMatchesVendorAndDetector(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_DetailToggle_OpensAndClosesOverlay(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_DetailToggle_OpensAndClosesOverlay(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 	p.SetSnapshot(aiSnapshotWithComponent(2, 0.91, 0.78))
 
@@ -245,14 +245,14 @@ func TestAIVisibility_DetailToggle_OpensAndClosesOverlay(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_DetailHeader_OmitsEmptyComponent(t *testing.T) {
+func TestAIDiscovery_DetailHeader_OmitsEmptyComponent(t *testing.T) {
 	// Regression for the "seen · Cursor ·  × 7 signal(s)" bug:
 	// CLI-style products (Cursor, Claude Code, Codex, ...) have
 	// no Component block, so the detail header used to render an
 	// awkward dangling "·" between Product and the count. The
 	// fixed header builds segments and joins with " · " so the
 	// empty Component is dropped cleanly.
-	p := NewAIVisibilityPanel()
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 	now := time.Now()
 	la := now.Add(-4 * time.Minute)
@@ -282,14 +282,14 @@ func TestAIVisibility_DetailHeader_OmitsEmptyComponent(t *testing.T) {
 	mustContain(t, out, "× 1 signal(s)")
 }
 
-func TestAIVisibility_Header_CollapsesZeroChurn(t *testing.T) {
+func TestAIDiscovery_Header_CollapsesZeroChurn(t *testing.T) {
 	// In the steady state (no churn since the last scan) the
 	// header used to read `active=755  new=0  changed=0  gone=0
 	// files=2103` -- four zeros for one signal. The fixed
 	// renderer drops the zero-valued churn segments and keeps
 	// active + files so the operator can still confirm a scan
 	// ran.
-	p := NewAIVisibilityPanel()
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 	now := time.Now()
 	p.SetSnapshot(&AIUsageSnapshot{
@@ -319,7 +319,7 @@ func TestAIVisibility_Header_CollapsesZeroChurn(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_Table_RowsAlignedWithHeader(t *testing.T) {
+func TestAIDiscovery_Table_RowsAlignedWithHeader(t *testing.T) {
 	// Regression for the column drift bug: a 27-char Categories
 	// aggregate (e.g. "active_process, ai_cli (+5)") used to
 	// overflow its 14-char column and push Product, Component,
@@ -333,7 +333,7 @@ func TestAIVisibility_Table_RowsAlignedWithHeader(t *testing.T) {
 	// every body line MUST have the same printable width as the
 	// header line. We strip ANSI before measuring because the
 	// renderer wraps cells in lipgloss styles for color.
-	p := NewAIVisibilityPanel()
+	p := NewAIDiscoveryPanel()
 	p.SetSize(220, 30)
 	now := time.Now()
 	la := now.Add(-1 * time.Minute)
@@ -414,11 +414,11 @@ func TestAIVisibility_Table_RowsAlignedWithHeader(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_Header_KeepsNonZeroChurn(t *testing.T) {
+func TestAIDiscovery_Header_KeepsNonZeroChurn(t *testing.T) {
 	// When there IS churn, the header MUST still surface it --
 	// dropping non-zero values would hide the operator-relevant
 	// "you have 5 NEW agents since last scan" signal.
-	p := NewAIVisibilityPanel()
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 	p.SetSnapshot(&AIUsageSnapshot{
 		Enabled: true,
@@ -439,8 +439,8 @@ func TestAIVisibility_Header_KeepsNonZeroChurn(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_DetailToggle_NoOpOnEmptyTable(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_DetailToggle_NoOpOnEmptyTable(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 	p.SetSnapshot(&AIUsageSnapshot{Enabled: true})
 
@@ -454,7 +454,7 @@ func TestAIVisibility_DetailToggle_NoOpOnEmptyTable(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_NormalizesAcrossDetectors(t *testing.T) {
+func TestAIDiscovery_NormalizesAcrossDetectors(t *testing.T) {
 	// Real-world bug: "Claude Code" was independently discovered
 	// by 7 detectors (binary, process, mcp, config, shell_history,
 	// provider_history, desktop_app) and the panel showed it as
@@ -463,7 +463,7 @@ func TestAIVisibility_NormalizesAcrossDetectors(t *testing.T) {
 	// categories / detectors aggregated as Categories[] /
 	// Detectors[]. This test pins the new behavior and asserts
 	// the renderer surfaces both detectors in the cell.
-	p := NewAIVisibilityPanel()
+	p := NewAIDiscoveryPanel()
 	p.SetSize(200, 30)
 	now := time.Now()
 	mk := func(id, cat, det string) AIUsageSignal {
@@ -499,7 +499,7 @@ func TestAIVisibility_NormalizesAcrossDetectors(t *testing.T) {
 	if got := len(rows); got != 2 {
 		t.Fatalf("expected 7 Claude Code signals to collapse to 1 row + 1 Cursor row (=2 total), got %d rows: %#v", got, rows)
 	}
-	var claude *aiVisibilityRow
+	var claude *aiDiscoveryRow
 	for i := range rows {
 		if rows[i].Product == "Claude Code" {
 			claude = &rows[i]
@@ -549,8 +549,8 @@ func TestAIVisibility_NormalizesAcrossDetectors(t *testing.T) {
 	}
 }
 
-func TestAIVisibility_CursorClampsOnFilter(t *testing.T) {
-	p := NewAIVisibilityPanel()
+func TestAIDiscovery_CursorClampsOnFilter(t *testing.T) {
+	p := NewAIDiscoveryPanel()
 	p.SetSize(160, 30)
 
 	now := time.Now()

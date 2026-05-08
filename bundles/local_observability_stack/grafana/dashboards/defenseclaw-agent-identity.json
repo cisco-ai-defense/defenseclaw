@@ -7,7 +7,7 @@
   "liveNow": false,
   "links": [
     {"title": "Overview",         "type": "link", "url": "/d/defenseclaw-overview?${__url_time_range}",                                                                  "icon": "external link", "targetBlank": false},
-    {"title": "Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}&${connector:queryparam}",                                       "icon": "external link", "targetBlank": false},
+    {"title": "Hook Connectors",       "type": "link", "url": "/d/defenseclaw-connectors?${__url_time_range}&${connector:queryparam}",                                       "icon": "external link", "targetBlank": false},
     {"title": "Connector detail", "type": "link", "url": "/d/defenseclaw-connector-detail?${__url_time_range}&${connector:queryparam}",                                  "icon": "external link", "targetBlank": false},
     {"title": "AI discovery",     "type": "link", "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",                                                              "icon": "external link", "targetBlank": false}
   ],
