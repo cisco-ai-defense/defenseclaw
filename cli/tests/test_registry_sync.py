@@ -251,6 +251,92 @@ class TestPromotion(SyncTestBase):
         self.assertEqual(names, {"demo-skill"})
 
 
+class TestManualVerdictStatusFlip(SyncTestBase):
+    """``manual_set_verdict`` must flip ``status`` alongside the
+    boolean override so ``registry entries --status blocked`` and
+    the TUI badges reflect the operator's call. The original
+    implementation only touched ``approved`` / ``rejected`` and
+    left ``status="pending"`` after a reject, so the operator had
+    to wait for the next scan run to see the row turn red.
+    """
+
+    def test_reject_flips_status_to_blocked(self):
+        manifest = _fresh_skill_manifest()
+        self.stub_fetch(manifest)
+
+        sync_source(
+            self.cfg, self.cfg.data_dir, self.source,
+            scan_callback=None, auto_promote=False, save=False,
+        )
+
+        verdict = manual_set_verdict(
+            self.cfg.data_dir, self.source.id, "skill", "demo-skill",
+            rejected=True,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertTrue(verdict.rejected)
+        self.assertEqual(verdict.status, "blocked")
+
+        # And it survives a reload from disk.
+        idx = load_index(self.cfg.data_dir, self.source.id)
+        v = idx.find("skill", "demo-skill")
+        self.assertEqual(v.status, "blocked")
+
+    def test_unreject_clears_synthetic_blocked_status(self):
+        # Reject then un-reject. The synthetic ``status="blocked"``
+        # should drop back to ``"pending"`` so a subsequent scan
+        # writes the real verdict instead of inheriting the manual
+        # override.
+        manifest = _fresh_skill_manifest()
+        self.stub_fetch(manifest)
+        sync_source(
+            self.cfg, self.cfg.data_dir, self.source,
+            scan_callback=None, auto_promote=False, save=False,
+        )
+        manual_set_verdict(
+            self.cfg.data_dir, self.source.id, "skill", "demo-skill",
+            rejected=True,
+        )
+        verdict = manual_set_verdict(
+            self.cfg.data_dir, self.source.id, "skill", "demo-skill",
+            rejected=False,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertFalse(verdict.rejected)
+        self.assertEqual(verdict.status, "pending")
+
+    def test_approve_clears_blocked_status(self):
+        # An approve on an entry the scanner had marked blocked
+        # should pull the row out of the ``blocked`` filter so the
+        # operator's intent is reflected immediately. The next
+        # scan run can re-write the verdict if the underlying
+        # finding is still present.
+        manifest = _fresh_skill_manifest()
+        self.stub_fetch(manifest)
+
+        def _scan(_src, entry):
+            findings = []
+            if entry.name == "demo-skill":
+                findings = [_finding("HIGH", entry.name)]
+            return _scan_result(entry.name, findings)
+
+        sync_source(
+            self.cfg, self.cfg.data_dir, self.source,
+            scan_callback=_scan, auto_promote=False, save=False,
+        )
+        idx = load_index(self.cfg.data_dir, self.source.id)
+        self.assertEqual(idx.find("skill", "demo-skill").status, "blocked")
+
+        verdict = manual_set_verdict(
+            self.cfg.data_dir, self.source.id, "skill", "demo-skill",
+            approved=True,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertTrue(verdict.approved)
+        self.assertFalse(verdict.rejected)
+        self.assertEqual(verdict.status, "pending")
+
+
 class TestPromotionWipeBeforeReplace(SyncTestBase):
     def test_remove_from_manifest_clears_old_rule(self):
         manifest_v1 = _fresh_skill_manifest()
