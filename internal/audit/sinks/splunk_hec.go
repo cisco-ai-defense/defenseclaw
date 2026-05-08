@@ -91,14 +91,14 @@ type SplunkHECConfig struct {
 	CircuitBreakerThreshold int
 	CircuitBreakerCooldownS int
 
-	// SourceTypeOverrides maps a canonical audit action (e.g.
-	// "llm-judge-response") to a dedicated Splunk sourcetype
+	// SourceTypeOverrides maps a canonical audit action, such as
+	// "llm-judge-response", to a dedicated Splunk sourcetype
 	// (e.g. "defenseclaw:judge"). When an event's Action matches
 	// a key, the per-event payload is emitted with the override
-	// sourcetype so Splunk dashboards can segment judge/verdict
-	// streams from the generic `_json` audit stream without a
-	// free-form grep on the `action` field. Zero-value map means
-	// "use SourceType for every event" (legacy behaviour).
+	// sourcetype so Splunk dashboards can segment selected streams
+	// from the generic `_json` audit stream without a free-form grep
+	// on the `action` field. Zero-value map means "use SourceType
+	// for every event" (legacy behaviour).
 	SourceTypeOverrides map[string]string
 }
 
@@ -185,6 +185,7 @@ type splunkAuditEvent struct {
 	// macros.conf, Cisco SIEM AgentWatch) can key on them without
 	// reparsing `details`. Matches the contract in sinks.Event.
 	SessionID string `json:"session_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 	AgentName string `json:"agent_name,omitempty"`
 	// AgentID (configured logical id) and SidecarInstanceID
 	// (per-process UUID) are both part of the v7 three-tier identity
@@ -421,6 +422,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			TraceID:           e.TraceID,
 			RequestID:         e.RequestID,
 			SessionID:         e.SessionID,
+			TurnID:            e.TurnID,
 			AgentName:         e.AgentName,
 			AgentID:           e.AgentID,
 			AgentInstanceID:   e.AgentInstanceID,

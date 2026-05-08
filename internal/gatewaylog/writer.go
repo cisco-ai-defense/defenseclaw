@@ -366,6 +366,7 @@ func (w *Writer) handleSchemaViolation(src Event, cause error) {
 		TraceID:           src.TraceID,
 		RunID:             src.RunID,
 		SessionID:         src.SessionID,
+		TurnID:            src.TurnID,
 		RequestID:         src.RequestID,
 		AgentID:           src.AgentID,
 		AgentInstanceID:   src.AgentInstanceID,

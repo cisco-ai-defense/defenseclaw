@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -81,6 +82,132 @@ func installCaptureSink(t *testing.T, l *Logger) *captureSink {
 	mgr.Register(cs)
 	l.SetSinks(mgr)
 	return cs
+}
+
+func TestForwardGatewayEventToSinks_EmitsCanonicalDefenseClawHECRow(t *testing.T) {
+	l := NewLogger(nil)
+	cs := installCaptureSink(t, l)
+
+	l.ForwardGatewayEventToSinks(context.Background(), gatewaylog.Event{
+		Timestamp: time.Unix(1700000000, 123000000).UTC(),
+		EventType: gatewaylog.EventLLMPrompt,
+		Severity:  gatewaylog.SeverityInfo,
+		RunID:     "run-1",
+		SessionID: "sess-1",
+		TurnID:    "turn-1",
+		AgentName: "codex",
+		Model:     "gpt-5.5",
+		LLMPrompt: &gatewaylog.LLMPromptPayload{
+			PromptID: "prompt-1",
+			TurnID:   "turn-1",
+			Role:     "user",
+			Prompt:   "hello",
+			Source:   "codex.notify.agent-turn-complete",
+		},
+	})
+
+	events := cs.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink events=%d want 1", len(events))
+	}
+	extras, ok := events[0].Structured[gatewaySplunkHECEventsKey].([]map[string]any)
+	if !ok || len(extras) != 1 {
+		t.Fatalf("missing gateway HEC extra event: %#v", events[0].Structured)
+	}
+	if got := extras[0]["sourcetype"]; got != "defenseclaw:json" {
+		t.Fatalf("sourcetype=%v want defenseclaw:json", got)
+	}
+	payload, ok := extras[0]["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload type=%T want map", extras[0]["event"])
+	}
+	if got := payload["event_type"]; got != "llm_prompt" {
+		t.Fatalf("event_type=%v want llm_prompt", got)
+	}
+	if got := payload["session_id"]; got != "sess-1" {
+		t.Fatalf("session_id=%v want sess-1", got)
+	}
+	if got := payload["turn_id"]; got != "turn-1" {
+		t.Fatalf("turn_id=%v want turn-1", got)
+	}
+	llmPrompt, ok := payload["llm_prompt"].(map[string]any)
+	if !ok {
+		t.Fatalf("llm_prompt type=%T want map", payload["llm_prompt"])
+	}
+	if got := llmPrompt["prompt"]; got == "" || got == "hello" {
+		t.Fatalf("prompt=%v, want redacted sink content", got)
+	}
+}
+
+func TestForwardGatewayEventToSinks_EmitsVerdictCorrelationFields(t *testing.T) {
+	l := NewLogger(nil)
+	cs := installCaptureSink(t, l)
+
+	l.ForwardGatewayEventToSinks(context.Background(), gatewaylog.Event{
+		Timestamp:      time.Unix(1700000000, 123000000).UTC(),
+		EventType:      gatewaylog.EventVerdict,
+		Severity:       gatewaylog.SeverityHigh,
+		RunID:          "run-1",
+		SessionID:      "sess-1",
+		TurnID:         "turn-1",
+		PolicyID:       "policy-1",
+		DestinationApp: "builtin",
+		ToolName:       "Bash",
+		ToolID:         "call-1",
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:  gatewaylog.StageFinal,
+			Action: "block",
+			Reason: "matched policy",
+		},
+	})
+
+	events := cs.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink events=%d want 1", len(events))
+	}
+	extras, ok := events[0].Structured[gatewaySplunkHECEventsKey].([]map[string]any)
+	if !ok || len(extras) != 1 {
+		t.Fatalf("missing gateway HEC extra event: %#v", events[0].Structured)
+	}
+	payload, ok := extras[0]["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload type=%T want map", extras[0]["event"])
+	}
+	for key, want := range map[string]any{
+		"event_type":      "verdict",
+		"session_id":      "sess-1",
+		"turn_id":         "turn-1",
+		"policy_id":       "policy-1",
+		"destination_app": "builtin",
+		"tool_name":       "Bash",
+		"tool_id":         "call-1",
+	} {
+		if got := payload[key]; got != want {
+			t.Fatalf("payload[%s]=%v want %v (payload=%#v)", key, got, want, payload)
+		}
+	}
+	if _, ok := payload["verdict"].(map[string]any); !ok {
+		t.Fatalf("verdict payload missing or wrong type: %#v", payload["verdict"])
+	}
+}
+
+func TestForwardGatewayEventToSinks_IgnoresLifecycleEvents(t *testing.T) {
+	l := NewLogger(nil)
+	cs := installCaptureSink(t, l)
+
+	l.ForwardGatewayEventToSinks(context.Background(), gatewaylog.Event{
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+		EventType: gatewaylog.EventLifecycle,
+		Severity:  gatewaylog.SeverityInfo,
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem:  "gateway",
+			Transition: "completed",
+		},
+	})
+
+	if events := cs.snapshot(); len(events) != 0 {
+		t.Fatalf("sink events=%d want 0: %#v", len(events), events)
+	}
 }
 
 func TestInferTargetType(t *testing.T) {

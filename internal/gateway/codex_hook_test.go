@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"go.opentelemetry.io/otel"
@@ -567,8 +568,8 @@ func TestCodexHookAuditEvent_EmitsStructuredPolicyFields(t *testing.T) {
 	if event.Action != "codex-hook" || event.PolicyID != "codex-hook:PreToolUse" {
 		t.Fatalf("audit event action/policy wrong: action=%q policy=%q", event.Action, event.PolicyID)
 	}
-	if event.Severity != "HIGH" || event.SessionID != "" {
-		t.Fatalf("event severity/session before ctx stamping = %q/%q, want HIGH/empty", event.Severity, event.SessionID)
+	if event.Severity != "HIGH" || event.SessionID != "session-1" || event.TurnID != "turn-1" {
+		t.Fatalf("event severity/session/turn = %q/%q/%q, want HIGH/session-1/turn-1", event.Severity, event.SessionID, event.TurnID)
 	}
 	if event.ToolName != "Bash" || event.ToolID != "call-1" || event.DestinationApp != "builtin" {
 		t.Fatalf("tool fields wrong: tool=%q id=%q dest=%q", event.ToolName, event.ToolID, event.DestinationApp)
@@ -580,6 +581,7 @@ func TestCodexHookAuditEvent_EmitsStructuredPolicyFields(t *testing.T) {
 		"raw_decision":    "block",
 		"severity":        "HIGH",
 		"session_id":      "session-1",
+		"turn_id":         "turn-1",
 		"run_id":          "run-codex-hook",
 		"trace_id":        "trace-1",
 		"request_id":      "req-1",
@@ -589,6 +591,34 @@ func TestCodexHookAuditEvent_EmitsStructuredPolicyFields(t *testing.T) {
 	} {
 		if event.Structured[key] != want {
 			t.Fatalf("structured[%s]=%v want %v (structured=%#v)", key, event.Structured[key], want, event.Structured)
+		}
+	}
+}
+
+func TestEnrichCodexHookContext_PopulatesAuditEnvelope(t *testing.T) {
+	ctx := enrichCodexHookContext(context.Background(), codexHookRequest{
+		HookEventName: "PreToolUse",
+		SessionID:     "session-1",
+		TurnID:        "turn-1",
+		AgentID:       "agent-1",
+		AgentType:     "codex",
+		ToolName:      "Bash",
+		ToolUseID:     "call-1",
+	})
+
+	env := audit.EnvelopeFromContext(ctx)
+	for field, gotWant := range map[string][2]string{
+		"session_id":      {env.SessionID, "session-1"},
+		"turn_id":         {env.TurnID, "turn-1"},
+		"agent_id":        {env.AgentID, "agent-1"},
+		"agent_name":      {env.AgentName, "codex"},
+		"policy_id":       {env.PolicyID, "codex-hook:PreToolUse"},
+		"destination_app": {env.DestinationApp, "builtin"},
+		"tool_name":       {env.ToolName, "Bash"},
+		"tool_id":         {env.ToolID, "call-1"},
+	} {
+		if gotWant[0] != gotWant[1] {
+			t.Fatalf("%s=%q want %q (env=%+v)", field, gotWant[0], gotWant[1], env)
 		}
 	}
 }

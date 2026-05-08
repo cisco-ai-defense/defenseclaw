@@ -58,6 +58,11 @@ type Event struct {
 	// and verdict events into one row per session.
 	SessionID string `json:"session_id,omitempty"`
 
+	// TurnID identifies a single agent turn inside a session. It is
+	// currently sink-only for audit events; gatewaylog events persist it
+	// directly in the canonical JSON envelope.
+	TurnID string `json:"turn_id,omitempty"`
+
 	// AgentName is the logical name of the agent producing the
 	// event (e.g. "openclaw", "nemoclaw", or a caller-supplied
 	// name from the incoming stream envelope). Falls back to

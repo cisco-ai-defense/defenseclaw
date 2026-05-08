@@ -59,6 +59,7 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 		Event{ID: "verdict-1", Action: "skill-scan",
 			Severity: "HIGH", Timestamp: time.Unix(1700000000, 0).UTC(),
 			SchemaVersion: 7, BinaryVersion: "unit-test",
+			SessionID: "sess-1", TurnID: "turn-1",
 			Structured: map[string]any{"stage": "guardrail", "action": "block"}})
 
 	mu.Lock()
@@ -86,6 +87,8 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 			Severity      string         `json:"severity"`
 			SchemaVersion int            `json:"schema_version"`
 			BinaryVersion string         `json:"binary_version"`
+			SessionID     string         `json:"session_id"`
+			TurnID        string         `json:"turn_id"`
 			Structured    map[string]any `json:"structured"`
 		} `json:"event"`
 	}
@@ -106,6 +109,9 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 	}
 	if envelope.Event.BinaryVersion != "unit-test" {
 		t.Fatalf("binary_version = %q, want unit-test", envelope.Event.BinaryVersion)
+	}
+	if envelope.Event.SessionID != "sess-1" || envelope.Event.TurnID != "turn-1" {
+		t.Fatalf("correlation fields wrong: %+v", envelope.Event)
 	}
 	if envelope.Event.Structured["stage"] != "guardrail" {
 		t.Fatalf("structured dropped: %+v", envelope.Event.Structured)
@@ -171,10 +177,10 @@ func TestSplunkHECSink_FilterSuppressesLowSeverity(t *testing.T) {
 }
 
 // TestSplunkHECSink_SourceTypeOverride_Defaults verifies that every
-// sink — even one built without SourceTypeOverrides — routes judge
-// and verdict actions to their Phase 3 canonical sourcetypes. This is
-// the load-bearing invariant for the Splunk dashboard split and for
-// the E2E observability assertions (which grep for defenseclaw:judge).
+// sink, even one built without SourceTypeOverrides, routes judge
+// actions to their Phase 3 canonical sourcetype. Guardrail verdict
+// audit rows stay on the generic audit sourcetype because verdicts are
+// emitted as first-class defenseclaw:json events.
 func TestSplunkHECSink_SourceTypeOverride_Defaults(t *testing.T) {
 	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
 	sink, err := NewSplunkHECSink(SplunkHECConfig{
@@ -194,7 +200,7 @@ func TestSplunkHECSink_SourceTypeOverride_Defaults(t *testing.T) {
 		wantSourceType string
 	}{
 		{"judge routes to defenseclaw:judge", "llm-judge-response", "defenseclaw:judge"},
-		{"verdict routes to defenseclaw:verdict", "guardrail-verdict", "defenseclaw:verdict"},
+		{"verdict audit keeps _json", "guardrail-verdict", "_json"},
 		{"generic audit keeps _json", "skill-scan", "_json"},
 	}
 
@@ -342,8 +348,8 @@ func TestSplunkHECSink_SourceTypeOverride_OperatorWins(t *testing.T) {
 		Timestamp: time.Unix(1700000000, 0).UTC(),
 	})
 
-	// The defaults that the operator didn't override must still apply
-	// (Phase 3 plan: defaults win unless explicitly overridden).
+	// The default that the operator didn't override must not create a
+	// dedicated guardrail verdict sourcetype.
 	_ = sink.Forward(context.Background(), Event{
 		ID: "v1", Action: "guardrail-verdict", Severity: "HIGH",
 		Timestamp: time.Unix(1700000001, 0).UTC(),
@@ -366,8 +372,8 @@ func TestSplunkHECSink_SourceTypeOverride_OperatorWins(t *testing.T) {
 	if first.SourceType != "corp:llm:judge" {
 		t.Fatalf("operator override lost: got %q", first.SourceType)
 	}
-	if second.SourceType != "defenseclaw:verdict" {
-		t.Fatalf("default dropped when operator override set: got %q", second.SourceType)
+	if second.SourceType != "_json" {
+		t.Fatalf("guardrail verdict audit should keep generic sourcetype: got %q", second.SourceType)
 	}
 }
 

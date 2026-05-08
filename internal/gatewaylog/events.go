@@ -267,6 +267,7 @@ type Event struct {
 	RunID     string `json:"run_id,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 	SessionID string `json:"session_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 	// TraceID mirrors the OTel span's trace id for cross-sink
 	// correlation. Optional — unset events are still valid.
 	TraceID   string    `json:"trace_id,omitempty"`

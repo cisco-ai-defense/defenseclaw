@@ -1531,6 +1531,8 @@ func extractServiceName(resourceRaw json.RawMessage) string {
 	return ""
 }
 
+const codexNotifyTurnCompleteSource = "codex.notify.agent-turn-complete"
+
 // codexNotifyPayload mirrors the documented codex notify JSON shape
 // (https://developers.openai.com/codex/config-advanced). We capture
 // the fields the SIEM rollup and session correlation need (type,
@@ -1558,6 +1560,8 @@ type codexNotifyPayload struct {
 //     are summarized by length + hash rather than stored raw.
 //  3. Persist as an INFO audit event with action="codex.notify.<type>"
 //     and Actor="codex" so the SIEM rollup can group by turn.
+//  4. For agent-turn-complete, emit first-class llm_prompt /
+//     llm_response events from the semantic notify fields.
 //
 // Failures are logged but always return 200 so the bridge doesn't
 // retry — codex's turn-complete is a fire-and-forget telemetry
@@ -1583,6 +1587,10 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 
 	var p codexNotifyPayload
 	parseErr := json.Unmarshal(body, &p)
+	var payload map[string]any
+	if parseErr == nil {
+		payload = normalizeCodexNotifyPayloadAliases(&p, body)
+	}
 
 	action := string(audit.ActionCodexNotify)
 	severity := "INFO"
@@ -1604,6 +1612,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 
 	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
 	sessionID := codexNotifySessionID(p)
+	ctx := ContextWithSessionID(r.Context(), sessionID)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -1618,6 +1627,9 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	if err := persistAuditEventCtx(r.Context(), a.logger, a.store, ev); err != nil {
 		fmt.Fprintf(otelIngestLogSink(), "[codex-notify] persist failed: %v\n", err)
 	}
+	if parseErr == nil && kind == "agent-turn-complete" {
+		a.emitCodexNotifyTurnCompleteLLMEvents(ctx, r, p, payload)
+	}
 
 	// Surface the same event as a Prometheus counter and an OTel log
 	// record so the local-stack dashboards see codex turn-completes
@@ -1628,7 +1640,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	// sanitization a hostile / verbose client could blow up the
 	// `codex_notify_status` series.
 	statusLabel := sanitizeNotifyType(p.Status)
-	ctx := ContextWithSessionID(r.Context(), sessionID)
+	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]).
 	enrichHTTPSpanFromContext(ctx)
 	enrichCodexNotifySpan(ctx, p, kind, result)
 	a.otel.RecordCodexNotify(ctx, kind, statusLabel, result)
@@ -1706,6 +1718,158 @@ func codexNotifySessionID(p codexNotifyPayload) string {
 		return p.ThreadID
 	}
 	return p.TurnID
+}
+
+func normalizeCodexNotifyPayloadAliases(p *codexNotifyPayload, body []byte) map[string]any {
+	payload := map[string]any{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	if p == nil {
+		return payload
+	}
+	if p.ThreadID == "" {
+		p.ThreadID = codexNotifyString(payload, "thread-id", "thread_id", "threadID")
+	}
+	if p.TurnID == "" {
+		p.TurnID = codexNotifyString(payload, "turn-id", "turn_id", "turnID")
+	}
+	if p.Model == "" {
+		p.Model = codexNotifyString(payload, "model", "request_model", "response_model")
+	}
+	if p.Status == "" {
+		p.Status = codexNotifyString(payload, "status")
+	}
+	return payload
+}
+
+func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r *http.Request, p codexNotifyPayload, payload map[string]any) {
+	if len(payload) == 0 {
+		return
+	}
+	sessionID := codexNotifySessionID(p)
+	turnID := firstNonEmpty(codexNotifyString(payload, "turn-id", "turn_id", "turnID"), p.TurnID)
+	if sessionID == "" && turnID == "" {
+		return
+	}
+	if sessionID == "" {
+		sessionID = turnID
+	}
+	model := firstNonEmpty(codexNotifyString(payload, "model", "request_model", "response_model"), p.Model)
+	provider := inferSystem("", model)
+	if provider == "unknown" {
+		provider = "codex"
+	}
+	userID, userName := userFromHTTPRequest(r, nil)
+	promptID := firstNonEmpty(
+		a.lastHookPromptIDForTurn("codex", sessionID, turnID),
+		a.lastHookPromptID("codex", sessionID),
+		promptIDForTurn("codex", sessionID, turnID),
+	)
+	meta := llmEventMeta{
+		Source:    codexNotifyTurnCompleteSource,
+		Provider:  provider,
+		Model:     model,
+		SessionID: sessionID,
+		TurnID:    turnID,
+		PromptID:  promptID,
+		AgentName: "codex",
+		AgentType: "codex",
+		UserID:    userID,
+		UserName:  userName,
+	}
+
+	if prompt := codexNotifyPrompt(payload); prompt != "" {
+		emittedPromptID := emitLLMPromptEvent(ctx, meta, prompt, nil)
+		if emittedPromptID != "" {
+			meta.PromptID = emittedPromptID
+			a.rememberHookPromptID("codex", sessionID, turnID, emittedPromptID)
+		}
+	}
+	if response := codexNotifyResponse(payload); response != "" {
+		meta.ResponseID = stableLLMEventID("response", "codex", sessionID, turnID)
+		emitLLMResponseEvent(ctx, meta, response, "", codexNotifyFinishReasons(payload))
+	}
+}
+
+func codexNotifyPrompt(payload map[string]any) string {
+	messages := codexNotifyStringSlice(payload, "input-messages", "input_messages", "prompts")
+	for i := len(messages) - 1; i >= 0; i-- {
+		if message := strings.TrimSpace(messages[i]); message != "" {
+			return message
+		}
+	}
+	return codexNotifyString(payload, "last-user-message", "last_user_message", "prompt", "prompt_content")
+}
+
+func codexNotifyResponse(payload map[string]any) string {
+	return codexNotifyString(payload, "last-assistant-message", "last_assistant_message", "response", "response_content")
+}
+
+func codexNotifyFinishReasons(payload map[string]any) []string {
+	reasons := codexNotifyStringSlice(payload, "finish-reasons", "finish_reasons", "gen_ai.response.finish_reasons")
+	if len(reasons) > 0 {
+		return reasons
+	}
+	if reason := codexNotifyString(payload, "finish-reason", "finish_reason"); reason != "" {
+		return []string{reason}
+	}
+	return nil
+}
+
+func codexNotifyString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch value := payload[key].(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		case map[string]any:
+			if text := codexNotifyString(value, "content", "text", "message"); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func codexNotifyStringSlice(payload map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		switch value := payload[key].(type) {
+		case []any:
+			out := make([]string, 0, len(value))
+			for _, item := range value {
+				switch v := item.(type) {
+				case string:
+					if strings.TrimSpace(v) != "" {
+						out = append(out, strings.TrimSpace(v))
+					}
+				case map[string]any:
+					if text := codexNotifyString(v, "content", "text", "message"); text != "" {
+						out = append(out, text)
+					}
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		case []string:
+			out := make([]string, 0, len(value))
+			for _, item := range value {
+				if strings.TrimSpace(item) != "" {
+					out = append(out, strings.TrimSpace(item))
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return []string{strings.TrimSpace(value)}
+			}
+		}
+	}
+	return nil
 }
 
 func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, result string) {

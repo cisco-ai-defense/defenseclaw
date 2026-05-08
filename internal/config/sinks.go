@@ -112,12 +112,10 @@ type SplunkHECSinkConfig struct {
 	//
 	//   sourcetype_overrides:
 	//     llm-judge-response: defenseclaw:judge
-	//     guardrail-verdict:  defenseclaw:verdict
 	//
 	// When omitted, the sink still emits Phase 3 defaults
-	// (defenseclaw:judge for judge events, defenseclaw:verdict
-	// for guardrail verdicts) so out-of-the-box Splunk
-	// dashboards work without any operator wiring.
+	// (defenseclaw:judge for judge events) so out-of-the-box
+	// Splunk dashboards work without any operator wiring.
 	SourceTypeOverrides map[string]string `mapstructure:"sourcetype_overrides" yaml:"sourcetype_overrides,omitempty"`
 }
 

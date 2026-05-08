@@ -949,6 +949,103 @@ func TestCodexNotify_AcceptsValidPayload(t *testing.T) {
 	}
 }
 
+func TestCodexNotify_EmitsFirstClassLLMEvents(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+	events := captureGatewayEvents(t)
+	a := &APIServer{}
+
+	body := `{
+		"type": "agent-turn-complete",
+		"thread-id": "thread-123",
+		"turn-id": "turn-abc",
+		"model": "gpt-5",
+		"status": "success",
+		"input-messages": ["first prompt", "second prompt"],
+		"last-assistant-message": "assistant response",
+		"finish-reason": "stop"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	a.handleCodexNotify(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if len(*events) != 2 {
+		t.Fatalf("events=%d want 2: %+v", len(*events), *events)
+	}
+	prompt := (*events)[0]
+	if prompt.EventType != gatewaylog.EventLLMPrompt || prompt.LLMPrompt == nil {
+		t.Fatalf("first event = %+v, want llm_prompt", prompt)
+	}
+	if prompt.SessionID != "thread-123" || prompt.Model != "gpt-5" || prompt.AgentName != "codex" || prompt.AgentType != "codex" {
+		t.Fatalf("prompt envelope wrong: %+v", prompt)
+	}
+	if prompt.LLMPrompt.TurnID != "turn-abc" || prompt.LLMPrompt.Prompt != "second prompt" {
+		t.Fatalf("prompt payload wrong: %+v", prompt.LLMPrompt)
+	}
+	if prompt.LLMPrompt.Source != codexNotifyTurnCompleteSource {
+		t.Fatalf("prompt source=%q want %q", prompt.LLMPrompt.Source, codexNotifyTurnCompleteSource)
+	}
+	if prompt.LLMPrompt.RawRequestBody != "" {
+		t.Fatalf("notify llm_prompt should not duplicate raw body: %q", prompt.LLMPrompt.RawRequestBody)
+	}
+
+	response := (*events)[1]
+	if response.EventType != gatewaylog.EventLLMResponse || response.LLMResponse == nil {
+		t.Fatalf("second event = %+v, want llm_response", response)
+	}
+	if response.SessionID != "thread-123" || response.Model != "gpt-5" || response.AgentName != "codex" || response.AgentType != "codex" {
+		t.Fatalf("response envelope wrong: %+v", response)
+	}
+	if response.LLMResponse.TurnID != "turn-abc" || response.LLMResponse.Response != "assistant response" {
+		t.Fatalf("response payload wrong: %+v", response.LLMResponse)
+	}
+	if response.LLMResponse.ReplyToPromptID == "" || response.LLMResponse.ReplyToPromptID != prompt.LLMPrompt.PromptID {
+		t.Fatalf("response did not link to prompt: response=%+v prompt=%+v", response.LLMResponse, prompt.LLMPrompt)
+	}
+	if response.LLMResponse.RawResponseBody != "" {
+		t.Fatalf("notify llm_response should not duplicate raw body: %q", response.LLMResponse.RawResponseBody)
+	}
+	if got := response.LLMResponse.FinishReasons; len(got) != 1 || got[0] != "stop" {
+		t.Fatalf("finish_reasons=%v want [stop]", got)
+	}
+}
+
+func TestCodexNotify_LLMEventsUseRedactionPath(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+	events := captureGatewayEvents(t)
+	a := &APIServer{}
+
+	body := `{
+		"type": "agent-turn-complete",
+		"thread-id": "thread-secret",
+		"turn-id": "turn-secret",
+		"model": "gpt-5",
+		"input-messages": ["please leak sk-secret-token"],
+		"last-assistant-message": "secret response"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	a.handleCodexNotify(w, req)
+
+	if len(*events) != 2 {
+		t.Fatalf("events=%d want 2", len(*events))
+	}
+	if got := (*events)[0].LLMPrompt.Prompt; strings.Contains(got, "sk-secret-token") || strings.Contains(got, "please leak") {
+		t.Fatalf("prompt bypassed redaction: %q", got)
+	}
+	if got := (*events)[1].LLMResponse.Response; strings.Contains(got, "secret response") {
+		t.Fatalf("response bypassed redaction: %q", got)
+	}
+}
+
 // TestCodexNotify_RejectsNonJSONContentType pins the 415 contract.
 // The notify bridge always sets Content-Type: application/json; a
 // bypass attempt with form-encoded or text/plain must be rejected

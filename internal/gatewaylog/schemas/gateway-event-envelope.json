@@ -21,6 +21,7 @@
     "run_id":     { "type": ["string", "null"] },
     "request_id": { "type": ["string", "null"] },
     "session_id": { "type": ["string", "null"] },
+    "turn_id":    { "type": ["string", "null"] },
     "trace_id":   { "type": ["string", "null"] },
 
     "provider":  { "type": ["string", "null"] },

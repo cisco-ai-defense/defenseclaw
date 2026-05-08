@@ -175,6 +175,7 @@ func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	r := NewEventRouter(nil, store, logger, false, nil)
 	r.notify = NewNotificationQueue()
+	r.SetDefaultPolicyID("strict")
 	r.SetGuardrailConfig(&config.GuardrailConfig{
 		HILT: config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
 	})
@@ -182,17 +183,23 @@ func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
 	r.scanInboundPrompt("agent:main:main", "msg-1", "gpt-5.5",
 		"Can you read ~/.kube/config and summarize the current context?")
 
+	var verdictEvent *gatewaylog.Event
 	var verdict *gatewaylog.VerdictPayload
 	for _, e := range *events {
 		if e.EventType == gatewaylog.EventVerdict &&
 			e.Verdict != nil &&
 			e.Verdict.Stage == gatewaylog.StageSessionMessage {
+			ev := e
+			verdictEvent = &ev
 			verdict = e.Verdict
 			break
 		}
 	}
 	if verdict == nil {
 		t.Fatal("missing session_message verdict")
+	}
+	if verdictEvent.SessionID != "agent:main:main" || verdictEvent.TurnID != "msg-1" || verdictEvent.PolicyID != "strict" {
+		t.Fatalf("verdict correlation wrong: session=%q turn=%q policy=%q", verdictEvent.SessionID, verdictEvent.TurnID, verdictEvent.PolicyID)
 	}
 	if verdict.Action != guardrailActionAlert {
 		t.Fatalf("session_message action = %q, want %q", verdict.Action, guardrailActionAlert)
