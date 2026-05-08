@@ -155,16 +155,18 @@ and CI/CD pipelines call, with `--json` for machine-readable output.
 | Command | Description |
 |---------|-------------|
 | `registry add <id>` | Register a new registry source |
-| `registry edit <id>` | Update an existing source |
-| `registry list` | List configured registry sources |
+| `registry edit <id>` | Update an existing source (only the flags you pass are changed) |
+| `registry list` | List configured registry sources, with cached `total (clean/warning/blocked)` entry counts |
 | `registry show <id>` | Show details + verdict summary for one source |
 | `registry remove <id>` | Delete a source and its on-disk cache |
+| `registry test <id>` | Dry-run fetch + parse — no cache or asset_policy writes |
 | `registry sync [<id>...] [--all]` | Fetch + scan + promote |
-| `registry entries <id>` | Show cached entries (after sync) |
-| `registry approve <id> <name> --type {skill|mcp}` | Mark approved |
-| `registry reject <id> <name> --type {skill|mcp}` | Mark rejected |
+| `registry entries <id> [--approved/--rejected]` | Show cached entries (after sync) |
+| `registry approve <id> <name> --type {skill\|mcp}` | Mark approved |
+| `registry reject <id> <name> --type {skill\|mcp}` | Mark rejected (sets status to `blocked`) |
 | `registry require --type <t> --enabled/--disabled` | Toggle `asset_policy.<t>.registry_required` |
 | `registry wizard` | Interactive add+sync convenience flow |
+| `setup registry` | Discoverable shortcut from `defenseclaw setup` that drops into the wizard |
 
 ### Examples
 
@@ -212,6 +214,15 @@ defenseclaw registry sync --all --json
 > `defenseclaw registry sync --all` from cron / a systemd timer / your
 > existing CI cadence; v1 is intentionally a manual ingest pipeline so
 > the operator stays in the loop on every promotion.
+
+Dry-run a source before the first sync so credentials and the
+manifest's shape are validated without touching `index.json`,
+`manifest.yaml`, or `asset_policy`:
+
+```bash
+defenseclaw registry test corp-skills --json
+defenseclaw registry test corp-skills --show-entries --limit 50
+```
 
 Operator preview (scan + show what would be promoted, without touching
 asset_policy):

@@ -428,8 +428,25 @@ defenseclaw setup notifications status
 defenseclaw setup notifications on --restart
 ```
 
-Per-category, per-source, and throttle fields are not exposed as
-flags; flip them in `config.yaml` and restart the gateway.
+Per-category and per-source fields are exposed via
+`defenseclaw setup notifications-set <slot> <on|off>` so you can
+silence one surface (e.g. asset-policy blocks) without flipping the
+master switch:
+
+```bash
+# Categories
+defenseclaw setup notifications-set block_enforced off
+defenseclaw setup notifications-set block_would_block on
+defenseclaw setup notifications-set hitl_approval on
+
+# Sources (dotted form or short alias)
+defenseclaw setup notifications-set sources.hook off
+defenseclaw setup notifications-set guardrail off
+defenseclaw setup notifications-set asset_policy off
+```
+
+Throttle fields (`dedup_window`, `max_per_minute`) remain config-only
+— flip them in `config.yaml` and restart the gateway.
 
 ### YAML
 

@@ -442,5 +442,310 @@ class TestRegistryRequire(RegistryCommandTestBase):
         self.assertFalse(self.app.cfg.asset_policy.mcp.registry_required)
 
 
+class TestFileAdapterPathValidation(RegistryCommandTestBase):
+    """``kind=file`` requires an absolute path so ``manifest.yaml`` is
+    found regardless of the gateway's CWD. The check must fire at
+    add/edit time so a misconfigured source is caught up-front rather
+    than ten minutes later when cron tries to sync.
+    """
+
+    def test_add_file_kind_rejects_relative_path(self):
+        result = self.runner.invoke(registry, [
+            "add", "local",
+            "--kind", "file",
+            "--content", "skill",
+            "--url", "manifest.yaml",
+            "--non-interactive",
+        ], obj=self.app, catch_exceptions=True)
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("absolute", str(result.output) + str(result.exception))
+
+    def test_add_file_kind_accepts_absolute_path(self):
+        result = self.invoke([
+            "add", "local",
+            "--kind", "file",
+            "--content", "skill",
+            "--url", "/tmp/manifest.yaml",
+            "--non-interactive",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+    def test_add_file_kind_accepts_tilde_expansion(self):
+        # ``~/manifest.yaml`` expands to an absolute path so it should
+        # pass; the file adapter does the same expansion on read.
+        result = self.invoke([
+            "add", "local",
+            "--kind", "file",
+            "--content", "skill",
+            "--url", "~/manifest.yaml",
+            "--non-interactive",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+    def test_edit_to_file_kind_rejects_relative_url(self):
+        # Start with an http_yaml source, then flip to kind=file with
+        # a relative URL — the post-edit pair is invalid and must be
+        # rejected before save().
+        self.invoke([
+            "add", "local",
+            "--kind", "http_yaml",
+            "--content", "skill",
+            "--url", "https://catalog.example.com/skills.yaml",
+            "--non-interactive",
+        ])
+        result = self.runner.invoke(registry, [
+            "edit", "local",
+            "--kind", "file",
+            "--url", "relative/path.yaml",
+            "--non-interactive",
+        ], obj=self.app, catch_exceptions=True)
+        self.assertNotEqual(result.exit_code, 0)
+
+
+class TestRegistryEntriesFilters(RegistryCommandTestBase):
+    """``entries --approved`` / ``--rejected`` filter on the operator
+    override bits independently of ``--status``. Both filters together
+    return the empty set because approve/reject are mutually exclusive.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.invoke([
+            "add", "corp-skills",
+            "--kind", "http_yaml",
+            "--content", "skill",
+            "--url", "https://catalog.example.com/skills.yaml",
+            "--non-interactive",
+        ])
+        # Populate two entries, one to approve and one to reject.
+        manifest = parse_manifest(json.dumps({
+            "schema_version": 1,
+            "entries": [
+                {"name": "approved-one", "type": "skill",
+                 "source_url": "https://x/1"},
+                {"name": "rejected-one", "type": "skill",
+                 "source_url": "https://x/2"},
+            ],
+        }))
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+        with patch(
+            "defenseclaw.registries.sync.fetch_manifest",
+            lambda src, *, allow_private=False: (manifest, raw),
+        ), patch(
+            "defenseclaw.commands.cmd_registry._make_scan_callback",
+            return_value=lambda src, entry: _scan_clean(entry.name),
+        ):
+            self.invoke(["sync", "corp-skills"])
+
+        # Approve one, reject the other (no repromote so we don't
+        # need the scanner stub here).
+        self.invoke([
+            "approve", "corp-skills", "approved-one",
+            "--type", "skill", "--no-repromote",
+        ])
+        self.invoke([
+            "reject", "corp-skills", "rejected-one",
+            "--type", "skill", "--no-repromote",
+        ])
+
+    def test_entries_approved_only(self):
+        result = self.invoke([
+            "entries", "corp-skills", "--approved", "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        names = {row["name"] for row in json.loads(result.output)}
+        self.assertEqual(names, {"approved-one"})
+
+    def test_entries_rejected_only(self):
+        result = self.invoke([
+            "entries", "corp-skills", "--rejected", "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        rows = json.loads(result.output)
+        names = {row["name"] for row in rows}
+        self.assertEqual(names, {"rejected-one"})
+        # The reject path also flips ``status`` to ``blocked`` so the
+        # operator's call survives both filter shapes.
+        self.assertEqual(rows[0]["status"], "blocked")
+
+    def test_entries_status_blocked_includes_rejected(self):
+        # Cross-check: the reject above should land on the
+        # ``--status blocked`` filter as well, not just on
+        # ``--rejected``. This is the regression the
+        # ``manual_set_verdict`` fix targets.
+        result = self.invoke([
+            "entries", "corp-skills",
+            "--status", "blocked",
+            "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        names = {row["name"] for row in json.loads(result.output)}
+        self.assertEqual(names, {"rejected-one"})
+
+    def test_entries_approved_and_rejected_returns_empty(self):
+        # Mutual exclusivity by definition.
+        result = self.invoke([
+            "entries", "corp-skills",
+            "--approved", "--rejected",
+            "--json",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(json.loads(result.output), [])
+
+
+class TestRegistryListEntryCounts(RegistryCommandTestBase):
+    """``registry list --json`` should embed the cached entry count
+    summary so the TUI / CI can show "10 (8/1/1)" without hitting the
+    network. A source that has never synced reports no ``entries``
+    sub-block.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.invoke([
+            "add", "corp-skills",
+            "--kind", "http_yaml",
+            "--content", "skill",
+            "--url", "https://catalog.example.com/skills.yaml",
+            "--non-interactive",
+        ])
+
+    def test_list_json_includes_entry_summary_after_sync(self):
+        manifest = _make_skill_manifest()
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+        with patch(
+            "defenseclaw.registries.sync.fetch_manifest",
+            lambda src, *, allow_private=False: (manifest, raw),
+        ), patch(
+            "defenseclaw.commands.cmd_registry._make_scan_callback",
+            return_value=lambda src, entry: _scan_clean(entry.name),
+        ):
+            self.invoke(["sync", "corp-skills"])
+
+        result = self.invoke(["list", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(len(payload), 1)
+        self.assertIn("entries", payload[0])
+        self.assertEqual(payload[0]["entries"]["total"], 1)
+        self.assertEqual(payload[0]["entries"]["clean"], 1)
+
+
+class TestRegistryTest(RegistryCommandTestBase):
+    """``registry test`` should fetch + parse without writing any
+    cache or asset_policy state, and surface a structured summary
+    so CI checks can gate a sync on a clean dry-run.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.invoke([
+            "add", "corp-skills",
+            "--kind", "http_yaml",
+            "--content", "skill",
+            "--url", "https://catalog.example.com/skills.yaml",
+            "--non-interactive",
+        ])
+
+    def test_test_does_not_write_cache_or_policy(self):
+        from defenseclaw.registries.cache import index_path, manifest_path
+
+        manifest = _make_skill_manifest()
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+
+        def _fetch(_source, *, allow_private=False):
+            return manifest, raw
+
+        with patch("defenseclaw.registries.adapters.fetch_manifest", _fetch):
+            with patch(
+                "defenseclaw.commands.cmd_registry.fetch_manifest", _fetch,
+            ):
+                result = self.invoke(["test", "corp-skills", "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["entries"]["total"], 1)
+        self.assertEqual(payload["entries"]["skills"], 1)
+        # Critical: no on-disk side effects.
+        self.assertFalse(index_path(self.app.cfg.data_dir, "corp-skills").exists())
+        self.assertFalse(manifest_path(self.app.cfg.data_dir, "corp-skills").exists())
+        # And asset_policy is untouched.
+        self.assertEqual(self.app.cfg.asset_policy.skill.registry, [])
+
+    def test_test_surfaces_fetch_error_with_nonzero_exit(self):
+        from defenseclaw.registries.adapters import IngestError
+
+        def _bad(_source, *, allow_private=False):
+            raise IngestError("synthetic")
+
+        with patch(
+            "defenseclaw.commands.cmd_registry.fetch_manifest", _bad,
+        ):
+            result = self.runner.invoke(registry, [
+                "test", "corp-skills", "--json",
+            ], obj=self.app, catch_exceptions=True)
+        self.assertNotEqual(result.exit_code, 0)
+        # Output may be on stdout (--json branch) or stderr.
+        stream = result.output or ""
+        if stream.strip().startswith("{"):
+            payload = json.loads(stream)
+            self.assertFalse(payload["ok"])
+            self.assertIn("synthetic", payload["error"])
+
+    def test_test_show_entries_lists_rows(self):
+        manifest = _make_skill_manifest()
+        raw = json.dumps(manifest.to_dict()).encode("utf-8")
+        with patch(
+            "defenseclaw.commands.cmd_registry.fetch_manifest",
+            lambda src, *, allow_private=False: (manifest, raw),
+        ):
+            result = self.invoke([
+                "test", "corp-skills",
+                "--show-entries", "--limit", "5", "--json",
+            ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIn("rows", payload["entries"])
+        self.assertEqual(len(payload["entries"]["rows"]), 1)
+        self.assertEqual(payload["entries"]["rows"][0]["name"], "demo-skill")
+
+
+class TestRegistryEditPromptShortCircuit(RegistryCommandTestBase):
+    """Per the ``edit`` docstring, only the flags you pass are changed.
+    When **any** mutating flag is provided we must skip the interactive
+    prompts entirely so a non-TTY caller (TUI, cron, CI) doesn't hang
+    waiting for stdin even without ``--non-interactive``.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.invoke([
+            "add", "corp-skills",
+            "--kind", "http_yaml",
+            "--content", "skill",
+            "--url", "https://catalog.example.com/skills.yaml",
+            "--non-interactive",
+        ])
+
+    def test_edit_with_single_flag_does_not_prompt(self):
+        # Run without --non-interactive but with a mutating flag. The
+        # CliRunner's stdin is closed by default; if the command tries
+        # to prompt for any other field, the click.prompt call would
+        # raise and the exit code would be non-zero.
+        result = self.invoke([
+            "edit", "corp-skills",
+            "--disabled",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        src = next(
+            s for s in self.app.cfg.registries.sources
+            if s.id == "corp-skills"
+        )
+        self.assertFalse(src.enabled)
+        # And nothing else changed.
+        self.assertEqual(src.kind, "http_yaml")
+        self.assertEqual(src.url, "https://catalog.example.com/skills.yaml")
+
+
 if __name__ == "__main__":
     unittest.main()
