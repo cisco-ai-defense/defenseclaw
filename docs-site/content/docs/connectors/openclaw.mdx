@@ -37,7 +37,7 @@ The flags above explicitly set: connector, mode, optional HITL, and optional rul
 | LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
 | Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
-| HITL minimum severity | `HIGH` (when `--human-approval` is on) | `--hilt-min-severity LOW\|MEDIUM\|HIGH\|CRITICAL` |
+| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
 | Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
@@ -69,7 +69,7 @@ The proxy is in the data path but nothing blocks. Every prompt, response, and to
 defenseclaw setup openclaw \
   --mode action \
   --human-approval \
-  --hilt-min-severity HIGH \
+  --hilt-min-severity high \
   --restart
 ```
 
@@ -85,7 +85,7 @@ export DEFENSECLAW_LLM_KEY=<your-key>
 defenseclaw setup openclaw \
   --mode action \
   --human-approval \
-  --hilt-min-severity HIGH \
+  --hilt-min-severity high \
   --detection-strategy regex_judge \
   --judge-model anthropic/claude-sonnet-4-20250514 \
   --judge-api-key-env DEFENSECLAW_LLM_KEY \
@@ -103,7 +103,7 @@ defenseclaw policy activate strict
 defenseclaw setup openclaw \
   --mode action \
   --human-approval \
-  --hilt-min-severity LOW \
+  --hilt-min-severity low \
   --rule-pack strict \
   --restart
 ```

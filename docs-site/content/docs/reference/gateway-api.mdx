@@ -25,7 +25,7 @@ Last audited: every entry on this page was verified against `mux.HandleFunc` cal
 | `gateway.api_bind` | `127.0.0.1` | `~/.defenseclaw/config.yaml` (override only when running the sandbox/lan profile) |
 | `gateway.port` (proxy) | `18789` | Separate from the API server — the proxy port the LiteLLM/Bifrost upstream listens on |
 
-The gateway binds to localhost by default. The `gateway.bind: "lan"` shortcut is only meaningful when `defenseclaw setup` puts the gateway in the sandbox profile (binds `0.0.0.0` so the host-side veth pair can reach it).
+The gateway binds to localhost by default. To expose the API to the LAN (sandbox/multi-host setups), set `gateway.api_bind: "0.0.0.0"` in `~/.defenseclaw/config.yaml`. `defenseclaw setup` does this for you when it provisions the sandbox profile.
 
 ## Auth
 

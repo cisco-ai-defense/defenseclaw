@@ -25,7 +25,10 @@ const SCRIPT: { kind: 'cmd' | 'out' | 'ok' | 'dim'; text: string }[] = [
 ];
 
 export function TerminalDemo() {
-  const [step, setStep] = useState(0);
+  // Start at step 1 so the first paint (and the headless-Chrome screenshot
+  // step on the docs-site landing + guardrail pages) shows the install
+  // command, not an empty terminal with a blinking cursor.
+  const [step, setStep] = useState(1);
   const [reduced, setReduced] = useState(false);
 
   useEffect(() => {
@@ -42,7 +45,10 @@ export function TerminalDemo() {
       return;
     }
     if (step >= SCRIPT.length) return;
-    const t = window.setTimeout(() => setStep((s) => s + 1), step === 0 ? 800 : 650);
+    // step === 1 holds the install command for ~600ms so it reads as a
+    // distinct beat before the success line renders; subsequent lines
+    // tick at 650ms.
+    const t = window.setTimeout(() => setStep((s) => s + 1), step === 1 ? 600 : 650);
     return () => window.clearTimeout(t);
   }, [step, reduced]);
 

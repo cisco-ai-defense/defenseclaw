@@ -113,12 +113,12 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
 | **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openclaw`, `zeptoclaw`. |
-| **Select integration mode** — Claude Code / Codex only *(default: 2 = full guardrail)* | **interactive-only** | Use [`setup claude-code`](/docs/connectors/claude-code) or [`setup codex`](/docs/connectors/codex) for the observability-only branch from a script. |
+| **Select integration mode** — Claude Code / Codex only *(default: 2 = full guardrail)* | **interactive-only** | Use [`setup claude-code`](/docs/connectors/claudecode) or [`setup codex`](/docs/connectors/codex) for the observability-only branch from a script. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
 | **Select hook fail mode** *(default: open)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |
 | **Human approval for risky actions?** *(action mode only, default: current)* | `--human-approval` / `--no-human-approval` | Skipped entirely in observe mode. |
-| **Approval minimum severity** *(if HITL on, default: HIGH)* | `--hilt-min-severity HIGH\|MEDIUM\|LOW\|CRITICAL` | — |
+| **Approval minimum severity** *(if HITL on, default: high)* | `--hilt-min-severity high\|medium\|low\|critical` | Click renders the choices lowercase; case-insensitive matching, so `HIGH` also works. |
 | **Select scanner engine** *(default: local)* | `--scanner-mode local\|remote\|both` | Wizard never picks `both` — pass the flag to run the union. |
 | **API endpoint / key env / timeout** *(remote scanner only)* | `--cisco-endpoint`, `--cisco-api-key-env`, `--cisco-timeout-ms` | Defaults inherit from existing `aid.*` config. |
 | **Enable LLM judge?** *(default: current)* | implicit when `--judge-model` is set | Pass `--detection-strategy regex_only` to force the judge off; the bare guardrail command has no `--no-judge` toggle. |
@@ -195,7 +195,7 @@ defenseclaw setup guardrail \
   --mode action \
   --rule-pack strict \
   --human-approval \
-  --hilt-min-severity HIGH \
+  --hilt-min-severity high \
   --restart
 ```
 
@@ -285,8 +285,8 @@ Regex still runs first (cheap and offline). The judge adjudicates anything regex
       description: "Enable or disable HITL. Action mode only.",
     },
     "--hilt-min-severity": {
-      type: "HIGH|MEDIUM|LOW|CRITICAL",
-      description: "Minimum severity that asks for human approval.",
+      type: "high|medium|low|critical",
+      description: "Minimum severity that asks for human approval. Case-insensitive (Click renders lowercase in --help).",
     },
     "--disable-redaction / --enable-redaction": {
       type: "flag",
@@ -351,7 +351,7 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | [`defenseclaw init`](/docs/get-started/quickstart#path-a--interactive-defenseclaw-init) | ✓ default on a TTY | ✓ `--non-interactive --yes` + per-knob flags | Identical to the wizard mode of `quickstart` once choices are made; both call `bootstrap.run_first_run()`. |
 | [`defenseclaw quickstart`](/docs/get-started/quickstart#path-b--zero-prompts-defenseclaw-quickstart) | ✗ never prompts | ✓ always | Zero-prompt by design. There is no wizard variant — use `init` for that. |
 | `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
-| [`defenseclaw setup claude-code`](/docs/connectors/claude-code) | ✓ confirm prompt | ✓ `--yes` | Light wrapper that only configures observability. Full guardrail still goes through `setup guardrail`. |
+| [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes` | Light wrapper that only configures observability. Full guardrail still goes through `setup guardrail`. |
 | [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes` | Same shape as `setup claude-code`. |
 | `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup hermes` | ✓ confirm prompt | ✓ `--yes` | Generated wrappers — confirmation only, then delegate. |
 | `defenseclaw setup openclaw` / `setup zeptoclaw` | ✓ confirm prompt | ✓ `--yes` | Confirm is skippable; the **full** guardrail wizard is **not** available here — pass `setup guardrail` flags after the confirm. |
@@ -359,7 +359,7 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | [`defenseclaw setup local-observability`](/docs/observability/local-observability) | ✗ no prompts | ✓ flags only | Compose-style up/down/logs subcommands; never asks. |
 | [`defenseclaw setup mcp-scanner`](/docs/setup/mcp-scanner) | ✓ wizard | ✓ `--non-interactive` | |
 | [`defenseclaw setup skill-scanner`](/docs/setup/skill-scanner) | ✓ wizard | ✓ `--non-interactive` | |
-| `defenseclaw registry add / remove / refresh` | ✓ prompts for missing args | ✓ `--non-interactive` + required flags | Module is built dual-path on purpose. |
+| `defenseclaw registry add / edit / remove / sync` | ✓ prompts for missing args | ✓ `--non-interactive` + required flags | `sync` (not `refresh`) fetches + scans + promotes. Module is built dual-path on purpose. |
 | `defenseclaw doctor` | conditional — only with `--fix` | ✓ `--fix --yes` | Default run is read-only and never prompts. |
 | [`defenseclaw agent discover`](/docs/ai-discovery) | ✗ no prompts | ✓ flags / `--json` | Read-only inventory command. |
 | [`defenseclaw aibom scan`](/docs/ai-discovery#aibom) | ✗ no prompts | ✓ flags only | Read-only. |

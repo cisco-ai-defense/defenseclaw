@@ -44,7 +44,7 @@ For the full machine-readable view see the [Capability Matrix](/docs/capability-
 defenseclaw setup guardrail \
   --mode action \
   --human-approval \
-  --hilt-min-severity HIGH \
+  --hilt-min-severity high \
   --restart
 ```
 
@@ -55,9 +55,9 @@ defenseclaw setup guardrail \
       description: "Toggle HITL on or off. Action mode only.",
     },
     "--hilt-min-severity": {
-      type: "HIGH|MEDIUM|LOW|CRITICAL",
-      description: "Lowest severity that triggers an approval prompt. CRITICAL findings always block regardless of HITL.",
-      default: "HIGH",
+      type: "high|medium|low|critical",
+      description: "Lowest severity that triggers an approval prompt. CRITICAL findings always block regardless of HITL. Click accepts the value case-insensitively; the underlying config stores the canonical uppercase rank label.",
+      default: "high",
     },
   }}
 />

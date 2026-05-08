@@ -47,7 +47,8 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
 | `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
 | `defenseclaw setup splunk` | Configure the Splunk audit sink. |
-| `defenseclaw setup webhook` | Configure a generic webhook audit sink. |
+| `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
+| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
 
 ## Audit & alerts
 
@@ -72,7 +73,7 @@ The Python CLI exposes one scan group per asset family — there is no top-level
 | `defenseclaw aibom scan [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) and emit findings. |
 | `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
 | `defenseclaw codeguard {status,install,install-skill}` | `defenseclaw` | Manage the CodeGuard skill/rule install (status, install, install-skill). |
-| `defenseclaw-gateway scan code <path> [--json] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack via the running sidecar. |
+| `defenseclaw-gateway scan code <path> [--json] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack. Runs the scanner in-process — does **not** require the sidecar daemon to be running. |
 
 ## Gateway daemon
 
@@ -99,7 +100,9 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw setup guardrail --disable` | Roll back guardrail. Connector files restored from backup. |
-| `defenseclaw uninstall` | Remove DefenseClaw entirely. Audit DB and `~/.defenseclaw/` deleted. |
+| `defenseclaw uninstall` | Reversible by default — runs connector teardown, stops the sidecar, removes the OpenClaw plugin, leaves `~/.defenseclaw/` (audit DB, config, secrets) intact. |
+| `defenseclaw uninstall --all` | Same as above, plus deletes `~/.defenseclaw/`. Add `--binaries` to also remove the `defenseclaw` and `defenseclaw-gateway` binaries from `~/.local/bin`. |
+| `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
 
 ## Discoverability
 

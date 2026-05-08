@@ -131,13 +131,14 @@ Stops the scanner and clears the `ai_discovery.*` block. Existing audit events a
 
 | Knob | Purpose |
 | --- | --- |
-| `--scan-root` (repeatable) | Filesystem roots to walk. Defaults to `~`, `/Applications`, `/opt`. |
-| `--scan-shell-history` / `--no-...` | Read `~/.bash_history`, `~/.zsh_history` for AI invocations. |
-| `--scan-package-manifests` / `--no-...` | Look at `package.json`, `pyproject.toml`, `requirements.txt`. |
-| `--scan-env` / `--no-...` | Enumerate process env *names* (values are never read). |
-| `--scan-network-domains` / `--no-...` | Watch DNS for provider endpoints (Anthropic, OpenAI, Bedrock, …). |
-| `--signature-pack` | Path or registry id of the signature pack. Default ships in the binary. |
-| `--scan-interval` | Seconds between rescans. Default 300. |
+| `--scan-roots` | Comma-separated filesystem roots to walk. Defaults inherit from `ai_discovery.scan_roots` (typically `~`). |
+| `--include-shell-history` / `--no-include-shell-history` | Read `~/.bash_history`, `~/.zsh_history` for AI invocations. |
+| `--include-package-manifests` / `--no-include-package-manifests` | Look at `package.json`, `pyproject.toml`, `requirements.txt`. |
+| `--include-env-var-names` / `--no-include-env-var-names` | Enumerate process env *names* (values are never read). |
+| `--include-network-domains` / `--no-include-network-domains` | Watch DNS for provider endpoints (Anthropic, OpenAI, Bedrock, …). |
+| `--scan-interval-min` | Minutes between rescans. Defaults inherit from `ai_discovery.scan_interval_min`. |
+
+Signature packs are managed separately under `defenseclaw agent signatures` (see below); there is no `--signature-pack` flag on `discovery enable`.
 
 Run `defenseclaw agent discovery enable --help` for the full list with defaults.
 
@@ -331,7 +332,7 @@ A common production pattern:
     Flip on registry-required mode: `defenseclaw registry require --type skill --enabled`. Now anything *new* that discovery finds — but the registry doesn't recognise — is admission-blocked by default.
   </Step>
   <Step>
-    Approve specific entries as you go: `defenseclaw registry approve <id> --type skill`. Discovery + admission are now closed-loop.
+    Approve specific entries as you go: `defenseclaw registry approve <source-id> <entry-name> --type skill` (or `--type mcp`). Approval is per entry, not per source — the source ID identifies the registry, and the entry name picks one cached skill or MCP server inside it. Discovery + admission are now closed-loop.
   </Step>
 </Steps>
 
@@ -351,7 +352,7 @@ A common production pattern:
     Two options: (1) author a custom signature pack and `defenseclaw agent signatures install ./my-pack` so continuous discovery learns it, or (2) run `defenseclaw agent confidence policy validate ./policy.yaml` and adjust the weights so the existing detectors score it correctly.
   </Accordion>
   <Accordion title="Discovery is too noisy on this host">
-    Scope it: `defenseclaw agent discovery enable --scan-root ~/work --no-scan-shell-history --no-scan-network-domains`. The defaults are conservative for privacy, but on shared dev hosts you may also want to drop the package-manifest walk.
+    Scope it: `defenseclaw agent discovery enable --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. The defaults are conservative for privacy, but on shared dev hosts you may also want to drop the package-manifest walk with `--no-include-package-manifests`.
   </Accordion>
 </Accordions>
 

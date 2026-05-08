@@ -33,11 +33,11 @@ defenseclaw setup guardrail \
   --connector claudecode \
   --mode action \
   --human-approval \
-  --hilt-min-severity HIGH \
+  --hilt-min-severity high \
   --restart
 ```
 
-`--hilt-min-severity HIGH` means HIGH and CRITICAL findings reach the operator. CRITICAL still blocks regardless; HIGH pauses for approval. Drop to `--hilt-min-severity MEDIUM` for very cautious workflows; raise to `--hilt-min-severity CRITICAL` if you want HIGH findings to block silently.
+`--hilt-min-severity high` means HIGH and CRITICAL findings reach the operator. CRITICAL still blocks regardless; HIGH pauses for approval. Drop to `--hilt-min-severity medium` for very cautious workflows; raise to `--hilt-min-severity critical` if you want HIGH findings to block silently.
 
 </Step>
 

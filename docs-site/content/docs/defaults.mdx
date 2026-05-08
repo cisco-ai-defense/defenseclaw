@@ -121,7 +121,7 @@ Nothing blocks (block threshold = CRITICAL, Cisco trust = advisory). Everything 
 ```bash
 defenseclaw policy activate default
 defenseclaw setup guardrail --rule-pack default
-defenseclaw setup guardrail --human-approval --hilt-min-severity HIGH
+defenseclaw setup guardrail --human-approval --hilt-min-severity high
 ```
 
 Default rules; HILT prompts only on HIGH+. Most engineering teams in the early/middle phase land here.
@@ -131,7 +131,7 @@ Default rules; HILT prompts only on HIGH+. Most engineering teams in the early/m
 ```bash
 defenseclaw policy activate strict
 defenseclaw setup guardrail --rule-pack strict
-defenseclaw setup guardrail --human-approval --hilt-min-severity LOW \
+defenseclaw setup guardrail --human-approval --hilt-min-severity low \
   --judge-model openai/gpt-4o-mini
 ```
 

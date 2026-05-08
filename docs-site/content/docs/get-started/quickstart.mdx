@@ -157,8 +157,8 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq .
       description: "HITL: pause risky tool actions for operator approval. Action mode only.",
     },
     "--hilt-min-severity": {
-      type: "HIGH|MEDIUM|LOW|CRITICAL",
-      description: "Lowest finding severity that triggers a HITL approval prompt. Default preserves existing config.",
+      type: "high|medium|low|critical",
+      description: "Lowest finding severity that triggers a HITL approval prompt. Case-insensitive; default preserves existing config.",
     },
     "--non-interactive": {
       type: "flag",

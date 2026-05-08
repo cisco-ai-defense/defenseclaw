@@ -46,11 +46,13 @@ All five run under one Compose project (`defenseclaw-local-observability`). They
     **Open Grafana.** [http://localhost:3000](http://localhost:3000) — anonymous viewer access is enabled by default for the demo dashboards. Sign in as `admin/admin` to edit.
   </Step>
   <Step>
-    **Generate traffic.** Run any DefenseClaw-managed agent, or seed events with:
+    **Generate traffic.** Run any DefenseClaw-managed agent, or send a synthetic event to every configured sink:
 
     ```bash
-    defenseclaw doctor --emit-test-events
+    defenseclaw setup observability test
     ```
+
+    The `test` subcommand fans a probe through every enabled destination — OTel exporter, audit sinks, webhooks — so you can confirm Grafana, Splunk, and notifier wiring in one shot.
   </Step>
   <Step>
     **Watch the dashboards populate.** "DefenseClaw → Overview" lights up first; per-rail dashboards (Guardrail, Admission, Judge, HITL) follow as the events flow.
@@ -72,14 +74,15 @@ defenseclaw setup local-observability up \
 
 | Flag | What it does |
 | --- | --- |
-| `--endpoint` | OTLP gRPC endpoint the gateway writes into config.yaml. Defaults to `127.0.0.1:4317`. |
-| `--protocol` | `grpc` (default) or `http`. |
+| `--endpoint` | OTLP endpoint the gateway writes into `config.yaml`. Defaults to whatever the bridge published (`127.0.0.1:4317`). |
 | `--signals` | Comma-separated subset of `traces,metrics,logs`. Useful for low-volume installs that only want metrics. |
-| `--service-name` | Resource attribute set on every emitted span. |
-| `--with-audit-sink` / `--no-audit-sink` | Also (or don't) add an `audit_sinks: otlp_logs` entry so audit events flow as OTel logs. |
+| `--service-name` | Resource attribute set on every emitted span. Defaults to `defenseclaw`. |
+| `--with-audit-sink` / `--no-audit-sink` | Also (or don't) add an `audit_sinks: otlp_logs` entry so audit events flow as OTel logs. Default is on. |
 | `--no-config` | Bring containers up but do **not** modify `config.yaml`. Useful when you manage gateway config out-of-band. |
 | `--no-wait` | Don't block on healthchecks — fire-and-forget. |
-| `--timeout` | Seconds to wait for healthchecks. |
+| `--timeout` | Seconds to wait for healthchecks. Default 180. |
+
+The OTLP protocol is read from the bridge readiness contract (currently `grpc`); there is no `--protocol` flag on `up`. Override it by editing `otel.protocol` in `config.yaml` if you need `http/protobuf`.
 
 ## What ends up in `config.yaml`
 
@@ -142,10 +145,10 @@ until you run `reset`.
 
 ```bash
 defenseclaw setup local-observability status
-defenseclaw setup local-observability logs grafana
+defenseclaw setup local-observability logs --service grafana --follow
 ```
 
-`status` shows container health and the resolved OTLP endpoint. `logs <service>` tails one of the five containers — useful when Grafana isn't picking up dashboards or the OTel collector is dropping spans.
+`status` shows container health and the resolved OTLP endpoint. `logs --service <name>` tails one of the five containers — useful when Grafana isn't picking up dashboards or the OTel collector is dropping spans. Drop `--service` to fan out logs from every container at once.
 
 ## Use it alongside Splunk
 
@@ -167,10 +170,10 @@ See [Splunk integration](/docs/observability/splunk) for the dashboards we ship 
 
 <Accordions>
   <Accordion title="Grafana shows no data">
-    Generate test events: `defenseclaw doctor --emit-test-events`. Then check the OTel collector container logs (`defenseclaw setup local-observability logs otel-collector`) — most "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
+    Send a synthetic event with `defenseclaw setup observability test`, then check the collector logs (`defenseclaw setup local-observability logs --service otel-collector --follow`). Most "no data" issues are the collector not being reachable from the gateway, not a Grafana problem.
   </Accordion>
   <Accordion title="Port already in use">
-    Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. Kill the conflicting service or shut the stack down with `down` and re-run with `--port-shift N` to add an offset.
+    Grafana 3000, Loki 3100, Tempo 3200, OTLP 4317/4318, Prometheus 9090. The bundled compose file pins these ports; the `up` preflight refuses to launch if a non-stack process is bound to one of them. Free the conflicting port (or stop the foreign container shown in the preflight warning) and re-run `up`. There is no `--port-shift` flag — edit `bundles/local_observability_stack/docker-compose.yml` if you need to relocate a port permanently.
   </Accordion>
   <Accordion title="Reverting config.yaml">
     `down` does not unwrite the `otel:` block. To fully detach the gateway, re-run `setup local-observability up --no-config` and then manually clear the block, or restore from `~/.defenseclaw/config.yaml.bak.<timestamp>` (created on every modification).

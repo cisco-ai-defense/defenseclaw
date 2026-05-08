@@ -123,13 +123,7 @@ Pick a pack at setup time:
 defenseclaw setup guardrail --rule-pack strict
 ```
 
-Or point at a custom directory:
-
-```bash
-defenseclaw setup guardrail --rule-pack ./my-custom-pack
-```
-
-The CLI validates the directory structure before writing it into `config.yaml`.
+`--rule-pack` only accepts the three bundled profiles (`default`, `strict`, `permissive`). To run a custom pack from your own directory, point `guardrail.rule_pack_dir` at it in `~/.defenseclaw/config.yaml` — see [Authoring custom rule packs](#authoring-custom-rule-packs) below for the full workflow.
 
 ### Rule shape
 
@@ -309,12 +303,12 @@ defenseclaw policy show <name>                # full content of one policy
 defenseclaw policy create <name> -d "..."     # scaffold a new one from a preset
 defenseclaw policy activate <name>            # set as active
 defenseclaw policy delete <name>              # remove
-defenseclaw policy validate                   # opa fmt --diff against the bundled rego
-defenseclaw policy test [-v]                  # opa test against the bundled rego
+defenseclaw policy validate                   # validates data.json schema + compiles bundled Rego
+defenseclaw policy test [-v]                  # runs `opa test` against the bundled Rego (requires `opa` on PATH)
 defenseclaw policy edit <section> ...         # actions / scanner / guardrail / firewall
 ```
 
-`policy show` and `policy activate` always take a policy name, not a filesystem path. `policy validate` and `policy test` only accept `--rego-dir` (override the bundled rego location); they do not take a path argument or `--fixtures`. There is no `policy diff` subcommand — compare named policies by reading them back through `policy show <a>` and `policy show <b>`.
+`policy show` and `policy activate` always take a policy name, not a filesystem path. `policy validate` checks that `data.json` parses, that every severity tier in `actions` and `scanner_overrides` has the required fields, and that the bundled Rego modules compile (it is **not** an `opa fmt --diff`). Both `validate` and `test` only accept `--rego-dir` to override the bundled Rego location; neither takes a path argument or `--fixtures`. There is no `policy diff` subcommand — compare named policies by reading them back through `policy show <a>` and `policy show <b>`.
 
 ## See also
 

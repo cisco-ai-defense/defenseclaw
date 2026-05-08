@@ -45,27 +45,36 @@ keywords:
 
 ## config.yaml schema
 
+The shape below mirrors the dataclasses in `cli/defenseclaw/config.py` and the matching Go structs in `internal/config/`. Every block is optional — `defenseclaw setup *` writes only the fields it needs and the merge keeps your hand-edits intact.
+
 ```yaml
 claw:
-  mode: claudecode  # active connector ID; pinned by setup aliases
+  mode: claudecode             # active connector; pinned by setup aliases
 
 gateway:
-  bind: 127.0.0.1:18970
-  log_level: info
-  otlp:
-    endpoint: ""           # set by `setup local-observability up` or operator
-    headers: {}
+  host: 127.0.0.1              # gateway proxy bind host
+  port: 18789                  # gateway proxy port (sidecar -> upstream LLM traffic)
+  api_port: 18970              # gateway REST API port (hooks + TUI dial this)
+  api_bind: ""                 # optional override for the REST API bind address
+
+# Top-level OTel exporter — wires the sidecar to a collector. Written by
+# `setup local-observability up` or `setup observability add <preset>`.
+otel:
+  enabled: false
+  protocol: grpc               # grpc | http/protobuf
+  endpoint: ""                 # 127.0.0.1:4317 after local-observability up
+  service_name: defenseclaw
+  signals: [traces, metrics, logs]
 
 guardrail:
   enabled: true
-  connector: claudecode    # actively enforced connector
-  mode: action             # observe | action
-  scanner_mode: local      # local | remote | both
-  rule_pack: default       # default | strict | permissive
-  port: 4000
-  block_message: ""        # custom; empty -> default
+  connector: claudecode        # actively enforced connector
+  mode: action                 # observe | action
+  scanner_mode: local          # local | remote | both
+  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default  # path; --rule-pack picks the bundled profile dir
+  port: 4000                   # guardrail proxy port
+  block_message: ""            # custom; empty -> default
   detection_strategy: regex_only  # regex_only | regex_judge | judge_first
-  redaction_enabled: true
 
   cisco:
     endpoint: ""
@@ -80,63 +89,85 @@ guardrail:
 
   hilt:
     enabled: false
-    min_severity: HIGH
+    min_severity: HIGH         # stored uppercase; CLI accepts high|medium|low|critical
 
   # Per-connector enforcement gates. setup aliases manage these for you.
   claudecode_enforcement_enabled: false
   codex_enforcement_enabled: false
 
-audit:
-  db_path: ~/.defenseclaw/audit.db
-  jsonl_path: ""           # optional file sink
-  splunk:
-    endpoint: ""
-    token_env: SPLUNK_HEC_TOKEN
-  webhooks:
-    - url: https://example.com/hooks/defenseclaw
-      headers:
-        X-Source: defenseclaw
+# Top-level redaction switches; persistent kill-switches are deliberately
+# top-level so multi-tenant operators can audit them without grepping the
+# guardrail block.
+privacy:
+  disable_redaction: false     # true bypasses redaction on every sink
+
+# Audit fan-out is a top-level list; each entry is a kind-tagged sink.
+# `setup observability add <preset>` and `setup splunk` both write here.
+audit_sinks:
+  - name: org-splunk
+    kind: splunk_hec
+    enabled: true
+    endpoint: https://splunk.example.com/services/collector
+    splunk_hec:
+      token_env: SPLUNK_ACCESS_TOKEN
+      index: defenseclaw
+  - name: local-otlp-logs
+    kind: otlp_logs
+    enabled: true
+    endpoint: 127.0.0.1:4317
+    otlp_logs:
+      protocol: grpc
+      insecure: true
+
+# Notifier webhooks (Slack / PagerDuty / Webex / generic). Distinct from
+# audit sinks — these are managed by `defenseclaw setup webhook`.
+webhooks:
+  - name: oncall-slack
+    type: slack
+    enabled: true
+    url: https://hooks.slack.com/services/T000/B000/XXX
+    secret_env: ""             # optional HMAC for `type: generic`
+    min_severity: HIGH
 ```
 
 ## Environment variables
 
+A handful of high-traffic env vars are inlined below. The full inventory — every variable the CLI and gateway read, with file:line references — lives on [Reference → Environment variables](/docs/reference/env-vars).
+
 <TypeTable
   type={{
-    "BASE_PATH": {
-      type: "string",
-      description: "Docs site basePath. Set to '/defenseclaw' for project pages, '' for a root domain.",
-      default: "/defenseclaw",
+    "DEFENSECLAW_HOME": {
+      type: "path",
+      description: "Override the data directory (default ~/.defenseclaw). Affects config.yaml, .env, audit.db, gateway.jsonl, hook scripts, and the registries cache.",
     },
     "DEFENSECLAW_LLM_KEY": {
       type: "string",
-      description: "Unified LLM Judge key. Read by guardrail.judge.api_key_env when set to its default.",
+      description: "Unified LLM key. Used by the guardrail upstream, the judge, and any scanner that calls an LLM.",
     },
     "CISCO_AI_DEFENSE_API_KEY": {
       type: "string",
-      description: "Cisco AI Defense API key. Required when scanner_mode is remote or both.",
-    },
-    "DEFENSECLAW_GATEWAY_BIND": {
-      type: "host:port",
-      description: "Override gateway bind address. Default 127.0.0.1:18970.",
+      description: "Cisco AI Defense API key. Required when guardrail.scanner_mode is remote or both.",
     },
     "DEFENSECLAW_STRICT_AVAILABILITY": {
       type: "0|1",
-      description: "Force fail-closed on transport failures to the gateway. Default fail-mode is open.",
+      description: "When 1, transport-layer hook failures (gateway unreachable / 5xx) block the tool. Default is fail-open on transport.",
     },
-    "DEFENSECLAW_DATA_DIR": {
-      type: "path",
-      description: "Override ~/.defenseclaw. Useful for parallel test environments.",
+    "DEFENSECLAW_FAIL_MODE": {
+      type: "open|closed",
+      description: "Per-shell override of guardrail.hook_fail_mode for response-layer failures. Read by every connector hook script.",
     },
-    "DEFENSECLAW_LOG_LEVEL": {
-      type: "trace|debug|info|warn|error",
-      description: "Gateway log verbosity. Same effect as gateway.log_level in config.yaml.",
+    "DEFENSECLAW_DISABLE_REDACTION": {
+      type: "0|1",
+      description: "When 1, every persistent sink (audit DB, OTel logs, webhooks, Splunk HEC) emits raw values. The strongest opt-out; mirrors privacy.disable_redaction in config.",
     },
-    "SPLUNK_HEC_TOKEN": {
+    "SPLUNK_ACCESS_TOKEN": {
       type: "string",
-      description: "Splunk HEC token. Read by audit.splunk.token_env when set to its default.",
+      description: "Splunk HEC token. Default consumer for any audit_sinks entry whose splunk_hec.token_env points at it.",
     },
   }}
 />
+
+There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or `DEFENSECLAW_LOG_LEVEL` env var today. Use `DEFENSECLAW_HOME` to relocate the data directory, edit `gateway.host` / `gateway.port` / `gateway.api_port` in `config.yaml` to change bind addresses, and set log verbosity through the sidecar's `--log-level` flag (see `defenseclaw-gateway start --help`).
 
 ## Per-connector source-of-truth files
 

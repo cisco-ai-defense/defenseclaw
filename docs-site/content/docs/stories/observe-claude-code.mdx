@@ -78,7 +78,7 @@ defenseclaw setup guardrail \
   --mode action \
   --rule-pack default \
   --human-approval \
-  --hilt-min-severity HIGH \
+  --hilt-min-severity high \
   --restart
 ```
 
@@ -86,7 +86,7 @@ Three flags matter here:
 
 - `--mode action` — CRITICAL findings now block.
 - `--human-approval` — HIGH findings pause for operator approval.
-- `--hilt-min-severity HIGH` — MEDIUM and LOW still log; only HIGH and above prompt.
+- `--hilt-min-severity high` — MEDIUM and LOW still log; only HIGH and above prompt.
 
 Claude Code supports native PreToolUse ask, so the approval prompt surfaces inside the agent UI itself.
 
