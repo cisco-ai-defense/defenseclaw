@@ -1,0 +1,137 @@
+---
+title: Cursor
+description: Cursor connector wires hooks.json with native ask on beforeShellExecution and beforeMCPExecution. Block on preToolUse, beforeReadFile, beforeTabFileRead, beforeSubmitPrompt, stop.
+keywords:
+  - DefenseClaw Cursor connector
+  - Cursor hooks
+  - Cursor beforeShellExecution
+  - Cursor beforeMCPExecution
+---
+
+<Banner variant="rainbow" id="cursor-hooks">Hooks connector — native ask on shell + MCP execution</Banner>
+
+The Cursor connector wires DefenseClaw into Cursor's [user-scoped hooks.json](https://docs.cursor.com/) so every shell command and MCP tool call is inspected before it runs.
+
+## Setup
+
+```bash
+defenseclaw setup cursor
+```
+
+This runs the observability-only template. Cursor talks directly to its native upstream; DefenseClaw inspects via hooks. **There is no proxy-enforcement path** for Cursor — blocking happens hook-side via Cursor's documented `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt`, and `stop` events. Native ask is supported only on the two `before*Execution` events.
+
+#### What `setup cursor` actually does
+
+The wrapper accepts exactly three flags. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--yes / -y` | off | Skip the confirmation prompt (alias: `--non-interactive`, `--accept-defaults`). |
+| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
+| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
+
+Pinned by the alias regardless of flags: `claw.mode=cursor`, `guardrail.connector=cursor`, `guardrail.mode=observe`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. To tune any of those after install, use [`defenseclaw setup guardrail --connector cursor`](/docs/setup/guardrail) — see the variations below.
+
+#### Common variations — pick the recipe that fits your phase
+
+<Tabs items={['Standard', 'Local stack', 'Add scanning rigor', 'Hook-side enforcement']}>
+
+<Tab value="Standard">
+
+```bash
+defenseclaw setup cursor
+```
+
+Confirms once, wires the hooks against `~/.cursor/hooks.json`, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+
+</Tab>
+
+<Tab value="Local stack">
+
+```bash
+defenseclaw setup cursor --yes --with-local-stack
+```
+
+Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally for ad-hoc dashboards. See [Local observability](/docs/observability/local-observability).
+
+</Tab>
+
+<Tab value="Add scanning rigor">
+
+```bash
+export DEFENSECLAW_LLM_KEY=<your-key>
+
+defenseclaw setup cursor                                  # base alias first
+defenseclaw setup guardrail \
+  --connector cursor \
+  --rule-pack strict \
+  --scanner-mode both \
+  --detection-strategy regex_judge \
+  --judge-model anthropic/claude-sonnet-4-20250514 \
+  --judge-api-key-env DEFENSECLAW_LLM_KEY \
+  --restart
+```
+
+The alias keeps the connector pinned; the follow-up `setup guardrail` swaps in the strict rule pack, runs both local + Cisco AI Defense scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
+
+</Tab>
+
+<Tab value="Hook-side enforcement">
+
+Cursor has no proxy enforcement, but its hooks themselves can block. After `setup cursor`, edit `~/.defenseclaw/config.yaml` and set the per-connector hook mode:
+
+```yaml
+connector_hooks:
+  cursor:
+    enabled: true
+    mode: action          # observe (default) | action
+    fail_mode: open       # open | closed
+```
+
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`, `beforeShellExecution` and `beforeMCPExecution` will surface a native ask in Cursor when the gateway returns a HITL verdict; the other block events (`beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) downgrade to a confirm verdict in the DefenseClaw TUI.
+
+</Tab>
+
+</Tabs>
+
+#### Decision aids — should I turn this on?
+
+<Cards>
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Cursor supports native ask only on beforeShellExecution and beforeMCPExecution; other events downgrade to confirm." />
+  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector cursor` after the alias has pinned things." />
+  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
+  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
+</Cards>
+
+<Callout>
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
+</Callout>
+
+## Files DefenseClaw will modify
+
+<Files>
+  <Folder name="~/.cursor" defaultOpen>
+    <File name="hooks.json (DefenseClaw entries appended)" />
+  </Folder>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name="hooks">
+      <File name="cursor-hook.sh" />
+    </Folder>
+  </Folder>
+</Files>
+
+Cursor's MCP / skills / rules surfaces are workspace-scoped — DefenseClaw discovers them when you open a workspace but never auto-creates configuration there.
+
+## Hook capabilities
+
+<HookEventsList connector="cursor" />
+
+<Callout type="info">
+Cursor supports native ask only on documented ask-capable hook events: `beforeShellExecution` and `beforeMCPExecution`. The other block events (`beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) downgrade HITL to a confirm verdict.
+</Callout>
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```

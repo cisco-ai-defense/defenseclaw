@@ -1,0 +1,56 @@
+---
+title: Capability Matrix
+description: Per-connector breakdown of block capability, native ask events, fail-closed support, subprocess policy, and HITL behaviour. The single source of truth for "can this connector do X?"
+keywords:
+  - DefenseClaw capability matrix
+  - DefenseClaw connector capabilities
+  - native ask connector
+  - fail-closed connector
+  - subprocess policy DefenseClaw
+---
+
+This page is the single source of truth for "can this connector do X?". Every row is hand-derived from the Go connector files in `internal/gateway/connector/` and re-verified on every change. Use it to pick the connector that fits your safety posture, or to find the gaps you need to compensate for.
+
+<CapabilityMatrix />
+
+## Reading the matrix
+
+<Cards>
+  <Card title="Family" description="proxy = DefenseClaw sits in the LLM data path. hooks = DefenseClaw hooks into the agent's lifecycle; the agent talks directly to its upstream." />
+  <Card title="Tool inspection" description="When DefenseClaw can see the tool call. pre-execution + response-scan means we score before the call fires and after it returns." />
+  <Card title="Subprocess policy" description="sandbox = DefenseClaw wires the agent into the openshell sandbox. none = the agent's own runtime executes commands; we observe via hooks." />
+  <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
+  <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Connectors without native ask downgrade HITL to a confirm verdict in the DefenseClaw TUI." />
+  <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
+  <Card title="HITL behaviour" description="One-line summary of how human-in-the-loop approvals reach the operator for this connector." />
+</Cards>
+
+## Where the data comes from
+
+| Field | Source |
+| --- | --- |
+| Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector` for proxy mode) |
+| Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
+| Subprocess policy | `_CONNECTOR_META[<id>].subprocess_policy` in `cli/defenseclaw/commands/cmd_setup.py` |
+| Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
+| HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
+
+The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.
+
+## Common patterns
+
+### "I want maximum safety on a single connector"
+
+Pick a row with **proxy family**, **block: yes**, **native ask: yes**, **fail-closed: yes**. That's [OpenClaw](/docs/connectors/openclaw) today.
+
+### "I want enforcement on Claude Code without the proxy"
+
+Hook-only enforcement is supported on [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Gemini CLI](/docs/connectors/geminicli), [Hermes](/docs/connectors/hermes), [Windsurf](/docs/connectors/windsurf), and [Copilot CLI](/docs/connectors/copilot). The constraint: hook-only enforcement cannot block a request the agent has not yet asked the hook about. Trust the hook surface to scope what's possible.
+
+### "I want HITL approvals to surface inside the agent UI"
+
+Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse). Other connectors downgrade to a confirm verdict.
+
+### "I want fail-closed on transport failures"
+
+Pick a row with **fail-closed: yes**: OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot CLI. For Hermes and Windsurf, configure operator-side timeouts.

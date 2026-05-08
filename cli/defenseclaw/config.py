@@ -2102,7 +2102,7 @@ def _warn_disable_redaction_config(cfg: Config) -> None:
         f"{prefix}privacy.disable_redaction=true — ALL sinks (audit DB, "
         f"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED prompts, "
         f"judge bodies, and verdict reasons. Disable in shared/multi-tenant "
-        f"deployments via `defenseclaw config set privacy.disable_redaction false`.{suffix}",
+        f"deployments via `defenseclaw setup redaction on`.{suffix}",
         file=sys.stderr,
     )
 

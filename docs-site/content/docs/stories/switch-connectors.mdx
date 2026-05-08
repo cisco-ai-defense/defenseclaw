@@ -1,0 +1,101 @@
+---
+title: Switch connectors without losing audit history
+description: defenseclaw setup mode <connector> rewires the data path without touching the audit DB. Move from OpenClaw to Codex (or Claude Code, or Cursor) in one command and keep every audit row.
+keywords:
+  - DefenseClaw switch connector
+  - DefenseClaw setup mode
+  - DefenseClaw connector inheritance
+  - DefenseClaw audit history preserved
+---
+
+The audit DB is connector-agnostic. Every audit row records its own `connector` column, so switching connectors moves the data path without losing history. New events land under the new connector; old events stay attributable to the old one.
+
+<Steps>
+
+<Step>
+
+### Inspect current state
+
+```bash
+defenseclaw status
+defenseclaw audit summary --by connector --since 7d
+```
+
+You should see the active connector and a histogram of which connectors generated traffic over the past week.
+
+</Step>
+
+<Step>
+
+### Switch with smart inheritance
+
+```bash
+defenseclaw setup mode codex
+```
+
+The CLI runs the previous connector's `Teardown()` — restoring backed-up agent files — then the new connector's `Setup()`. Inheritance rules:
+
+- `openclaw ↔ zeptoclaw`: full guardrail config inherits verbatim (both are proxy connectors).
+- `proxy → hooks`: switch to observability-only, force enforcement off, preserve the rest of `guardrail.*` on disk.
+- `hooks → proxy`: enable guardrail in observe mode so the proxy binds; never auto-enable enforcement.
+- `hooks ↔ hooks`: apply the destination's observability-only template.
+
+Full table on the [Switching connectors](/docs/setup/guardrail/switching-connectors) page.
+
+</Step>
+
+<Step>
+
+### Verify
+
+```bash
+defenseclaw doctor
+defenseclaw audit summary --by connector --since 1h
+```
+
+`doctor` confirms the previous connector left no residual hook entries; `audit summary` shows new events landing under the new connector.
+
+</Step>
+
+</Steps>
+
+## What stays, what moves
+
+| Stays put | Moves |
+| --- | --- |
+| Audit DB (`~/.defenseclaw/audit.db`) | Active connector (`guardrail.connector`) |
+| Rule packs (`~/.defenseclaw/policies/`) | Hook scripts wired in agent config |
+| Sinks (OTLP / Splunk / webhooks) | `claw.mode` (drives source-of-truth files) |
+| `~/.defenseclaw/config.yaml` (selectively rewritten) | Backed-up agent files (restored to original) |
+
+<Flow
+  direction="TB"
+  compact
+  caption="Switching is a teardown + setup, scoped to the data path. The audit DB and policy directory are never touched."
+>
+  <Node id="old" kind="connector">{`Old connector\ne.g. openclaw`}</Node>
+  <Node id="teardown" kind="connector">{`Teardown()\nrestore backups,\nremove entries`}</Node>
+  <Node id="new" kind="connector">{`New connector\ne.g. codex`}</Node>
+  <Node id="setup" kind="connector">{`Setup()\nwrite hooks,\nupdate config`}</Node>
+  <Node id="audit" kind="datastore">{`Audit DB\nuntouched`}</Node>
+  <Node id="policy" kind="policy">{`Rule packs\nuntouched`}</Node>
+  <Edge from="old" to="teardown" />
+  <Edge from="teardown" to="new" />
+  <Edge from="new" to="setup" />
+  <Edge from="audit" to="old" variant="dashed" label="shared" />
+  <Edge from="audit" to="new" variant="dashed" label="shared" />
+  <Edge from="policy" to="old" variant="dashed" label="shared" />
+  <Edge from="policy" to="new" variant="dashed" label="shared" />
+</Flow>
+
+## When to switch
+
+- Trying a different agent. Operators switch connectors more often than they realise; the typical operator runs both Claude Code and Codex during a normal week.
+- Promoting an agent. You started with observability-only on Claude Code; now you want enforcement and want to use OpenClaw's plugin-mediated HITL instead. Switch.
+- Demoting an agent. You promoted Codex to enforcement; the rule pack is too aggressive; switch back to observability-only while you tune.
+
+## Caveats
+
+<Callout>
+The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Run `defenseclaw audit migrate` after a major version upgrade. The CLI prompts you when this is needed.
+</Callout>

@@ -1,0 +1,94 @@
+---
+title: CLI commands
+description: Every defenseclaw verb, grouped by what you are trying to do — first run, setup, audit, scanning, gateway control, status, uninstall.
+keywords:
+  - DefenseClaw CLI commands
+  - defenseclaw setup
+  - defenseclaw scan
+  - defenseclaw audit
+  - defenseclaw doctor
+---
+
+Authoritative source for any flag is `defenseclaw <command> --help`. These groupings are curated for browsing.
+
+## First run
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw init` | Interactive first-run wizard. Asks about scanner mode, judge, HITL. |
+| `defenseclaw quickstart` | Zero-prompt first-run with safe defaults. See [Quickstart](/docs/get-started/quickstart). |
+| `defenseclaw doctor` | Health check. Run this first whenever something feels off. |
+| `defenseclaw status` | Resolved active connector, enforcement flags, gateway state. |
+
+## Setup
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw setup guardrail` | The central setup command. See [Setup Guardrail](/docs/setup/guardrail). |
+| `defenseclaw setup mode <connector>` | Switch the active claw connector with smart guardrail inheritance. See [Switching connectors](/docs/setup/guardrail/switching-connectors). |
+| `defenseclaw setup claude-code` | Observability-only alias for Claude Code. |
+| `defenseclaw setup codex` | Observability-only alias for Codex. |
+| `defenseclaw setup cursor` | Observability-only alias for Cursor. |
+| `defenseclaw setup windsurf` | Observability-only alias for Windsurf. |
+| `defenseclaw setup geminicli` | Observability-only alias for Gemini CLI. |
+| `defenseclaw setup copilot` | Observability-only alias for GitHub Copilot CLI. |
+| `defenseclaw setup hermes` | Observability-only alias for Hermes. |
+| `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
+| `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
+| `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
+| `defenseclaw setup splunk` | Configure the Splunk audit sink. |
+| `defenseclaw setup webhook` | Configure a generic webhook audit sink. |
+
+## Audit & alerts
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw tui` | Interactive Bubbletea dashboard — audit, alerts, logs, inventory panels. The recommended live view. |
+| `defenseclaw alerts` | Snapshot of recent alerts (default 25) as a table. `--limit N` to widen, `--show <n>` for full record. |
+| `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
+| `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
+
+## Scanning
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw scan skills` | Scan agent skills for the active connector. |
+| `defenseclaw scan mcp` | Scan MCP servers. |
+| `defenseclaw scan plugins` | Scan plugins / extensions. |
+| `defenseclaw scan codeguard <path>` | Scan source files with the bundled CodeGuard rule pack. |
+| `defenseclaw scan registry` | Scan registry-resolved components (skills, MCP, plugins) from a registry endpoint. |
+
+## Gateway
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw gateway start` | Start `defenseclaw-gateway` in the background. |
+| `defenseclaw gateway stop` | Stop the gateway. |
+| `defenseclaw gateway restart` | Restart (most setup commands do this implicitly with `--restart`). |
+| `defenseclaw gateway logs` | Tail gateway stdout/stderr. |
+
+## TUI
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw tui` | Open the interactive operator UI. Pending-approvals panel, audit stream, settings. |
+
+## Uninstall / disable
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw setup guardrail --disable` | Roll back guardrail. Connector files restored from backup. |
+| `defenseclaw uninstall` | Remove DefenseClaw entirely. Audit DB and `~/.defenseclaw/` deleted. |
+
+## Discoverability
+
+```bash
+defenseclaw --help
+defenseclaw setup --help
+defenseclaw setup guardrail --help
+defenseclaw audit --help
+```
+
+Every command tree responds to `--help`. The CLI prints all flags, defaults, and a one-line description for each.

@@ -1557,7 +1557,7 @@ func warnDisableRedactionConfig(cfg *Config) {
 				"OTel logs, webhooks, Splunk HEC) will receive UNREDACTED "+
 				"prompts, judge bodies, and verdict reasons. Disable in "+
 				"shared/multi-tenant deployments via "+
-				"`defenseclaw config set privacy.disable_redaction false`.")
+				"`defenseclaw setup redaction on`.")
 	})
 }
 

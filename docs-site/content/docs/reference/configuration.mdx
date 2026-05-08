@@ -1,0 +1,163 @@
+---
+title: Configuration
+description: ~/.defenseclaw/config.yaml schema, environment variables, on-disk layout, and per-connector source-of-truth files. The single source of truth for "where does this setting live?"
+keywords:
+  - DefenseClaw configuration
+  - DefenseClaw config.yaml
+  - DefenseClaw environment variables
+  - DefenseClaw on-disk layout
+  - DEFENSECLAW_LLM_KEY
+---
+
+`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit, then run `defenseclaw gateway restart` (or `defenseclaw setup guardrail --restart`).
+
+## On-disk layout
+
+<Files>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <File name="config.yaml" />
+    <File name="audit.db" />
+    <File name="gateway-token" />
+    <File name="picked_connector" />
+    <Folder name=".venv">
+      <File name="…" />
+    </Folder>
+    <Folder name="hooks">
+      <File name="<connector>-hook.sh" />
+    </Folder>
+    <Folder name="policies" defaultOpen>
+      <Folder name="guardrail">
+        <Folder name="default">
+          <File name="shell.yaml" />
+          <File name="secrets.yaml" />
+          <File name="prompt-injection.yaml" />
+        </Folder>
+        <Folder name="strict" />
+        <Folder name="permissive" />
+      </Folder>
+      <Folder name="codeguard" />
+    </Folder>
+    <Folder name="backups">
+      <File name="<connector>-<timestamp>.json" />
+    </Folder>
+  </Folder>
+</Files>
+
+## config.yaml schema
+
+```yaml
+claw:
+  mode: claudecode  # active connector ID; pinned by setup aliases
+
+gateway:
+  bind: 127.0.0.1:18970
+  log_level: info
+  otlp:
+    endpoint: ""           # set by `setup local-observability up` or operator
+    headers: {}
+
+guardrail:
+  enabled: true
+  connector: claudecode    # actively enforced connector
+  mode: action             # observe | action
+  scanner_mode: local      # local | remote | both
+  rule_pack: default       # default | strict | permissive
+  port: 4000
+  block_message: ""        # custom; empty -> default
+  detection_strategy: regex_only  # regex_only | regex_judge | judge_first
+  redaction_enabled: true
+
+  cisco:
+    endpoint: ""
+    api_key_env: CISCO_AI_DEFENSE_API_KEY
+    timeout_ms: 5000
+
+  judge:
+    enabled: false
+    model: anthropic/claude-sonnet-4-20250514
+    api_base: ""
+    api_key_env: DEFENSECLAW_LLM_KEY
+
+  hilt:
+    enabled: false
+    min_severity: HIGH
+
+  # Per-connector enforcement gates. setup aliases manage these for you.
+  claudecode_enforcement_enabled: false
+  codex_enforcement_enabled: false
+
+audit:
+  db_path: ~/.defenseclaw/audit.db
+  jsonl_path: ""           # optional file sink
+  splunk:
+    endpoint: ""
+    token_env: SPLUNK_HEC_TOKEN
+  webhooks:
+    - url: https://example.com/hooks/defenseclaw
+      headers:
+        X-Source: defenseclaw
+```
+
+## Environment variables
+
+<TypeTable
+  type={{
+    "BASE_PATH": {
+      type: "string",
+      description: "Docs site basePath. Set to '/defenseclaw' for project pages, '' for a root domain.",
+      default: "/defenseclaw",
+    },
+    "DEFENSECLAW_LLM_KEY": {
+      type: "string",
+      description: "Unified LLM Judge key. Read by guardrail.judge.api_key_env when set to its default.",
+    },
+    "CISCO_AI_DEFENSE_API_KEY": {
+      type: "string",
+      description: "Cisco AI Defense API key. Required when scanner_mode is remote or both.",
+    },
+    "DEFENSECLAW_GATEWAY_BIND": {
+      type: "host:port",
+      description: "Override gateway bind address. Default 127.0.0.1:18970.",
+    },
+    "DEFENSECLAW_STRICT_AVAILABILITY": {
+      type: "0|1",
+      description: "Force fail-closed on transport failures to the gateway. Default fail-mode is open.",
+    },
+    "DEFENSECLAW_DATA_DIR": {
+      type: "path",
+      description: "Override ~/.defenseclaw. Useful for parallel test environments.",
+    },
+    "DEFENSECLAW_LOG_LEVEL": {
+      type: "trace|debug|info|warn|error",
+      description: "Gateway log verbosity. Same effect as gateway.log_level in config.yaml.",
+    },
+    "SPLUNK_HEC_TOKEN": {
+      type: "string",
+      description: "Splunk HEC token. Read by audit.splunk.token_env when set to its default.",
+    },
+  }}
+/>
+
+## Per-connector source-of-truth files
+
+| Connector | File DefenseClaw mutates |
+| --- | --- |
+| OpenClaw | `~/.openclaw/openclaw.json`, `~/.openclaw/extensions/defenseclaw/` |
+| ZeptoClaw | `~/.zeptoclaw/config.json` |
+| Claude Code | `~/.claude/settings.json` |
+| Codex | `~/.codex/config.toml` |
+| Cursor | `~/.cursor/hooks.json` |
+| Windsurf | `~/.codeium/windsurf/hooks.json` |
+| Gemini CLI | `~/.gemini/settings.json` |
+| GitHub Copilot CLI | `<workspace>/.github/hooks/defenseclaw.json` |
+| Hermes | `~/.hermes/config.yaml` |
+
+A hash-checked backup of each file is stored in `~/.defenseclaw/backups/` before any mutation. Teardown (or `--disable`) restores the backup byte-for-byte; if the file has drifted since the backup, only DefenseClaw-owned entries are surgically removed.
+
+## Reload without restart
+
+```bash
+defenseclaw gateway reload
+```
+
+Pulls a fresh `config.yaml` into the running gateway. Connector wiring (hook scripts, agent files) is not re-applied — use `defenseclaw setup guardrail --restart` for that.

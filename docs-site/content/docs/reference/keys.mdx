@@ -1,0 +1,114 @@
+---
+title: Keys
+description: The complete credential reference. Where keys live, the resolution order DefenseClaw uses, and the full table of every credential the gateway and CLI know about.
+keywords:
+  - defenseclaw keys
+  - DEFENSECLAW_LLM_KEY
+  - OPENCLAW_GATEWAY_TOKEN
+  - JUDGE_API_KEY
+  - CISCO_AI_DEFENSE_API_KEY
+  - VIRUSTOTAL_API_KEY
+  - SPLUNK_ACCESS_TOKEN
+  - DefenseClaw credentials registry
+  - dotenv
+---
+
+DefenseClaw stores secrets in a single dotenv file and reads them through one resolution function. There is no Keychain integration, no per-user OS-level secret store, and no scope of "credential providers" — just one canonical location and one CLI surface to manipulate it.
+
+## Where keys live
+
+```
+~/.defenseclaw/.env       # 0o600 file. Never commit. Never log.
+```
+
+Created on demand by `defenseclaw keys set <ENV>`. Atomic tmp+rename writes; values are read **lazily** by the gateway and CLI on every operation, so rotating a secret is a single `defenseclaw keys set` (or a `vim` followed by save) — no service restart.
+
+The CLI also supports overriding any value at runtime by `export`-ing it in your shell. That's the highest-priority source.
+
+<Callout title="No macOS Keychain, no AWS Secrets Manager">
+DefenseClaw does **not** read or write the macOS Keychain, AWS Secrets Manager, HashiCorp Vault, or any other external secret store. If you want secrets sourced from one of those, fetch them in your shell init and `export` the result — the CLI will pick them up via the env-var resolution path.
+</Callout>
+
+## Resolution order
+
+```
+1. process environment           ← highest priority
+2. ~/.defenseclaw/.env
+3. unset                          ← REQUIRED keys here mark the install MISSING
+```
+
+Implemented by `cli/defenseclaw/credentials.py::resolve`. The same code path is consumed by `defenseclaw keys list`, `defenseclaw quickstart`, and `defenseclaw doctor`, so what those commands report is what the running gateway and scanners see.
+
+## The four `keys` subcommands
+
+```bash
+defenseclaw keys list                            # tabular: env name, feature, requirement, source
+defenseclaw keys list --json                     # machine-readable
+defenseclaw keys list --missing-only             # triage view
+
+defenseclaw keys set DEFENSECLAW_LLM_KEY         # hidden prompt, writes to .env
+defenseclaw keys set DEFENSECLAW_LLM_KEY --value "$LLM_KEY"   # CI form
+
+defenseclaw keys fill-missing                    # walk every REQUIRED-but-unset key
+defenseclaw keys fill-missing --yes              # skip the upfront confirmation
+
+defenseclaw keys check                           # exit 0 iff every REQUIRED is set
+```
+
+Every `set` and `fill-missing` invocation logs an audit entry tagged `actor=cli:operator action=config.update target=dotenv:<ENV>` with `before/after = had_value` (the value itself is **never** logged).
+
+## Requirement classification
+
+A credential is one of three states **given the current config**:
+
+| State | Glyph | Meaning |
+| --- | --- | --- |
+| `REQUIRED` | `●` | Feature is enabled and the key is mandatory. `keys check` exits non-zero if missing. |
+| `OPTIONAL` | `○` | Feature is enabled and the key would add capability, but the install runs without it. |
+| `NOT_USED` | `·` | Feature is disabled — the key is irrelevant for this config. |
+
+Classification predicates live in `cli/defenseclaw/credentials.py` and are unit-tested. The convention: when a feature is disabled, the predicate returns `NOT_USED`, not `OPTIONAL`. `OPTIONAL` is reserved for "feature is on and this key would add capability but the operator can run without it".
+
+## The full credential registry
+
+Every credential the gateway and CLI know about is registered in `cli/defenseclaw/credentials.py::CREDENTIALS`. The order below matches the order the table renders in `keys list`.
+
+| Env name | Feature | Required when… | Notes |
+| --- | --- | --- | --- |
+| `DEFENSECLAW_LLM_KEY` | `llm.default` | Any LLM-using component (guardrail upstream, judge, skill / MCP scanners) is enabled and falls back to the default key. | The single canonical key. Provider-specific keys (`OPENAI_API_KEY`, etc.) are derived from this + the model prefix at routing time. |
+| `OPENCLAW_GATEWAY_TOKEN` | `gateway` | Always (the gateway needs an auth token to talk to OpenClaw). | Auto-detected from `~/.openclaw/openclaw.json` when the file exists. Marked REQUIRED but auto-detected. |
+| `JUDGE_API_KEY` | `guardrail.judge` | The judge is enabled and `guardrail.judge.llm.api_key_env` overrides the default. | Only tracked when there's a custom override. Otherwise the judge falls through to `DEFENSECLAW_LLM_KEY`. |
+| `CISCO_AI_DEFENSE_API_KEY` | `guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the Cisco AI Defense remote scanner. |
+| `VIRUSTOTAL_API_KEY` | `skill-scanner.virustotal` | `scanners.skill_scanner.use_virustotal=true`. | Required when the skill scanner is wired up to ask VirusTotal. |
+| `SPLUNK_ACCESS_TOKEN` | `observability.splunk` | A Splunk audit sink is enabled. | The HEC token. |
+| `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | `skill-scanner.llm` | The skill scanner uses LLM and has a custom `llm.api_key_env` override. | Only tracked when there's a custom override; otherwise falls through to `DEFENSECLAW_LLM_KEY`. |
+
+The names you see in `keys list` are the **effective** ones. If you set `guardrail.judge.llm.api_key_env: MY_JUDGE_KEY`, the table shows `MY_JUDGE_KEY` — not the canonical `JUDGE_API_KEY` — because that's the env var the running gateway will actually read.
+
+## Provider keys (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …) are NOT tracked
+
+DefenseClaw routes every LLM call through Bifrost (Go gateway) or LiteLLM (Python scanners). Both layers derive the provider-specific key from `DEFENSECLAW_LLM_KEY` plus the model prefix on the configured model name (`openai/`, `anthropic/`, `bedrock/`, `vertex/`, `azure/`, `ollama/`, …). You don't need to set `OPENAI_API_KEY` separately — the unified key is the only knob. See [`cli/defenseclaw/scanner/_llm_env.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/_llm_env.py) for the mapping.
+
+## Example: `keys list` output
+
+```text
+    ENV NAME                    FEATURE                 REQUIREMENT  SOURCE  STATUS
+    ──────────────────────────  ─────────────────────   ───────────  ──────  ─────────
+  ● DEFENSECLAW_LLM_KEY         llm.default             REQUIRED     dotenv  ✓ set
+  ● OPENCLAW_GATEWAY_TOKEN      gateway                 REQUIRED     env     ✓ set
+  · JUDGE_API_KEY               guardrail.judge         NOT_USED     unset   n/a
+  ● CISCO_AI_DEFENSE_API_KEY    guardrail.remote        REQUIRED     env     ✓ set
+  · VIRUSTOTAL_API_KEY          skill-scanner.virustotal NOT_USED    unset   n/a
+  · SPLUNK_ACCESS_TOKEN         observability.splunk    NOT_USED     unset   n/a
+  · DEFENSECLAW_SKILL_SCANNER_LLM_KEY skill-scanner.llm NOT_USED     unset   n/a
+
+  Legend: ● required   ○ optional   · not used by current config
+           Source: 'env' = process environment, 'dotenv' = ~/.defenseclaw/.env, 'unset' = missing
+```
+
+## Reference
+
+- [`cli/defenseclaw/credentials.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/credentials.py) — the `CREDENTIALS` registry, `Requirement` enum, `Resolution` dataclass, and the `classify` / `resolve` functions.
+- [`cli/defenseclaw/commands/cmd_keys.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_keys.py) — the `list` / `set` / `fill-missing` / `check` subcommands.
+- [Setup → Unified LLM key](/docs/setup/unified-llm-key) — the guided action page.
+- [Reference → Env vars](/docs/reference/env-vars) — every other env var DefenseClaw reads (behavior switches, paths, telemetry).

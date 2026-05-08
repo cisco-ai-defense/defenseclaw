@@ -1,0 +1,385 @@
+---
+title: defenseclaw setup guardrail
+description: The central command. Routes LLM traffic through the Go guardrail proxy, configures observe vs action mode, picks the connector, scanner, rule pack, judge, and HITL behaviour, then restarts the gateway.
+keywords:
+  - defenseclaw setup guardrail
+  - DefenseClaw observe action mode
+  - DefenseClaw scanner mode
+  - DefenseClaw rule pack
+  - LLM judge
+  - human approval HITL
+  - DefenseClaw interactive setup
+  - defenseclaw non-interactive
+---
+
+`defenseclaw setup guardrail` is the operator command. It picks the connector, picks the mode, points the scanners at the right backend, optionally enables the LLM judge, and configures human-in-the-loop. Every other setup verb in DefenseClaw is a thin wrapper around this one.
+
+<Callout>
+Run it interactively the first time — the wizard explains each choice and picks safe defaults. Once the configuration is happy, re-run with explicit flags (or use `--non-interactive`) for unattended setups and CI.
+</Callout>
+
+## Watch the interactive flow
+
+The animation below replays a real `defenseclaw setup guardrail` session — connector pick, integration mode, observe vs action, hook fail-mode, scanner backend, judge, advanced options, and the final summary. Hover or press **Pause** to study a frame; press **Restart** to replay.
+
+<TerminalAnimation
+  cwd="~/code/your-agent-repo"
+  height={520}
+  ariaLabel="Animated terminal demo of defenseclaw setup guardrail running through nine prompts and ending with a configuration summary."
+  caption="Defaults shown in [brackets]. Pressing Enter accepts the default; the orange characters represent the operator's reply."
+  frames={[
+    { type: 'cmd', text: 'defenseclaw setup guardrail', pauseMs: 700 },
+    { type: 'spacer' },
+    { type: 'warn', text: '⚠ privacy.disable_redaction=true — sinks will receive UNREDACTED prompts.' },
+    { type: 'spacer' },
+    { type: 'dim', text: '  LLM Guardrail Setup' },
+    { type: 'dim', text: '  ───────────────────' },
+    { type: 'spacer' },
+    { type: 'dim', text: '  Scans every LLM prompt and response for:' },
+    { type: 'dim', text: '    • Prompt injection and jailbreak attempts' },
+    { type: 'dim', text: '    • Secrets, API keys, and credentials' },
+    { type: 'dim', text: '    • PII leakage (names, emails, SSNs, credit cards)' },
+    { type: 'dim', text: '    • Data exfiltration: credential reads, OOB channels' },
+    { type: 'spacer' },
+    { type: 'out', text: '  Which agent framework are you using?' },
+    { type: 'spacer' },
+    { type: 'dim', text: '    1. OpenClaw       — fetch interceptor + before_tool_call plugin' },
+    { type: 'dim', text: '    2. ZeptoClaw      — api_base redirect + proxy response-scan' },
+    { type: 'dim', text: '    3. Claude Code    — env var + PreToolUse hook script *' },
+    { type: 'dim', text: '    4. Codex          — env var + hook script + response-scan' },
+    { type: 'dim', text: '    5. Hermes         — config.yaml hooks + MCP/skills/plugins' },
+    { type: 'dim', text: '    6. Cursor         — hooks.json + MCP/skills/rules surfaces' },
+    { type: 'dim', text: '    7. Windsurf       — Cascade hooks + local config discovery' },
+    { type: 'dim', text: '    8. Gemini CLI     — settings.json hooks + native OTLP' },
+    { type: 'dim', text: '    9. GitHub Copilot CLI — .github/hooks command hooks' },
+    { type: 'spacer' },
+    { type: 'prompt', text: '  Selection [3]: ', reply: '', pauseMs: 1100 },
+    { type: 'spacer' },
+    { type: 'out', text: '  Select integration mode' },
+    { type: 'dim', text: '    1. Observability only (audit + telemetry, no blocking)' },
+    { type: 'dim', text: '    2. Full guardrail (scan + enforce)' },
+    { type: 'prompt', text: '  Choice [2]: ', reply: '2', pauseMs: 800 },
+    { type: 'spacer' },
+    { type: 'prompt', text: '  Enable guardrail? [Y/n]: ', reply: '', pauseMs: 700 },
+    { type: 'spacer' },
+    { type: 'out', text: '  Select mode' },
+    { type: 'dim', text: '    1. observe (log only)' },
+    { type: 'dim', text: '    2. action  (block on findings)' },
+    { type: 'prompt', text: '  Choice [1]: ', reply: '', pauseMs: 700 },
+    { type: 'spacer' },
+    { type: 'out', text: '  Select hook fail mode' },
+    { type: 'dim', text: '    1. open   (allow on guardrail failure)' },
+    { type: 'dim', text: '    2. closed (block on guardrail failure)' },
+    { type: 'prompt', text: '  Choice [1]: ', reply: '', pauseMs: 700 },
+    { type: 'spacer' },
+    { type: 'out', text: '  Select scanner engine' },
+    { type: 'dim', text: '    1. local  (bundled regex + heuristics, zero key)' },
+    { type: 'dim', text: '    2. remote (Cisco AI Defense API)' },
+    { type: 'prompt', text: '  Choice [1]: ', reply: '', pauseMs: 700 },
+    { type: 'spacer' },
+    { type: 'prompt', text: '  Enable LLM judge? [y/N]: ', reply: '', pauseMs: 700 },
+    { type: 'prompt', text: '  Configure advanced options? [y/N]: ', reply: '', pauseMs: 800 },
+    { type: 'spacer' },
+    { type: 'ok', text: '  ✓ Wrote ~/.defenseclaw/config.yaml' },
+    { type: 'ok', text: '  ✓ Installed Claude Code PreToolUse hook' },
+    { type: 'ok', text: '  ✓ Gateway restarted on 127.0.0.1:18970' },
+    { type: 'ok', text: '  ✓ Guardrail engaged: claudecode | observe | local | no-judge' },
+    { type: 'spacer' },
+    { type: 'dim', text: '  Watch live:      defenseclaw tui    (or tail -f ~/.defenseclaw/gateway.jsonl)' },
+    { type: 'dim', text: '  Health check:    defenseclaw doctor' },
+  ]}
+/>
+
+## Same setup, no prompts
+
+Every choice the wizard makes has a flag (with a couple of documented exceptions, below). The CI-friendly equivalent of the demo above is one command:
+
+```bash
+defenseclaw setup guardrail \
+  --non-interactive \
+  --connector claudecode \
+  --mode observe \
+  --scanner-mode local \
+  --no-judge \
+  --restart
+```
+
+Pass `--non-interactive` (or `--accept-defaults`) to skip every prompt; missing flags fall back to the same defaults the wizard would have offered.
+
+## Prompt → flag mapping
+
+Each row corresponds to one prompt in the animation. **Default** shows what pressing Enter selects; **Flag** is the CI-shaped equivalent. Rows tagged **interactive-only** have no direct flag — the Note explains the workaround.
+
+| Prompt (default) | Flag equivalent | Note |
+| --- | --- | --- |
+| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openclaw`, `zeptoclaw`. |
+| **Select integration mode** — Claude Code / Codex only *(default: 2 = full guardrail)* | **interactive-only** | Use [`setup claude-code`](/docs/connectors/claude-code) or [`setup codex`](/docs/connectors/codex) for the observability-only branch from a script. |
+| **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
+| **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
+| **Select hook fail mode** *(default: open)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |
+| **Human approval for risky actions?** *(action mode only, default: current)* | `--human-approval` / `--no-human-approval` | Skipped entirely in observe mode. |
+| **Approval minimum severity** *(if HITL on, default: HIGH)* | `--hilt-min-severity HIGH\|MEDIUM\|LOW\|CRITICAL` | — |
+| **Select scanner engine** *(default: local)* | `--scanner-mode local\|remote\|both` | Wizard never picks `both` — pass the flag to run the union. |
+| **API endpoint / key env / timeout** *(remote scanner only)* | `--cisco-endpoint`, `--cisco-api-key-env`, `--cisco-timeout-ms` | Defaults inherit from existing `aid.*` config. |
+| **Enable LLM judge?** *(default: current)* | implicit when `--judge-model` is set | Pass `--no-judge` to force off. |
+| **Select judge strategy** *(if judge on, default: regex_judge)* | `--detection-strategy regex_only\|regex_judge\|judge_first` | — |
+| **Inherit unified LLM key for judge?** *(default: Y)* | `--judge-api-key-env` | Override with a different env var to use a separate key. |
+| **Configure judge fallback models?** *(default: N)* | **interactive-only** | Edit `guardrail.judge.fallback_models` in `~/.defenseclaw/config.yaml` to script. |
+| **Configure advanced options?** *(default: N)* | — | Gates the next three prompts. |
+| **Guardrail proxy port** *(default: 4000)* | `--port` | — |
+| **Custom block message?** *(action mode only)* | `--block-message` | — |
+| **Disable redaction?** *(default: current)* | `--disable-redaction` / `--enable-redaction` | Only disable inside trusted, single-tenant environments. |
+
+<Callout type="warn">
+**Three genuinely interactive-only choices** on this command: integration mode (Claude Code / Codex split), hook fail mode (use `defenseclaw guardrail fail-mode` afterward), and judge fallback models (edit `config.yaml`). Everything else round-trips through flags.
+</Callout>
+
+## Two modes you have to choose between
+
+<Cards>
+  <Card title="observe" description="Log findings to the audit DB and sinks. Block nothing. Run this for at least a week before promoting." />
+  <Card title="action" description="Block on configured severities. CRITICAL always blocks. HIGH blocks unless HITL is on." />
+</Cards>
+
+## Connector resolution
+
+When you omit `--connector`, DefenseClaw resolves it in this order:
+
+1. `--connector` flag (operator intent always wins)
+2. Existing `guardrail.connector` if you have run setup before
+3. `<data_dir>/picked_connector` hint written by `scripts/install.sh --connector ...`
+4. Filesystem auto-detection (only in interactive mode)
+5. Fallback to `openclaw`
+
+## Tabs by mode (non-interactive recipes)
+
+<Tabs items={['Observe', 'Action', 'Action + HITL', 'Action + judge']}>
+
+<Tab value="Observe">
+
+```bash
+defenseclaw setup guardrail \
+  --non-interactive \
+  --connector claudecode \
+  --mode observe \
+  --scanner-mode local \
+  --restart
+```
+
+The audit DB fills up with every prompt and tool call. Nothing blocks. Open `defenseclaw tui` for the live audit panel, or `tail -f ~/.defenseclaw/gateway.jsonl | jq` for a scripted view.
+
+</Tab>
+
+<Tab value="Action">
+
+```bash
+defenseclaw setup guardrail \
+  --non-interactive \
+  --connector claudecode \
+  --mode action \
+  --scanner-mode local \
+  --rule-pack default \
+  --restart
+```
+
+CRITICAL findings block immediately. HIGH findings block. Operators see the block reason in the agent UI; the audit log captures the verdict.
+
+</Tab>
+
+<Tab value="Action + HITL">
+
+```bash
+defenseclaw setup guardrail \
+  --non-interactive \
+  --connector claudecode \
+  --mode action \
+  --rule-pack strict \
+  --human-approval \
+  --hilt-min-severity HIGH \
+  --restart
+```
+
+HIGH findings pause for operator approval. CRITICAL still blocks unconditionally. On Claude Code, the approval prompt surfaces as a native PreToolUse ask; on Codex, it downgrades to a TUI prompt. See the [HITL page](/docs/hitl) for the full matrix.
+
+</Tab>
+
+<Tab value="Action + judge">
+
+```bash
+export DEFENSECLAW_LLM_KEY=<your-key>
+
+defenseclaw setup guardrail \
+  --non-interactive \
+  --connector claudecode \
+  --mode action \
+  --detection-strategy regex_judge \
+  --judge-model anthropic/claude-sonnet-4-20250514 \
+  --judge-api-key-env DEFENSECLAW_LLM_KEY \
+  --restart
+```
+
+Regex still runs first (cheap and offline). The judge adjudicates anything regex flagged as ambiguous. Detection strategy `judge_first` flips the order — useful when regex is too noisy.
+
+</Tab>
+
+</Tabs>
+
+## Every flag
+
+<TypeTable
+  type={{
+    "--connector / --agent": {
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot",
+      description: "Agent framework connector. Drives traffic interception, tool inspection, and subprocess enforcement defaults.",
+    },
+    "--mode": {
+      type: "observe|action",
+      description: "observe logs without blocking; action enforces on configured severities.",
+    },
+    "--scanner-mode": {
+      type: "local|remote|both",
+      description: "Scanner backend. local uses the bundled regex packs; remote calls Cisco AI Defense; both runs the union.",
+    },
+    "--cisco-endpoint": {
+      type: "string",
+      description: "Cisco AI Defense API endpoint. Required when --scanner-mode is remote or both.",
+    },
+    "--cisco-api-key-env": {
+      type: "string",
+      description: "Env var name holding the Cisco AI Defense API key (default CISCO_AI_DEFENSE_API_KEY).",
+    },
+    "--cisco-timeout-ms": {
+      type: "int",
+      description: "Cisco AI Defense request timeout in milliseconds.",
+    },
+    "--port": {
+      type: "int",
+      description: "Guardrail proxy port (default 4000).",
+    },
+    "--block-message": {
+      type: "string",
+      description: "Custom message shown when a request is blocked. Empty string keeps the default.",
+    },
+    "--detection-strategy": {
+      type: "regex_only|regex_judge|judge_first",
+      description: "How DefenseClaw orders detection. regex_only is the zero-key default.",
+    },
+    "--rule-pack": {
+      type: "default|strict|permissive",
+      description: "Bundled rule-pack profile. Picks the directory under ~/.defenseclaw/policies/guardrail/.",
+    },
+    "--judge-model": {
+      type: "string",
+      description: "LLM judge model (e.g. anthropic/claude-sonnet-4-20250514). Enables the judge implicitly.",
+    },
+    "--judge-api-base": {
+      type: "string",
+      description: "Override the judge API base URL.",
+    },
+    "--judge-api-key-env": {
+      type: "string",
+      description: "Env var name for the judge API key.",
+    },
+    "--human-approval / --no-human-approval": {
+      type: "flag",
+      description: "Enable or disable HITL. Action mode only.",
+    },
+    "--hilt-min-severity": {
+      type: "HIGH|MEDIUM|LOW|CRITICAL",
+      description: "Minimum severity that asks for human approval.",
+    },
+    "--disable-redaction / --enable-redaction": {
+      type: "flag",
+      description: "Disable or enable PII / prompt redaction. Disable only inside trusted environments.",
+    },
+    "--restart / --no-restart": {
+      type: "flag",
+      description: "Restart the gateway and the active connector after setup.",
+      default: "--restart",
+    },
+    "--verify / --no-verify": {
+      type: "flag",
+      description: "Run connectivity checks after setup.",
+      default: "--verify",
+    },
+    "--non-interactive / --accept-defaults": {
+      type: "flag",
+      description: "Use flags instead of prompts. Required for CI.",
+    },
+    "--disable": {
+      type: "flag",
+      description: "Disable the guardrail and restore connector config where applicable.",
+    },
+  }}
+/>
+
+## What setup writes
+
+<Files>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <File name="config.yaml" />
+    <File name="picked_connector" />
+    <Folder name="hooks">
+      <File name="claudecode-hook.sh" />
+    </Folder>
+  </Folder>
+  <Folder name="~/.claude" defaultOpen>
+    <File name="settings.json (DefenseClaw hook entries appended)" />
+  </Folder>
+</Files>
+
+A hash-checked backup is stored before edits; teardown restores or surgically removes only DefenseClaw-owned entries. See the [per-connector pages](/docs/connectors) for the exact files mutated for each agent.
+
+## Verify it worked
+
+```bash
+defenseclaw doctor
+defenseclaw status --connector claudecode
+defenseclaw alerts --limit 25
+```
+
+`doctor` prints the full health report. `status` shows the resolved connector + enforcement flags. `alerts` lists recent decisions as a table; pass `--show <n>` for the full record. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
+
+## Interactive vs non-interactive — every command
+
+DefenseClaw is **interactive-first**. When you run a `setup` or `init` verb at a terminal, you get a wizard with sane defaults and inline help. The same commands accept flags for unattended runs.
+
+The matrix below is the source of truth. ✓ means "supported"; ✗ means "not supported on this command — see Notes for the workaround". A blank cell in the **Notes** column means there's no asymmetry worth flagging.
+
+| Command | Interactive wizard | Non-interactive flags | Notes |
+| --- | --- | --- | --- |
+| [`defenseclaw init`](/docs/get-started/quickstart#path-a--interactive-defenseclaw-init) | ✓ default on a TTY | ✓ `--non-interactive --yes` + per-knob flags | Identical to the wizard mode of `quickstart` once choices are made; both call `bootstrap.run_first_run()`. |
+| [`defenseclaw quickstart`](/docs/get-started/quickstart#path-b--zero-prompts-defenseclaw-quickstart) | ✗ never prompts | ✓ always | Zero-prompt by design. There is no wizard variant — use `init` for that. |
+| `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
+| [`defenseclaw setup claude-code`](/docs/connectors/claude-code) | ✓ confirm prompt | ✓ `--yes` | Light wrapper that only configures observability. Full guardrail still goes through `setup guardrail`. |
+| [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes` | Same shape as `setup claude-code`. |
+| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup hermes` | ✓ confirm prompt | ✓ `--yes` | Generated wrappers — confirmation only, then delegate. |
+| `defenseclaw setup openclaw` / `setup zeptoclaw` | ✓ confirm prompt | ✓ `--yes` | Confirm is skippable; the **full** guardrail wizard is **not** available here — pass `setup guardrail` flags after the confirm. |
+| [`defenseclaw setup splunk`](/docs/observability/splunk) | ✓ wizard when no mode flag | ✓ `--non-interactive` + `--logs` / `--enterprise` / `--o11y` | |
+| [`defenseclaw setup local-observability`](/docs/observability/local-observability) | ✗ no prompts | ✓ flags only | Compose-style up/down/logs subcommands; never asks. |
+| [`defenseclaw setup mcp-scanner`](/docs/setup/mcp-scanner) | ✓ wizard | ✓ `--non-interactive` | |
+| [`defenseclaw setup skill-scanner`](/docs/setup/skill-scanner) | ✓ wizard | ✓ `--non-interactive` | |
+| `defenseclaw registry add / remove / refresh` | ✓ prompts for missing args | ✓ `--non-interactive` + required flags | Module is built dual-path on purpose. |
+| `defenseclaw doctor` | conditional — only with `--fix` | ✓ `--fix --yes` | Default run is read-only and never prompts. |
+| [`defenseclaw agent discover`](/docs/ai-discovery) | ✗ no prompts | ✓ flags / `--json` | Read-only inventory command. |
+| [`defenseclaw aibom scan`](/docs/ai-discovery#aibom) | ✗ no prompts | ✓ flags only | Read-only. |
+| `defenseclaw policy ...` | ✗ no prompts | ✓ flags only | Pure CLI for repeatable policy authoring. |
+| `defenseclaw tui` | ✓ full TUI | — | Interactive only — Bubbletea dashboard with audit, alerts, logs, inventory panels. |
+| `defenseclaw alerts` | ✗ no prompts | ✓ `--limit`, `--show <n>`, `acknowledge` / `dismiss` subcommands | Snapshot view of recent alerts; not a live tail. |
+| `defenseclaw-gateway audit export` (Go binary) | ✗ no prompts | ✓ `--output`, `--limit`, `--include-activity` | JSONL export of `audit_events` from the SQLite DB. |
+| `defenseclaw-gateway` (sidecar daemon) | ✗ no prompts | ✓ flags only | Long-running gateway — `--config`, `--port`, `--log-level`. Started for you by `setup guardrail --restart`. |
+
+<Callout>
+The two **interactive-only** corners worth knowing about: the integration-mode submenu inside `setup guardrail` (Claude Code / Codex), and the judge fallback-models prompt. Everything else has a flag.
+
+The **non-interactive-only** group is `quickstart`, `setup local-observability`, `policy`, `agent discover`, `aibom scan`, `defenseclaw-gateway audit export`, and `gateway start` — all by design (CI-shaped, read-only, or daemon).
+</Callout>
+
+## Common follow-ups
+
+<Cards>
+  <Card title="Quick aliases" href="/docs/setup/guardrail/aliases" description="defenseclaw setup claude-code, setup codex, setup cursor, ..." />
+  <Card title="Switching connectors" href="/docs/setup/guardrail/switching-connectors" description="defenseclaw setup mode <connector> with smart inheritance." />
+  <Card title="Disabling" href="/docs/setup/guardrail/disabling" description="--disable rolls everything back, including agent-side hook entries." />
+  <Card title="HITL" href="/docs/hitl" description="Per-connector ask behaviour and downgraded confirm." />
+</Cards>

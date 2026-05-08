@@ -1,0 +1,12 @@
+{
+  "title": "Setup",
+  "pages": [
+    "index",
+    "guardrail",
+    "unified-llm-key",
+    "skill-scanner",
+    "mcp-scanner",
+    "webhooks",
+    "registries"
+  ]
+}

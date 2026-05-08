@@ -362,7 +362,7 @@ groups:
                  `max_line_size` / `max_structured_metadata_size` in
                  bundles/local_observability_stack/loki/loki.yaml.
               3. Consider re-enabling redaction on the sidecar
-                 (`defenseclaw config set privacy.disable_redaction false`)
+                 (`defenseclaw setup redaction on`)
                  — raw payloads still exist in the audit DB and remain
                  viewable on the workstation via DEFENSECLAW_REVEAL_PII=1.
 

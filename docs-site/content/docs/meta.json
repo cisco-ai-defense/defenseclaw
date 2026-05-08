@@ -1,0 +1,25 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "index",
+    "---Get Started---",
+    "get-started",
+    "---Setup---",
+    "setup",
+    "connectors",
+    "capability-matrix",
+    "ai-discovery",
+    "hitl",
+    "---Policies & Defaults---",
+    "policies",
+    "defaults",
+    "---Integrations---",
+    "openclaw",
+    "---Observability---",
+    "observability",
+    "---Stories---",
+    "stories",
+    "---Reference---",
+    "reference"
+  ]
+}
