@@ -1,0 +1,40 @@
+{
+  "name": "defenseclaw-docs-site",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cisco · DefenseClaw documentation site. Next.js + Fumadocs, statically exported for GitHub Pages.",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --turbopack",
+    "build": "next build",
+    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts",
+    "start": "next start",
+    "lint": "next lint",
+    "validate-links": "tsx ./scripts/validate-links.ts",
+    "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",
+    "postinstall": "fumadocs-mdx"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
+    "flexsearch": "^0.8.212",
+    "fumadocs-core": "^16.8.0",
+    "fumadocs-mdx": "^15.0.0",
+    "fumadocs-ui": "^16.8.0",
+    "next": "^16.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.0.0",
+    "@types/mdx": "^2.0.13",
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "autoprefixer": "^10.4.20",
+    "next-validate-link": "^1.6.6",
+    "postcss": "^8.5.0",
+    "tailwindcss": "^4.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

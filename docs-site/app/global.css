@@ -1,0 +1,125 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@source '../node_modules/fumadocs-ui/dist/**/*.js';
+
+/* Cisco brand mapping. Cisco's signature blue (#049fd9)
+ * drives links, focus rings, primary buttons, and code-block accents.
+ * Tokens are expressed in OKLCH so they degrade gracefully across
+ * light + dark themes and stay perceptually uniform when the user
+ * flips schemes. The warm orange `--brand-warn` mirrors the orange
+ * "AI Security Framework" badge used in the project README and is
+ * reserved for action-mode / blocked / warning surfaces so the visual
+ * vocabulary lines up with the operator's mental model.
+ */
+:root {
+  --brand-cisco: oklch(0.7 0.16 237);
+  --brand-cisco-strong: oklch(0.62 0.18 240);
+  --brand-warn: oklch(0.74 0.18 50);
+  --brand-grain-opacity: 0.08;
+
+  --color-fd-primary: var(--brand-cisco);
+  --color-fd-accent: var(--brand-cisco);
+  --color-fd-ring: var(--brand-cisco);
+
+  /* Widen Fumadocs's docs chrome on large screens. The library default
+   * of 97rem (1552px) leaves ~360px unused on a 1920px monitor, which
+   * forces the capability matrix and Flow diagrams to scroll
+   * horizontally inside a too-narrow article column. 108rem (1728px)
+   * uses big monitors well without breaking small ones (the chrome
+   * still shrinks to viewport width below this cap). Combined with
+   * the per-page `full` opt-in (defaulted to `true` in page.tsx), the
+   * article gets ~1168px of usable width on 1920px+ displays. */
+  --fd-layout-width: 108rem;
+}
+
+/* Wide content (Flow/Sequence figures and our `<table>`s) should never
+ * be horizontally clipped or scrolled inside the article column when
+ * the article itself is wide enough to hold them. Fumadocs renders
+ * tables inside an `overflow-x-auto` wrapper for safety on small
+ * screens — that wrapper still applies, so on tablet/phone the
+ * gesture-friendly horizontal scroll stays. On `xl:` breakpoints (the
+ * width where the docs chrome actually grants the full 1168px), we
+ * lift the wrapper and let the table breathe across the full article
+ * column instead of pinning it to its `min-w-[900px]` size. */
+@media (min-width: 1280px) {
+  article#nd-page[data-full="true"] :where(table) {
+    min-width: 0;
+  }
+}
+
+.dark {
+  --brand-cisco: oklch(0.78 0.14 237);
+  --brand-cisco-strong: oklch(0.7 0.18 240);
+  --color-fd-primary: var(--brand-cisco);
+  --color-fd-accent: var(--brand-cisco);
+  --color-fd-ring: var(--brand-cisco);
+}
+
+/* Hero terminal window — minimal styling, leans on the Fumadocs token
+ * palette so the component re-themes for free when operators switch
+ * to light mode.
+ */
+.terminal-window {
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--color-fd-card) 92%, transparent) 0%,
+    color-mix(in oklab, var(--color-fd-card) 70%, transparent) 100%
+  );
+  border: 1px solid var(--color-fd-border);
+  box-shadow: 0 30px 80px -20px rgb(0 0 0 / 0.45),
+    inset 0 0 0 1px color-mix(in oklab, var(--brand-cisco) 12%, transparent);
+}
+
+/* Subtle SVG grain layer for the landing-page hero. Inline data URI to
+ * keep the request graph clean (no extra HTTP roundtrip) and so the
+ * grain ships in the same statically-exported HTML chunk as the hero.
+ */
+.hero-grain {
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.6 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  opacity: var(--brand-grain-opacity);
+  mix-blend-mode: overlay;
+}
+
+/* Respect reduced-motion. The terminal animation, hero gradient
+ * shimmer, and any decorative motion fall back to a static frame.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .terminal-cursor {
+    animation: none !important;
+  }
+}
+
+@keyframes terminal-blink {
+  0%, 49% {
+    opacity: 1;
+  }
+  50%, 100% {
+    opacity: 0;
+  }
+}
+
+.terminal-cursor {
+  animation: terminal-blink 1s steps(2, end) infinite;
+}
+
+/* Search dialog polish — Fumadocs's FlexSearch result list paints the
+ * active row with `bg-fd-accent text-fd-accent-foreground`, but the
+ * breadcrumb child still has `text-fd-muted-foreground` baked in. The
+ * collision drops the path text to ~3:1 contrast on the highlight
+ * band; promoting it back to the accent foreground keeps the trail
+ * legible in both light and dark themes (the explicit muted class
+ * still beats the cascade for non-active rows). The bottom rail adds
+ * a hair of breathing room so the last result snippet doesn't visually
+ * butt up against the dialog chrome at the bottom of the scroll list.
+ */
+[role="dialog"] button[aria-selected="true"] > div:first-child,
+[role="dialog"] button[aria-selected="true"] > div:first-child * {
+  color: var(--color-fd-accent-foreground);
+  opacity: 0.85;
+}
+
+[role="dialog"] [data-empty="false"] > div {
+  padding-bottom: 0.5rem;
+}

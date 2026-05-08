@@ -1,0 +1,116 @@
+---
+title: CLI commands
+description: Every defenseclaw verb, grouped by what you are trying to do — first run, setup, audit, scanning, gateway control, status, uninstall.
+keywords:
+  - DefenseClaw CLI commands
+  - defenseclaw setup
+  - defenseclaw skill scan
+  - defenseclaw mcp scan
+  - defenseclaw plugin scan
+  - defenseclaw audit
+  - defenseclaw doctor
+  - defenseclaw-gateway
+---
+
+Authoritative source for any flag is `defenseclaw <command> --help`. These groupings are curated for browsing.
+
+DefenseClaw ships **two** binaries:
+
+- **`defenseclaw`** — the operator-facing Python CLI. Entry point for `init`, `setup`, `audit`, `policy`, `skill`/`mcp`/`plugin` scans, alerts, doctor, etc.
+- **`defenseclaw-gateway`** — the long-running Go sidecar. Owns the on-host daemon (`start`/`stop`/`restart`), policy reload, code scanning, and the audit-DB JSONL exporter.
+
+Tables below tag each row with the binary that owns it.
+
+## First run
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw init` | Interactive first-run wizard. Asks about scanner mode, judge, HITL. |
+| `defenseclaw quickstart` | Zero-prompt first-run with safe defaults. See [Quickstart](/docs/get-started/quickstart). |
+| `defenseclaw doctor` | Health check. Run this first whenever something feels off. |
+| `defenseclaw status` | Resolved active connector, enforcement flags, gateway state. |
+
+## Setup
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw setup guardrail` | The central setup command. See [Setup Guardrail](/docs/setup/guardrail). |
+| `defenseclaw setup mode <connector>` | Switch the active claw connector with smart guardrail inheritance. See [Switching connectors](/docs/setup/guardrail/switching-connectors). |
+| `defenseclaw setup claude-code` | Observability-only alias for Claude Code. |
+| `defenseclaw setup codex` | Observability-only alias for Codex. |
+| `defenseclaw setup cursor` | Observability-only alias for Cursor. |
+| `defenseclaw setup windsurf` | Observability-only alias for Windsurf. |
+| `defenseclaw setup geminicli` | Observability-only alias for Gemini CLI. |
+| `defenseclaw setup copilot` | Observability-only alias for GitHub Copilot CLI. |
+| `defenseclaw setup hermes` | Observability-only alias for Hermes. |
+| `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
+| `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
+| `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
+| `defenseclaw setup splunk` | Configure the Splunk audit sink. |
+| `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
+| `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
+
+## Audit & alerts
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw tui` | Interactive Bubbletea dashboard — audit, alerts, logs, inventory panels. The recommended live view. |
+| `defenseclaw alerts` | Snapshot of recent alerts (default 25) as a table. `--limit N` to widen, `--show <n>` for full record. |
+| `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
+| `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
+
+## Scanning
+
+The Python CLI exposes one scan group per asset family — there is no top-level `defenseclaw scan` group. Code-scanning lives on the Go sidecar.
+
+| Command | Binary | Use it for |
+| --- | --- | --- |
+| `defenseclaw skill scan [target] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. |
+| `defenseclaw mcp scan [target] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, or every configured server with `--all`. |
+| `defenseclaw plugin scan <name_or_path> [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan a plugin/extension package. |
+| `defenseclaw aibom scan [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) and emit findings. |
+| `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
+| `defenseclaw codeguard {status,install,install-skill}` | `defenseclaw` | Manage the CodeGuard skill/rule install (status, install, install-skill). |
+| `defenseclaw-gateway scan code <path> [--json] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack. Runs the scanner in-process — does **not** require the sidecar daemon to be running. |
+
+## Gateway daemon
+
+The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Most operators never run these directly — `defenseclaw setup *` commands restart the sidecar implicitly when `--restart` is passed.
+
+| Command | Binary | Use it for |
+| --- | --- | --- |
+| `defenseclaw-gateway start` | `defenseclaw-gateway` | Start the sidecar as a background daemon. |
+| `defenseclaw-gateway stop` | `defenseclaw-gateway` | Stop the running sidecar. |
+| `defenseclaw-gateway restart` | `defenseclaw-gateway` | Restart the sidecar. |
+| `defenseclaw-gateway status` | `defenseclaw-gateway` | One-line health snapshot of the running daemon. |
+| `defenseclaw-gateway policy reload` | `defenseclaw-gateway` | Re-read OPA policies from disk without bouncing the daemon. |
+| `defenseclaw-gateway watchdog [start\|stop\|status]` | `defenseclaw-gateway` | Health-watchdog daemon that notifies when the gateway is down. |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail the gateway's JSONL fan-out — every decision and event is appended here. There is **no** built-in `gateway logs` subcommand; the JSONL fan-out is the canonical decision log. |
+
+## TUI
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw tui` | Open the interactive operator UI. Pending-approvals panel, audit stream, settings. |
+
+## Uninstall / disable
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw setup guardrail --disable` | Roll back guardrail. Connector files restored from backup. |
+| `defenseclaw uninstall` | Reversible by default — runs connector teardown, stops the sidecar, removes the OpenClaw plugin, leaves `~/.defenseclaw/` (audit DB, config, secrets) intact. |
+| `defenseclaw uninstall --all` | Same as above, plus deletes `~/.defenseclaw/`. Add `--binaries` to also remove the `defenseclaw` and `defenseclaw-gateway` binaries from `~/.local/bin`. |
+| `defenseclaw reset --yes` | Wipe `~/.defenseclaw/` so `defenseclaw quickstart` starts clean — keeps binaries and the OpenClaw plugin in place. |
+
+## Discoverability
+
+```bash
+defenseclaw --help
+defenseclaw setup --help
+defenseclaw setup guardrail --help
+defenseclaw audit --help
+```
+
+Every command tree responds to `--help`. The CLI prints all flags, defaults, and a one-line description for each.

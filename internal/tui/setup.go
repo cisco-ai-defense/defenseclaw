@@ -4208,7 +4208,9 @@ func agentHookFields(label, prefix string, h config.AgentHookConfig) []configFie
 		{Label: "Mode", Key: prefix + ".mode", Kind: "choice", Options: []string{"", "observe", "action"}, Value: agentHookModeValue(h.Mode),
 			Hint: "Hook operating mode. Blank inherits connector defaults."},
 		{Label: "Fail Mode", Key: prefix + ".fail_mode", Kind: "choice", Options: []string{"", "open", "closed"}, Value: h.FailMode,
-			Hint: "open=continue if DefenseClaw is unreachable; closed=block on hook failure."},
+			Hint: "LEGACY policy-layer hint — NOT consumed by the generated hook scripts. " +
+				"To change response-layer hook behaviour edit guardrail.hook_fail_mode " +
+				"or run `defenseclaw guardrail fail-mode <open|closed>` instead."},
 		{Label: "Scan on Session Start", Key: prefix + ".scan_on_session_start", Kind: "bool", Value: fmt.Sprintf("%v", h.ScanOnSessionStart),
 			Hint: "Run inventory/scanner checks when an agent session begins."},
 		{Label: "Scan on Stop", Key: prefix + ".scan_on_stop", Kind: "bool", Value: fmt.Sprintf("%v", h.ScanOnStop),

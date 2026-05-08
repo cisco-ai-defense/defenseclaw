@@ -1,0 +1,125 @@
+---
+title: Redaction
+description: How DefenseClaw masks PII / prompts / verdict reasons before they reach any sink, the two env vars and one config field that control the behaviour, and the right command to flip it.
+keywords:
+  - DefenseClaw redaction
+  - DEFENSECLAW_REVEAL_PII
+  - DEFENSECLAW_DISABLE_REDACTION
+  - privacy.disable_redaction
+  - defenseclaw setup redaction
+  - PII placeholder
+  - audit DB redaction
+  - Splunk HEC redaction
+---
+
+DefenseClaw inspects LLM traffic that routinely contains PII (emails, phone numbers, SSNs, credentials, customer records). Operators need rich diagnostic detail to triage false positives and incidents, but raw PII must never be the **default** in any sink — stderr, SQLite audit DB, Splunk HEC, OTel log exporters, webhook payloads. Redaction is the contract that keeps that promise.
+
+This page explains the contract, the two env vars and one config field that control it, and the right CLI to flip them.
+
+## What gets redacted
+
+The following surfaces are passed through `internal/redaction/redaction.go` before they leave the gateway:
+
+- User prompts (request bodies)
+- Judge / scanner LLM bodies (request and response)
+- Evidence windows (the bracketed snippets that explain a verdict)
+- Verdict reasons (the human-readable verdict string)
+- Connector trace metadata (entity names, identifiers)
+- Webhook payloads forwarded to chat / incident receivers
+
+Placeholder shape, parseable across log lines:
+
+```
+<redacted len=N sha=8hex>
+```
+
+The 8-char SHA-256 prefix lets operators correlate the same value across log lines without exposing the value itself. Length is preserved so false-positive triage (distinguishing a 9-digit value from a 16-digit value) still works.
+
+## The three controls — at a glance
+
+| Control | Scope | Persistence | Use case |
+| --- | --- | --- | --- |
+| `privacy.disable_redaction` (config) | ALL sinks | Persisted in `~/.defenseclaw/config.yaml` | Lab / single-tenant install where every sink is inside the same trust boundary. |
+| `DEFENSECLAW_DISABLE_REDACTION=1` (env) | ALL sinks | Ephemeral (process env) | Same as above but without rewriting `config.yaml`. |
+| `DEFENSECLAW_REVEAL_PII=1` (env) | **Operator-facing only** (stderr / TUI Logs panel / `gateway.log`) | Ephemeral (process env) | Short-lived incident triage on a workstation. Persistent sinks STILL redact. |
+
+<Callout title="Reveal vs Disable — the threat models differ">
+- **Reveal** is a short-lived display-only opt-in: an operator wants to see one prompt to debug a false positive. The audit DB, Splunk HEC, and webhook receivers continue to receive redacted placeholders, so the compliance contract stays intact.
+- **Disable** is a deliberate, persistent operator decision: every downstream consumer is trusted, redacted placeholders only obstruct the work. The unconditional-redaction contract documented in `OBSERVABILITY.md` is **explicitly violated** when this is on. The CLI emits a loud warning every time the flag is flipped on, and config loaders log a once-per-process warning at sidecar boot.
+</Callout>
+
+## How to toggle
+
+```bash
+defenseclaw setup redaction status     # show current state (config + env + effective)
+defenseclaw setup redaction off        # turn it OFF (raw passthrough). Confirms first.
+defenseclaw setup redaction off --yes  # CI / TUI form (no confirmation)
+defenseclaw setup redaction on         # turn it back ON
+```
+
+`setup redaction` updates `privacy.disable_redaction` in `~/.defenseclaw/config.yaml`, restarts the gateway by default (the kill-switch is read at sidecar boot), and logs an audit entry. Use `--no-restart` only when the sidecar is offline.
+
+For a one-shell ephemeral reveal during incident triage:
+
+```bash
+DEFENSECLAW_REVEAL_PII=1 defenseclaw tui     # raw values in the Logs panel only
+```
+
+— the audit DB and Splunk HEC will continue to receive redacted placeholders.
+
+<Callout title="Do not use `defenseclaw config set …`">
+There is no `defenseclaw config set` subcommand — `defenseclaw config` only exposes `show`, `path`, and `validate`. Use `defenseclaw setup redaction on|off` to flip the kill-switch. The Go and Python loaders emit a startup warning when `privacy.disable_redaction=true`; that warning has been corrected to point at this command.
+</Callout>
+
+## What `status` prints
+
+```text
+  Redaction state
+    config (privacy.disable_redaction):  ON (redacted)
+    env (DEFENSECLAW_DISABLE_REDACTION): (unset)
+    effective at sidecar boot:           ON — placeholders only
+```
+
+Three lines because the answer "is redaction on?" depends on **both** the persisted config and the runtime env. The "effective" line is the one that matches what the running sidecar will do on its next boot.
+
+## Per-sink behaviour
+
+| Sink | Reveal=1 | Disable=1 / config off |
+| --- | --- | --- |
+| stderr (gateway log file) | raw | raw |
+| TUI Logs panel | raw | raw |
+| SQLite audit DB | redacted | raw |
+| `gateway.jsonl` | redacted | raw |
+| OTel log exporter | redacted | raw |
+| Splunk HEC | redacted | raw |
+| Webhook receivers | redacted | raw |
+
+The isolation is enforced by routing persistent sinks through `ForSink*` helpers (which check `DisableAll()`) rather than the raw `Reveal()`-respecting variants. Reading `internal/redaction/redaction.go` is the canonical source if you ever need to verify behaviour.
+
+## Verifying redaction is working
+
+In the TUI:
+
+- The **Privacy** tab shows the current state, the most recent flip, and the warning banner when redaction is off.
+- The **Logs** panel shows an `[R]` indicator next to every redacted line. Lines without the indicator have a `<redacted len=N sha=...>` placeholder embedded in them.
+
+From the CLI:
+
+```bash
+defenseclaw setup redaction status
+tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.event.body)'   # look for placeholders
+```
+
+## What to do during an incident
+
+1. **Default**: leave redaction on. Use `DEFENSECLAW_REVEAL_PII=1` in your shell to surface raw values **in the operator-facing logs only** while you triage.
+2. **Lab debugging**: flip `defenseclaw setup redaction off` for the duration of the prompt-engineering session, then flip it back on.
+3. **Production**: never flip the kill-switch. If you cannot triage with the placeholders, file a bug — the placeholder shape is supposed to give you enough signal to correlate.
+
+## Reference
+
+- [`internal/redaction/redaction.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/redaction/redaction.go) — the canonical implementation, threat-model docs, `Reveal()` / `DisableAll()` / `ForSink*` helpers.
+- `internal/config/config.go::warnDisableRedactionConfig` — the Go startup warning.
+- `cli/defenseclaw/config.py::_warn_disable_redaction_config` — the Python startup warning.
+- [Reference → Env vars](/docs/reference/env-vars) — the canonical list of every env var, including these two.
+- [Setup → guardrail](/docs/setup/guardrail) — picks safe defaults including redaction-on.

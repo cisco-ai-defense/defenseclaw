@@ -1,0 +1,15 @@
+{
+  "title": "Connectors",
+  "pages": [
+    "index",
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "hermes"
+  ]
+}

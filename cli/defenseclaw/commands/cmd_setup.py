@@ -2383,8 +2383,12 @@ def _print_observability_summary(connector: str, cfg=None) -> None:
         "defenseclaw setup local-observability up"
     )
     click.echo(
-        f"    • Tail audit events for the new connector: "
-        f"defenseclaw audit tail --connector {connector}"
+        "    • Watch decisions live: defenseclaw tui  "
+        "(or: tail -f ~/.defenseclaw/gateway.jsonl | jq)"
+    )
+    click.echo(
+        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
+        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
     )
     click.echo()
     click.echo("  To revert and restore direct LLM access:")

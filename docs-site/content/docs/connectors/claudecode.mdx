@@ -1,0 +1,184 @@
+---
+title: Claude Code
+description: Claude Code connector wires PreToolUse, PostToolUse, UserPromptSubmit, Stop, and PermissionRequest hooks plus the native OTel exporter. Native ask is supported on PreToolUse for HITL.
+keywords:
+  - DefenseClaw Claude Code connector
+  - Claude Code hooks
+  - Claude Code PreToolUse
+  - Claude Code observability
+  - Claude Code guardrail
+---
+
+<Banner variant="rainbow" id="claudecode-hooks">Hooks connector — observability by default, enforcement opt-in</Banner>
+
+The Claude Code connector wires DefenseClaw into [Anthropic's documented hook surfaces](https://docs.anthropic.com/) without inserting a proxy in the data path. Claude Code talks directly to its native upstream; DefenseClaw inspects via hooks + native OTel.
+
+## Setup
+
+<Tabs items={['Observability only', 'Full enforcement']}>
+
+<Tab value="Observability only">
+
+```bash
+defenseclaw setup claude-code
+```
+
+The shortcut alias. Pins `claw.mode=claudecode`, wires hooks + native OTel, leaves enforcement off.
+
+</Tab>
+
+<Tab value="Full enforcement">
+
+```bash
+defenseclaw setup guardrail --connector claudecode --mode action --human-approval --restart
+```
+
+Flips `guardrail.claudecode_enforcement_enabled=true` so the proxy listener binds and Claude Code's `ANTHROPIC_BASE_URL` is pointed at the local DefenseClaw proxy (e.g. `http://127.0.0.1:4000/c/claudecode`). The proxy then forwards inspected, allowed traffic to the real upstream provider via the gateway's [Bifrost](https://github.com/maximhq/bifrost)-backed router. Hooks now consult the gateway for an allow/block decision on every tool call.
+
+#### What this command sets vs. leaves at defaults
+
+The four flags above explicitly set: connector, mode, HITL, and post-setup restart. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+
+| Knob | Value when omitted | Flag to override |
+| --- | --- | --- |
+| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
+| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
+| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
+| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
+| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
+| Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
+| Proxy port | `4000` | `--port <int>` |
+| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
+| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Verify after setup | on | `--no-verify` |
+
+See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
+
+#### Common variations — pick the recipe that fits your phase
+
+<Tabs items={['Pilot (observe)', 'Action + judge', 'Strict / regulated']}>
+
+<Tab value="Pilot (observe)">
+
+```bash
+defenseclaw setup guardrail \
+  --connector claudecode \
+  --mode observe \
+  --rule-pack permissive \
+  --restart
+```
+
+Nothing blocks. Every prompt and tool call lands in `~/.defenseclaw/gateway.jsonl`. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
+
+</Tab>
+
+<Tab value="Action + judge">
+
+```bash
+export DEFENSECLAW_LLM_KEY=<your-key>
+
+defenseclaw setup guardrail \
+  --connector claudecode \
+  --mode action \
+  --human-approval \
+  --hilt-min-severity high \
+  --detection-strategy regex_judge \
+  --judge-model anthropic/claude-sonnet-4-20250514 \
+  --judge-api-key-env DEFENSECLAW_LLM_KEY \
+  --restart
+```
+
+Adds the LLM judge as a second pass on regex-flagged prompts. Costs a few cents per turn; cuts false positives meaningfully on semantic jailbreaks regex misses.
+
+</Tab>
+
+<Tab value="Strict / regulated">
+
+```bash
+defenseclaw policy activate strict
+defenseclaw setup guardrail \
+  --connector claudecode \
+  --mode action \
+  --human-approval \
+  --hilt-min-severity low \
+  --rule-pack strict \
+  --restart
+```
+
+Block ≥ MEDIUM, no allow-list bypass, HITL on every LOW+ event. Pair with the OpenShell sandbox profile and an MCP allow-list for full lockdown.
+
+</Tab>
+
+</Tabs>
+
+#### Decision aids — should I turn this on?
+
+<Cards>
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="When to enable --human-approval, the per-connector ask matrix, and how Claude Code's native PreToolUse ask works." />
+  <Card href="/docs/setup/guardrail#tabs-by-mode-non-interactive-recipes" title="Mode + judge recipes" description="Side-by-side bash for observe / action / action+HITL / action+judge — copy-paste ready." />
+  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
+  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
+</Cards>
+
+<Callout>
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. Once you're happy with the setup, the [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
+</Callout>
+
+</Tab>
+
+</Tabs>
+
+## Files DefenseClaw will modify
+
+<Files>
+  <Folder name="~/.claude" defaultOpen>
+    <File name="settings.json (hooks block + OTEL_* env vars + CLAUDE_CODE_ENABLE_TELEMETRY)" />
+  </Folder>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name="hooks">
+      <File name="claudecode-hook.sh" />
+    </Folder>
+  </Folder>
+</Files>
+
+DefenseClaw stores a hash-checked backup of `settings.json` before edits. Teardown restores it byte-for-byte; if the file drifted, only DefenseClaw-owned entries are surgically removed.
+
+## Hook capabilities
+
+<HookEventsList connector="claudecode" />
+
+<Callout type="info">
+Claude Code is one of the few connectors that supports native PreToolUse ask. HITL approvals surface inside the agent UI itself, so the operator never has to leave Claude Code to decide.
+</Callout>
+
+## Telemetry channels at boot
+
+<Flow
+  direction="LR"
+  caption="Two telemetry channels run in observability mode; the proxy data path activates only when claudecode_enforcement_enabled is set."
+>
+  <Node id="cc" kind="agent">Claude Code</Node>
+  <Node id="hooks" kind="connector">{`PreToolUse / PostToolUse /\nUserPromptSubmit / Stop /\nPermissionRequest hooks`}</Node>
+  <Node id="otel" kind="connector">{`Native OTel exporter\n(env-driven)`}</Node>
+  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
+  <Edge from="cc" to="hooks" />
+  <Edge from="hooks" to="gateway" />
+  <Edge from="cc" to="otel" />
+  <Edge from="otel" to="gateway" />
+</Flow>
+
+## When to enable enforcement
+
+The enforcement flag (`guardrail.claudecode_enforcement_enabled`) gates the proxy-redirect path: setting Claude Code's `ANTHROPIC_BASE_URL` to the local proxy (which then proxies upstream via Bifrost), reserved-id strip, and subprocess sandbox. Until you flip it on, observability runs end-to-end via hooks and OTel without any data-path modification.
+
+Flip it on when:
+
+- The audit log has at least a week of data and you've tuned the rule pack.
+- HITL is on for HIGH so risky calls pause for review instead of blocking outright.
+- Operators have access to either the agent UI (for native PreToolUse ask) or the DefenseClaw TUI.
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```

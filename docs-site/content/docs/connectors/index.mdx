@@ -1,0 +1,62 @@
+---
+title: Connectors
+description: Nine first-class connectors — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, Hermes — with a single enforcement contract.
+keywords:
+  - DefenseClaw connectors
+  - Claude Code connector
+  - Codex connector
+  - Cursor connector
+  - OpenClaw connector
+  - GitHub Copilot CLI connector
+  - Gemini CLI connector
+  - Windsurf connector
+  - Hermes connector
+---
+
+Connectors are the adapter layer between agent frameworks and DefenseClaw's guardrail proxy. Each connector owns all security surfaces for its agent: LLM traffic routing, tool call inspection, agent hook events, component scanning, CodeGuard file scanning, and subprocess enforcement.
+
+## The two families
+
+<Cards>
+  <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. DefenseClaw sits in the LLM data path — every request and response is intercepted, scored, and forwarded." />
+  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, Hermes. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
+</Cards>
+
+## Pick yours
+
+<Cards>
+  <Card title="OpenClaw" href="/docs/connectors/openclaw" description="Reference proxy connector with the bundled fetch interceptor and before_tool_call plugin." />
+  <Card title="ZeptoClaw" href="/docs/connectors/zeptoclaw" description="api_base redirect into the DefenseClaw proxy plus response-scan." />
+  <Card title="Claude Code" href="/docs/connectors/claudecode" description="Native hooks (PreToolUse, PostToolUse, UserPromptSubmit, Stop, PermissionRequest) + native OTel exporter." />
+  <Card title="Codex" href="/docs/connectors/codex" description="config.toml hooks + native OTel + notify bridge for agent-turn-complete events." />
+  <Card title="Cursor" href="/docs/connectors/cursor" description="hooks.json with native ask on beforeShellExecution and beforeMCPExecution." />
+  <Card title="Windsurf" href="/docs/connectors/windsurf" description="Cascade hooks across pre_user_prompt, pre_run_command, pre_mcp_tool_use." />
+  <Card title="Gemini CLI" href="/docs/connectors/geminicli" description="settings.json hooks + native OTLP exporter pointing at the gateway." />
+  <Card title="GitHub Copilot CLI" href="/docs/connectors/copilot" description="Workspace-scoped hooks under .github/hooks/." />
+  <Card title="Hermes" href="/docs/connectors/hermes" description="config.yaml hooks for the Hermes agent runtime." />
+</Cards>
+
+## Capability summary
+
+<CapabilityMatrix />
+
+For the full breakdown including HITL behaviour, head to the [Capability Matrix](/docs/capability-matrix).
+
+## How a connector is structured
+
+<Flow
+  direction="TB"
+  caption="Every connector implements the same Go interface; the gateway routes traffic generically once a connector has resolved its signals."
+>
+  <Node id="setup" kind="connector">{`Setup(ctx, opts)\nwrite hook scripts,\nback up agent files,\nregister routes`}</Node>
+  <Node id="auth" kind="connector">{`Authenticate(r)\nverify gateway token`}</Node>
+  <Node id="route" kind="connector">{`Route(r, body)\nextract upstream + model\n+ stream + headers`}</Node>
+  <Node id="teardown" kind="connector">{`Teardown(ctx, opts)\nrestore agent files`}</Node>
+  <Node id="verify" kind="connector">{`VerifyClean(opts)\nno residual artifacts`}</Node>
+  <Edge from="setup" to="auth" />
+  <Edge from="auth" to="route" />
+  <Edge from="route" to="teardown" />
+  <Edge from="teardown" to="verify" />
+</Flow>
+
+The interface is defined in [`internal/gateway/connector/connector.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/connector.go); each per-connector file (`claudecode.go`, `codex.go`, `cursor.go` via `hook_only.go`, ...) implements it.
