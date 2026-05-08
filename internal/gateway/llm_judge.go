@@ -458,14 +458,13 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 	}
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
-		Messages: []ChatMessage{
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
+		[]ChatMessage{
 			{Role: "system", Content: prompt},
 			{Role: "user", Content: wrapJudgeSample(content)},
 		},
-		MaxTokens: intPtr(maxTok),
-		Fallbacks: j.cfg.Fallbacks,
-	})
+		maxTok,
+	))
 	latencyMs := time.Since(start).Milliseconds()
 	promptTok, completionTok := 0, 0
 	responseModel := j.model
@@ -659,6 +658,26 @@ func judgeGenAISystem(model string) string {
 		return strings.ToLower(model[:i])
 	}
 	return "unknown"
+}
+
+func judgeExtraParams(model string) map[string]any {
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "vllm/") {
+		return map[string]any{
+			"chat_template_kwargs": map[string]any{
+				"enable_thinking": false,
+			},
+		}
+	}
+	return nil
+}
+
+func (j *LLMJudge) judgeChatRequest(messages []ChatMessage, maxTok int) *ChatRequest {
+	return &ChatRequest{
+		Messages:    messages,
+		MaxTokens:   intPtr(maxTok),
+		Fallbacks:   j.cfg.Fallbacks,
+		ExtraParams: judgeExtraParams(j.model),
+	}
 }
 
 func verdictSnapshotFrom(v *ScanVerdict) *guardrail.VerdictSnapshot {
@@ -873,14 +892,13 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
 	}
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
-		Messages: []ChatMessage{
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
+		[]ChatMessage{
 			{Role: "system", Content: prompt},
 			{Role: "user", Content: wrapJudgeSample(content)},
 		},
-		MaxTokens: intPtr(maxTok),
-		Fallbacks: j.cfg.Fallbacks,
-	})
+		maxTok,
+	))
 	latencyMs := time.Since(start).Milliseconds()
 	responseModel := j.model
 
@@ -1360,14 +1378,13 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 	}
 	start := time.Now()
 
-	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
-		Messages: []ChatMessage{
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
+		[]ChatMessage{
 			{Role: "system", Content: prompt},
 			{Role: "user", Content: wrapJudgeSample(content)},
 		},
-		MaxTokens: intPtr(maxTok),
-		Fallbacks: j.cfg.Fallbacks,
-	})
+		maxTok,
+	))
 	latencyMs := time.Since(start).Milliseconds()
 	promptTok, completionTok := 0, 0
 	responseModel := j.model
@@ -1645,14 +1662,13 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		llmCtx, sp = tel.StartJudgeSpan(ctx, sys, j.model, maxTok, kind)
 	}
 	start := time.Now()
-	resp, err := j.provider.ChatCompletion(llmCtx, &ChatRequest{
-		Messages: []ChatMessage{
+	resp, err := j.provider.ChatCompletion(llmCtx, j.judgeChatRequest(
+		[]ChatMessage{
 			{Role: "system", Content: systemPrompt},
 			{Role: "user", Content: wrapJudgeSample(args)},
 		},
-		MaxTokens: intPtr(maxTok),
-		Fallbacks: j.cfg.Fallbacks,
-	})
+		maxTok,
+	))
 	latencyMs := time.Since(start).Milliseconds()
 	responseModel := j.model
 
