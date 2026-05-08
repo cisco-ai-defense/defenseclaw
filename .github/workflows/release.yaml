@@ -18,7 +18,7 @@ name: Release
 # cli/defenseclaw/__init__.py, and extensions/defenseclaw/package.json so
 # every published artifact (gateway tarball, wheel, plugin tarball) is
 # named with the same X.Y.Z that scripts/install.sh and `defenseclaw
-# upgrade` will look up at GitHub Releases.
+# upgrade` look up at GitHub Releases.
 
 on:
   push:
@@ -36,10 +36,16 @@ permissions:
   id-token: write
   packages: write
 
-# Make sure two manual runs (or a manual run + a tag push) for the same
-# version can't race each other into a half-baked release.
+# Serialize all releases for the same version regardless of trigger.
+# `github.ref_name` is `0.4.1` for both `refs/tags/0.4.1` (push:tags) and
+# the branch name on workflow_dispatch — combined with `inputs.version`
+# (set only on workflow_dispatch), this produces the same `release-0.4.1`
+# group key whether you cut the release from the Actions UI or by pushing
+# the tag from your machine. Using `github.ref` here would have stamped
+# `release-refs/tags/0.4.1` for tag pushes vs `release-0.4.1` for manual
+# runs, letting two jobs for the same version race each other.
 concurrency:
-  group: release-${{ inputs.version || github.ref }}
+  group: release-${{ inputs.version || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -53,14 +59,24 @@ jobs:
       # Single source of truth for the target tag: ${{ steps.tag.outputs.tag }}.
       # Validates strict X.Y.Z, refuses to overwrite a pre-existing tag or
       # release, and works for both trigger paths.
+      #
+      # Security: workflow inputs are passed via `env` so they reach the
+      # shell as `$RELEASE_VERSION_INPUT` (a normal env var) rather than
+      # being string-interpolated into the script body before bash parses
+      # it. Direct `${{ inputs.version }}` substitution would let an
+      # operator-supplied quote/newline turn into shell syntax before the
+      # validation regex below could reject it. See:
+      # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
       - name: Resolve and validate target tag
         id: tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION_INPUT: ${{ inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.version }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$RELEASE_VERSION_INPUT"
             if [[ ! "$TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "::error title=Invalid version input::version must be X.Y.Z with no v prefix (got: '$TAG')"
               exit 1
@@ -70,7 +86,7 @@ jobs:
             # we never create a duplicate tag, and we never re-tag a
             # different SHA than the operator expects.
             if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-              echo "::error title=Tag already exists::Tag '$TAG' already exists at $(git rev-parse refs/tags/$TAG). Pick a fresh version (e.g. patch bump) or delete the existing tag."
+              echo "::error title=Tag already exists::Tag '$TAG' already exists at $(git rev-parse "refs/tags/$TAG"). Pick a fresh version (e.g. patch bump) or delete the existing tag."
               exit 1
             fi
             if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
@@ -114,29 +130,21 @@ jobs:
         with:
           node-version: "20"
 
-      # The git tag (or workflow input) is the single source of truth for
-      # the release version. Stamp it into Makefile / pyproject.toml /
-      # cli/__init__.py / extensions/defenseclaw/package.json BEFORE any
-      # build step so the wheel becomes `defenseclaw-<TAG>-py3-none-any.whl`,
-      # the plugin tarball becomes `defenseclaw-plugin-<TAG>.tar.gz`, the
-      # gateway binary embeds <TAG> via -ldflags, and `defenseclaw --version`
-      # reports <TAG> on the installed CLI. Those names match what
-      # scripts/install.sh and `defenseclaw upgrade` look up at GitHub
-      # Releases — so any drift between in-repo version files and the tag
-      # is invisible to end users by construction.
-      - name: Stamp release version
-        run: |
-          set -euo pipefail
-          scripts/stamp-version.sh "${{ steps.tag.outputs.tag }}"
-
-      # GoReleaser builds, signs, and generates SBOMs, but does NOT create
-      # the GitHub release (release.disable: true in .goreleaser.yaml). This
-      # is required because the repository has "Immutable releases" enabled,
-      # which rejects post-create asset uploads. We must instead create the
-      # release atomically with all assets (final step below).
+      # ORDERING NOTE: GoReleaser MUST run before scripts/stamp-version.sh.
+      # GoReleaser refuses to release from a dirty working tree
+      # (https://goreleaser.com/errors/dirty/), and the stamp script edits
+      # tracked files (Makefile, pyproject.toml, cli/__init__.py,
+      # package.json) whenever the tag differs from the in-repo defaults
+      # (the common case for any release after the next planned one).
+      # GoReleaser doesn't need the in-repo files anyway — it gets the
+      # version through GORELEASER_CURRENT_TAG and never reads the Python
+      # / npm metadata.
       #
-      # On workflow_dispatch the tag does not yet exist; pass GORELEASER_CURRENT_TAG
-      # so GoReleaser stamps the right version into binary names and ldflags.
+      # release.disable: true in .goreleaser.yaml means GoReleaser produces
+      # signed, sbom'd artifacts in dist/ but does NOT publish a GitHub
+      # release. We must instead create the release atomically with all
+      # assets at the end of the job, because Immutable Releases rejects
+      # post-create asset uploads.
       - name: Build artifacts with GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -145,6 +153,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}
+
+      # Stamp AFTER GoReleaser has finished (so the working tree was clean
+      # for it) but BEFORE building the wheel + plugin tarball, since the
+      # wheel name comes from pyproject.toml and the plugin tarball name
+      # comes from the Makefile's VERSION. The stamped __init__.py is
+      # what makes `defenseclaw --version` report the right value on the
+      # installed CLI.
+      #
+      # `steps.tag.outputs.tag` is regex-validated to ^[0-9]+\.[0-9]+\.[0-9]+$
+      # in the resolve step above (no shell metacharacters possible), but
+      # we still pass it via env to keep the script-injection-resistant
+      # style consistent across every step that consumes a workflow
+      # expression in shell.
+      - name: Stamp release version
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          scripts/stamp-version.sh "$RELEASE_TAG"
 
       - name: Build CLI wheel and plugin tarball
         run: |
@@ -159,9 +186,10 @@ jobs:
       - name: Publish GitHub release with all assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.tag.outputs.tag }}"
+          TAG="$RELEASE_TAG"
 
           shopt -s nullglob
           assets=(
@@ -188,5 +216,5 @@ jobs:
             "${assets[@]}"
 
           echo ""
-          echo "Release $TAG created with $(printf '%s\n' "${assets[@]}" | wc -l | tr -d ' ') assets at $GITHUB_SHA"
+          echo "Release $TAG created with ${#assets[@]} assets at $GITHUB_SHA"
           echo "https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
