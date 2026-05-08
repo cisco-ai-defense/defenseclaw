@@ -24,11 +24,18 @@ const SCRIPT: { kind: 'cmd' | 'out' | 'ok' | 'dim'; text: string }[] = [
   { kind: 'ok', text: '  ✓ Action mode engaged — destructive ops will pause for review' },
 ];
 
+// Number of lines visible on first paint. We seed the install command +
+// its success line so even a headless screenshot of the very first
+// frame captures the "what is this thing doing?" beat. Below this the
+// animation takes over and reveals the rest at human-readable cadence.
+const INITIAL_STEP = 2;
+
 export function TerminalDemo() {
-  // Start at step 1 so the first paint (and the headless-Chrome screenshot
-  // step on the docs-site landing + guardrail pages) shows the install
-  // command, not an empty terminal with a blinking cursor.
-  const [step, setStep] = useState(1);
+  // Seed with the install command + ✓ line so the landing and
+  // guardrail pages never paint a blank terminal during initial load
+  // (headless capture, slow JS hydration, throttled CPUs all looked
+  // empty before this fix).
+  const [step, setStep] = useState(INITIAL_STEP);
   const [reduced, setReduced] = useState(false);
 
   useEffect(() => {
@@ -45,16 +52,20 @@ export function TerminalDemo() {
       return;
     }
     if (step >= SCRIPT.length) return;
-    // step === 1 holds the install command for ~600ms so it reads as a
-    // distinct beat before the success line renders; subsequent lines
-    // tick at 650ms.
-    const t = window.setTimeout(() => setStep((s) => s + 1), step === 1 ? 600 : 650);
+    // Pause briefly after the seeded install + ✓ block so the next
+    // command (`defenseclaw setup …`) reads as a distinct beat;
+    // subsequent lines tick at 650ms for a steady "log streaming" feel.
+    const t = window.setTimeout(() => setStep((s) => s + 1), step === INITIAL_STEP ? 700 : 650);
     return () => window.clearTimeout(t);
   }, [step, reduced]);
 
   return (
+    // `w-full min-w-0` keeps the terminal inside its grid cell on narrow
+    // phones — long lines (e.g. the install curl) scroll inside the
+    // inner <pre overflow-x-auto> instead of pushing the hero grid wider
+    // than the viewport.
     <div
-      className="terminal-window overflow-hidden rounded-2xl backdrop-blur"
+      className="terminal-window w-full min-w-0 overflow-hidden rounded-2xl backdrop-blur"
       role="img"
       aria-label="Terminal demo: installing DefenseClaw and configuring the Claude Code connector with action mode and human-in-the-loop approvals."
     >

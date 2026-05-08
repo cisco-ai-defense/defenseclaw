@@ -89,13 +89,18 @@ export default function HomePage() {
         />
         <div aria-hidden className="hero-grain pointer-events-none absolute inset-0" />
 
-        <div className="container relative mx-auto grid max-w-7xl gap-10 px-4 py-16 lg:grid-cols-2 lg:gap-16 lg:py-24">
-          <div className="flex flex-col justify-center gap-6">
+        {/* `min-w-0` on the grid + each cell prevents the right column
+            (the terminal `<pre overflow-x-auto>`) from forcing the whole
+            grid wider than the viewport on narrow phones (≤390px). The
+            `w-full` clamp on cells keeps every chip row, CTA strip, and
+            paragraph honoring the parent width once min-width is zero. */}
+        <div className="container relative mx-auto grid min-w-0 max-w-7xl gap-10 px-4 py-16 lg:grid-cols-2 lg:gap-16 lg:py-24">
+          <div className="flex w-full min-w-0 flex-col justify-center gap-6">
             <span className="inline-flex w-fit items-center gap-2 rounded-full border border-[var(--brand-cisco)]/30 bg-[var(--brand-cisco)]/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
               <span aria-hidden className="size-1.5 rounded-full bg-[var(--brand-cisco)]" />
               Official Cisco project · Apache-2.0
             </span>
-            <h1 className="text-balance text-4xl font-bold tracking-tight md:text-5xl lg:text-6xl">
+            <h1 className="text-balance wrap-break-word text-4xl font-bold tracking-tight md:text-5xl lg:text-6xl">
               Security governance for{' '}
               <span className="text-[var(--brand-cisco-strong)]">OpenClaw</span> and agentic AI
               runtimes.
@@ -168,7 +173,11 @@ export default function HomePage() {
             </div>
           </div>
 
-          <div className="flex items-center">
+          {/* The terminal pre uses overflow-x-auto, but it can only scroll
+              inside its own box if the grid cell honors min-width:0.
+              Without `min-w-0` here the long install curl line pushes
+              the grid track wider than the viewport on phones. */}
+          <div className="flex w-full min-w-0 items-center">
             <TerminalDemo />
           </div>
         </div>

@@ -110,14 +110,21 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             client picks it up via the basePath-aware URL configured
             inside components/search.tsx. */}
         <ClientRootProvider>
+          {/* Responsive banner content: on phones (<sm) we drop the
+              repo stats pills and the "Official Cisco project" prefix
+              so the banner stops clipping the owner/repo link. The
+              rainbow gradient already cues the "official" framing, so
+              the prose tag is decorative on tiny viewports. From sm+
+              the full lockup (prefix · owner/repo + stars + forks)
+              comes back in. */}
           <Banner
             id="cisco-official"
             variant="rainbow"
             changeLayout={false}
             className="text-center text-xs font-medium tracking-wide"
           >
-            <span className="opacity-90">Official Cisco project</span>
-            <span aria-hidden className="mx-2 opacity-60">
+            <span className="hidden opacity-90 sm:inline">Official Cisco project</span>
+            <span aria-hidden className="mx-2 hidden opacity-60 sm:inline">
               ·
             </span>
             <span>
@@ -130,9 +137,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               </a>
             </span>
             {/* Stars + forks fetched once at build time, refreshed on
-                mount in the browser. Renders nothing if both calls
-                fail so the banner gracefully falls back. */}
-            <RepoStats />
+                mount in the browser. Hidden below sm to keep the
+                banner readable on 390px-class phones; renders nothing
+                if both API calls fail (graceful fallback). */}
+            <span className="hidden sm:inline">
+              <RepoStats />
+            </span>
           </Banner>
           {children}
         </ClientRootProvider>

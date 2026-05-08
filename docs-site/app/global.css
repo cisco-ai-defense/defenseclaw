@@ -103,3 +103,23 @@
 .terminal-cursor {
   animation: terminal-blink 1s steps(2, end) infinite;
 }
+
+/* Search dialog polish — Fumadocs's FlexSearch result list paints the
+ * active row with `bg-fd-accent text-fd-accent-foreground`, but the
+ * breadcrumb child still has `text-fd-muted-foreground` baked in. The
+ * collision drops the path text to ~3:1 contrast on the highlight
+ * band; promoting it back to the accent foreground keeps the trail
+ * legible in both light and dark themes (the explicit muted class
+ * still beats the cascade for non-active rows). The bottom rail adds
+ * a hair of breathing room so the last result snippet doesn't visually
+ * butt up against the dialog chrome at the bottom of the scroll list.
+ */
+[role="dialog"] button[aria-selected="true"] > div:first-child,
+[role="dialog"] button[aria-selected="true"] > div:first-child * {
+  color: var(--color-fd-accent-foreground);
+  opacity: 0.85;
+}
+
+[role="dialog"] [data-empty="false"] > div {
+  padding-bottom: 0.5rem;
+}
