@@ -158,7 +158,7 @@ def _require_cfg(app: AppContext) -> Config:
         an unbootstrapped context, the failure is loud rather than a
         confusing AttributeError on ``.registries`` half a stack down.
     """
-    cfg = _require_cfg(app)
+    cfg = app.cfg
     if cfg is None:
         # Should not happen in normal CLI flow — main() always loads cfg
         # before dispatching. Keep the message terse and operator-facing.
