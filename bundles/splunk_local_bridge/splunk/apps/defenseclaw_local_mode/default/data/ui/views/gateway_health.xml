@@ -1,0 +1,164 @@
+<dashboard version="1.1">
+  <label>DefenseClaw Gateway Health</label>
+  <description>Operational health for the DefenseClaw gateway: circuit breaker state, verdict rates, sink failures, guardrail latency, and schema violations. Mirrors the Grafana overview health-at-a-glance and SLO panels.</description>
+
+  <row>
+    <panel>
+      <title>Circuit breaker state (Splunk HEC sink)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_circuit_breaker_events` | stats latest(circuit_state) as circuit_state latest(circuit_state_num) as circuit_state_num by component | stats max(circuit_state_num) as worst_state | eval state_label=case(worst_state=0, "closed", worst_state=1, "half-open", worst_state=2, "open", 1=1, "unknown")</query>
+          <earliest>-15m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="field">state_label</option>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x53A051","0xF8BE34","0xDC4E41"]</option>
+        <option name="rangeValues">[1,2]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Verdicts / min (5m avg)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_gateway_verdicts_base` | stats count as verdict_count | eval verdicts_per_min=round(verdict_count/5, 2) | table verdicts_per_min</query>
+          <earliest>-5m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Blocks / min (5m avg)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_gateway_blocks` | stats count as block_count | eval blocks_per_min=round(block_count/5, 2) | table blocks_per_min</query>
+          <earliest>-5m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x53A051","0xF8BE34","0xDC4E41"]</option>
+        <option name="rangeValues">[5,30]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Sink failures / min (5m avg)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_sink_failures` | stats count as fail_count | eval failures_per_min=round(fail_count/5, 2) | table failures_per_min</query>
+          <earliest>-5m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x53A051","0xF8BE34","0xDC4E41"]</option>
+        <option name="rangeValues">[0.01,1]</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Schema violations / min (5m avg)</title>
+      <single>
+        <search>
+          <query>`defenseclaw_schema_violation_events` | stats count as violation_count | eval violations_per_min=round(violation_count/5, 2) | table violations_per_min</query>
+          <earliest>-5m</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="drilldown">none</option>
+        <option name="colorBy">value</option>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x53A051","0xDC4E41"]</option>
+        <option name="rangeValues">[0.01]</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Circuit breaker state over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_circuit_breaker_events` | timechart span=5m max(circuit_state_num) as circuit_state_num | eval circuit_state=case(circuit_state_num=0, "closed", circuit_state_num=1, "half-open", circuit_state_num=2, "open", 1=1, "unknown")</query>
+          <earliest>-1h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">state (0=closed 1=half-open 2=open)</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Verdicts by action over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_gateway_verdicts_base` | timechart span=5m count by verdict_action limit=5 useother=f</query>
+          <earliest>-1h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">area</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Guardrail latency percentiles (p50 / p95 / p99) over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_guardrail_latency_events` | timechart span=5m p50(duration_ms) as p50_ms p95(duration_ms) as p95_ms p99(duration_ms) as p99_ms</query>
+          <earliest>-1h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="charting.axisTitleY.text">latency (ms)</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Sink failures over time</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_sink_failures` | timechart span=5m count by component limit=5 useother=f</query>
+          <earliest>-1h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Recent circuit breaker state changes</title>
+      <table>
+        <search>
+          <query>`defenseclaw_circuit_breaker_events` | table timestamp component circuit_state action severity details | sort - timestamp | head 25</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Recent sink failures</title>
+      <table>
+        <search>
+          <query>`defenseclaw_sink_failures` | table timestamp component action severity error_code details run_id session_id | sort - timestamp | head 25</query>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+</dashboard>

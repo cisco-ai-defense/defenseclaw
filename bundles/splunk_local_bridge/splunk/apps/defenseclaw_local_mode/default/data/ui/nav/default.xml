@@ -6,6 +6,7 @@
     <view name="queue_runtime_health" />
   </collection>
   <collection label="Observe">
+    <view name="gateway_health" />
     <view name="gateway_logs" />
     <view name="model_usage_and_cost" />
   </collection>
