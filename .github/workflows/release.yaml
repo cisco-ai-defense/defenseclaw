@@ -159,6 +159,29 @@ jobs:
         with:
           node-version: "20"
 
+      # Build the OpenClaw plugin and sync its runtime files into
+      # internal/gateway/connector/openclaw_extension/ so the gateway's
+      # `//go:embed all:openclaw_extension` directive (openclaw.go:40)
+      # resolves at compile time.
+      #
+      # Without this step GoReleaser fails the cross-build with:
+      #   internal/gateway/connector/openclaw.go:40:12:
+      #     pattern all:openclaw_extension: no matching files found
+      # (release run #7 / 25533484548 hit this exactly).
+      #
+      # The embed dir is gitignored (.gitignore:75) and so is
+      # extensions/defenseclaw/{node_modules,dist,src/providers.json}, so
+      # this step does NOT dirty the working tree from git's perspective —
+      # GoReleaser's clean-tree check still passes.
+      #
+      # `make extensions` is `plugin + sync-openclaw-extension`. We use the
+      # full target rather than just `sync-openclaw-extension` (placeholder
+      # mode) so the released gateway binary actually contains the OpenClaw
+      # plugin runtime, not just a "not built" marker — operators get a
+      # working OpenClaw connector out of the curl-to-bash installer.
+      - name: Build OpenClaw plugin and populate embed tree
+        run: make extensions
+
       # ORDERING NOTE: GoReleaser MUST run before scripts/stamp-version.sh.
       # GoReleaser refuses to release from a dirty working tree
       # (https://goreleaser.com/errors/dirty/), and the stamp script edits
