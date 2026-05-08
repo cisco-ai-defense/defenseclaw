@@ -114,6 +114,35 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Resolved release tag: $TAG (commit: $GITHUB_SHA)"
 
+      # workflow_dispatch path only: create a local lightweight tag at HEAD
+      # so GoReleaser sees a real tag pointing at the commit it's releasing.
+      # This is the canonical pattern documented by the GoReleaser author:
+      # https://carlosbecker.com/posts/goreleaser-create-tag-action/
+      #
+      # Why not GORELEASER_CURRENT_TAG: that env var is documented as a
+      # selector when one commit has multiple tags, not a substitute for a
+      # missing tag. It's also been buggy across goreleaser-action versions
+      # (e.g. ignored entirely in v2.4 — goreleaser/goreleaser-action#260),
+      # whereas a real local tag is unambiguous.
+      #
+      # The tag is local-only — it's never pushed to origin in this step.
+      # If anything later in the job fails, the workflow VM is destroyed
+      # and no remote tag is left dangling. The remote tag is created
+      # atomically alongside the GitHub release in the final step via
+      # `gh release create --target $GITHUB_SHA`, so a failed run leaves
+      # neither a remote tag nor an empty release behind.
+      #
+      # Skipped on push:tags because the tag is already in the fetched
+      # history (GITHUB_REF resolves it).
+      - name: Create local tag for GoReleaser (workflow_dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RELEASE_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag "$RELEASE_TAG"
+          echo "Created local tag $RELEASE_TAG at $(git rev-parse HEAD)"
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -134,11 +163,16 @@ jobs:
       # GoReleaser refuses to release from a dirty working tree
       # (https://goreleaser.com/errors/dirty/), and the stamp script edits
       # tracked files (Makefile, pyproject.toml, cli/__init__.py,
-      # package.json) whenever the tag differs from the in-repo defaults
-      # (the common case for any release after the next planned one).
-      # GoReleaser doesn't need the in-repo files anyway — it gets the
-      # version through GORELEASER_CURRENT_TAG and never reads the Python
-      # / npm metadata.
+      # package.json) whenever the tag differs from the in-repo defaults —
+      # the common case for any release after the next planned one. So we
+      # run GoReleaser first against the clean checkout, then stamp, then
+      # build the wheel + plugin tarball (which DO need the stamped
+      # metadata for filenames and embedded __version__).
+      #
+      # GoReleaser picks the version from the local tag (created above on
+      # workflow_dispatch, or already present from push:tags). It never
+      # reads pyproject.toml / package.json / the Makefile, so leaving
+      # those at their in-repo defaults during this step is fine.
       #
       # release.disable: true in .goreleaser.yaml means GoReleaser produces
       # signed, sbom'd artifacts in dist/ but does NOT publish a GitHub
@@ -152,14 +186,13 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: ${{ steps.tag.outputs.tag }}
 
       # Stamp AFTER GoReleaser has finished (so the working tree was clean
       # for it) but BEFORE building the wheel + plugin tarball, since the
-      # wheel name comes from pyproject.toml and the plugin tarball name
-      # comes from the Makefile's VERSION. The stamped __init__.py is
-      # what makes `defenseclaw --version` report the right value on the
-      # installed CLI.
+      # wheel filename comes from pyproject.toml and the plugin tarball
+      # filename comes from the Makefile's VERSION. The stamped
+      # __init__.py is what makes `defenseclaw --version` report the
+      # right value on the installed CLI.
       #
       # `steps.tag.outputs.tag` is regex-validated to ^[0-9]+\.[0-9]+\.[0-9]+$
       # in the resolve step above (no shell metacharacters possible), but
