@@ -67,6 +67,15 @@ type skillItem struct {
 	Source      string
 	Verdict     string
 	Severity    string
+	// RegistrySource is the id of the registry source whose
+	// asset_policy rule covers this skill (set by the panel from
+	// cfg.AssetPolicy.Skill.Registry — see SetRegistryAttribution).
+	// Empty when the skill is not registry-backed (manual rule,
+	// admin-allow, or asset_policy disabled). Surfaced as a small
+	// "registry:<id>" badge on the row + a "Approved by" line in
+	// detail view so operators can attribute the rule back to its
+	// source without context-switching.
+	RegistrySource string
 }
 
 type SkillDetailInfo struct {
@@ -98,11 +107,37 @@ type SkillsPanel struct {
 	// "Source: …" banner so operators see where listed skills
 	// came from. Empty string falls back to the OpenClaw label.
 	connector string
+
+	// registryByName maps a skill name to the registry source id
+	// that covers it via cfg.AssetPolicy.Skill.Registry. Populated
+	// by SetRegistryAttribution. Used to render the
+	// "registry:<id>" badge on each row + "Approved by" line in
+	// detail view. nil-safe — callers can read freely without
+	// guarding for an unset map.
+	registryByName map[string]string
 }
 
 // SetConnector updates the active connector for source labelling.
 // Called by the root Model whenever cfg or /health changes.
 func (p *SkillsPanel) SetConnector(name string) { p.connector = name }
+
+// SetRegistryAttribution replaces the in-memory name->registry-source-id
+// map used to render the "registry:<id>" badge. The caller (app.go's
+// propagateConnector / cfg-reload path) is responsible for building
+// the map from cfg.AssetPolicy.Skill.Registry; the panel does not
+// touch the config directly so test wiring stays cheap.
+//
+// Re-assigns the in-memory rows so a refresh isn't required to see
+// new attributions after a registry sync.
+func (p *SkillsPanel) SetRegistryAttribution(attr map[string]string) {
+	p.registryByName = attr
+	for i := range p.items {
+		p.items[i].RegistrySource = attr[p.items[i].Name]
+	}
+	for i := range p.filtered {
+		p.filtered[i].RegistrySource = attr[p.filtered[i].Name]
+	}
+}
 
 // SkillsLoadedMsg is sent when `defenseclaw skill list --json` completes.
 // Modeled on PluginsLoadedMsg so the dispatch pattern is identical —
@@ -230,6 +265,13 @@ func (p *SkillsPanel) ApplyLoaded(msg SkillsLoadedMsg) {
 		return
 	}
 	p.items = msg.Items
+	// Re-apply the latest attribution so registry badges survive
+	// a load triggered by `r` after a `registry sync`.
+	if p.registryByName != nil {
+		for i := range p.items {
+			p.items[i].RegistrySource = p.registryByName[p.items[i].Name]
+		}
+	}
 	p.loaded = true
 	p.message = ""
 	p.applyFilter()
@@ -589,6 +631,9 @@ func (p *SkillsPanel) View() string {
 		}
 
 		line := fmt.Sprintf("%s%s %-28s %-14s %s %-18s", pointer, badge, name, source, sev, actions)
+		if badge := registryBadge(item.RegistrySource); badge != "" {
+			line += " " + badge
+		}
 
 		if i == p.cursor {
 			line = lipgloss.NewStyle().Background(lipgloss.Color("236")).Width(p.width).Render(line)
@@ -650,6 +695,11 @@ func (p *SkillsPanel) renderDetail() string {
 		d.WriteString(labelStyle.Render("    Verdict: ") + valStyle.Render(info.Item.Verdict))
 	}
 	d.WriteString("\n")
+	if info.Item.RegistrySource != "" {
+		d.WriteString(labelStyle.Render("  Approved by: ") +
+			valStyle.Render("registry:"+info.Item.RegistrySource) +
+			labelStyle.Render("   (press R for registry view)") + "\n")
+	}
 
 	if info.Item.Description != "" {
 		desc := info.Item.Description

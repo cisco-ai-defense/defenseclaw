@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.io/schemas/registry-manifest.json",
+  "title": "DefenseClaw Registry Manifest",
+  "description": "Vendor-neutral catalog manifest published by an external registry source (corporate HTTPS YAML/JSON, smithery.ai, a git repo containing defenseclaw-registry.yaml, etc.). The `defenseclaw registry sync` pipeline fetches this document, validates it against this schema, scans every entry with the existing skill / mcp scanners, and promotes clean entries into asset_policy.{skill,mcp}.registry. Untrusted-by-construction: all string fields are validated to length and character class to keep manifest poisoning from reaching scanner subprocesses.",
+  "type": "object",
+  "required": ["schema_version", "entries"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema major version. Bumped only on breaking changes. v1 is the initial release."
+    },
+    "generated_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "description": "ISO-8601 UTC timestamp when the publisher built the manifest. Used for staleness reporting in `defenseclaw registry list` but not for verification."
+    },
+    "publisher": {
+      "type": ["string", "null"],
+      "maxLength": 256,
+      "description": "Human-readable publisher name (e.g. 'acme-corp'). Surfaced in the TUI but not used for trust decisions."
+    },
+    "default_connector": {
+      "type": ["string", "null"],
+      "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw"],
+      "description": "Optional default connector applied to entries that don't specify one. Per-entry `connector` overrides this."
+    },
+    "entries": {
+      "type": "array",
+      "minItems": 0,
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/entry" }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "entry": {
+      "oneOf": [
+        { "$ref": "#/$defs/skill_entry" },
+        { "$ref": "#/$defs/mcp_entry" }
+      ]
+    },
+    "skill_entry": {
+      "type": "object",
+      "required": ["name", "type", "source_url"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$",
+          "description": "Stable skill identifier. Must match the on-disk directory name and the skill-scanner output target."
+        },
+        "type": { "const": "skill" },
+        "source_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^(clawhub://|https://|http://)",
+          "description": "Resolvable fetch URL. http:// is accepted but flagged by the SSRF guard; https:// is preferred. Local file:// URLs are intentionally NOT accepted in published manifests — operators that want to ingest local catalogs use kind=file on the source itself."
+        },
+        "sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[a-fA-F0-9]{64}$",
+          "description": "Hex sha256 of the fetched archive. Required at sync time for https:// source_urls; clawhub:// entries inherit npm tarball integrity."
+        },
+        "version": { "type": ["string", "null"], "maxLength": 64 },
+        "license": { "type": ["string", "null"], "maxLength": 128 },
+        "publisher": { "type": ["string", "null"], "maxLength": 256 },
+        "description": { "type": ["string", "null"], "maxLength": 2048 },
+        "homepage": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^https?://" },
+        "connector": {
+          "type": ["string", "null"],
+          "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw"]
+        },
+        "tags": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "maxLength": 64 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "mcp_entry": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$"
+        },
+        "type": { "const": "mcp" },
+        "transport": {
+          "type": ["string", "null"],
+          "enum": [null, "stdio", "http", "sse", "streamable-http", "websocket"],
+          "description": "MCP transport. Empty / null defaults to stdio at sync time, matching how connector configs treat unset transports."
+        },
+        "command": {
+          "type": ["string", "null"],
+          "maxLength": 256,
+          "pattern": "^[A-Za-z0-9_./@-]*$",
+          "description": "Executable path or basename. Restricted to a conservative character class so a poisoned manifest can't smuggle shell metacharacters into the scanner subprocess. stdio entries require a non-empty command at sync time."
+        },
+        "args": {
+          "type": ["array", "null"],
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Argument values are NOT character-class restricted (they may legitimately contain paths, URLs, JSON snippets) but are length-capped. The sync command validates each entry before promotion."
+          }
+        },
+        "env_required": {
+          "type": ["array", "null"],
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+            "description": "Names only — never values. Sync surfaces unset names so operators know which env vars they still need to provision."
+          }
+        },
+        "url": {
+          "type": ["string", "null"],
+          "maxLength": 2048,
+          "pattern": "^(https?|wss?|sse)://",
+          "description": "For non-stdio MCP servers."
+        },
+        "version": { "type": ["string", "null"], "maxLength": 64 },
+        "publisher": { "type": ["string", "null"], "maxLength": 256 },
+        "license": { "type": ["string", "null"], "maxLength": 128 },
+        "description": { "type": ["string", "null"], "maxLength": 2048 },
+        "homepage": { "type": ["string", "null"], "maxLength": 2048, "pattern": "^https?://" },
+        "connector": {
+          "type": ["string", "null"],
+          "enum": [null, "openclaw", "claudecode", "codex", "zeptoclaw"]
+        },
+        "tags": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "maxLength": 64 }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -151,15 +151,6 @@ func (p *FirstRunPanel) cycle(delta int) {
 	}
 }
 
-func (p *FirstRunPanel) setValue(label, value string) {
-	for i := range p.fields {
-		if p.fields[i].Label == label {
-			p.fields[i].Value = value
-			return
-		}
-	}
-}
-
 func (p FirstRunPanel) View() string {
 	var b strings.Builder
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("230")).Render("DefenseClaw first-run setup")

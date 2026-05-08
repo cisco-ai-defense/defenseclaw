@@ -31,6 +31,15 @@ func TestSendDoesNotPanic(t *testing.T) {
 	_ = err // OK to fail (e.g. no display server in CI)
 }
 
+func TestSendNotificationDoesNotPanic(t *testing.T) {
+	err := SendNotification(Notification{
+		Title:    "Test",
+		Subtitle: "subtitle",
+		Body:     "body",
+	})
+	_ = err // OK to fail in CI without a display server
+}
+
 func TestFallbackWriter(t *testing.T) {
 	var buf bytes.Buffer
 	old := fallbackWriter
@@ -38,7 +47,28 @@ func TestFallbackWriter(t *testing.T) {
 	defer func() { fallbackWriter = old }()
 
 	err := Send("", "")
-	if err != nil && !strings.Contains(buf.String(), "[defenseclaw-watchdog]") {
+	if err != nil && !strings.Contains(buf.String(), "[defenseclaw]") {
 		t.Fatalf("expected fallback line when send fails, got buf=%q err=%v", buf.String(), err)
+	}
+}
+
+func TestFallbackIncludesSubtitle(t *testing.T) {
+	var buf bytes.Buffer
+	old := fallbackWriter
+	fallbackWriter = &buf
+	defer func() { fallbackWriter = old }()
+
+	err := SendNotification(Notification{
+		Title:    "DefenseClaw",
+		Subtitle: "guardrail · HIGH",
+		Body:     "blocked tool call",
+	})
+	if err == nil {
+		// Send succeeded (e.g. display server present); nothing more
+		// to assert — the platform path took ownership of delivery.
+		return
+	}
+	if !strings.Contains(buf.String(), "guardrail · HIGH") {
+		t.Fatalf("expected subtitle in fallback line, got %q", buf.String())
 	}
 }

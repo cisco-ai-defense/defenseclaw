@@ -87,24 +87,35 @@ func TestOpenShell_StartNonZeroExitEmitted(t *testing.T) {
 	if err := o.Start(filepath.Join(dir, "p.yaml")); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond)
-	var rm metricdata.ResourceMetrics
-	if err := r.Collect(context.Background(), &rm); err != nil {
-		t.Fatal(err)
-	}
+	// OpenShell.Start launches a goroutine that calls cmd.Wait() and then
+	// records the exit metric. There's no synchronisation hook, so we
+	// poll the manual reader instead of sleeping a fixed window — the
+	// previous 200ms wait was not enough on loaded test runners and
+	// produced an intermittent flake (n=0). 5s is a safety net; a
+	// healthy run completes within tens of milliseconds.
+	deadline := time.Now().Add(5 * time.Second)
 	var n int64
-	for _, sm := range rm.ScopeMetrics {
-		for _, m := range sm.Metrics {
-			if m.Name != "defenseclaw.openshell.exit" {
-				continue
-			}
-			sum := m.Data.(metricdata.Sum[int64])
-			for _, dp := range sum.DataPoints {
-				n += dp.Value
+	for time.Now().Before(deadline) {
+		var rm metricdata.ResourceMetrics
+		if err := r.Collect(context.Background(), &rm); err != nil {
+			t.Fatal(err)
+		}
+		n = 0
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if m.Name != "defenseclaw.openshell.exit" {
+					continue
+				}
+				sum := m.Data.(metricdata.Sum[int64])
+				for _, dp := range sum.DataPoints {
+					n += dp.Value
+				}
 			}
 		}
+		if n >= 1 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	if n < 1 {
-		t.Fatalf("expected openshell exit metric, got %d", n)
-	}
+	t.Fatalf("expected openshell exit metric, got %d", n)
 }

@@ -53,13 +53,21 @@ const (
 	// tab navigation. Re-ordering would silently change muscle
 	// memory for every operator — don't do it without a migration.
 	PanelTools
+	// PanelRegistries surfaces external skill / MCP catalog sources
+	// registered via `defenseclaw registry add`. Same convention as
+	// PanelTools — letter-only ('R') shortcut so we don't shift the
+	// existing 1–9 / 0 numeric bindings. Sources / Entries / Approved
+	// sub-tabs render the on-disk index.json verdicts cached by
+	// cli/defenseclaw/registries/cache.py.
+	PanelRegistries
 	PanelSetup
 	panelCount
 )
 
 var panelNames = [panelCount]string{
 	"Overview", "Alerts", "Skills", "MCPs", "Plugins",
-	"Inventory", "Policy", "Logs", "Audit", "Activity", "Tools", "Setup",
+	"Inventory", "Policy", "Logs", "Audit", "Activity", "Tools",
+	"Registries", "Setup",
 }
 
 const refreshInterval = 5 * time.Second
@@ -126,29 +134,31 @@ type Model struct {
 	height      int
 
 	// Panels (stubs that will be filled in later phases)
-	overview  OverviewPanel
-	alerts    AlertsPanel
-	skills    SkillsPanel
-	mcps      MCPsPanel
-	plugins   PluginsPanel
-	inventory InventoryPanel
-	policy    PolicyPanel
-	logs      LogsPanel
-	auditHist AuditPanel
-	activity  ActivityPanel
-	tools     ToolsPanel
-	setup     SetupPanel
-	firstRun  FirstRunPanel
+	overview   OverviewPanel
+	alerts     AlertsPanel
+	skills     SkillsPanel
+	mcps       MCPsPanel
+	plugins    PluginsPanel
+	inventory  InventoryPanel
+	policy     PolicyPanel
+	logs       LogsPanel
+	auditHist  AuditPanel
+	activity   ActivityPanel
+	tools      ToolsPanel
+	registries RegistriesPanel
+	setup      SetupPanel
+	firstRun   FirstRunPanel
 
 	// Overlays
 	detail     DetailModal
 	palette    PaletteModel
 	actionMenu ActionMenu
 
-	mcpSetForm     MCPSetForm
-	modePicker     ModePickerModal
-	redactionModal RedactionToggleModal
-	uninstallModal UninstallModal
+	mcpSetForm         MCPSetForm
+	modePicker         ModePickerModal
+	redactionModal     RedactionToggleModal
+	notificationsModal NotificationsToggleModal
+	uninstallModal     UninstallModal
 
 	helpOpen bool
 
@@ -219,26 +229,28 @@ func New(deps Deps) Model {
 	ti.SetStyles(s)
 
 	m := Model{
-		overview:       NewOverviewPanel(theme, deps.Config, deps.Version),
-		alerts:         NewAlertsPanel(deps.Store, dataDir),
-		skills:         NewSkillsPanel(deps.Store),
-		mcps:           NewMCPsPanel(deps.Store),
-		plugins:        NewPluginsPanel(theme, deps.Store),
-		inventory:      NewInventoryPanel(theme, executor, deps.Store),
-		policy:         NewPolicyPanel(theme, deps.Config),
-		logs:           NewLogsPanel(theme, deps.Config),
-		auditHist:      NewAuditPanel(theme, deps.Store),
-		activity:       NewActivityPanel(theme, dataDir),
-		tools:          NewToolsPanel(deps.Store),
-		setup:          NewSetupPanel(theme, deps.Config, executor),
-		firstRun:       NewFirstRunPanel(theme, deps.FirstRun),
-		detail:         NewDetailModal(),
-		palette:        NewPaletteModel(theme, registry, executor),
-		actionMenu:     NewActionMenu(theme),
-		mcpSetForm:     NewMCPSetForm(),
-		modePicker:     NewModePickerModal(theme),
-		redactionModal: NewRedactionToggleModal(theme),
-		uninstallModal: NewUninstallModal(theme),
+		overview:           NewOverviewPanel(theme, deps.Config, deps.Version),
+		alerts:             NewAlertsPanel(deps.Store, dataDir),
+		skills:             NewSkillsPanel(deps.Store),
+		mcps:               NewMCPsPanel(deps.Store),
+		plugins:            NewPluginsPanel(theme, deps.Store),
+		inventory:          NewInventoryPanel(theme, executor, deps.Store),
+		policy:             NewPolicyPanel(theme, deps.Config),
+		logs:               NewLogsPanel(theme, deps.Config),
+		auditHist:          NewAuditPanel(theme, deps.Store),
+		activity:           NewActivityPanel(theme, dataDir),
+		tools:              NewToolsPanel(deps.Store),
+		registries:         NewRegistriesPanel(deps.Config, executor),
+		setup:              NewSetupPanel(theme, deps.Config, executor),
+		firstRun:           NewFirstRunPanel(theme, deps.FirstRun),
+		detail:             NewDetailModal(),
+		palette:            NewPaletteModel(theme, registry, executor),
+		actionMenu:         NewActionMenu(theme),
+		mcpSetForm:         NewMCPSetForm(),
+		modePicker:         NewModePickerModal(theme),
+		redactionModal:     NewRedactionToggleModal(theme),
+		notificationsModal: NewNotificationsToggleModal(theme),
+		uninstallModal:     NewUninstallModal(theme),
 
 		cmdInput: ti,
 
@@ -293,6 +305,52 @@ func (m *Model) propagateConnector() {
 	m.mcps.SetConnector(name)
 	m.plugins.SetConnector(name)
 	m.inventory.SetConnector(name)
+	m.propagateRegistryAttribution()
+}
+
+// propagateRegistryAttribution rebuilds the per-panel "name -> registry
+// source id" maps used to render the "registry:<id>" badge on Skills /
+// MCPs rows and the "Approved by" line in detail view. Built fresh
+// from cfg.AssetPolicy.{Skill,MCP}.Registry every time cfg changes —
+// the registry list mutates on every `registry sync` / `approve` /
+// `reject`, and a stale map would silently mis-attribute. The
+// indirection through SetRegistryAttribution keeps the panels free of
+// any direct config dependency, which makes them cheap to test.
+func (m *Model) propagateRegistryAttribution() {
+	if m.cfg == nil {
+		m.skills.SetRegistryAttribution(nil)
+		m.mcps.SetRegistryAttribution(nil)
+		return
+	}
+	skillAttr := registryAttributionFromRules(m.cfg.AssetPolicy.Skill.Registry)
+	mcpAttr := registryAttributionFromRules(m.cfg.AssetPolicy.MCP.Registry)
+	m.skills.SetRegistryAttribution(skillAttr)
+	m.mcps.SetRegistryAttribution(mcpAttr)
+}
+
+// registryAttributionFromRules walks an asset_policy registry list
+// and returns a name -> source-id map for every rule whose Reason
+// matches the "registry:<id>" provenance tag. Rules with no name or
+// a non-registry reason (e.g. operator-authored allow-list entries)
+// are skipped so the badge surfaces *only* registry-promoted assets.
+// Returns nil when the input is empty so the caller can pass the
+// result straight to SetRegistryAttribution(nil).
+func registryAttributionFromRules(rules []config.AssetPolicyRule) map[string]string {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(rules))
+	for _, rule := range rules {
+		sid := config.ParseRegistrySourceID(rule.Reason)
+		if sid == "" || rule.Name == "" {
+			continue
+		}
+		out[rule.Name] = sid
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // isDoctorCommand reports whether the display-name passed to
@@ -629,7 +687,7 @@ func (m Model) handleMouseClick(mouse tea.Mouse) (tea.Model, tea.Cmd) {
 		m.detail.Hide()
 		return m, nil
 	}
-	if m.modePicker.IsVisible() || m.redactionModal.IsVisible() || m.uninstallModal.IsVisible() {
+	if m.modePicker.IsVisible() || m.redactionModal.IsVisible() || m.notificationsModal.IsVisible() || m.uninstallModal.IsVisible() {
 		return m, nil
 	}
 	// If a panel has an in-panel overlay/form/editor open, don't let
@@ -790,6 +848,8 @@ func (m Model) handlePanelClick(x, y int) (tea.Model, tea.Cmd) {
 					return m, nil
 				case "R":
 					return m.showRedactionModal()
+				case "N":
+					return m.showNotificationsModal()
 				case "p":
 					m.activePanel = PanelPolicy
 				case "l":
@@ -1125,6 +1185,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.redactionModal.IsVisible() {
 		return m.handleRedactionModalKey(msg)
 	}
+	if m.notificationsModal.IsVisible() {
+		return m.handleNotificationsModalKey(msg)
+	}
 	if m.uninstallModal.IsVisible() {
 		return m.handleUninstallModalKey(msg)
 	}
@@ -1245,6 +1308,16 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// with the lowercase 't' most panels use for in-panel
 		// actions; it's mnemonic for the panel name.
 		if cmd := m.switchPanel(PanelTools); cmd != nil {
+			return m, cmd
+		}
+	case "R":
+		// Registries panel uses the same letter-only convention as
+		// Tools (see PanelRegistries comment). Mnemonic: 'R' for
+		// Registries; uppercase to avoid clashing with lowercase 'r'
+		// (refresh / reject) used by various sub-panels. Skills and
+		// MCPs panels also bind 'R' to "open Registries filtered to
+		// the highlighted entry" — see registries_links.go.
+		if cmd := m.switchPanel(PanelRegistries); cmd != nil {
 			return m, cmd
 		}
 
@@ -1687,6 +1760,8 @@ func (m Model) handlePanelKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.handleActivityKey(msg)
 	case PanelTools:
 		return m.handleToolsKey(msg)
+	case PanelRegistries:
+		return m.handleRegistriesKey(msg)
 	case PanelSetup:
 		return m.handleSetupKey(msg)
 	}
@@ -1708,6 +1783,46 @@ func (m Model) handlePolicyKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, m.executor.Execute(bin, args, name)
 	}
 	return m, nil
+}
+
+// handleRegistriesKey routes panel-local keystrokes for the
+// Registries panel. The panel itself decides which keys it owns (1/2/3
+// tabs, r refresh, s/S sync, a/x approve/reject, d delete) and
+// returns the argv we should hand to the shared CommandExecutor for
+// any mutation. j/k/up/down stay here so list navigation lines up
+// with every other panel.
+func (m Model) handleRegistriesKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	key := msg.String()
+	switch key {
+	case "j", "down":
+		m.registries.CursorDown()
+		return m, nil
+	case "k", "up":
+		m.registries.CursorUp()
+		return m, nil
+	case "pgdown":
+		m.registries.ScrollBy(10)
+		return m, nil
+	case "pgup":
+		m.registries.ScrollBy(-10)
+		return m, nil
+	}
+	handled, label, args, hint := m.registries.HandleKey(key)
+	if !handled {
+		return m, nil
+	}
+	if hint != "" {
+		m.toasts.Push(ToastInfo, hint)
+	}
+	if label == "" || len(args) == 0 {
+		return m, nil
+	}
+	if m.executor.IsRunning() {
+		m.toasts.Push(ToastWarn, "Another command is running — wait or press Ctrl+C first")
+		return m, nil
+	}
+	m.activePanel = PanelActivity
+	return m, m.executor.Execute("defenseclaw", args, label)
 }
 
 func (m Model) handleSetupKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -1864,6 +1979,8 @@ func (m Model) handleOverviewKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "R":
 		return m.showRedactionModal()
+	case "N":
+		return m.showNotificationsModal()
 	case "p":
 		m.activePanel = PanelPolicy
 	case "l":
@@ -1943,6 +2060,75 @@ func (m Model) showRedactionModal() (tea.Model, tea.Cmd) {
 	m.redactionModal.SetSize(m.width, m.height)
 	m.redactionModal.Show(redactionDisabledForLogsBadge())
 	return m, nil
+}
+
+// handleNotificationsModalKey runs while the [N]-from-Overview/Logs
+// overlay is open. The contract mirrors the redaction modal:
+//
+//   - esc / q: close without changing anything
+//   - enter:   dispatch `defenseclaw setup notifications <on|off> --yes`
+//     and switch to the Activity panel so the operator
+//     watches the restart progress.
+//
+// Hotkeys (e.g. "y") are deliberately not supported so a stray
+// keystroke can't flip the dispatcher state in either direction.
+func (m Model) handleNotificationsModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.notificationsModal.Hide()
+		return m, nil
+	case "enter":
+		return m.confirmNotificationsToggle()
+	}
+	return m, nil
+}
+
+// showNotificationsModal opens the [N]-from-Overview/Logs overlay
+// pre-populated with the cached “notifications.enabled“ state.
+//
+// We read the flag from the loaded config (m.cfg) rather than
+// re-shelling out to “defenseclaw setup notifications status“
+// because the TUI is already config-aware and a subprocess for a
+// boolean read would add latency to a keystroke. If config is nil
+// (test harness) the modal opens against a default-false state,
+// matching what a fresh install on a non-darwin host would see.
+func (m Model) showNotificationsModal() (tea.Model, tea.Cmd) {
+	enabled := false
+	if m.cfg != nil {
+		enabled = m.cfg.Notifications.Enabled
+	}
+	m.notificationsModal.SetSize(m.width, m.height)
+	m.notificationsModal.Show(enabled)
+	return m, nil
+}
+
+// confirmNotificationsToggle dispatches the chosen action through
+// the Python CLI. Unlike confirmRedactionToggle there is no
+// in-process state to flip first — the dispatcher is constructed
+// once at sidecar boot from cfg.Notifications, so the toast
+// behaviour catches up when the gateway restarts (which the CLI
+// command does for us via _restart_services + the auto-restart
+// hook). We always pass --yes because the modal is the
+// confirmation step.
+//
+// We deliberately do NOT optimistically mutate m.cfg before the
+// subprocess returns. The successful-completion path runs through
+// reloadConfigAfterSetupCommand (see Update's commandFinishedMsg
+// branch), which re-reads config.yaml and rebuilds the in-memory
+// snapshot from disk. A subprocess failure leaves the in-memory
+// cfg untouched, so reopening the modal still reflects ground
+// truth instead of an aspirational state that the CLI never wrote.
+func (m Model) confirmNotificationsToggle() (tea.Model, tea.Cmd) {
+	action := m.notificationsModal.DesiredAction()
+	m.notificationsModal.Hide()
+
+	cmd := m.executor.Execute(
+		"defenseclaw",
+		[]string{"setup", "notifications", action, "--yes"},
+		"setup notifications "+action,
+	)
+	m.activePanel = PanelActivity
+	return m, cmd
 }
 
 func (m Model) handleUninstallModalKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
@@ -2217,6 +2403,19 @@ func (m Model) handleSkillsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// in memory, which is why operators kept seeing stale
 		// data after an out-of-process `defenseclaw skill …`.
 		return m, m.skills.LoadCmd()
+	case "R":
+		// Cross-link to Registries panel — when the highlighted
+		// skill was promoted from a registry source (Reason starts
+		// with "registry:"), jump straight to the Entries tab
+		// filtered to that name. Otherwise switch to the panel
+		// without a filter so the operator can browse sources.
+		if sel := m.skills.Selected(); sel != nil {
+			m.registries.FocusEntry("skill", sel.Name)
+		}
+		if cmd := m.switchPanel(PanelRegistries); cmd != nil {
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -2298,6 +2497,20 @@ func (m Model) handleMCPsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		// catalog from the CLI instead of re-filtering the
 		// already-loaded rows.
 		return m, m.mcps.LoadCmd()
+	case "R":
+		// Cross-link to Registries panel — same rationale as the
+		// Skills handler. We pass the URL as the entry name because
+		// MCPs in the registry adapter pipeline are keyed by URL or
+		// command depending on transport. The panel's FocusEntry
+		// performs a best-effort name match and falls back to an
+		// unfiltered view when nothing matches.
+		if sel := m.mcps.Selected(); sel != nil {
+			m.registries.FocusEntry("mcp", sel.URL)
+		}
+		if cmd := m.switchPanel(PanelRegistries); cmd != nil {
+			return m, cmd
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -2405,6 +2618,9 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.redactionModal.IsVisible() {
 		return m.handleRedactionModalKey(msg)
 	}
+	if m.notificationsModal.IsVisible() {
+		return m.handleNotificationsModalKey(msg)
+	}
 	// `R` (uppercase — lowercase is reserved for "regex search later"
 	// and stays untouched) opens the redaction kill-switch modal.
 	// Available regardless of the active log source because every
@@ -2412,6 +2628,13 @@ func (m Model) handleLogsKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// pipeline; flipping the switch affects them uniformly.
 	if key == "R" && !m.logs.searching {
 		return m.showRedactionModal()
+	}
+	// `N` is the same shape: opens the notifications toggle modal
+	// from anywhere on the Logs panel that's not in search mode.
+	// The notifications dispatcher operates orthogonally to the
+	// redaction pipeline so flipping it doesn't affect log content.
+	if key == "N" && !m.logs.searching {
+		return m.showNotificationsModal()
 	}
 	// On structured log sources, Enter opens a detail modal for the
 	// most-recent visible event. We intercept before handing the
@@ -2843,6 +3066,15 @@ func (m Model) View() tea.View {
 		return m.tuiShellView(m.redactionModal.View())
 	}
 
+	// Desktop-notifications toggle overlay ([N]). Mirrors the
+	// redaction modal pattern — a blocking confirmation rather
+	// than an inline switch, so a stray keystroke can't flip the
+	// dispatcher state.
+	if m.notificationsModal.IsVisible() {
+		m.notificationsModal.SetSize(m.width, m.height)
+		return m.tuiShellView(m.notificationsModal.View())
+	}
+
 	if m.uninstallModal.IsVisible() {
 		m.uninstallModal.SetSize(m.width, m.height)
 		return m.tuiShellView(m.uninstallModal.View())
@@ -2971,6 +3203,7 @@ func (m *Model) reloadRuntimeAfterInit() error {
 	m.logs = NewLogsPanel(m.theme, cfg)
 	m.auditHist = NewAuditPanel(m.theme, store)
 	m.tools = NewToolsPanel(store)
+	m.registries = NewRegistriesPanel(cfg, m.executor)
 	m.setup = NewSetupPanel(m.theme, cfg, m.executor)
 	m.activity.dataDir = dataDir
 	m.resizePanels()
@@ -3032,6 +3265,11 @@ func (m *Model) switchPanel(panel int) tea.Cmd {
 		// jumping in via 'T' sees fresh rows even if the periodic
 		// refresh hasn't fired yet.
 		m.tools.Refresh()
+	case PanelRegistries:
+		// Registries reads from cfg + on-disk index files; both
+		// are cheap so we re-read on every panel entry to avoid
+		// stale rows after a sync.
+		m.registries.Refresh()
 	}
 	return nil
 }
@@ -3045,6 +3283,7 @@ func (m *Model) resizePanels() {
 	m.skills.SetSize(m.width, panelH)
 	m.mcps.SetSize(m.width, panelH)
 	m.tools.SetSize(m.width, panelH)
+	m.registries.SetSize(m.width, panelH)
 	m.detail.SetSize(m.width, m.height)
 	m.actionMenu.SetSize(m.width, m.height)
 	m.firstRun.SetSize(m.width, m.height)
@@ -3255,6 +3494,8 @@ func (m Model) renderActivePanel() string {
 		return m.activity.View()
 	case PanelTools:
 		return m.tools.View()
+	case PanelRegistries:
+		return m.registries.View(m.width, m.height-5)
 	case PanelSetup:
 		return m.setup.View(m.width, m.height-5)
 	default:

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -158,6 +159,378 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPreToolUse(t *testing.T) {
 	}
 	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
 		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPermissionRequest(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "github"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+	hook, ok := resp.ClaudeCodeOutput["hookSpecificOutput"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("claude output = %+v, want hookSpecificOutput", resp.ClaudeCodeOutput)
+	}
+	decision, ok := hook["decision"].(map[string]interface{})
+	if !ok || decision["behavior"] != "deny" {
+		t.Fatalf("permission decision = %+v, want behavior=deny", hook["decision"])
+	}
+	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=mcp", "asset_name=rogue", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+}
+
+func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillPreToolUse(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Skill",
+		ToolInput:     map[string]interface{}{"skill_name": "rogue-skill"},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if resp.Severity != "HIGH" {
+		t.Fatalf("severity=%q, want HIGH", resp.Severity)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
+	}
+	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=skill", "asset_name=rogue-skill", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+}
+
+func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillUserPromptExpansion(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "slash_command",
+		CommandName:   "rogue-skill",
+		CommandSource: "plugin",
+		Prompt:        "/rogue-skill check",
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
+	}
+	if resp.ClaudeCodeOutput["decision"] != "block" {
+		t.Fatalf("claude output = %+v, want decision=block", resp.ClaudeCodeOutput)
+	}
+	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=skill", "asset_name=rogue-skill", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true", "surface=prompt_expansion"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+}
+
+func TestEvaluateClaudeCodeHook_BlocksUnregisteredMCPPromptExpansion(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "github"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "mcp_prompt",
+		CommandName:   "search",
+		CommandSource: "rogue",
+		Prompt:        "/mcp/rogue/search status",
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+	if resp.ClaudeCodeOutput["decision"] != "block" {
+		t.Fatalf("claude output = %+v, want decision=block", resp.ClaudeCodeOutput)
+	}
+	for _, want := range []string{"reason_code=not-in-approved-registry", "asset_type=mcp", "asset_name=rogue", "connector=claudecode", "source=registry-required", "registry_status=not-registered", "registry_configured=true", "surface=prompt_expansion"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
+	}
+}
+
+// TestEvaluateClaudeCodeHook_RegistryRequiredEmptyDeniesByDefault pins
+// the new fail-closed default at the hook layer: registry_required=true
+// with an empty registry now blocks unregistered MCPs even when the
+// type policy's Default is "allow". This is the safer default for a
+// security-critical knob — operators who haven't populated the
+// registry should not silently get fall-through-to-allow behavior.
+func TestEvaluateClaudeCodeHook_RegistryRequiredEmptyDeniesByDefault(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	// Default "allow" is intentionally left in place so the test
+	// proves the empty-registry guard kicks in BEFORE Default is
+	// consulted.
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-MCP", resp.Findings)
+	}
+	if !strings.Contains(resp.Reason, "reason_code=registry-required-but-empty") {
+		t.Fatalf("reason %q missing registry-required-but-empty reason_code", resp.Reason)
+	}
+}
+
+// TestEvaluateClaudeCodeHook_RegistryRequiredEmptyAllowOptInPermits pins
+// the explicit opt-in path: setting registry_empty_action="allow" gets
+// the previous (looser) behavior of falling through to Default. This
+// test asserts the knob actually works end-to-end through the hook
+// layer, not just at the config-evaluation layer.
+func TestEvaluateClaudeCodeHook_RegistryRequiredEmptyAllowOptInPermits(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	cfg.AssetPolicy.MCP.RegistryEmptyAction = "allow"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "mcp__rogue__search",
+		ToolInput:     map[string]interface{}{"query": "status"},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("action=%q raw=%q, want allow/allow", resp.Action, resp.RawAction)
+	}
+	if containsString(resp.Findings, "ASSET-POLICY-MCP") {
+		t.Fatalf("findings=%v, did not expect ASSET-POLICY-MCP", resp.Findings)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyDeniesByDefault(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "slash_command",
+		CommandName:   "rogue-skill",
+		CommandSource: "plugin",
+		Prompt:        "/rogue-skill check",
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
+	}
+	if !strings.Contains(resp.Reason, "reason_code=registry-required-but-empty") {
+		t.Fatalf("reason %q missing registry-required-but-empty reason_code", resp.Reason)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyAllowOptInPermits(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	cfg.AssetPolicy.Skill.RegistryEmptyAction = "allow"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "UserPromptExpansion",
+		ExpansionType: "slash_command",
+		CommandName:   "rogue-skill",
+		CommandSource: "plugin",
+		Prompt:        "/rogue-skill check",
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("action=%q raw=%q, want allow/allow", resp.Action, resp.RawAction)
+	}
+	if containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, did not expect ASSET-POLICY-SKILL", resp.Findings)
+	}
+}
+
+// TestEvaluateClaudeCodeHook_SkillCraftedPathStillBlocksWhenUnregistered
+// is a security regression test for the skill-name normalization
+// behavior: an agent passing a path-shaped value can match an approved
+// name only via filepath.Base, but a path that doesn't end at an
+// approved basename must still be blocked. This covers the "raw
+// input != normalized" code path that audit telemetry relies on.
+func TestEvaluateClaudeCodeHook_SkillCraftedPathStillBlocksWhenUnregistered(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "Skill",
+		ToolInput: map[string]interface{}{
+			// basename collapses to "evil-skill", which is NOT in the registry.
+			"skill_name": "/tmp/attacker/evil-skill/SKILL.md",
+		},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
+	}
+	if !strings.Contains(resp.Reason, "asset_name=evil-skill") {
+		t.Fatalf("reason %q must surface the normalized basename so audit can see what was matched", resp.Reason)
+	}
+}
+
+// TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename
+// documents (and therefore pins as a known behavior) the fact that
+// an agent supplying "/tmp/x/<approved>/SKILL.md" allows when
+// "<approved>" is in the registry. This is by design — the registry
+// matches by name, not by path — but the test exists so the next
+// person changing skill name parsing has to opt in or out of this
+// behavior consciously, with full audit context (RawName/SourcePath)
+// reaching telemetry.
+func TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "Skill",
+		ToolInput: map[string]interface{}{
+			"skill_name": "/tmp/attacker/trusted-skill/SKILL.md",
+		},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "allow" || resp.RawAction != "allow" {
+		t.Fatalf("action=%q raw=%q, want allow/allow (registry matches by basename — see RawName/SourcePath in telemetry to detect bypass attempts)", resp.Action, resp.RawAction)
+	}
+}
+
+func TestEvaluateClaudeCodeHook_SkillDefaultDenyBlocksWithoutRegistry(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.Default = "deny"
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := claudeCodeHookRequest{
+		HookEventName: "PermissionRequest",
+		ToolName:      "Skill",
+		ToolInput:     map[string]interface{}{"skill_name": "rogue-skill"},
+	}
+	resp := api.evaluateClaudeCodeHook(context.Background(), req)
+
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block", resp.Action, resp.RawAction)
+	}
+	if !containsString(resp.Findings, "ASSET-POLICY-SKILL") {
+		t.Fatalf("findings=%v, want ASSET-POLICY-SKILL", resp.Findings)
+	}
+	for _, want := range []string{"reason_code=default-deny", "source=default-deny", "asset_type=skill", "asset_name=rogue-skill", "connector=claudecode", "registry_status=unknown", "registry_configured=false"} {
+		if !strings.Contains(resp.Reason, want) {
+			t.Fatalf("reason %q missing %q", resp.Reason, want)
+		}
 	}
 }
 

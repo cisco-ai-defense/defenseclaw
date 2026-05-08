@@ -42,8 +42,14 @@ func TestContextWithRequestID_RoundTrip(t *testing.T) {
 
 func TestRequestIDFromContext_NilCtx(t *testing.T) {
 	// A nil ctx must not panic. Prod code doesn't pass one but we've
-	// seen tests do it via background helpers.
-	if got := RequestIDFromContext(nil); got != "" { //nolint:staticcheck // intentional nil ctx test
+	// seen tests do it via background helpers, so we explicitly
+	// pin the contract here. We launder the nil through an
+	// untyped-nil variable so newer staticcheck versions stop
+	// flagging the call site (SA1012); the `//nolint:staticcheck`
+	// directive used to be enough on older releases. The semantics
+	// are unchanged — RequestIDFromContext receives a nil ctx.
+	var ctx context.Context //nolint:staticcheck
+	if got := RequestIDFromContext(ctx); got != "" {
 		t.Fatalf("nil ctx must return empty; got %q", got)
 	}
 }
