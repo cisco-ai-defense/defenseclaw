@@ -14,6 +14,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version-sync:
+    name: Version Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Catches drift between the four in-repo version sources (Makefile,
+      # pyproject.toml, cli/__init__.py, package.json) before it can ship
+      # in a release. The release workflow restamps from the git tag, but
+      # PRs still need to keep the in-repo defaults in sync so local dev
+      # builds (`make dist`) produce artifacts whose names match what
+      # install.sh / `defenseclaw upgrade` will look up at the next tag.
+      - run: make check-version-sync
+
   go-lint:
     name: Go Lint
     runs-on: ubuntu-latest
