@@ -12,7 +12,7 @@ import { useEffect, useState } from 'react';
 // requested reduced motion see the final frame immediately so we
 // don't flicker text into place.
 const SCRIPT: { kind: 'cmd' | 'out' | 'ok' | 'dim'; text: string }[] = [
-  { kind: 'cmd', text: 'curl -LsSf https://defenseclaw.dev/install.sh | bash' },
+  { kind: 'cmd', text: 'curl -LsSf https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh | bash' },
   { kind: 'ok', text: '✓ Installed defenseclaw + defenseclaw-gateway' },
   { kind: 'cmd', text: 'defenseclaw setup claude-code' },
   { kind: 'dim', text: '  DefenseClaw — Claude Code observability setup' },

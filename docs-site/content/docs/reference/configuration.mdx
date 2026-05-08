@@ -9,7 +9,7 @@ keywords:
   - DEFENSECLAW_LLM_KEY
 ---
 
-`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit, then run `defenseclaw gateway restart` (or `defenseclaw setup guardrail --restart`).
+`~/.defenseclaw/config.yaml` is the single source of truth for operator-owned configuration. Most fields are managed by `defenseclaw setup *` commands; you can also hand-edit, then run `defenseclaw-gateway restart` (or `defenseclaw setup guardrail --restart`). Note `restart` is on the **Go sidecar binary** — the Python `defenseclaw` CLI has no top-level `gateway` group.
 
 ## On-disk layout
 
@@ -157,7 +157,7 @@ A hash-checked backup of each file is stored in `~/.defenseclaw/backups/` before
 ## Reload without restart
 
 ```bash
-defenseclaw gateway reload
+defenseclaw-gateway policy reload
 ```
 
-Pulls a fresh `config.yaml` into the running gateway. Connector wiring (hook scripts, agent files) is not re-applied — use `defenseclaw setup guardrail --restart` for that.
+Tells the running sidecar to re-read OPA policies from disk without bouncing the daemon. Connector wiring (hook scripts, agent files) is not re-applied — use `defenseclaw setup guardrail --restart` for that. Note this is on the **Go sidecar binary** (`defenseclaw-gateway`), not the Python CLI; the Python CLI has no top-level `gateway` group.

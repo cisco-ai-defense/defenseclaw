@@ -18,10 +18,11 @@ The audit DB is connector-agnostic. Every audit row records its own `connector` 
 
 ```bash
 defenseclaw status
-defenseclaw audit summary --by connector --since 7d
+defenseclaw alerts --limit 25
+tail -n 200 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
-You should see the active connector and a histogram of which connectors generated traffic over the past week.
+`status` shows the active connector and enforcement flags. `alerts` lists the most recent decisions as a table. The third command is a quick by-connector histogram of recent events from the gateway's JSONL fan-out — replace `tail -n 200` with `cat` for a full-DB view, or open `defenseclaw tui` for the interactive Audit panel.
 
 </Step>
 
@@ -50,10 +51,11 @@ Full table on the [Switching connectors](/docs/setup/guardrail/switching-connect
 
 ```bash
 defenseclaw doctor
-defenseclaw audit summary --by connector --since 1h
+defenseclaw alerts --limit 10
+tail -n 100 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
-`doctor` confirms the previous connector left no residual hook entries; `audit summary` shows new events landing under the new connector.
+`doctor` confirms the previous connector left no residual hook entries; `alerts` and the JSONL histogram show new events landing under the new connector.
 
 </Step>
 
@@ -97,5 +99,5 @@ defenseclaw audit summary --by connector --since 1h
 ## Caveats
 
 <Callout>
-The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Run `defenseclaw audit migrate` after a major version upgrade. The CLI prompts you when this is needed.
+The audit DB is portable across connectors but not across DefenseClaw versions in some cases. Run `defenseclaw migrations status` after a major version upgrade to see whether any schema migrations are pending; the CLI prompts you when this is needed and applies them automatically on the next command.
 </Callout>

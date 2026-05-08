@@ -180,10 +180,10 @@ The MCP scanner runs each stdio server inside a subprocess sandbox with a wall-c
 
 ## Install if missing
 
+`cisco-ai-mcp-scanner` is a hard dependency of `defenseclaw` (Python ≥3.11) and is pulled in automatically by `pip install defenseclaw`. If your environment somehow lost it, reinstall it directly:
+
 ```bash
-pip install cisco-ai-mcp-scanner
-# or, with the optional extra:
-pip install "defenseclaw[scanners]"
+pip install --upgrade cisco-ai-mcp-scanner
 ```
 
 `defenseclaw mcp` exits cleanly with a one-line install hint if the SDK isn't present — it never crashes the gateway.

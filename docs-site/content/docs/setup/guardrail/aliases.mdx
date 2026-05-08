@@ -115,4 +115,4 @@ defenseclaw setup cursor         # observability-only for Cursor
 defenseclaw setup openclaw       # full guardrail for OpenClaw
 ```
 
-Both halves also flip `claw.mode` so the rest of the CLI/TUI reads from the matching connector's source-of-truth files. Without this flip, `defenseclaw scan skills` after `setup codex` would scan `~/.openclaw/skills` and miss every Codex skill — a foot-gun the aliases explicitly close.
+Both halves also flip `claw.mode` so the rest of the CLI/TUI reads from the matching connector's source-of-truth files. Without this flip, `defenseclaw skill scan --all` after `setup codex` would scan `~/.openclaw/skills` and miss every Codex skill — a foot-gun the aliases explicitly close.

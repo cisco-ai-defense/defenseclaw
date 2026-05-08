@@ -100,11 +100,11 @@ defenseclaw setup guardrail \
   --connector claudecode \
   --mode observe \
   --scanner-mode local \
-  --no-judge \
+  --detection-strategy regex_only \
   --restart
 ```
 
-Pass `--non-interactive` (or `--accept-defaults`) to skip every prompt; missing flags fall back to the same defaults the wizard would have offered.
+Pass `--non-interactive` (or `--accept-defaults`) to skip every prompt; missing flags fall back to the same defaults the wizard would have offered. The judge stays off until you pass `--judge-model` (or pick a strategy that uses it); `--detection-strategy regex_only` here just makes that explicit.
 
 ## Prompt → flag mapping
 
@@ -121,7 +121,7 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **Approval minimum severity** *(if HITL on, default: HIGH)* | `--hilt-min-severity HIGH\|MEDIUM\|LOW\|CRITICAL` | — |
 | **Select scanner engine** *(default: local)* | `--scanner-mode local\|remote\|both` | Wizard never picks `both` — pass the flag to run the union. |
 | **API endpoint / key env / timeout** *(remote scanner only)* | `--cisco-endpoint`, `--cisco-api-key-env`, `--cisco-timeout-ms` | Defaults inherit from existing `aid.*` config. |
-| **Enable LLM judge?** *(default: current)* | implicit when `--judge-model` is set | Pass `--no-judge` to force off. |
+| **Enable LLM judge?** *(default: current)* | implicit when `--judge-model` is set | Pass `--detection-strategy regex_only` to force the judge off; the bare guardrail command has no `--no-judge` toggle. |
 | **Select judge strategy** *(if judge on, default: regex_judge)* | `--detection-strategy regex_only\|regex_judge\|judge_first` | — |
 | **Inherit unified LLM key for judge?** *(default: Y)* | `--judge-api-key-env` | Override with a different env var to use a separate key. |
 | **Configure judge fallback models?** *(default: N)* | **interactive-only** | Edit `guardrail.judge.fallback_models` in `~/.defenseclaw/config.yaml` to script. |
@@ -334,11 +334,11 @@ A hash-checked backup is stored before edits; teardown restores or surgically re
 
 ```bash
 defenseclaw doctor
-defenseclaw status --connector claudecode
+defenseclaw status
 defenseclaw alerts --limit 25
 ```
 
-`doctor` prints the full health report. `status` shows the resolved connector + enforcement flags. `alerts` lists recent decisions as a table; pass `--show <n>` for the full record. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
+`doctor` prints the full health report. `status` shows the resolved connector + enforcement flags (it has no flags of its own — it always reports the active connector from config and `/health`). `alerts` lists recent decisions as a table; pass `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
 
 ## Interactive vs non-interactive — every command
 

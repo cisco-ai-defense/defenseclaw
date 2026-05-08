@@ -51,9 +51,9 @@ The non-guardrail verbs each own a focused slice of the configuration surface. E
 
 <Cards>
   <Card
-    title="setup keys / unified-llm-key"
+    title="defenseclaw keys"
     href="/docs/setup/unified-llm-key"
-    description="Stash DEFENSECLAW_LLM_KEY (and any per-component overrides) in ~/.defenseclaw/.env. List, set, fill-missing, check."
+    description="Stash DEFENSECLAW_LLM_KEY (and any per-component overrides) in ~/.defenseclaw/.env. Top-level group: list, set, fill-missing, check. Not a setup subcommand."
   />
   <Card
     title="setup webhook"
@@ -105,9 +105,9 @@ Every verb in the setup family exposes both a fully-interactive walkthrough and 
 | `setup webhook test <name>` | n/a | n/a | Always non-interactive; safe to re-run. |
 | `registry add <id>` | yes (default) | `--non-interactive` + flags | `wizard` is the friendly first-run alias. |
 | `registry sync` / `entries` / `approve` / `reject` | n/a | flags only | Designed for cron / scripts. |
-| `setup splunk` | yes | `--non-interactive` + flags | Token always read from env var (`--hec-token-env`). |
+| `setup splunk` | yes | `--non-interactive` + flags | HEC token comes from `--hec-token <value>` or, if omitted, the `DEFENSECLAW_SPLUNK_HEC_TOKEN` env var. |
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
-| `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; SDKs ship as pip extras. |
+| `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
 | `setup redaction on` / `off` / `status` | n/a | flags only | Idempotent; status exits 0/1 for CI. |
 
 <Callout title="See it for yourself">
@@ -127,4 +127,4 @@ Every setup verb writes to `~/.defenseclaw/`:
   registries/<id>/     # cached manifest + scanner verdicts for each registry source
 ```
 
-Next steps: [`defenseclaw setup guardrail`](/docs/setup/guardrail) is the right starting point if you have not run it yet. Already running? [`defenseclaw setup unified-llm-key`](/docs/setup/unified-llm-key) is the most common follow-up — it unlocks the LLM judge and the LLM-backed scanners.
+Next steps: [`defenseclaw setup guardrail`](/docs/setup/guardrail) is the right starting point if you have not run it yet. Already running? `defenseclaw keys set DEFENSECLAW_LLM_KEY` is the most common follow-up — it unlocks the LLM judge and the LLM-backed scanners. The full guided workflow lives at [Unified LLM key](/docs/setup/unified-llm-key).

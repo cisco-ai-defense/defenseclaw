@@ -174,15 +174,13 @@ The Skill Scanner's LLM mode currently supports `anthropic` and `openai` provide
 
 ## Install if missing
 
-`cisco-ai-skill-scanner` ships as an optional dependency. The wrapper detects it lazily so a vanilla `pip install defenseclaw` works without it:
+`cisco-ai-skill-scanner` is a hard dependency of `defenseclaw` and is installed automatically by `pip install defenseclaw` (see [`pyproject.toml`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/pyproject.toml)). The wrapper detects it lazily, so an environment that managed to drop the package can be repaired by reinstalling it directly:
 
 ```bash
-pip install cisco-ai-skill-scanner
-# or, with the optional extra:
-pip install "defenseclaw[scanners]"
+pip install --upgrade cisco-ai-skill-scanner
 ```
 
-If it's missing when you run a scan, DefenseClaw prints the install hint and exits cleanly — it does not crash the gateway.
+If the SDK is missing when you run a scan, DefenseClaw prints the install hint and exits cleanly — it does not crash the gateway.
 
 ## Manage individual skills
 

@@ -4,12 +4,22 @@ description: Every defenseclaw verb, grouped by what you are trying to do — fi
 keywords:
   - DefenseClaw CLI commands
   - defenseclaw setup
-  - defenseclaw scan
+  - defenseclaw skill scan
+  - defenseclaw mcp scan
+  - defenseclaw plugin scan
   - defenseclaw audit
   - defenseclaw doctor
+  - defenseclaw-gateway
 ---
 
 Authoritative source for any flag is `defenseclaw <command> --help`. These groupings are curated for browsing.
+
+DefenseClaw ships **two** binaries:
+
+- **`defenseclaw`** — the operator-facing Python CLI. Entry point for `init`, `setup`, `audit`, `policy`, `skill`/`mcp`/`plugin` scans, alerts, doctor, etc.
+- **`defenseclaw-gateway`** — the long-running Go sidecar. Owns the on-host daemon (`start`/`stop`/`restart`), policy reload, code scanning, and the audit-DB JSONL exporter.
+
+Tables below tag each row with the binary that owns it.
 
 ## First run
 
@@ -52,22 +62,31 @@ Authoritative source for any flag is `defenseclaw <command> --help`. These group
 
 ## Scanning
 
-| Command | Use it for |
-| --- | --- |
-| `defenseclaw scan skills` | Scan agent skills for the active connector. |
-| `defenseclaw scan mcp` | Scan MCP servers. |
-| `defenseclaw scan plugins` | Scan plugins / extensions. |
-| `defenseclaw scan codeguard <path>` | Scan source files with the bundled CodeGuard rule pack. |
-| `defenseclaw scan registry` | Scan registry-resolved components (skills, MCP, plugins) from a registry endpoint. |
+The Python CLI exposes one scan group per asset family — there is no top-level `defenseclaw scan` group. Code-scanning lives on the Go sidecar.
 
-## Gateway
+| Command | Binary | Use it for |
+| --- | --- | --- |
+| `defenseclaw skill scan [target] [--all] [--path] [--remote] [--action]` | `defenseclaw` | Scan a configured skill, a path, a URL (`https://…` / `clawhub://…`), or every configured skill with `--all`. |
+| `defenseclaw mcp scan [target] [--all] [--scan-prompts] [--scan-resources] [--scan-instructions]` | `defenseclaw` | Scan one MCP server by name or URL, or every configured server with `--all`. |
+| `defenseclaw plugin scan <name_or_path> [--profile default\|strict] [--use-llm]` | `defenseclaw` | Scan a plugin/extension package. |
+| `defenseclaw aibom scan [--json] [--summary] [--only <cat>]` | `defenseclaw` | Build the agent SBOM (skills, MCP, plugins, models, sinks) and emit findings. |
+| `defenseclaw registry sync [source...] [--all] [--scan]` | `defenseclaw` | Sync registries; with `--scan`, runs the scanner pipeline against every fetched entry. |
+| `defenseclaw codeguard {status,install,install-skill}` | `defenseclaw` | Manage the CodeGuard skill/rule install (status, install, install-skill). |
+| `defenseclaw-gateway scan code <path> [--json] [--schema]` | `defenseclaw-gateway` | Scan source files in `<path>` using the bundled CodeGuard rule pack via the running sidecar. |
 
-| Command | Use it for |
-| --- | --- |
-| `defenseclaw gateway start` | Start `defenseclaw-gateway` in the background. |
-| `defenseclaw gateway stop` | Stop the gateway. |
-| `defenseclaw gateway restart` | Restart (most setup commands do this implicitly with `--restart`). |
-| `defenseclaw gateway logs` | Tail gateway stdout/stderr. |
+## Gateway daemon
+
+The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Most operators never run these directly — `defenseclaw setup *` commands restart the sidecar implicitly when `--restart` is passed.
+
+| Command | Binary | Use it for |
+| --- | --- | --- |
+| `defenseclaw-gateway start` | `defenseclaw-gateway` | Start the sidecar as a background daemon. |
+| `defenseclaw-gateway stop` | `defenseclaw-gateway` | Stop the running sidecar. |
+| `defenseclaw-gateway restart` | `defenseclaw-gateway` | Restart the sidecar. |
+| `defenseclaw-gateway status` | `defenseclaw-gateway` | One-line health snapshot of the running daemon. |
+| `defenseclaw-gateway policy reload` | `defenseclaw-gateway` | Re-read OPA policies from disk without bouncing the daemon. |
+| `defenseclaw-gateway watchdog [start\|stop\|status]` | `defenseclaw-gateway` | Health-watchdog daemon that notifies when the gateway is down. |
+| `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail the gateway's JSONL fan-out — every decision and event is appended here. There is **no** built-in `gateway logs` subcommand; the JSONL fan-out is the canonical decision log. |
 
 ## TUI
 

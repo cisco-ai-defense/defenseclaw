@@ -128,12 +128,14 @@ Stops all five containers and removes the Compose project. Dashboards and Grafan
 To wipe everything including the volumes:
 
 ```bash
-defenseclaw setup local-observability down --purge
+defenseclaw setup local-observability reset --yes
 ```
 
 <Callout type="warn">
-`--purge` is destructive — your historical traces, logs, and metrics
-go with it. Splunk HEC and JSONL sinks are unaffected.
+`reset` is destructive — your historical traces, logs, and metrics
+go with it. Splunk HEC and JSONL sinks are unaffected. `down` only stops
+the containers; named Docker volumes survive across `down`/`up` cycles
+until you run `reset`.
 </Callout>
 
 ## Status and logs
