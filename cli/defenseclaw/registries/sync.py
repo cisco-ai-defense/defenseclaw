@@ -408,10 +408,26 @@ def manual_set_verdict(
         verdict.approved = approved
         if approved:
             verdict.rejected = False
+            # Approving a previously-blocked entry should land in
+            # ``status`` so list filters and the TUI badge reflect
+            # the decision before the next scan run.
+            if verdict.status == "blocked":
+                verdict.status = "pending"
     if rejected is not None:
         verdict.rejected = rejected
         if rejected:
             verdict.approved = False
+            # Reject is the strongest negative verdict the operator
+            # can express. Surface it through ``status`` so
+            # ``registry entries --status blocked`` and the TUI's
+            # rendering both show the row as blocked, not pending.
+            verdict.status = "blocked"
+        else:
+            # Operator un-rejected — drop the synthetic 'blocked'
+            # so a subsequent scan can write a real verdict without
+            # an explicit re-approve.
+            if verdict.status == "blocked":
+                verdict.status = "pending"
     save_index(data_dir, source_id, idx)
     return verdict
 

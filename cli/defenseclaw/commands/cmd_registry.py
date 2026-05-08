@@ -59,7 +59,8 @@ from defenseclaw.registries import (
 from defenseclaw.registries import (
     remove_source as remove_source_cache,
 )
-from defenseclaw.registries.manifest import ManifestEntry
+from defenseclaw.registries.adapters import IngestError, fetch_manifest
+from defenseclaw.registries.manifest import ManifestEntry, ManifestError
 from defenseclaw.registries.sync import (
     ScanCallback,
     manual_set_verdict,
@@ -134,6 +135,35 @@ def _validate_auth_env(env: str) -> str:
     return env
 
 
+def _validate_file_url(kind: str, url: str) -> None:
+    """For ``kind=file``, fail fast at add/edit time if the path isn't
+    absolute.
+
+    The file adapter rejects relative paths at sync time (because
+    ``~/.defenseclaw`` and the operator's CWD aren't guaranteed to
+    line up at admission), but discovering that ten minutes later
+    when the cron job fires is poor UX. Catch the same condition at
+    config-write time so the operator gets the error before they
+    walk away.
+    """
+    if kind != "file":
+        return
+    val = (url or "").strip()
+    # Tolerate a leading file:// scheme — the adapter strips it
+    # before checking, so we should accept the same form here.
+    bare = val[len("file://"):] if val.lower().startswith("file://") else val
+    if not bare:
+        # The caller (add/edit) already enforces a non-empty URL for
+        # kind=file via _require / the per-kind url-required block.
+        return
+    expanded = os.path.expanduser(bare)
+    if not os.path.isabs(expanded):
+        raise click.BadParameter(
+            f"--url for kind=file must be an absolute path (got {url!r}). "
+            "Use $PWD/manifest.yaml or a fully-qualified path.",
+        )
+
+
 def _find_source(cfg: Config, sid: str) -> RegistrySource:
     sid = sid.strip().lower()
     for s in cfg.registries.sources:
@@ -206,9 +236,10 @@ def registry() -> None:
     Subcommands:
       add       Register a new source (interactive or flag-only).
       edit      Update an existing source.
-      list      Show every configured source.
+      list      Show every configured source (with entry counts).
       show      Pretty-print a single source.
       remove    Delete a source and its cache.
+      test      Dry-run fetch + parse — no cache or policy writes.
       sync      Fetch + scan + promote one or all sources.
       entries   Show cached entries (after sync).
       approve   Mark an entry approved (forces promotion next sync).
@@ -317,6 +348,7 @@ def add_cmd(  # noqa: PLR0913 - mirrors the prompt surface
             err=True,
         )
         raise SystemExit(2)
+    _validate_file_url(kind, url)
 
     if any(s.id == sid for s in cfg.registries.sources):
         click.echo(f"error: source {sid!r} already exists; use 'registry edit'", err=True)
@@ -383,11 +415,27 @@ def edit_cmd(  # noqa: PLR0913
     non_interactive: bool,
     emit_json: bool,
 ) -> None:
-    """Update an existing source. Only the flags you pass are changed."""
+    """Update an existing source. Only the flags you pass are changed.
+
+    With no mutating flags, the command falls into an interactive
+    prompt that walks every editable field with the current value as
+    the default. As soon as **any** mutating flag is passed
+    (``--kind`` / ``--url`` / ``--content`` / ``--auth-env`` /
+    ``--clear-auth-env`` / ``--enabled`` / ``--disabled`` /
+    ``--auto-sync`` / ``--no-auto-sync`` / ``--sync-interval-hours``
+    / ``--non-interactive``), prompts are suppressed entirely so the
+    docstring promise — "only the flags you pass are changed" —
+    holds. Use the bare form (no flags) when you want to re-confirm
+    every field.
+    """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
 
-    if not non_interactive:
+    any_mutating = any(v is not None for v in (
+        kind, content, url, auth_env, enabled, auto_sync, sync_interval_hours,
+    )) or clear_auth_env
+
+    if not non_interactive and not any_mutating:
         if kind is None:
             new = click.prompt("Kind", default=source.kind)
             kind = new if new != source.kind else None
@@ -424,6 +472,11 @@ def edit_cmd(  # noqa: PLR0913
     if sync_interval_hours is not None:
         source.sync_interval_hours = max(0, int(sync_interval_hours))
 
+    # Validate the post-edit (kind, url) pair so flipping an
+    # ``http_yaml`` source to ``kind=file`` without re-supplying the
+    # ``--url`` (or vice versa) fails before the next sync.
+    _validate_file_url(source.kind, source.url)
+
     cfg.save()
     if app.logger:
         app.logger.log_action(
@@ -444,11 +497,36 @@ def edit_cmd(  # noqa: PLR0913
 @click.option("--json", "emit_json", is_flag=True)
 @pass_ctx
 def list_cmd(app: AppContext, emit_json: bool) -> None:
-    """List configured registry sources."""
+    """List configured registry sources.
+
+    The ``ENTRIES`` column reports cached counts as
+    ``total (clean/warning/blocked)`` from the on-disk index — a
+    dash means the source has never been synced. Counts are
+    deliberately read fresh from ``index.json`` rather than the
+    config file so manual ``approve`` / ``reject`` calls (which
+    rewrite the index) are reflected without forcing an additional
+    config write.
+    """
     cfg = _require_cfg(app)
     sources = list(cfg.registries.sources)
+    indices: dict[str, SourceIndex] = {
+        s.id: load_index(cfg.data_dir, s.id) for s in sources
+    }
     if emit_json:
-        _emit_json([_source_to_dict(s) for s in sources])
+        out: list[dict[str, Any]] = []
+        for s in sources:
+            d = _source_to_dict(s)
+            idx = indices.get(s.id)
+            if idx is not None:
+                d["entries"] = {
+                    "total": idx.entry_count,
+                    "clean": idx.clean_count,
+                    "warning": idx.warning_count,
+                    "blocked": idx.blocked_count,
+                    "error": idx.error_count,
+                }
+            out.append(d)
+        _emit_json(out)
         return
     if not sources:
         ux.subhead("No registry sources configured.")
@@ -457,21 +535,33 @@ def list_cmd(app: AppContext, emit_json: bool) -> None:
     click.echo()
     ux.section("Registry sources")
     click.echo(
-        f"  {'ID':<24} {'KIND':<12} {'CONTENT':<8} {'ON':<3} {'LAST SYNC':<22} URL"
+        f"  {'ID':<24} {'KIND':<12} {'CONTENT':<8} {'ON':<3} "
+        f"{'ENTRIES':<18} {'LAST SYNC':<22} URL"
     )
     click.echo(
-        f"  {'-' * 24} {'-' * 12} {'-' * 8} {'-' * 3} {'-' * 22} {'-' * 32}"
+        f"  {'-' * 24} {'-' * 12} {'-' * 8} {'-' * 3} "
+        f"{'-' * 18} {'-' * 22} {'-' * 32}"
     )
     for s in sources:
         on = "yes" if s.enabled else "no"
         last = s.last_sync or "-"
         url = s.url or ""
-        if len(url) > 36:
-            url = url[:33] + "..."
+        if len(url) > 32:
+            url = url[:29] + "..."
+        idx = indices.get(s.id)
+        if idx is None or idx.entry_count == 0 and not s.last_sync:
+            entries = "-"
+        else:
+            entries = (
+                f"{idx.entry_count} "
+                f"({idx.clean_count}/{idx.warning_count}/{idx.blocked_count})"
+            )
         click.echo(
-            f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} {last:<22} {url}"
+            f"  {s.id:<24} {s.kind:<12} {s.content:<8} {on:<3} "
+            f"{entries:<18} {last:<22} {url}"
         )
     click.echo()
+    ux.subhead("ENTRIES column: total (clean/warning/blocked)")
 
 
 @registry.command("show")
@@ -556,6 +646,120 @@ def remove_cmd(
         _emit_json({"action": "remove", "source_id": sid})
         return
     ux.ok(f"Removed registry source {sid!r}.")
+
+
+# ---------------------------------------------------------------------------
+# test — dry-run fetch + parse, no cache / no asset_policy mutation
+# ---------------------------------------------------------------------------
+
+@registry.command("test")
+@click.argument("source_id")
+@click.option("--allow-private", is_flag=True,
+              help="Permit RFC1918 / ULA destinations (off by default)")
+@click.option("--show-entries", "-e", is_flag=True,
+              help="Print every entry name + type instead of just summary")
+@click.option("--limit", type=int, default=20,
+              help="With --show-entries, cap the row count (default 20)")
+@click.option("--json", "emit_json", is_flag=True)
+@pass_ctx
+def test_cmd(
+    app: AppContext,
+    source_id: str,
+    allow_private: bool,
+    show_entries: bool,
+    limit: int,
+    emit_json: bool,
+) -> None:
+    """Dry-run a source: fetch + parse the manifest, no cache writes.
+
+    Useful before ``registry sync`` to confirm credentials and
+    the manifest's shape without touching ``index.json``,
+    ``manifest.yaml``, or ``asset_policy``. The SSRF guard, size
+    cap, redirect policy, and content-type filter all apply
+    exactly as they do in the real sync path so a successful
+    ``registry test`` is a strong signal that the next sync will
+    behave the same way.
+    """
+    cfg = _require_cfg(app)
+    source = _find_source(cfg, source_id)
+
+    try:
+        manifest, raw = fetch_manifest(source, allow_private=allow_private)
+    except (IngestError, ManifestError) as exc:
+        # Mirror the wording of sync_source's report.errors so log
+        # consumers don't have to special-case test-vs-sync.
+        msg = f"fetch failed: {exc}"
+        if emit_json:
+            _emit_json({
+                "ok": False,
+                "source_id": source.id,
+                "error": str(exc),
+            })
+        else:
+            click.echo(f"error: {msg}", err=True)
+        raise SystemExit(2) from exc
+
+    # Apply the same content filter sync_source does so the dry-run
+    # exactly matches what would land in the cache.
+    filtered = manifest.filter_by_content(source.content)
+
+    skill_count = sum(1 for e in filtered if e.is_skill())
+    mcp_count = sum(1 for e in filtered if e.is_mcp())
+
+    payload: dict[str, Any] = {
+        "ok": True,
+        "source_id": source.id,
+        "publisher": manifest.publisher,
+        "schema_version": manifest.schema_version,
+        "generated_at": manifest.generated_at,
+        "fetched_bytes": len(raw),
+        "entries": {
+            "total": len(filtered),
+            "skills": skill_count,
+            "mcps": mcp_count,
+        },
+    }
+
+    if show_entries:
+        rows = []
+        for entry in filtered[: max(0, int(limit))]:
+            rows.append({
+                "name": entry.name,
+                "type": entry.type,
+                "version": entry.version,
+                "publisher": entry.publisher or manifest.publisher,
+            })
+        payload["entries"]["rows"] = rows
+        payload["entries"]["truncated"] = len(filtered) > len(rows)
+
+    if emit_json:
+        _emit_json(payload)
+        return
+
+    click.echo()
+    ux.section(f"Dry-run: {source.id}")
+    click.echo(f"  {ux.dim('Publisher:')}      {manifest.publisher or '(none)'}")
+    click.echo(f"  {ux.dim('Schema:')}         v{manifest.schema_version}")
+    if manifest.generated_at:
+        click.echo(f"  {ux.dim('Generated at:')}   {manifest.generated_at}")
+    click.echo(f"  {ux.dim('Bytes fetched:')}  {len(raw):,}")
+    click.echo(
+        f"  {ux.dim('Entries:')}        {len(filtered)} "
+        f"({skill_count} skills, {mcp_count} mcps)"
+    )
+    if show_entries and filtered:
+        click.echo()
+        ux.subhead(f"First {min(limit, len(filtered))} entries:")
+        for entry in filtered[: max(0, int(limit))]:
+            ver = f" v{entry.version}" if entry.version else ""
+            click.echo(f"    [{entry.type}] {entry.name}{ver}")
+        if len(filtered) > limit:
+            ux.subhead(f"  … {len(filtered) - limit} more (raise --limit to see)")
+    click.echo()
+    ux.ok(
+        f"Dry-run successful — run `defenseclaw registry sync {source.id}` "
+        "to persist + scan + promote.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -795,6 +999,10 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
               type=click.Choice(["pending", "clean", "warning", "blocked", "error", "all"],
                                 case_sensitive=False),
               default="all")
+@click.option("--approved", is_flag=True,
+              help="Show only operator-approved entries")
+@click.option("--rejected", is_flag=True,
+              help="Show only operator-rejected entries")
 @click.option("--json", "emit_json", is_flag=True)
 @pass_ctx
 def entries_cmd(
@@ -802,18 +1010,37 @@ def entries_cmd(
     source_id: str,
     entry_type: str,
     status: str,
+    approved: bool,
+    rejected: bool,
     emit_json: bool,
 ) -> None:
-    """Show cached entries for a source. Run after ``registry sync``."""
+    """Show cached entries for a source. Run after ``registry sync``.
+
+    The ``--approved`` / ``--rejected`` flags filter on the
+    operator-override bits stored alongside the scanner verdict;
+    these are independent of ``--status`` so combinations like
+    ``--rejected --status warning`` still work (operator rejected
+    an entry the scanner had only warned about). Both flags
+    together returns the empty set by definition because
+    ``approve`` clears ``rejected`` and vice versa.
+    """
     cfg = _require_cfg(app)
     source = _find_source(cfg, source_id)
     idx = load_index(cfg.data_dir, source.id)
-    rows = _filter_verdicts(idx, entry_type, status)
+    rows = _filter_verdicts(
+        idx, entry_type, status,
+        only_approved=approved, only_rejected=rejected,
+    )
     if emit_json:
         _emit_json([v.to_dict() for v in rows])
         return
     if not rows:
-        ux.subhead(f"No matching entries (type={entry_type}, status={status}).")
+        bits = [f"type={entry_type}", f"status={status}"]
+        if approved:
+            bits.append("approved")
+        if rejected:
+            bits.append("rejected")
+        ux.subhead(f"No matching entries ({', '.join(bits)}).")
         return
     click.echo()
     ux.section(f"Entries for {source.id}")
@@ -830,7 +1057,14 @@ def entries_cmd(
     click.echo()
 
 
-def _filter_verdicts(idx: SourceIndex, type_: str, status: str) -> list[EntryVerdict]:
+def _filter_verdicts(
+    idx: SourceIndex,
+    type_: str,
+    status: str,
+    *,
+    only_approved: bool = False,
+    only_rejected: bool = False,
+) -> list[EntryVerdict]:
     out: list[EntryVerdict] = []
     type_ = type_.lower()
     status = status.lower()
@@ -838,6 +1072,10 @@ def _filter_verdicts(idx: SourceIndex, type_: str, status: str) -> list[EntryVer
         if type_ != "all" and v.type != type_:
             continue
         if status != "all" and v.status != status:
+            continue
+        if only_approved and not v.approved:
+            continue
+        if only_rejected and not v.rejected:
             continue
         out.append(v)
     return out

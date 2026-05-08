@@ -34,6 +34,7 @@ uniformly to every fetch path.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import re
 from dataclasses import dataclass, field
@@ -396,11 +397,56 @@ def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:
 # Tiny string helpers — keep length / type validation tight and uniform.
 # ---------------------------------------------------------------------------
 
+def _coerce_yaml_scalar(value: Any, label: str) -> str:
+    """Coerce a YAML-auto-typed scalar to its string surface form.
+
+    PyYAML's safe_load resolves common patterns even when the publisher
+    didn't quote them: ``2026-05-07T20:00:00Z`` becomes ``datetime``,
+    ``1.0`` becomes ``float``, ``42`` becomes ``int``. The manifest
+    schema declares every text field as a string, so without coercion
+    a publisher who emits perfectly valid YAML hits a hard parse
+    failure on first sync. We accept the lossless scalar types and
+    render them with the syntax YAML used (``isoformat``-style for
+    timestamps; ``repr``-equivalent for ints/floats); structured
+    values (mapping / sequence / bytes) and ``bool`` (which would
+    silently coerce ``True`` to a misleading ``"True"`` token in fields
+    like ``version``) remain hard errors so manifest poisoning still
+    fails closed.
+    """
+    if isinstance(value, _dt.datetime):
+        # datetime.isoformat keeps offset / microseconds; we strip
+        # microseconds so the surface matches the typical
+        # publisher-written ``YYYY-MM-DDTHH:MM:SSZ`` form. Naive
+        # datetimes (no tzinfo) are emitted without a 'Z' since
+        # tagging them as UTC would be a lie.
+        if value.microsecond:
+            value = value.replace(microsecond=0)
+        s = value.isoformat()
+        if value.tzinfo is None:
+            return s
+        return s.replace("+00:00", "Z")
+    if isinstance(value, _dt.date):
+        return value.isoformat()
+    # Reject bool BEFORE int (bool is a subclass of int) so
+    # ``version: yes`` doesn't silently become "True".
+    if isinstance(value, bool):
+        raise ManifestError(
+            f"{label} must be a string (got bool — quote the value, e.g. \"true\")"
+        )
+    if isinstance(value, int | float):
+        # repr() avoids YAML's int(1) → "1" + float(1.0) → "1.0"
+        # both rendering identically; preserves the operator's intent.
+        return repr(value) if isinstance(value, float) else str(value)
+    raise ManifestError(
+        f"{label} must be a string (got {type(value).__name__})"
+    )
+
+
 def _opt_str(value: Any, label: str, *, max_len: int) -> str:
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise ManifestError(f"{label} must be a string (got {type(value).__name__})")
+        value = _coerce_yaml_scalar(value, label)
     if len(value) > max_len:
         raise ManifestError(f"{label} exceeds {max_len} chars")
     return value
@@ -423,9 +469,7 @@ def _opt_str_list(value: Any, label: str, *, max_items: int, max_len: int) -> li
     out: list[str] = []
     for i, item in enumerate(value):
         if not isinstance(item, str):
-            raise ManifestError(
-                f"{label}[{i}] must be a string (got {type(item).__name__})"
-            )
+            item = _coerce_yaml_scalar(item, f"{label}[{i}]")
         if len(item) > max_len:
             raise ManifestError(f"{label}[{i}] exceeds {max_len} chars")
         out.append(item)

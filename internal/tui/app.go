@@ -2110,18 +2110,17 @@ func (m Model) showNotificationsModal() (tea.Model, tea.Cmd) {
 // command does for us via _restart_services + the auto-restart
 // hook). We always pass --yes because the modal is the
 // confirmation step.
+//
+// We deliberately do NOT optimistically mutate m.cfg before the
+// subprocess returns. The successful-completion path runs through
+// reloadConfigAfterSetupCommand (see Update's commandFinishedMsg
+// branch), which re-reads config.yaml and rebuilds the in-memory
+// snapshot from disk. A subprocess failure leaves the in-memory
+// cfg untouched, so reopening the modal still reflects ground
+// truth instead of an aspirational state that the CLI never wrote.
 func (m Model) confirmNotificationsToggle() (tea.Model, tea.Cmd) {
 	action := m.notificationsModal.DesiredAction()
 	m.notificationsModal.Hide()
-
-	// Mirror the operator's intent in the in-memory cfg snapshot
-	// so subsequent paints (e.g. an immediate re-open of the modal)
-	// see the new state without waiting for the subprocess to
-	// finish writing config.yaml. The actual persistence is owned
-	// by setup_notifications in the Python CLI.
-	if m.cfg != nil {
-		m.cfg.Notifications.Enabled = action == "on"
-	}
 
 	cmd := m.executor.Execute(
 		"defenseclaw",

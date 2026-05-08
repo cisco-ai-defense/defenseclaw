@@ -2873,6 +2873,167 @@ def setup_notifications(
         )
 
 
+# ``setup notifications`` is already a one-shot command (action is a
+# positional argument, not a subgroup) so we can't attach
+# ``set <key> <value>`` to it without breaking the existing
+# ``defenseclaw setup notifications on`` form. A flat sibling command
+# keeps the new surface discoverable (``setup --help`` lists it next
+# to ``notifications``) and avoids click's argument-vs-subcommand
+# parsing ambiguity.
+_NOTIFICATION_SLOTS: dict[str, tuple[str, str]] = {
+    # slot name (operator-typed)  ->  (object_path, attr)
+    # Categories (event types) live on the NotificationsConfig itself.
+    "block_enforced":     ("",        "block_enforced"),
+    "block_would_block":  ("",        "block_would_block"),
+    "hitl_approval":      ("",        "hitl_approval"),
+    # Sources live on the nested NotificationSourceFilter struct.
+    "sources.hook":       ("sources", "hook"),
+    "sources.guardrail":  ("sources", "guardrail"),
+    "sources.asset_policy": ("sources", "asset_policy"),
+    # Friendlier short forms for the source toggles. Keep both so
+    # ``--help`` callers and operators copying from ``status`` output
+    # land on a working invocation either way.
+    "hook":               ("sources", "hook"),
+    "guardrail":          ("sources", "guardrail"),
+    "asset_policy":       ("sources", "asset_policy"),
+}
+
+
+@setup.command("notifications-set")
+@click.argument(
+    "slot",
+    type=click.Choice(sorted(set(_NOTIFICATION_SLOTS.keys())), case_sensitive=False),
+)
+@click.argument(
+    "value",
+    type=click.Choice(("on", "off"), case_sensitive=False),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after the toggle. The notifier "
+        "dispatcher reads its filters at sidecar boot, so a flip "
+        "without restart leaves the running process on the previous "
+        "filter set."
+    ),
+)
+@pass_ctx
+def setup_notifications_set(
+    app: AppContext,
+    slot: str,
+    value: str,
+    restart: bool,
+) -> None:
+    """Toggle a single notifications category or source.
+
+    ``slot`` is one of the dotted paths below; ``value`` is ``on`` or
+    ``off``. The master switch (``notifications.enabled``) is left
+    alone — use ``defenseclaw setup notifications on/off`` for that.
+
+    \b
+    Categories (event types):
+      block_enforced       Real blocks (default: on).
+      block_would_block    Audit-mode blocks (default: on).
+      hitl_approval        Human-in-the-loop prompts (default: on).
+
+    \b
+    Sources (subsystem of origin):
+      sources.hook         Per-tool hooks (claude_code / codex / ...).
+      sources.guardrail    Guardrail verdicts.
+      sources.asset_policy Skill / MCP allow-list blocks.
+
+    \b
+    Examples:
+      defenseclaw setup notifications-set sources.hook off
+      defenseclaw setup notifications-set hitl_approval on --no-restart
+      defenseclaw setup notifications-set guardrail off  # short form
+    """
+    cfg = app.cfg
+    nc = cfg.notifications
+
+    obj_path, attr = _NOTIFICATION_SLOTS[slot.lower()]
+    target = nc if not obj_path else getattr(nc, obj_path)
+    current = bool(getattr(target, attr))
+    desired = value.lower() == "on"
+
+    if current == desired:
+        ux.subhead(
+            f"notifications.{slot} already {value.lower()}; nothing to change.",
+        )
+        return
+
+    setattr(target, attr, desired)
+    try:
+        cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise click.ClickException("config save failed") from exc
+
+    ux.ok(f"notifications.{slot} = {value.lower()}")
+    if not nc.enabled:
+        # The dispatcher checks the master switch first, so flipping a
+        # sub-toggle with the master OFF is harmless but invisible —
+        # surface that so operators don't think their change had no
+        # effect.
+        ux.warn(
+            "notifications.enabled is OFF — this toggle won't have any "
+            "user-visible effect until you run "
+            "`defenseclaw setup notifications on`.",
+        )
+
+    if restart:
+        ux.subhead("Restarting gateway so the dispatcher picks up the new filter…")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        ux.subhead(
+            "Skipped restart (--no-restart). Run `defenseclaw-gateway "
+            "restart` when ready.",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-notifications-set",
+            "config",
+            f"slot={slot} value={value.lower()}",
+        )
+
+
+# ``setup registry`` — discoverable shortcut that drops the operator
+# straight into the registry wizard. The full ``defenseclaw registry``
+# group remains the canonical surface for non-onboarding flows
+# (``add`` / ``edit`` / ``sync`` / ...); this wrapper exists so a
+# first-time operator working through ``defenseclaw setup --help``
+# doesn't have to know that registries live in their own top-level
+# group.
+@setup.command("registry")
+@click.pass_context
+def setup_registry(ctx: click.Context) -> None:
+    """Register an external skill / MCP catalog (interactive wizard).
+
+    Wraps ``defenseclaw registry wizard`` so first-run operators
+    discover the registry feature inside ``defenseclaw setup --help``.
+    For non-interactive usage and the full subcommand surface
+    (``add`` / ``edit`` / ``sync`` / ``approve`` / ``reject`` /
+    ``test`` / ``list`` / ``show`` / ``remove`` / ``require``), use
+    the top-level ``defenseclaw registry`` group directly.
+    """
+    # Lazy import to avoid pulling the registry HTTP / YAML deps into
+    # setup commands that don't need them, and to dodge a potential
+    # circular import (cmd_registry imports config -> ... -> setup
+    # in some lint configurations).
+    from defenseclaw.commands.cmd_registry import wizard_cmd
+
+    return ctx.invoke(wizard_cmd)
+
+
 def execute_guardrail_setup(
     app: AppContext,
     *,

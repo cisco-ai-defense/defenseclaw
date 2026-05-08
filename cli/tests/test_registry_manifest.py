@@ -242,6 +242,86 @@ class TestFilterByContent(unittest.TestCase):
         self.assertEqual({e.name for e in both}, {"s1", "m1"})
 
 
+class TestYAMLAutoTypingCoercion(unittest.TestCase):
+    """PyYAML's safe_load auto-types unquoted scalars (datetime, int,
+    float). The manifest schema declares every text field as a string,
+    so the parser is supposed to coerce these losslessly back to their
+    surface form before validation kicks in. A regression here turns
+    perfectly valid catalog YAML into a hard failure on first sync.
+    """
+
+    def test_unquoted_datetime_generated_at_accepted(self):
+        body = (
+            "schema_version: 1\n"
+            "publisher: vendor\n"
+            "generated_at: 2026-05-07T20:00:00Z\n"
+            "entries: []\n"
+        )
+        m = parse_manifest(body)
+        self.assertEqual(m.generated_at, "2026-05-07T20:00:00Z")
+
+    def test_unquoted_date_generated_at_accepted(self):
+        body = (
+            "schema_version: 1\n"
+            "generated_at: 2026-05-07\n"
+            "entries: []\n"
+        )
+        m = parse_manifest(body)
+        self.assertEqual(m.generated_at, "2026-05-07")
+
+    def test_unquoted_float_version_accepted(self):
+        body = (
+            "schema_version: 1\n"
+            "entries:\n"
+            "  - name: hello\n"
+            "    type: skill\n"
+            "    source_url: clawhub://hello\n"
+            "    version: 1.0\n"
+        )
+        m = parse_manifest(body)
+        self.assertEqual(m.entries[0].version, "1.0")
+
+    def test_unquoted_int_version_accepted(self):
+        body = (
+            "schema_version: 1\n"
+            "entries:\n"
+            "  - name: hello\n"
+            "    type: skill\n"
+            "    source_url: clawhub://hello\n"
+            "    version: 7\n"
+        )
+        m = parse_manifest(body)
+        self.assertEqual(m.entries[0].version, "7")
+
+    def test_bool_in_string_field_still_rejected(self):
+        # A bare YAML ``yes`` should NOT silently become "True" in
+        # generated_at — the operator either typed something they
+        # didn't mean or the manifest is corrupted, and we want a
+        # loud error either way.
+        body = (
+            "schema_version: 1\n"
+            "generated_at: yes\n"
+            "entries: []\n"
+        )
+        with self.assertRaises(ManifestError) as cm:
+            parse_manifest(body)
+        self.assertIn("bool", str(cm.exception))
+
+    def test_dict_in_string_field_still_rejected(self):
+        # Nested mappings can't be coerced to a string in any
+        # lossless way; reject so the operator notices their
+        # publisher emitted a structural value where a scalar was
+        # expected.
+        body = (
+            "schema_version: 1\n"
+            "publisher:\n"
+            "  name: nested\n"
+            "entries: []\n"
+        )
+        with self.assertRaises(ManifestError):
+            parse_manifest(body)
+
+
 class TestKnownConstants(unittest.TestCase):
     """Regression: keep the KNOWN_* sets aligned with the schema."""
 
