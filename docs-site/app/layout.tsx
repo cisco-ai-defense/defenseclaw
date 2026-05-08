@@ -1,11 +1,9 @@
 import './global.css';
 import type { Metadata, Viewport } from 'next';
-import { Banner } from 'fumadocs-ui/components/banner';
 import { JetBrains_Mono, Inter } from 'next/font/google';
-import { site, siteUrl, defaultKeywords } from '@/lib/site';
+import { siteUrl, defaultKeywords, site } from '@/lib/site';
 import { OrganizationSchema, WebSiteSchema, SoftwareSourceCodeSchema } from '@/components/structured-data';
 import ClientRootProvider from '@/components/root-provider';
-import RepoStats from '@/components/repo-stats';
 
 // Self-hosted via next/font so we never hit a runtime CDN — both for
 // privacy (no third-party calls from end-user browsers) and to keep
@@ -109,43 +107,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             JSON index is emitted by app/api/search/route.ts and the
             client picks it up via the basePath-aware URL configured
             inside components/search.tsx. */}
-        <ClientRootProvider>
-          {/* Responsive banner content: on phones (<sm) we drop the
-              repo stats pills and the "Official Cisco project" prefix
-              so the banner stops clipping the owner/repo link. The
-              rainbow gradient already cues the "official" framing, so
-              the prose tag is decorative on tiny viewports. From sm+
-              the full lockup (prefix · owner/repo + stars + forks)
-              comes back in. */}
-          <Banner
-            id="cisco-official"
-            variant="rainbow"
-            changeLayout={false}
-            className="text-center text-xs font-medium tracking-wide"
-          >
-            <span className="hidden opacity-90 sm:inline">Official Cisco project</span>
-            <span aria-hidden className="mx-2 hidden opacity-60 sm:inline">
-              ·
-            </span>
-            <span>
-              <a
-                href={site.repo.url}
-                className="underline-offset-2 hover:underline"
-                rel="noreferrer"
-              >
-                {site.repo.owner}/{site.repo.name}
-              </a>
-            </span>
-            {/* Stars + forks fetched once at build time, refreshed on
-                mount in the browser. Hidden below sm to keep the
-                banner readable on 390px-class phones; renders nothing
-                if both API calls fail (graceful fallback). */}
-            <span className="hidden sm:inline">
-              <RepoStats />
-            </span>
-          </Banner>
-          {children}
-        </ClientRootProvider>
+        {/* The "Official Cisco project · cisco-ai-defense/defenseclaw"
+            rainbow banner used to live here. The same affordances —
+            repo link + star/fork counts + the official-Cisco framing
+            — already render in the navbar and on the landing-page
+            hero pill, so the banner was redundant chrome. Removing it
+            also reclaims ~28px of vertical space above the fold on
+            every page. */}
+        <ClientRootProvider>{children}</ClientRootProvider>
       </body>
     </html>
   );
