@@ -215,7 +215,7 @@ func TestHookLLMEventMetaFallsBackToLocalUser(t *testing.T) {
 		t.Skipf("os/user current unavailable: %v", err)
 	}
 
-	meta := hookLLMEventMeta("codex", "sess", "turn", "gpt-5.5", "openai", "", "codex", map[string]interface{}{})
+	meta := hookLLMEventMeta("codex", "sess", "turn", "gpt-5.5", "openai", "", "codex", "ide", map[string]interface{}{})
 	if meta.UserID == "" && meta.UserName == "" {
 		t.Fatalf("expected local user fallback, got user_id=%q user_name=%q", meta.UserID, meta.UserName)
 	}

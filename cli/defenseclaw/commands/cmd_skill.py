@@ -37,7 +37,7 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group()
 def skill() -> None:
-    """Manage OpenClaw skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
+    """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
 
 
 # ---------------------------------------------------------------------------
@@ -1034,7 +1034,7 @@ def _scan_from_url(app: AppContext, url: str, as_json: bool) -> None:
         _scan_from_http(app, url, as_json)
 
 
-def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
+def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
     """Download a skill from the npm registry, scan locally, then clean up.
 
     Skills are bundled inside the 'openclaw' npm package at skills/<name>/.
@@ -1043,8 +1043,11 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
     import shutil
     import tempfile
 
-    import requests
-
+    from defenseclaw.registries.adapters._base import (
+        MAX_SKILL_ARCHIVE_BYTES,
+        IngestError,
+        http_get,
+    )
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     name, _version = _parse_clawhub_uri(uri)
@@ -1057,9 +1060,13 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
 
     # Get the tarball URL from npm
     try:
-        meta = requests.get("https://registry.npmjs.org/openclaw/latest", timeout=30).json()
+        meta = json.loads(http_get(
+            "https://registry.npmjs.org/openclaw/latest",
+            accept="application/json",
+            timeout=30,
+        ))
         tarball_url = meta.get("dist", {}).get("tarball")
-    except requests.RequestException as exc:
+    except (IngestError, json.JSONDecodeError) as exc:
         click.echo(f"error: npm registry lookup failed: {exc}", err=True)
         raise SystemExit(1)
 
@@ -1072,13 +1079,17 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
 
     tmpdir = tempfile.mkdtemp(prefix="defenseclaw-clawhub-")
     try:
-        resp = requests.get(tarball_url, timeout=120, stream=True)
-        resp.raise_for_status()
+        raw = http_get(
+            tarball_url,
+            accept="application/gzip, application/x-tar, application/octet-stream, */*;q=0.5",
+            timeout=120,
+            max_bytes=MAX_SKILL_ARCHIVE_BYTES,
+            payload_label="skill archive",
+        )
 
         archive_path = os.path.join(tmpdir, "openclaw.tgz")
         with open(archive_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=65536):
-                f.write(chunk)
+            f.write(raw)
 
         if not as_json:
             size_mb = os.path.getsize(archive_path) / (1024 * 1024)
@@ -1122,8 +1133,9 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
             click.echo(result.to_json())
         else:
             _print_result(name, result)
+        return result
 
-    except requests.RequestException as exc:
+    except IngestError as exc:
         click.echo(f"error: download failed: {exc}", err=True)
         raise SystemExit(1)
     finally:
@@ -1132,29 +1144,65 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> None:
             click.echo("[scan] cleaned up temporary files")
 
 
-def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
+def _scan_from_http(
+    app: AppContext,
+    url: str,
+    as_json: bool,
+    *,
+    expected_sha256: str = "",
+    require_sha256: bool = False,
+    allow_private: bool = False,
+    auth_env: str = "",
+) -> Any:
     """Download a skill archive from HTTP(S), extract, scan, then clean up."""
+    import hashlib
     import shutil
     import tarfile
     import tempfile
     import zipfile
 
-    import requests
-
+    from defenseclaw.registries.adapters._base import (
+        MAX_SKILL_ARCHIVE_BYTES,
+        IngestError,
+        http_get,
+    )
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     if not as_json:
         click.echo(f"[scan] fetching skill from {url}")
 
+    expected_sha256 = expected_sha256.strip().lower()
+    if require_sha256 and not expected_sha256:
+        click.echo("error: sha256 is required for registry http(s) skill archives", err=True)
+        raise SystemExit(1)
+    if expected_sha256 and not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+        click.echo("error: sha256 must be 64 lowercase or uppercase hex chars", err=True)
+        raise SystemExit(1)
+
     tmpdir = tempfile.mkdtemp(prefix="defenseclaw-skill-")
     try:
-        resp = requests.get(url, timeout=60, stream=True)
-        resp.raise_for_status()
+        raw = http_get(
+            url,
+            auth_env=auth_env,
+            accept="application/gzip, application/x-tar, application/zip, application/octet-stream, */*;q=0.5",
+            allow_private=allow_private,
+            timeout=60,
+            max_bytes=MAX_SKILL_ARCHIVE_BYTES,
+            payload_label="skill archive",
+        )
+        if expected_sha256:
+            actual_sha256 = hashlib.sha256(raw).hexdigest()
+            if actual_sha256 != expected_sha256:
+                click.echo(
+                    "error: sha256 mismatch for skill archive "
+                    f"(expected {expected_sha256}, got {actual_sha256})",
+                    err=True,
+                )
+                raise SystemExit(1)
 
         download_path = os.path.join(tmpdir, "download")
         with open(download_path, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
-                f.write(chunk)
+            f.write(raw)
 
         extract_dir = os.path.join(tmpdir, "skill")
         os.makedirs(extract_dir, exist_ok=True)
@@ -1213,8 +1261,9 @@ def _scan_from_http(app: AppContext, url: str, as_json: bool) -> None:
             click.echo(result.to_json())
         else:
             _print_result(name, result)
+        return result
 
-    except requests.RequestException as exc:
+    except IngestError as exc:
         click.echo(f"error: download failed: {exc}", err=True)
         raise SystemExit(1)
     finally:

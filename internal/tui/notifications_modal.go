@@ -87,6 +87,27 @@ func (n *NotificationsToggleModal) DesiredAction() string {
 	return "on"
 }
 
+func (n *NotificationsToggleModal) ClickAction(x, y int) string {
+	if !n.visible {
+		return ""
+	}
+	view := n.View()
+	rect := newClickBox("notifications", 0, 0, lipgloss.Width(view), lipgloss.Height(view))
+	if !rect.contains(x, y) {
+		return "cancel"
+	}
+	row := lipgloss.Height(view) - 3
+	if y != row {
+		return ""
+	}
+	confirm := newClickBox("confirm", 3, row, 17, 1)
+	cancel := newClickBox("cancel", 22, row, 14, 1)
+	if id, ok := hitClickBox([]clickBox{confirm, cancel}, x, y); ok {
+		return id
+	}
+	return ""
+}
+
 // View renders the modal box. Layout intentionally parallels
 // RedactionToggleModal so an operator who's seen one immediately
 // understands the other.

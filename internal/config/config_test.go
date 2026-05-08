@@ -124,6 +124,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.DataDir == "" {
 		t.Error("DataDir is empty")
 	}
+	if got, want := cfg.AIDiscovery.ConfidencePolicyPath, filepath.Join(cfg.DataDir, "confidence.yaml"); got != want {
+		t.Errorf("ai_discovery.confidence_policy_path = %q, want %q", got, want)
+	}
 	if cfg.Claw.Mode != ClawOpenClaw {
 		t.Errorf("expected mode %q, got %q", ClawOpenClaw, cfg.Claw.Mode)
 	}
@@ -337,6 +340,10 @@ func TestValidateDeploymentMode_Valid(t *testing.T) {
 		string(DeploymentModeSandboxed),
 		string(DeploymentModeServer),
 		string(DeploymentModeSaaS),
+		"managed",
+		"standalone",
+		"ci",
+		"edge",
 	} {
 		t.Run(mode, func(t *testing.T) {
 			if err := validateDeploymentMode(mode); err != nil {
@@ -347,7 +354,7 @@ func TestValidateDeploymentMode_Valid(t *testing.T) {
 }
 
 func TestValidateDeploymentMode_Invalid(t *testing.T) {
-	if err := validateDeploymentMode("managed"); err == nil {
+	if err := validateDeploymentMode("freeform"); err == nil {
 		t.Fatal("expected validateDeploymentMode to reject free-form value")
 	}
 }
@@ -1268,9 +1275,8 @@ func TestConfig_Save_BumpsProvenance(t *testing.T) {
 	// Mutate the config and save again; both hash and generation
 	// must advance. Pinning this guards the "ContentHash stable
 	// across identical saves, fresh per mutation" invariant.
-	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw
-	// connector — kept aligned with the canonical four-connector
-	// enum in schemas/otel/resource.schema.json so this test
+	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw connector.
+	// Keep it aligned with schemas/otel/resource.schema.json so this test
 	// doesn't bake a stale legacy mode string.
 	cfg.Claw.Mode = "zeptoclaw"
 	if err := cfg.Save(); err != nil {

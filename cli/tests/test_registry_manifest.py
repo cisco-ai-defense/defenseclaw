@@ -335,9 +335,25 @@ class TestKnownConstants(unittest.TestCase):
         )
 
     def test_known_connectors_match_schema(self):
+        # Manifest-side allow-list must include every connector the
+        # registry/schema layer can route entries into. Hook-only
+        # connectors (cursor, windsurf, geminicli, copilot, hermes)
+        # are first-class targets in the v1 schema and have shipped
+        # ``connector:`` values in published manifests, so they must
+        # be part of this set.
         self.assertEqual(
             KNOWN_CONNECTORS,
-            {"openclaw", "claudecode", "codex", "zeptoclaw"},
+            {
+                "openclaw",
+                "claudecode",
+                "codex",
+                "zeptoclaw",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+            },
         )
 
 

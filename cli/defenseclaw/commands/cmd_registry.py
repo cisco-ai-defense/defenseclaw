@@ -802,7 +802,7 @@ def sync_cmd(  # noqa: PLR0913
     cfg = _require_cfg(app)
 
     callback: ScanCallback | None = (
-        _make_scan_callback(app) if scan else None
+        _make_scan_callback(app, allow_private=allow_private) if scan else None
     )
 
     if sync_all_flag:
@@ -874,12 +874,15 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
 # Lazy scanner factory — keeps the heavy SDK import off the hot path
 # of `registry list` / `registry show`. Returns None when scanner SDKs
 # aren't installed so the operator still gets a metadata-only sync.
-def _make_scan_callback(app: AppContext) -> ScanCallback:
+_HASH_REQUIRED_SKILL_SOURCE_KINDS = {"http_yaml", "http_json", "git", "file"}
+
+
+def _make_scan_callback(app: AppContext, *, allow_private: bool = False) -> ScanCallback:
     cfg = _require_cfg(app)
 
     def _scan(source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
         if entry.is_skill():
-            return _run_skill_scan(app, cfg, source, entry)
+            return _run_skill_scan(app, cfg, source, entry, allow_private=allow_private)
         if entry.is_mcp():
             return _run_mcp_scan(app, cfg, source, entry)
         return None
@@ -887,14 +890,22 @@ def _make_scan_callback(app: AppContext) -> ScanCallback:
     return _scan
 
 
-def _run_skill_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]
+def _run_skill_scan(  # type: ignore[no-untyped-def]
+    app: AppContext,
+    cfg: Config,
+    source: RegistrySource,
+    entry: ManifestEntry,
+    *,
+    allow_private: bool = False,
+):
     """Best-effort skill scan via the SDK wrapper.
 
     The full clawhub:// / https:// download flow is delegated to the
     existing helpers in :mod:`cmd_skill` so we don't duplicate the
-    archive-extraction logic. Failures fall through to a None return,
-    which leaves the entry at status="pending" — operators can then
-    use ``registry approve`` to promote it manually.
+    archive-extraction logic. Missing scanner extras fall through to
+    ``None`` (metadata-only / pending); hard download, hash, or scan
+    failures raise so the sync report marks the entry ``error`` rather
+    than silently leaving an unsafe asset eligible for manual confusion.
     """
     # Optional dep: the skill scanner SDK ships separately from the
     # CLI so on a stripped install (operator without the scanner
@@ -916,7 +927,16 @@ def _run_skill_scan(app: AppContext, cfg: Config, source: RegistrySource, entry:
     if target.startswith("clawhub://"):
         return _scan_skill_via_clawhub(cmd_skill, app, target)
     if target.startswith(("http://", "https://")):
-        return _scan_skill_via_http(cmd_skill, app, target)
+        require_sha256 = source.kind in _HASH_REQUIRED_SKILL_SOURCE_KINDS
+        return _scan_skill_via_http(
+            cmd_skill,
+            app,
+            target,
+            expected_sha256=entry.sha256,
+            require_sha256=require_sha256,
+            allow_private=allow_private,
+            auth_env=source.auth_env,
+        )
     return None
 
 
@@ -925,22 +945,41 @@ def _scan_skill_via_clawhub(cmd_skill_module, app: AppContext, uri: str):  # typ
     # lockstep. The helper exits the process on hard errors; we wrap
     # that in a try so a single failure doesn't kill `registry sync`.
     try:
-        cmd_skill_module._scan_from_clawhub(app, uri, as_json=True)  # type: ignore[attr-defined]
-    except SystemExit:
-        return None
-    except Exception:  # noqa: BLE001 - keep the loop alive
-        return None
-    return None
+        return cmd_skill_module._scan_from_clawhub(app, uri, as_json=True)  # type: ignore[attr-defined]
+    except SystemExit as exc:
+        raise RuntimeError(f"skill scan failed for {uri}") from exc
+    except Exception as exc:  # noqa: BLE001 - keep the loop alive
+        raise RuntimeError(f"skill scan failed for {uri}: {exc}") from exc
 
 
-def _scan_skill_via_http(cmd_skill_module, app: AppContext, url: str):  # type: ignore[no-untyped-def]
+def _scan_skill_via_http(  # type: ignore[no-untyped-def]
+    cmd_skill_module,
+    app: AppContext,
+    url: str,
+    *,
+    expected_sha256: str = "",
+    require_sha256: bool = False,
+    allow_private: bool = False,
+    auth_env: str = "",
+):
+    if require_sha256 and not expected_sha256:
+        raise RuntimeError(
+            "sha256 is required for registry-managed http(s) skill source_url"
+        )
     try:
-        cmd_skill_module._scan_from_http(app, url, as_json=True)  # type: ignore[attr-defined]
-    except SystemExit:
-        return None
-    except Exception:  # noqa: BLE001
-        return None
-    return None
+        return cmd_skill_module._scan_from_http(  # type: ignore[attr-defined]
+            app,
+            url,
+            as_json=True,
+            expected_sha256=expected_sha256,
+            require_sha256=require_sha256,
+            allow_private=allow_private,
+            auth_env=auth_env,
+        )
+    except SystemExit as exc:
+        raise RuntimeError(f"skill scan failed for {url}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"skill scan failed for {url}: {exc}") from exc
 
 
 def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: ManifestEntry):  # type: ignore[no-untyped-def]

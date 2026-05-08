@@ -70,7 +70,17 @@ HTTP_URL_RE = re.compile(r"^https?://")
 SHA256_RE = re.compile(r"^[a-fA-F0-9]{64}$")
 
 KNOWN_TRANSPORTS = {"stdio", "http", "sse", "streamable-http", "websocket"}
-KNOWN_CONNECTORS = {"openclaw", "claudecode", "codex", "zeptoclaw"}
+KNOWN_CONNECTORS = {
+    "openclaw",
+    "claudecode",
+    "codex",
+    "zeptoclaw",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+}
 KNOWN_TYPES = {"skill", "mcp"}
 
 MAX_ENTRIES = 10000
@@ -287,6 +297,21 @@ def _build_manifest(data: Any) -> Manifest:
     _maybe_jsonschema_validate(manifest.to_dict())
 
     return manifest
+
+
+def validate_entry(raw: dict[str, Any], default_connector: str = "") -> ManifestEntry:
+    """Validate *raw* (a dict) and return a clean :class:`ManifestEntry`.
+
+    Public wrapper around the same checks :func:`_build_manifest`
+    applies per-entry. Adapters that synthesize entries from a
+    third-party API response (smithery.ai, clawhub, etc.) should run
+    every candidate through this function before appending it to the
+    manifest so the same character-class / enum / length / required-
+    field invariants apply uniformly to every ingest path.
+
+    Raises :class:`ManifestError` on any policy violation.
+    """
+    return _build_entry(raw, default_connector)
 
 
 def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:

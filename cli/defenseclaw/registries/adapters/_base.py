@@ -28,12 +28,18 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 from urllib.parse import urljoin, urlparse
 
 import requests
+from urllib3.util import connection as _urllib3_connection
 
 from defenseclaw.config import RegistrySource
-from defenseclaw.registries.ssrf import Resolver, SSRFError, guard_url
+from defenseclaw.registries.ssrf import (
+    Resolver,
+    SSRFError,
+    resolve_and_pin,
+)
 
 MAX_MANIFEST_BYTES = 8 * 1024 * 1024
 """Hard cap on a fetched manifest payload (8 MiB).
@@ -44,6 +50,9 @@ budget. Anything larger almost certainly indicates an attack
 runaway publisher; we'd rather refuse and force a config fix than
 balloon the operator's RAM during sync.
 """
+
+MAX_SKILL_ARCHIVE_BYTES = 128 * 1024 * 1024
+"""Hard cap on a fetched skill archive payload (128 MiB)."""
 
 DEFAULT_TIMEOUT = 30.0
 """Per-request timeout (seconds) for adapter HTTP calls."""
@@ -64,6 +73,8 @@ def http_get(
     accept: str = "application/json, application/yaml, text/yaml, text/plain;q=0.9, */*;q=0.5",
     allow_private: bool = False,
     timeout: float = DEFAULT_TIMEOUT,
+    max_bytes: int = MAX_MANIFEST_BYTES,
+    payload_label: str = "manifest",
     resolver: Resolver | None = None,
 ) -> bytes:
     """Fetch *url* with the SSRF / size / redirect guards applied.
@@ -73,7 +84,7 @@ def http_get(
     * the URL fails :func:`defenseclaw.registries.ssrf.guard_url`;
     * a redirect points to a host that fails the SSRF guard (we
       validate every hop, not just the original URL);
-    * the response body exceeds :data:`MAX_MANIFEST_BYTES`;
+    * the response body exceeds ``max_bytes``;
     * the underlying :mod:`requests` call raises.
 
     The optional ``resolver`` is plumbed through to :func:`guard_url`
@@ -82,7 +93,9 @@ def http_get(
     :func:`socket.getaddrinfo`.
     """
     try:
-        guard_url(url, allow_private=allow_private, resolver=resolver)
+        ip, host, port = resolve_and_pin(
+            url, allow_private=allow_private, resolver=resolver
+        )
     except SSRFError as exc:
         raise IngestError(str(exc)) from exc
 
@@ -92,8 +105,9 @@ def http_get(
     if auth:
         request_headers["Authorization"] = auth
 
+    pin = _PinnedConnect(host, port, ip)
     try:
-        with requests.get(
+        with pin, requests.get(
             url,
             headers=request_headers,
             timeout=timeout,
@@ -115,7 +129,7 @@ def http_get(
                     # Relative redirect — resolve against the previous URL.
                     location = urljoin(current_url, location)
                 try:
-                    guard_url(
+                    next_ip, next_host, next_port = resolve_and_pin(
                         location,
                         allow_private=allow_private,
                         resolver=resolver,
@@ -134,6 +148,12 @@ def http_get(
                 if auth and _same_origin(current_url, location):
                     next_headers["Authorization"] = auth
                 resp.close()
+                # Re-pin the next hop without releasing the lock so a
+                # concurrent adapter can never sneak its own pin into
+                # the window between hops. The Authorization header is
+                # already correctly stripped above for cross-origin
+                # hops via _same_origin().
+                pin.repin(next_host, next_port, next_ip)
                 resp = requests.get(  # noqa: PLW2901  - intentional reassign
                     location,
                     headers=next_headers,
@@ -155,9 +175,9 @@ def http_get(
             cl = resp.headers.get("Content-Length")
             if cl:
                 try:
-                    if int(cl) > MAX_MANIFEST_BYTES:
+                    if int(cl) > max_bytes:
                         raise IngestError(
-                            f"manifest is {cl} bytes (max {MAX_MANIFEST_BYTES})"
+                            f"{payload_label} is {cl} bytes (max {max_bytes})"
                         )
                 except ValueError:
                     pass
@@ -165,9 +185,9 @@ def http_get(
             buf = bytearray()
             for chunk in resp.iter_content(chunk_size=65536):
                 buf.extend(chunk)
-                if len(buf) > MAX_MANIFEST_BYTES:
+                if len(buf) > max_bytes:
                     raise IngestError(
-                        f"manifest exceeds {MAX_MANIFEST_BYTES} bytes"
+                        f"{payload_label} exceeds {max_bytes} bytes"
                     )
             return bytes(buf)
     except requests.RequestException as exc:
@@ -236,3 +256,117 @@ def normalize_url(source: RegistrySource) -> str:
     newlines that break the SSRF guard's host extraction.
     """
     return (source.url or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# DNS-rebind defense — pin urllib3's connect to a vetted IP literal
+# ---------------------------------------------------------------------------
+#
+# guard_url() resolves the hostname once via getaddrinfo to validate
+# that no IP in the answer set is in the loopback / private / reserved
+# ranges. urllib3 then resolves the same hostname AGAIN when opening
+# the TCP connection — a malicious low-TTL DNS answer can return a
+# safe IP on the first lookup and an unsafe IP on the second, defeating
+# the SSRF guard entirely.
+#
+# _PinnedConnect monkeypatches ``urllib3.util.connection.create_connection``
+# inside a ``with`` block to return a connection to a fixed, pre-vetted
+# IP whenever the requested host matches the original URL host. The
+# Host: header and TLS SNI continue to carry the original hostname so
+# virtual hosting / certificate validation still work. Outside the
+# block the original create_connection is restored.
+#
+# This is intentionally per-call rather than process-wide so concurrent
+# adapters (which never share threads inside a single fetch) don't
+# clobber each other's pins. Each fetch holds the lock for the
+# duration of its connect() and releases it as soon as the request is
+# done.
+
+import threading  # noqa: E402  (needed only for _PinnedConnect)
+
+_PIN_LOCK = threading.Lock()
+
+
+class _PinnedConnect:
+    """Context manager that pins urllib3 connect() to a vetted IP.
+
+    Replaces ``urllib3.util.connection.create_connection`` while the
+    block is active. Lookups for the pinned host go to the pinned IP
+    and port; lookups for any other host (which can happen if a
+    library quietly side-channels another HTTP call during the
+    request) raise ``SSRFError`` so a request to e.g. an OCSP
+    responder doesn't escape the guard. The original function is
+    always restored on exit, even on exception.
+    """
+
+    def __init__(self, host: str, port: int, ip: str) -> None:
+        self._host = host.lower()
+        self._port = int(port)
+        self._ip = ip
+        self._original = None
+
+    def repin(self, host: str, port: int, ip: str) -> None:
+        """Update the pinned target without releasing the lock.
+
+        Used when following a redirect: the same fetch holds the
+        connect-pin lock for the duration of every hop; only the
+        target IP / host / port change. Calling ``repin`` outside an
+        active ``with`` block is a programming error and is detected
+        by the assertion below — a release-then-acquire sequence is
+        intentionally avoided so a concurrent adapter can never sneak
+        a different pin into the window between hops.
+        """
+        assert self._original is not None, (
+            "_PinnedConnect.repin() called outside an active context"
+        )
+        self._host = host.lower()
+        self._port = int(port)
+        self._ip = ip
+
+    def __enter__(self) -> _PinnedConnect:
+        _PIN_LOCK.acquire()
+        self._original = _urllib3_connection.create_connection
+
+        def _pinned_create_connection(
+            address, *args, **kwargs
+        ):  # type: ignore[no-untyped-def]
+            asked_host, asked_port = address
+            if (
+                asked_host
+                and asked_host.lower() == self._host
+                and int(asked_port) == self._port
+            ):
+                # Direct connect to the vetted IP. We pass the IP as
+                # the host so getaddrinfo is not invoked a second
+                # time. requests still sends Host: <hostname> and
+                # uses <hostname> for TLS SNI because urllib3 carries
+                # those independently of the connect address.
+                return self._original((self._ip, asked_port), *args, **kwargs)
+            # Any other destination during this fetch is suspicious —
+            # an HTTP layer should not be making side requests. Refuse.
+            raise SSRFError(
+                f"unexpected outbound connect to {asked_host}:{asked_port} "
+                f"during pinned fetch of {self._host}:{self._port}"
+            )
+
+        _urllib3_connection.create_connection = _pinned_create_connection
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            if self._original is not None:
+                _urllib3_connection.create_connection = self._original
+                self._original = None
+        finally:
+            try:
+                _PIN_LOCK.release()
+            except RuntimeError:
+                # Lock already released. Safe to ignore — the next
+                # acquire will block correctly.
+                pass
+
+
+# Silence unused-import warnings: socket is referenced only via
+# urllib3's connect path under our pin, but keeping it imported
+# documents the dependency surface for future readers.
+_ = socket

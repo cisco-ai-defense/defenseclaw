@@ -47,7 +47,7 @@ type FirstRunPanel struct {
 
 func NewFirstRunPanel(theme *Theme, active bool) FirstRunPanel {
 	fields := []firstRunField{
-		{Label: "Connector", Kind: "choice", Value: "codex", Options: []string{"codex", "claudecode", "zeptoclaw", "openclaw"},
+		{Label: "Connector", Kind: "choice", Value: "codex", Options: []string{"codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot"},
 			Hint: "Agent framework to protect. OpenClaw is optional, not assumed."},
 		{Label: "Profile", Kind: "choice", Value: "observe", Options: []string{"observe", "action"},
 			Hint: "observe=detect/log; action=block."},

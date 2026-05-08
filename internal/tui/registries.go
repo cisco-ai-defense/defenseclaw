@@ -244,6 +244,33 @@ func (p *RegistriesPanel) CurrentTab() int { return p.tab }
 func (p *RegistriesPanel) Cursor() int   { return p.cursor }
 func (p *RegistriesPanel) RowCount() int { return p.rowCount() }
 
+func (p *RegistriesPanel) SetCursor(i int) {
+	if i < 0 {
+		i = 0
+	}
+	max := p.rowCount() - 1
+	if i > max {
+		i = max
+	}
+	if i < 0 {
+		i = 0
+	}
+	p.cursor = i
+}
+
+func (p *RegistriesPanel) TabHitTest(x int) int {
+	cursor := 0
+	for i := 0; i < registriesTabCount; i++ {
+		label := fmt.Sprintf("[%d] %s", i+1, registriesTabNames[i])
+		w := lipgloss.Width(label)
+		if x >= cursor && x < cursor+w {
+			return i
+		}
+		cursor += w + 2
+	}
+	return -1
+}
+
 // SelectedSource returns the highlighted source on the Sources tab,
 // or nil if the tab/cursor combination doesn't address a source.
 func (p *RegistriesPanel) SelectedSource() *config.RegistrySource {

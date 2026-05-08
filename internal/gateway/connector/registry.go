@@ -169,6 +169,11 @@ func NewDefaultRegistry() *Registry {
 	r.RegisterBuiltin(NewZeptoClawConnector())
 	r.RegisterBuiltin(NewClaudeCodeConnector())
 	r.RegisterBuiltin(NewCodexConnector())
+	r.RegisterBuiltin(NewHermesConnector())
+	r.RegisterBuiltin(NewCursorConnector())
+	r.RegisterBuiltin(NewWindsurfConnector())
+	r.RegisterBuiltin(NewGeminiCLIConnector())
+	r.RegisterBuiltin(NewCopilotConnector())
 	return r
 }
 

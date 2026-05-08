@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v3
 # DefenseClaw Claude Code hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/claude-code/hook endpoint. Claude Code pipes
 # the structured JSON event to stdin and reads the response from stdout.
@@ -30,11 +30,18 @@ FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
+DEFENSECLAW_HOOK_CONNECTOR="claudecode"
+DEFENSECLAW_HOOK_NAME="claude-code-hook"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+
 if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
 fi
 
-PAYLOAD=$(cat)
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: claudecode hook refusing oversized payload" >&2
+  exit 0
+}
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked

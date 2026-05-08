@@ -70,6 +70,20 @@ func (p *Provider) setSpanResourceContext(span trace.Span) {
 	}
 }
 
+// SetSpanResourceContext mirrors the deployment / device join keys
+// from the process resource onto a span. Public wrapper around
+// setSpanResourceContext so callers outside this package (notably
+// internal/inventory/ai_discovery, which spans its own scan but does
+// not go through StartGuardrail*Span) can keep parity with guardrail
+// span attributes. Nil receiver / nil span are safe no-ops so call
+// sites do not need to guard each invocation.
+func (p *Provider) SetSpanResourceContext(span trace.Span) {
+	if p == nil {
+		return
+	}
+	p.setSpanResourceContext(span)
+}
+
 // EmitStartupSpan creates a short-lived span to verify the trace export pipeline
 // is working. Called once at sidecar startup.
 func (p *Provider) EmitStartupSpan(ctx context.Context) {

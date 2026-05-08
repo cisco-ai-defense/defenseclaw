@@ -1,6 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.4.0
+VERSION     := 0.5.0
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
@@ -15,9 +15,11 @@ DIST_DIR    := dist
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
+        connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync \
         set-version \
+        _bundle-data \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -107,30 +109,43 @@ path:
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
 quickstart:
-	@connector="$${CONNECTOR:-codex}"; \
-	profile="$${PROFILE:-observe}"; \
+	@profile="$${PROFILE:-observe}"; \
 	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
 		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
-	elif [ "$$connector" = "none" ]; then \
+	elif [ "$${CONNECTOR:-}" = "none" ]; then \
 		echo "CONNECTOR=none set — skipping first-run setup"; \
 		echo "  Run later: defenseclaw init"; \
-	elif [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
-		"$(INSTALL_DIR)/defenseclaw" init --non-interactive --yes \
-			--connector "$$connector" \
-			--profile "$$profile" \
-			--scanner-mode "$${SCANNER_MODE:-local}" \
-			--no-start-gateway --verify \
-			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
-	elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
-		"$(VENV)/bin/defenseclaw" init --non-interactive --yes \
-			--connector "$$connector" \
-			--profile "$$profile" \
-			--scanner-mode "$${SCANNER_MODE:-local}" \
-			--no-start-gateway --verify \
-			|| echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 	else \
-		echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
-		exit 1; \
+		if [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
+			dc_bin="$(INSTALL_DIR)/defenseclaw"; \
+		elif [ -x "$(VENV)/bin/defenseclaw" ]; then \
+			dc_bin="$(VENV)/bin/defenseclaw"; \
+		else \
+			echo "  Could not locate the defenseclaw binary — run 'make install' first."; \
+			exit 1; \
+		fi; \
+		if [ -n "$${CONNECTOR:-}" ]; then \
+			if ! "$$dc_bin" init --non-interactive --yes \
+				--connector "$${CONNECTOR}" \
+				--profile "$$profile" \
+				--scanner-mode "$${SCANNER_MODE:-local}" \
+				--no-start-gateway --verify; then \
+				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+			fi; \
+		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
+			if ! "$$dc_bin" init \
+				--scanner-mode "$${SCANNER_MODE:-local}" \
+				--no-start-gateway --verify; then \
+				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+			fi; \
+		else \
+			if ! "$$dc_bin" init --non-interactive --yes \
+				--profile "$$profile" \
+				--scanner-mode "$${SCANNER_MODE:-local}" \
+				--no-start-gateway --verify; then \
+				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+			fi; \
+		fi; \
 	fi
 
 # Post-install interactive prompt for DEFENSECLAW_LLM_KEY + llm.model.
@@ -232,7 +247,20 @@ maybe-openclaw-plugin-install:
 dev-install:
 	@./scripts/install-dev.sh
 
-pycli:
+# pycli depends on _bundle-data so every editable install (and the
+# downstream `make all` / `make build`) sees the latest bundled
+# assets — Grafana dashboards, splunk_local_bridge, guardrail
+# policy bundles, codeguard skills. The runtime resolves these via
+# importlib.resources.files("defenseclaw") / "_data", which in
+# editable mode points straight at cli/defenseclaw/_data/. Without
+# the dependency, edits under bundles/local_observability_stack/ or
+# policies/guardrail/ silently lag behind every wheel-install
+# until someone remembers to run `make dist-cli` (the only other
+# call site for _bundle-data). That stale-mirror failure mode bit
+# us with the v7 connector-detail dashboard — fixed at the source
+# but invisible until a manual cp -r. Keeping the sync attached
+# here makes that class of bug structurally impossible.
+pycli: _bundle-data
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv venv $(VENV) --python 3.12 --clear
@@ -452,6 +480,30 @@ tui-test:
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
 
+connector-matrix-test: go-connector-matrix-test py-connector-matrix-test
+
+go-connector-matrix-test: sync-openclaw-extension
+	go test -count=1 \
+		./internal/cli \
+		./internal/config \
+		./internal/gateway \
+		./internal/gateway/connector \
+		./internal/tui \
+		./test/e2e \
+		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
+
+py-connector-matrix-test:
+	$(VENV)/bin/python -m pytest -q \
+		cli/tests/test_agent_discovery.py \
+		cli/tests/test_cmd_guardrail_matrix.py \
+		cli/tests/test_cmd_init.py \
+		cli/tests/test_cmd_setup_mode.py \
+		cli/tests/test_codeguard_opt_in.py \
+		cli/tests/test_connector_mcp_writers.py \
+		cli/tests/test_connector_paths.py \
+		cli/tests/test_install_smoke.py \
+		cli/tests/test_scan_ux_connector_matrix.py
+
 ts-test:
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
 	cd $(PLUGIN_DIR) && \
@@ -497,11 +549,16 @@ check-schemas:
 # the two sides — e.g. a new provider added to providers.json but
 # never exercised — would be the exact "silent bypass" failure mode
 # Layer 4 of the robust-guardrail plan is designed to surface.
-check-provider-coverage:
+check-provider-coverage: sync-openclaw-extension
 	@echo "==> provider coverage (Go)"
 	@go test ./internal/gateway -run TestProviderCoverageCorpus -count=1
 	@echo "==> provider coverage (TS)"
-	@cd extensions/defenseclaw && npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
+	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
+	cd $(PLUGIN_DIR) && \
+		if [ ! -x node_modules/.bin/vitest ]; then \
+			NODE_ENV=development npm ci --include=dev; \
+		fi && \
+		npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
 
 # ---------------------------------------------------------------------------
@@ -574,11 +631,11 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
+	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
+	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
-	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
-	@rm -rf cli/defenseclaw/_data/local_observability_stack
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
@@ -590,8 +647,16 @@ _bundle-data:
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
-	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/
-	cp -r bundles/local_observability_stack cli/defenseclaw/_data/
+	@# splunk_local_bridge and local_observability_stack are bind-mounted by Docker
+	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. We must
+	@# rsync-with-delete instead of `rm -rf && cp -r` because Docker Desktop on
+	@# macOS captures the directory inode at container start time; replacing the
+	@# inode silently empties the in-container view of the bind-mounted volume
+	@# until the container is recreated. rsync --inplace --delete keeps the inode
+	@# stable, mutates files in place, and prunes anything no longer in bundles/
+	@# so dashboard / dashcfg edits propagate without restarting the obs stack.
+	rsync -a --delete --inplace bundles/splunk_local_bridge/        cli/defenseclaw/_data/splunk_local_bridge/
+	rsync -a --delete --inplace bundles/local_observability_stack/  cli/defenseclaw/_data/local_observability_stack/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:

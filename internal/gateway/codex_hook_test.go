@@ -275,6 +275,7 @@ func TestEvaluateCodexHook_BlocksUnregisteredSkillPermissionRequest(t *testing.T
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.RegistryRequired = true
 	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -375,6 +376,7 @@ func TestEvaluateCodexHook_SkillDefaultDenyBlocksWithoutRegistry(t *testing.T) {
 	cfg.AssetPolicy.Enabled = true
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.Default = "deny"
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 

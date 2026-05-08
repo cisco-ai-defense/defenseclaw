@@ -94,6 +94,31 @@ def guard_url(
     The default fail-closed posture matches the project guidance for
     operator-provided URLs (codeguard-0-api-web-services).
     """
+    resolve_and_pin(url, allow_private=allow_private, resolver=resolver)
+
+
+def resolve_and_pin(
+    url: str,
+    *,
+    allow_private: bool = False,
+    resolver: Resolver | None = None,
+) -> tuple[str, str, int]:
+    """Validate *url* and return ``(safe_ip, host, port)`` for pinning.
+
+    This is the rebind-safe extension of :func:`guard_url`. It performs
+    the same allow-list / scheme / IP-range checks, then returns the
+    first IP literal that survived the policy. Callers can then open
+    the underlying TCP connection against that exact IP (preserving
+    ``Host:`` and TLS SNI), eliminating the time-of-check vs.
+    time-of-use window that exists when :mod:`requests` is allowed to
+    resolve the hostname a second time.
+
+    The function intentionally returns a single IP rather than the full
+    resolved set. urllib3 uses the first address from
+    :func:`socket.getaddrinfo`; we mirror that to keep DNS-policy
+    behaviour predictable across adapter versions and to avoid leaking
+    DNS round-robin into deterministic test runs.
+    """
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     if scheme not in ALLOWED_SCHEMES:
@@ -112,6 +137,7 @@ def guard_url(
     if not addrs:
         raise SSRFError(f"could not resolve host {host!r}")
 
+    safe_ip: str | None = None
     for addr in addrs:
         try:
             ip = ipaddress.ip_address(addr)
@@ -132,6 +158,14 @@ def guard_url(
                 f"host {host!r} resolves to private address {addr} "
                 "(use --allow-private to opt in)"
             )
+        if safe_ip is None:
+            safe_ip = addr
+    if safe_ip is None:
+        # Every addrinfo entry was non-IP-literal junk (highly unusual,
+        # but possible with a custom resolver returning hostnames).
+        raise SSRFError(f"could not pin a usable IP for host {host!r}")
+    port = parsed.port or (443 if scheme == "https" else 80)
+    return safe_ip, host, port
 
 
 def guard_git_url(

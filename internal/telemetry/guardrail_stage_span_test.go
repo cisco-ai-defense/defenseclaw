@@ -47,7 +47,7 @@ func attachTraceTestResourceContext(t *testing.T, p *Provider) {
 	cfg := disabledCfg()
 	cfg.TenantID = "tenant-a"
 	cfg.WorkspaceID = "workspace-1"
-	cfg.DeploymentMode = "standalone"
+	cfg.DeploymentMode = "unmanaged_byod"
 	cfg.DiscoverySource = "registry"
 	p.res = buildResource(cfg, "1.0.0")
 }
@@ -58,7 +58,7 @@ func assertMirroredResourceJoinKeys(t *testing.T, attrs []attribute.KeyValue) {
 		"tenant.id":              "tenant-a",
 		"workspace.id":           "workspace-1",
 		"deployment.environment": "test",
-		"deployment.mode":        "standalone",
+		"deployment.mode":        "unmanaged_byod",
 		"discovery.source":       "registry",
 	} {
 		got, ok := attrByKey(attrs, key)

@@ -258,8 +258,9 @@ func TestHandleMCPsKey_B_RoutesToCLI(t *testing.T) {
 	m.mcps.cursor = 0
 	m.width = 120
 	m.height = 40
-	_, cmd := m.handleMCPsKey(pressKey("b"))
-	if cmd == nil {
+	newM, cmd := m.handleMCPsKey(pressKey("b"))
+	mm := newM.(Model)
+	if cmd == nil && !mm.commandPreview.Active {
 		t.Fatal("'b' must dispatch `defenseclaw mcp block`, not mutate in-memory state")
 	}
 }
@@ -276,7 +277,9 @@ func TestHandleMCPsKey_A_RoutesToCLI_ForAllStatuses(t *testing.T) {
 		m.mcps.filtered = m.mcps.items
 		m.width = 120
 		m.height = 40
-		if _, cmd := m.handleMCPsKey(pressKey("a")); cmd == nil {
+		newM, cmd := m.handleMCPsKey(pressKey("a"))
+		mm := newM.(Model)
+		if cmd == nil && !mm.commandPreview.Active {
 			t.Errorf("status=%s: 'a' must dispatch allow", status)
 		}
 	}
@@ -337,7 +340,8 @@ func TestExecuteActionMenuItem_MCPDispatch(t *testing.T) {
 		t.Fatal("MCPActions returned no actions")
 	}
 	for key := range seen {
-		if cmd := m.executeActionMenuItem(key); cmd == nil {
+		next, cmd := m.executeActionMenuItem(key)
+		if cmd == nil && !next.commandPreview.Active {
 			t.Errorf("executeActionMenuItem(%q) returned nil — MCPActions surfaces it but dispatch doesn't", key)
 		}
 	}

@@ -24,7 +24,12 @@ import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.registries.ssrf import SSRFError, guard_git_url, guard_url
+from defenseclaw.registries.ssrf import (
+    SSRFError,
+    guard_git_url,
+    guard_url,
+    resolve_and_pin,
+)
 
 
 def stub(addr_map):
@@ -141,6 +146,55 @@ class TestPrivateRanges(unittest.TestCase):
                 "https://zero.example/m",
                 resolver=stub({"zero.example": ["0.0.0.0"]}),
             )
+
+
+class TestResolveAndPin(unittest.TestCase):
+    """H-2: callers must be able to retrieve a vetted IP literal so the
+    underlying TCP connect can bypass the host-resolver and defeat
+    DNS-rebind. The IP we return must be the one that survived the
+    SSRF policy — never the second-resolution answer.
+    """
+
+    PUBLIC_IP = "8.8.8.8"
+
+    def test_returns_pinned_public_ip(self):
+        ip, host, port = resolve_and_pin(
+            "https://catalog.example.com/manifest.yaml",
+            resolver=stub({"catalog.example.com": [self.PUBLIC_IP]}),
+        )
+        self.assertEqual(ip, self.PUBLIC_IP)
+        self.assertEqual(host, "catalog.example.com")
+        self.assertEqual(port, 443)
+
+    def test_default_http_port(self):
+        _, _, port = resolve_and_pin(
+            "http://catalog.example.com/manifest.yaml",
+            resolver=stub({"catalog.example.com": [self.PUBLIC_IP]}),
+        )
+        self.assertEqual(port, 80)
+
+    def test_explicit_port_preserved(self):
+        _, _, port = resolve_and_pin(
+            "https://catalog.example.com:8443/manifest.yaml",
+            resolver=stub({"catalog.example.com": [self.PUBLIC_IP]}),
+        )
+        self.assertEqual(port, 8443)
+
+    def test_rejects_disallowed_ip_before_returning_pin(self):
+        with self.assertRaises(SSRFError):
+            resolve_and_pin(
+                "https://corp.example/m",
+                resolver=stub({"corp.example": ["10.0.0.1"]}),
+            )
+
+    def test_first_safe_ip_wins(self):
+        ip, _, _ = resolve_and_pin(
+            "https://multi.example/m",
+            resolver=stub({"multi.example": ["8.8.8.8", "1.1.1.1"]}),
+        )
+        # Stable mirror of urllib3.util.connection — always the first
+        # entry in the resolver's iteration order.
+        self.assertEqual(ip, "8.8.8.8")
 
 
 class TestGitGuard(unittest.TestCase):

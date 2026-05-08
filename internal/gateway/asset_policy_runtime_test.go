@@ -11,11 +11,35 @@
 package gateway
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+func enableSkillRuntimeDetection(cfg *config.Config) {
+	cfg.AssetPolicy.Skill.RuntimeDetection.Enabled = true
+}
+
+func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.Skill.Default = "deny"
+	api := &APIServer{scannerCfg: cfg}
+
+	decision, matched := api.evaluateRuntimeSkillAssetPolicy(context.Background(), "codex", "PermissionRequest", skillRuntimeProbe{
+		SkillName: "rogue-skill",
+		ToolName:  "Skill",
+		Surface:   "hook",
+		Matched:   true,
+	})
+
+	if matched {
+		t.Fatalf("matched=%v decision=%+v, want runtime detection disabled to skip skill policy", matched, decision)
+	}
+}
 
 // TestFirstMapStringRejectsNonStringValues pins the strict-string
 // semantics the helper relies on. Earlier versions used fmt.Sprint

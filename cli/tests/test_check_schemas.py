@@ -19,8 +19,8 @@ validation, audit drill-down) silently depend on:
    directory, so OTel schemas drifted unchecked for months.
 
 2. ``schemas/otel/resource.schema.json``'s ``defenseclaw.claw.mode``
-   enum stays aligned with the four canonical connector names emitted
-   by ``Connector.Name()`` in ``internal/gateway/connector``.
+   enum stays aligned with every built-in connector name emitted by
+   ``Connector.Name()`` in ``internal/gateway/connector``.
    Adding a connector and forgetting the schema means dashboards
    silently start dropping records — and the fresh-install empty
    placeholder ("") masks the failure on bench tests.
@@ -50,12 +50,22 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
         enum = set(
             doc["properties"]["defenseclaw.claw.mode"].get("enum", [])
         )
-        # Connector names from internal/gateway/connector/{openclaw,
-        # zeptoclaw, claudecode, codex}.go plus the empty placeholder
+        # Connector names from internal/gateway/connector plus the empty placeholder
         # for fresh installs that haven't picked a connector yet.
         self.assertEqual(
             enum,
-            {"openclaw", "zeptoclaw", "claudecode", "codex", ""},
+            {
+                "openclaw",
+                "zeptoclaw",
+                "claudecode",
+                "codex",
+                "hermes",
+                "cursor",
+                "windsurf",
+                "geminicli",
+                "copilot",
+                "",
+            },
             "drift in defenseclaw.claw.mode enum — update Connector.Name() "
             "and the schema together; downstream APM dashboards pivot on this",
         )

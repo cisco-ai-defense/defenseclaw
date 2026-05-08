@@ -23,8 +23,8 @@ import (
 
 // TestModePickerModal_DefaultsToCurrent verifies the contract that
 // re-opening the picker always highlights whatever connector is
-// currently active. This is what makes "press [m] then enter" a safe
-// no-op — the cursor lands on the row that won't change anything.
+// currently active. Pressing Enter there intentionally re-runs setup
+// for the active connector, which can refresh hooks/runtime files.
 func TestModePickerModal_DefaultsToCurrent(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -77,7 +77,17 @@ func TestModePickerModal_HotkeysCoverEveryConnector(t *testing.T) {
 		}
 		keys[ch.hotkey] = ch.wire
 	}
-	want := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	want := []string{
+		"openclaw",
+		"zeptoclaw",
+		"claudecode",
+		"codex",
+		"hermes",
+		"cursor",
+		"windsurf",
+		"geminicli",
+		"copilot",
+	}
 	for _, w := range want {
 		if !wires[w] {
 			t.Fatalf("missing modePickerChoices entry for %q", w)
@@ -124,30 +134,21 @@ func TestModePickerModal_CursorBoundsClamp(t *testing.T) {
 	}
 }
 
-// TestModePickerModal_PreviewMatchesInheritanceRules covers the
-// contract that the preview line correctly describes what the
-// matching `defenseclaw setup mode` invocation will do — so the TUI
-// doesn't lie about a switch's effects. We exercise all four
-// transition kinds.
-func TestModePickerModal_PreviewMatchesInheritanceRules(t *testing.T) {
+// TestModePickerModal_PreviewMatchesSetupAliases covers the contract
+// that the preview line describes the full setup alias that Overview
+// dispatches, not the command-palette-only `setup mode` fallback.
+func TestModePickerModal_PreviewMatchesSetupAliases(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		from, to string
 		wantSub  string
 	}{
-		// openclaw ↔ zeptoclaw → inheritance
-		{"openclaw", "zeptoclaw", "Inherits current guardrail config"},
-		{"zeptoclaw", "openclaw", "Inherits current guardrail config"},
-		// → codex/claudecode → observability-only
-		{"openclaw", "codex", "observability-only"},
-		{"zeptoclaw", "claudecode", "observability-only"},
-		{"codex", "claudecode", "observability-only"},
-		{"claudecode", "codex", "observability-only"},
-		// codex/claudecode → openclaw/zeptoclaw → observe mode (no auto-enforce)
-		{"codex", "openclaw", "observe mode (no auto-enforcement)"},
-		{"claudecode", "zeptoclaw", "observe mode (no auto-enforcement)"},
-		// no-op
-		{"openclaw", "openclaw", "Already active"},
+		{"openclaw", "zeptoclaw", "full guardrail-capable connector setup"},
+		{"codex", "openclaw", "full guardrail-capable connector setup"},
+		{"openclaw", "codex", "observability-only connector setup"},
+		{"zeptoclaw", "claudecode", "observability-only connector setup"},
+		{"hermes", "copilot", "observability-only connector setup"},
+		{"openclaw", "openclaw", "setup will be re-run"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -159,6 +160,41 @@ func TestModePickerModal_PreviewMatchesInheritanceRules(t *testing.T) {
 			if !strings.Contains(got, tc.wantSub) {
 				t.Fatalf("preview(%s→%s) = %q, expected substring %q",
 					tc.from, tc.to, got, tc.wantSub)
+			}
+		})
+	}
+}
+
+func TestConnectorSetupCommandForMode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		wire        string
+		wantArgs    []string
+		wantDisplay string
+	}{
+		{"openclaw", []string{"setup", "openclaw", "--yes"}, "setup openclaw"},
+		{"zeptoclaw", []string{"setup", "zeptoclaw", "--yes"}, "setup zeptoclaw"},
+		{"codex", []string{"setup", "codex", "--yes"}, "setup codex"},
+		{"claudecode", []string{"setup", "claude-code", "--yes"}, "setup claude-code"},
+		{"hermes", []string{"setup", "hermes", "--yes"}, "setup hermes"},
+		{"cursor", []string{"setup", "cursor", "--yes"}, "setup cursor"},
+		{"windsurf", []string{"setup", "windsurf", "--yes"}, "setup windsurf"},
+		{"geminicli", []string{"setup", "geminicli", "--yes"}, "setup geminicli"},
+		{"copilot", []string{"setup", "copilot", "--yes"}, "setup copilot"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.wire, func(t *testing.T) {
+			t.Parallel()
+			args, display := connectorSetupCommandForMode(tc.wire)
+			if strings.Join(args, " ") != strings.Join(tc.wantArgs, " ") {
+				t.Fatalf("connectorSetupCommandForMode(%q) args=%v want=%v", tc.wire, args, tc.wantArgs)
+			}
+			if display != tc.wantDisplay {
+				t.Fatalf("display=%q want=%q", display, tc.wantDisplay)
+			}
+			if strings.Contains(strings.Join(args, " "), "setup mode") {
+				t.Fatalf("Overview connector setup must not dispatch setup mode: %v", args)
 			}
 		})
 	}

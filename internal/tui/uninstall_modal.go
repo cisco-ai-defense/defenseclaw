@@ -118,6 +118,32 @@ func (m *UninstallModal) Selected() UninstallOption {
 	return uninstallChoices[m.cursor].option
 }
 
+func (m *UninstallModal) ClickAction(x, y int) string {
+	if !m.visible {
+		return ""
+	}
+	view := m.View()
+	rect := newClickBox("uninstall", 0, 0, lipgloss.Width(view), lipgloss.Height(view))
+	if !rect.contains(x, y) {
+		return "cancel"
+	}
+	choiceY := 7 // border + padding + title/separator/instruction spacing
+	idx := y - choiceY
+	if idx >= 0 && idx < len(uninstallChoices) {
+		m.cursor = idx
+		return ""
+	}
+	runY := lipgloss.Height(view) - 3
+	if y == runY {
+		run := newClickBox("run", 3, runY, 22, 1)
+		cancel := newClickBox("cancel", 62, runY, 14, 1)
+		if id, ok := hitClickBox([]clickBox{run, cancel}, x, y); ok {
+			return id
+		}
+	}
+	return ""
+}
+
 func (m *UninstallModal) View() string {
 	if !m.visible {
 		return ""

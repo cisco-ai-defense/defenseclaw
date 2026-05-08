@@ -76,6 +76,12 @@ VALID_DEPLOYMENT_MODES = {
     "server",
     "saas",
 }
+LEGACY_DEPLOYMENT_MODE_ALIASES = {
+    "managed": "managed_enterprise",
+    "standalone": "unmanaged_byod",
+    "ci": "ci_cd",
+    "edge": "server",
+}
 
 
 def _home() -> Path:
@@ -141,6 +147,7 @@ def _validate_deployment_mode(mode: str) -> str:
     mode = (mode or "").strip()
     if not mode:
         return ""
+    mode = LEGACY_DEPLOYMENT_MODE_ALIASES.get(mode, mode)
     if mode not in VALID_DEPLOYMENT_MODES:
         raise ValueError(
             f"config: deployment_mode={mode!r} is invalid "
@@ -988,7 +995,7 @@ class GuardrailConfig:
     # of the key wins, and an explicit `false` round-trips as False).
     judge_sweep: bool = True
     rule_pack_dir: str = ""                 # path to guardrail rule-pack profile directory
-    connector: str = ""  # empty => fall back to claw.mode; otherwise openclaw | zeptoclaw | claudecode | codex
+    connector: str = ""  # empty => fall back to claw.mode; otherwise a registered connector name
     hilt: HILTConfig = field(default_factory=HILTConfig)
     # ``codex_enforcement_enabled`` gates the proxy-redirect /
     # blocking path for the Codex connector. Default ``False`` means
@@ -1080,6 +1087,15 @@ class NotificationsConfig:
     the canonical opt-in path; operators dialing noise back down can
     flip individual category / source / throttle fields.
 
+    Category defaults favor signal over noise: ``block_enforced``
+    and ``hitl_approval`` are on so users see real blocks and real
+    chat-side asks, while ``block_would_block`` is OFF so the
+    observe-mode "would have blocked / would have asked" toasts
+    stay quiet by default. Keep these defaults in lockstep with
+    ``internal/config/notifications.go``'s
+    ``DefaultNotificationsConfig`` and the viper SetDefault calls
+    in ``internal/config/config.go``.
+
     Throttle defaults match the Go side
     (``dedup_window=30s``, ``max_per_minute=12``); zero values are
     interpreted as "use the default" rather than "no throttle".
@@ -1087,7 +1103,7 @@ class NotificationsConfig:
 
     enabled: bool = field(default_factory=_default_notifications_enabled)
     block_enforced: bool = True
-    block_would_block: bool = True
+    block_would_block: bool = False
     hitl_approval: bool = True
     sources: NotificationSourceFilter = field(default_factory=NotificationSourceFilter)
     # Stored as the same string viper accepts on the Go side so the
@@ -1112,6 +1128,27 @@ class PrivacyConfig:
     """
 
     disable_redaction: bool = False
+
+
+@dataclass
+class AIDiscoveryConfig:
+    enabled: bool = False
+    mode: str = "enhanced"
+    scan_interval_min: int = 5
+    process_interval_s: int = 60
+    scan_roots: list[str] = field(default_factory=lambda: ["~"])
+    signature_packs: list[str] = field(default_factory=list)
+    allow_workspace_signatures: bool = False
+    disabled_signature_ids: list[str] = field(default_factory=list)
+    include_shell_history: bool = True
+    include_package_manifests: bool = True
+    include_env_var_names: bool = True
+    include_network_domains: bool = True
+    max_files_per_scan: int = 1000
+    max_file_bytes: int = 512 * 1024
+    emit_otel: bool = True
+    store_raw_local_paths: bool = False
+    confidence_policy_path: str = ""
 
 
 @dataclass
@@ -1152,12 +1189,16 @@ class Config:
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
+    ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
 
     # -- Claw-mode path resolution (mirrors claw.go) --
 
     def claw_home_dir(self) -> str:
-        return _expand(self.claw.home_dir)
+        return connector_paths.connector_home(
+            self.active_connector(),
+            openclaw_home=self.claw.home_dir,
+        ) or _expand(self.claw.home_dir)
 
     def active_connector(self) -> str:
         """Return the canonical connector name for this config.
@@ -1398,6 +1439,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     privacy = d.get("privacy")
     if isinstance(privacy, dict) and not any(privacy.values()):
         d.pop("privacy", None)
+    if d.get("ai_discovery") == _disabled_ai_discovery_dict():
+        d.pop("ai_discovery", None)
     # Mirror Go's ``yaml:"notifications,omitempty"`` — when the
     # block is at full defaults (master switch off, every category /
     # source still on, default throttles) drop it so legacy configs
@@ -1429,6 +1472,11 @@ def _default_notifications_dict() -> dict[str, Any]:
 def _default_asset_policy_dict() -> dict[str, Any]:
     from dataclasses import asdict
     return asdict(AssetPolicyConfig())
+
+
+def _disabled_ai_discovery_dict() -> dict[str, Any]:
+    from dataclasses import asdict
+    return asdict(AIDiscoveryConfig(enabled=False))
 
 
 def _merge_severity_action(raw: dict[str, Any] | None) -> SeverityAction:
@@ -2199,6 +2247,7 @@ def load() -> Config:
         registries=_merge_registries(raw.get("registries")),
         webhooks=_merge_webhooks(raw.get("webhooks")),
         privacy=_merge_privacy(raw.get("privacy")),
+        ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         notifications=_merge_notifications(raw.get("notifications")),
     )
     _migrate_llm_fields(cfg)
@@ -2218,6 +2267,30 @@ def _merge_privacy(raw: dict[str, Any] | None) -> PrivacyConfig:
         return PrivacyConfig()
     return PrivacyConfig(
         disable_redaction=bool(raw.get("disable_redaction", False)),
+    )
+
+
+def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
+    if not isinstance(raw, dict):
+        return AIDiscoveryConfig(enabled=False)
+    return AIDiscoveryConfig(
+        enabled=bool(raw.get("enabled", True)),
+        mode=str(raw.get("mode", "enhanced") or "enhanced"),
+        scan_interval_min=int(raw.get("scan_interval_min", 5) or 5),
+        process_interval_s=int(raw.get("process_interval_s", 60) or 60),
+        scan_roots=list(raw.get("scan_roots", ["~"]) or ["~"]),
+        signature_packs=list(raw.get("signature_packs", []) or []),
+        allow_workspace_signatures=bool(raw.get("allow_workspace_signatures", False)),
+        disabled_signature_ids=list(raw.get("disabled_signature_ids", []) or []),
+        include_shell_history=bool(raw.get("include_shell_history", True)),
+        include_package_manifests=bool(raw.get("include_package_manifests", True)),
+        include_env_var_names=bool(raw.get("include_env_var_names", True)),
+        include_network_domains=bool(raw.get("include_network_domains", True)),
+        max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
+        max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
+        emit_otel=bool(raw.get("emit_otel", True)),
+        store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),
+        confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
     )
 
 
@@ -2295,6 +2368,10 @@ def default_config() -> Config:
             rules_file=os.path.join(data_dir, "firewall.pf.conf"),
         ),
         guardrail=GuardrailConfig(),
+        ai_discovery=AIDiscoveryConfig(
+            enabled=True,
+            confidence_policy_path=os.path.join(data_dir, "confidence.yaml"),
+        ),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),
         ),

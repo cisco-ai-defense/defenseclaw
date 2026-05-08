@@ -133,6 +133,24 @@ func (f *MCPSetForm) SetValue(field mcpSetField, v string) {
 	f.values[field] = v
 }
 
+func (f *MCPSetForm) HandleMouseClick(x, y int) (submit bool, binary string, args []string, displayName string) {
+	if !f.active {
+		return false, "", nil, ""
+	}
+	field := mcpSetField((y - 3) / 2)
+	if y < 3 || field < 0 || field >= mcpFieldCount {
+		return false, "", nil, ""
+	}
+	// Field labels and value rows are both clickable. The X
+	// coordinate is intentionally broad because the value column can
+	// be empty and should still be focusable.
+	if x >= 0 {
+		f.field = field
+		f.status = ""
+	}
+	return false, "", nil, ""
+}
+
 // HandleKey processes a keypress. Returns (submit, binary, args,
 // displayName) — when submit is true the caller should Close() the
 // form (or the caller will, once the command returns) and dispatch

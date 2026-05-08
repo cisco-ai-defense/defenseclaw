@@ -65,7 +65,8 @@ const (
 	// Other recognised connector names (kept in sync with
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
-	// "zeptoclaw", "claudecode", "codex". Constants for those modes
+	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
+	// "windsurf", "geminicli", "copilot". Constants for those modes
 	// are intentionally not introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
@@ -191,6 +192,7 @@ type Config struct {
 	AuditSinks    []AuditSink         `mapstructure:"audit_sinks"      yaml:"audit_sinks,omitempty"`
 	Webhooks      []WebhookConfig     `mapstructure:"webhooks"         yaml:"webhooks"`
 	Privacy       PrivacyConfig       `mapstructure:"privacy"          yaml:"privacy,omitempty"`
+	AIDiscovery   AIDiscoveryConfig   `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	Notifications NotificationsConfig `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 }
 
@@ -220,6 +222,30 @@ type PrivacyConfig struct {
 	// a once-per-process warning when they observe the setting so the
 	// runtime state stays auditable without spamming reload loops.
 	DisableRedaction bool `mapstructure:"disable_redaction" yaml:"disable_redaction,omitempty"`
+}
+
+// AIDiscoveryConfig controls continuous, sidecar-native visibility for
+// supported connectors and broader "shadow AI" usage signals. Outbound
+// telemetry is sanitized by the inventory service; this config only controls
+// which local metadata sources are inspected.
+type AIDiscoveryConfig struct {
+	Enabled                  bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode                     string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin          int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec       int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots                []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	MaxFilesPerScan          int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes             int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                 bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths       bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	ConfidencePolicyPath     string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -708,6 +734,12 @@ func (c *Config) ConnectorHookConfig(name string) AgentHookConfig {
 		return c.ClaudeCode
 	case "codex":
 		return c.Codex
+	case "gemini-cli", "gemini_cli", "gemini":
+		if c.ConnectorHooks != nil {
+			if h, ok := c.ConnectorHooks["geminicli"]; ok {
+				return h
+			}
+		}
 	}
 	return AgentHookConfig{}
 }
@@ -1414,6 +1446,14 @@ func Load() (*Config, error) {
 
 	migrateConfig(&cfg)
 	warnDisableRedactionConfig(&cfg)
+	cfg.DeploymentMode = normalizeDeploymentMode(cfg.DeploymentMode)
+
+	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "deployment_mode_invalid")
+		}
+		return nil, err
+	}
 
 	if err := validateDeploymentMode(cfg.DeploymentMode); err != nil {
 		if ReportConfigLoadError != nil {
@@ -1893,7 +1933,7 @@ func warnPlaintextSecrets(cfg *Config) {
 }
 
 func validateDeploymentMode(mode string) error {
-	mode = strings.TrimSpace(mode)
+	mode = normalizeDeploymentMode(mode)
 	if mode == "" {
 		return nil
 	}
@@ -1901,6 +1941,21 @@ func validateDeploymentMode(mode string) error {
 		return nil
 	}
 	return fmt.Errorf("config: deployment_mode=%q is invalid (allowed: managed_enterprise, unmanaged_byod, ci_cd, sandboxed, server, saas)", mode)
+}
+
+func normalizeDeploymentMode(mode string) string {
+	switch strings.TrimSpace(mode) {
+	case "managed":
+		return string(DeploymentModeManagedEnterprise)
+	case "standalone":
+		return string(DeploymentModeUnmanagedBYOD)
+	case "ci":
+		return string(DeploymentModeCICD)
+	case "edge":
+		return string(DeploymentModeServer)
+	default:
+		return strings.TrimSpace(mode)
+	}
 }
 
 func (c *Config) Save() error {
@@ -2069,6 +2124,24 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("asset_policy.mcp.runtime_detection.terminal_commands", true)
 	viper.SetDefault("asset_policy.mcp.runtime_detection.unknown_terminal_mcp", AssetPolicyModeObserve)
 
+	viper.SetDefault("ai_discovery.enabled", false)
+	viper.SetDefault("ai_discovery.mode", "enhanced")
+	viper.SetDefault("ai_discovery.scan_interval_min", 5)
+	viper.SetDefault("ai_discovery.process_interval_s", 60)
+	viper.SetDefault("ai_discovery.scan_roots", []string{"~"})
+	viper.SetDefault("ai_discovery.signature_packs", []string{})
+	viper.SetDefault("ai_discovery.allow_workspace_signatures", false)
+	viper.SetDefault("ai_discovery.disabled_signature_ids", []string{})
+	viper.SetDefault("ai_discovery.include_shell_history", true)
+	viper.SetDefault("ai_discovery.include_package_manifests", true)
+	viper.SetDefault("ai_discovery.include_env_var_names", true)
+	viper.SetDefault("ai_discovery.include_network_domains", true)
+	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
+	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
+	viper.SetDefault("ai_discovery.emit_otel", true)
+	viper.SetDefault("ai_discovery.store_raw_local_paths", false)
+	viper.SetDefault("ai_discovery.confidence_policy_path", filepath.Join(dataDir, "confidence.yaml"))
+
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
 	// "open" is the user-friendly default — see
@@ -2154,12 +2227,16 @@ func setDefaults(dataDir string) {
 
 	// User-session OS notifications. Master switch defaults to true
 	// on darwin and false elsewhere — see DefaultNotificationsEnabled
-	// in notifications.go for the rationale. Sub-toggles default ON
-	// so a single yes-answer (or the macOS auto-opt-in) gives full
-	// coverage; operators dial down by flipping individual fields.
+	// in notifications.go for the rationale. block_enforced and
+	// hitl_approval default ON so the user sees real blocks and
+	// real chat-side asks; block_would_block defaults OFF so the
+	// observe-mode "would have blocked / would have asked" toasts
+	// stay quiet by default and are an explicit opt-in for operators
+	// tuning policy. Keep this in lockstep with
+	// DefaultNotificationsConfig() and cli/defenseclaw/config.py.
 	viper.SetDefault("notifications.enabled", DefaultNotificationsEnabled)
 	viper.SetDefault("notifications.block_enforced", true)
-	viper.SetDefault("notifications.block_would_block", true)
+	viper.SetDefault("notifications.block_would_block", false)
 	viper.SetDefault("notifications.hitl_approval", true)
 	viper.SetDefault("notifications.sources.hook", true)
 	viper.SetDefault("notifications.sources.guardrail", true)

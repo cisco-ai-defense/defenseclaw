@@ -55,6 +55,8 @@
             "otel.ingest.metrics",
             "otel.ingest.traces",
             "otel.ingest.malformed",
+            "connector-hook",
+            "asset-policy",
             "codex.notify",
             "codex.notify.agent-turn-complete",
             "codex.notify.malformed"

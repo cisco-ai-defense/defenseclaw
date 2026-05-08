@@ -143,6 +143,129 @@
         }
       ]
     },
+    "connector_metrics": {
+      "type": "array",
+      "description": "Metrics related to connector hook requests, native OTLP ingest, and notify bridge traffic.",
+      "items": { "$ref": "#/$defs/metricDef" },
+      "default": [
+        {
+          "name": "defenseclaw.connector.hook.invocations",
+          "type": "counter",
+          "unit": "{hook}",
+          "description": "Connector hook invocations observed by the gateway, including rejected requests.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            },
+            "event_type": { "type": "string" },
+            "result": { "type": "string", "enum": ["ok", "rejected", "unknown"] },
+            "reason": { "type": "string" }
+          }
+        },
+        {
+          "name": "defenseclaw.connector.hook.latency",
+          "type": "histogram",
+          "unit": "ms",
+          "description": "Connector hook handler latency.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            },
+            "event_type": { "type": "string" },
+            "result": { "type": "string", "enum": ["ok", "rejected", "unknown"] },
+            "reason": { "type": "string" }
+          }
+        },
+        {
+          "name": "defenseclaw.otel.ingest.requests",
+          "type": "counter",
+          "unit": "{request}",
+          "description": "Native connector OTLP-HTTP batches received by the gateway.",
+          "attributes": {
+            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "source": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            },
+            "result": { "type": "string", "enum": ["ok", "malformed"] }
+          }
+        },
+        {
+          "name": "defenseclaw.otel.ingest.records",
+          "type": "counter",
+          "unit": "{record}",
+          "description": "Native connector OTLP leaf records extracted from accepted batches.",
+          "attributes": {
+            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "source": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            }
+          }
+        },
+        {
+          "name": "defenseclaw.otel.ingest.bytes",
+          "type": "counter",
+          "unit": "By",
+          "description": "Native connector OTLP request-body bytes received by the gateway.",
+          "attributes": {
+            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "source": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            }
+          }
+        },
+        {
+          "name": "defenseclaw.otel.ingest.malformed",
+          "type": "counter",
+          "unit": "{request}",
+          "description": "Native connector OTLP batches that failed payload normalization or summary parsing.",
+          "attributes": {
+            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "source": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            }
+          }
+        },
+        {
+          "name": "defenseclaw.otel.ingest.last_seen_ts",
+          "type": "gauge",
+          "unit": "s",
+          "description": "Unix seconds timestamp of the last native connector OTLP batch.",
+          "attributes": {
+            "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
+            "source": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            }
+          }
+        },
+        {
+          "name": "defenseclaw.codex.notify",
+          "type": "counter",
+          "unit": "{event}",
+          "description": "Codex notify bridge events received by the gateway.",
+          "attributes": {
+            "type": { "type": "string" },
+            "status": { "type": "string" },
+            "result": { "type": "string", "enum": ["ok", "malformed"] }
+          }
+        },
+        {
+          "name": "defenseclaw.codex.notify.malformed",
+          "type": "counter",
+          "unit": "{event}",
+          "description": "Codex notify payloads that failed JSON parsing.",
+          "attributes": {
+            "type": { "type": "string", "enum": ["malformed"] }
+          }
+        }
+      ]
+    },
     "alert_metrics": {
       "type": "array",
       "description": "Metrics related to runtime alerts and guardrail evaluations.",

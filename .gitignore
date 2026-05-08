@@ -81,6 +81,14 @@ scripts/e2e-*-session*
 .worktrees/
 tmp/
 
+# Playwright session/console logs and outputs (transient debug artifacts).
+.playwright-cli/
+output/playwright/
+
+# Local-only screenshots from dashboard / TUI debugging passes. Add a
+# specific PNG to git only when it ships in docs/.
+/*.png
+
 # Agent memory / context files — local-only, not versioned.
 # Each contributor's AI assistant (Claude, Codex, Cursor, etc.) loads
 # these from disk; keeping them out of git prevents cross-contamination

@@ -80,6 +80,23 @@ const (
 // flows into the audit-friendly subtitle but never appears in the
 // dedup hash (so the same rule fired across many sessions still
 // collapses to one notification per dedup window).
+//
+// WouldAsk repurposes the would-block category for verdicts that
+// are technically "confirm" upstream but never reach the user as a
+// chat ask. Two cases hit this:
+//
+//  1. Observe mode — mapHookAction downgrades a confirm verdict to
+//     action=allow, so no chat prompt is issued.
+//  2. Connectors that cannot natively ask for the event (e.g.
+//     cursor's beforeReadFile is blockable but not askable).
+//
+// In both cases the notification reads "DefenseClaw would ask X"
+// rather than the misleading "Approval needed: X / reply in chat",
+// AND it goes through the would-block category gate so a single
+// `notifications.block_would_block: false` switch silences every
+// observe-mode hook notification (would-block + would-ask) without
+// touching real native asks (which still flow through
+// OnApprovalPending and the HITLApproval gate).
 type BlockEvent struct {
 	Source    Source
 	Target    string
@@ -87,16 +104,27 @@ type BlockEvent struct {
 	Severity  string
 	Connector string
 	Event     string
+	WouldAsk  bool
 }
 
 // ApprovalEvent describes a HITL/confirm prompt that is now waiting
-// for the user. The user-visible Subject reads naturally in a toast
-// title ("Approval needed: LLM tool call for gpt-4o").
+// for the user on a real chat surface. Callers MUST only fire this
+// when the connector will actually surface a native ask — observe
+// mode and "confirm-but-not-askable" cases route through
+// Dispatcher.OnWouldBlock with BlockEvent.WouldAsk=true instead, so
+// the user does not get an "Approval needed: reply in chat" toast
+// for an action that was already allowed through.
+//
+// The user-visible Subject reads naturally in a toast title
+// ("Approval needed: LLM tool call for gpt-4o"). Connector and Event
+// are optional context for the subtitle — symmetric with BlockEvent.
 type ApprovalEvent struct {
-	Subject  string
-	Reason   string
-	Severity string
-	Source   Source
+	Subject   string
+	Reason    string
+	Severity  string
+	Source    Source
+	Connector string
+	Event     string
 }
 
 // Dispatcher is the single fan-in point for OS notifications.
@@ -348,12 +376,21 @@ func blockNotification(ev BlockEvent, wouldBlock bool) notify.Notification {
 	if target == "" {
 		target = "request"
 	}
+	// WouldAsk is the "confirm verdict that never reached the chat
+	// surface" case — observe mode or a connector that cannot
+	// natively ask. The toast still flows through the would-block
+	// category gate (so block_would_block=false silences it
+	// alongside observe-mode would-blocks) but reads honestly as
+	// "would ask" rather than "would block".
 	verb := "blocked"
-	if wouldBlock {
+	switch {
+	case ev.WouldAsk:
+		verb = "would ask about"
+	case wouldBlock:
 		verb = "would block"
 	}
 	title := fmt.Sprintf("DefenseClaw %s %s", verb, target)
-	subtitle := buildSubtitle(string(ev.Source), ev.Severity, ev.Connector, ev.Event, wouldBlock)
+	subtitle := buildSubtitle(string(ev.Source), ev.Severity, ev.Connector, ev.Event, wouldBlock || ev.WouldAsk)
 	return notify.Notification{
 		Title:    title,
 		Subtitle: subtitle,
@@ -366,7 +403,7 @@ func approvalNotification(ev ApprovalEvent) notify.Notification {
 	if subject == "" {
 		subject = "agent action"
 	}
-	subtitle := buildSubtitle(string(ev.Source), ev.Severity, "", "", false)
+	subtitle := buildSubtitle(string(ev.Source), ev.Severity, ev.Connector, ev.Event, false)
 	if subtitle == "" {
 		subtitle = "reply in chat"
 	} else {

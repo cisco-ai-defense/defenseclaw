@@ -164,9 +164,9 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		})
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(ctx, "asset-policy", "mcp:"+decision.TargetName,
-			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s would_block=%v reason=%s",
-				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, decision.WouldBlock, decision.Reason))
+		a.logAssetPolicyAudit(ctx, "mcp:"+decision.TargetName,
+			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
+				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason))
 	}
 	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent)
 	return decision, true
@@ -174,6 +174,13 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 
 func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connector, hookEvent string, probe skillRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	if a.scannerCfg == nil || !probe.Matched {
+		return config.AssetPolicyDecision{}, false
+	}
+	runtimeDetection, _ := a.scannerCfg.AssetRuntimeDetectionFor("skill")
+	if !runtimeDetection.Enabled {
+		return config.AssetPolicyDecision{}, false
+	}
+	if probe.Surface == "terminal" && !runtimeDetection.TerminalCommands {
 		return config.AssetPolicyDecision{}, false
 	}
 	decision := a.scannerCfg.EvaluateAssetPolicy(config.AssetPolicyInput{
@@ -211,12 +218,24 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, "skill", decision.Reason, attrs)
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(ctx, "asset-policy", "skill:"+decision.TargetName,
-			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
-				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason))
+		a.logAssetPolicyAudit(ctx, "skill:"+decision.TargetName,
+			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
+				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason))
 	}
 	a.dispatchAssetPolicyNotification(decision, "skill", connector, hookEvent)
 	return decision, true
+}
+
+func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDecisions []runtimeAssetDecision) bool {
+	if len(assetDecisions) == 0 {
+		return false
+	}
+	switch normalizeCodexAction(rawActionBeforeAssets) {
+	case "block", "confirm":
+		return false
+	default:
+		return true
+	}
 }
 
 // dispatchAssetPolicyNotification fires an OS toast for an asset
@@ -796,12 +815,25 @@ func assetPolicyRegistryStatusForReason(status string) string {
 }
 
 func runtimeAssetCanEnforce(event string) bool {
+	// Claude Code / Codex use canonical PascalCase event names — keep
+	// these literal switches so the original behavior is byte-identical
+	// for those high-traffic hooks.
 	switch event {
 	case "UserPromptExpansion", "PreToolUse", "PermissionRequest":
 		return true
-	default:
-		return false
 	}
+	// Generic hook-only connectors (hermes, cursor, windsurf, geminicli,
+	// copilot) use varied case/spacing for the same semantic events
+	// (preToolUse, pre_tool_call, beforeMCPExecution, beforeShellExecution,
+	// pre_run_command, premcptooluse, ...). Reusing the canonical
+	// tool-inspection set keeps the asset-policy enforcement gate
+	// in lockstep with the inspect path: anything we already classify
+	// as a tool-inspection event is also a valid surface to enforce
+	// asset-policy blocks on.
+	if isGenericToolInspectionEvent(event) {
+		return true
+	}
+	return false
 }
 
 func coalesceRuntimeSurface(value, fallback string) string {

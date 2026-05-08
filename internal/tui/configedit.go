@@ -362,7 +362,11 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "scanners.skill_scanner.binary":
 		c.Scanners.SkillScanner.Binary = val
 	case "scanners.skill_scanner.policy":
-		c.Scanners.SkillScanner.Policy = val
+		if strings.TrimSpace(val) == "none" {
+			c.Scanners.SkillScanner.Policy = ""
+		} else {
+			c.Scanners.SkillScanner.Policy = val
+		}
 	case "scanners.skill_scanner.lenient":
 		c.Scanners.SkillScanner.Lenient = boolVal
 	case "scanners.skill_scanner.use_llm":
@@ -439,6 +443,40 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Scanners.PluginScannerLLM.MaxRetries = intVal
 	case "scanners.codeguard":
 		c.Scanners.CodeGuard = val
+
+	// Continuous AI visibility.
+	case "ai_discovery.enabled":
+		c.AIDiscovery.Enabled = boolVal
+	case "ai_discovery.mode":
+		c.AIDiscovery.Mode = val
+	case "ai_discovery.scan_interval_min":
+		c.AIDiscovery.ScanIntervalMin = intVal
+	case "ai_discovery.process_interval_s":
+		c.AIDiscovery.ProcessIntervalSec = intVal
+	case "ai_discovery.scan_roots":
+		c.AIDiscovery.ScanRoots = splitCSV(val)
+	case "ai_discovery.signature_packs":
+		c.AIDiscovery.SignaturePacks = splitCSV(val)
+	case "ai_discovery.allow_workspace_signatures":
+		c.AIDiscovery.AllowWorkspaceSignatures = boolVal
+	case "ai_discovery.disabled_signature_ids":
+		c.AIDiscovery.DisabledSignatureIDs = splitCSV(val)
+	case "ai_discovery.include_shell_history":
+		c.AIDiscovery.IncludeShellHistory = boolVal
+	case "ai_discovery.include_package_manifests":
+		c.AIDiscovery.IncludePackageManifests = boolVal
+	case "ai_discovery.include_env_var_names":
+		c.AIDiscovery.IncludeEnvVarNames = boolVal
+	case "ai_discovery.include_network_domains":
+		c.AIDiscovery.IncludeNetworkDomains = boolVal
+	case "ai_discovery.max_files_per_scan":
+		c.AIDiscovery.MaxFilesPerScan = intVal
+	case "ai_discovery.max_file_bytes":
+		c.AIDiscovery.MaxFileBytes = intVal
+	case "ai_discovery.emit_otel":
+		c.AIDiscovery.EmitOTel = boolVal
+	case "ai_discovery.store_raw_local_paths":
+		c.AIDiscovery.StoreRawLocalPaths = boolVal
 
 	// Gateway inline watcher (P2-#9). The watcher runs inside the
 	// gateway process; its config governs directory watch / auto-
@@ -613,6 +651,53 @@ func applyConfigField(c *config.Config, key, val string) {
 	}
 	if strings.HasPrefix(key, "connector_hooks.") {
 		applyConnectorHookField(c, key, val)
+	}
+	if strings.HasPrefix(key, "asset_policy.") {
+		applyAssetPolicyField(c, key, val)
+	}
+}
+
+func applyAssetPolicyField(c *config.Config, key, val string) {
+	boolVal := val == "true"
+	switch key {
+	case "asset_policy.enabled":
+		c.AssetPolicy.Enabled = boolVal
+		return
+	case "asset_policy.mode":
+		c.AssetPolicy.Mode = val
+		return
+	}
+
+	parts := strings.Split(key, ".")
+	if len(parts) < 3 {
+		return
+	}
+	var target *config.AssetTypePolicy
+	switch parts[1] {
+	case "skill":
+		target = &c.AssetPolicy.Skill
+	case "mcp":
+		target = &c.AssetPolicy.MCP
+	case "plugin":
+		target = &c.AssetPolicy.Plugin
+	default:
+		return
+	}
+
+	field := strings.Join(parts[2:], ".")
+	switch field {
+	case "default":
+		target.Default = val
+	case "registry_required":
+		target.RegistryRequired = boolVal
+	case "registry_empty_action":
+		target.RegistryEmptyAction = val
+	case "runtime_detection.enabled":
+		target.RuntimeDetection.Enabled = boolVal
+	case "runtime_detection.terminal_commands":
+		target.RuntimeDetection.TerminalCommands = boolVal
+	case "runtime_detection.unknown_terminal_mcp":
+		target.RuntimeDetection.UnknownTerminalMCP = val
 	}
 }
 

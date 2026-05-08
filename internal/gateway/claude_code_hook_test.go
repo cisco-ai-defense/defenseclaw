@@ -209,6 +209,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillPreToolUse(t *testing.T) 
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.RegistryRequired = true
 	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -243,6 +244,7 @@ func TestEvaluateClaudeCodeHook_BlocksUnregisteredSkillUserPromptExpansion(t *te
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.RegistryRequired = true
 	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -382,6 +384,7 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyDeniesBy
 	cfg.AssetPolicy.Enabled = true
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.RegistryRequired = true
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -413,6 +416,7 @@ func TestEvaluateClaudeCodeHook_UserPromptExpansionRegistryRequiredEmptyAllowOpt
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.RegistryRequired = true
 	cfg.AssetPolicy.Skill.RegistryEmptyAction = "allow"
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -447,6 +451,7 @@ func TestEvaluateClaudeCodeHook_SkillCraftedPathStillBlocksWhenUnregistered(t *t
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.RegistryRequired = true
 	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -487,6 +492,7 @@ func TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename(t *testi
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.RegistryRequired = true
 	cfg.AssetPolicy.Skill.Registry = []config.AssetPolicyRule{{Name: "trusted-skill"}}
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 
@@ -511,6 +517,7 @@ func TestEvaluateClaudeCodeHook_SkillDefaultDenyBlocksWithoutRegistry(t *testing
 	cfg.AssetPolicy.Enabled = true
 	cfg.AssetPolicy.Mode = "action"
 	cfg.AssetPolicy.Skill.Default = "deny"
+	enableSkillRuntimeDetection(cfg)
 
 	api := &APIServer{scannerCfg: cfg}
 

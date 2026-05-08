@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -197,6 +198,23 @@ func (w *Writer) EmitContext(ctx context.Context, e Event) {
 	// overwrites a caller-supplied value so tests can pin their own.
 	if e.SidecarInstanceID == "" {
 		e.SidecarInstanceID = SidecarInstanceID()
+	}
+	// Fill blanks for the two correlation fields that every emit
+	// path ought to carry but that callers outside the gateway
+	// request scope frequently forget (e.g. inventory/AI-discovery
+	// runs in its own goroutine with only a span context). RunID is
+	// process-wide so the writer can always default it; TraceID
+	// comes from the active OTel span when caller didn't pass one.
+	// Caller-supplied non-empty values always win — this never
+	// overwrites a value that gateway.stampEventCorrelation or a
+	// test fixture set explicitly.
+	if e.RunID == "" {
+		e.RunID = ProcessRunID()
+	}
+	if e.TraceID == "" {
+		if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
+			e.TraceID = sp.SpanContext().TraceID().String()
+		}
 	}
 	StampAgentWatchContext(&e)
 	// Plan B6 / S0.10: stamp HMAC over the canonical JSON of the
