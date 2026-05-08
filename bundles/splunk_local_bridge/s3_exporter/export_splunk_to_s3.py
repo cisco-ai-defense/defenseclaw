@@ -51,6 +51,7 @@ search index=defenseclaw_local earliest="{earliest}" latest="{latest}"
   sourcetype="defenseclaw:json"
   OR sourcetype="openclaw:gateway:json"
   OR sourcetype="openclaw:diagnostics:json"
+  OR sourcetype="otel:log"
   OR sourcetype="otel:metric"
   OR sourcetype="otel:trace"
 )

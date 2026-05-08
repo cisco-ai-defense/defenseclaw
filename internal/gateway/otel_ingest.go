@@ -261,6 +261,13 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		AgentName: source,
 		SessionID: sessionID,
 	}
+	if signal == otelSignalLogs {
+		if events := otlpLogRecordsForSplunkHEC(body, source, ev.Timestamp); len(events) > 0 {
+			ev.Structured = map[string]any{
+				"_splunk_hec_events": events,
+			}
+		}
+	}
 	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
 		// Best-effort: failing to persist must NOT cause the
 		// exporter to retry — telemetry storms during DB outages
@@ -319,6 +326,110 @@ func decorateOTLPIngestSummary(summary, payloadFormat string, wireBytes, normali
 		return summary
 	}
 	return fmt.Sprintf("format=protobuf wire_size=%d bytes normalized_json_size=%d bytes %s", wireBytes, normalizedBytes, summary)
+}
+
+func otlpLogRecordsForSplunkHEC(body []byte, source string, receivedAt time.Time) []map[string]any {
+	var envelope struct {
+		ResourceLogs []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeLogs []struct {
+				LogRecords []struct {
+					TimeUnixNano         json.RawMessage `json:"timeUnixNano"`
+					ObservedTimeUnixNano json.RawMessage `json:"observedTimeUnixNano"`
+					SeverityNumber       int             `json:"severityNumber"`
+					SeverityText         string          `json:"severityText"`
+					Body                 json.RawMessage `json:"body"`
+					Attributes           []otlpAttribute `json:"attributes"`
+					TraceID              string          `json:"traceId"`
+					SpanID               string          `json:"spanId"`
+				} `json:"logRecords"`
+			} `json:"scopeLogs"`
+		} `json:"resourceLogs"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+
+	events := []map[string]any{}
+	for _, resourceLog := range envelope.ResourceLogs {
+		resourceAttrs := otlpAttributesToMap(resourceLog.Resource.Attributes)
+		for _, scopeLog := range resourceLog.ScopeLogs {
+			for _, rec := range scopeLog.LogRecords {
+				recordAttrs := otlpAttributesToMap(rec.Attributes)
+				mergedAttrs := make(map[string]interface{}, len(resourceAttrs)+len(recordAttrs))
+				for k, v := range resourceAttrs {
+					mergedAttrs[k] = v
+				}
+				for k, v := range recordAttrs {
+					mergedAttrs[k] = v
+				}
+				eventTime := otlpLogRecordTime(rec.TimeUnixNano, rec.ObservedTimeUnixNano, receivedAt)
+				event := map[string]any{
+					"signal_family":      "log",
+					"timestamp":          eventTime.UTC().Format(time.RFC3339Nano),
+					"observed_timestamp": otlpNanosISO(rec.ObservedTimeUnixNano),
+					"severity":           firstNonEmpty(rec.SeverityText, "INFO"),
+					"severity_text":      rec.SeverityText,
+					"severity_number":    rec.SeverityNumber,
+					"body":               decodeOTLPAnyValue(rec.Body),
+					"trace_id":           rec.TraceID,
+					"span_id":            rec.SpanID,
+					"resource":           resourceAttrs,
+					"attributes":         recordAttrs,
+					"source":             "otel",
+					"source_system":      "defenseclaw",
+					"event_name":         otlpString(mergedAttrs, "event.name"),
+					"action":             firstNonEmpty(otlpString(mergedAttrs, "action"), otlpString(mergedAttrs, "event.name")),
+					"run_id":             otlpString(mergedAttrs, "run_id"),
+					"session_id":         otlpSessionID(mergedAttrs),
+					"request_id":         otlpString(mergedAttrs, "request_id"),
+					"agent_name":         firstNonEmpty(otlpString(mergedAttrs, "gen_ai.agent.name"), source),
+					"agent_type":         otlpString(mergedAttrs, "gen_ai.agent.type"),
+					"tool_name":          firstNonEmpty(otlpString(mergedAttrs, "tool_name"), otlpString(mergedAttrs, "gen_ai.tool.name")),
+					"destination_app":    firstNonEmpty(otlpString(mergedAttrs, "destination_app"), otlpString(mergedAttrs, "defenseclaw.destination_app")),
+					"provider_name":      firstNonEmpty(otlpString(mergedAttrs, "gen_ai.provider.name"), source),
+					"request_model":      firstNonEmpty(otlpString(mergedAttrs, "gen_ai.request.model"), otlpString(mergedAttrs, "model")),
+					"response_model":     otlpString(mergedAttrs, "gen_ai.response.model"),
+				}
+				events = append(events, map[string]any{
+					"time":       float64(eventTime.Unix()) + float64(eventTime.Nanosecond())/1e9,
+					"host":       firstNonEmpty(otlpString(resourceAttrs, "host.name"), "defenseclaw-local"),
+					"source":     "otel",
+					"sourcetype": "otel:log",
+					"event":      event,
+				})
+			}
+		}
+	}
+	return events
+}
+
+func otlpLogRecordTime(timeRaw, observedRaw json.RawMessage, fallback time.Time) time.Time {
+	if t, ok := otlpNanosTime(timeRaw); ok && !t.IsZero() {
+		return t
+	}
+	if t, ok := otlpNanosTime(observedRaw); ok && !t.IsZero() {
+		return t
+	}
+	return fallback
+}
+
+func otlpNanosISO(raw json.RawMessage) string {
+	t, ok := otlpNanosTime(raw)
+	if !ok || t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func otlpNanosTime(raw json.RawMessage) (time.Time, bool) {
+	nanos := parseOTLPNumber(raw)
+	if nanos <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, nanos).UTC(), true
 }
 
 func agentIdentityForOTLPSource(source string) AgentIdentity {

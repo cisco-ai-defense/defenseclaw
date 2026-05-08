@@ -100,6 +100,11 @@ type Event struct {
 	BinaryVersion     string `json:"binary_version,omitempty"`
 	AgentID           string `json:"agent_id,omitempty"`
 	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+
+	// Structured carries sanitized machine-readable data for sink fanout.
+	// It is intentionally not persisted in SQLite audit_events; callers that
+	// need durable structured records should use their native table/log path.
+	Structured map[string]any `json:"structured,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.

@@ -235,6 +235,87 @@ func TestSplunkHECSink_SourceTypeOverride_Defaults(t *testing.T) {
 	}
 }
 
+func TestSplunkHECSink_EmitsStructuredExtraHECEvents(t *testing.T) {
+	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
+	sink, err := NewSplunkHECSink(SplunkHECConfig{
+		Endpoint:       srv.URL,
+		Token:          "t",
+		BatchSize:      2,
+		FlushIntervalS: 60,
+	})
+	if err != nil {
+		t.Fatalf("NewSplunkHECSink err=%v", err)
+	}
+	defer sink.Close()
+
+	err = sink.Forward(context.Background(), Event{
+		ID:        "summary",
+		Action:    "otel.ingest.logs",
+		Severity:  "INFO",
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+		Structured: map[string]any{
+			"summary": "kept",
+			structuredSplunkHECEventsKey: []map[string]any{
+				{
+					"time":       float64(1700000001),
+					"source":     "otel",
+					"sourcetype": "otel:log",
+					"index":      "defenseclaw_local",
+					"event": map[string]any{
+						"session_id": "sess-1",
+						"action":     "codex.user_prompt",
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*records) != 1 {
+		t.Fatalf("records=%d want 1", len(*records))
+	}
+	dec := json.NewDecoder(strings.NewReader(string((*records)[0].body)))
+	var summary struct {
+		SourceType string `json:"sourcetype"`
+		Event      struct {
+			Action     string         `json:"action"`
+			Structured map[string]any `json:"structured"`
+		} `json:"event"`
+	}
+	if err := dec.Decode(&summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.SourceType != "_json" || summary.Event.Action != "otel.ingest.logs" {
+		t.Fatalf("summary event wrong: %+v", summary)
+	}
+	if _, exists := summary.Event.Structured[structuredSplunkHECEventsKey]; exists {
+		t.Fatalf("control extra-events key leaked into summary structured payload")
+	}
+
+	var logEvent struct {
+		Source     string `json:"source"`
+		SourceType string `json:"sourcetype"`
+		Index      string `json:"index"`
+		Event      struct {
+			SessionID string `json:"session_id"`
+			Action    string `json:"action"`
+		} `json:"event"`
+	}
+	if err := dec.Decode(&logEvent); err != nil {
+		t.Fatalf("decode otel log event: %v", err)
+	}
+	if logEvent.Source != "otel" || logEvent.SourceType != "otel:log" || logEvent.Index != "defenseclaw_local" {
+		t.Fatalf("otel HEC envelope wrong: %+v", logEvent)
+	}
+	if logEvent.Event.SessionID != "sess-1" || logEvent.Event.Action != "codex.user_prompt" {
+		t.Fatalf("otel HEC payload wrong: %+v", logEvent.Event)
+	}
+}
+
 // TestSplunkHECSink_SourceTypeOverride_OperatorWins confirms that an
 // operator-supplied override map overrides the defaults rather than
 // being replaced by them. A customer who already standardised on

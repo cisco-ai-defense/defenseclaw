@@ -163,6 +163,8 @@ type splunkEvent struct {
 	Event      any     `json:"event"`
 }
 
+const structuredSplunkHECEventsKey = "_splunk_hec_events"
+
 // splunkAuditEvent is the inner payload Splunk indexes. Mirrors the
 // pre-migration shape so search queries (`source=defenseclaw action=…`)
 // continue to work.
@@ -400,6 +402,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 	if !s.cfg.Filter.Matches(e) {
 		return nil
 	}
+	structured, extraEvents := splitStructuredSplunkHECEvents(e.Structured)
 	se := splunkEvent{
 		Time:       float64(e.Timestamp.Unix()) + float64(e.Timestamp.Nanosecond())/1e9,
 		Source:     s.cfg.Source,
@@ -430,12 +433,20 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			ContentHash:       e.ContentHash,
 			Generation:        e.Generation,
 			BinaryVersion:     e.BinaryVersion,
-			Structured:        e.Structured,
+			Structured:        structured,
 		},
 	}
+	events := make([]splunkEvent, 0, 1+len(extraEvents))
+	events = append(events, se)
+	for i := range extraEvents {
+		if extraEvents[i].Index == "" {
+			extraEvents[i].Index = s.cfg.Index
+		}
+	}
+	events = append(events, extraEvents...)
 
 	s.mu.Lock()
-	s.batch = append(s.batch, se)
+	s.batch = append(s.batch, events...)
 	needsFlush := len(s.batch) >= s.cfg.BatchSize
 	s.mu.Unlock()
 
@@ -443,6 +454,64 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 		return s.Flush(ctx)
 	}
 	return nil
+}
+
+func splitStructuredSplunkHECEvents(structured map[string]any) (map[string]any, []splunkEvent) {
+	if len(structured) == 0 {
+		return structured, nil
+	}
+	raw, ok := structured[structuredSplunkHECEventsKey]
+	if !ok {
+		return structured, nil
+	}
+	cleaned := make(map[string]any, len(structured)-1)
+	for k, v := range structured {
+		if k != structuredSplunkHECEventsKey {
+			cleaned[k] = v
+		}
+	}
+	if len(cleaned) == 0 {
+		cleaned = nil
+	}
+
+	items, ok := raw.([]map[string]any)
+	if !ok {
+		return cleaned, nil
+	}
+	events := make([]splunkEvent, 0, len(items))
+	for _, item := range items {
+		event, ok := item["event"].(map[string]any)
+		if !ok || len(event) == 0 {
+			continue
+		}
+		events = append(events, splunkEvent{
+			Time:       splunkFloat(item["time"]),
+			Host:       splunkString(item["host"]),
+			Source:     splunkString(item["source"]),
+			SourceType: splunkString(item["sourcetype"]),
+			Index:      splunkString(item["index"]),
+			Event:      event,
+		})
+	}
+	return cleaned, events
+}
+
+func splunkString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func splunkFloat(v any) float64 {
+	switch x := v.(type) {
+	case float64:
+		return x
+	case int64:
+		return float64(x)
+	case int:
+		return float64(x)
+	default:
+		return 0
+	}
 }
 
 func (s *SplunkHECSink) flushLoop() {

@@ -77,6 +77,70 @@ func TestOTLPIngest_Logs_AcceptsValidPayload(t *testing.T) {
 	}
 }
 
+func TestOTLPLogRecordsForSplunkHEC_FlattensCodexLogRecord(t *testing.T) {
+	body := []byte(`{
+		"resourceLogs": [{
+			"resource": {"attributes": [
+				{"key": "service.name", "value": {"stringValue": "codex-app-server"}},
+				{"key": "host.name", "value": {"stringValue": "ADIAGNE-M-H9T4"}}
+			]},
+			"scopeLogs": [{"logRecords": [{
+				"timeUnixNano": "0",
+				"observedTimeUnixNano": "1778152115531514000",
+				"severityNumber": 9,
+				"severityText": "INFO",
+				"traceId": "trace-1",
+				"spanId": "span-1",
+				"body": {"stringValue": "raw prompt body"},
+				"attributes": [
+					{"key": "event.name", "value": {"stringValue": "codex.user_prompt"}},
+					{"key": "conversation.id", "value": {"stringValue": "sess-1"}},
+					{"key": "model", "value": {"stringValue": "gpt-5.4"}},
+					{"key": "prompt", "value": {"stringValue": "summarize a secret customer note"}},
+					{"key": "user.email", "value": {"stringValue": "user@example.com"}}
+				]
+			}]}]
+		}]
+	}`)
+
+	events := otlpLogRecordsForSplunkHEC(body, "codex", time.Unix(1700000000, 0).UTC())
+	if len(events) != 1 {
+		t.Fatalf("events=%d want 1", len(events))
+	}
+	if got := events[0]["sourcetype"]; got != "otel:log" {
+		t.Fatalf("sourcetype=%v want otel:log", got)
+	}
+	if got := events[0]["source"]; got != "otel" {
+		t.Fatalf("source=%v want otel", got)
+	}
+	event, ok := events[0]["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("event payload missing: %+v", events[0])
+	}
+	if got := event["session_id"]; got != "sess-1" {
+		t.Fatalf("session_id=%v want sess-1", got)
+	}
+	if got := event["action"]; got != "codex.user_prompt" {
+		t.Fatalf("action=%v want codex.user_prompt", got)
+	}
+	if got := event["request_model"]; got != "gpt-5.4" {
+		t.Fatalf("request_model=%v want gpt-5.4", got)
+	}
+	if got := event["timestamp"]; got != "2026-05-07T11:08:35.531514Z" {
+		t.Fatalf("timestamp=%v", got)
+	}
+	if got := event["body"]; got != "raw prompt body" {
+		t.Fatalf("body=%v want raw prompt body", got)
+	}
+	attrs := event["attributes"].(map[string]interface{})
+	if got := attrs["prompt"]; got != "summarize a secret customer note" {
+		t.Fatalf("prompt=%v want raw prompt", got)
+	}
+	if got := attrs["user.email"]; got != "user@example.com" {
+		t.Fatalf("user.email=%v want raw email", got)
+	}
+}
+
 func TestOTLPIngest_Logs_EnrichesHTTPSpanWithConversationID(t *testing.T) {
 	gatewaylog.SetProcessRunID("run-otlp-123")
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
