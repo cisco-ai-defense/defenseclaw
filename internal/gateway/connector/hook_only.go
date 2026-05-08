@@ -924,12 +924,31 @@ func patchGeminiTelemetry(path string, opts SetupOpts) error {
 	}
 	telemetry := ensureJSONObject(cfg, "telemetry")
 	endpoint := "http://" + strings.TrimSpace(opts.APIAddr) + "/otlp/geminicli/" + url.PathEscape(pathToken)
+	// Gemini CLI's settings.json schema (see
+	// https://geminicli.com/docs/reference/configuration/) constrains
+	// `telemetry.target` to {"local","gcp"}, names the protocol field
+	// `otlpProtocol` with values {"grpc","http"}, and rejects unknown
+	// keys outright (so a former `managedBy` marker now fails the
+	// loader with "Unrecognized key(s) in object").
+	//
+	// We therefore use target=local + useCollector=true to forward to
+	// our loopback OTLP-HTTP receiver, which accepts both protobuf
+	// (default for `otlpProtocol: http`) and OTLP-JSON. The marker we
+	// rely on for teardown detection is the path-scoped endpoint URL
+	// containing "/otlp/geminicli/" — that pattern is already unique
+	// to DefenseClaw, so removing the unsupported `managedBy` key is
+	// safe (see removeManagedGeminiTelemetry).
 	telemetry["enabled"] = true
-	telemetry["target"] = "otlp"
+	telemetry["target"] = "local"
+	telemetry["useCollector"] = true
 	telemetry["otlpEndpoint"] = endpoint
-	telemetry["protocol"] = "http/json"
+	telemetry["otlpProtocol"] = "http"
 	telemetry["logPrompts"] = redaction.DisableAll()
-	telemetry["managedBy"] = "defenseclaw"
+	// Drop legacy keys that older defenseclaw versions wrote — they
+	// are unrecognized by the current Gemini schema and would crash
+	// `gemini` startup if a stale settings.json is upgraded in place.
+	delete(telemetry, "managedBy")
+	delete(telemetry, "protocol")
 	return writeJSONObject(path, cfg)
 }
 
@@ -1080,12 +1099,29 @@ func removeManagedGeminiTelemetry(cfg map[string]interface{}) {
 	if !ok {
 		return
 	}
+	// Detect both current and legacy DefenseClaw-managed telemetry:
+	//   - current: endpoint contains "/otlp/geminicli/<token>"
+	//   - legacy:  managedBy == "defenseclaw" (pre-schema-fix installs)
+	// Either signal is unique enough to attribute ownership safely.
 	managedBy, _ := telemetry["managedBy"].(string)
 	endpoint, _ := telemetry["otlpEndpoint"].(string)
 	if !strings.EqualFold(strings.TrimSpace(managedBy), "defenseclaw") && !strings.Contains(endpoint, "/otlp/geminicli/") {
 		return
 	}
-	for _, key := range []string{"enabled", "target", "otlpEndpoint", "protocol", "logPrompts", "managedBy"} {
+	// Delete both the current schema keys and the legacy keys
+	// ("protocol", "managedBy") so an upgrade from an older
+	// defenseclaw install also leaves a clean settings.json.
+	for _, key := range []string{
+		"enabled",
+		"target",
+		"otlpEndpoint",
+		"otlpProtocol",
+		"useCollector",
+		"logPrompts",
+		// legacy keys, harmless if absent
+		"protocol",
+		"managedBy",
+	} {
 		delete(telemetry, key)
 	}
 	if len(telemetry) == 0 {

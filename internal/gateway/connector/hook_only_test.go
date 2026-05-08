@@ -180,8 +180,26 @@ func TestGeminiSetup_PatchesNativeTelemetryPathToken(t *testing.T) {
 		t.Fatalf("read gemini settings: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, `"target": "otlp"`) {
-		t.Fatalf("gemini settings missing managed telemetry target=otlp:\n%s", text)
+	// Gemini CLI's settings.json schema only accepts target ∈
+	// {"local","gcp"}. To forward telemetry to a custom (loopback)
+	// OTLP collector we must set target=local + useCollector=true.
+	// See https://geminicli.com/docs/reference/configuration/.
+	if !strings.Contains(text, `"target": "local"`) {
+		t.Fatalf("gemini settings missing managed telemetry target=local:\n%s", text)
+	}
+	if !strings.Contains(text, `"useCollector": true`) {
+		t.Fatalf("gemini settings missing useCollector=true (required for external OTLP):\n%s", text)
+	}
+	if !strings.Contains(text, `"otlpProtocol": "http"`) {
+		t.Fatalf("gemini settings missing otlpProtocol=http:\n%s", text)
+	}
+	// Gemini's schema rejects unknown keys at load time, so we MUST
+	// NOT write the legacy "managedBy" / "protocol" fields anymore —
+	// otherwise `gemini` aborts with "Unrecognized key(s) in object".
+	for _, banned := range []string{`"managedBy"`, `"protocol":`} {
+		if strings.Contains(text, banned) {
+			t.Fatalf("gemini settings contain key rejected by schema (%s):\n%s", banned, text)
+		}
 	}
 	// H-4: settings.json must NOT contain the master gateway bearer
 	// (opts.APIToken). The OTLP exporter authenticates via a scoped
@@ -200,8 +218,64 @@ func TestGeminiSetup_PatchesNativeTelemetryPathToken(t *testing.T) {
 	if !strings.Contains(text, "/otlp/geminicli/"+scoped) {
 		t.Fatalf("gemini settings missing scoped path-token config:\n%s", text)
 	}
-	if !strings.Contains(text, `"managedBy": "defenseclaw"`) {
-		t.Fatalf("gemini settings missing managed marker:\n%s", text)
+}
+
+func TestGeminiSetup_MigratesLegacySchemaInPlace(t *testing.T) {
+	// Regression: defenseclaw < 0.x wrote `target: "otlp"`,
+	// `protocol: "http/json"`, and `managedBy: "defenseclaw"` —
+	// all three are rejected by the current Gemini CLI schema, so
+	// `gemini` refuses to start until the file is repaired. Running
+	// `defenseclaw setup` against a stale settings.json must
+	// migrate the keys (not just append).
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "settings.json")
+	prev := GeminiSettingsPathOverride
+	GeminiSettingsPathOverride = cfgPath
+	t.Cleanup(func() { GeminiSettingsPathOverride = prev })
+
+	legacy := map[string]interface{}{
+		"telemetry": map[string]interface{}{
+			"enabled":      true,
+			"target":       "otlp",
+			"otlpEndpoint": "http://127.0.0.1:18790/otlp/geminicli/legacy-token",
+			"protocol":     "http/json",
+			"logPrompts":   true,
+			"managedBy":    "defenseclaw",
+		},
+		"userSetting": "keep",
+	}
+	body, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, append(body, '\n'), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+
+	conn := NewGeminiCLIConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup over legacy config: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read migrated config: %v", err)
+	}
+	text := string(data)
+	for _, banned := range []string{`"target": "otlp"`, `"protocol": "http/json"`, `"managedBy": "defenseclaw"`} {
+		if strings.Contains(text, banned) {
+			t.Fatalf("legacy schema key %q survived migration:\n%s", banned, text)
+		}
+	}
+	for _, want := range []string{`"target": "local"`, `"otlpProtocol": "http"`, `"useCollector": true`, `"userSetting": "keep"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("migrated config missing %q:\n%s", want, text)
+		}
 	}
 }
 
