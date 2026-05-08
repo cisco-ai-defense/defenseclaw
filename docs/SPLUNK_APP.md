@@ -170,6 +170,23 @@ dashboards. They use the same local index, `defenseclaw_local`, and the same
 event-indexed signal families listed above. They are designed for local demos
 where Splunk should be the visible dashboard surface.
 
+#### Executive Agent Watch Overview
+
+High-impact landing page for local Splunk demos of Agent Watch.
+
+Use it to inspect:
+
+- total observed agent sessions
+- active connectors
+- discovery signal volume
+- block/deny outcomes and human-review signals
+- highest-attention sessions by run/session/trace identifiers
+- policy and finding heatmaps
+
+This page is intended to start demos with an executive story before drilling
+into the detailed AI Discovery Inventory, Connector Activity, Policy Decisions,
+and Findings/HITL dashboards.
+
 #### AI Discovery Inventory
 
 Local view of AI discovery and shadow-agent signals.

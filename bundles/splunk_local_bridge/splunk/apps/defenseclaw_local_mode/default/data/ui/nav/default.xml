@@ -10,6 +10,7 @@
     <view name="model_usage_and_cost" />
   </collection>
   <collection label="Demo Dashboards">
+    <view name="executive_agent_watch_overview" />
     <view name="ai_discovery_inventory" />
     <view name="connector_activity" />
     <view name="policy_decisions_demo" />
