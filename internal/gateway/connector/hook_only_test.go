@@ -180,8 +180,25 @@ func TestGeminiSetup_PatchesNativeTelemetryPathToken(t *testing.T) {
 		t.Fatalf("read gemini settings: %v", err)
 	}
 	text := string(data)
-	if !strings.Contains(text, `"target": "otlp"`) || !strings.Contains(text, `/otlp/geminicli/tok-test`) {
-		t.Fatalf("gemini settings missing managed telemetry path-token config:\n%s", text)
+	if !strings.Contains(text, `"target": "otlp"`) {
+		t.Fatalf("gemini settings missing managed telemetry target=otlp:\n%s", text)
+	}
+	// H-4: settings.json must NOT contain the master gateway bearer
+	// (opts.APIToken). The OTLP exporter authenticates via a scoped
+	// per-source path-token instead — see EnsureOTLPPathToken /
+	// patchGeminiTelemetry.
+	if strings.Contains(text, "tok-test") {
+		t.Fatalf("gemini settings leaked master gateway token (H4 regression):\n%s", text)
+	}
+	scoped, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI)
+	if err != nil {
+		t.Fatalf("LoadOTLPPathToken: %v", err)
+	}
+	if scoped == "" {
+		t.Fatalf("setup did not mint a scoped OTLP token under %s", opts.DataDir)
+	}
+	if !strings.Contains(text, "/otlp/geminicli/"+scoped) {
+		t.Fatalf("gemini settings missing scoped path-token config:\n%s", text)
 	}
 	if !strings.Contains(text, `"managedBy": "defenseclaw"`) {
 		t.Fatalf("gemini settings missing managed marker:\n%s", text)

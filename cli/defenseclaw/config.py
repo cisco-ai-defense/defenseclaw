@@ -1087,6 +1087,15 @@ class NotificationsConfig:
     the canonical opt-in path; operators dialing noise back down can
     flip individual category / source / throttle fields.
 
+    Category defaults favor signal over noise: ``block_enforced``
+    and ``hitl_approval`` are on so users see real blocks and real
+    chat-side asks, while ``block_would_block`` is OFF so the
+    observe-mode "would have blocked / would have asked" toasts
+    stay quiet by default. Keep these defaults in lockstep with
+    ``internal/config/notifications.go``'s
+    ``DefaultNotificationsConfig`` and the viper SetDefault calls
+    in ``internal/config/config.go``.
+
     Throttle defaults match the Go side
     (``dedup_window=30s``, ``max_per_minute=12``); zero values are
     interpreted as "use the default" rather than "no throttle".
@@ -1094,7 +1103,7 @@ class NotificationsConfig:
 
     enabled: bool = field(default_factory=_default_notifications_enabled)
     block_enforced: bool = True
-    block_would_block: bool = True
+    block_would_block: bool = False
     hitl_approval: bool = True
     sources: NotificationSourceFilter = field(default_factory=NotificationSourceFilter)
     # Stored as the same string viper accepts on the Go side so the

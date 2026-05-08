@@ -19,6 +19,7 @@ DIST_DIR    := dist
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync \
         set-version \
+        _bundle-data \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
@@ -246,7 +247,20 @@ maybe-openclaw-plugin-install:
 dev-install:
 	@./scripts/install-dev.sh
 
-pycli:
+# pycli depends on _bundle-data so every editable install (and the
+# downstream `make all` / `make build`) sees the latest bundled
+# assets — Grafana dashboards, splunk_local_bridge, guardrail
+# policy bundles, codeguard skills. The runtime resolves these via
+# importlib.resources.files("defenseclaw") / "_data", which in
+# editable mode points straight at cli/defenseclaw/_data/. Without
+# the dependency, edits under bundles/local_observability_stack/ or
+# policies/guardrail/ silently lag behind every wheel-install
+# until someone remembers to run `make dist-cli` (the only other
+# call site for _bundle-data). That stale-mirror failure mode bit
+# us with the v7 connector-detail dashboard — fixed at the source
+# but invisible until a manual cp -r. Keeping the sync attached
+# here makes that class of bug structurally impossible.
+pycli: _bundle-data
 	@command -v uv >/dev/null 2>&1 || { echo "uv not found — install from https://docs.astral.sh/uv/"; exit 1; }
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv venv $(VENV) --python 3.12 --clear

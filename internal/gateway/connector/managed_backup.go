@@ -175,7 +175,40 @@ func writeManagedFileBackup(path string, b managedFileBackup) error {
 	if err != nil {
 		return err
 	}
+	// Ensure the per-connector backup directory is owner-only (0o700)
+	// before atomicWriteFile lays down the file. atomicWriteFile uses
+	// MkdirAll(_, 0o755) by design — that perm is right for parent
+	// dirs of user-owned config files (e.g. ~/.codex/) but wrong for
+	// our own ${data_dir}/connector_backups/<connector>/ tree, which
+	// would otherwise be world-readable. Listing the connector_backups
+	// dir leaks which connectors the operator has installed; the
+	// payload itself already has 0o600 from atomicWriteFile.
+	if err := ensureManagedBackupDirRestricted(filepath.Dir(path)); err != nil {
+		return err
+	}
 	return atomicWriteFile(path, append(data, '\n'), 0o600)
+}
+
+// ensureManagedBackupDirRestricted creates *dir* with mode 0o700 if it
+// does not exist, and tightens an existing dir down to 0o700 if a prior
+// install (or umask) left it world-readable. Failures are returned
+// rather than swallowed because the per-connector dir is the parent of
+// every backup; if we cannot guarantee 0o700 here, the operator should
+// see the error rather than discover later that the backup payload was
+// listable.
+func ensureManagedBackupDirRestricted(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create managed backup dir %s: %w", dir, err)
+	}
+	// Tighten perms even when MkdirAll was a no-op (existing dir
+	// from an older defenseclaw build that used 0o755).
+	if err := os.Chmod(dir, 0o700); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("chmod managed backup dir %s: %w", dir, err)
+	}
+	return nil
 }
 
 func readManagedTarget(path string) ([]byte, os.FileInfo, error) {

@@ -1110,20 +1110,58 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     os.replace(tmp, dotenv_path)
 
 
+_ROTATE_TOKEN_TIMEOUT_S = 60.0
+_ROTATE_TOKEN_MAX_OUTPUT_BYTES = 256 * 1024
+
+
 def _rotate_token_run_gateway(args: list[str]) -> tuple[int, str, str]:
-    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr)."""
+    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr).
+
+    Bounded by ``_ROTATE_TOKEN_TIMEOUT_S`` (a hung gateway during a
+    teardown/setup cycle must not wedge the rotate-token CLI forever)
+    and by ``_ROTATE_TOKEN_MAX_OUTPUT_BYTES`` (a runaway subprocess
+    must not balloon the CLI's resident memory). Hitting either limit
+    raises ``ClickException`` so the operator sees the failure rather
+    than a silent kill.
+    """
     binary = shutil.which("defenseclaw-gateway")
     if not binary:
         raise click.ClickException(
             "defenseclaw-gateway binary not found on PATH. Install it before running rotate-token "
             "(the connector teardown/setup hooks need it to refresh hook scripts)."
         )
-    proc = subprocess.run(
-        [binary, *args],
-        capture_output=True,
-        check=False,
+    try:
+        proc = subprocess.run(
+            [binary, *args],
+            capture_output=True,
+            check=False,
+            timeout=_ROTATE_TOKEN_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Surface partial output so the operator can see how far the
+        # subprocess got before the timeout fired.
+        head = (exc.stdout or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
+        tail = (exc.stderr or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
+        raise click.ClickException(
+            f"defenseclaw-gateway {' '.join(args)!r} timed out after "
+            f"{_ROTATE_TOKEN_TIMEOUT_S:.0f}s. Partial stderr: "
+            f"{tail.decode('utf-8', errors='replace')[:512]} "
+            f"(stdout: {head.decode('utf-8', errors='replace')[:256]})"
+        ) from exc
+
+    stdout = proc.stdout or b""
+    stderr = proc.stderr or b""
+    if len(stdout) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES or len(stderr) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES:
+        raise click.ClickException(
+            f"defenseclaw-gateway {' '.join(args)!r} produced "
+            f"{len(stdout)+len(stderr)} bytes of output (cap "
+            f"{_ROTATE_TOKEN_MAX_OUTPUT_BYTES} per stream); refusing to buffer."
+        )
+    return (
+        proc.returncode,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
     )
-    return proc.returncode, proc.stdout.decode("utf-8", errors="replace"), proc.stderr.decode("utf-8", errors="replace")
 
 
 @setup.command("rotate-token")
@@ -3391,7 +3429,7 @@ def setup_notifications_set(
     \b
     Categories (event types):
       block_enforced       Real blocks (default: on).
-      block_would_block    Audit-mode blocks (default: on).
+      block_would_block    Observe-mode would-block / would-ask toasts (default: off).
       hitl_approval        Human-in-the-loop prompts (default: on).
 
     \b

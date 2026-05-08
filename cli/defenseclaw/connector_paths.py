@@ -1203,7 +1203,20 @@ def _atomic_yaml_delete(
 
 
 def restore_managed_mcp_backup(path: str) -> bool:
-    """Restore the one-shot DefenseClaw backup for *path* if present."""
+    """Restore the one-shot DefenseClaw backup for *path* if present.
+
+    Looks first for the registry-recorded backup under
+    ``$DEFENSECLAW_HOME/connector_backups/mcp/`` (which records the
+    absolute target path so workspace-scoped restores survive a
+    ``cd``); falls back to the legacy sibling ``.bak`` file for
+    backwards compatibility with existing installs.
+    """
+    abs_path = os.path.abspath(path)
+    registry_backup = _registry_backup_for(abs_path)
+    if registry_backup is not None and os.path.isfile(registry_backup):
+        os.replace(registry_backup, abs_path)
+        _registry_clear(abs_path)
+        return True
     backup = _managed_mcp_backup_path(path)
     if not os.path.isfile(backup):
         return False
@@ -1216,15 +1229,149 @@ def _capture_managed_mcp_backup(path: str) -> None:
         return
     backup = _managed_mcp_backup_path(path)
     if os.path.exists(backup):
+        # Sibling backup already present — the registry entry may be
+        # stale; refresh it so a later restore_by_id() resolves to the
+        # right absolute path even when called from a different cwd.
+        _registry_register(os.path.abspath(path), backup)
         return
     shutil.copy2(path, backup)
     os.chmod(backup, 0o600)
+    _registry_register(os.path.abspath(path), backup)
 
 
 def _managed_mcp_backup_path(path: str) -> str:
     parent = os.path.dirname(path) or "."
     basename = os.path.basename(path).lstrip(".") or "config"
     return os.path.join(parent, f".defenseclaw-{basename}.bak")
+
+
+# ---------------------------------------------------------------------------
+# MCP backup registry — workspace-cwd-independent restore (S5.2 / C-2)
+# ---------------------------------------------------------------------------
+#
+# The historical ``.defenseclaw-<name>.bak`` sibling-file scheme works
+# fine for user-scope configs (``~/.claude/settings.json``) because the
+# absolute path is stable. It breaks for workspace-scope configs (e.g.
+# Copilot's ``<cwd>/.github/mcp.json``) because the .bak is anchored to
+# the cwd at backup time; restoring after a ``cd`` either touches the
+# wrong workspace or no-ops silently.
+#
+# The registry below is a single JSON file under
+# ``$DEFENSECLAW_HOME/connector_backups/mcp/registry.json`` that maps
+# the SHA-256 of the absolute target path -> {"path": <abs target>,
+# "backup": <abs sibling .bak>, "ts": <utc>}. ``restore_by_id`` and
+# ``restore_managed_mcp_backup`` look here first, ensuring restore is
+# anchored to the original target regardless of cwd.
+
+def _registry_dir() -> str:
+    """Return the absolute MCP backup registry directory.
+
+    Created lazily with mode 0o700 because the registry leaks the
+    file paths of every config DefenseClaw has touched.
+    """
+    home = os.environ.get("DEFENSECLAW_HOME", "").strip()
+    if not home:
+        home = str(Path.home() / ".defenseclaw")
+    return os.path.join(home, "connector_backups", "mcp")
+
+
+def _registry_path() -> str:
+    return os.path.join(_registry_dir(), "registry.json")
+
+
+def _registry_load() -> dict[str, dict[str, str]]:
+    path = _registry_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for k, v in data.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            out[k] = {kk: str(vv) for kk, vv in v.items() if isinstance(kk, str)}
+    return out
+
+
+def _registry_save(state: dict[str, dict[str, str]]) -> None:
+    path = _registry_path()
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-registry-", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _registry_key(abs_target: str) -> str:
+    """Stable identifier for *abs_target* used as the registry key.
+
+    SHA-256 of the absolute path. We use a hash (not the path itself)
+    because some operators consider the on-disk filename of a workspace
+    as sensitive; the original is still recorded in the value as
+    ``path`` so legitimate restore flows can echo it back to the user.
+    """
+    import hashlib
+    return hashlib.sha256(abs_target.encode("utf-8")).hexdigest()
+
+
+def _registry_register(abs_target: str, backup: str) -> None:
+    import datetime as _dt
+    state = _registry_load()
+    state[_registry_key(abs_target)] = {
+        "path": abs_target,
+        "backup": os.path.abspath(backup),
+        "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    try:
+        _registry_save(state)
+    except OSError:
+        # Best-effort: registry write failure must not block setup.
+        # The legacy sibling backup is still in place for restore.
+        pass
+
+
+def _registry_clear(abs_target: str) -> None:
+    state = _registry_load()
+    if state.pop(_registry_key(abs_target), None) is None:
+        return
+    try:
+        _registry_save(state)
+    except OSError:
+        pass
+
+
+def _registry_backup_for(abs_target: str) -> str | None:
+    entry = _registry_load().get(_registry_key(abs_target))
+    if not entry:
+        return None
+    backup = entry.get("backup", "")
+    return backup or None
+
+
+def lookup_managed_mcp_backup(path: str) -> str | None:
+    """Return the absolute backup path for *path* if recorded.
+
+    Public lookup helper for tests and for tooling that needs to surface
+    the recorded backup location without performing a restore.
+    """
+    return _registry_backup_for(os.path.abspath(path))
 
 
 def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:

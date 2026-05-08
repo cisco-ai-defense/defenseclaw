@@ -266,6 +266,14 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // regex-match verdict carrying echoed user content (PII, secrets)
 // does not land verbatim on the screen — this matches how proxy.go
 // and hilt.go feed the same dispatcher.
+// dispatchClaudeCodeHookNotification follows the same routing
+// contract documented on dispatchAgentHookNotification. The
+// rawAction=="confirm" && action!="confirm" branch covers observe
+// mode (claudecode's PreToolUse response is permissionDecision=allow
+// in observe mode, so no chat ask is issued) — those toasts go
+// through OnWouldBlock with WouldAsk=true so a single
+// notifications.block_would_block=false silences all observe-mode
+// noise without affecting real native asks.
 func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
 	if a == nil || a.notifier == nil {
 		return
@@ -275,32 +283,32 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 		target = req.HookEventName
 	}
 	safeReason := string(redaction.ForSinkReason(reason))
+	base := notifier.BlockEvent{
+		Source:    notifier.SourceHook,
+		Target:    target,
+		Reason:    safeReason,
+		Severity:  severity,
+		Connector: "claudecode",
+		Event:     req.HookEventName,
+	}
 	switch {
 	case action == "block":
-		a.notifier.OnBlock(notifier.BlockEvent{
-			Source:    notifier.SourceHook,
-			Target:    target,
-			Reason:    safeReason,
-			Severity:  severity,
-			Connector: "claudecode",
-			Event:     req.HookEventName,
-		})
+		a.notifier.OnBlock(base)
 	case rawAction == "block" && (wouldBlock || action != "block"):
-		a.notifier.OnWouldBlock(notifier.BlockEvent{
-			Source:    notifier.SourceHook,
-			Target:    target,
+		a.notifier.OnWouldBlock(base)
+	case action == "confirm":
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:   fmt.Sprintf("%s (%s)", target, req.HookEventName),
 			Reason:    safeReason,
 			Severity:  severity,
+			Source:    notifier.SourceHook,
 			Connector: "claudecode",
 			Event:     req.HookEventName,
 		})
 	case rawAction == "confirm":
-		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
-			Subject:  fmt.Sprintf("%s (%s)", target, req.HookEventName),
-			Reason:   safeReason,
-			Severity: severity,
-			Source:   notifier.SourceHook,
-		})
+		evt := base
+		evt.WouldAsk = true
+		a.notifier.OnWouldBlock(evt)
 	}
 }
 

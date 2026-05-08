@@ -344,6 +344,130 @@ func TestAgentHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 	}
 }
 
+// TestAgentHookDispatch_ConfirmCarriesConnectorAndEvent pins the
+// regression fix where cursor (and the other hook-only connectors)
+// fired an "Approval needed: <tool>" toast that did not surface
+// the connector name or the hook event in the subtitle. Operators
+// looking at the toast in isolation could not tell which framework
+// raised it. The toast subtitle must now read "hook · HIGH ·
+// cursor · beforeShellExecution · reply in chat" so attribution
+// works without opening the audit log.
+func TestAgentHookDispatch_ConfirmCarriesConnectorAndEvent(t *testing.T) {
+	d, rec := newWiringDispatcher()
+	api := &APIServer{}
+	api.SetNotifier(d)
+
+	api.dispatchAgentHookNotification(
+		agentHookRequest{
+			ConnectorName: "cursor",
+			HookEventName: "beforeShellExecution",
+			ToolName:      "shell",
+		},
+		"confirm", "confirm", "HIGH", "matched: deny-rm-rf", false,
+	)
+	got := rec.WaitFor(t, 1)
+	if !strings.Contains(got[0].Title, "Approval needed") {
+		t.Fatalf("title should mention 'Approval needed', got %q", got[0].Title)
+	}
+	if !strings.Contains(got[0].Subtitle, "cursor") {
+		t.Errorf("subtitle should carry connector 'cursor', got %q", got[0].Subtitle)
+	}
+	if !strings.Contains(got[0].Subtitle, "beforeShellExecution") {
+		t.Errorf("subtitle should carry event 'beforeShellExecution', got %q", got[0].Subtitle)
+	}
+	if !strings.Contains(got[0].Subtitle, "reply in chat") {
+		t.Errorf("native ask should keep the 'reply in chat' tail, got %q", got[0].Subtitle)
+	}
+}
+
+// TestAgentHookDispatch_ConfirmDowngradedRewordsToast guards the
+// fix for the misleading "Approval needed: ... reply in chat"
+// toast when DefenseClaw verdict is "confirm" but the connector
+// cannot natively ask for that event (cursor's beforeReadFile is
+// blockable but not askable — see connector.NewCursorConnector).
+// In that case mapHookAction demotes action to "alert" and the
+// chat surface receives no ask. The toast must:
+//
+//   - read "DefenseClaw would ask about <target>" rather than
+//     "Approval needed" with a "reply in chat" tail, AND
+//   - flow through the would-block category so a single
+//     notifications.block_would_block=false silences it (and every
+//     other observe-mode hook toast) without affecting real
+//     native asks routed through OnApprovalPending.
+func TestAgentHookDispatch_ConfirmDowngradedRewordsToast(t *testing.T) {
+	d, rec := newWiringDispatcher()
+	api := &APIServer{}
+	api.SetNotifier(d)
+
+	api.dispatchAgentHookNotification(
+		agentHookRequest{
+			ConnectorName: "cursor",
+			HookEventName: "beforeReadFile",
+			ToolName:      "Read",
+		},
+		// rawAction stays "confirm" but mapHookAction has demoted
+		// the surface action to "alert" because beforeReadFile is
+		// not in cursor's AskEvents.
+		"alert", "confirm", "HIGH", "matched: gateway.json access", false,
+	)
+	got := rec.WaitFor(t, 1)
+	if strings.Contains(got[0].Subtitle, "reply in chat") {
+		t.Fatalf("downgraded approval must not promise a chat reply, got %q", got[0].Subtitle)
+	}
+	if !strings.Contains(strings.ToLower(got[0].Title), "would ask about") {
+		t.Errorf("title should mention 'would ask about' for downgraded confirm, got %q", got[0].Title)
+	}
+	if !strings.Contains(got[0].Subtitle, "cursor") {
+		t.Errorf("subtitle should still carry connector 'cursor', got %q", got[0].Subtitle)
+	}
+	if !strings.Contains(got[0].Subtitle, "observe") {
+		t.Errorf("downgraded confirm goes through OnWouldBlock so subtitle must carry the observe tag, got %q", got[0].Subtitle)
+	}
+}
+
+// TestAgentHookDispatch_ObserveModeConfirmRoutesThroughWouldBlock
+// pins the routing contract that lets users running connectors in
+// observe mode silence ALL hook noise with a single
+// notifications.block_would_block=false. In observe mode
+// mapHookAction returns ("allow", false) for a confirm verdict — the
+// chat surface gets permission=allow and no ask is issued — so the
+// toast must not promise a chat reply, and must flow through the
+// would-block category gate (OnWouldBlock with WouldAsk=true) rather
+// than OnApprovalPending. The recorder used by newWiringDispatcher
+// has all categories on, so this test only locks the user-visible
+// shape; the gate behavior is covered by the dispatcher's own tests.
+func TestAgentHookDispatch_ObserveModeConfirmRoutesThroughWouldBlock(t *testing.T) {
+	d, rec := newWiringDispatcher()
+	api := &APIServer{}
+	api.SetNotifier(d)
+
+	// Observe-mode shape from mapHookAction: rawAction="confirm",
+	// action="allow", wouldBlock=false. Same shape regardless of
+	// whether the event is in caps.AskEvents because mode != action
+	// short-circuits before the AskEvents check.
+	api.dispatchAgentHookNotification(
+		agentHookRequest{
+			ConnectorName: "cursor",
+			HookEventName: "beforeShellExecution",
+			ToolName:      "Shell",
+		},
+		"allow", "confirm", "HIGH", "matched: rm -rf /", false,
+	)
+	got := rec.WaitFor(t, 1)
+	if strings.Contains(strings.ToLower(got[0].Title), "approval needed") {
+		t.Fatalf("observe-mode confirm must not fire 'Approval needed' (no chat ask is issued), got %q", got[0].Title)
+	}
+	if strings.Contains(got[0].Subtitle, "reply in chat") {
+		t.Fatalf("observe-mode confirm must not promise a chat reply, got %q", got[0].Subtitle)
+	}
+	if !strings.Contains(strings.ToLower(got[0].Title), "would ask about") {
+		t.Errorf("title should mention 'would ask about' for observe-mode confirm, got %q", got[0].Title)
+	}
+	if !strings.Contains(got[0].Subtitle, "observe") {
+		t.Errorf("observe-mode confirm must carry the observe tag, got %q", got[0].Subtitle)
+	}
+}
+
 // TestAgentHookDispatch_RedactsReason locks the privacy posture on
 // the generic helper: regex-shaped echoed user content (PII /
 // secrets) must not land verbatim in the toast body. Same contract

@@ -36,6 +36,8 @@ from defenseclaw.registries.manifest import (
     NAME_RE,
     Manifest,
     ManifestEntry,
+    ManifestError,
+    validate_entry,
 )
 from defenseclaw.registries.ssrf import Resolver, SSRFError, guard_url
 
@@ -173,19 +175,30 @@ def _server_to_entry(
         except SSRFError:
             return None
 
-    return ManifestEntry(
-        name=name,
-        type="mcp",
-        transport=transport if transport in (
-            "stdio", "http", "sse", "streamable-http", "websocket",
-        ) else "stdio",
-        command=command,
-        args=args,
-        env_required=env_required,
-        url=url,
-        version=str(server.get("version") or ""),
-        license=str(server.get("license") or ""),
-        publisher=str(server.get("publisher") or "smithery"),
-        description=str(server.get("description") or "")[:2048],
-        homepage=str(server.get("homepage") or "")[:2048],
-    )
+    # Route the synthesized entry through the shared manifest validator
+    # rather than constructing a ManifestEntry directly. The hand-written
+    # checks in validate_entry() enforce the env-var character class,
+    # transport enum, and length caps that the per-row code below was
+    # silently coercing (e.g. unknown transports → "stdio") instead of
+    # rejecting. A single source of truth for entry validity keeps the
+    # security guarantees uniform across every adapter.
+    candidate: dict[str, Any] = {
+        "name": name,
+        "type": "mcp",
+        "transport": transport,
+        "command": command,
+        "args": args,
+        "env_required": env_required,
+        "url": url,
+        "version": str(server.get("version") or ""),
+        "license": str(server.get("license") or ""),
+        "publisher": str(server.get("publisher") or "smithery"),
+        "description": str(server.get("description") or "")[:2048],
+        "homepage": str(server.get("homepage") or "")[:2048],
+    }
+    try:
+        return validate_entry(candidate)
+    except ManifestError as exc:
+        # Convert to IngestError so the per-row except handler in
+        # fetch_smithery() drops just this entry and keeps syncing.
+        raise IngestError(f"smithery entry {name!r}: {exc}") from exc

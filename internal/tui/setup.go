@@ -523,7 +523,7 @@ func (p *SetupPanel) loadSections() {
 				{Label: "Block (enforced)", Key: "notifications.block_enforced", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.BlockEnforced),
 					Hint: "Toast when a request is actually denied (mode=action, action=block)."},
 				{Label: "Block (would-block)", Key: "notifications.block_would_block", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.BlockWouldBlock),
-					Hint: "Toast for observe-mode 'would have blocked' verdicts. Useful while tuning policy; turn off once posture is stable."},
+					Hint: "Toast for observe-mode 'would have blocked / would have asked' verdicts. Off by default — opt in while tuning policy in observe mode."},
 				{Label: "HITL Approval", Key: "notifications.hitl_approval", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.HITLApproval),
 					Hint: "Informational toast when a HILT/confirm prompt is awaiting a user reply in chat / TUI. Click does NOT approve — operator still replies in chat."},
 				{Label: "── Sources ──", Kind: "header"},

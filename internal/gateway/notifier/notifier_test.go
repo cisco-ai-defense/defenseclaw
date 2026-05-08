@@ -101,6 +101,12 @@ func TestDispatcher_CategoryGate(t *testing.T) {
 
 	d.OnBlock(BlockEvent{Source: SourceHook, Target: "Bash", Reason: "denied"})
 	d.OnWouldBlock(BlockEvent{Source: SourceHook, Target: "Bash"})
+	// WouldAsk-flagged BlockEvent — observe-mode confirm path —
+	// MUST be gated by BlockWouldBlock too so a single
+	// `notifications.block_would_block: false` silences every
+	// observe-mode hook notification (block + ask) without
+	// touching real native asks below.
+	d.OnWouldBlock(BlockEvent{Source: SourceHook, Target: "Read", WouldAsk: true})
 	d.OnApprovalPending(ApprovalEvent{Subject: "tool", Source: SourceHook})
 
 	got := rec.Drain(1, 100*time.Millisecond)
@@ -280,6 +286,68 @@ func TestBlockNotification_WouldBlockTagsObserve(t *testing.T) {
 	}
 	if !strings.Contains(n.Subtitle, "observe") {
 		t.Fatalf("expected observe tag in subtitle, got %q", n.Subtitle)
+	}
+}
+
+// TestApprovalNotification_CarriesConnectorAndEvent pins the
+// contract that the approval toast subtitle includes the
+// connector name and hook event when the caller provides them,
+// so an operator paging through toasts can attribute each
+// "Approval needed: ..." to a specific framework + hook surface
+// without opening the audit log.
+func TestApprovalNotification_CarriesConnectorAndEvent(t *testing.T) {
+	n := approvalNotification(ApprovalEvent{
+		Subject:   "Read (beforeReadFile)",
+		Severity:  "HIGH",
+		Source:    SourceHook,
+		Connector: "cursor",
+		Event:     "beforeReadFile",
+		Reason:    "matched: policy.json access",
+	})
+	if !strings.Contains(n.Title, "Approval needed") || !strings.Contains(n.Title, "Read (beforeReadFile)") {
+		t.Fatalf("expected approval title with subject, got %q", n.Title)
+	}
+	if !strings.Contains(n.Subtitle, "cursor") {
+		t.Fatalf("expected subtitle to carry connector 'cursor', got %q", n.Subtitle)
+	}
+	if !strings.Contains(n.Subtitle, "beforeReadFile") {
+		t.Fatalf("expected subtitle to carry event 'beforeReadFile', got %q", n.Subtitle)
+	}
+	if !strings.Contains(n.Subtitle, "reply in chat") {
+		t.Fatalf("default approval should keep the 'reply in chat' tail, got %q", n.Subtitle)
+	}
+}
+
+// TestBlockNotification_WouldAskRewordsToast pins the contract that
+// observe-mode and not-natively-askable confirm verdicts route
+// through OnWouldBlock with WouldAsk=true and render as
+// "DefenseClaw would ask about <target>" rather than a misleading
+// "DefenseClaw would block …" or "Approval needed: … reply in chat".
+// Keeping the rendering on the would-block category lets a single
+// notifications.block_would_block=false silence every observe-mode
+// hook notification, which is the user-facing knob for "I run
+// connectors in observe mode and want a quiet desktop".
+func TestBlockNotification_WouldAskRewordsToast(t *testing.T) {
+	n := blockNotification(BlockEvent{
+		Source:    SourceHook,
+		Target:    "Read",
+		Reason:    "matched: policy.json access",
+		Severity:  "HIGH",
+		Connector: "cursor",
+		Event:     "beforeReadFile",
+		WouldAsk:  true,
+	}, true)
+	if !strings.Contains(n.Title, "would ask about") || !strings.Contains(n.Title, "Read") {
+		t.Fatalf("expected 'would ask about Read' framing in title, got %q", n.Title)
+	}
+	if strings.Contains(n.Title, "would block") {
+		t.Fatalf("WouldAsk must not fall back to 'would block' title, got %q", n.Title)
+	}
+	if !strings.Contains(n.Subtitle, "cursor") || !strings.Contains(n.Subtitle, "beforeReadFile") {
+		t.Fatalf("expected subtitle to carry connector + event, got %q", n.Subtitle)
+	}
+	if !strings.Contains(n.Subtitle, "observe") {
+		t.Fatalf("WouldAsk subtitle must carry the observe tag (it routes through OnWouldBlock), got %q", n.Subtitle)
 	}
 }
 

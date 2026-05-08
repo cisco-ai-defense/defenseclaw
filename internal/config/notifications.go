@@ -45,8 +45,13 @@ type NotificationsConfig struct {
 	BlockEnforced bool `mapstructure:"block_enforced" yaml:"block_enforced"`
 
 	// BlockWouldBlock fires a notification when a verdict would have
-	// blocked under enforcement but observe mode let it through.
-	// Helpful while tuning policy.
+	// blocked under enforcement but observe mode let it through, OR
+	// when a confirm verdict was downgraded because the connector
+	// cannot natively ask for that event (see BlockEvent.WouldAsk in
+	// internal/gateway/notifier). Default OFF: a fresh install only
+	// notifies for things that actually happened (enforced block or
+	// a real chat-side ask). Operators tuning policy in observe mode
+	// can opt in by setting this to true.
 	BlockWouldBlock bool `mapstructure:"block_would_block" yaml:"block_would_block"`
 
 	// HITLApproval fires a notification when a HITL/confirm prompt
@@ -105,14 +110,19 @@ var DefaultNotificationsEnabled = runtime.GOOS == "darwin"
 
 // DefaultNotificationsConfig returns the recommended starting point
 // for fresh installs: master switch defaults to true on darwin and
-// false elsewhere (see DefaultNotificationsEnabled), and every
-// category and source is enabled so a single yes-answer gives full
-// coverage with no further tuning.
+// false elsewhere (see DefaultNotificationsEnabled). Categories
+// favor signal over noise — a fresh install only notifies for
+// things that ACTUALLY happened (enforced block, real native ask).
+// BlockWouldBlock defaults to false; observe-mode "would have
+// blocked" / "would have asked" toasts are off by default and are
+// an explicit opt-in for operators tuning a strict policy. Sources
+// remain on so opting BlockWouldBlock back in still hits every
+// emission site without a second tuning pass.
 func DefaultNotificationsConfig() NotificationsConfig {
 	return NotificationsConfig{
 		Enabled:         DefaultNotificationsEnabled,
 		BlockEnforced:   true,
-		BlockWouldBlock: true,
+		BlockWouldBlock: false,
 		HITLApproval:    true,
 		Sources: NotificationSourceFilter{
 			Hook:        true,

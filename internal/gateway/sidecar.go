@@ -1677,6 +1677,16 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}
+	// Load any per-source OTLP path-tokens that connector setup
+	// previously minted (e.g. ${data_dir}/hooks/.otlp-geminicli.token).
+	// Failure to load is logged but non-fatal: tokenAuth falls back
+	// to the master-bearer comparison so a missing per-source token
+	// only loses the scoped-token path, never breaks /otlp/.
+	if scoped, err := connector.LoadAllOTLPPathTokens(s.cfg.DataDir); err == nil {
+		api.SetOTLPPathTokens(scoped)
+	} else {
+		fmt.Fprintf(os.Stderr, "[sidecar] load OTLP path-tokens: %v\n", err)
+	}
 	reg := connector.NewDefaultRegistry()
 	if s.cfg.PluginDir != "" {
 		_ = reg.DiscoverPlugins(s.cfg.PluginDir)

@@ -1267,3 +1267,88 @@ func TestDetectPackageManifests_CollapsesTransitiveNodeModules(t *testing.T) {
 		}
 	}
 }
+
+// TestRunScan_SingleFlight (H-1) verifies that two concurrent scans
+// serialize on the per-service mutex instead of racing on the state
+// store / detector fanout. Without the lock the JSON ai_discovery_state
+// snapshot can be clobbered when the API-trigger path falls through to
+// runScan() at the same moment a scheduled tick fires.
+func TestRunScan_SingleFlight(t *testing.T) {
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "data")
+	home := filepath.Join(tmp, "home")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir dataDir: %v", err)
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled:         true,
+		Mode:            "enhanced",
+		DataDir:         dataDir,
+		HomeDir:         home,
+		EmitOTel:        false,
+		MaxFilesPerScan: 5,
+		MaxFileBytes:    32 * 1024,
+	}, []AISignature{testAISignature()}, nil, nil)
+	if svc == nil {
+		t.Fatal("expected non-nil service")
+	}
+
+	// Spawn N concurrent runScan goroutines; if the mutex is wired
+	// correctly all of them should complete without races (a -race
+	// build catches concurrent map writes / store.Save races
+	// otherwise). Each call is allowed to fail due to environmental
+	// reasons (e.g. detectors finding nothing on a clean tmp tree);
+	// what we are asserting is the absence of a panic and a clean
+	// exit for every goroutine.
+	const N = 8
+	done := make(chan struct{}, N)
+	for i := 0; i < N; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			_, _ = svc.runScan(context.Background(), true, "test-concurrent")
+		}()
+	}
+	timeout := time.After(15 * time.Second)
+	for i := 0; i < N; i++ {
+		select {
+		case <-done:
+		case <-timeout:
+			t.Fatalf("runScan goroutines did not finish — possible deadlock or unbounded wait")
+		}
+	}
+}
+
+// TestRunScan_RespectsCancelledContext verifies the early-cancel
+// shortcut: a caller whose context is already cancelled must NOT
+// block waiting for the single-flight mutex behind a slow scan.
+func TestRunScan_RespectsCancelledContext(t *testing.T) {
+	tmp := t.TempDir()
+	dataDir := filepath.Join(tmp, "data")
+	home := filepath.Join(tmp, "home")
+	_ = os.MkdirAll(dataDir, 0o700)
+	_ = os.MkdirAll(home, 0o700)
+
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled:         true,
+		Mode:            "enhanced",
+		DataDir:         dataDir,
+		HomeDir:         home,
+		EmitOTel:        false,
+		MaxFilesPerScan: 1,
+		MaxFileBytes:    1024,
+	}, []AISignature{testAISignature()}, nil, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := svc.runScan(ctx, true, "test-cancelled")
+	if err == nil {
+		t.Fatal("expected runScan to return ctx.Err() for already-cancelled context")
+	}
+	if err != context.Canceled {
+		t.Fatalf("got err=%v, want context.Canceled", err)
+	}
+}

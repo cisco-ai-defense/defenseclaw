@@ -72,6 +72,21 @@ type APIServer struct {
 	// /v1/guardrail/config endpoint while other goroutines read them.
 	cfgMu sync.RWMutex
 
+	// otlpPathTokenMu guards otlpPathTokens — the in-memory map of
+	// per-source OTLP path tokens loaded from
+	// ${data_dir}/hooks/.otlp-<source>.token. Reads happen on every
+	// loopback OTLP request that lacks an Authorization header (i.e.
+	// the path-token branch in tokenAuth), so the map is held under
+	// an RWMutex to keep the hot path lock-free for readers.
+	//
+	// The map is populated lazily: SetOTLPPathTokens replaces the
+	// snapshot when the sidecar boots after a connector setup
+	// minted a new token; lookupOTLPPathToken treats an absent
+	// scope as "no scoped token configured" and falls through to
+	// the master-token comparison.
+	otlpPathTokenMu sync.RWMutex
+	otlpPathTokens  map[connector.OTLPPathTokenScope]string
+
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
@@ -93,6 +108,49 @@ type APIServer struct {
 // can be recorded as metrics.
 func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
+}
+
+// SetOTLPPathTokens replaces the in-memory snapshot of per-source
+// OTLP path-tokens. Called by the sidecar at boot once
+// ${data_dir}/hooks/.otlp-<source>.token files have been minted.
+//
+// Passing nil clears the table — useful for tests and for operators
+// that explicitly disable the scoped-token path. Passing a partial
+// map (a subset of OTLPPathTokenScopes()) is supported: scopes
+// missing from the map fall back to the master-token comparison in
+// tokenAuth so we do not break legacy deployments.
+func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]string) {
+	a.otlpPathTokenMu.Lock()
+	defer a.otlpPathTokenMu.Unlock()
+	if tokens == nil {
+		a.otlpPathTokens = nil
+		return
+	}
+	cp := make(map[connector.OTLPPathTokenScope]string, len(tokens))
+	for k, v := range tokens {
+		cp[k] = v
+	}
+	a.otlpPathTokens = cp
+}
+
+// lookupOTLPPathToken returns the per-source scoped OTLP path-token
+// for *source*, or "" when no token has been provisioned for that
+// source. *source* is the URL segment from
+// /otlp/<source>/<token>/v1/<signal>; it is matched against the
+// closed allow-list of known OTLPPathTokenScope values so an
+// attacker cannot trigger a map lookup against arbitrary scopes.
+func (a *APIServer) lookupOTLPPathToken(source string) string {
+	a.otlpPathTokenMu.RLock()
+	defer a.otlpPathTokenMu.RUnlock()
+	if a.otlpPathTokens == nil {
+		return ""
+	}
+	scope := connector.OTLPPathTokenScope(source)
+	// We deliberately do not validate scope membership here — the
+	// map only contains scopes that were already validated when
+	// SetOTLPPathTokens populated it, so an unknown source segment
+	// simply misses the map and returns "".
+	return a.otlpPathTokens[scope]
 }
 
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
@@ -2049,10 +2107,24 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 		if token == "" {
-			if pathToken, _, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) &&
-				subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
-				next.ServeHTTP(w, r)
-				return
+			if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
+				// Accept either the master gateway bearer (legacy
+				// path; still allowed for backwards compatibility
+				// with deployments that have not regenerated their
+				// connector OTLP tokens) or the per-source scoped
+				// token. The per-source token is preferred because
+				// it cannot be replayed against /api/v1/* routes
+				// and is bound to a single connector's OTLP
+				// namespace. See connector/otlp_token.go.
+				if subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
+					next.ServeHTTP(w, r)
+					return
+				}
+				if scoped := a.lookupOTLPPathToken(source); scoped != "" &&
+					subtle.ConstantTimeCompare([]byte(pathToken), []byte(scoped)) == 1 {
+					next.ServeHTTP(w, r)
+					return
+				}
 			}
 		}
 		if token == "" {

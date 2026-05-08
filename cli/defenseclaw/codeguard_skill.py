@@ -23,14 +23,23 @@ directories when the operator explicitly runs ``defenseclaw codeguard install``.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from defenseclaw import connector_paths
 from defenseclaw.paths import bundled_codeguard_dir
+
+# Allow-listed character class for the per-target archive sub-directory.
+# Connector and target are normalized to one of a small known set elsewhere
+# in this module, but we belt-and-brace here in case a future caller
+# bypasses _normalize_target / _resolve_connector and supplies a raw
+# string that could otherwise traverse out of the archive root.
+_ARCHIVE_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 @dataclass
@@ -103,20 +112,31 @@ def install_codeguard_asset(
     if source_dir is None:
         return "skipped (skill source not found in package)"
 
+    archive_root = _archive_root(cfg)
+    archived: str | None = None
+
     if target == "skill":
+        archived = _archive_path(
+            status.path, archive_root, status.connector, target, replace=replace
+        )
         _replace_path(status.path, replace=replace)
         os.makedirs(os.path.dirname(status.path), exist_ok=True)
         shutil.copytree(source_dir, status.path)
         if status.connector == "openclaw":
             _enable_codeguard_in_openclaw(_expand(cfg.claw.config_file))
-        return f"installed to {status.path}"
+        suffix = f" (previous content archived to {archived})" if archived else ""
+        return f"installed to {status.path}{suffix}"
 
     content = _rule_content(source_dir)
+    archived = _archive_path(
+        status.path, archive_root, status.connector, target, replace=replace
+    )
     _replace_path(status.path, replace=replace)
     os.makedirs(os.path.dirname(status.path), exist_ok=True)
     with open(status.path, "w", encoding="utf-8") as f:
         f.write(content)
-    return f"installed to {status.path}"
+    suffix = f" (previous content archived to {archived})" if archived else ""
+    return f"installed to {status.path}{suffix}"
 
 
 def install_codeguard_skill(cfg, connector: str | None = None, replace: bool = False) -> str:
@@ -183,6 +203,129 @@ def _replace_path(path: str, *, replace: bool) -> None:
         shutil.rmtree(path)
     else:
         os.unlink(path)
+
+
+def _archive_root(cfg) -> str:
+    """Return the absolute directory used for opt-in CodeGuard backups.
+
+    Prefers ``cfg.data_dir`` (the persisted DefenseClaw home), falling
+    back to ``$DEFENSECLAW_HOME`` and finally ``~/.defenseclaw`` so the
+    archive is always under the operator's owner-only state directory.
+    The directory is created with mode ``0o700`` because the archived
+    payload may carry user-authored skill/rule content.
+    """
+    data_dir = (getattr(cfg, "data_dir", None) or "").strip()
+    if not data_dir:
+        data_dir = os.environ.get("DEFENSECLAW_HOME", "").strip()
+    if not data_dir:
+        data_dir = str(Path.home() / ".defenseclaw")
+    return os.path.join(data_dir, "connector_backups", "codeguard")
+
+
+def _archive_slug(value: str) -> str:
+    """Sanitize *value* for use as a single archive sub-directory name.
+
+    Returns a non-empty token from the ``[A-Za-z0-9._-]`` allow-list.
+    Empty inputs (or inputs that reduce to nothing after sanitization)
+    fall back to ``"_"`` so we never create an archive path that points
+    at the parent directory.
+    """
+    cleaned = _ARCHIVE_SLUG_RE.sub("_", (value or "").strip())
+    cleaned = cleaned.strip(".-_")
+    return cleaned or "_"
+
+
+def _archive_path(
+    path: str,
+    archive_root: str,
+    connector: str,
+    target: str,
+    *,
+    replace: bool,
+) -> str | None:
+    """Copy *path* into the per-connector archive before --replace deletes it.
+
+    Returns the archive directory on success, ``None`` when there is
+    nothing to archive (target absent or operator did not pass
+    ``--replace``).
+
+    Every directory we create under the archive root is forced to
+    ``0o700`` because ``os.makedirs(mode=...)`` only applies the mode
+    to the *leaf* directory — intermediates are created with the
+    default 0o777 masked by the current umask (typically 0o022,
+    yielding world-readable 0o755). Listing
+    ``${data_dir}/connector_backups/codeguard/`` reveals which
+    connectors are installed, which is operator state we do not want
+    leaked to other local users.
+    """
+    if not replace:
+        return None
+    if not os.path.exists(path):
+        return None
+    ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    target_dir = os.path.join(
+        archive_root,
+        _archive_slug(connector),
+        _archive_slug(target),
+        ts,
+    )
+    # stop_at is the directory ABOVE archive_root (i.e. data_dir
+    # itself, which the operator may have set to ~ or similar). The
+    # walk tightens connector_backups, codeguard, <connector>,
+    # <target>, and <ts> — every DefenseClaw-owned dir under the
+    # operator-owned data_dir gets 0o700 if we created it.
+    _makedirs_owner_only(target_dir, stop_at=os.path.dirname(os.path.dirname(archive_root)))
+    dest = os.path.join(target_dir, os.path.basename(path) or "previous")
+    if os.path.isdir(path):
+        shutil.copytree(path, dest, symlinks=False)
+    else:
+        shutil.copy2(path, dest)
+    return target_dir
+
+
+def _makedirs_owner_only(path: str, *, stop_at: str = "") -> None:
+    """Create *path* and tighten every newly-created component to 0o700.
+
+    Walks from ``stop_at`` (exclusive) down to *path*, creating each
+    directory and setting the mode to ``0o700`` as we go. Directories
+    that already exist are left untouched on the way down — we only
+    chmod paths we created — so this helper never narrows perms on a
+    pre-existing user dir like ``~/`` or ``~/.defenseclaw``.
+
+    ``stop_at`` defaults to the empty string which means "walk all the
+    way up to the filesystem root". Callers pass an explicit value
+    when they only want to harden the subtree they own.
+    """
+    components: list[str] = []
+    current = path
+    stop_at = os.path.abspath(stop_at) if stop_at else ""
+    while True:
+        components.append(current)
+        parent = os.path.dirname(current)
+        if not parent or parent == current:
+            break
+        if stop_at and os.path.abspath(parent) == stop_at:
+            break
+        current = parent
+    components.reverse()
+    for comp in components:
+        existed = os.path.isdir(comp)
+        try:
+            os.makedirs(comp, exist_ok=True)
+        except OSError:
+            # Re-raise so the caller sees the underlying error
+            # (typically permissions on the parent), instead of
+            # silently failing to archive.
+            raise
+        if not existed:
+            try:
+                os.chmod(comp, 0o700)
+            except OSError:
+                # chmod can fail on filesystems that don't honor POSIX
+                # modes (CIFS, exFAT). The MkdirAll already applied
+                # the mode argument to the leaf, and an unwritable
+                # archive will surface its own error on shutil.copy2.
+                pass
 
 
 def _is_codeguard_skill_dir(path: str) -> bool:

@@ -351,6 +351,30 @@ type ContinuousDiscoveryService struct {
 	last     AIDiscoveryReport
 	lastErr  error
 	triggers chan chan scanResponse
+
+	// scanMu serializes runScan invocations so the scheduled-tick
+	// path, the process-tick path, and the API-triggered ScanNow
+	// path cannot race on the state store / detector fanout.
+	//
+	// Without this guard, ScanNow's `default:` branch (taken when
+	// the triggers channel is full) would execute runScan directly
+	// and concurrently with whichever ticker also fired, producing:
+	//
+	//   1. classifyAndPersist racing on the same prev snapshot —
+	//      two goroutines compute different `new`/`gone` deltas
+	//      from divergent baselines, emit conflicting events, and
+	//      the second store.Save overwrites the first;
+	//
+	//   2. invStore.RecordScan fan-out doubled up, breaking
+	//      history-row uniqueness invariants;
+	//
+	//   3. s.last clobbered non-deterministically (Snapshot()
+	//      callers see whichever scan happened to win the race).
+	//
+	// The mutex is per-service (not global) because the sidecar
+	// only constructs one ContinuousDiscoveryService; if that ever
+	// changes, each instance still gets its own serialization.
+	scanMu sync.Mutex
 }
 
 type scanResponse struct {
@@ -596,6 +620,25 @@ func (s *ContinuousDiscoveryService) LastError() error {
 }
 
 func (s *ContinuousDiscoveryService) runScan(ctx context.Context, full bool, source string) (AIDiscoveryReport, error) {
+	// Single-flight: the scheduled-tick path, the process-tick
+	// path, and the API-triggered ScanNow path can all reach this
+	// function concurrently. Without the mutex, classifyAndPersist
+	// races on the prev snapshot and store.Save (atomic per call,
+	// but two callers can leapfrog with stale data). See the
+	// comment on ContinuousDiscoveryService.scanMu for details.
+	//
+	// We honor ctx.Done() before blocking so a cancelled callerand
+	// (e.g. an API request whose client disconnected) returns
+	// promptly instead of queueing behind a slow scheduled scan.
+	if err := ctx.Err(); err != nil {
+		return AIDiscoveryReport{}, err
+	}
+	s.scanMu.Lock()
+	defer s.scanMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return AIDiscoveryReport{}, err
+	}
+
 	start := time.Now()
 	scanID := newScanID()
 	ctx, span := s.otel.Tracer().Start(ctx, "defenseclaw.ai.discovery",

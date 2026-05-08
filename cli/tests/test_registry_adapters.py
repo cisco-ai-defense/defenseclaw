@@ -445,13 +445,15 @@ class TestSmitheryAdapter(unittest.TestCase):
         manifest, _, _ = self._post(body)
         self.assertEqual([e.name for e in manifest.entries], ["ok"])
 
-    def test_unknown_transport_falls_back_to_stdio(self):
-        # Unknown transport with a URL provided: the adapter accepts
-        # the row but normalises the transport to "stdio" so the
-        # downstream scanner doesn't crash on a value outside
-        # KNOWN_TRANSPORTS. Note: an unknown transport with NO url
-        # would be rejected (URL is required for non-stdio
-        # transports), which is also the behaviour we want.
+    def test_unknown_transport_rejected_after_validate_entry(self):
+        # H-3: Smithery now routes synthesized rows through
+        # validate_entry() which strictly enforces KNOWN_TRANSPORTS.
+        # The previous behavior silently coerced unknown transports to
+        # "stdio" — masking publisher bugs and (worse) admitting
+        # entries the downstream scanner could not properly classify.
+        # The strict path drops the row instead so the operator sees
+        # a 0-entry manifest and a structured warning rather than a
+        # mis-labelled "stdio" command pretending to be carrier-pigeon.
         body = json.dumps({
             "servers": [
                 {
@@ -462,11 +464,47 @@ class TestSmitheryAdapter(unittest.TestCase):
                         "url": "https://server.example.com/mcp",
                     },
                 },
+                {
+                    "name": "ok",
+                    "deployment": {
+                        "transport": "stdio",
+                        "command": "/bin/ok",
+                    },
+                },
             ],
         }).encode("utf-8")
         manifest, _, _ = self._post(body)
-        self.assertEqual(len(manifest.entries), 1)
-        self.assertEqual(manifest.entries[0].transport, "stdio")
+        # Only the validly-typed entry survives; the carrier-pigeon
+        # row is dropped via the IngestError per-row handler.
+        self.assertEqual([e.name for e in manifest.entries], ["ok"])
+
+    def test_invalid_env_var_name_rejected(self):
+        # H-3: validate_entry enforces ENV_VAR_RE — names that don't
+        # match must be rejected, not stored. Smithery's previous
+        # synthesizer copied env keys verbatim with only a length cap.
+        body = json.dumps({
+            "servers": [
+                {
+                    "name": "lower-env",
+                    "deployment": {
+                        "transport": "stdio",
+                        "command": "/bin/ok",
+                        # lowercase + dash — fails ENV_VAR_RE
+                        "env": ["api-key"],
+                    },
+                },
+                {
+                    "name": "good-env",
+                    "deployment": {
+                        "transport": "stdio",
+                        "command": "/bin/ok",
+                        "env": ["API_KEY"],
+                    },
+                },
+            ],
+        }).encode("utf-8")
+        manifest, _, _ = self._post(body)
+        self.assertEqual([e.name for e in manifest.entries], ["good-env"])
 
     def test_auth_env_passed_as_bearer(self):
         body = b'{"servers":[]}'
@@ -1119,6 +1157,80 @@ class TestDispatch(unittest.TestCase):
             fetch_manifest(
                 RegistrySource(id="x", kind="totally-fake", content="skill"),
             )
+
+
+# ---------------------------------------------------------------------------
+# H-2 — DNS-rebind defense
+# ---------------------------------------------------------------------------
+#
+# These tests live alongside the adapter tests because the pin is wired
+# inside ``_base.http_get``: we need the integration assertion that
+# the SSRF-vetted IP literal actually shows up in the connect path,
+# not just in resolve_and_pin's return value.
+
+class TestDNSRebindPin(unittest.TestCase):
+    """The connect-pin must short-circuit urllib3.util.connection so a
+    second DNS lookup performed by ``requests`` cannot resolve to a
+    different IP than the one ``guard_url`` validated.
+    """
+
+    def test_pin_replaces_create_connection_during_fetch(self):
+        # The fake transport never actually opens a TCP connection;
+        # we only need to prove that during the with-block, the
+        # urllib3 connect function is the pinned one. After the
+        # block exits, the original is restored.
+        from urllib3.util import connection as urllib3_connection
+
+        body = b'{"servers":[]}'
+        transport = _MockTransport(responses=[_FakeResp(body)])
+
+        original_connect = urllib3_connection.create_connection
+        seen_during: list[object] = []
+
+        class _Spy:
+            def __enter__(self):
+                seen_during.append(urllib3_connection.create_connection)
+                return self
+
+            def __exit__(self, *exc):
+                pass
+
+        # Wrap the fetch so we can capture the live create_connection
+        # at the moment requests.get is invoked. We patch
+        # adapter_base.requests.get with a side-effecting transport
+        # that records the function pointer urllib3 would use.
+        def _recording_get(*args, **kwargs):
+            seen_during.append(urllib3_connection.create_connection)
+            return transport(*args, **kwargs)
+
+        with patch.object(adapter_base.requests, "get", _recording_get):
+            adapter_base.http_get(
+                "https://catalog.example.com/manifest.yaml",
+                resolver=_stub_resolver(),
+            )
+
+        # During the fetch, the connect function MUST have been the
+        # pinned one (i.e. NOT the original urllib3 function). After
+        # the fetch the original must be restored.
+        self.assertTrue(seen_during)
+        self.assertIsNot(seen_during[0], original_connect)
+        self.assertIs(urllib3_connection.create_connection, original_connect)
+
+    def test_pin_blocks_unexpected_hosts(self):
+        """Defense in depth: a side-channel HTTP call to an unrelated
+        host during a pinned fetch must raise SSRFError rather than
+        sneaking out of the guard.
+        """
+        from defenseclaw.registries.ssrf import SSRFError
+        from urllib3.util import connection as urllib3_connection
+
+        # Build a real PinnedConnect wrapper and verify its connect
+        # rejects requests for any host other than the pinned target.
+        pin = adapter_base._PinnedConnect("catalog.example.com", 443, "8.8.8.8")
+        with pin:
+            patched = urllib3_connection.create_connection
+            with self.assertRaises(SSRFError):
+                patched(("metadata.google.internal", 80))
 
 
 if __name__ == "__main__":

@@ -450,11 +450,30 @@ func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
 
 // dispatchAgentHookNotification mirrors dispatchClaudeCodeHookNotification
 // / dispatchCodexHookNotification but for the five generic hook-only
-// connectors. Same routing contract:
+// connectors. Routing contract:
 //
-//   - action=="block"                                → notifier.OnBlock
-//   - rawAction=="block" + (wouldBlock || action!=block) → OnWouldBlock
-//   - action=="confirm" || rawAction=="confirm"      → OnApprovalPending
+//   - action=="block"                              → OnBlock        (enforced)
+//   - rawAction=="block" + (wouldBlock||!block)    → OnWouldBlock   (observe-block)
+//   - action=="confirm"                            → OnApprovalPending (real native ask)
+//   - rawAction=="confirm" && action!="confirm"    → OnWouldBlock(WouldAsk=true)
+//
+// The last case is the "would have asked but did not" bucket and
+// covers two concrete scenarios:
+//
+//   - observe mode for any connector — mapHookAction returns
+//     ("allow", false) so the response carries permission=allow and
+//     no chat ask is issued.
+//   - cursor beforeReadFile (and any other event missing from
+//     caps.AskEvents) — confirm gets demoted to alert so, again, no
+//     chat ask is issued.
+//
+// Both belong in the would-block category, NOT in OnApprovalPending,
+// because OnApprovalPending implies "the user has a chat reply box
+// open right now". By collapsing them onto OnWouldBlock with
+// WouldAsk=true, a single `notifications.block_would_block: false`
+// switch silences every observe-mode hook notification (would-block
+// and would-ask alike) — which is the right knob for users running
+// connectors in pure observe mode and wanting a quiet desktop.
 //
 // Reason is run through redaction.ForSinkReason before display so a
 // regex-match verdict carrying echoed user content (PII / secrets)
@@ -471,32 +490,38 @@ func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, 
 		target = req.HookEventName
 	}
 	safeReason := string(redaction.ForSinkReason(reason))
+	base := notifier.BlockEvent{
+		Source:    notifier.SourceHook,
+		Target:    target,
+		Reason:    safeReason,
+		Severity:  severity,
+		Connector: req.ConnectorName,
+		Event:     req.HookEventName,
+	}
 	switch {
 	case action == "block":
-		a.notifier.OnBlock(notifier.BlockEvent{
-			Source:    notifier.SourceHook,
-			Target:    target,
-			Reason:    safeReason,
-			Severity:  severity,
-			Connector: req.ConnectorName,
-			Event:     req.HookEventName,
-		})
+		a.notifier.OnBlock(base)
 	case rawAction == "block" && (wouldBlock || action != "block"):
-		a.notifier.OnWouldBlock(notifier.BlockEvent{
-			Source:    notifier.SourceHook,
-			Target:    target,
+		a.notifier.OnWouldBlock(base)
+	case action == "confirm":
+		// Native chat-side ask actually issued — only path that
+		// belongs in the approvals category.
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:   fmt.Sprintf("%s (%s)", target, req.HookEventName),
 			Reason:    safeReason,
 			Severity:  severity,
+			Source:    notifier.SourceHook,
 			Connector: req.ConnectorName,
 			Event:     req.HookEventName,
 		})
-	case action == "confirm" || rawAction == "confirm":
-		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
-			Subject:  fmt.Sprintf("%s (%s)", target, req.HookEventName),
-			Reason:   safeReason,
-			Severity: severity,
-			Source:   notifier.SourceHook,
-		})
+	case rawAction == "confirm":
+		// Verdict was confirm but the user will not see a chat ask
+		// (observe mode, or event not in caps.AskEvents). Route
+		// through the would-block category so a single
+		// block_would_block=false silences all observe-mode noise.
+		evt := base
+		evt.WouldAsk = true
+		a.notifier.OnWouldBlock(evt)
 	}
 }
 

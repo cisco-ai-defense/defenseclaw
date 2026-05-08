@@ -30,19 +30,17 @@ from __future__ import annotations
 import json
 import os
 import stat
-from pathlib import Path
 
 import pytest
-
 from defenseclaw import connector_paths
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
     MCPWriteUnsupportedError,
-    set_mcp_server,
+    lookup_managed_mcp_backup,
     restore_managed_mcp_backup,
+    set_mcp_server,
     unset_mcp_server,
 )
-
 
 # ---------------------------------------------------------------------------
 # OpenClaw — delegation to injected setter/unsetter
@@ -217,6 +215,43 @@ class TestCodexWrites:
         assert (tmp_path / ".defenseclaw-mcp.json.bak").is_file()
         assert restore_managed_mcp_backup(str(path))
 
+        data = json.loads(path.read_text())
+        assert "demo" not in data["mcpServers"]
+        assert data["mcpServers"]["old"]["command"] == "old"
+
+    def test_set_records_absolute_target_in_registry(self, tmp_path, monkeypatch):
+        """C-2: workspace MCP backup must persist the absolute target path.
+
+        Without this, ``restore_managed_mcp_backup`` could not be
+        called from a different cwd (Copilot, Codex, Cursor all use
+        workspace-scoped paths), and a ``cd`` between setup and
+        teardown would silently lose the original config.
+        """
+        # DEFENSECLAW_HOME isolates the registry for this test run.
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "dchome"))
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        path = workspace / ".mcp.json"
+        path.write_text(json.dumps({"mcpServers": {"old": {"command": "old"}}}))
+
+        set_mcp_server("codex", "demo", {"command": "uvx"})
+
+        recorded = lookup_managed_mcp_backup(str(path))
+        assert recorded is not None
+        assert os.path.isabs(recorded), recorded
+        # The registry directory itself must be 0o700 because it
+        # leaks every config path DefenseClaw has ever touched.
+        registry_dir = tmp_path / "dchome" / "connector_backups" / "mcp"
+        assert registry_dir.is_dir()
+        mode = stat.S_IMODE(registry_dir.stat().st_mode)
+        assert mode == 0o700, f"registry dir mode {oct(mode)} != 0o700"
+
+        # Restore from a totally different cwd — proves the fix.
+        far_away = tmp_path / "elsewhere"
+        far_away.mkdir()
+        monkeypatch.chdir(far_away)
+        assert restore_managed_mcp_backup(str(path)) is True
         data = json.loads(path.read_text())
         assert "demo" not in data["mcpServers"]
         assert data["mcpServers"]["old"]["command"] == "old"

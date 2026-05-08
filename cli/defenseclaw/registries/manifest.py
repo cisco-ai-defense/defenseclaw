@@ -299,6 +299,21 @@ def _build_manifest(data: Any) -> Manifest:
     return manifest
 
 
+def validate_entry(raw: dict[str, Any], default_connector: str = "") -> ManifestEntry:
+    """Validate *raw* (a dict) and return a clean :class:`ManifestEntry`.
+
+    Public wrapper around the same checks :func:`_build_manifest`
+    applies per-entry. Adapters that synthesize entries from a
+    third-party API response (smithery.ai, clawhub, etc.) should run
+    every candidate through this function before appending it to the
+    manifest so the same character-class / enum / length / required-
+    field invariants apply uniformly to every ingest path.
+
+    Raises :class:`ManifestError` on any policy violation.
+    """
+    return _build_entry(raw, default_connector)
+
+
 def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:
     if not isinstance(raw, dict):
         raise ManifestError("entry must be a mapping")

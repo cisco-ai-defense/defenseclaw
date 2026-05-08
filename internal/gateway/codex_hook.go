@@ -17,9 +17,11 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -34,6 +36,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
+
+// runGitListMaxBytes caps the bytes we will read from a `git`
+// invocation. A monorepo with O(100k) tracked files comfortably fits
+// inside 8 MiB; anything larger almost certainly indicates a runaway
+// repo or hostile state and would otherwise balloon the gateway's
+// resident memory because cmd.Output() reads all of stdout into RAM.
+const runGitListMaxBytes = 8 * 1024 * 1024
 
 type codexHookRequest struct {
 	HookEventName        string                 `json:"hook_event_name"`
@@ -281,6 +290,9 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 // dispatchCodexHookNotification mirrors the Claude Code path —
 // see dispatchClaudeCodeHookNotification for the routing contract,
 // including the redaction.ForSinkReason scrub on the reason string.
+// dispatchCodexHookNotification follows the same routing contract
+// documented on dispatchAgentHookNotification. See that comment for
+// the rationale behind WouldAsk routing through OnWouldBlock.
 func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
 	if a == nil || a.notifier == nil {
 		return
@@ -290,32 +302,32 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 		target = req.HookEventName
 	}
 	safeReason := string(redaction.ForSinkReason(reason))
+	base := notifier.BlockEvent{
+		Source:    notifier.SourceHook,
+		Target:    target,
+		Reason:    safeReason,
+		Severity:  severity,
+		Connector: "codex",
+		Event:     req.HookEventName,
+	}
 	switch {
 	case action == "block":
-		a.notifier.OnBlock(notifier.BlockEvent{
-			Source:    notifier.SourceHook,
-			Target:    target,
-			Reason:    safeReason,
-			Severity:  severity,
-			Connector: "codex",
-			Event:     req.HookEventName,
-		})
+		a.notifier.OnBlock(base)
 	case rawAction == "block" && (wouldBlock || action != "block"):
-		a.notifier.OnWouldBlock(notifier.BlockEvent{
-			Source:    notifier.SourceHook,
-			Target:    target,
+		a.notifier.OnWouldBlock(base)
+	case action == "confirm":
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:   fmt.Sprintf("%s (%s)", target, req.HookEventName),
 			Reason:    safeReason,
 			Severity:  severity,
+			Source:    notifier.SourceHook,
 			Connector: "codex",
 			Event:     req.HookEventName,
 		})
 	case rawAction == "confirm":
-		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
-			Subject:  fmt.Sprintf("%s (%s)", target, req.HookEventName),
-			Reason:   safeReason,
-			Severity: severity,
-			Source:   notifier.SourceHook,
-		})
+		evt := base
+		evt.WouldAsk = true
+		a.notifier.OnWouldBlock(evt)
 	}
 }
 
@@ -661,11 +673,41 @@ func runGitList(ctx context.Context, cwd string, args ...string) ([]string, erro
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = cwd
 	cmd.Env = safeGitEnv()
-	out, err := cmd.Output()
+
+	// Bound stdout via io.LimitReader so a monorepo with many
+	// millions of tracked files (or a hostile worktree manufactured
+	// to exhaust gateway memory) cannot OOM the sidecar. We read up
+	// to runGitListMaxBytes+1 — the extra byte tells us when the cap
+	// was breached so we can fail loudly instead of returning a
+	// silently-truncated file list (which would mis-report changed
+	// files and miss legitimate guardrail signals).
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("git %v in %s: %w", args, cwd, err)
+		return nil, fmt.Errorf("git %v in %s: stdout pipe: %w", args, cwd, err)
 	}
-	lines := strings.Split(string(out), "\n")
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("git %v in %s: start: %w", args, cwd, err)
+	}
+	var buf bytes.Buffer
+	if _, copyErr := io.CopyN(&buf, stdout, int64(runGitListMaxBytes)+1); copyErr != nil && copyErr != io.EOF {
+		// Drain remaining stdout / wait so the child does not get
+		// SIGPIPE before we report the underlying error. We
+		// intentionally ignore the wait error here because the read
+		// failure is the actionable signal.
+		_, _ = io.Copy(io.Discard, stdout)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("git %v in %s: read stdout: %w", args, cwd, copyErr)
+	}
+	if buf.Len() > runGitListMaxBytes {
+		_, _ = io.Copy(io.Discard, stdout)
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("git %v in %s: stdout exceeded %d bytes", args, cwd, runGitListMaxBytes)
+	}
+	if waitErr := cmd.Wait(); waitErr != nil {
+		return nil, fmt.Errorf("git %v in %s: %w", args, cwd, waitErr)
+	}
+
+	lines := strings.Split(buf.String(), "\n")
 	ret := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if strings.TrimSpace(line) != "" {

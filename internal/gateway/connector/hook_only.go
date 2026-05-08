@@ -882,37 +882,48 @@ func patchGeminiHooks(path, hookScript string) error {
 // segment that the gateway's tokenAuth middleware accepts only for
 // loopback callers (see parseOTLPPathToken + tokenAuth in api.go).
 //
-// SECURITY (H-1, follow-up needed): the token written into the URL is
-// the MASTER gateway bearer token (opts.APIToken). That means a process
-// with read access to the user's ~/.gemini/settings.json — which is
-// 0644-by-default for Gemini — gets full sidecar admin via
+// SECURITY (Plan B5, H-1 fix): the token embedded in the URL is now a
+// per-connector SCOPED OTLP path-token, NOT the master gateway bearer.
 //
-//	curl -H "Authorization: Bearer ${stolen}" http://127.0.0.1:.../api/v1/...
+//   - The scoped token is minted by EnsureOTLPPathToken() and stored
+//     in ${data_dir}/hooks/.otlp-geminicli.token at 0o600.
+//   - tokenAuth accepts it ONLY on /otlp/<source>/<token>/v1/<signal>
+//     paths and ONLY for loopback callers, so a process that reads
+//     ~/.gemini/settings.json cannot replay it against /api/v1/* or
+//     against any other connector's OTLP namespace.
+//   - sanitizeRouteForTelemetry continues to strip the token segment
+//     from any OTel metric / span attribute the gateway exports.
+//   - apiCSRFProtect continues to require an OTLP Content-Type for
+//     path-token POSTs so a browser CSRF cannot smuggle a non-OTLP
+//     payload.
 //
-// This is significantly weaker than the .token-file pattern the hook
-// scripts use (0600, gateway-managed). Mitigations layered on top
-// today (reduce blast radius but do NOT eliminate the issue):
-//   - tokenAuth restricts path-token authentication to loopback only,
-//     so the leaked token cannot be replayed from another host.
-//   - sanitizeRouteForTelemetry strips the token segment from any OTel
-//     metric / span attribute the gateway exports (otherwise the master
-//     credential would also leak to whatever observability backend the
-//     sidecar reports to).
-//   - apiCSRFProtect requires an OTLP Content-Type for path-token POSTs
-//     so a browser-initiated CSRF cannot smuggle a non-OTLP payload.
-//
-// The proper fix (planned, NOT in this PR) is to mint a per-connector
-// scoped capability token bound to "POST /otlp/geminicli/*/v1/*"
-// only, persist it under the same 0600 hook-token directory we use for
-// claude/codex, and write only that scoped token here. Tracking issue:
-// see Plan B5 follow-up "scoped OTLP path-tokens".
+// We fall back to opts.APIToken only when the per-source mint fails
+// AND opts.APIToken is non-empty — that path preserves backwards
+// compatibility with deployments that ran an older defenseclaw setup
+// (no scoped token on disk yet) and a partial sidecar rollout. The
+// fallback is loud (stderr) so the operator notices and can re-run
+// `defenseclaw setup` to regenerate the file.
 func patchGeminiTelemetry(path string, opts SetupOpts) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
 	}
+	pathToken := ""
+	if opts.DataDir != "" {
+		if tok, mintErr := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); mintErr == nil {
+			pathToken = tok
+		} else {
+			fmt.Fprintf(os.Stderr, "[geminicli] mint scoped OTLP token failed (%v); falling back to master bearer for back-compat — re-run `defenseclaw setup` to fix\n", mintErr)
+		}
+	}
+	if pathToken == "" {
+		// Back-compat fallback. Strictly worse than the scoped
+		// token (full sidecar admin if the file is read), but
+		// preserves the v0 behaviour for existing installs.
+		pathToken = opts.APIToken
+	}
 	telemetry := ensureJSONObject(cfg, "telemetry")
-	endpoint := "http://" + strings.TrimSpace(opts.APIAddr) + "/otlp/geminicli/" + url.PathEscape(opts.APIToken)
+	endpoint := "http://" + strings.TrimSpace(opts.APIAddr) + "/otlp/geminicli/" + url.PathEscape(pathToken)
 	telemetry["enabled"] = true
 	telemetry["target"] = "otlp"
 	telemetry["otlpEndpoint"] = endpoint

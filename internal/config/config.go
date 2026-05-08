@@ -2220,12 +2220,16 @@ func setDefaults(dataDir string) {
 
 	// User-session OS notifications. Master switch defaults to true
 	// on darwin and false elsewhere — see DefaultNotificationsEnabled
-	// in notifications.go for the rationale. Sub-toggles default ON
-	// so a single yes-answer (or the macOS auto-opt-in) gives full
-	// coverage; operators dial down by flipping individual fields.
+	// in notifications.go for the rationale. block_enforced and
+	// hitl_approval default ON so the user sees real blocks and
+	// real chat-side asks; block_would_block defaults OFF so the
+	// observe-mode "would have blocked / would have asked" toasts
+	// stay quiet by default and are an explicit opt-in for operators
+	// tuning policy. Keep this in lockstep with
+	// DefaultNotificationsConfig() and cli/defenseclaw/config.py.
 	viper.SetDefault("notifications.enabled", DefaultNotificationsEnabled)
 	viper.SetDefault("notifications.block_enforced", true)
-	viper.SetDefault("notifications.block_would_block", true)
+	viper.SetDefault("notifications.block_would_block", false)
 	viper.SetDefault("notifications.hitl_approval", true)
 	viper.SetDefault("notifications.sources.hook", true)
 	viper.SetDefault("notifications.sources.guardrail", true)
