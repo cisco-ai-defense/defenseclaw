@@ -118,6 +118,7 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		if resp.WouldBlock {
 			reason = "would_block"
 		}
+		enrichConnectorHookTelemetrySpan(ctx, "codex", req.HookEventName, "ok", reason, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed)
 		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
 		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
 		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))

@@ -20,8 +20,11 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func normalizeHookTelemetryLabel(value, fallback string) string {
@@ -36,6 +39,7 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 	connectorName = normalizeHookTelemetryLabel(connectorName, "unknown")
 	eventType = normalizeHookTelemetryLabel(eventType, "unknown")
 	reason = normalizeHookTelemetryLabel(reason, "unknown")
+	enrichConnectorHookTelemetrySpan(ctx, connectorName, eventType, "rejected", reason, "", "", false, "", 0)
 
 	if a.otel != nil {
 		a.otel.RecordConnectorHookInvocation(ctx, connectorName, eventType, "rejected", reason, 0)
@@ -67,4 +71,37 @@ func (a *APIServer) logAssetPolicyAudit(ctx context.Context, target, details str
 		return
 	}
 	_ = a.logger.LogActionCtx(ctx, string(audit.ActionAssetPolicy), target, details)
+}
+
+func enrichConnectorHookTelemetrySpan(ctx context.Context, connectorName, eventType, result, reason, decision, rawAction string, wouldBlock bool, mode string, elapsed time.Duration) {
+	span := trace.SpanFromContext(ctx)
+	if span == nil || !span.IsRecording() {
+		return
+	}
+	connectorName = normalizeHookTelemetryLabel(connectorName, "unknown")
+	eventType = normalizeHookTelemetryLabel(eventType, "unknown")
+	result = normalizeHookTelemetryLabel(result, "unknown")
+	attrs := []attribute.KeyValue{
+		attribute.String("defenseclaw.connector.source", connectorName),
+		attribute.String("defenseclaw.connector.signal", "hook"),
+		attribute.String("defenseclaw.connector.result", result),
+		attribute.String("defenseclaw.hook.event", eventType),
+	}
+	if reason = strings.TrimSpace(reason); reason != "" {
+		attrs = append(attrs, attribute.String("defenseclaw.hook.reason", reason))
+	}
+	if decision = strings.TrimSpace(decision); decision != "" {
+		attrs = append(attrs, attribute.String("defenseclaw.decision", decision))
+	}
+	if rawAction = strings.TrimSpace(rawAction); rawAction != "" {
+		attrs = append(attrs, attribute.String("defenseclaw.raw_action", rawAction))
+	}
+	if mode = strings.TrimSpace(mode); mode != "" {
+		attrs = append(attrs, attribute.String("defenseclaw.mode", mode))
+	}
+	if elapsed > 0 {
+		attrs = append(attrs, attribute.Int64("defenseclaw.duration_ms", elapsed.Milliseconds()))
+	}
+	attrs = append(attrs, attribute.Bool("defenseclaw.would_block", wouldBlock))
+	span.SetAttributes(attrs...)
 }

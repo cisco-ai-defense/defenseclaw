@@ -19,6 +19,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -317,6 +318,12 @@ func ValidateConfigField(f configField) ValidationResult {
 		}
 	}
 	if looksLikeURLField(f.Key) && v != "" {
+		if isOTLPEndpointField(f.Key) && !strings.Contains(v, "://") {
+			if validateOTLPHostPort(v) {
+				return ValidationResult{Severity: ValidationOK}
+			}
+			return ValidationResult{Severity: ValidationError, Message: "expected a URL with scheme and host or host:port"}
+		}
 		u, err := url.Parse(v)
 		if err != nil || u.Scheme == "" || u.Host == "" {
 			return ValidationResult{Severity: ValidationError, Message: "expected a URL with scheme and host"}
@@ -342,6 +349,27 @@ func ValidateConfigField(f configField) ValidationResult {
 		return ValidationResult{Severity: ValidationWarning, Message: "secret-like value will be saved inline"}
 	}
 	return ValidationResult{Severity: ValidationOK}
+}
+
+func isOTLPEndpointField(key string) bool {
+	switch key {
+	case "otel.endpoint", "otel.traces.endpoint", "otel.logs.endpoint", "otel.metrics.endpoint":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateOTLPHostPort(v string) bool {
+	host, port, err := net.SplitHostPort(v)
+	if err != nil {
+		return false
+	}
+	if strings.Trim(strings.TrimSpace(host), "[]") == "" {
+		return false
+	}
+	p, err := strconv.Atoi(port)
+	return err == nil && p >= 1 && p <= 65535
 }
 
 func looksLikeURLField(key string) bool {

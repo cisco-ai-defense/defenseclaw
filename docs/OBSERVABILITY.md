@@ -829,7 +829,8 @@ The matching OTel connector log contract
 (`schemas/otel/connector-telemetry-event.schema.json`) carries
 `event.name=defenseclaw.otel.ingest`, `defenseclaw.hook.invocation`,
 or `defenseclaw.codex.notify` with connector `source`, `signal`,
-`result`, record count, bytes, and notify fields. SIEM rules should
+and `result` fields; ingest and hook records also carry record count
+and bytes, while notify records carry notify-specific fields. SIEM rules should
 join on `defenseclaw.connector.source` to break down telemetry rate
 per connector.
 

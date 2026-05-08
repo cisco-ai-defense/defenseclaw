@@ -84,7 +84,7 @@
         },
         "defenseclaw.connector.signal": {
           "type": "string",
-          "enum": ["logs", "metrics", "traces", "hook"]
+          "enum": ["logs", "metrics", "traces", "hook", "notify"]
         },
         "defenseclaw.connector.result": {
           "type": "string",

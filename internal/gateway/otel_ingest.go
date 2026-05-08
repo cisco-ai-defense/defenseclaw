@@ -1531,6 +1531,10 @@ func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, resu
 	if sessionID != "" {
 		span.SetAttributes(attribute.String("gen_ai.conversation.id", sessionID))
 	}
+	span.SetAttributes(
+		attribute.String("defenseclaw.connector.source", "codex"),
+		attribute.String("defenseclaw.connector.signal", "notify"),
+	)
 	span.SetAttributes(attribute.String("gen_ai.agent.name", "codex"))
 	if p.TurnID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.codex.notify.turn_id", p.TurnID))
@@ -1539,7 +1543,10 @@ func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, resu
 		span.SetAttributes(attribute.String("defenseclaw.codex.notify.type", kind))
 	}
 	if result != "" {
-		span.SetAttributes(attribute.String("defenseclaw.codex.notify.result", result))
+		span.SetAttributes(
+			attribute.String("defenseclaw.connector.result", result),
+			attribute.String("defenseclaw.codex.notify.result", result),
+		)
 	}
 	if p.Status != "" {
 		span.SetAttributes(attribute.String("defenseclaw.codex.notify.status", p.Status))

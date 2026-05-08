@@ -64,6 +64,9 @@ func TestValidateConfigField(t *testing.T) {
 		{"port-range", configField{Key: "gateway.port", Kind: "int", Value: "70000"}, ValidationError},
 		{"env-secret-warning", configField{Key: "llm.api_key_env", Kind: "string", Value: "sk-test-1234567890abcdef"}, ValidationWarning},
 		{"url-credentials", configField{Key: "otel.endpoint", Kind: "string", Value: "https://u:p@example.com"}, ValidationError},
+		{"otel-host-port", configField{Key: "otel.traces.endpoint", Kind: "string", Value: "127.0.0.1:4317"}, ValidationOK},
+		{"otel-host-port-global", configField{Key: "otel.endpoint", Kind: "string", Value: "collector.internal:4317"}, ValidationOK},
+		{"non-otel-endpoint-host-port", configField{Key: "cisco_ai_defense.endpoint", Kind: "string", Value: "127.0.0.1:4317"}, ValidationError},
 		{"duration", configField{Key: "notifications.dedup_window", Kind: "string", Value: "30s"}, ValidationOK},
 		{"choice", configField{Key: "guardrail.mode", Kind: "choice", Value: "action", Options: []string{"observe", "action"}}, ValidationOK},
 	}

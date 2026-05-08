@@ -163,8 +163,16 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 	if span == nil || !span.IsRecording() {
 		return
 	}
+	reason := resp.Action
+	if resp.WouldBlock {
+		reason = "would_block"
+	}
 	attrs := []attribute.KeyValue{
 		attribute.String("defenseclaw.connector", req.ConnectorName),
+		attribute.String("defenseclaw.connector.source", req.ConnectorName),
+		attribute.String("defenseclaw.connector.signal", "hook"),
+		attribute.String("defenseclaw.connector.result", "ok"),
+		attribute.String("defenseclaw.hook.reason", reason),
 		attribute.String("defenseclaw.telemetry.source", "hook"),
 		attribute.String("defenseclaw.hook.event", req.HookEventName),
 		attribute.String("defenseclaw.tool.name", req.ToolName),
