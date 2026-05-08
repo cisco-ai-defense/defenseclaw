@@ -51,10 +51,10 @@ jobs:
         with:
           node-version: "20"
 
-      # GoReleaser builds, signs, generates SBOMs, and publishes the Homebrew
-      # cask, but does NOT create the GitHub release (release.disable: true in
-      # .goreleaser.yaml). This is required because the repository has
-      # "Immutable releases" enabled, which rejects post-create asset uploads.
+      # GoReleaser builds, signs, and generates SBOMs, but does NOT create the
+      # GitHub release (release.disable: true in .goreleaser.yaml). This is
+      # required because the repository has "Immutable releases" enabled, which
+      # rejects post-create asset uploads.
       - name: Build artifacts with GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
