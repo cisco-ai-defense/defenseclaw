@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -49,8 +49,10 @@ type claudeCodeHookRequest struct {
 	ToolResponse         interface{}            `json:"tool_response,omitempty"`
 	ToolCalls            interface{}            `json:"tool_calls,omitempty"`
 	Prompt               string                 `json:"prompt,omitempty"`
+	ExpansionType        string                 `json:"expansion_type,omitempty"`
 	CommandName          string                 `json:"command_name,omitempty"`
 	CommandArgs          string                 `json:"command_args,omitempty"`
+	CommandSource        string                 `json:"command_source,omitempty"`
 	StopHookActive       bool                   `json:"stop_hook_active,omitempty"`
 	LastAssistantMessage string                 `json:"last_assistant_message,omitempty"`
 	Error                string                 `json:"error,omitempty"`
@@ -170,8 +172,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	}
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	assetDecision := config.AssetPolicyDecision{}
-	assetMatched := false
+	var assetDecisions []runtimeAssetDecision
 	switch req.HookEventName {
 	case "SessionStart":
 		if req.ScanComponents || (a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnSessionStart) {
@@ -187,12 +188,25 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 	case "UserPromptSubmit", "UserPromptExpansion":
 		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodePromptContent(req), Direction: "prompt"})
+		if req.HookEventName == "UserPromptExpansion" {
+			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
+		}
 	case "PreToolUse", "PermissionRequest", "PermissionDenied":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call"})
-		assetDecision, assetMatched = a.claudeCodeMCPAssetDecision(ctx, req)
+		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
 		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result"})
-		assetDecision, assetMatched = a.claudeCodeMCPAssetDecision(ctx, req)
+		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -222,18 +236,74 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	if mode == "action" && rawAction == "confirm" && req.HookEventName != "PreToolUse" {
 		action = "alert"
 	}
-	mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
-		assetDecision, assetMatched, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
-	)
-	action = mergedAction
-	rawAction = mergedRawAction
-	verdict.Severity = mergedSeverity
-	verdict.Reason = mergedReason
-	verdict.Findings = mergedFindings
-	if assetWouldBlock {
-		wouldBlock = true
+	for _, asset := range assetDecisions {
+		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
+			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
+		)
+		action = mergedAction
+		rawAction = mergedRawAction
+		verdict.Severity = mergedSeverity
+		verdict.Reason = mergedReason
+		verdict.Findings = mergedFindings
+		if assetWouldBlock {
+			wouldBlock = true
+		}
 	}
+	a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock)
 	return claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+}
+
+// dispatchClaudeCodeHookNotification fires a user-session OS toast
+// for any non-allow verdict the hook produced. Routing is:
+//
+//   - action=="block"            → notifier.OnBlock
+//   - rawAction=="block" and we did not actually enforce (observe
+//     mode, or the hook event is not enforceable) → OnWouldBlock
+//   - rawAction=="confirm"       → OnApprovalPending
+//
+// All callers receive the same audit-shaped subtitle (source +
+// severity + connector + hook event) so operators can tell the
+// surface from the toast without opening the audit log. The reason
+// is run through redaction.ForSinkReason before display so a
+// regex-match verdict carrying echoed user content (PII, secrets)
+// does not land verbatim on the screen — this matches how proxy.go
+// and hilt.go feed the same dispatcher.
+func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
+	if a == nil || a.notifier == nil {
+		return
+	}
+	target := strings.TrimSpace(req.ToolName)
+	if target == "" {
+		target = req.HookEventName
+	}
+	safeReason := string(redaction.ForSinkReason(reason))
+	switch {
+	case action == "block":
+		a.notifier.OnBlock(notifier.BlockEvent{
+			Source:    notifier.SourceHook,
+			Target:    target,
+			Reason:    safeReason,
+			Severity:  severity,
+			Connector: "claudecode",
+			Event:     req.HookEventName,
+		})
+	case rawAction == "block" && (wouldBlock || action != "block"):
+		a.notifier.OnWouldBlock(notifier.BlockEvent{
+			Source:    notifier.SourceHook,
+			Target:    target,
+			Reason:    safeReason,
+			Severity:  severity,
+			Connector: "claudecode",
+			Event:     req.HookEventName,
+		})
+	case rawAction == "confirm":
+		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:  fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:   safeReason,
+			Severity: severity,
+			Source:   notifier.SourceHook,
+		})
+	}
 }
 
 // claudeCodeEnabled returns true when the claude-code hook handler

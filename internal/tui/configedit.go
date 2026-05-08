@@ -19,6 +19,7 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
@@ -28,6 +29,39 @@ func normalizeHookModeForSave(val string) string {
 		return "observe"
 	}
 	return val
+}
+
+// parseDurationOrSeconds accepts either a Go duration string
+// ("30s", "1m", "500ms") or a bare integer interpreted as seconds.
+// Empty / unparseable -> 0, which downstream
+// EffectiveDedupWindow()-style helpers resolve to the package
+// default. Used by the Notifications setup-tab section so an
+// operator typing "30" gets the same behaviour as the Privacy
+// modal's status output (which prints "30s").
+func parseDurationOrSeconds(val string) time.Duration {
+	v := strings.TrimSpace(val)
+	if v == "" {
+		return 0
+	}
+	if d, err := time.ParseDuration(v); err == nil {
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil {
+		return time.Duration(n) * time.Second
+	}
+	return 0
+}
+
+// fmtNotificationsDedupWindow renders a time.Duration for the
+// Setup-tab field. Zero -> "" (so the field reads as "use default"
+// rather than "0s", matching how the YAML treats it). Non-zero
+// values use Go's canonical String() ("30s", "1m500ms") which
+// round-trips cleanly back through parseDurationOrSeconds.
+func fmtNotificationsDedupWindow(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
 }
 
 // applyConfigField writes a single field value back to the Config struct
@@ -56,6 +90,35 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Agent.Name = val
 	case "privacy.disable_redaction":
 		c.Privacy.DisableRedaction = boolVal
+	// Desktop notifications: master switch + per-category + per-source +
+	// throttle. The dispatcher (internal/gateway/notifier) snapshots
+	// cfg.Notifications once at sidecar boot, so an edit here is a
+	// "restart required" change — the Setup-tab save banner already
+	// surfaces that, and the [N]-modal sibling toggles ``enabled``
+	// via the auditing CLI path which restarts for us.
+	case "notifications.enabled":
+		c.Notifications.Enabled = boolVal
+	case "notifications.block_enforced":
+		c.Notifications.BlockEnforced = boolVal
+	case "notifications.block_would_block":
+		c.Notifications.BlockWouldBlock = boolVal
+	case "notifications.hitl_approval":
+		c.Notifications.HITLApproval = boolVal
+	case "notifications.sources.hook":
+		c.Notifications.Sources.Hook = boolVal
+	case "notifications.sources.guardrail":
+		c.Notifications.Sources.Guardrail = boolVal
+	case "notifications.sources.asset_policy":
+		c.Notifications.Sources.AssetPolicy = boolVal
+	case "notifications.dedup_window":
+		// time.Duration field: accept either a Go duration string
+		// ("30s", "1m", "500ms") or a bare integer interpreted as
+		// seconds (matches how Approval Timeout treats its int
+		// kind). Empty / unparseable -> 0, which the dispatcher's
+		// EffectiveDedupWindow() resolves to the default.
+		c.Notifications.DedupWindow = parseDurationOrSeconds(val)
+	case "notifications.max_per_minute":
+		c.Notifications.MaxPerMinute = intVal
 	// Unified top-level llm: block — the single source of truth
 	// consumed by guardrail (Bifrost), MCP scanner, skill scanner,
 	// and plugin scanner via Config.ResolveLLM(...). Writes here

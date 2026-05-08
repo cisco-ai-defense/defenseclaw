@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/google/uuid"
@@ -47,9 +48,10 @@ type pendingHILTApproval struct {
 // Connector-native approval surfaces such as Claude Code PreToolUse do not use
 // this manager; they emit the connector's native "ask" decision instead.
 type HILTApprovalManager struct {
-	client *Client
-	logger *audit.Logger
-	otel   *telemetry.Provider
+	client   *Client
+	logger   *audit.Logger
+	otel     *telemetry.Provider
+	notifier *notifier.Dispatcher
 
 	mu             sync.Mutex
 	pending        map[string]*pendingHILTApproval
@@ -65,6 +67,16 @@ func NewHILTApprovalManager(client *Client, logger *audit.Logger, otel *telemetr
 		pending:        make(map[string]*pendingHILTApproval),
 		activeSessions: make(map[string]time.Time),
 	}
+}
+
+// SetNotifier wires the user-session OS notifier dispatcher used to
+// surface "approval needed" toasts when a HILT prompt is dispatched.
+// Safe to call with nil.
+func (m *HILTApprovalManager) SetNotifier(n *notifier.Dispatcher) {
+	if m == nil {
+		return
+	}
+	m.notifier = n
 }
 
 func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, severity, reason string, timeout time.Duration) (bool, string, error) {
@@ -118,6 +130,26 @@ func (m *HILTApprovalManager) Request(ctx context.Context, sessionID, subject, s
 		return false, hiltStatusUnsupported, fmt.Errorf("hilt approval unavailable: %s", details)
 	}
 	m.record(ctx, hiltStatusRequested, subject, severity, safeReason)
+	// Fire a user-session toast as soon as the chat-side prompt has
+	// been delivered. This is the single chokepoint covering every
+	// HILT path — guardrail confirm verdicts, OpenClaw inspect
+	// confirm, and exec approval prompts all funnel through here —
+	// so a per-call dispatcher injection at each surface is not
+	// needed. The notification is purely informational ("reply in
+	// chat"); approve/deny still happens via the chat session.
+	if m.notifier != nil {
+		m.notifier.OnApprovalPending(notifier.ApprovalEvent{
+			Subject:  subject,
+			Reason:   safeReason,
+			Severity: severity,
+			// Source is left empty because HILT does not know which
+			// upstream surface emitted the confirm verdict — the
+			// dispatcher's allowSource lets unspecified sources
+			// through under the master Enabled gate, which keeps
+			// approval coverage independent of the per-source
+			// filter that operators use to silence chatty blocks.
+		})
+	}
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()

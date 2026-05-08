@@ -710,18 +710,6 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 	})
 }
 
-// isClaudeCodeOtelKey reports whether an env-var name belongs to the
-// OTel-related set this connector manages. Used both for backup-time
-// filtering and for Teardown stripping.
-func isClaudeCodeOtelKey(name string) bool {
-	for _, k := range claudeCodeOtelEnvKeys {
-		if name == k {
-			return true
-		}
-	}
-	return false
-}
-
 func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed string) bool {
 	got, _ := value.(string)
 	if got == "" {

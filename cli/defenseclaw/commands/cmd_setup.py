@@ -1343,7 +1343,7 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/ and subprocess policy files",
     ),
     "codex": (
-        "~/.codex/config.toml hooks / features.codex_hooks",
+        "~/.codex/config.toml hooks / features.hooks / hook trust state",
         "~/.codex/config.toml otel / notify",
         "~/.codex/skills/software-security Project CodeGuard skill (installed once and left enabled)",
         "~/.defenseclaw/hooks/ and notify bridge files",
@@ -2702,6 +2702,174 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
             "setup-redaction-toggle",
             "config",
             f"disable_redaction={desired!s}",
+        )
+
+
+@setup.command("notifications")
+@click.argument(
+    "action",
+    type=click.Choice(("on", "off", "status"), case_sensitive=False),
+    required=False,
+)
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help=(
+        "Skip the interactive confirmation prompt and accept the "
+        "default answer. Required for non-TTY callers (CI, scripts, "
+        "TUI shell-outs); without it the command may hang waiting "
+        "on stdin when invoked without an explicit on/off/status "
+        "argument."
+    ),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after toggling. The notification "
+        "dispatcher is built once at sidecar boot from "
+        "``notifications.*`` so a flip without restart leaves the "
+        "previous state in effect for the running process. Use "
+        "``--no-restart`` only when the sidecar is offline; the "
+        "``setup`` group's auto-restart hook will not double-bounce "
+        "the gateway because this command marks the restart as "
+        "handled."
+    ),
+)
+@pass_ctx
+def setup_notifications(
+    app: AppContext,
+    action: str | None,
+    yes: bool,
+    restart: bool,
+) -> None:
+    """Toggle user-session desktop notifications for blocks and HITL approvals.
+
+    \b
+    DefenseClaw can surface a desktop notification whenever a hook,
+    guardrail verdict, or asset policy blocks a tool call, or when a
+    Human-in-the-Loop approval is pending in the chat / TUI. The
+    notification is informational only — clicking it does not approve
+    or deny anything; the operator still replies in the existing
+    chat/CLI surface.
+    \b
+    With no argument this command is a one-shot Y/n onboarding
+    prompt:
+    \b
+      Show desktop notifications for blocks and approval requests? [Y/n]
+    \b
+    Use ``on`` / ``off`` to flip ``notifications.enabled`` directly,
+    and ``status`` to print the resolved configuration without
+    mutating it.
+    \b
+    Examples:
+      defenseclaw setup notifications
+      defenseclaw setup notifications on
+      defenseclaw setup notifications off --yes
+      defenseclaw setup notifications status
+    """
+    cfg = app.cfg
+    nc = cfg.notifications
+    current = bool(nc.enabled)
+
+    normalized = action.strip().lower() if action else None
+
+    if normalized == "status":
+        ux.section("Notifications state")
+        click.echo(
+            f"    {ux.dim('config (notifications.enabled):')} "
+            f"{'ON' if current else 'OFF'}"
+        )
+        click.echo(
+            f"    {ux.dim('block_enforced:')} {'on' if nc.block_enforced else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('block_would_block:')} {'on' if nc.block_would_block else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('hitl_approval:')} {'on' if nc.hitl_approval else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.hook:')} {'on' if nc.sources.hook else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.guardrail:')} "
+            f"{'on' if nc.sources.guardrail else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.asset_policy:')} "
+            f"{'on' if nc.sources.asset_policy else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('dedup_window:')} {nc.dedup_window or '30s'}"
+        )
+        click.echo(
+            f"    {ux.dim('max_per_minute:')} {nc.max_per_minute}"
+        )
+        return
+
+    if normalized in ("on", "off"):
+        desired = normalized == "on"
+    else:
+        # No explicit action -> interactive Y/n onboarding prompt.
+        # ``--yes`` short-circuits to the prompt's default (True).
+        if yes:
+            desired = True
+        else:
+            desired = click.confirm(
+                "  Show desktop notifications for blocks and approval requests?",
+                default=True,
+            )
+
+    if desired == current:
+        state = "ON" if current else "OFF"
+        click.echo(f"  • Notifications are already {state}; nothing to change.")
+        return
+
+    nc.enabled = desired
+
+    try:
+        cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise click.ClickException("config save failed") from exc
+
+    ux.ok(
+        f"notifications.enabled set to {desired!s} "
+        f"({'ON' if desired else 'OFF'})"
+    )
+
+    if restart:
+        ux.subhead(
+            "Restarting gateway so the notification dispatcher picks up the new state..."
+        )
+        # _restart_defense_gateway sets the per-context "restart
+        # already handled" flag, so the setup group's
+        # _auto_restart_sidecar_after_setup result callback won't
+        # bounce the gateway a second time after this one returns.
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        # Operator opted out of the restart explicitly; suppress the
+        # group-level auto-restart hook too so the operator sees one
+        # consistent "do it yourself" message instead of the hook
+        # contradicting us by bouncing the gateway anyway.
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        ux.warn(
+            "Skipped restart (--no-restart). The running sidecar still "
+            "uses the previous notification state. Restart manually:"
+        )
+        ux.subhead("   defenseclaw-gateway restart")
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-notifications-toggle",
+            "config",
+            f"enabled={desired!s}",
         )
 
 

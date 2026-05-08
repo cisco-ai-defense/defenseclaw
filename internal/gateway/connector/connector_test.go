@@ -1785,7 +1785,7 @@ env_key = "OPENAI_API_KEY"
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all five Codex events and pointing at the generated
+// covering all six Codex events and pointing at the generated
 // codex-hook.sh. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
@@ -1813,9 +1813,9 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	raw, _ := os.ReadFile(configPath)
 	content := string(raw)
 
-	// The [hooks] table must be present with each of the five events
+	// The [hooks] table must be present with each of the six events
 	// listed as sub-tables.
-	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
+	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"} {
 		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
 			// Accept either dotted or nested rendering.
 			if !strings.Contains(content, evt) {
@@ -1839,12 +1839,45 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	if _, isTable := parsed["hooks"].(map[string]interface{}); !isTable {
 		t.Errorf("hooks key is not a table, got %T", parsed["hooks"])
 	}
+	hooks := parsed["hooks"].(map[string]interface{})
+	state, ok := hooks["state"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
+	}
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	for _, tc := range []struct {
+		eventType string
+		eventKey  string
+		matcher   string
+		timeout   int
+	}{
+		{"SessionStart", "session_start", "startup|resume|clear", 30},
+		{"UserPromptSubmit", "user_prompt_submit", "", 30},
+		{"PreToolUse", "pre_tool_use", "*", 30},
+		{"PermissionRequest", "permission_request", "*", 30},
+		{"PostToolUse", "post_tool_use", "*", 30},
+		{"Stop", "stop", "", 90},
+	} {
+		key := fmt.Sprintf("%s:%s:0:0", configPath, tc.eventKey)
+		entry, ok := state[key].(map[string]interface{})
+		if !ok {
+			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
+		}
+		gotHash, _ := entry["trusted_hash"].(string)
+		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookPath, tc.timeout)
+		if gotHash != wantHash {
+			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
+		}
+		if _, ok := entry["enabled"]; ok {
+			t.Errorf("trusted state for %s should not force enabled; got %v", tc.eventType, entry)
+		}
+	}
 }
 
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
 // regression test for the codex/claude-code observability-only
 // architecture. With CodexEnforcement=false (the default), Setup must
-// install the [hooks] table and features.codex_hooks=true (so the
+// install the [hooks] table and features.hooks=true (so the
 // codex-hook.sh script fires for tool-call telemetry) but must NOT:
 //   - rewrite cfg["openai_base_url"] to the proxy URL (codex talks
 //     directly to its native upstream — api.openai.com or
@@ -1948,8 +1981,11 @@ env_key = "OPENROUTER_API_KEY"
 		t.Error("hooks.PostToolUse missing — tool-result telemetry lost")
 	}
 	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["codex_hooks"].(bool); !v {
-		t.Errorf("features.codex_hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("features.hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("deprecated features.codex_hooks should be removed to avoid Codex startup warnings, got=%v", features)
 	}
 
 	// Subprocess sandbox JSON must NOT be created — that's
@@ -2221,7 +2257,7 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 }
 
 // TestCodex_Setup_EnablesHooksFeature confirms the connector writes
-// features.codex_hooks = true into config.toml. Without this, Codex
+// features.hooks = true into config.toml. Without this, Codex
 // ignores any registered hooks because the feature gate defaults to
 // off.
 func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
@@ -2239,9 +2275,167 @@ func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(configPath)
-	content := string(data)
-	if !strings.Contains(content, "codex_hooks") {
-		t.Errorf("config.toml missing codex_hooks feature flag\nfile:\n%s", content)
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+	features, _ := parsed["features"].(map[string]interface{})
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("config.toml missing hooks feature flag; features=%v\nfile:\n%s", features, data)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("config.toml still contains deprecated codex_hooks feature flag\nfile:\n%s", data)
+	}
+}
+
+func TestCodexCommandHookHashMatchesCodexCanonicalIdentity(t *testing.T) {
+	got := codexCommandHookHash("pre_tool_use", "*", "/tmp/hook.sh", 30)
+	want := "sha256:73ec4bb1ffa348f02fcca6c5c0725cc825ba47aa298a7e72eab4e47856cbadbc"
+	if got != want {
+		t.Fatalf("codexCommandHookHash = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	key := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	otherKey := codexHookStateKey(codexHookStateKeySource(configPath), "post_tool_use", 2, 0)
+
+	state := map[string]interface{}{
+		key: map[string]interface{}{
+			"trusted_hash": "sha256:user-replacement",
+		},
+		otherKey: map[string]interface{}{
+			"trusted_hash": "sha256:unrelated",
+		},
+	}
+	hooks := map[string]interface{}{"state": state}
+	if removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatalf("user replacement trust state was removed: %v", hooks)
+	}
+	if _, ok := state[key]; !ok {
+		t.Fatalf("user replacement trust entry missing: %v", state)
+	}
+
+	state[key] = map[string]interface{}{
+		"trusted_hash": codexCommandHookHash("pre_tool_use", "*", hookPath, 30),
+	}
+	if !removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatal("DefenseClaw-owned trust state was not removed")
+	}
+	if _, ok := state[key]; ok {
+		t.Fatalf("DefenseClaw-owned trust entry still present: %v", state)
+	}
+	if _, ok := state[otherKey]; !ok {
+		t.Fatalf("unrelated trust entry removed: %v", state)
+	}
+}
+
+// TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust is
+// the end-to-end pin for the "user replaced our hook script with their
+// own" workflow: after Setup, the operator may swap the hook command
+// out (or change the timeout/matcher) for any of the events. On
+// Teardown, DefenseClaw must NOT delete those entries because the
+// trusted_hash no longer matches what we wrote. Removing them would
+// silently re-prompt the user to trust their own hooks on next Codex
+// launch — a confusing security UX failure.
+func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "tok-test",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Operator simulates editing config.toml to register their own
+	// PreToolUse hook in place of (or alongside) ours. We model this
+	// by overwriting only the trust-state entry for that event. The
+	// real hook command stays whatever Setup wrote; what matters is
+	// that the trusted_hash diverges from codexCommandHookHash().
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after setup: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	hooks, _ := parsed["hooks"].(map[string]interface{})
+	if hooks == nil {
+		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
+	}
+	state, _ := hooks["state"].(map[string]interface{})
+	if state == nil {
+		t.Fatalf("hooks.state missing after Setup; cannot exercise user-modified branch")
+	}
+	preToolUseKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	if _, ok := state[preToolUseKey]; !ok {
+		t.Fatalf("expected DefenseClaw to install pre_tool_use trust entry at %q; state=%v", preToolUseKey, state)
+	}
+	state[preToolUseKey] = map[string]interface{}{
+		"trusted_hash": "sha256:user-replacement-do-not-touch",
+	}
+	rewritten, err := toml.Marshal(parsed)
+	if err != nil {
+		t.Fatalf("re-marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, rewritten, 0o600); err != nil {
+		t.Fatalf("write user-modified config: %v", err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+
+	postRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after teardown: %v", err)
+	}
+	var post map[string]interface{}
+	if err := toml.Unmarshal(postRaw, &post); err != nil {
+		t.Fatalf("unmarshal post-teardown config: %v", err)
+	}
+
+	postHooks, _ := post["hooks"].(map[string]interface{})
+	if postHooks == nil {
+		t.Fatalf("teardown deleted entire hooks block even though user edits remain:\n%s", postRaw)
+	}
+	postState, _ := postHooks["state"].(map[string]interface{})
+	if postState == nil {
+		t.Fatalf("teardown deleted hooks.state even though user edit at %q must be preserved", preToolUseKey)
+	}
+	entry, ok := postState[preToolUseKey].(map[string]interface{})
+	if !ok {
+		t.Fatalf("teardown removed user trust entry at %q; state=%v", preToolUseKey, postState)
+	}
+	if got, _ := entry["trusted_hash"].(string); got != "sha256:user-replacement-do-not-touch" {
+		t.Fatalf("teardown clobbered user trusted_hash: got=%q want=sha256:user-replacement-do-not-touch", got)
+	}
+
+	// Untouched DefenseClaw entries (other events) must be removed,
+	// since their trusted_hash still matches what we wrote — that's
+	// the recognition signal teardown relies on.
+	for _, eventKey := range []string{"session_start", "user_prompt_submit", "permission_request", "post_tool_use", "stop"} {
+		key := codexHookStateKey(codexHookStateKeySource(configPath), eventKey, 0, 0)
+		if _, present := postState[key]; present {
+			t.Errorf("teardown failed to remove DefenseClaw-owned trust entry for %s at %q", eventKey, key)
+		}
 	}
 }
 
@@ -2433,6 +2627,7 @@ func TestCodex_TeardownWithoutBackup_RemovesManagedConfig(t *testing.T) {
 		"codex-hook.sh",
 		"notify-bridge.sh",
 		"codex_hooks",
+		"trusted_hash",
 		"x-defenseclaw-token",
 		"x-defenseclaw-client",
 		"[otel]",
@@ -2457,7 +2652,7 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 		t.Fatalf("write hook: %v", err)
 	}
 	cfg := map[string]interface{}{
-		"hooks": buildCodexHooksTable(hookPath),
+		"hooks": buildCodexHooksTable(configPath, hookPath),
 		"otel":  buildCodexOtelBlock(SetupOpts{APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}),
 		"notify": []interface{}{
 			"bash",
@@ -6090,25 +6285,3 @@ func mustNotExist(t *testing.T, path string) {
 	}
 }
 
-// stringSlicesEqual is the order-sensitive equivalent of
-// reflect.DeepEqual for two []string. We use it (rather than
-// reflect.DeepEqual) when the test's *intent* is to communicate
-// "compare two ordered string slices"; reflect.DeepEqual would
-// work but obscures the contract for readers. Equality requires
-// identical lengths and pairwise element equality at every index.
-//
-// Defined here as a local helper rather than imported from a util
-// package because the connector test suite is the only consumer
-// today, and adding a public helper would invite the test-only
-// helper to leak into production code.
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}

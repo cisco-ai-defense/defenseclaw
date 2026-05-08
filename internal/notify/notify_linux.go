@@ -26,10 +26,23 @@ import (
 
 var fallbackWriter io.Writer = os.Stderr
 
-func sendPlatform(title, message string) error {
+// sendPlatform delivers the notification via libnotify's notify-send
+// CLI. notify-send has no native subtitle field, so when one is set
+// it is folded into the body separated by an em-dash. The fallback
+// writer in notify.go already preserves the structured form for
+// non-display environments.
+func sendPlatform(n Notification) error {
 	path, err := exec.LookPath("notify-send")
 	if err != nil {
 		return err
 	}
-	return exec.Command(path, title, message).Run()
+	body := n.Body
+	if n.Subtitle != "" {
+		if body == "" {
+			body = n.Subtitle
+		} else {
+			body = n.Subtitle + " — " + body
+		}
+	}
+	return exec.Command(path, n.Title, body).Run()
 }

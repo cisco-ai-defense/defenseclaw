@@ -30,6 +30,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -43,18 +44,19 @@ import (
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
-	cfg      *config.Config
-	client   *Client
-	router   *EventRouter
-	store    *audit.Store
-	logger   *audit.Logger
-	health   *SidecarHealth
-	shell    *sandbox.OpenShell
-	otel     *telemetry.Provider
-	notify   *NotificationQueue
-	opa      *policy.Engine
-	hilt     *HILTApprovalManager
-	webhooks *WebhookDispatcher
+	cfg        *config.Config
+	client     *Client
+	router     *EventRouter
+	store      *audit.Store
+	logger     *audit.Logger
+	health     *SidecarHealth
+	shell      *sandbox.OpenShell
+	otel       *telemetry.Provider
+	notify     *NotificationQueue
+	opa        *policy.Engine
+	hilt       *HILTApprovalManager
+	webhooks   *WebhookDispatcher
+	osNotifier *notifier.Dispatcher
 
 	alertCtx    context.Context
 	alertCancel context.CancelFunc
@@ -155,10 +157,19 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 
 	notify := NewNotificationQueue()
 
+	// User-session OS notifier dispatcher. Constructed unconditionally
+	// so every block / approval site can call into it without nil
+	// checks; the dispatcher's master Enabled gate keeps it silent
+	// when the operator hasn't opted in (or is on a platform without
+	// a display server). The setup wizard flips Enabled=true after
+	// asking the user — see cli/defenseclaw/commands/cmd_setup.py.
+	osNotifier := notifier.New(cfg.Notifications)
+
 	router := NewEventRouter(client, store, logger, cfg.Gateway.AutoApprove, otel)
 	router.notify = notify
 	router.SetGuardrailConfig(&cfg.Guardrail)
 	hilt := NewHILTApprovalManager(client, logger, otel)
+	hilt.SetNotifier(osNotifier)
 	router.SetHILTApprovalManager(hilt)
 	// Seed defaults for the observability contract so every span /
 	// audit row knows which agent (framework mode) and policy
@@ -382,6 +393,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		notify:      notify,
 		webhooks:    webhooks,
 		hilt:        hilt,
+		osNotifier:  osNotifier,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
 		events:      events,
@@ -1304,6 +1316,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetDefaultPolicyID(s.cfg.Guardrail.Mode)
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
+		proxy.SetNotifier(s.osNotifier)
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
@@ -1573,6 +1586,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
 	api.SetHILTApprovalManager(s.hilt)
+	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)
 	}

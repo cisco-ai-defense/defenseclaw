@@ -45,12 +45,19 @@ const (
 	wizardObservability
 	wizardWebhook
 	wizardSandbox
+	// wizardRegistries (slot 9) registers a new external skill / MCP
+	// catalog source via `defenseclaw registry add --non-interactive`.
+	// The full management surface (sync / approve / reject / require) lives
+	// on the dedicated Registries panel — this wizard is intentionally
+	// just the discoverability hook for first-run users.
+	wizardRegistries
 	wizardCount
 )
 
 var wizardNames = [wizardCount]string{
 	"Skill Scanner", "MCP Scanner", "Gateway",
 	"Guardrail", "Splunk", "Observability", "Webhooks", "Sandbox",
+	"Registries",
 }
 
 var wizardCommands = [wizardCount][]string{
@@ -66,6 +73,9 @@ var wizardCommands = [wizardCount][]string{
 	// "type" field. See buildWizardArgs + webhookWizardFields.
 	{"setup", "webhook", "add"},
 	{"sandbox", "setup"},
+	// Registries: the source id is injected positionally from the
+	// "id" field by buildWizardArgs.
+	{"registry", "add"},
 }
 
 var wizardDescriptions = [wizardCount]string{
@@ -77,6 +87,7 @@ var wizardDescriptions = [wizardCount]string{
 	"Unified OTel + audit sink setup. Pick a preset (Splunk O11y, Splunk HEC, Splunk Enterprise, Datadog, Honeycomb, New Relic, Grafana Cloud, generic OTLP, Generic HTTP JSONL) and fill the prompts. Shells out to `setup observability add`.",
 	"Configure chat/incident notifier webhooks (Slack, PagerDuty, Webex, generic HMAC). Distinct from the observability HTTP JSONL audit-log forwarder. Shells out to `setup webhook add`.",
 	"Initialize and configure sandbox environment (OpenShell policy, networking).",
+	"Register an external skill / MCP catalog source (corp HTTPS YAML, smithery.ai, skills.sh, ClawHub, git repo). The full management surface lives on the Registries panel; this wizard is for first-run discoverability.",
 }
 
 // wizardHowTo gives operators a quick "what this wizard will actually
@@ -117,6 +128,10 @@ var wizardHowTo = [wizardCount]string{
 	"Runs: defenseclaw sandbox setup\n" +
 		"What you'll need: OpenShell binary on PATH (Linux), optional sandbox home directory.\n" +
 		"Tip: macOS has no OpenShell — the wizard will skip runtime checks but still write policy YAML.",
+	// Registries
+	"Runs: defenseclaw registry add <id> --non-interactive\n" +
+		"What you'll need: a kebab-case source id, the source kind (clawhub / smithery / skills_sh / http_yaml / http_json / git / file), the manifest URL (or empty for clawhub/skills_sh defaults), and optionally an env var holding an auth token.\n" +
+		"Tip: Press 'y' on the Registries panel to run a sync immediately after the wizard exits.",
 }
 
 // observabilityPresets mirrors cli/defenseclaw/observability/presets.py::preset_choices().
@@ -379,6 +394,43 @@ func (p *SetupPanel) loadSections() {
 			Fields: []configField{
 				{Label: "Disable Redaction", Key: "privacy.disable_redaction", Kind: "bool", Value: fmt.Sprintf("%v", c.Privacy.DisableRedaction),
 					Hint: "true stores raw content in all sinks. Only use inside a single trusted boundary."},
+			},
+		},
+		// Desktop notifications: master switch + per-category +
+		// per-source + throttle. The [N] modal flips only `enabled`;
+		// dialing in the rest is what this section is for. Save +
+		// gateway restart is needed for any change to take effect
+		// because internal/gateway/notifier.New(cfg.Notifications)
+		// snapshots the config once at sidecar boot.
+		{
+			Name: "Notifications",
+			Summary: "User-session desktop toasts for blocks, would-blocks, and HITL approvals. " +
+				"Local-only — see webhooks[] for chat/incident routing.",
+			Help: "enabled is the master switch. Categories gate event types; sources gate the subsystem that emitted them. " +
+				"dedup_window collapses repeats; max_per_minute caps the global rate (excess rolled into one summary toast). " +
+				"Restart the gateway after editing — the dispatcher snapshots cfg at boot.",
+			Fields: []configField{
+				{Label: "Enabled", Key: "notifications.enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Enabled),
+					Hint: "Master switch. Default: ON on macOS, OFF elsewhere. When false, every other field below is a no-op."},
+				{Label: "── Categories ──", Kind: "header"},
+				{Label: "Block (enforced)", Key: "notifications.block_enforced", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.BlockEnforced),
+					Hint: "Toast when a request is actually denied (mode=action, action=block)."},
+				{Label: "Block (would-block)", Key: "notifications.block_would_block", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.BlockWouldBlock),
+					Hint: "Toast for observe-mode 'would have blocked' verdicts. Useful while tuning policy; turn off once posture is stable."},
+				{Label: "HITL Approval", Key: "notifications.hitl_approval", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.HITLApproval),
+					Hint: "Informational toast when a HILT/confirm prompt is awaiting a user reply in chat / TUI. Click does NOT approve — operator still replies in chat."},
+				{Label: "── Sources ──", Kind: "header"},
+				{Label: "Source: Hook", Key: "notifications.sources.hook", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Sources.Hook),
+					Hint: "Allow notifications from claude_code_hook + codex_hook decisions."},
+				{Label: "Source: Guardrail", Key: "notifications.sources.guardrail", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Sources.Guardrail),
+					Hint: "Allow notifications from GuardrailProxy block / would-block branches (LLM egress proxy)."},
+				{Label: "Source: Asset Policy", Key: "notifications.sources.asset_policy", Kind: "bool", Value: fmt.Sprintf("%v", c.Notifications.Sources.AssetPolicy),
+					Hint: "Allow notifications from asset-policy runtime decisions (skill/MCP allow-list/deny-list)."},
+				{Label: "── Throttle ──", Kind: "header"},
+				{Label: "Dedup Window", Key: "notifications.dedup_window", Kind: "string", Value: fmtNotificationsDedupWindow(c.Notifications.DedupWindow),
+					Hint: "Duration string (e.g. '30s', '1m', '500ms'). Identical (category|source|target|reason) tuples seen inside the window are suppressed. Empty = use default (30s)."},
+				{Label: "Max Per Minute", Key: "notifications.max_per_minute", Kind: "int", Value: fmt.Sprintf("%d", c.Notifications.MaxPerMinute),
+					Hint: "Global rate cap across all categories. Excess collapses into one 'suppressed N notifications' toast per minute. 0 = use default (12)."},
 			},
 		},
 		{
@@ -1323,6 +1375,22 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 		}
 	}
 
+	// Registries: extract the source id from the "regid" picker and
+	// insert it positionally after ``add``. The CLI surface is
+	// ``defenseclaw registry add <id> ...``.
+	if idx == wizardRegistries {
+		regID := ""
+		for _, f := range p.wizFormFields {
+			if f.Kind == "regid" {
+				regID = strings.TrimSpace(f.Value)
+				break
+			}
+		}
+		if regID != "" {
+			base = append(base, regID)
+		}
+	}
+
 	base = append(base, "--non-interactive")
 
 	// For guardrail wizard, combine Provider + Model into
@@ -1348,8 +1416,8 @@ func (p *SetupPanel) buildWizardArgs(idx int) []string {
 
 	for _, f := range p.wizFormFields {
 		switch f.Kind {
-		case "section", "preset", "whtype":
-			// Section dividers are cosmetic; preset/whtype are
+		case "section", "preset", "whtype", "regid":
+			// Section dividers are cosmetic; preset/whtype/regid are
 			// already consumed as positionals above.
 			continue
 		}
@@ -1796,6 +1864,8 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 		return observabilityWizardFields("splunk-o11y")
 	case wizardWebhook:
 		return webhookWizardFields("slack")
+	case wizardRegistries:
+		return registryWizardFields()
 	case wizardSandbox:
 		return []wizardFormField{
 			{Label: "Sandbox IP", Flag: "--sandbox-ip", Kind: "string", Default: "10.200.0.2", Value: "10.200.0.2"},
@@ -1939,6 +2009,82 @@ var webhookTypes = [][2]string{
 // Webex additionally requires “room-id“. These line up with
 // webhooks/writer.py::apply_webhook's server-side validation so the
 // TUI catches missing fields before the CLI ever runs.
+// registryKindOptions / registryContentOptions mirror REGISTRY_KINDS /
+// REGISTRY_CONTENT_TYPES in cli/defenseclaw/config.py and
+// internal/config/registries.go::KnownRegistryKinds. Drift would show
+// up as "kind X is not one of …" errors from the CLI — keep them in
+// strict lockstep.
+var registryKindOptions = []string{
+	"clawhub", "smithery", "skills_sh", "http_yaml", "http_json", "git", "file",
+}
+
+var registryContentOptions = []string{"skill", "mcp", "both"}
+
+// registryWizardFields builds the Registries wizard form. The form
+// shells out to `defenseclaw registry add <id> --non-interactive`
+// (the source id is injected positionally by buildWizardArgs from
+// the "regid" Kind field). Required=true is reserved for inputs the
+// CLI's --non-interactive path will reject as missing: the source
+// id, kind, content, and (for non-clawhub kinds) the manifest URL.
+//
+// auth_env carries the env var NAME, never the token itself — the
+// CLI's _validate_auth_env enforces the same rule, and the TUI hint
+// makes that contract obvious to operators who would otherwise paste
+// a literal token.
+func registryWizardFields() []wizardFormField {
+	return []wizardFormField{
+		{
+			Label:    "Source id",
+			Flag:     "", // positional — injected in buildWizardArgs
+			Kind:     "regid",
+			Value:    "corp-skills",
+			Default:  "corp-skills",
+			Required: true,
+			Hint:     "Kebab-case identifier; used as the asset_policy reason tag (registry:<id>).",
+		},
+		{
+			Label:    "Kind",
+			Flag:     "--kind",
+			Kind:     "choice",
+			Options:  registryKindOptions,
+			Value:    "http_yaml",
+			Default:  "http_yaml",
+			Required: true,
+			Hint:     "clawhub=npm openclaw, smithery=registry.smithery.ai, skills_sh=skills.sh public catalog, http_*=corporate manifest, git=clone-and-read.",
+		},
+		{
+			Label:    "Content",
+			Flag:     "--content",
+			Kind:     "choice",
+			Options:  registryContentOptions,
+			Value:    "skill",
+			Default:  "skill",
+			Required: true,
+			Hint:     "Filters which entries promote into asset_policy.{skill,mcp}.registry.",
+		},
+		{
+			Label: "Manifest URL",
+			Flag:  "--url",
+			Kind:  "string",
+			Hint:  "Required for http_yaml / http_json / git / file. Optional for clawhub (defaults to npmjs.org).",
+		},
+		{
+			Label: "Auth env (optional)",
+			Flag:  "--auth-env",
+			Kind:  "string",
+			Hint:  "Env var NAME holding a Bearer token. Never paste the token itself.",
+		},
+		{
+			Label:   "Enabled",
+			Flag:    "--enabled",
+			NoFlag:  "--disabled",
+			Kind:    "bool",
+			Default: "yes",
+			Value:   "yes",
+		},
+	}
+}
+
 func webhookWizardFields(channelType string) []wizardFormField {
 	typeOpts := make([]string, 0, len(webhookTypes))
 	for _, t := range webhookTypes {

@@ -714,7 +714,7 @@ wheels = [
 
 [[package]]
 name = "defenseclaw"
-version = "0.5.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "cisco-ai-mcp-scanner", marker = "python_full_version >= '3.11'" },

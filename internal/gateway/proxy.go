@@ -42,6 +42,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -102,6 +103,7 @@ type GuardrailProxy struct {
 	notify       *NotificationQueue
 	webhooks     *WebhookDispatcher
 	hilt         *HILTApprovalManager
+	notifier     *notifier.Dispatcher
 
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
@@ -161,6 +163,15 @@ func (p *GuardrailProxy) SetDefaultPolicyID(id string) {
 // confirm verdicts.
 func (p *GuardrailProxy) SetHILTApprovalManager(m *HILTApprovalManager) {
 	p.hilt = m
+}
+
+// SetNotifier wires the user-session OS notifier dispatcher used by
+// the proxy to surface block / would-block events alongside the
+// existing webhooks/audit fan-out. Safe to call with nil — the
+// dispatcher's methods short-circuit on nil so the per-call site
+// stays clean.
+func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
+	p.notifier = n
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -2386,7 +2397,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 // site. No-op when notify is nil or verdict is nil so callers don't
 // need a guard at each site.
 func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, direction, model string) {
-	if p.notify == nil || verdict == nil {
+	if verdict == nil {
 		return
 	}
 	// SubjectType drives the "Skill"/"Plugin"/"MCP"/"Tool" label in
@@ -2402,21 +2413,57 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	if verdict.Findings != nil {
 		findings = len(verdict.Findings)
 	}
-	p.notify.Push(SecurityNotification{
-		SubjectType: subject,
-		// SkillName is rendered verbatim in the enforcement notice.
-		// Use the model name so operators and the LLM both see which
-		// target the block applied to; not sensitive and always
-		// present at block time.
-		SkillName: model,
+	if p.notify != nil {
+		p.notify.Push(SecurityNotification{
+			SubjectType: subject,
+			// SkillName is rendered verbatim in the enforcement notice.
+			// Use the model name so operators and the LLM both see which
+			// target the block applied to; not sensitive and always
+			// present at block time.
+			SkillName: model,
+			Severity:  verdict.Severity,
+			Findings:  findings,
+			Actions:   []string{"block"},
+			// verdict.Reason is minted from user content in the regex
+			// path and can carry literal secrets/PII. Always scrub
+			// before the text lands in a system message that gets
+			// shipped off-box to the LLM provider.
+			Reason: redaction.ForSinkReason(verdict.Reason),
+		})
+	}
+	// Also fire a user-session OS notification so the operator sees
+	// the enforcement event without polling the audit log. The
+	// dispatcher applies its own per-category gate, dedup window,
+	// and rate limit before delivery.
+	p.notifier.OnBlock(notifier.BlockEvent{
+		Source:    notifier.SourceGuardrail,
+		Target:    model,
+		Reason:    string(redaction.ForSinkReason(verdict.Reason)),
 		Severity:  verdict.Severity,
-		Findings:  findings,
-		Actions:   []string{"block"},
-		// verdict.Reason is minted from user content in the regex
-		// path and can carry literal secrets/PII. Always scrub
-		// before the text lands in a system message that gets
-		// shipped off-box to the LLM provider.
-		Reason: redaction.ForSinkReason(verdict.Reason),
+		Connector: p.connectorName(),
+		Event:     direction,
+	})
+}
+
+// enqueueWouldBlockNotification fires only the OS notifier toast for
+// observe-mode verdicts that would have blocked under enforcement.
+// It deliberately does NOT push to the LLM-facing NotificationQueue
+// (that channel is reserved for *enforced* blocks; the LLM gets a
+// "your last request was blocked" system message there) and it does
+// NOT dispatch a webhook (the existing webhooks.Dispatch site is
+// gated on verdict.Action == "block" and already covers the would-
+// block-but-not-enforced case via the same branch).
+func (p *GuardrailProxy) enqueueWouldBlockNotification(verdict *ScanVerdict, direction, model string) {
+	if verdict == nil {
+		return
+	}
+	p.notifier.OnWouldBlock(notifier.BlockEvent{
+		Source:    notifier.SourceGuardrail,
+		Target:    model,
+		Reason:    string(redaction.ForSinkReason(verdict.Reason)),
+		Severity:  verdict.Severity,
+		Connector: p.connectorName(),
+		Event:     direction,
 	})
 }
 
@@ -3527,6 +3574,21 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// webhook body in lockstep with the matching logger/store rows.
 		audit.ApplyEnvelope(&event, audit.EnvelopeFromContext(ctx))
 		p.webhooks.Dispatch(event)
+	}
+
+	// Surface observe-mode would-blocks to the operator via the OS
+	// notifier. Enforced blocks are reported by the matching
+	// enqueueBlockNotification call at the request handler's
+	// "if verdict.Action == block && mode == action" branch — the
+	// dispatcher's per-category gating keeps these two channels
+	// from double-firing for the same event.
+	if verdict.Action == "block" && p.notifier != nil {
+		p.rtMu.RLock()
+		curMode := p.mode
+		p.rtMu.RUnlock()
+		if curMode != "action" {
+			p.enqueueWouldBlockNotification(verdict, direction, model)
+		}
 	}
 }
 

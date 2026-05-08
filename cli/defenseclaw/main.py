@@ -41,6 +41,7 @@ from defenseclaw.commands.cmd_migrations import migrations_cmd
 from defenseclaw.commands.cmd_plugin import plugin
 from defenseclaw.commands.cmd_policy import policy
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
+from defenseclaw.commands.cmd_registry import registry
 from defenseclaw.commands.cmd_sandbox import sandbox
 from defenseclaw.commands.cmd_settings import settings_cmd
 from defenseclaw.commands.cmd_setup import setup
@@ -152,6 +153,7 @@ cli.add_command(setup)
 cli.add_command(skill)
 cli.add_command(plugin)
 cli.add_command(policy)
+cli.add_command(registry)
 cli.add_command(mcp)
 cli.add_command(aibom)
 cli.add_command(status)

@@ -538,6 +538,7 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup gateway", CLIBinary: dc, CLIArgs: []string{"setup", "gateway"}, Description: "Configure gateway connection (interactive)", Category: "setup"},
 		{TUIName: "setup guardrail", CLIBinary: dc, CLIArgs: []string{"setup", "guardrail"}, Description: "Configure LLM guardrail", Category: "setup"},
 		{TUIName: "setup redaction", CLIBinary: dc, CLIArgs: []string{"setup", "redaction"}, Description: "Show/toggle redaction state", Category: "setup", NeedsArg: true, ArgHint: "<status|on|off> [--yes]"},
+		{TUIName: "setup notifications", CLIBinary: dc, CLIArgs: []string{"setup", "notifications"}, Description: "Show/toggle desktop notifications", Category: "setup", NeedsArg: true, ArgHint: "<status|on|off> [--yes]"},
 		{TUIName: "setup splunk", CLIBinary: dc, CLIArgs: []string{"setup", "splunk"}, Description: "Configure Splunk / O11y", Category: "setup"},
 		{TUIName: "setup local-observability up", CLIBinary: dc, CLIArgs: []string{"setup", "local-observability", "up"}, Description: "Start local Prom/Loki/Tempo/Grafana stack", Category: "setup"},
 		{TUIName: "setup local-observability down", CLIBinary: dc, CLIArgs: []string{"setup", "local-observability", "down"}, Description: "Stop local observability stack", Category: "setup"},

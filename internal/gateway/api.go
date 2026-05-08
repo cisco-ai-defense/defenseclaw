@@ -43,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -62,6 +63,7 @@ type APIServer struct {
 	scannerCfg *config.Config
 	otel       *telemetry.Provider
 	hilt       *HILTApprovalManager
+	notifier   *notifier.Dispatcher
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -93,6 +95,14 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
 	a.hilt = m
+}
+
+// SetNotifier wires the user-session OS notifier dispatcher used by
+// the hook handlers to surface block / would-block / approval-pending
+// events. Safe to call with nil — the dispatcher's methods short-
+// circuit on nil so callers do not need to guard each emission site.
+func (a *APIServer) SetNotifier(n *notifier.Dispatcher) {
+	a.notifier = n
 }
 
 func (a *APIServer) connectorName() string {

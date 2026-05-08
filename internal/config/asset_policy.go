@@ -33,13 +33,26 @@ type AssetPolicyConfig struct {
 }
 
 type AssetTypePolicy struct {
-	Default          string                `mapstructure:"default"           yaml:"default"`
-	RegistryRequired bool                  `mapstructure:"registry_required" yaml:"registry_required"`
-	Registry         []AssetPolicyRule     `mapstructure:"registry"          yaml:"registry"`
-	Allowed          []AssetPolicyRule     `mapstructure:"allowed"           yaml:"allowed"`
-	Denied           []AssetPolicyRule     `mapstructure:"denied"            yaml:"denied"`
-	RuntimeDetection AssetRuntimeDetection `mapstructure:"runtime_detection" yaml:"runtime_detection,omitempty"`
+	Default          string `mapstructure:"default"           yaml:"default"`
+	RegistryRequired bool   `mapstructure:"registry_required" yaml:"registry_required"`
+	// RegistryEmptyAction selects the failure mode when RegistryRequired is
+	// true but Registry is empty (e.g., the operator hasn't populated the
+	// allowlist yet, or YAML parse silently produced zero rules). It is
+	// deliberately fail-closed by default ("deny") so that an empty
+	// registry behaves like "no asset is approved" rather than silently
+	// disabling the requirement. Set to "allow" to opt into the looser
+	// behavior of falling through to Default when the registry is empty.
+	RegistryEmptyAction string                `mapstructure:"registry_empty_action" yaml:"registry_empty_action,omitempty"`
+	Registry            []AssetPolicyRule     `mapstructure:"registry"              yaml:"registry"`
+	Allowed             []AssetPolicyRule     `mapstructure:"allowed"               yaml:"allowed"`
+	Denied              []AssetPolicyRule     `mapstructure:"denied"                yaml:"denied"`
+	RuntimeDetection    AssetRuntimeDetection `mapstructure:"runtime_detection"     yaml:"runtime_detection,omitempty"`
 }
+
+const (
+	registryEmptyActionDeny  = "deny"
+	registryEmptyActionAllow = "allow"
+)
 
 type AssetRuntimeDetection struct {
 	Enabled            bool   `mapstructure:"enabled"              yaml:"enabled"`
@@ -74,16 +87,26 @@ type AssetPolicyInput struct {
 }
 
 type AssetPolicyDecision struct {
-	Enabled        bool
-	Mode           string
-	Action         string // allow | block
-	RawAction      string // allow | block
-	WouldBlock     bool
-	Reason         string
-	Source         string
-	RegistryStatus string // registered | unregistered | unknown
+	Enabled            bool
+	Mode               string
+	Action             string // allow | block
+	RawAction          string // allow | block
+	WouldBlock         bool
+	Reason             string
+	Source             string
+	RegistryStatus     string // registered | unregistered | unknown
+	RegistryConfigured bool
+	// RegistrySource is the id of the registry source that promoted
+	// the matched rule (read from AssetPolicyRule.Reason when it's
+	// "registry:<id>"). Empty when the matched rule was added by
+	// an operator directly. Surfaced in audit events and the TUI's
+	// "approved-by: registry:<id>" badge so cross-links can
+	// attribute the promotion back to its source.
+	RegistrySource string
 	TargetType     string
 	TargetName     string
+	Connector      string
+	RuntimeSurface string
 }
 
 func DefaultAssetPolicy() AssetPolicyConfig {
@@ -123,6 +146,8 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 		RegistryStatus: "unknown",
 		TargetType:     targetType,
 		TargetName:     name,
+		Connector:      strings.TrimSpace(in.Connector),
+		RuntimeSurface: strings.TrimSpace(in.RuntimeSurface),
 	}
 	if c == nil || !c.AssetPolicy.Enabled {
 		return out
@@ -136,9 +161,11 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	}
 
 	mode := normalizeAssetMode(c.AssetPolicy.Mode)
+	registryConfigured := assetRegistryConfigured(p.Registry)
 	out.Enabled = true
 	out.Mode = mode
 	out.Source = "asset-policy"
+	out.RegistryConfigured = registryConfigured
 
 	if rule, ok := findAssetRule(p.Denied, in); ok {
 		return assetPolicyViolation(out, mode, ruleReason(rule, fmt.Sprintf("%s %q is denied by asset policy", targetType, name)), "admin-deny")
@@ -155,11 +182,26 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	if regStatus == "registered" {
 		out.Source = "registry"
 		out.Reason = fmt.Sprintf("%s %q is registered", targetType, name)
+		// Surface the registry source id (parsed out of the matched
+		// rule's Reason="registry:<id>") so the gateway audit event
+		// and the TUI cross-link badge can point operators back to
+		// the source that promoted the asset.
+		if rule, ok := findAssetRule(p.Registry, in); ok {
+			out.RegistrySource = ParseRegistrySourceID(rule.Reason)
+		}
 		return out
 	}
 
 	if p.RegistryRequired {
-		return assetPolicyViolation(out, mode, fmt.Sprintf("%s %q is not in the approved registry", targetType, name), "registry-required")
+		if registryConfigured {
+			return assetPolicyViolation(out, mode, fmt.Sprintf("%s %q is not in the approved registry", targetType, name), "registry-required")
+		}
+		// Registry is required but empty. Fail closed by default so that
+		// the absence of approved assets does not silently downgrade to
+		// allow-all. Operators can opt out via registry_empty_action="allow".
+		if normalizeRegistryEmptyAction(p.RegistryEmptyAction) == registryEmptyActionDeny {
+			return assetPolicyViolation(out, mode, fmt.Sprintf("%s %q is blocked because asset policy requires a registry but none is configured", targetType, name), "registry-required-empty")
+		}
 	}
 	if normalizeAssetDefault(p.Default) == "deny" {
 		return assetPolicyViolation(out, mode, fmt.Sprintf("%s %q is denied by default asset policy", targetType, name), "default-deny")
@@ -168,6 +210,10 @@ func (c *Config) EvaluateAssetPolicy(in AssetPolicyInput) AssetPolicyDecision {
 	out.Source = "default-allow"
 	out.Reason = fmt.Sprintf("%s %q allowed by default asset policy", targetType, name)
 	return out
+}
+
+func assetRegistryConfigured(rules []AssetPolicyRule) bool {
+	return len(rules) > 0
 }
 
 func (c *Config) assetPolicyFor(targetType string) (AssetTypePolicy, bool) {
@@ -335,6 +381,22 @@ func normalizeAssetDefault(value string) string {
 	}
 }
 
+// normalizeRegistryEmptyAction returns the configured action when
+// RegistryRequired is true and the registry is empty. Default is "deny"
+// (fail-closed): an unconfigured allowlist is treated as "no asset is
+// approved" rather than silently relaxing the requirement. Operators
+// must explicitly opt into "allow" to get fall-through-to-default.
+func normalizeRegistryEmptyAction(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "allow":
+		return registryEmptyActionAllow
+	case "deny", "block", "":
+		return registryEmptyActionDeny
+	default:
+		return registryEmptyActionDeny
+	}
+}
+
 func normalizeAssetToken(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
@@ -344,4 +406,23 @@ func coalesceString(v, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// ParseRegistrySourceID extracts the source id from a rule reason of
+// the form "registry:<id>". Returns "" for any other shape (e.g. an
+// operator-authored rule with a free-form Reason).
+//
+// The convention is owned by cli/defenseclaw/registries/sync.py —
+// keep the prefix and validation in lockstep with both sides.
+//
+// Exported so the TUI ([internal/tui]) can rebuild "name -> source"
+// attribution maps from the same Reason format the audit + admission
+// paths emit.
+func ParseRegistrySourceID(reason string) string {
+	const prefix = "registry:"
+	r := strings.TrimSpace(reason)
+	if !strings.HasPrefix(r, prefix) {
+		return ""
+	}
+	return strings.TrimSpace(r[len(prefix):])
 }

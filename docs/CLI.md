@@ -65,6 +65,29 @@ Use `<binary> --help` for any command.
 | `plugin install <name-or-path>` | Install a plugin from a local path |
 | `plugin remove <name>` | Remove an installed plugin |
 
+### registry
+
+External skill / MCP catalog ingestion. See
+[`docs/REGISTRIES.md`](./REGISTRIES.md) for the full pipeline.
+
+| Command | Description |
+|---------|-------------|
+| `registry add <id>` | Register a new external catalog source (clawhub, smithery, skills_sh, http_yaml, http_json, git, file) |
+| `registry edit <id>` | Update an existing source |
+| `registry list` | List configured registry sources |
+| `registry show <id>` | Pretty-print one source plus its verdict summary |
+| `registry remove <id>` | Delete a source and its on-disk cache |
+| `registry sync [<id>...] [--all]` | Fetch + scan + auto-promote clean entries into `asset_policy.{skill,mcp}.registry` |
+| `registry entries <id>` | Show cached entries (after sync) |
+| `registry approve <id> <name> --type {skill|mcp}` | Manually approve an entry |
+| `registry reject <id> <name> --type {skill|mcp}` | Manually reject an entry |
+| `registry require --type <t> --enabled/--disabled` | Toggle `asset_policy.<t>.registry_required` |
+| `registry wizard` | Interactive add+sync convenience flow |
+
+All `registry` subcommands accept `--non-interactive` (skip prompts;
+required flags must be present) and `--json` (stable machine-readable
+output) so they're safe to call from the TUI and CI/CD pipelines.
+
 ### tool
 
 | Command | Description |
