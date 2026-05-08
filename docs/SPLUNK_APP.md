@@ -82,7 +82,7 @@ enrichment domains.
 
 ## App Navigation
 
-The app ships with three navigation groups.
+The app ships with four navigation groups.
 
 ### Overview
 
@@ -162,6 +162,53 @@ Use it to inspect:
 - trace spans by run and session
 
 This page is for local investigation, not billing-authoritative reporting.
+
+### Demo Dashboards
+
+These pages provide Splunk-local equivalents for the demo Grafana/Loki
+dashboards. They use the same local index, `defenseclaw_local`, and the same
+event-indexed signal families listed above. They are designed for local demos
+where Splunk should be the visible dashboard surface.
+
+#### AI Discovery Inventory
+
+Local view of AI discovery and shadow-agent signals.
+
+Use it to inspect:
+
+- active, new, changed, and gone AI signals
+- signal category, vendor, product, and detector breakdowns
+- recent discovery events and per-signal evidence
+
+#### Connector Activity
+
+Connector-level activity and verdict view.
+
+Use it to inspect:
+
+- active connectors in the selected time range
+- connector event volume
+- blocks, confirms, tools, targets, and recent connector events
+
+#### Policy Decisions
+
+Policy, verdict, egress, and block-list view.
+
+Use it to inspect:
+
+- allow, block, deny, and confirm activity
+- top policies or rules firing
+- blocked targets and recent policy-decision evidence
+
+#### Findings And HITL
+
+Rule finding and human-in-the-loop approval view.
+
+Use it to inspect:
+
+- findings by severity and rule
+- critical or high-severity findings
+- approval requests, approvals, denials, and recent HITL events
 
 ### Operate
 
