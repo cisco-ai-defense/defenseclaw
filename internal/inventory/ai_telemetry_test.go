@@ -586,8 +586,8 @@ func (c *capturingWriter) events() []gatewaylog.Event {
 // discovery span in Tempo could not find the corresponding envelope
 // row in Loki/Splunk by trace_id. This test fails if either:
 //
-//   1. emitGatewayEvents drops the caller's ctx (regression to Emit).
-//   2. The writer stops auto-stamping run_id / trace_id from ctx.
+//  1. emitGatewayEvents drops the caller's ctx (regression to Emit).
+//  2. The writer stops auto-stamping run_id / trace_id from ctx.
 func TestEmitGatewayEvents_StampsCorrelationFromContext(t *testing.T) {
 	// Cannot t.Parallel(): mutates package-wide gatewaylog state.
 	gatewaylog.SetProcessRunID("test-run-corr")

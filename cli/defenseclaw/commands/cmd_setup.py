@@ -2780,21 +2780,46 @@ def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
     )
     @click.option("--yes", "-y", "yes", is_flag=True, help="Skip confirmation prompt.")
     @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Alias for --yes.")
-    @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None, help="Guardrail mode.")
+    @click.option(
+        "--mode",
+        "guard_mode",
+        type=click.Choice(["observe", "action"]),
+        default=None,
+        help="Guardrail mode.",
+    )
     @click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None, help="Scanner mode.")
     @click.option("--cisco-endpoint", default=None, help="Cisco AI Defense API endpoint.")
     @click.option("--cisco-api-key-env", default=None, help="Env var name holding Cisco AI Defense API key.")
     @click.option("--cisco-timeout-ms", type=int, default=None, help="Cisco AI Defense timeout (ms).")
     @click.option("--port", "guard_port", type=int, default=None, help="Guardrail proxy port.")
     @click.option("--block-message", default=None, help="Custom block message.")
-    @click.option("--detection-strategy", type=click.Choice(["regex_only", "regex_judge", "judge_first"]), default=None, help="Detection strategy.")
-    @click.option("--rule-pack", type=click.Choice(["default", "strict", "permissive"]), default=None, help="Guardrail rule-pack profile.")
+    @click.option(
+        "--detection-strategy",
+        type=click.Choice(["regex_only", "regex_judge", "judge_first"]),
+        default=None,
+        help="Detection strategy.",
+    )
+    @click.option(
+        "--rule-pack",
+        type=click.Choice(["default", "strict", "permissive"]),
+        default=None,
+        help="Guardrail rule-pack profile.",
+    )
     @click.option("--judge-model", default=None, help="LLM judge model.")
     @click.option("--judge-api-base", default=None, help="LLM judge API base URL.")
     @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key.")
     @click.option("--human-approval/--no-human-approval", default=None, help="Enable or disable human approval.")
-    @click.option("--hilt-min-severity", type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False), default=None, help="Minimum severity that asks for human approval.")
-    @click.option("--disable-redaction/--enable-redaction", default=None, help="Disable or enable prompt/log redaction.")
+    @click.option(
+        "--hilt-min-severity",
+        type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False),
+        default=None,
+        help="Minimum severity that asks for human approval.",
+    )
+    @click.option(
+        "--disable-redaction/--enable-redaction",
+        default=None,
+        help="Disable or enable prompt/log redaction.",
+    )
     @click.option("--restart/--no-restart", default=True, show_default=True, help="Restart gateway after setup.")
     @click.option("--verify/--no-verify", default=True, show_default=True, help="Run connectivity checks after setup.")
     @pass_ctx

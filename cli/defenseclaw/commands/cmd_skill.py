@@ -1044,8 +1044,8 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
     import tempfile
 
     from defenseclaw.registries.adapters._base import (
-        IngestError,
         MAX_SKILL_ARCHIVE_BYTES,
+        IngestError,
         http_get,
     )
     from defenseclaw.scanner.skill import SkillScannerWrapper
@@ -1162,8 +1162,8 @@ def _scan_from_http(
     import zipfile
 
     from defenseclaw.registries.adapters._base import (
-        IngestError,
         MAX_SKILL_ARCHIVE_BYTES,
+        IngestError,
         http_get,
     )
     from defenseclaw.scanner.skill import SkillScannerWrapper
