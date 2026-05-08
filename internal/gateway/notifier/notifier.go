@@ -115,12 +115,9 @@ type BlockEvent struct {
 // the user does not get an "Approval needed: reply in chat" toast
 // for an action that was already allowed through.
 //
-// Connector and Event are optional context that flows into the
-// audit-friendly subtitle so the operator can tell at a glance
-// which framework + hook event raised the approval — symmetric
-// with BlockEvent. They never appear in the dedup hash so the
-// same approval prompt fired across multiple sessions still
-// collapses to one toast per dedup window.
+// The user-visible Subject reads naturally in a toast title
+// ("Approval needed: LLM tool call for gpt-4o"). Connector and Event
+// are optional context for the subtitle — symmetric with BlockEvent.
 type ApprovalEvent struct {
 	Subject   string
 	Reason    string

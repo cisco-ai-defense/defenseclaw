@@ -305,6 +305,14 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         is_new_config=is_new_config,
     )
 
+    ux.banner("Notifications")
+    _onboard_notifications(
+        cfg, logger,
+        non_interactive=non_interactive,
+        yes=yes,
+        is_new_config=is_new_config,
+    )
+
     cfg.save()
 
     # Sandbox setup (Linux only)
@@ -1117,6 +1125,98 @@ def _install_codeguard_skill(cfg, logger) -> None:
     _ = cfg
     _ = logger
     click.echo("  CodeGuard:     skipped (explicit opt-in required)")
+
+
+def _onboard_notifications(
+    cfg,
+    logger,
+    *,
+    non_interactive: bool,
+    yes: bool,
+    is_new_config: bool,
+) -> None:
+    """Surface the desktop-notifications opt-in prompt on first run.
+
+    Mirrors the single-question contract documented in the
+    ``macos-block-and-hitl-notifications`` plan: a fresh install is
+    asked once, the answer is persisted to
+    ``notifications.enabled``, and subsequent ``defenseclaw init``
+    invocations stay quiet (the operator can rerun
+    ``defenseclaw setup notifications`` to flip it).
+
+    Decision tree:
+      * Existing config (``is_new_config=False``) → never prompt;
+        print the current state for visibility. Re-running ``init``
+        on a configured install must not re-litigate onboarding.
+      * ``--non-interactive`` or ``--yes`` or non-TTY stdin (CI) →
+        keep platform default, print a one-liner pointing at
+        ``setup notifications``.
+      * Otherwise → ``click.confirm`` with the platform-aware
+        default.
+
+    The ``cfg`` mutation is in-memory; the caller does the
+    ``cfg.save()`` so this helper composes with whatever else
+    ``init`` decides to write.
+    """
+    nc = cfg.notifications
+
+    if not is_new_config:
+        # Re-run of ``init`` against an existing config. We can't
+        # safely tell "operator said no last time" from "operator
+        # never saw the prompt" without a separate sentinel, and
+        # re-prompting on every init would be irritating, so the
+        # rule is: ask only at first-install. Operators flip the
+        # toggle later via ``defenseclaw setup notifications``.
+        state = "ON" if nc.enabled else "OFF"
+        click.echo(
+            f"  Notifications: {ux.dim('preserving current setting')} ({state})"
+        )
+        click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
+        return
+
+    if non_interactive or yes or not _stdin_is_tty():
+        state = "ON" if nc.enabled else "OFF"
+        click.echo(
+            f"  Notifications: {ux.dim('platform default')} ({state})"
+        )
+        click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
+        return
+
+    desired = click.confirm(
+        "  Show desktop notifications for blocks and approval requests?",
+        default=bool(nc.enabled),
+    )
+
+    if desired == bool(nc.enabled):
+        state = "ON" if desired else "OFF"
+        click.echo("  Notifications: " + ux._style(state, fg="green") +
+                   ux.dim(" (unchanged)"))
+        return
+
+    nc.enabled = desired
+    state = "ON" if desired else "OFF"
+    click.echo("  Notifications: " + ux._style(state, fg="green"))
+    click.echo("  " + ux.dim("Re-run: defenseclaw setup notifications"))
+    logger.log_action(
+        "init-notifications-toggle",
+        "config",
+        f"enabled={desired!s}",
+    )
+
+
+def _stdin_is_tty() -> bool:
+    """Best-effort TTY probe used by the notifications onboarding.
+
+    Wrapped so unit tests can monkey-patch a single point. ``init``
+    already routes around interactive prompts when ``--non-interactive``
+    or ``--yes`` is set, so this is the last-mile guard for piped /
+    redirected stdin.
+    """
+    import sys
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
 
 
 def _onboard_notifications(

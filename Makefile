@@ -631,11 +631,11 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
 	@mkdir -p cli/defenseclaw/_data/scripts
 	@mkdir -p cli/defenseclaw/_data/skills
+	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
+	@mkdir -p cli/defenseclaw/_data/local_observability_stack
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
-	@rm -rf cli/defenseclaw/_data/splunk_local_bridge
-	@rm -rf cli/defenseclaw/_data/local_observability_stack
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
@@ -647,8 +647,16 @@ _bundle-data:
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
-	cp -r bundles/splunk_local_bridge cli/defenseclaw/_data/
-	cp -r bundles/local_observability_stack cli/defenseclaw/_data/
+	@# splunk_local_bridge and local_observability_stack are bind-mounted by Docker
+	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. We must
+	@# rsync-with-delete instead of `rm -rf && cp -r` because Docker Desktop on
+	@# macOS captures the directory inode at container start time; replacing the
+	@# inode silently empties the in-container view of the bind-mounted volume
+	@# until the container is recreated. rsync --inplace --delete keeps the inode
+	@# stable, mutates files in place, and prunes anything no longer in bundles/
+	@# so dashboard / dashcfg edits propagate without restarting the obs stack.
+	rsync -a --delete --inplace bundles/splunk_local_bridge/        cli/defenseclaw/_data/splunk_local_bridge/
+	rsync -a --delete --inplace bundles/local_observability_stack/  cli/defenseclaw/_data/local_observability_stack/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:
