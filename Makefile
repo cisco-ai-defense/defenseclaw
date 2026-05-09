@@ -185,6 +185,13 @@ gateway:
 	@echo "  Run with: ./$(GATEWAY)"
 	@echo "  Check status: ./$(GATEWAY) status"
 
+web:
+	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
+	cd web && npm ci && npm run build
+	@echo ""
+	@echo "Built web dashboard → internal/dashboard/dist/"
+	@echo "  Rebuild gateway to embed: make gateway"
+
 gateway-cross:
 	@test -n "$(GOOS)" -a -n "$(GOARCH)" || { echo "Usage: make gateway-cross GOOS=linux GOARCH=amd64"; exit 1; }
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw

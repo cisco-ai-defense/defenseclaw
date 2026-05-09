@@ -1,0 +1,45 @@
+/*
+ * Optional CRT skin. Activated when <html data-effects="crt"> is set.
+ * Three layers, each kept subtle so readability is never compromised:
+ *   1. scanlines  — 1px-on-3px-off horizontal stripes at low alpha
+ *   2. vignette   — radial darkening of the corners
+ *   3. text-glow  — soft halo on accent text and primary chrome
+ *
+ * The technique is borrowed from the legacy bundle. Honors prefers-reduced-motion.
+ */
+html[data-effects="crt"] body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 175, 255, 0.018) 0px,
+    rgba(0, 175, 255, 0.018) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+  mix-blend-mode: screen;
+}
+
+html[data-effects="crt"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9998;
+  background: radial-gradient(
+    ellipse at center,
+    transparent 55%,
+    rgba(0, 0, 0, 0.22) 100%
+  );
+}
+
+html[data-effects="crt"] .dc-section {
+  text-shadow: var(--dc-accent-glow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-effects="crt"] body::before { display: none; }
+}

@@ -1,0 +1,68 @@
+/*
+ * Design tokens. Palette mirrors the TUI theme (internal/tui/theme.go) so the
+ * web surface reads as the TUI's larger sibling. Hex values are the standard
+ * ANSI 256-color mappings of the lipgloss color codes used in Go.
+ */
+:root {
+  /* Surfaces */
+  --dc-bg:           #0a0a0f;
+  --dc-surface-1:    #111118;
+  --dc-surface-2:    #181820;
+  --dc-surface-3:    #21212c;
+  --dc-border:       #444444;   /* lipgloss 238 */
+  --dc-border-strong:#5f5fd7;   /* lipgloss 62 — primary chrome */
+  --dc-row-hover:    #303030;   /* lipgloss 236 */
+  --dc-row-selected: #3a3a3a;   /* lipgloss 237 */
+
+  /* Text */
+  --dc-text:         #e0e0e0;
+  --dc-text-muted:   #8a8a8a;   /* lipgloss 245 */
+  --dc-text-faint:   #626262;   /* lipgloss 241 */
+  --dc-text-bright:  #ffffd7;   /* lipgloss 230 */
+
+  /* Brand / chrome */
+  --dc-primary:      #5f5fd7;   /* lipgloss 62 — titles, panel borders, modals */
+  --dc-accent:       #00afff;   /* lipgloss 39 — section headers, accents */
+  --dc-hint:         #5fd7d7;   /* lipgloss 80 — italic hints */
+
+  /* Severity */
+  --dc-critical:     #ff0000;   /* lipgloss 196 */
+  --dc-high:         #ff8700;   /* lipgloss 208 */
+  --dc-medium:       #ffd700;   /* lipgloss 220 */
+  --dc-low:          #00afff;   /* lipgloss 39 */
+  --dc-info:         #8a8a8a;   /* lipgloss 245 */
+  --dc-clean:        #00ff00;   /* lipgloss 46 */
+  --dc-quarantine:   #af5fd7;   /* lipgloss 133 */
+
+  /* Optional glow (only applied when data-effects="crt") */
+  --dc-accent-glow:  0 0 6px rgba(0, 175, 255, 0.45);
+  --dc-primary-glow: 0 0 6px rgba(95, 95, 215, 0.40);
+
+  /* Type */
+  --dc-font-mono:    "JetBrains Mono", "SFMono-Regular", "SF Mono",
+                     ui-monospace, Menlo, Monaco, Consolas, monospace;
+  --dc-font-body:    "Inter", ui-sans-serif, system-ui, -apple-system,
+                     "Segoe UI", sans-serif;
+
+  --dc-fs-xs:        11px;
+  --dc-fs-sm:        12px;
+  --dc-fs-md:        13px;
+  --dc-fs-lg:        15px;
+  --dc-fs-xl:        20px;
+
+  /* Spacing */
+  --dc-space-1:      4px;
+  --dc-space-2:      8px;
+  --dc-space-3:      12px;
+  --dc-space-4:      16px;
+  --dc-space-5:      24px;
+  --dc-space-6:      32px;
+
+  /* Layout */
+  --dc-sidebar-w:    232px;
+  --dc-statusbar-h:  40px;
+  --dc-radius-sm:    3px;
+  --dc-radius-md:    4px;
+
+  color-scheme: dark;
+}

@@ -1,0 +1,72 @@
+/*
+ * Global resets + body chrome. Component-scoped styles live in each Lit
+ * component's static styles.
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+}
+
+body {
+  font-family: var(--dc-font-mono);
+  font-size: var(--dc-fs-md);
+  background: var(--dc-bg);
+  color: var(--dc-text);
+  overflow: hidden;
+}
+
+/* Anything tabular, ID-like, command-like reads in mono by default;
+ * Inter is opt-in via .dc-prose for paragraph copy. */
+.dc-prose {
+  font-family: var(--dc-font-body);
+}
+
+/* Section header convention from the TUI: bold, all-caps, accent color. */
+.dc-section {
+  font-family: var(--dc-font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--dc-accent);
+  font-weight: 700;
+}
+
+/* Hint text (bottom strip + footer hints) — italic teal, mirrors TUI hints. */
+.dc-hint {
+  font-style: italic;
+  color: var(--dc-hint);
+}
+
+a {
+  color: var(--dc-accent);
+  text-decoration: none;
+}
+a:hover { text-decoration: underline; }
+
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--dc-border);
+  padding: 4px 10px;
+  cursor: pointer;
+  border-radius: var(--dc-radius-sm);
+}
+button:hover { border-color: var(--dc-primary); }
+button:focus-visible {
+  outline: 2px solid var(--dc-accent);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: var(--dc-bg); }
+::-webkit-scrollbar-thumb { background: var(--dc-surface-3); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--dc-primary); }
