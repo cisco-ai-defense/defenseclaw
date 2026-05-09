@@ -20,6 +20,11 @@ extensions/defenseclaw/src/providers.json
 # Go build and test artifacts
 bin/
 dist/
+# Exception: the gateway binary embeds the web dashboard via `//go:embed`,
+# so the build output at internal/dashboard/dist/ must be tracked.
+# Regenerate with `make web` after editing web/src/.
+!internal/dashboard/dist/
+!internal/dashboard/dist/**
 build/
 coverage.out
 cover.out
