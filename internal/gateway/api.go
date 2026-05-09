@@ -35,11 +35,13 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
+	"gopkg.in/yaml.v3"
 
 	"github.com/google/uuid"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/dashboard"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
@@ -107,6 +109,22 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/plugin/disable", a.handlePluginDisable)
 	mux.HandleFunc("/plugin/enable", a.handlePluginEnable)
 	mux.HandleFunc("/config/patch", a.handleConfigPatch)
+	mux.HandleFunc("/v1/config", a.handleV1Config)
+	mux.HandleFunc("/v1/setup/wizards", a.handleV1SetupWizards)
+	mux.HandleFunc("/v1/setup/run", a.handleV1SetupRun)
+	mux.HandleFunc("GET /v1/sinks", a.handleListSinks)
+	mux.HandleFunc("POST /v1/sinks/{name}/{action}", a.handleSinkAction)
+	mux.HandleFunc("GET /v1/webhooks", a.handleListWebhooks)
+	mux.HandleFunc("POST /v1/webhooks/{name}/{action}", a.handleWebhookAction)
+	mux.HandleFunc("GET /v1/audit", a.handleV1Audit)
+	mux.HandleFunc("GET /v1/audit/counts", a.handleV1AuditCounts)
+	mux.HandleFunc("GET /v1/logs", a.handleV1Logs)
+	mux.HandleFunc("GET /v1/plugins", a.handleV1Plugins)
+	mux.HandleFunc("POST /v1/skills/{name}/{action}", a.handleV1SkillAction)
+	mux.HandleFunc("POST /v1/mcps/{name}/{action}", a.handleV1MCPAction)
+	mux.HandleFunc("POST /v1/plugins/{name}/{action}", a.handleV1PluginAction)
+	mux.HandleFunc("GET /v1/policy/bundles", a.handleV1PolicyBundles)
+	mux.HandleFunc("GET /v1/policy/bundle", a.handleV1PolicyBundle)
 	mux.HandleFunc("/scan/result", a.handleScanResult)
 	mux.HandleFunc("/enforce/block", a.handleEnforceBlock)
 	mux.HandleFunc("/enforce/allow", a.handleEnforceAllow)
@@ -132,6 +150,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/inspect/tool", a.handleInspectTool)
 	mux.HandleFunc("/api/v1/scan/code", a.handleCodeScan)
 	mux.HandleFunc("/api/v1/network-egress", a.handleNetworkEgress)
+
+	// Embedded web dashboard. Registered last so the API routes above win via
+	// ServeMux's longest-prefix match.
+	mux.Handle("/", dashboard.Handler())
 
 	handler := maxBodyMiddleware(mux, 1<<20)
 	handler = a.apiCSRFProtect(handler)
@@ -489,6 +511,178 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogActionCtx(r.Context(), "api-config-patch", req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
+}
+
+// handleV1Config implements GET and PUT /v1/config.
+//
+// GET returns the current effective DefenseClaw config as JSON in on-disk
+// shape (snake_case keys via yaml→map round-trip), plus the raw YAML text so
+// editors can show the canonical source form.
+//
+// PUT accepts either application/json (the same shape returned by GET, with
+// optional {"config": ...} envelope) or application/x-yaml. The body is
+// parsed into a config.Config to validate types, then written atomically to
+// ~/.defenseclaw/config.yaml via temp+rename. The previous file is preserved
+// at config.yaml.bak. Most config changes require a gateway restart to take
+// full effect (port binds, sink wiring, scanner subprocess args); the
+// response includes a needs_restart hint.
+func (a *APIServer) handleV1Config(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		a.handleConfigGet(w, r)
+	case http.MethodPut:
+		a.handleConfigPut(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *APIServer) handleConfigGet(w http.ResponseWriter, r *http.Request) {
+	if a.scannerCfg == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not loaded"})
+		return
+	}
+
+	a.cfgMu.RLock()
+	raw, err := yaml.Marshal(a.scannerCfg)
+	a.cfgMu.RUnlock()
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal: " + err.Error()})
+		return
+	}
+
+	if strings.Contains(r.Header.Get("Accept"), "yaml") {
+		w.Header().Set("Content-Type", "application/x-yaml; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(raw)
+		return
+	}
+
+	var asMap map[string]any
+	if err := yaml.Unmarshal(raw, &asMap); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "yaml->map: " + err.Error()})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"config": asMap,
+		"yaml":   string(raw),
+		"path":   filepath.Join(a.scannerCfg.DataDir, config.DefaultConfigName),
+	})
+}
+
+func (a *APIServer) handleConfigPut(w http.ResponseWriter, r *http.Request) {
+	if a.scannerCfg == nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "config not loaded"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read body: " + err.Error()})
+		return
+	}
+
+	// Normalize to YAML bytes regardless of input content-type.
+	//
+	// CSRF middleware forces Content-Type: application/json on mutations, so
+	// the canonical web payload is JSON. Three accepted shapes:
+	//
+	//   {"yaml": "config_version: 5\n..."}   ← preferred: raw YAML preserved
+	//   {"config": {<snake_case map>}}       ← envelope
+	//   {<snake_case map>}                   ← bare map at top level
+	//
+	// application/x-yaml is also honored when callers can bypass CSRF (e.g.
+	// loopback automation tools).
+	var yamlBytes []byte
+	ct := r.Header.Get("Content-Type")
+	switch {
+	case strings.Contains(ct, "yaml"):
+		yamlBytes = body
+	case strings.Contains(ct, "json") || ct == "":
+		var asMap map[string]any
+		if err := json.Unmarshal(body, &asMap); err != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "json: " + err.Error()})
+			return
+		}
+		if y, ok := asMap["yaml"].(string); ok && y != "" {
+			yamlBytes = []byte(y)
+		} else {
+			if inner, ok := asMap["config"].(map[string]any); ok {
+				asMap = inner
+			}
+			yamlBytes, err = yaml.Marshal(asMap)
+			if err != nil {
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "to-yaml: " + err.Error()})
+				return
+			}
+		}
+	default:
+		a.writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "use application/json or application/x-yaml"})
+		return
+	}
+
+	// Validate by parsing into Config struct. This catches type errors and
+	// malformed YAML before anything touches disk.
+	var newCfg config.Config
+	if err := yaml.Unmarshal(yamlBytes, &newCfg); err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "validate: " + err.Error()})
+		return
+	}
+
+	// DataDir is owned by the runtime ($DEFENSECLAW_HOME at startup) and must
+	// not be overwritten by the client — the file would land in the wrong
+	// place on next save.
+	a.cfgMu.RLock()
+	newCfg.DataDir = a.scannerCfg.DataDir
+	a.cfgMu.RUnlock()
+
+	configFile := filepath.Join(newCfg.DataDir, config.DefaultConfigName)
+	backup := configFile + ".bak"
+	if existing, rErr := os.ReadFile(configFile); rErr == nil {
+		_ = os.WriteFile(backup, existing, 0o600)
+	}
+
+	finalBytes, err := yaml.Marshal(&newCfg)
+	if err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "marshal-final: " + err.Error()})
+		return
+	}
+	tmp := configFile + ".tmp"
+	if err := os.WriteFile(tmp, finalBytes, 0o600); err != nil {
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "write-tmp: " + err.Error()})
+		return
+	}
+	if err := os.Rename(tmp, configFile); err != nil {
+		_ = os.Remove(tmp)
+		a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "rename: " + err.Error()})
+		return
+	}
+
+	// Match the provenance contract Config.Save() defines: every successful
+	// write bumps the generation counter and updates the content hash so
+	// downstream events fingerprint the new config shape.
+	version.SetContentHash(finalBytes)
+	version.BumpGeneration()
+
+	a.cfgMu.Lock()
+	a.scannerCfg = &newCfg
+	a.cfgMu.Unlock()
+
+	if a.logger != nil {
+		_ = a.logger.LogActionCtx(r.Context(), "api-config-save", configFile,
+			fmt.Sprintf("rewrote config via /v1/config (bytes=%d)", len(finalBytes)))
+	}
+
+	a.writeJSON(w, http.StatusOK, map[string]any{
+		"status": "saved",
+		"path":   configFile,
+		"backup": backup,
+		"needs_restart": []string{
+			"gateway port bindings (api_port, host:port)",
+			"audit sink wiring",
+			"scanner subprocess args",
+		},
+	})
 }
 
 func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
@@ -1616,6 +1810,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && isDashboardPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		route := r.URL.Path
 		if r.Pattern != "" {
 			route = r.Pattern
@@ -1651,6 +1849,14 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isDashboardPath(p string) bool {
+	switch p {
+	case "/", "/index.html", "/favicon.ico":
+		return true
+	}
+	return strings.HasPrefix(p, "/assets/")
 }
 
 func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, route string, code gatewaylog.ErrorCode, metricReason string) {
