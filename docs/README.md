@@ -14,6 +14,8 @@ DefenseClaw is the enterprise governance layer for [OpenClaw](https://github.com
 - [OpenShell Sandbox](SANDBOX.md) — sandbox architecture, setup, monitoring, and debugging
 - [Splunk App Guide](SPLUNK_APP.md) — local Splunk app purpose, dashboards, signals, and investigation flow
 - [TUI Guide](TUI.md) — dashboard usage, keybindings, navigation
+- [DefenseClaw Style Guide](design/style-guide.md) — original visual language, product tone, and component rules
+- [DefenseClaw Layout Guide](design/layout-guide.md) — original screen architecture for operational dashboards and workbenches
 - [OpenTelemetry](OTEL.md) — OTEL signal spec, Splunk mapping
 - [Config Files](CONFIG_FILES.md) — config files and environment variables
 - [Plugin Development](PLUGINS.md) — custom scanner plugin interface
