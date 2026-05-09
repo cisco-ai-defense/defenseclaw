@@ -187,6 +187,21 @@ This page is intended to start demos with an executive story before drilling
 into the detailed AI Discovery Inventory, Connector Activity, Policy Decisions,
 and Findings/HITL dashboards.
 
+#### Agent Tokenomics Overview
+
+Executive view of O11y / OTel GenAI token telemetry for agent sessions.
+
+Use it to inspect:
+
+- total token activity by agent, connector, model, and session
+- input, output, cached, reasoning, and tool-token mix
+- top token-driving models, tools, and targets
+- optimization candidates such as tool-heavy sessions, high reasoning-token use,
+  low cache leverage, or unusually large output expansion
+
+This page uses tokens as a cost proxy. It is not billing-authoritative and does
+not use confidential customer-specific model pricing.
+
 #### AI Discovery Inventory
 
 Local view of AI discovery and shadow-agent signals.
