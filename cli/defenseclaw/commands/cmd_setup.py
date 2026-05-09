@@ -1992,6 +1992,17 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
     if ctx.meta.get(_SETUP_RESTART_HANDLED_KEY):
         return
 
+    # When the CLI is invoked as a subprocess of the running gateway
+    # (e.g. via /v1/setup/run from the web dashboard), restarting would
+    # kill our own parent process mid-stream. The gateway sets this env
+    # var on the child; the user gets a "restart required" hint in the
+    # wizard output instead of an immediate self-immolation.
+    if os.environ.get("DEFENSECLAW_NO_AUTO_RESTART") == "1":
+        click.echo("")
+        click.echo("  Config updated. Restart the gateway to apply: "
+                   "defenseclaw-gateway restart")
+        return
+
     cfg_path = _config_yaml_path_from_ctx(ctx)
     before = ctx.meta.get(_SETUP_CFG_MTIME_KEY)
     after = _safe_mtime(cfg_path)
