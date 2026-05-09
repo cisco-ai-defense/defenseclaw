@@ -1,7 +1,9 @@
 import Link from 'next/link';
-import { TerminalDemo } from '@/components/terminal-demo';
 import { SoftwareApplicationSchema } from '@/components/structured-data';
-import { Flow, Node, Edge } from '@/components/diagram/flow';
+import { HeroLockup } from '@/components/hero-lockup';
+import { RotatingConnectorWord } from '@/components/rotating-connector-word';
+import { TerminalDemo } from '@/components/terminal-demo';
+import { CtaGlowButton } from '@/components/cta-glow-button';
 import matrix from '@/data/capability-matrix.json';
 
 const connectors = matrix.connectors;
@@ -42,19 +44,16 @@ const STORIES = [
 const MODES = [
   {
     name: 'Observe',
-    mark: 'O',
     tagline: 'See what your agent does. Block nothing.',
     body: 'Findings stream to the audit DB and your sinks. Run it for a week before enforcement.',
   },
   {
     name: 'Action',
-    mark: 'A',
     tagline: 'Block on HIGH and CRITICAL.',
-    body: 'CRITICAL findings always block. HIGH findings block unless HITL pauses them for review.',
+    body: 'CRITICAL findings always block. HIGH findings block unless approval mode pauses them for review.',
   },
   {
-    name: 'HITL',
-    mark: 'H',
+    name: 'Ask approval',
     tagline: 'Pause, review, then continue.',
     body: 'Reaches the operator via the connector’s native ask, or downgrades to a TUI prompt.',
   },
@@ -65,7 +64,7 @@ const MODES = [
 // under a second instead of forcing the visitor through a sentence.
 const AUDIT_SINKS = ['SQLite', 'JSONL', 'OTLP', 'Splunk', 'Webhooks'];
 
-const WORKFLOW = ['Observe', 'Action', 'HITL'];
+const WORKFLOW = ['Observe', 'Action', 'Ask approval'];
 
 // First sentence of c.notes is enough on the landing page; the full
 // sentence runs onto a second line and dilutes the card's job (point
@@ -89,96 +88,135 @@ export default function HomePage() {
         />
         <div aria-hidden className="hero-grain pointer-events-none absolute inset-0" />
 
-        {/* `min-w-0` on the grid + each cell prevents the right column
-            (the terminal `<pre overflow-x-auto>`) from forcing the whole
-            grid wider than the viewport on narrow phones (≤390px). The
-            `w-full` clamp on cells keeps every chip row, CTA strip, and
-            paragraph honoring the parent width once min-width is zero. */}
-        <div className="container relative mx-auto grid min-w-0 max-w-7xl gap-10 px-4 py-16 lg:grid-cols-2 lg:gap-16 lg:py-24">
-          <div className="flex w-full min-w-0 flex-col justify-center gap-6">
-            <span className="inline-flex w-fit items-center gap-2 rounded-full border border-[var(--brand-cisco)]/30 bg-[var(--brand-cisco)]/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
-              <span aria-hidden className="size-1.5 rounded-full bg-[var(--brand-cisco)]" />
-              Official Cisco project · Apache-2.0
-            </span>
-            <h1 className="text-balance wrap-break-word text-4xl font-bold tracking-tight md:text-5xl lg:text-6xl">
-              Security governance for{' '}
-              <span className="text-[var(--brand-cisco-strong)]">OpenClaw</span> and agentic AI
-              runtimes.
-            </h1>
-            <p className="max-w-xl text-pretty text-lg text-fd-muted-foreground">
-              DefenseClaw inspects every prompt, completion, and tool call your AI coding agent
-              makes — block, approve, or audit, per connector.
-            </p>
-            <div className="flex flex-wrap items-center gap-3">
-              <Link
-                href="/docs/get-started/quickstart"
-                className="inline-flex items-center gap-2 rounded-md bg-[var(--brand-cisco)] px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-[var(--brand-cisco-strong)]"
-              >
-                Quickstart
-                <span aria-hidden>→</span>
-              </Link>
-              <Link
-                href="/docs/setup/guardrail"
-                className="inline-flex items-center gap-2 rounded-md border border-fd-border bg-fd-card px-4 py-2 text-sm font-medium transition hover:bg-fd-muted"
-              >
-                Setup Guardrail
-              </Link>
-              <Link
-                href="/docs/capability-matrix"
-                className="inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-fd-muted-foreground transition hover:text-fd-foreground"
-              >
-                Capability Matrix
-              </Link>
+        {/* HeroLockup owns the rotation index and the cadence between
+            the rotating word in the headline and the typewriter in
+            the terminal. Both consumers (<RotatingConnectorWord> and
+            <TerminalDemo>) read the index from context, so the
+            headline and the `defenseclaw setup …` line stay in
+            lockstep regardless of how long any one block takes to
+            type. The page-level layout (grid, eyebrow, h1, lede,
+            CTAs, chip strips, terminal column) lives here as
+            children. */}
+        <HeroLockup>
+          {/* Grid tracks tilt slightly toward the terminal column on lg+
+              (≈45/55) so the install curl URL wraps onto fewer lines
+              without crowding the headline / chip strips on the left. */}
+          <div className="container relative mx-auto grid min-w-0 max-w-7xl gap-10 px-4 py-16 lg:grid-cols-[9fr_11fr] lg:gap-16 lg:py-24">
+            <div className="flex w-full min-w-0 flex-col justify-center gap-6">
+              <span className="inline-flex w-fit items-center gap-2 rounded-full border border-[var(--brand-cisco)]/30 bg-[var(--brand-cisco)]/10 px-3 py-1 text-xs font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
+                <span aria-hidden className="size-1.5 rounded-full bg-[var(--brand-cisco)]" />
+                Official Cisco project · Apache-2.0
+              </span>
+              <h1 className="text-balance wrap-break-word text-4xl font-bold tracking-tight md:text-5xl lg:text-6xl">
+                Security governance for <RotatingConnectorWord />.
+              </h1>
+              <p className="max-w-xl text-pretty text-lg text-fd-muted-foreground">
+                DefenseClaw inspects every prompt, completion, and tool call your AI coding agent
+                makes — block, approve, or audit, per connector.
+              </p>
+              <div className="flex flex-wrap items-center gap-3">
+                <Link
+                  href="/docs/get-started/quickstart"
+                  className="inline-flex items-center gap-2 rounded-md bg-[var(--brand-cisco)] px-4 py-2 text-sm font-medium text-white shadow-md transition hover:bg-[var(--brand-cisco-strong)]"
+                >
+                  Quickstart
+                  <span aria-hidden>→</span>
+                </Link>
+                <Link
+                  href="/docs/setup/guardrail"
+                  className="inline-flex items-center gap-2 rounded-md border border-fd-border bg-fd-card px-4 py-2 text-sm font-medium transition hover:bg-fd-muted"
+                >
+                  Setup Guardrail
+                </Link>
+                <Link
+                  href="/docs/capability-matrix"
+                  className="inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium text-fd-muted-foreground transition hover:text-fd-foreground"
+                >
+                  Capability Matrix
+                </Link>
+              </div>
+
+              {/* Three rows compress the same content as before (connectors,
+                  workflow, audit fan-out) with a tight visual rhythm: each
+                  row has a fixed-width label rail with a thin horizontal
+                  divider between rows. The Workflow row's `→` arrows
+                  carry the left-to-right enforcement progression on
+                  their own — an earlier moving-dot underline froze
+                  under prefers-reduced-motion and read as a stray blue
+                  pixel, so the dot was retired. */}
+              <div className="mt-2 rounded-xl border border-fd-border bg-fd-card/40">
+                <HeroChipRow label="Connectors">
+                  {connectors.map((c) => (
+                    <HeroChip key={c.id}>{c.label}</HeroChip>
+                  ))}
+                </HeroChipRow>
+                <HeroChipRow label="Workflow">
+                  <span className="inline-flex flex-wrap items-center gap-1.5">
+                    {WORKFLOW.map((w, i) => (
+                      <span key={w} className="inline-flex items-center gap-1.5">
+                        <HeroChip>{w}</HeroChip>
+                        {i < WORKFLOW.length - 1 && (
+                          <span
+                            aria-hidden
+                            className="text-[var(--brand-cisco-strong)]/70"
+                          >
+                            →
+                          </span>
+                        )}
+                      </span>
+                    ))}
+                  </span>
+                </HeroChipRow>
+                <HeroChipRow label="Audit">
+                  {AUDIT_SINKS.map((s) => (
+                    <HeroChip key={s}>{s}</HeroChip>
+                  ))}
+                </HeroChipRow>
+              </div>
             </div>
 
-            {/* Three chip strips replace the previous prose bullets. They
-                cover the same ground (connectors / workflow / audit
-                fan-out) but compress the read time from "scan three
-                long sentences" to "scan three rows of pills". The
-                visual vocabulary mirrors the navbar repo-stats pills
-                so the lockup reads as one design system. */}
-            <div className="mt-2 flex flex-col gap-3">
-              <HeroChipRow label="Connectors">
-                {connectors.map((c) => (
-                  <HeroChip key={c.id}>
-                    <span
-                      aria-hidden
-                      className={
-                        c.family === 'proxy'
-                          ? 'size-1.5 rounded-full bg-[var(--brand-cisco)]'
-                          : 'size-1.5 rounded-full bg-fd-muted-foreground/40'
-                      }
-                    />
-                    {c.label}
-                  </HeroChip>
-                ))}
-              </HeroChipRow>
-              <HeroChipRow label="Workflow">
-                {WORKFLOW.map((w, i) => (
-                  <span key={w} className="inline-flex items-center gap-1.5">
-                    <HeroChip>{w}</HeroChip>
-                    {i < WORKFLOW.length - 1 && (
-                      <span aria-hidden className="text-fd-muted-foreground/60">
-                        →
-                      </span>
-                    )}
-                  </span>
-                ))}
-              </HeroChipRow>
-              <HeroChipRow label="Audit">
-                {AUDIT_SINKS.map((s) => (
-                  <HeroChip key={s}>{s}</HeroChip>
-                ))}
-              </HeroChipRow>
+            {/* The terminal pre uses overflow-x-auto, but it can only
+                scroll inside its own box if the grid cell honors
+                min-width:0. Without `min-w-0` the long install curl
+                line pushes the grid track wider than the viewport on
+                phones. */}
+            <div className="flex w-full min-w-0 items-center">
+              <TerminalDemo />
             </div>
           </div>
+        </HeroLockup>
+      </section>
 
-          {/* The terminal pre uses overflow-x-auto, but it can only scroll
-              inside its own box if the grid cell honors min-width:0.
-              Without `min-w-0` here the long install curl line pushes
-              the grid track wider than the viewport on phones. */}
-          <div className="flex w-full min-w-0 items-center">
-            <TerminalDemo />
+      {/* Stories — moved above Three modes so visitors land on
+          concrete "things you can do today" before the conceptual
+          enforcement-tier explainer. */}
+      <section className="border-t border-fd-border bg-fd-card/30 py-16">
+        <div className="container mx-auto max-w-7xl px-4">
+          <div className="mb-8 flex flex-col gap-2">
+            <p className="text-sm font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
+              Stories
+            </p>
+            <h2 className="text-3xl font-semibold tracking-tight">
+              Six things you can do today.
+            </h2>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {STORIES.map((s) => (
+              <Link
+                key={s.href}
+                href={s.href}
+                className="group rounded-xl border border-fd-border bg-fd-card p-5 transition duration-200 hover:-translate-y-0.5 hover:border-[var(--brand-cisco)]/50 hover:shadow-md"
+              >
+                <h3 className="text-base font-semibold">{s.title}</h3>
+                <p className="mt-2 text-sm text-fd-muted-foreground">{s.body}</p>
+                {/* "Read →" is muted at rest so the card body reads as
+                    the primary content; on hover it brightens and
+                    underlines as the click affordance. */}
+                <p className="mt-3 text-sm font-medium text-[var(--brand-cisco-strong)] opacity-70 transition group-hover:opacity-100 group-hover:underline">
+                  Read →
+                </p>
+              </Link>
+            ))}
           </div>
         </div>
       </section>
@@ -193,8 +231,8 @@ export default function HomePage() {
             Start in observe. Earn enforcement.
           </h2>
           <p className="max-w-2xl text-fd-muted-foreground">
-            Start in observe. Promote to action when the policy is tuned. Layer HITL on top for
-            CRITICAL findings.
+            Start in observe. Promote to action when the policy is tuned. Layer approval prompts
+            on top for CRITICAL findings.
           </p>
         </div>
         <div className="grid gap-4 md:grid-cols-3">
@@ -203,18 +241,7 @@ export default function HomePage() {
               key={m.name}
               className="rounded-xl border border-fd-border bg-fd-card/40 p-6 transition hover:border-[var(--brand-cisco)]/50"
             >
-              <div className="flex items-center gap-3">
-                {/* Single-letter mark mirrors the chip language used in
-                    the hero so the cards feel like part of the same
-                    system rather than a separate component island. */}
-                <span
-                  aria-hidden
-                  className="inline-flex size-7 items-center justify-center rounded-full border border-fd-border bg-fd-card text-xs font-semibold text-[var(--brand-cisco-strong)]"
-                >
-                  {m.mark}
-                </span>
-                <h3 className="text-xl font-semibold">{m.name}</h3>
-              </div>
+              <h3 className="text-xl font-semibold">{m.name}</h3>
               <p className="mt-3 text-sm font-medium text-[var(--brand-cisco-strong)]">{m.tagline}</p>
               <p className="mt-2 text-sm text-fd-muted-foreground">{m.body}</p>
             </article>
@@ -233,8 +260,8 @@ export default function HomePage() {
               One adapter per agent. Same enforcement contract.
             </h2>
             <p className="max-w-2xl text-fd-muted-foreground">
-              Proxy connectors intercept LLM traffic. Hook connectors wire into the agent’s
-              native lifecycle.
+              Every connector lands in the same gateway with the same block / approve / observe
+              verbs — pick the agent you ship with, the contract is identical.
             </p>
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -242,106 +269,12 @@ export default function HomePage() {
               <Link
                 key={c.id}
                 href={`/docs/connectors/${c.id}`}
-                className="group rounded-xl border border-fd-border bg-fd-card p-5 transition hover:border-[var(--brand-cisco)]/50"
+                className="group rounded-xl border border-fd-border bg-fd-card p-5 transition duration-200 hover:-translate-y-0.5 hover:border-[var(--brand-cisco)]/50 hover:shadow-md"
               >
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <span className="text-base font-semibold">{c.label}</span>
-                  {/* Family badge dot matches the hero chip dots so the
-                      proxy/hooks distinction reads identically across
-                      both surfaces. */}
-                  <span className="inline-flex items-center gap-1.5 rounded-full border border-fd-border bg-fd-secondary/50 px-2 py-0.5 text-[11px] font-medium text-fd-muted-foreground">
-                    <span
-                      aria-hidden
-                      className={
-                        c.family === 'proxy'
-                          ? 'size-1.5 rounded-full bg-[var(--brand-cisco)]'
-                          : 'size-1.5 rounded-full bg-fd-muted-foreground/40'
-                      }
-                    />
-                    {c.family}
-                  </span>
-                </div>
-                <p className="text-sm text-fd-muted-foreground">{firstSentence(c.notes)}</p>
+                <span className="text-base font-semibold">{c.label}</span>
+                <p className="mt-3 text-sm text-fd-muted-foreground">{firstSentence(c.notes)}</p>
                 <p className="mt-3 text-sm font-medium text-[var(--brand-cisco-strong)] opacity-70 transition group-hover:opacity-100 group-hover:underline">
                   Open page →
-                </p>
-              </Link>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* Architecture */}
-      <section className="container mx-auto max-w-7xl px-4 py-16">
-        <div className="mb-6 flex flex-col gap-2">
-          <p className="text-sm font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
-            Architecture
-          </p>
-          <h2 className="text-3xl font-semibold tracking-tight">A Python CLI, a Go sidecar, and one OpenClaw plugin.</h2>
-        </div>
-        {/* Replaces the previous ASCII <pre> with the same diagram
-            primitive every docs page uses, so the gateway, policy, and
-            audit fan-out all share the visual vocabulary readers see
-            once they click through. */}
-        <Flow
-          direction="LR"
-          caption="The connector talks to the gateway over a stable Go interface; the gateway fans out to scanners, the LLM provider, and audit sinks."
-        >
-          <Node id="agent" kind="agent">
-            Agent runtime
-          </Node>
-          <Node id="connector" kind="connector">
-            DefenseClaw connector
-          </Node>
-          <Node id="gateway" kind="gateway">
-            defenseclaw-gateway
-          </Node>
-          <Node id="policy" kind="policy">
-            {`Policy + scanners\n+ audit`}
-          </Node>
-          <Node id="llm" kind="generic">
-            LLM provider
-          </Node>
-          <Node id="sinks" kind="datastore">
-            {`OTLP / Splunk\nwebhooks / JSONL`}
-          </Node>
-          <Edge from="agent" to="connector" />
-          <Edge from="connector" to="gateway" />
-          <Edge from="gateway" to="policy" label="inspect" />
-          <Edge from="gateway" to="llm" label="guardrail proxy" />
-          <Edge from="gateway" to="sinks" label="audit" />
-        </Flow>
-        <p className="mt-3 text-sm text-fd-muted-foreground">
-          Python CLI for setup. Go gateway for inspection and audit. TypeScript plugin closes the
-          loop on the agent side.
-        </p>
-      </section>
-
-      {/* Stories */}
-      <section className="border-t border-fd-border bg-fd-card/30 py-16">
-        <div className="container mx-auto max-w-7xl px-4">
-          <div className="mb-8 flex flex-col gap-2">
-            <p className="text-sm font-medium uppercase tracking-wider text-[var(--brand-cisco-strong)]">
-              Stories
-            </p>
-            <h2 className="text-3xl font-semibold tracking-tight">
-              Six things you can do today.
-            </h2>
-          </div>
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {STORIES.map((s) => (
-              <Link
-                key={s.href}
-                href={s.href}
-                className="group rounded-xl border border-fd-border bg-fd-card p-5 transition hover:border-[var(--brand-cisco)]/50"
-              >
-                <h3 className="text-base font-semibold">{s.title}</h3>
-                <p className="mt-2 text-sm text-fd-muted-foreground">{s.body}</p>
-                {/* "Read →" is muted at rest so the card body reads as
-                    the primary content; on hover it brightens and
-                    underlines as the click affordance. */}
-                <p className="mt-3 text-sm font-medium text-[var(--brand-cisco-strong)] opacity-70 transition group-hover:opacity-100 group-hover:underline">
-                  Read →
                 </p>
               </Link>
             ))}
@@ -358,12 +291,12 @@ export default function HomePage() {
           Five minutes. No LLM key required.
         </p>
         <div className="mt-6 flex flex-wrap justify-center gap-3">
-          <Link
+          <CtaGlowButton
             href="/docs/get-started/install"
             className="inline-flex items-center gap-2 rounded-md bg-[var(--brand-cisco)] px-5 py-2.5 text-sm font-medium text-white shadow-md transition hover:bg-[var(--brand-cisco-strong)]"
           >
             Install DefenseClaw
-          </Link>
+          </CtaGlowButton>
           <Link
             href="/docs/setup/guardrail"
             className="inline-flex items-center gap-2 rounded-md border border-fd-border bg-fd-card px-5 py-2.5 text-sm font-medium transition hover:bg-fd-muted"
@@ -377,11 +310,14 @@ export default function HomePage() {
 }
 
 // Hero chip primitives — kept co-located because they exist solely to
-// give the hero left column three scannable rows. Sharing one
-// `HeroChip` ensures the connector dots, the workflow pills, and the
-// audit sinks all read with identical weight. The styling tokens
-// (rounded-full, bg-fd-secondary/50, border-fd-border, text-xs) match
-// the navbar repo-stats pills so the lockup reads as one system.
+// give the hero left column three scannable rows. The container is a
+// soft card; each row sits inside that card with a fixed-width label
+// rail on the left and the chip cluster on the right, with a thin
+// horizontal divider between rows. Sharing one `HeroChip` ensures
+// connectors, workflow pills, and audit sinks all read with identical
+// weight, and the styling tokens (rounded-full, bg-fd-secondary/50,
+// border-fd-border, text-xs) match the navbar repo-stats pills so the
+// lockup reads as one design system.
 function HeroChipRow({
   label,
   children,
@@ -390,18 +326,20 @@ function HeroChipRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
-      <span className="text-[11px] font-semibold uppercase tracking-wider text-fd-muted-foreground/70 sm:w-20 sm:shrink-0">
+    <div className="flex flex-col gap-2 border-b border-fd-border/60 px-4 py-3 last:border-b-0 sm:flex-row sm:items-baseline sm:gap-4">
+      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-fd-muted-foreground sm:w-24 sm:shrink-0">
         {label}
       </span>
-      <div className="flex flex-wrap items-center gap-1.5">{children}</div>
+      <div className="flex flex-1 flex-wrap items-center gap-1.5">
+        {children}
+      </div>
     </div>
   );
 }
 
 function HeroChip({ children }: { children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full border border-fd-border bg-fd-secondary/50 px-2.5 py-0.5 text-xs text-fd-muted-foreground">
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-fd-border bg-fd-secondary/60 px-2.5 py-0.5 text-xs text-fd-foreground/85">
       {children}
     </span>
   );

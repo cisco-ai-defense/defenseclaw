@@ -1,11 +1,13 @@
 import matrix from '@/data/capability-matrix.json';
+import { CapabilityMatrixWrapper } from './capability-matrix-wrapper';
 
 // Renders the connector × capability matrix as a horizontally-scrolling
 // table. Data lives in a JSON file (`data/capability-matrix.json`) so a
 // follow-up CI job can regenerate it from `defenseclaw doctor
 // --capabilities --json` without touching the React component. The
-// component itself is intentionally server-rendered (no client JS) so
-// it ships zero runtime cost and remains fully indexable.
+// table itself is server-rendered (no client JS for the data) — only
+// the outer scroll wrapper hydrates so it can attach the
+// IntersectionObserver that drives the row-stagger entrance.
 
 interface ConnectorRow {
   id: string;
@@ -58,7 +60,7 @@ function Family({ family }: { family: ConnectorRow['family'] }) {
 
 export function CapabilityMatrix() {
   return (
-    <div className="not-prose my-6 overflow-x-auto rounded-xl border border-fd-border">
+    <CapabilityMatrixWrapper className="not-prose my-6 overflow-x-auto rounded-xl border border-fd-border">
       <table className="w-full min-w-[900px] border-collapse text-sm">
         <thead>
           <tr className="bg-fd-card text-left">
@@ -73,8 +75,16 @@ export function CapabilityMatrix() {
           </tr>
         </thead>
         <tbody>
-          {data.connectors.map((c) => (
-            <tr key={c.id} className="border-t border-fd-border">
+          {data.connectors.map((c, i) => (
+            <tr
+              key={c.id}
+              className="fd-row border-t border-fd-border"
+              // Stagger delay matches the eye's reading cadence — fast
+              // enough that the whole table settles in <500ms even for
+              // a dozen connectors, slow enough that each row registers
+              // as a discrete arrival.
+              style={{ animationDelay: `${i * 35}ms` }}
+            >
               <Td>
                 <a href={`/docs/connectors/${c.id}`} className="font-medium text-[var(--brand-cisco-strong)] hover:underline">
                   {c.label}
@@ -105,7 +115,7 @@ export function CapabilityMatrix() {
           ))}
         </tbody>
       </table>
-    </div>
+    </CapabilityMatrixWrapper>
   );
 }
 

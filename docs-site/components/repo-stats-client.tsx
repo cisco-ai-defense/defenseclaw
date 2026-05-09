@@ -1,7 +1,65 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { formatCount, githubApiUrl, type RepoStats } from '@/lib/github-stats';
+
+// Single-shot count-up that animates from 0 → target in ~600ms on
+// initial client mount. Reduced-motion users skip the animation. The
+// `aria-label` on the wrapping pill always reflects the final number,
+// so assistive tech never sees the in-progress animation.
+//
+// Subsequent updates (e.g. the GitHub API refresh) just snap to the
+// new value — we don't re-animate, because that would make the navbar
+// numbers count up *twice* in normal use.
+function CountUp({ value }: { value: number }) {
+  const [display, setDisplay] = useState(value);
+  const fromRef = useRef(0);
+  const animatedRef = useRef(false);
+  const rafRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    // First mount only: animate 0 → value. After that any value
+    // change is treated as a real update (API refresh) and snaps.
+    if (animatedRef.current) {
+      setDisplay(value);
+      return;
+    }
+
+    const reduced = window.matchMedia(
+      '(prefers-reduced-motion: reduce)',
+    ).matches;
+    if (reduced) {
+      animatedRef.current = true;
+      setDisplay(value);
+      return;
+    }
+
+    animatedRef.current = true;
+    const start = performance.now();
+    const duration = 600;
+    const from = fromRef.current;
+    const to = value;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      // Ease-out cubic so the number settles smoothly into place
+      // rather than slamming into the final value.
+      const eased = 1 - Math.pow(1 - t, 3);
+      setDisplay(Math.round(from + (to - from) * eased));
+      if (t < 1) {
+        rafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    rafRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+      }
+    };
+  }, [value]);
+
+  return <>{formatCount(display)}</>;
+}
 
 export type RepoStatsVariant = 'banner' | 'nav';
 
@@ -100,7 +158,9 @@ export default function RepoStatsClient({ initial, variant = 'banner' }: Props) 
         >
           <path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.75.75 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.193L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z" />
         </svg>
-        <span className="tabular-nums">{formatCount(stats.stars)}</span>
+        <span className="tabular-nums">
+          <CountUp value={stats.stars} />
+        </span>
       </span>
       <span
         aria-label={`${stats.forks.toLocaleString('en-US')} forks on GitHub`}
@@ -116,7 +176,9 @@ export default function RepoStatsClient({ initial, variant = 'banner' }: Props) 
         >
           <path d="M5 5.372v.878c0 .414.336.75.75.75h4.5a.75.75 0 0 0 .75-.75v-.878a2.25 2.25 0 1 1 1.5 0v.878a2.25 2.25 0 0 1-2.25 2.25h-1.5v2.128a2.251 2.251 0 1 1-1.5 0V8.5h-1.5A2.25 2.25 0 0 1 3.5 6.25v-.878a2.25 2.25 0 1 1 1.5 0ZM5 3.25a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Zm6.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Zm-3 8.75a.75.75 0 1 0-1.5 0 .75.75 0 0 0 1.5 0Z" />
         </svg>
-        <span className="tabular-nums">{formatCount(stats.forks)}</span>
+        <span className="tabular-nums">
+          <CountUp value={stats.forks} />
+        </span>
       </span>
     </span>
   );

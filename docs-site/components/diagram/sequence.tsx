@@ -242,10 +242,22 @@ export function Sequence({
     >
       <DiagramDefs id={id} />
 
-      {/* Lifelines first so messages render on top. */}
+      {/*
+        Animation cadence (gated on the parent figure's
+        `data-animate="entered"`, so SSR paints the final state until
+        JS hydrates and the diagram scrolls into view):
+          1. Pills fade-down in column order:    i  * 50ms
+          2. Lifelines scaleY together once pills are settled:
+                                                  participants.length * 50 + 80ms
+          3. Messages slide-in row-by-row:       lifelinesEnd + i * 90ms
+          4. Each message's label fades in 200ms after the message.
+      */}
+      {/* Lifelines first so messages render on top. All lifelines
+          scaleY downward simultaneously once every pill has landed. */}
       {resolved.map((p) => (
         <line
           key={`lifeline-${p.id}`}
+          className="fd-seq-lifeline"
           x1={p.x}
           x2={p.x}
           y1={lifelineTop}
@@ -257,18 +269,31 @@ export function Sequence({
             strokeWidth: p.emphasis ? 1.5 : 1,
             strokeDasharray: p.emphasis ? undefined : '4 5',
             opacity: p.emphasis ? 0.7 : 0.9,
+            animationDelay: `${participants.length * 50 + 80}ms`,
           }}
         />
       ))}
 
       {/* Participant pills */}
-      {resolved.map((p) => (
-        <ParticipantPill key={`pill-${p.id}`} p={p} gradientId={id} filterId={id} />
+      {resolved.map((p, i) => (
+        <ParticipantPill
+          key={`pill-${p.id}`}
+          p={p}
+          gradientId={id}
+          filterId={id}
+          animationDelay={`${i * 50}ms`}
+        />
       ))}
 
       {/* Messages */}
       {messages.map((m, i) => {
         const y = lifelineTop + 28 + i * MESSAGE_GAP;
+        // Messages animate after every lifeline has finished drawing
+        // (participants.length * 50 + 80ms breather + 240ms scaleY
+        // duration), then stagger one per row at 90ms.
+        const messagesStartMs = participants.length * 50 + 80 + 240;
+        const messageDelay = `${messagesStartMs + i * 90}ms`;
+        const labelDelay = `${messagesStartMs + i * 90 + 200}ms`;
         if (m.note) {
           return (
             <SequenceNote
@@ -277,6 +302,8 @@ export function Sequence({
               x1={Math.min(resolved[m.fromIdx].x, resolved[m.toIdx].x)}
               x2={Math.max(resolved[m.fromIdx].x, resolved[m.toIdx].x)}
               label={m.label ?? ''}
+              animationDelay={messageDelay}
+              labelAnimationDelay={labelDelay}
             />
           );
         }
@@ -289,6 +316,8 @@ export function Sequence({
             label={m.label}
             kind={m.kind ?? 'sync'}
             markerId={id}
+            animationDelay={messageDelay}
+            labelAnimationDelay={labelDelay}
           />
         );
       })}
@@ -406,10 +435,15 @@ function ParticipantPill({
   p,
   gradientId,
   filterId,
+  animationDelay,
 }: {
   p: ResolvedParticipant;
   gradientId: string;
   filterId: string;
+  // Per-participant entrance delay; gated on the parent figure's
+  // `data-animate="entered"`, so SSR paints the pill in its final
+  // state until JS hydrates and the diagram scrolls into view.
+  animationDelay?: string;
 }) {
   const kind: DiagramKind = p.kind ?? 'generic';
   const style = KIND_TO_STYLE[kind];
@@ -419,7 +453,10 @@ function ParticipantPill({
     ? `url(#${gradientId}-emphasis)`
     : 'var(--color-fd-border)';
   return (
-    <g>
+    <g
+      className="fd-seq-pill"
+      style={animationDelay ? { animationDelay } : undefined}
+    >
       <rect
         x={x}
         y={y}
@@ -483,6 +520,8 @@ function SequenceArrow({
   label,
   kind,
   markerId,
+  animationDelay,
+  labelAnimationDelay,
 }: {
   y: number;
   from: ResolvedParticipant;
@@ -490,6 +529,12 @@ function SequenceArrow({
   label?: string;
   kind: MessageKind;
   markerId: string;
+  // Row-staggered entrance delay; gated on the parent figure's
+  // `data-animate="entered"`. The arrow slides in from the left
+  // (transform-origin set in global.css), the label fades in 200ms
+  // later so it never lands before the line it sits on.
+  animationDelay?: string;
+  labelAnimationDelay?: string;
 }) {
   const isReturn = kind === 'return';
   const isAsync = kind === 'async';
@@ -508,7 +553,10 @@ function SequenceArrow({
     const cx = from.x;
     const r = 14;
     return (
-      <g style={{ opacity }}>
+      <g
+        className="fd-seq-message"
+        style={{ opacity, ...(animationDelay && { animationDelay }) }}
+      >
         <path
           d={`M ${cx} ${y} h ${r} a ${r} ${r} 0 0 1 0 ${r * 2} h -${r}`}
           style={{
@@ -526,6 +574,7 @@ function SequenceArrow({
             y={y + r}
             label={label}
             anchor="start"
+            animationDelay={labelAnimationDelay}
           />
         )}
       </g>
@@ -538,7 +587,10 @@ function SequenceArrow({
   const x2 = to.x - dir * 4;
 
   return (
-    <g style={{ opacity }}>
+    <g
+      className="fd-seq-message"
+      style={{ opacity, ...(animationDelay && { animationDelay }) }}
+    >
       <line
         x1={x1}
         y1={y}
@@ -558,6 +610,7 @@ function SequenceArrow({
           y={y - 18}
           label={label}
           anchor="middle"
+          animationDelay={labelAnimationDelay}
         />
       )}
     </g>
@@ -569,17 +622,26 @@ function SequenceLabelChip({
   y,
   label,
   anchor,
+  animationDelay,
 }: {
   x: number;
   y: number;
   label: string;
   anchor: 'start' | 'middle' | 'end';
+  animationDelay?: string;
 }) {
   const w = Math.min(280, Math.max(40, label.length * 6.6 + 20));
   const h = 22;
   const offsetX = anchor === 'middle' ? -w / 2 : anchor === 'end' ? -w : 0;
   return (
-    <foreignObject x={x + offsetX} y={y - h / 2} width={w} height={h}>
+    <foreignObject
+      className="fd-seq-message-label"
+      x={x + offsetX}
+      y={y - h / 2}
+      width={w}
+      height={h}
+      style={animationDelay ? { animationDelay } : undefined}
+    >
       <ForeignDiv
         style={{
           width: '100%',
@@ -611,11 +673,15 @@ function SequenceNote({
   x1,
   x2,
   label,
+  animationDelay,
+  labelAnimationDelay,
 }: {
   y: number;
   x1: number;
   x2: number;
   label: string;
+  animationDelay?: string;
+  labelAnimationDelay?: string;
 }) {
   const padding = 14;
   // When the note spans a single participant (x1 === x2), give the
@@ -628,7 +694,10 @@ function SequenceNote({
   const left = (x1 + x2) / 2 - width / 2;
   const height = 30;
   return (
-    <g>
+    <g
+      className="fd-seq-message"
+      style={animationDelay ? { animationDelay } : undefined}
+    >
       <rect
         x={left}
         y={y - height / 2}
@@ -643,7 +712,14 @@ function SequenceNote({
           opacity: 0.95,
         }}
       />
-      <foreignObject x={left} y={y - height / 2} width={width} height={height}>
+      <foreignObject
+        className="fd-seq-message-label"
+        x={left}
+        y={y - height / 2}
+        width={width}
+        height={height}
+        style={labelAnimationDelay ? { animationDelay: labelAnimationDelay } : undefined}
+      >
         <ForeignDiv
           style={{
             width: '100%',

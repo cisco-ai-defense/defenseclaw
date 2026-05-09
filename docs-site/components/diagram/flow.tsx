@@ -235,6 +235,16 @@ export function Flow({
   const width = Math.ceil(graphLabel.width ?? 0) + 16;
   const height = Math.ceil(graphLabel.height ?? 0) + 16;
 
+  // Rank each node along the layout's primary axis so the entrance
+  // animation lights up nodes in reading order (LR → left-to-right
+  // columns, TB → top-to-bottom rows). Edges inherit their source
+  // node's rank + a half-step so each edge starts as soon as its
+  // source has landed.
+  const rankAxis = (n: ResolvedNode) => (direction === 'LR' ? n.x : n.y);
+  const nodesByRank = [...resolved].sort((a, b) => rankAxis(a) - rankAxis(b));
+  const rankById = new Map<string, number>();
+  nodesByRank.forEach((n, i) => rankById.set(n.id, i));
+
   const id = nextDiagramId('fd-flow');
   const ariaLabel = caption ?? 'Flow diagram';
 
@@ -278,11 +288,22 @@ export function Flow({
 
       {/* Edges first so they sit underneath the node panels. */}
       {resolvedEdges.map((edge, i) => (
-        <FlowEdge key={`e-${i}`} edge={edge} markerId={id} />
+        <FlowEdge
+          key={`e-${i}`}
+          edge={edge}
+          markerId={id}
+          fromRank={rankById.get(edge.from) ?? 0}
+        />
       ))}
 
       {resolved.map((node) => (
-        <FlowNode key={node.id} node={node} filterId={id} gradientId={id} />
+        <FlowNode
+          key={node.id}
+          node={node}
+          filterId={id}
+          gradientId={id}
+          rank={rankById.get(node.id) ?? 0}
+        />
       ))}
     </svg>
   );
@@ -325,10 +346,16 @@ function FlowNode({
   node,
   filterId,
   gradientId,
+  rank,
 }: {
   node: ResolvedNode;
   filterId: string;
   gradientId: string;
+  // Layout-axis rank (left-to-right or top-to-bottom column index).
+  // Used to stagger the entrance animation in reading order; the
+  // class is gated on the parent figure's `data-animate="entered"`,
+  // so the SSR render paints the final state until JS hydrates.
+  rank: number;
 }) {
   const style = KIND_TO_STYLE[node.kind];
   const x = node.x - node.width / 2;
@@ -338,6 +365,7 @@ function FlowNode({
     ? `url(#${gradientId}-emphasis)`
     : 'var(--color-fd-border)';
   const strokeWidth = node.emphasis ? 1.75 : 1;
+  const nodeAnimDelay = `${rank * 60}ms`;
 
   if (style.diamond) {
     // Diamond shape: vertices at top/right/bottom/left of the bounding box.
@@ -350,7 +378,7 @@ function FlowNode({
       `${node.x - w / 2},${node.y}`,
     ].join(' ');
     return (
-      <g>
+      <g className="fd-flow-node" style={{ animationDelay: nodeAnimDelay }}>
         <polygon
           points={points}
           style={{
@@ -382,7 +410,7 @@ function FlowNode({
   }
 
   return (
-    <g>
+    <g className="fd-flow-node" style={{ animationDelay: nodeAnimDelay }}>
       <rect
         x={x}
         y={y}
@@ -445,7 +473,18 @@ function FlowNode({
   );
 }
 
-function FlowEdge({ edge, markerId }: { edge: ResolvedEdge; markerId: string }) {
+function FlowEdge({
+  edge,
+  markerId,
+  fromRank,
+}: {
+  edge: ResolvedEdge;
+  markerId: string;
+  // Source-node rank. The edge animation starts a half-step after the
+  // source node's entrance lands so the line "draws out" of an
+  // already-visible node.
+  fromRank: number;
+}) {
   if (edge.points.length < 2) return null;
   const isEmphasis = edge.emphasis;
   const stroke = isEmphasis ? 'var(--brand-cisco)' : 'var(--color-fd-border)';
@@ -466,9 +505,17 @@ function FlowEdge({ edge, markerId }: { edge: ResolvedEdge; markerId: string }) 
   // edge — which we did — so prefer that for accuracy.
   const mid = midpoint(edge.points);
 
+  // Edge starts as soon as the source node has settled (rank * 60ms +
+  // half a step). The label fades in 240ms after the line begins so
+  // it never lands before the path it sits on is visible.
+  const edgeDelayMs = (fromRank + 0.5) * 60;
+  const edgeAnimDelay = `${edgeDelayMs}ms`;
+  const labelAnimDelay = `${edgeDelayMs + 240}ms`;
+
   return (
     <g>
       <path
+        className="fd-flow-edge"
         d={d}
         style={{
           fill: 'none',
@@ -477,18 +524,34 @@ function FlowEdge({ edge, markerId }: { edge: ResolvedEdge; markerId: string }) 
           strokeLinecap: 'round',
           strokeLinejoin: 'round',
           strokeDasharray: dasharray,
+          animationDelay: edgeAnimDelay,
         }}
         markerStart={markerStart}
         markerEnd={markerEnd}
       />
       {edge.label && (
-        <EdgeLabelChip x={mid.x} y={mid.y} label={edge.label} />
+        <EdgeLabelChip
+          x={mid.x}
+          y={mid.y}
+          label={edge.label}
+          animationDelay={labelAnimDelay}
+        />
       )}
     </g>
   );
 }
 
-function EdgeLabelChip({ x, y, label }: { x: number; y: number; label: string }) {
+function EdgeLabelChip({
+  x,
+  y,
+  label,
+  animationDelay,
+}: {
+  x: number;
+  y: number;
+  label: string;
+  animationDelay?: string;
+}) {
   // Estimate chip width from char count. The chip uses an HTML
   // foreignObject so we get full font fallback and crisp anti-aliased
   // text instead of SVG <text> spacing quirks.
@@ -496,10 +559,12 @@ function EdgeLabelChip({ x, y, label }: { x: number; y: number; label: string })
   const chipH = 22;
   return (
     <foreignObject
+      className="fd-flow-edge-label"
       x={x - chipW / 2}
       y={y - chipH / 2}
       width={chipW}
       height={chipH}
+      style={animationDelay ? { animationDelay } : undefined}
     >
       <ForeignDiv
         style={{

@@ -64,11 +64,46 @@ export function DiagramLightbox({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const figureRef = useRef<HTMLElement | null>(null);
   const titleId = useId();
   const captionId = useId();
 
   useEffect(() => {
     setHydrated(true);
+  }, []);
+
+  // One-shot viewport intersection trigger. The Flow / Sequence /
+  // capability-matrix CSS animations are gated on
+  // `data-animate="entered"` on this <figure>, so the SSR-rendered
+  // SVG paints to its final state until JS hydrates and the diagram
+  // scrolls into view. Once entered, we disconnect — the animation
+  // runs exactly once per page visit and never replays on scrollback.
+  useEffect(() => {
+    const el = figureRef.current;
+    if (!el) return;
+    if (el.dataset.animate === 'entered') return;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      // Reduced-motion: still set the attribute so any conditional
+      // styling that depends on it (e.g. final-state colours) is
+      // applied; the keyframes themselves are no-ops via the global
+      // reduced-motion guard in global.css.
+      el.dataset.animate = 'entered';
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            el.dataset.animate = 'entered';
+            io.disconnect();
+            break;
+          }
+        }
+      },
+      { rootMargin: '0px 0px -10% 0px', threshold: 0.15 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
   }, []);
 
   // Esc-to-close + restore focus to the trigger when the modal closes.
@@ -126,6 +161,7 @@ export function DiagramLightbox({
 
   return (
     <figure
+      ref={figureRef}
       className="my-6 not-prose relative group"
       data-oversize={oversize ? 'true' : undefined}
       data-natural-width={naturalWidth}
@@ -185,7 +221,10 @@ export function DiagramLightbox({
           onClick={handleSurfaceClick}
           className="fixed inset-0 z-50 flex items-stretch justify-stretch bg-black/70 p-4 backdrop-blur-sm sm:p-8"
         >
-          <div className="relative flex h-full w-full flex-col rounded-xl border border-fd-border bg-fd-background shadow-2xl">
+          <div
+            data-animate="entered"
+            className="relative flex h-full w-full flex-col rounded-xl border border-fd-border bg-fd-background shadow-2xl"
+          >
             <div className="flex items-center justify-between gap-4 border-b border-fd-border px-4 py-3">
               <h2
                 id={titleId}

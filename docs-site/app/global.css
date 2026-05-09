@@ -104,6 +104,160 @@
   animation: terminal-blink 1s steps(2, end) infinite;
 }
 
+/* Rotating connector word in the hero h1. Each word remounts via a
+ * React `key` change which retriggers this single-shot animation;
+ * the absolute-positioned wrapper around it keeps the heading width
+ * stable so the layout doesn't jiggle while the word swaps.
+ */
+@keyframes connector-word-in {
+  0% {
+    opacity: 0;
+    transform: translateY(0.25em);
+    filter: blur(2px);
+  }
+  60% {
+    opacity: 1;
+    filter: blur(0);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+.connector-word-in {
+  animation: connector-word-in 360ms cubic-bezier(0.2, 0.6, 0.2, 1) both;
+}
+
+/* CTA pulse — fired once via React adding the class, then auto-removes
+ * itself on `animationend` so subsequent scrolls don't re-trigger.
+ * The pulse expands a ring outward and fades, mimicking the iOS
+ * "tap target" feedback so the eye is drawn to the install button
+ * once the CTA section enters the viewport.
+ */
+@keyframes cta-pulse {
+  0%   { box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand-cisco) 70%, transparent); }
+  70%  { box-shadow: 0 0 0 12px color-mix(in oklab, var(--brand-cisco) 0%, transparent); }
+  100% { box-shadow: 0 0 0 0 color-mix(in oklab, var(--brand-cisco) 0%, transparent); }
+}
+
+.cta-pulse {
+  animation: cta-pulse 1.6s ease-out 1;
+}
+
+/* Diagram entrance animations. <DiagramLightbox> flips
+ * `data-animate="entered"` on the <figure> once the diagram scrolls
+ * into view; every keyframe below is scoped to that attribute so the
+ * SSR-rendered SVG paints to its final state until JS hydrates and
+ * the IntersectionObserver fires.
+ */
+@keyframes flow-node-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes flow-edge-draw {
+  from { stroke-dashoffset: 600; opacity: 0.5; }
+  to   { stroke-dashoffset: 0;   opacity: 1; }
+}
+@keyframes flow-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+[data-animate='entered'] .fd-flow-node {
+  animation: flow-node-in 380ms ease-out both;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+[data-animate='entered'] .fd-flow-edge {
+  stroke-dasharray: 600;
+  animation: flow-edge-draw 480ms ease-in-out both;
+}
+[data-animate='entered'] .fd-flow-edge-label {
+  animation: flow-fade-in 240ms ease-out both;
+}
+
+@keyframes seq-pill-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes seq-lifeline {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+@keyframes seq-message-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+
+[data-animate='entered'] .fd-seq-pill {
+  animation: seq-pill-in 320ms ease-out both;
+  transform-box: fill-box;
+  transform-origin: top center;
+}
+[data-animate='entered'] .fd-seq-lifeline {
+  animation: seq-lifeline 240ms ease-out both;
+  transform-box: fill-box;
+  transform-origin: top;
+}
+[data-animate='entered'] .fd-seq-message {
+  animation: seq-message-in 280ms ease-out both;
+  transform-box: fill-box;
+  transform-origin: left center;
+}
+[data-animate='entered'] .fd-seq-message-label {
+  animation: flow-fade-in 200ms ease-out both;
+}
+
+/* Capability matrix row stagger. The wrapper toggles
+ * `data-animate="entered"` on viewport entry so the rows fade up in
+ * sequence — letting the eye scan the connector list one by one
+ * instead of swallowing the whole table at once.
+ */
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+[data-animate='entered'] .fd-row {
+  animation: row-in 280ms ease-out both;
+}
+
+/* Fumadocs Card hover-lift across the docs. Targets the upstream
+ * `data-card="true"` attribute so every <Cards> block (Stories
+ * landing, every connector page's "next steps", Get Started landing,
+ * Setup landing, the Quickstart, etc.) gains a subtle lift on hover
+ * with no MDX edits. Hover-only, so screen-readers and keyboard nav
+ * are unaffected.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  a[data-card='true'] {
+    transition: transform 180ms ease-out, box-shadow 180ms ease-out,
+      border-color 180ms ease-out;
+  }
+  a[data-card='true']:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px -10px
+      color-mix(in oklab, var(--brand-cisco) 40%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connector-word-in,
+  .cta-pulse,
+  [data-animate='entered'] .fd-flow-node,
+  [data-animate='entered'] .fd-flow-edge,
+  [data-animate='entered'] .fd-flow-edge-label,
+  [data-animate='entered'] .fd-seq-pill,
+  [data-animate='entered'] .fd-seq-lifeline,
+  [data-animate='entered'] .fd-seq-message,
+  [data-animate='entered'] .fd-seq-message-label,
+  [data-animate='entered'] .fd-row {
+    animation: none !important;
+  }
+}
+
 /* Search dialog polish — Fumadocs's FlexSearch result list paints the
  * active row with `bg-fd-accent text-fd-accent-foreground`, but the
  * breadcrumb child still has `text-fd-muted-foreground` baked in. The
