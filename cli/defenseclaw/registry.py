@@ -124,7 +124,7 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
                 try:
                     tf.extractall(dest_dir, filter="data")
                 except TypeError:
-                    # Avarice F-2390: Python <3.12 lacks the `filter`
+                    # Python <3.12 lacks the `filter`
                     # parameter. The legacy fallback called
                     # tf.extractall(dest_dir) WITHOUT any path-
                     # traversal validation, so a malicious tar with
@@ -146,7 +146,7 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
                         if not (m.isfile() or m.isdir()):
                             raise RegistryError(
                                 f"tar contains non-regular member: {m.name!r} "
-                                f"(type={m.type!r}, F-2390)"
+                                f"(type={m.type!r}, )"
                             )
                         # Tar members are POSIX paths regardless of
                         # the host OS; split on `/` and `\\` so we
@@ -155,12 +155,12 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
                         normalized = m.name.replace("\\", "/")
                         if normalized.startswith("/") or normalized.startswith("\\"):
                             raise RegistryError(
-                                f"tar contains absolute-path entry: {m.name!r} (F-2390)"
+                                f"tar contains absolute-path entry: {m.name!r}"
                             )
                         parts = os.path.normpath(normalized).split("/")
                         if ".." in parts:
                             raise RegistryError(
-                                f"tar contains path-traversal entry: {m.name!r} (F-2390)"
+                                f"tar contains path-traversal entry: {m.name!r}"
                             )
                         member_path = os.path.realpath(
                             os.path.join(dest_dir, normalized)
@@ -168,7 +168,7 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
                         if (member_path != safe_root
                                 and not member_path.startswith(safe_root + os.sep)):
                             raise RegistryError(
-                                f"tar contains path-traversal entry: {m.name!r} (F-2390)"
+                                f"tar contains path-traversal entry: {m.name!r}"
                             )
                         members.append(m)
                     tf.extractall(dest_dir, members=members)

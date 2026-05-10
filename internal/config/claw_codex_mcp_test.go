@@ -181,7 +181,7 @@ args = ["/opt/global-fs.js"]
 }
 
 // TestReadMCPServersCodex_ProjectLocalOverridesGlobal is the
-// regression for DeepSec finding "Codex project-local MCP overrides
+// regression for finding "Codex project-local MCP overrides
 // are shadowed by global entries". Before the fix, when both
 // `~/.codex/config.toml` and `./.mcp.json` declared the same MCP
 // server name, the global TOML entry was retained and the

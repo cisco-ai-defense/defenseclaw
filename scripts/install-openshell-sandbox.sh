@@ -142,7 +142,7 @@ for m in idx.get('manifests', []):
 sys.exit(1)
 ") || die "No linux/${OCI_ARCH} manifest in ${OCI_IMAGE}:${OPENSHELL_VERSION}"
 
-# Avarice F-1829: the OCI tag itself is mutable, so the operator MUST
+# the OCI tag itself is mutable, so the operator MUST
 # either pin the platform manifest digest (DEFENSECLAW_OPENSHELL_ARCH_DIGEST)
 # or pin the final extracted-binary sha256
 # (DEFENSECLAW_OPENSHELL_BINARY_SHA256). Without one of those, we
@@ -151,20 +151,20 @@ sys.exit(1)
 if [[ -n "${DEFENSECLAW_OPENSHELL_ARCH_DIGEST:-}" ]]; then
     pinned="${DEFENSECLAW_OPENSHELL_ARCH_DIGEST}"
     if [[ "${pinned,,}" != "${ARCH_DIGEST,,}" ]]; then
-        die "OCI manifest digest mismatch: pinned ${pinned} got ${ARCH_DIGEST} (F-1829)"
+        die "OCI manifest digest mismatch: pinned ${pinned} got ${ARCH_DIGEST}"
     fi
     info "OCI manifest digest verified against pinned DEFENSECLAW_OPENSHELL_ARCH_DIGEST"
 elif [[ -n "${DEFENSECLAW_OPENSHELL_BINARY_SHA256:-}" ]]; then
     info "OCI manifest digest unpinned but DEFENSECLAW_OPENSHELL_BINARY_SHA256 is set — will verify final binary instead"
 elif [[ "${DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED:-0}" == "1" ]]; then
-    warn "OCI tag ${OPENSHELL_VERSION} is mutable and DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED=1 — proceeding without integrity verification (F-1829)"
+    warn "OCI tag ${OPENSHELL_VERSION} is mutable and DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED=1 — proceeding without integrity verification"
 else
     die "Refusing to install openshell-sandbox from mutable tag ${OPENSHELL_VERSION} without integrity pin.
   Set one of:
     DEFENSECLAW_OPENSHELL_ARCH_DIGEST=sha256:<digest>   # pin platform manifest
     DEFENSECLAW_OPENSHELL_BINARY_SHA256=<hex>           # pin final binary
     DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED=1              # explicit opt-out (NOT recommended)
-  (F-1829)"
+ "
 fi
 
 # ── Step 2: Fetch platform manifest + image config ──────────────────────────
@@ -244,7 +244,7 @@ if [[ ! -f "${EXTRACTED}" ]]; then
     die "${BINARY_NAME} not found in extracted layer — image layout may have changed"
 fi
 
-# Avarice F-1829: when DEFENSECLAW_OPENSHELL_BINARY_SHA256 is pinned
+# when DEFENSECLAW_OPENSHELL_BINARY_SHA256 is pinned
 # (regardless of whether the manifest digest was also pinned),
 # verify the extracted binary against it before install.
 if [[ -n "${DEFENSECLAW_OPENSHELL_BINARY_SHA256:-}" ]]; then
@@ -253,11 +253,11 @@ if [[ -n "${DEFENSECLAW_OPENSHELL_BINARY_SHA256:-}" ]]; then
     elif command -v shasum >/dev/null 2>&1; then
         actual="$(shasum -a 256 "${EXTRACTED}" | awk '{print $1}')"
     else
-        die "no sha256sum/shasum available — cannot verify pinned binary (F-1829)"
+        die "no sha256sum/shasum available — cannot verify pinned binary"
     fi
     pinned="${DEFENSECLAW_OPENSHELL_BINARY_SHA256}"
     if [[ "${pinned,,}" != "${actual,,}" ]]; then
-        die "openshell-sandbox sha256 mismatch: pinned ${pinned} got ${actual} (F-1829)"
+        die "openshell-sandbox sha256 mismatch: pinned ${pinned} got ${actual}"
     fi
     info "openshell-sandbox: pinned sha256 match"
 fi

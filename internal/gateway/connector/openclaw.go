@@ -154,7 +154,7 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 3: Hook script for tool inspection.
 	//
-	// DeepSec hardening (S2.5): use the token-aware hook writer so
+	// hardening (S2.5): use the token-aware hook writer so
 	// the companion .token file (sourced by the generic inspect
 	// templates) contains the gateway bearer token. Previously this
 	// path called the back-compat WriteHookScript shim with an

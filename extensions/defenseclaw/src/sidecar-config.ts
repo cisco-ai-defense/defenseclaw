@@ -46,7 +46,7 @@ interface SidecarConfig {
    *   - "action" / "enforce": inspection failures fail CLOSED. The
    *     extension MUST NOT silently allow tool calls when the sidecar
    *     is unreachable, returns 401/403/413, times out, or returns
-   *     malformed JSON (DeepSec finding "Tool inspection fails open
+   *     malformed JSON (finding "Tool inspection fails open
    *     on sidecar errors").
    * Anything else is treated as observe to preserve the existing
    * conservative default for unknown values.

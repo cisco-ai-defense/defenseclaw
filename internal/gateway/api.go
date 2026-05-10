@@ -847,7 +847,7 @@ type policyEvaluateInput struct {
 type policyEvaluateScanResult struct {
 	MaxSeverity   string `json:"max_severity"`
 	TotalFindings int    `json:"total_findings"`
-	// DeepSec hardening (S2.scanners): expose the scanner failure
+	// hardening (S2.scanners): expose the scanner failure
 	// signal so callers driving this debug endpoint can reproduce
 	// the post-scan admission decision a non-zero scanner exit
 	// would yield. Mirrors policy.ScanResultInput.
@@ -1537,7 +1537,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Avarice F-3287: the legacy handler accepted any directory the
+	// the legacy handler accepted any directory the
 	// gateway process could read and streamed every regular file
 	// inside it. A caller with the sidecar bearer token could ask
 	// for ~/.defenseclaw, ~/.ssh, /etc, /private/etc/ssh, etc., and
@@ -1591,10 +1591,10 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	if !rootOK {
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch-rejected", req.Target,
-				"reason=outside-skill-roots (F-3287)")
+				"reason=outside-skill-roots")
 		}
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
-			"error": "target is not under a configured skill or plugin root (F-3287)",
+			"error": "target is not under a configured skill or plugin root",
 		})
 		return
 	}
@@ -2060,7 +2060,7 @@ func (a *APIServer) writeGuardrailRuntime() error {
 }
 
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
-	// Avarice F-3288: when a policy bundle is configured but
+	// when a policy bundle is configured but
 	// either the engine constructor or evaluation fails, the
 	// previous code silently fell back to a built-in
 	// severity-derived decision that allows clean/missing scanner
@@ -2225,7 +2225,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				// and is bound to a single connector's OTLP
 				// namespace. See connector/otlp_token.go.
 				//
-				// DeepSec follow-up: parity with the bearer branch
+				// follow-up: parity with the bearer branch
 				// below — promote the peeked agent identity once
 				// auth has succeeded so audit rows on path-token
 				// authed traffic still carry agent_instance_id.
@@ -2253,7 +2253,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 
-		// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+		// ("CorrelationMiddleware mints
 		// unauthenticated agent sessions"): now that auth has
 		// succeeded, upgrade the previously peeked agent identity
 		// to a fully minted entry so authenticated traffic still
@@ -2829,7 +2829,7 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
-	// DeepSec H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
+	// H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
 	// findings"): the persistent path (LogScanWithCorrelation →
 	// audit.scan_persist.go) already runs Description / Location /
 	// Remediation through redaction.ForSinkString before INSERT, and

@@ -661,7 +661,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
-	// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+	// ("CorrelationMiddleware mints
 	// unauthenticated agent sessions"): now that the proxy has
 	// authenticated the request, upgrade the previously peeked
 	// agent identity to a fully minted entry so downstream
@@ -710,7 +710,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// be matched correctly by the allowlist and the provider inference.
 	targetForMatch := targetOrigin + r.URL.Path
 
-	// DeepSec hardening (S2.proxy): refuse target URLs that embed
+	// hardening (S2.proxy): refuse target URLs that embed
 	// userinfo. "https://attacker:password@evil.com/..." is parseable
 	// but the userinfo segment is exfiltrated in the upstream
 	// Authorization header; an attacker who can influence
@@ -792,7 +792,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// SSRF defense-in-depth (DeepSec finding "Provider allowlist can
+	// SSRF defense-in-depth (finding "Provider allowlist can
 	// be spoofed to forward to internal hosts"): apply the
 	// private/link-local resolution check to BOTH the shape AND known
 	// branches. The previous code only ran isPrivateHost in the
@@ -955,7 +955,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectionText := promptInspectionText(userText)
-	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
 	// or session-startup-shaped suffix inside the user-controlled OpenClaw
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
@@ -970,7 +970,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
-		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// stripOpenClawUntrustedEnvelope is keyed on a literal prefix
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict.
@@ -1196,7 +1196,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
-		// Avarice F-1188: scan provider-native tool calls (Anthropic
+		// scan provider-native tool calls (Anthropic
 		// tool_use, Gemini functionCall, Bedrock toolUse, OpenAI
 		// Responses function_call, OpenAI Chat Completions tool_calls).
 		// Pre-fix only the OpenAI chat-completion JSON path scanned tool
@@ -1378,7 +1378,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 // OpenAI Responses API, OpenAI Chat Completions, Ollama native chat/generate,
 // and Bedrock Converse.
 //
-// Avarice F-1186: pre-fix Ollama and Bedrock envelopes were ignored, so
+// pre-fix Ollama and Bedrock envelopes were ignored, so
 // completion inspection silently skipped any prompt-injection that triggered
 // `block` because `content` came back empty and the proxy short-circuited
 // the inspector call. The new branches keep parity with the providers that
@@ -1426,7 +1426,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 		}
 
 	case "ollama":
-		// F-1186: Ollama native chat: {"message": {"content": "..."}}
+		// Ollama native chat: {"message": {"content": "..."}}
 		// Ollama native generate: {"response": "..."}
 		var chatResp struct {
 			Message struct {
@@ -1444,7 +1444,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 		}
 
 	case "bedrock":
-		// F-1186: Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
+		// Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
 		// Bedrock InvokeModel responses are model-shaped and re-routed through
 		// the matching provider extractor (anthropic / cohere / etc.) by the
 		// caller, so this branch only handles the Converse envelope.
@@ -1507,7 +1507,7 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 // found in a non-streaming response body, normalised into a JSON array of
 // {name, arguments(json string)} objects. Returns nil when the body
 // contains no recognised tool-call shape, so the caller can short-circuit
-// inspection. Avarice F-1188: pre-fix tool-call inspection only ran on the
+// inspection. pre-fix tool-call inspection only ran on the
 // OpenAI chat-completion path; Anthropic `tool_use`, Gemini `functionCall`,
 // Bedrock tool use, and OpenAI Responses `function_call` output sailed
 // through unchecked.
@@ -1648,7 +1648,7 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 // extractSSEChunkText extracts the assistant text delta from a single SSE
 // data JSON object in a streaming provider-native response.
 //
-// Avarice F-1187: pre-fix the default branch only parsed OpenAI Chat
+// pre-fix the default branch only parsed OpenAI Chat
 // Completions `choices[].delta.content`, so OpenAI Responses streams
 // (`response.output_text.delta`), Bedrock Converse streams
 // (`contentBlockDelta`), and Ollama native streams (`message.content`)
@@ -1691,7 +1691,7 @@ func extractSSEChunkText(data string, provider string) string {
 		}
 
 	case "bedrock":
-		// F-1187: Bedrock Converse streaming uses contentBlockDelta frames
+		// Bedrock Converse streaming uses contentBlockDelta frames
 		// shaped {"contentBlockDelta":{"delta":{"text":"..."}}}.
 		var chunk struct {
 			ContentBlockDelta struct {
@@ -1705,7 +1705,7 @@ func extractSSEChunkText(data string, provider string) string {
 		}
 
 	case "ollama":
-		// F-1187: Ollama native streaming chat: {"message":{"content":"..."}}
+		// Ollama native streaming chat: {"message":{"content":"..."}}
 		// generate: {"response":"..."}
 		var chunk struct {
 			Message struct {
@@ -1721,7 +1721,7 @@ func extractSSEChunkText(data string, provider string) string {
 		}
 
 	default:
-		// F-1187: OpenAI Responses API streaming uses event-shaped frames
+		// OpenAI Responses API streaming uses event-shaped frames
 		// keyed by `type`, e.g.:
 		//   {"type":"response.output_text.delta","delta":"..."}
 		// Pre-fix the default branch only parsed Chat Completions, so
@@ -2007,7 +2007,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
-	// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+	// ("CorrelationMiddleware mints
 	// unauthenticated agent sessions"): mint-after-auth.
 	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 
@@ -2085,7 +2085,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// DeepSec hardening (mirror of handlePassthrough at proxy.go:713–747):
+	// hardening (mirror of handlePassthrough at proxy.go:713–747):
 	// the chat-completion path also forwards req.TargetURL into the upstream
 	// provider (Bifrost handles the actual dial); apply the same userinfo /
 	// scheme / private-host guards so an authenticated caller (or a
@@ -2237,7 +2237,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	inspectionText := promptInspectionText(userText)
-	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
+	// heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
 	// or session-startup-shaped suffix inside the user-controlled OpenClaw
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
@@ -2262,7 +2262,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, req.Messages, req.Model, mode)
-		// F-1265: stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// stripOpenClawUntrustedEnvelope is keyed on a literal prefix
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict.
@@ -3793,7 +3793,7 @@ func redactAuthValue(val string) string {
 // scrubURLSecrets removes sensitive userinfo and query parameters
 // from a URL string before logging.
 //
-// DeepSec S2.MEDIUM ("Credential-bearing upstream URLs can be logged"):
+// ("Credential-bearing upstream URLs can be logged"):
 // the legacy implementation returned the original string unchanged
 // when “RawQuery“ was empty, so URLs with userinfo
 // (“https://user:pass@host“) leaked verbatim. It also only redacted

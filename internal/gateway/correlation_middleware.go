@@ -309,7 +309,7 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				ctx = ContextWithTraceID(ctx, span.SpanContext().TraceID().String())
 			}
 			if registry != nil {
-				// DeepSec S2.MEDIUM ("CorrelationMiddleware
+				// ("CorrelationMiddleware
 				// mints unauthenticated agent sessions"):
 				// CorrelationMiddleware runs BEFORE auth on
 				// /health, /metrics, and the proxy chain.

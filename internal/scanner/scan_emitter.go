@@ -19,7 +19,7 @@ import (
 
 // redactedScanResultJSON serializes a copy of “result“ whose finding
 // description / location / remediation fields have been passed through
-// redaction.ForSinkString. DeepSec S2.MEDIUM ("Raw scan JSON stores
+// redaction.ForSinkString. ("Raw scan JSON stores
 // unredacted secret-bearing findings"): callers persist this JSON into
 // scan_results.raw_json, which is read back through GetScanRawJSON and
 // LatestScansByScanner -- both surfaces had previously leaked the raw
@@ -153,7 +153,7 @@ func EmitScanResult(
 	}
 
 	if pers != nil {
-		// DeepSec S2.MEDIUM ("Raw scan JSON stores unredacted
+		// ("Raw scan JSON stores unredacted
 		// secret-bearing findings"): the per-finding rows pass
 		// description / location / remediation through
 		// redaction.ForSinkString, but the legacy emitter

@@ -129,7 +129,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
 		interval, debounce, healthURL)
 
-	// DeepSec S3.HIGH_BUG ("Stale watchdog PID file can stop an
+	// S3.HIGH_BUG ("Stale watchdog PID file can stop an
 	// unrelated process"): the PID file is now opened with an
 	// exclusive flock that the watchdog process holds for its entire
 	// lifetime. A second `defenseclaw-gateway watchdog` invocation
@@ -342,7 +342,7 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	// DeepSec hardening: probe for a running watchdog by attempting
+	// hardening: probe for a running watchdog by attempting
 	// to take the PID-file flock. If the lock is held, the watchdog
 	// is alive. If the lock is free, ANY old plaintext PID file
 	// content is by definition stale (a live watchdog would still
@@ -414,7 +414,7 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// DeepSec S3.HIGH_BUG ("Stale watchdog PID file can stop an
+	// S3.HIGH_BUG ("Stale watchdog PID file can stop an
 	// unrelated process"): verify the recorded fingerprint BEFORE
 	// signalling. A PID-reuse race (the watchdog crashed and the
 	// kernel handed its PID to an unrelated user-owned process) used
@@ -484,7 +484,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// DeepSec hardening: same fingerprint check as stop. If the
+	// hardening: same fingerprint check as stop. If the
 	// recorded executable does not match /proc/<pid>/exe (Linux) the
 	// PID was reused by an unrelated process; report not-running and
 	// clear the stale file.
@@ -505,7 +505,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 // watchdogPIDInfo is the JSON payload of watchdog.pid. The fingerprint
 // (Executable + StartTime) lets stop/status verify that the recorded PID
 // is still the same process that wrote the file rather than a recycled
-// PID owned by an unrelated user-space process. See DeepSec S3.HIGH_BUG
+// PID owned by an unrelated user-space process. See S3.HIGH_BUG
 // "Stale watchdog PID file can stop an unrelated process".
 type watchdogPIDInfo struct {
 	PID        int    `json:"pid"`

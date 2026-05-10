@@ -875,7 +875,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_no_action_refuses_critical_findings(self, mock_fetch, mock_scan):
-        """Avarice F-0683: the legacy code printed "no action taken" and
+        """the legacy code printed "no action taken" and
         STILL fell through to copytree() when a CRITICAL was found
         without --action. We now refuse the install (fail closed) until
         the operator either passes --action or explicitly allow-lists."""
@@ -889,13 +889,13 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
         # The plugin must NOT have landed on disk.
         self.assertFalse(
             os.path.exists(os.path.join(self.app.cfg.plugin_dir, "warn-pkg")),
-            "F-0683 regression: critical plugin was installed without --action",
+            "regression: critical plugin was installed without --action",
         )
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_no_action_allows_low_severity_findings(self, mock_fetch, mock_scan):
-        """F-0683 must not over-block: LOW/INFO scan findings without
+        """must not over-block: LOW/INFO scan findings without
         --action still install with a warning so existing operator
         workflows don't break."""
         from datetime import datetime, timedelta, timezone

@@ -174,7 +174,7 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 
 // rescanTarget scans a single target, compares with baseline, and emits drift alerts.
 //
-// DeepSec hardening (S2.watcher, "Rescan findings are baselined without
+// hardening (S2.watcher, "Rescan findings are baselined without
 // admission enforcement"): both the initial-baseline path
 // (no prior baseline) and the drift-detected path now route the fresh
 // scan result through the same admission/enforcement gate as
@@ -234,7 +234,7 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 
 	w.emitDriftAlerts(evt, deltas)
 
-	// DeepSec hardening: route drift through admission. If the fresh
+	// hardening: route drift through admission. If the fresh
 	// scan would be rejected/blocked by current policy, refuse to
 	// promote the new snapshot to the baseline so we keep alerting on
 	// every subsequent rescan (and any operator-configured auto-block
@@ -428,7 +428,7 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 
 	current, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 	if err != nil {
-		// DeepSec hardening (S2.watcher): scanner Scan() now
+		// hardening (S2.watcher): scanner Scan() now
 		// fails closed on non-zero exit. Surface that as a
 		// drift signal so the operator can act, but do NOT
 		// silently swap the baseline; a nil result here causes

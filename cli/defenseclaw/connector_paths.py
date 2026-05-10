@@ -1227,7 +1227,7 @@ def restore_managed_mcp_backup(path: str) -> bool:
 
 
 def _capture_managed_mcp_backup(path: str) -> None:
-    # Avarice F-2128: workspace-scoped MCP configs (Codex .mcp.json,
+    # workspace-scoped MCP configs (Codex .mcp.json,
     # Cursor .cursor/mcp.json, Copilot .github/mcp.json) live in a
     # CWD chosen by the operator. A malicious repository can pre-place
     # those config paths as symlinks to private files readable by the
@@ -1253,7 +1253,7 @@ def _capture_managed_mcp_backup(path: str) -> None:
             target = "<unreadable>"
         sys.stderr.write(
             f"[defenseclaw] refusing to back up MCP config: {path} is a symlink "
-            f"-> {target!r} (F-2128)\n"
+            f"-> {target!r}\n"
         )
         return
     if not stat.S_ISREG(st.st_mode):

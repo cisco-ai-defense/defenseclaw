@@ -755,7 +755,7 @@ def _pid_file_running(pid_file: str) -> bool:
     """Return True only when pid_file points at a live process whose
     /proc/<pid>/cmdline argv0 looks like the DefenseClaw gateway.
 
-    Avarice F-2188 / F-2189: the legacy implementation accepted any
+    The legacy implementation accepted any
     PID that passed `os.kill(pid, 0)` as proof that the gateway was
     running. A local process that planted or staled gateway.pid
     could therefore make `quickstart`/`init` skip starting the
@@ -785,7 +785,7 @@ def _pid_file_running(pid_file: str) -> bool:
 def _pid_looks_like_gateway(pid: int) -> bool:
     """Verify that /proc/<pid>/cmdline (Linux) or `ps -o command=`
     (macOS) advertises one of the expected DefenseClaw gateway
-    binary names. This blocks the F-2188/F-2189 stale-PID
+    binary names. This blocks stale-PID
     spoofing attacks where a planted gateway.pid points at an
     unrelated long-running process (e.g. /bin/sleep)."""
     candidates = ("defenseclaw-gateway", "defenseclaw_gateway", "defenseclaw")

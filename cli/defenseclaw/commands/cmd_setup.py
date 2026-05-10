@@ -92,7 +92,7 @@ def _resolve_secret_arg(
 ) -> str | None:
     """Resolve a secret-valued setup option from safe sources.
 
-    DeepSec S2.MEDIUM ("Setup secret entry can echo or expose
+    ("Setup secret entry can echo or expose
     credentials"): raw argv values for ``--api-key`` / ``--token`` /
     ``--access-token`` / ``--hec-token`` leak via shell history,
     terminal scrollback, CI logs, and ``ps``/``/proc/<pid>/cmdline``.
@@ -454,7 +454,7 @@ def setup_llm(
     cfg = app.cfg
     llm = cfg.llm
 
-    # DeepSec S2.MEDIUM: argv-secret options leak via shell history,
+    # argv-secret options leak via shell history,
     # CI logs, and ps. Resolve via the safe alternatives before any
     # downstream code touches the value. Returns None when no source
     # was supplied; callers must keep the existing value.
@@ -931,7 +931,7 @@ def _prompt_and_save_secret(env_name: str, current: str, data_dir: str) -> None:
         hint = _mask(effective)
     else:
         hint = "(not set)"
-    # DeepSec S2.MEDIUM ("Setup secret entry can echo or expose
+    # ("Setup secret entry can echo or expose
     # credentials"): default click.prompt echoes input, so typed
     # secrets show up in terminal scrollback, screen recordings, and
     # session logs. hide_input=True suppresses the echo.
@@ -979,7 +979,7 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
 
     Note: ``O_CREAT`` only applies the ``0o600`` mode on *initial*
     creation. When the file already exists (common on repeat runs),
-    the previous permission bits survive. We chmod() after the write
+    The previous permission bits survive. We chmod() after the write
     so that repeated invocations keep converging on 0600, even if a
     stray ``chmod 644`` happened out-of-band.
     """
@@ -1418,7 +1418,7 @@ def setup_gateway(
 
     data_dir = app.cfg.data_dir
 
-    # DeepSec S2.MEDIUM ("Setup secret entry can echo or expose
+    # ("Setup secret entry can echo or expose
     # credentials"): resolve gateway token through safe sources before
     # any downstream code touches the value.
     resolved_token = _resolve_secret_arg(
@@ -4909,7 +4909,7 @@ def setup_splunk(
         _show_splunk_credentials(app.cfg.data_dir)
         return
 
-    # DeepSec S2.MEDIUM ("Setup secret entry can echo or expose
+    # ("Setup secret entry can echo or expose
     # credentials"): resolve the splunk argv-secret options through the
     # safe alternatives before any downstream code touches them.
     resolved_access = _resolve_secret_arg(

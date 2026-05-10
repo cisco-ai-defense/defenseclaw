@@ -511,7 +511,7 @@ func TestCorrelation_RequestEnvelopeLandsOnAuditAndSink(t *testing.T) {
 		// regression that reverts this to LogAction (context-free)
 		// would fail the sqlite/sink assertions below.
 		//
-		// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+		// ("CorrelationMiddleware mints
 		// unauthenticated agent sessions") closure: this handler
 		// stands in for the gateway's authenticated paths. After
 		// the (mocked) auth check succeeds, it must call

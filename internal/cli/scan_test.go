@@ -85,7 +85,7 @@ func TestScanFixtureFileJSONSchemaPython(t *testing.T) {
 }
 
 // TestScanResultV7RedactsSecretsFromFindingText is a regression test for
-// the DeepSec H.MEDIUM finding "Raw scan JSON stores unredacted
+// the H.MEDIUM finding "Raw scan JSON stores unredacted
 // secret-bearing findings". Per-finding text in the v7 wire output
 // (`defenseclaw scan code --json`, gateway API scan endpoint) MUST go
 // through redaction.ForSinkString — the audit DB has done so since

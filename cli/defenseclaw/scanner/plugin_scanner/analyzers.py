@@ -432,7 +432,7 @@ def scan_source_files(
     symlink_escapes: list[str] = []
     depth_truncations: list[str] = []
     oversized_files: list[str] = []
-    # Avarice F-2427: a CommonJS plugin can ship `index.cjs` (or
+    # a CommonJS plugin can ship `index.cjs` (or
     # JSX/TSX) and point package.json `main`/`bin` at it; the legacy
     # extension list (.ts/.js/.mjs) skipped these executable entries
     # entirely. Add .cjs/.cts/.jsx/.tsx so source rules see them.
@@ -1129,7 +1129,7 @@ def scan_claw_manifest(
     findings: list[Finding],
 ) -> None:
     manifest_path = os.path.join(directory, "openclaw.plugin.json")
-    # Avarice F-2429: a malicious plugin can replace
+    # a malicious plugin can replace
     # openclaw.plugin.json with a symlink to any file readable by the
     # scanner process. The previous code passed the path straight to
     # open(), which followed the link and copied outside JSON content
@@ -1148,7 +1148,7 @@ def scan_claw_manifest(
                 severity="HIGH",
                 confidence=1.0,
                 title="openclaw.plugin.json is a symlink",
-                evidence=f"{manifest_path} is a symlink — refusing to follow (F-2429)",
+                evidence=f"{manifest_path} is a symlink — refusing to follow",
                 description=(
                     "The plugin's openclaw.plugin.json is a symlink. The scanner "
                     "refuses to follow symlinks for the manifest because doing so "

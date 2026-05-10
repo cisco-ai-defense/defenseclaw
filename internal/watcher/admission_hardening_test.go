@@ -17,7 +17,7 @@ import (
 )
 
 // TestRescan_NestedFileWriteRetriggersAdmission is the regression for
-// DeepSec finding "Post-admission file changes inside installed
+// finding "Post-admission file changes inside installed
 // skills/plugins are not watched". A new direct child directory is
 // created, admission runs once, then a nested file is written inside
 // that already-admitted directory. The post-admission recursive
@@ -168,7 +168,7 @@ func TestResolveTopLevelChild(t *testing.T) {
 }
 
 // TestStoreBaseline_RejectsScanErrorBaseline is the regression for
-// DeepSec finding "Rescan findings are baselined without admission
+// finding "Rescan findings are baselined without admission
 // enforcement". Prior to the fix, when no baseline existed for a
 // target the rescan path called storeBaseline directly, which ran
 // the scanner and persisted its result without consulting the

@@ -108,7 +108,7 @@ def _migrate_0_3_0(ctx: MigrationContext) -> None:
     The fetch interceptor introduced in 0.3.0 handles routing transparently,
     so these entries are no longer needed and must be cleaned up on upgrade.
 
-    DeepSec S3.HIGH_BUG ("Migration can overwrite live OpenClaw config with a
+    S3.HIGH_BUG ("Migration can overwrite live OpenClaw config with a
     stale pristine snapshot"): the previous strategy restored a pristine
     backup taken BEFORE DefenseClaw first touched openclaw.json and then
     re-applied only the plugin registration. That destroyed any model
@@ -212,7 +212,7 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
     except OSError as exc:
         click.echo(f"    WARNING: could not back up openclaw.json ({exc})")
 
-    # DeepSec follow-up: the previous implementation used a non-atomic
+    # follow-up: the previous implementation used a non-atomic
     # ``open(..., "w") + json.dump`` pair which could leave the user's
     # Codex MCP config truncated mid-write if the process was killed.
     # Route through the atomic temp-file + os.replace helper used for
@@ -385,7 +385,7 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
 
 
 def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
-    """Avarice F-3395: migrate stale ``gateway.token_env`` references.
+    """migrate stale ``gateway.token_env`` references.
 
     The 0.4.0 migration above renames ``OPENCLAW_GATEWAY_TOKEN`` to
     ``DEFENSECLAW_GATEWAY_TOKEN`` in ``~/.defenseclaw/.env`` but the
@@ -439,7 +439,7 @@ def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
         return
     ctx.changes.append(
         f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml "
-        "(F-3395)"
+        "()"
     )
 
 
@@ -636,13 +636,13 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     Pre-v3 installs had no concept of a hook fail mode — every hook
     was hardcoded to fail-OPEN on any gateway error, which made the
     response-layer boundary silently leakable. The v3 wave introduced
-    a dedicated config field, and v4 (avarice F-0681) flipped the
+    a dedicated config field, and v4 () flipped the
     BUILT-IN default to ``"closed"`` so new installs deny by default.
 
     To avoid a noisy behavior change under existing operators, this
     migration writes ``hook_fail_mode: open`` into ANY pre-existing
     config.yaml that doesn't already pin the field. That preserves
-    the legacy fail-OPEN behavior for upgraders while letting fresh
+    The legacy fail-OPEN behavior for upgraders while letting fresh
     installs (which never run any migration on v4+) inherit the safer
     default. Operators see the new field on next ``cat config.yaml``
     and can opt into "closed" via ``defenseclaw guardrail fail-mode``
@@ -700,7 +700,7 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
         ctx.changes.append(
             "seeded guardrail.hook_fail_mode='open' in config.yaml "
             "(legacy fail-open behavior preserved for upgraders; v4 "
-            "fresh installs default to 'closed' per avarice F-0681)"
+            "fresh installs default to 'closed' per )"
         )
 
 
@@ -919,7 +919,7 @@ def _dotenv_update_keys(
 def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
     """Atomically write ``body`` to ``path`` with the given file mode.
 
-    DeepSec S2.MEDIUM ("Gateway token is written through a fixed-name
+    ("Gateway token is written through a fixed-name
     temp file before permissions are tightened"): the previous
     implementation used ``open(path + ".tmp", "w")``, which created a
     new file with permissions derived from 0666 masked by the process

@@ -134,7 +134,7 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 		return "", fmt.Errorf("create OTLP path-token dir: %w", err)
 	}
 
-	// DeepSec S3.BUG ("Cross-process OTLP token minting can
+	// ("Cross-process OTLP token minting can
 	// desynchronize the returned token from the persisted token"):
 	// the previous implementation serialized only goroutines in the
 	// current process via otlpTokenMu and then wrote through a

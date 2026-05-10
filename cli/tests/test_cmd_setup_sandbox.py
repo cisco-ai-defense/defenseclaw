@@ -88,7 +88,7 @@ class _MockGateway:
 
 
 class _MockClaw:
-    """Avarice F-2227: launcher generation now reads
+    """launcher generation now reads
     ``cfg.claw.openclaw_home_original`` to pin the privileged
     pre-sandbox repair to the operator-confirmed home path."""
     def __init__(self, openclaw_home_original: str = ""):
@@ -330,7 +330,7 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertNotIn("getaddrinfo", content)
         self.assertIn("openclaw gateway run", content)
 
-    # --- DeepSec S3.HIGH_BUG: scoped sandbox cleanup regressions ---
+    # --- S3.HIGH_BUG: scoped sandbox cleanup regressions ---
 
     def test_cleanup_sandbox_uses_saved_namespace_marker(self):
         """cleanup-sandbox.sh must read the per-instance namespace marker
@@ -398,7 +398,7 @@ class TestLauncherScriptConditionals(unittest.TestCase):
 
     def test_run_sandbox_strays_are_scoped_to_data_dir(self):
         """run-sandbox.sh stop must not kill processes by name only.
-        The DeepSec finding (#5) was that pgrep -f matches across the
+        The finding (#5) was that pgrep -f matches across the
         host. The replacement must verify processes belong to this
         instance via /proc/<pid>/cmdline or cwd referencing $DATA_DIR."""
         self._gen_run_sandbox()
@@ -441,7 +441,7 @@ class TestPrePairDevice(unittest.TestCase):
 
     def _write_device_key(self, blob: bytes) -> str:
         """Write a device.key with mode 0o600 + the gateway provenance
-        sentinel that avarice F-2551 now requires before the pre-pair
+        sentinel that now requires before the pre-pair
         flow will touch paired.json."""
         path = os.path.join(self.data_dir, "device.key")
         with open(path, "wb") as f:
@@ -494,7 +494,7 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(device["displayName"], "defenseclaw-sidecar")
 
     def test_f2551_overpermissive_mode_refused(self):
-        """Avarice F-2551: device.key mode 0o644 (group/world read)
+        """device.key mode 0o644 (group/world read)
         must be refused even with a provenance sentinel present."""
         path = os.path.join(self.data_dir, "device.key")
         with open(path, "wb") as f:
@@ -504,10 +504,10 @@ class TestPrePairDevice(unittest.TestCase):
             f.write("source=test\n")
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
-        self.assertFalse(result, "F-2551 regression: 0o644 device.key was accepted")
+        self.assertFalse(result, "regression: 0o644 device.key was accepted")
 
     def test_f2551_missing_provenance_refused(self):
-        """Avarice F-2551: a 0o600 device.key without the gateway
+        """a 0o600 device.key without the gateway
         provenance sentinel must be refused (a local user could have
         planted the file before sandbox setup ran)."""
         path = os.path.join(self.data_dir, "device.key")
@@ -517,7 +517,7 @@ class TestPrePairDevice(unittest.TestCase):
         # No .provenance file alongside.
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
-        self.assertFalse(result, "F-2551 regression: device.key without sentinel accepted")
+        self.assertFalse(result, "regression: device.key without sentinel accepted")
 
     def test_f2551_legacy_optin_bypasses_sentinel(self):
         """The DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 escape hatch
@@ -556,7 +556,7 @@ class TestPrePairDevice(unittest.TestCase):
         key_path = os.path.join(self.data_dir, "device.key")
         with open(key_path, "w") as f:
             f.write(pem_data)
-        # Avarice F-2551: regenerate the on-disk perms + provenance
+        # regenerate the on-disk perms + provenance
         # sentinel that the hardened pre-pair flow now requires.
         os.chmod(key_path, 0o600)
         with open(key_path + ".provenance", "w", encoding="utf-8") as f:

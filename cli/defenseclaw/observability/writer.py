@@ -558,7 +558,7 @@ def _build_sink_entry(
             raise ValueError(
                 f"splunk HEC endpoint must start with http:// or https:// (got {endpoint!r})",
             )
-        # F-0286 / F-2787: TLS verification is now ON by default on the
+        # / TLS verification is now ON by default on the
         # Go sink. Presets that historically pointed at a self-signed
         # local HEC (the docker-compose ``splunk-hec`` flavour) opt
         # OUT explicitly via ``insecure_skip_verify=true``. Production

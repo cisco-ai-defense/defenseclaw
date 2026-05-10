@@ -46,7 +46,7 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 		hash string
 		keys []string
 	}
-	// DeepSec S3.BUG ("One unreadable policy file suppresses all
+	// ("One unreadable policy file suppresses all
 	// policy change activity"): the previous implementation
 	// returned immediately on any non-IsNotExist os.ReadFile error,
 	// which meant a single permission-denied .yaml under
@@ -305,7 +305,7 @@ func (w *InstallWatcher) policyWatchPaths() []string {
 // recordPolicyFileReadFailure emits a single audit + telemetry
 // activity for an unreadable policy file so operators see *that the
 // file is unreadable* without losing change detection on the rest of
-// the watched set. DeepSec S3.BUG ("One unreadable policy file
+// the watched set. ("One unreadable policy file
 // suppresses all policy change activity") closure: this is the
 // per-file error signal the watcher previously dropped.
 func (w *InstallWatcher) recordPolicyFileReadFailure(ctx context.Context, path string, err error) {

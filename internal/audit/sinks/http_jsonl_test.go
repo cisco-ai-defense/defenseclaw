@@ -230,7 +230,7 @@ func TestHTTPJSONLSink_RequeuesOnFailure(t *testing.T) {
 	}
 }
 
-// DeepSec S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+// S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
 // deliveries"): with BatchSize=1 (the default for the generic webhook
 // sink), Forward used to call s.send synchronously and return the error
 // without queuing, so a transient collector outage permanently dropped
@@ -376,7 +376,7 @@ func TestMaxHTTPJSONLQueue_HasFloor(t *testing.T) {
 	}
 }
 
-// TestHTTPJSONLSink_TLSSecureByDefault pins the F-2788 fix: a sink
+// TestHTTPJSONLSink_TLSSecureByDefault pins the fix: a sink
 // built with the zero-value config (no VerifyTLS, no
 // InsecureSkipVerify) MUST construct an http.Client that verifies TLS
 // certificates. Pre-fix the same shape silently downgraded

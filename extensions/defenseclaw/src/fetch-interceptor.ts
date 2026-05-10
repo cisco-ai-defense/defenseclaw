@@ -1,29 +1,23 @@
 /**
  * Copyright 2026 Cisco Systems, Inc. and its affiliates
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
+ * * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
+ * * http://www.apache.org/licenses/LICENSE-2.0
+ * * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- *
- * SPDX-License-Identifier: Apache-2.0
+ * * SPDX-License-Identifier: Apache-2.0
  */
 
 /**
  * LLM Fetch Interceptor
- *
- * Patches globalThis.fetch to redirect outbound LLM API calls through the
+ * * Patches globalThis.fetch to redirect outbound LLM API calls through the
  * DefenseClaw guardrail proxy at localhost:{guardrailPort}, regardless of
  * which provider or model the user selected in OpenClaw.
- *
- * The original upstream URL is preserved in the X-DC-Target-URL header so
+ * * The original upstream URL is preserved in the X-DC-Target-URL header so
  * the proxy can route to the correct upstream after inspection.
  */
 
@@ -31,14 +25,14 @@ import { createRequire } from "node:module";
 import { createEgressReporter, type EgressReporter } from "./egress-telemetry.js";
 import { loadSidecarConfig } from "./sidecar-config.js";
 import {
-  HEADER_DEFENSECLAW_AGENT_ID,
-  HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
-  HEADER_DEFENSECLAW_AGENT_NAME,
-  HEADER_DEFENSECLAW_POLICY_ID,
-  HEADER_DEFENSECLAW_RUN_ID,
-  HEADER_DEFENSECLAW_SESSION_ID,
-  HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
-  HEADER_DEFENSECLAW_TRACE_ID,
+ HEADER_DEFENSECLAW_AGENT_ID,
+ HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
+ HEADER_DEFENSECLAW_AGENT_NAME,
+ HEADER_DEFENSECLAW_POLICY_ID,
+ HEADER_DEFENSECLAW_RUN_ID,
+ HEADER_DEFENSECLAW_SESSION_ID,
+ HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
+ HEADER_DEFENSECLAW_TRACE_ID,
 } from "./correlation-headers.js";
 // Canonical provider config — single source of truth shared with the Go proxy.
 // Copied from internal/configs/providers.json by `make plugin`.
@@ -59,8 +53,7 @@ const http = _require("http") as typeof import("http");
  * the overlay can grow the list in place without the rest of the
  * module holding a stale snapshot.
  */
-let LLM_DOMAINS: string[] = providersConfig.providers.flatMap(
-  (p: { domains: string[] }) => p.domains,
+let LLM_DOMAINS: string[] = providersConfig.providers.flatMap( (p: { domains: string[] }) => p.domains,
 );
 
 /**
@@ -80,60 +73,60 @@ let OLLAMA_PORTS: string[] = providersConfig.ollama_ports.map(String);
  * sidecar.
  */
 export function applyProviderRegistry(reg: {
-  providers?: Array<{ domains?: string[] | null }>;
-  ollama_ports?: number[] | null;
+ providers?: Array<{ domains?: string[] | null }>;
+ ollama_ports?: number[] | null;
 }): void {
-  // Tolerate a sidecar that returns a shape we don't recognize (e.g.
-  // older schema, corrupted response). Silently no-op rather than
-  // throw: the built-in list still provides full coverage for every
-  // provider we ship with.
-  if (!reg || typeof reg !== "object") return;
-  // Domain matching downstream (isLLMUrl, isLLMHost) lower-cases the
-  // request host but compares to the raw entry. Normalize here so an
-  // overlay entry hand-edited to "Api.OpenAI.com" still matches
-  // traffic to api.openai.com.
-  const seenDomains = new Set(LLM_DOMAINS.map((d) => d.toLowerCase()));
-  const seenPorts = new Set(OLLAMA_PORTS);
-  // Cap the number of additions to guard against a runaway /
-  // corrupted sidecar response (defense-in-depth; the Go side already
-  // bounds the overlay file size).
-  const MAX_ADDITIONS = 1024;
-  let added = 0;
-  for (const p of reg.providers ?? []) {
-    if (added >= MAX_ADDITIONS) break;
-    for (const d of p?.domains ?? []) {
-      if (added >= MAX_ADDITIONS) break;
-      if (typeof d !== "string") continue;
-      const norm = d.trim().toLowerCase();
-      // Reject obviously malformed entries: empty, contains whitespace,
-      // a scheme, or a path. The Python CLI normalizes these already;
-      // this is the defensive server-side filter for hand-edits.
-      if (norm === "" || /[\s/\\]/.test(norm) || norm.includes("://")) continue;
-      if (seenDomains.has(norm)) continue;
-      seenDomains.add(norm);
-      LLM_DOMAINS.push(norm);
-      added++;
-    }
-  }
-  // Cap port additions independently of domains: a runaway overlay
-  // with tens of thousands of bogus ports would otherwise turn every
-  // isLLMUrl call into a linear scan through garbage. Real-world
-  // Ollama deployments have 1-2 ports.
-  const MAX_PORT_ADDITIONS = 64;
-  let portsAdded = 0;
-  for (const port of reg.ollama_ports ?? []) {
-    if (portsAdded >= MAX_PORT_ADDITIONS) break;
-    // Require integer (not float, not NaN, not Infinity). 3.14 would
-    // otherwise stringify to "3.14" and sit in OLLAMA_PORTS as a
-    // dead entry, a sure sign of operator error.
-    if (typeof port !== "number" || !Number.isInteger(port)) continue;
-    if (port <= 0 || port > 65535) continue;
-    const s = String(port);
-    if (seenPorts.has(s)) continue;
-    seenPorts.add(s);
-    OLLAMA_PORTS.push(s);
-    portsAdded++;
-  }
+ // Tolerate a sidecar that returns a shape we don't recognize (e.g.
+ // older schema, corrupted response). Silently no-op rather than
+ // throw: the built-in list still provides full coverage for every
+ // provider we ship with.
+ if (!reg || typeof reg !== "object") return;
+ // Domain matching downstream (isLLMUrl, isLLMHost) lower-cases the
+ // request host but compares to the raw entry. Normalize here so an
+ // overlay entry hand-edited to "Api.OpenAI.com" still matches
+ // traffic to api.openai.com.
+ const seenDomains = new Set(LLM_DOMAINS.map((d) => d.toLowerCase()));
+ const seenPorts = new Set(OLLAMA_PORTS);
+ // Cap the number of additions to guard against a runaway /
+ // corrupted sidecar response (defense-in-depth; the Go side already
+ // bounds the overlay file size).
+ const MAX_ADDITIONS = 1024;
+ let added = 0;
+ for (const p of reg.providers ?? []) {
+ if (added >= MAX_ADDITIONS) break;
+ for (const d of p?.domains ?? []) {
+ if (added >= MAX_ADDITIONS) break;
+ if (typeof d !== "string") continue;
+ const norm = d.trim().toLowerCase();
+ // Reject obviously malformed entries: empty, contains whitespace,
+ // a scheme, or a path. The Python CLI normalizes these already;
+ // this is the defensive server-side filter for hand-edits.
+ if (norm === "" || /[\s/\\]/.test(norm) || norm.includes("://")) continue;
+ if (seenDomains.has(norm)) continue;
+ seenDomains.add(norm);
+ LLM_DOMAINS.push(norm);
+ added++;
+ }
+ }
+ // Cap port additions independently of domains: a runaway overlay
+ // with tens of thousands of bogus ports would otherwise turn every
+ // isLLMUrl call into a linear scan through garbage. Real-world
+ // Ollama deployments have 1-2 ports.
+ const MAX_PORT_ADDITIONS = 64;
+ let portsAdded = 0;
+ for (const port of reg.ollama_ports ?? []) {
+ if (portsAdded >= MAX_PORT_ADDITIONS) break;
+ // Require integer (not float, not NaN, not Infinity). 3.14 would
+ // otherwise stringify to "3.14" and sit in OLLAMA_PORTS as a
+ // dead entry, a sure sign of operator error.
+ if (typeof port !== "number" || !Number.isInteger(port)) continue;
+ if (port <= 0 || port > 65535) continue;
+ const s = String(port);
+ if (seenPorts.has(s)) continue;
+ seenPorts.add(s);
+ OLLAMA_PORTS.push(s);
+ portsAdded++;
+ }
 }
 
 /**
@@ -143,82 +136,77 @@ export function applyProviderRegistry(reg: {
  * that is slow to boot) cannot hold up the plugin's own start-up —
  * the built-in list still provides full coverage for every provider
  * we ship with.
- *
- * A tight 2s timeout prevents a misbehaving sidecar from blocking
+ * * A tight 2s timeout prevents a misbehaving sidecar from blocking
  * the extension host indefinitely.
  */
-export async function bootstrapProviderOverlay(
-  guardrailPort: number,
-  options?: { timeoutMs?: number; fetchImpl?: typeof fetch },
+export async function bootstrapProviderOverlay( guardrailPort: number,
+ options?: { timeoutMs?: number; fetchImpl?: typeof fetch },
 ): Promise<void> {
-  const timeoutMs = options?.timeoutMs ?? 2000;
-  const doFetch = options?.fetchImpl ?? globalThis.fetch;
-  if (typeof doFetch !== "function") return;
-  // Mirror the Go-side 1 MiB overlay cap. The merged registry is
-  // tiny (a few KB) but a compromised or buggy sidecar must not be
-  // able to exhaust the extension host's memory just by serving a
-  // giant response body. 2 MiB gives 2x headroom over Go's 1 MiB
-  // ceiling without leaving room for abuse.
-  const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await doFetch(
-      `http://127.0.0.1:${guardrailPort}/v1/config/providers`,
-      { method: "GET", signal: ctrl.signal, cache: "no-store" },
-    );
-    if (!res.ok) return;
-    // If Content-Length advertises more than the cap, bail early —
-    // no sense allocating a 100 MiB buffer just to reject it. A
-    // missing or lying Content-Length is still defended by the
-    // streaming read below, which bounds actual bytes consumed.
-    const lenHdr = res.headers?.get?.("content-length");
-    if (lenHdr) {
-      const n = parseInt(lenHdr, 10);
-      if (Number.isFinite(n) && n > MAX_RESPONSE_BYTES) return;
-    }
-    // Prefer a true streaming read capped at MAX_RESPONSE_BYTES so
-    // a lying Content-Length header (or a hostile sidecar) cannot
-    // force us to allocate past the cap. We only fall back to
-    // res.text() for mock-based environments where res.body is not
-    // exposed (e.g. older Node shims used in tests).
-    let text: string | null = null;
-    const resBody = (res as unknown as { body?: ReadableStream<Uint8Array> }).body;
-    if (resBody && typeof resBody.getReader === "function") {
-      const bytes = await readStreamBounded(resBody, MAX_RESPONSE_BYTES);
-      if (bytes.byteLength > MAX_RESPONSE_BYTES) return;
-      text = decodeUtf8Safe(bytes);
-    } else if (typeof (res as Response).text === "function") {
-      const t = await (res as Response).text();
-      if (t.length > MAX_RESPONSE_BYTES) return;
-      text = t;
-    } else {
-      // Last-resort: older shim without text() nor body. res.json()
-      // has no native byte cap, so we only reach here if every
-      // better path is unavailable.
-      const body = await res.json();
-      applyProviderRegistry(
-        body as {
-          providers?: Array<{ domains?: string[] | null }>;
-          ollama_ports?: number[] | null;
-        },
-      );
-      return;
-    }
-    if (text == null) return;
-    const body: unknown = JSON.parse(text);
-    applyProviderRegistry(
-      body as {
-        providers?: Array<{ domains?: string[] | null }>;
-        ollama_ports?: number[] | null;
-      },
-    );
-  } catch {
-    // Sidecar unreachable / malformed body — we stay on the built-in
-    // list. The Go side logs the failure via its own stderr alert.
-  } finally {
-    clearTimeout(timer);
-  }
+ const timeoutMs = options?.timeoutMs ?? 2000;
+ const doFetch = options?.fetchImpl ?? globalThis.fetch;
+ if (typeof doFetch !== "function") return;
+ // Mirror the Go-side 1 MiB overlay cap. The merged registry is
+ // tiny (a few KB) but a compromised or buggy sidecar must not be
+ // able to exhaust the extension host's memory just by serving a
+ // giant response body. 2 MiB gives 2x headroom over Go's 1 MiB
+ // ceiling without leaving room for abuse.
+ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+ const ctrl = new AbortController();
+ const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+ try {
+ const res = await doFetch( `http://127.0.0.1:${guardrailPort}/v1/config/providers`,
+ { method: "GET", signal: ctrl.signal, cache: "no-store" },
+);
+ if (!res.ok) return;
+ // If Content-Length advertises more than the cap, bail early —
+ // no sense allocating a 100 MiB buffer just to reject it. A
+ // missing or lying Content-Length is still defended by the
+ // streaming read below, which bounds actual bytes consumed.
+ const lenHdr = res.headers?.get?.("content-length");
+ if (lenHdr) {
+ const n = parseInt(lenHdr, 10);
+ if (Number.isFinite(n) && n > MAX_RESPONSE_BYTES) return;
+ }
+ // Prefer a true streaming read capped at MAX_RESPONSE_BYTES so
+ // a lying Content-Length header (or a hostile sidecar) cannot
+ // force us to allocate past the cap. We only fall back to
+ // res.text() for mock-based environments where res.body is not
+ // exposed (e.g. older Node shims used in tests).
+ let text: string | null = null;
+ const resBody = (res as unknown as { body?: ReadableStream<Uint8Array> }).body;
+ if (resBody && typeof resBody.getReader === "function") {
+ const bytes = await readStreamBounded(resBody, MAX_RESPONSE_BYTES);
+ if (bytes.byteLength > MAX_RESPONSE_BYTES) return;
+ text = decodeUtf8Safe(bytes);
+ } else if (typeof (res as Response).text === "function") {
+ const t = await (res as Response).text();
+ if (t.length > MAX_RESPONSE_BYTES) return;
+ text = t;
+ } else {
+ // Last-resort: older shim without text() nor body. res.json()
+ // has no native byte cap, so we only reach here if every
+ // better path is unavailable.
+ const body = await res.json();
+ applyProviderRegistry( body as {
+ providers?: Array<{ domains?: string[] | null }>;
+ ollama_ports?: number[] | null;
+ },
+);
+ return;
+ }
+ if (text == null) return;
+ const body: unknown = JSON.parse(text);
+ applyProviderRegistry( body as {
+ providers?: Array<{ domains?: string[] | null }>;
+ ollama_ports?: number[] | null;
+ },
+);
+ } catch {
+ // Sidecar unreachable / malformed body — we stay on the built-in
+ // list. The Go side logs the failure via its own stderr alert.
+ } finally {
+ clearTimeout(timer);
+ }
 }
 
 /** Header name the proxy reads to determine the real upstream URL. */
@@ -247,11 +235,11 @@ export const DC_AUTH_HEADER = "X-DC-Auth";
  * gets intercepted.
  */
 function extractHost(urlStr: string): string {
-  try {
-    return new URL(urlStr).hostname.toLowerCase();
-  } catch {
-    return "";
-  }
+ try {
+ return new URL(urlStr).hostname.toLowerCase();
+ } catch {
+ return "";
+ }
 }
 
 /**
@@ -261,15 +249,13 @@ function extractHost(urlStr: string): string {
  * "api.openai.com.evil.test" or a substring match somewhere inside
  * the query string. Entries are stored lower-cased (see
  * applyProviderRegistry + providers.json build step).
- *
- * Wildcard entries ("bedrock-runtime.*.amazonaws.com") use a
+ * * Wildcard entries ("bedrock-runtime.*.amazonaws.com") use a
  * single-label "*", mirroring matchProviderDomain in the Go proxy.
  * The wildcard MUST stand for exactly one DNS label between two
  * literal anchors -- this handles AWS Bedrock's regional hosts
  * without shipping a per-region allow-list while refusing the
  * prefix-only spoof "bedrock-runtime.evil.example".
- *
- * The legacy trailing-dot prefix syntax ("bedrock-runtime.") is no
+ * * The legacy trailing-dot prefix syntax ("bedrock-runtime.") is no
  * longer honoured: a host such as "bedrock-runtime.evil.example"
  * would otherwise match the legacy "bedrock-runtime." prefix entry,
  * letting an attacker spoof a known-provider host and bypass
@@ -279,72 +265,49 @@ function extractHost(urlStr: string): string {
  * allow-list.
  */
 function matchesWildcardDomain(host: string, pattern: string): boolean {
-  const hostLabels = host.split(".");
-  const patternLabels = pattern.split(".");
-  if (hostLabels.length < patternLabels.length) return false;
-  // Anchor at the right (TLD) so leading `*` segments can absorb
-  // arbitrary subdomains (e.g. an attacker prefix).
-  const offset = hostLabels.length - patternLabels.length;
-  for (let i = 0; i < patternLabels.length; i++) {
-    const p = patternLabels[i];
-    const h = hostLabels[offset + i];
-    if (p === "*") continue;
-    if (p !== h) return false;
-  }
-  // For exact match (no leading wildcard) require label counts to
-  // match, so "api.openai.com" doesn't accept "evil.api.openai.com"
-  // here — that's handled by the explicit subdomain branch in
-  // matchesLLMDomain.
-  return offset === 0 || patternLabels[0] === "*";
+ const hostLabels = host.split(".");
+ const patternLabels = pattern.split(".");
+ if (hostLabels.length < patternLabels.length) return false;
+ // Anchor at the right (TLD) so leading `*` segments can absorb
+ // arbitrary subdomains (e.g. an attacker prefix).
+ const offset = hostLabels.length - patternLabels.length;
+ for (let i = 0; i < patternLabels.length; i++) {
+ const p = patternLabels[i];
+ const h = hostLabels[offset + i];
+ if (p === "*") continue;
+ if (p !== h) return false;
+ }
+ // For exact match (no leading wildcard) require label counts to
+ // match, so "api.openai.com" doesn't accept "evil.api.openai.com"
+ // here — that's handled by the explicit subdomain branch in
+ // matchesLLMDomain.
+ return offset === 0 || patternLabels[0] === "*";
 }
 
 function matchesLLMDomain(host: string): boolean {
-  if (!host) return false;
-  for (const domain of LLM_DOMAINS) {
-    // Path-style entries (e.g. "googleapis.com/v1/projects") are
-    // legacy compatibility — they can never match a hostname, so
-    // skip them. Host-based matching uses only the host-prefix of
-    // such entries.
-    const slash = domain.indexOf("/");
-    const bare = slash >= 0 ? domain.slice(0, slash) : domain;
-    if (!bare) continue;
-    // Reject the legacy ends-with-dot form ("bedrock-runtime."),
-    // which the Go side used to treat as a hostname prefix. With
-    // matchProviderDomain upgraded to require label-pinned
-    // wildcards, the corresponding TS matcher MUST also reject the
-    // legacy form to keep the two sides in sync.
-    if (bare.endsWith(".")) continue;
-    if (bare.includes("*")) {
-      if (matchesWildcardDomain(host, bare)) return true;
-      continue;
-    }
-    if (host === bare) return true;
-    if (host.endsWith("." + bare)) return true;
-  }
-  return false;
-}
-
-/**
- * matchWildcardDomain implements one-label wildcard matching. A
- * pattern like "a.*.b.c" matches a host iff:
- *  - the host has the literal prefix "a." (part before "*")
- *  - the host has the literal suffix ".b.c" (part after "*")
- *  - host length >= prefix.length + suffix.length (no overlap)
- *  - the substring between those anchors contains no "." (single
- *    DNS label)
- *
- * Multiple "*" are not supported; such patterns return false.
- */
-function matchWildcardDomain(host: string, pattern: string): boolean {
-  const parts = pattern.split("*");
-  if (parts.length !== 2) return false;
-  const [prefix, suffix] = parts;
-  if (!prefix || !suffix) return false;
-  if (host.length < prefix.length + suffix.length) return false;
-  if (!host.startsWith(prefix) || !host.endsWith(suffix)) return false;
-  const middle = host.slice(prefix.length, host.length - suffix.length);
-  if (middle.length === 0 || middle.includes(".")) return false;
-  return true;
+ if (!host) return false;
+ for (const domain of LLM_DOMAINS) {
+ // Path-style entries (e.g. "googleapis.com/v1/projects") are
+ // legacy compatibility — they can never match a hostname, so
+ // skip them. Host-based matching uses only the host-prefix of
+ // such entries.
+ const slash = domain.indexOf("/");
+ const bare = slash >= 0 ? domain.slice(0, slash) : domain;
+ if (!bare) continue;
+ // Reject the legacy ends-with-dot form ("bedrock-runtime."),
+ // which the Go side used to treat as a hostname prefix. With
+ // matchProviderDomain upgraded to require label-pinned
+ // wildcards, the corresponding TS matcher MUST also reject the
+ // legacy form to keep the two sides in sync.
+ if (bare.endsWith(".")) continue;
+ if (bare.includes("*")) {
+ if (matchesWildcardDomain(host, bare)) return true;
+ continue;
+ }
+ if (host === bare) return true;
+ if (host.endsWith("." + bare)) return true;
+ }
+ return false;
 }
 
 /**
@@ -355,20 +318,20 @@ function matchWildcardDomain(host: string, pattern: string): boolean {
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1"]);
 
 export function isLLMUrl(url: string, guardrailPort: number): boolean {
-  const host = extractHost(url);
-  if (matchesLLMDomain(host)) return true;
-  if (LOOPBACK_HOSTNAMES.has(host)) {
-    let port = "";
-    try {
-      port = new URL(url).port;
-    } catch {
-      port = "";
-    }
-    if (!port) return false;
-    if (port === String(guardrailPort)) return false;
-    return OLLAMA_PORTS.includes(port);
-  }
-  return false;
+ const host = extractHost(url);
+ if (matchesLLMDomain(host)) return true;
+ if (LOOPBACK_HOSTNAMES.has(host)) {
+ let port = "";
+ try {
+ port = new URL(url).port;
+ } catch {
+ port = "";
+ }
+ if (!port) return false;
+ if (port === String(guardrailPort)) return false;
+ return OLLAMA_PORTS.includes(port);
+ }
+ return false;
 }
 
 /**
@@ -377,34 +340,33 @@ export function isLLMUrl(url: string, guardrailPort: number): boolean {
  * the parsed port equals the guardrail port. The previous
  * implementation used substring matching on the raw URL, so a real
  * provider URL such as
- *   https://api.openai.com/v1/chat/completions?cb=http://127.0.0.1:4000
- * would short-circuit interception entirely (DeepSec finding
+ * https://api.openai.com/v1/chat/completions?cb=http://127.0.0.1:4000
+ * would short-circuit interception entirely (security finding
  * "Substring self-proxy check lets LLM requests bypass interception").
- *
- * Returns false on any URL we cannot parse — that path falls through
+ * * Returns false on any URL we cannot parse — that path falls through
  * to the regular interception logic, which will either rewrite the
  * URL or pass it through with the originalFetch path.
  */
 function isAlreadyProxied(url: string, guardrailPort: number): boolean {
-  // Parse and compare hostname + port directly. A naive substring
-  // check of the form url.includes("127.0.0.1:<port>") would match
-  // any provider URL that embedded that string anywhere — path,
-  // query, fragment — and skip the guardrail entirely. A crafted
-  // request such as
-  //   https://api.openai.com/v1/chat/completions?proxy=127.0.0.1:43099
-  // must still route through the proxy.
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (!LOOPBACK_HOSTNAMES.has(parsed.hostname.toLowerCase())) return false;
-  // URL.port is "" for the protocol's default port. We never want a
-  // "default-port" loopback URL to count as already-proxied because
-  // the guardrail proxy never listens on 80/443 by accident.
-  if (!parsed.port) return false;
-  return parsed.port === String(guardrailPort);
+ // Parse and compare hostname + port directly. A naive substring
+ // check of the form url.includes("127.0.0.1:<port>") would match
+ // any provider URL that embedded that string anywhere — path,
+ // query, fragment — and skip the guardrail entirely. A crafted
+ // request such as
+ // https://api.openai.com/v1/chat/completions?proxy=127.0.0.1:43099
+ // must still route through the proxy.
+ let parsed: URL;
+ try {
+ parsed = new URL(url);
+ } catch {
+ return false;
+ }
+ if (!LOOPBACK_HOSTNAMES.has(parsed.hostname.toLowerCase())) return false;
+ // URL.port is "" for the protocol's default port. We never want a
+ // "default-port" loopback URL to count as already-proxied because
+ // the guardrail proxy never listens on 80/443 by accident.
+ if (!parsed.port) return false;
+ return parsed.port === String(guardrailPort);
 }
 
 /**
@@ -412,31 +374,30 @@ function isAlreadyProxied(url: string, guardrailPort: number): boolean {
  * providers. The interceptor strips their values before logging /
  * emitting telemetry. Compared case-insensitively so callers can
  * register either casing.
- *
- * Known offenders:
- *   - Gemini native: ?key=<api-key>
- *   - Generic OpenAI-compatible proxies: ?api_key=, ?api-key=
- *   - SAS-style URLs: ?token=, ?access_token=, ?sig=
- *   - AWS pre-signed S3 URLs (referenced from Bedrock requests):
- *     X-Amz-Signature, X-Amz-Security-Token
+ * * Known offenders:
+ * - Gemini native: ?key=<api-key>
+ * - Generic OpenAI-compatible proxies: ?api_key=, ?api-key=
+ * - SAS-style URLs: ?token=, ?access_token=, ?sig=
+ * - AWS pre-signed S3 URLs (referenced from Bedrock requests):
+ * X-Amz-Signature, X-Amz-Security-Token
  */
 const SECRET_QUERY_KEYS = new Set<string>([
-  "key",
-  "api_key",
-  "api-key",
-  "apikey",
-  "token",
-  "access_token",
-  "refresh_token",
-  "id_token",
-  "auth_token",
-  "auth",
-  "password",
-  "sig",
-  "signature",
-  "x-amz-signature",
-  "x-amz-security-token",
-  "x-amz-credential",
+ "key",
+ "api_key",
+ "api-key",
+ "apikey",
+ "token",
+ "access_token",
+ "refresh_token",
+ "id_token",
+ "auth_token",
+ "auth",
+ "password",
+ "sig",
+ "signature",
+ "x-amz-signature",
+ "x-amz-security-token",
+ "x-amz-credential",
 ]);
 
 const SECRET_REDACTION = "<redacted>";
@@ -447,30 +408,30 @@ const SECRET_REDACTION = "<redacted>";
  * callers never log a half-redacted string.
  */
 function scrubUrlForLog(urlStr: string): string {
-  if (!urlStr) return urlStr;
-  let parsed: URL;
-  try {
-    parsed = new URL(urlStr);
-  } catch {
-    // Cannot parse -> just drop everything past the last "?" so we do
-    // not echo query secrets even if the URL is structurally wrong.
-    const q = urlStr.indexOf("?");
-    return q < 0 ? urlStr : `${urlStr.slice(0, q)}?<unparseable>`;
-  }
-  parsed.username = "";
-  parsed.password = "";
-  if (parsed.search) {
-    const params = parsed.searchParams;
-    const keys = Array.from(params.keys());
-    for (const k of keys) {
-      if (SECRET_QUERY_KEYS.has(k.toLowerCase())) {
-        params.set(k, SECRET_REDACTION);
-      }
-    }
-    // Re-encode through URLSearchParams to apply the redactions.
-    parsed.search = params.toString();
-  }
-  return parsed.toString();
+ if (!urlStr) return urlStr;
+ let parsed: URL;
+ try {
+ parsed = new URL(urlStr);
+ } catch {
+ // Cannot parse -> just drop everything past the last "?" so we do
+ // not echo query secrets even if the URL is structurally wrong.
+ const q = urlStr.indexOf("?");
+ return q < 0 ? urlStr : `${urlStr.slice(0, q)}?<unparseable>`;
+ }
+ parsed.username = "";
+ parsed.password = "";
+ if (parsed.search) {
+ const params = parsed.searchParams;
+ const keys = Array.from(params.keys());
+ for (const k of keys) {
+ if (SECRET_QUERY_KEYS.has(k.toLowerCase())) {
+ params.set(k, SECRET_REDACTION);
+ }
+ }
+ // Re-encode through URLSearchParams to apply the redactions.
+ parsed.search = params.toString();
+ }
+ return parsed.toString();
 }
 
 /**
@@ -479,26 +440,25 @@ function scrubUrlForLog(urlStr: string): string {
  * path+query.
  */
 function scrubPathForLog(pathWithQuery: string): string {
-  if (!pathWithQuery) return pathWithQuery;
-  const q = pathWithQuery.indexOf("?");
-  if (q < 0) return pathWithQuery;
-  // URLSearchParams accepts the bare query (without the leading "?").
-  const params = new URLSearchParams(pathWithQuery.slice(q + 1));
-  let mutated = false;
-  const keys = Array.from(params.keys());
-  for (const k of keys) {
-    if (SECRET_QUERY_KEYS.has(k.toLowerCase())) {
-      params.set(k, SECRET_REDACTION);
-      mutated = true;
-    }
-  }
-  if (!mutated) return pathWithQuery;
-  return `${pathWithQuery.slice(0, q)}?${params.toString()}`;
+ if (!pathWithQuery) return pathWithQuery;
+ const q = pathWithQuery.indexOf("?");
+ if (q < 0) return pathWithQuery;
+ // URLSearchParams accepts the bare query (without the leading "?").
+ const params = new URLSearchParams(pathWithQuery.slice(q + 1));
+ let mutated = false;
+ const keys = Array.from(params.keys());
+ for (const k of keys) {
+ if (SECRET_QUERY_KEYS.has(k.toLowerCase())) {
+ params.set(k, SECRET_REDACTION);
+ mutated = true;
+ }
+ }
+ if (!mutated) return pathWithQuery;
+ return `${pathWithQuery.slice(0, q)}?${params.toString()}`;
 }
 
 // ---------------------------------------------------------------------------
 // Layer 1: request-shape detection
-//
 // The providers.json allowlist catches the major providers by hostname, but
 // any LLM whose endpoint we have not yet learned about would slip through
 // (the "silent bypass" failure mode). Layer 1 adds a second rail that
@@ -506,7 +466,6 @@ function scrubPathForLog(pathWithQuery: string): string {
 // schema, method, destination classification — and forces the request
 // through the guardrail proxy whenever it walks like an LLM call, even
 // when we have never seen the host before.
-//
 // This is intentionally cheap: no network, no parsing beyond a best-effort
 // JSON peek, and we return "none" on any error so a broken heuristic never
 // blocks real traffic.
@@ -514,34 +473,34 @@ function scrubPathForLog(pathWithQuery: string): string {
 
 /** Path fragments that identify LLM or agent APIs across providers. */
 export const LLM_PATH_SUFFIXES: ReadonlyArray<string> = [
-  "/chat/completions",
-  "/completions",
-  "/messages",
-  ":generateContent",
-  ":streamGenerateContent",
-  "/converse",
-  "/converse-stream",
-  "/api/chat",
-  "/api/generate",
-  "/responses",
-  "/backend-api/codex/responses",
-  // Bedrock InvokeModel REST paths. The Go provider matcher catches
-  // bedrock-runtime.<region>.amazonaws.com via the trailing-dot
-  // prefix, but the TypeScript shape rail has to cover Bedrock SDKs
-  // that bypass the host registry too (DeepSec finding
-  // "Bedrock provider prefix is not matched by the TypeScript
-  // interceptor").
-  "/invoke",
-  "/invoke-with-response-stream",
+ "/chat/completions",
+ "/completions",
+ "/messages",
+ ":generateContent",
+ ":streamGenerateContent",
+ "/converse",
+ "/converse-stream",
+ "/api/chat",
+ "/api/generate",
+ "/responses",
+ "/backend-api/codex/responses",
+ // Bedrock InvokeModel REST paths. The Go provider matcher catches
+ // bedrock-runtime.<region>.amazonaws.com via the trailing-dot
+ // prefix, but the TypeScript shape rail has to cover Bedrock SDKs
+ // that bypass the host registry too (security finding
+ // "Bedrock provider prefix is not matched by the TypeScript
+ // interceptor").
+ "/invoke",
+ "/invoke-with-response-stream",
 ];
 
 /** Top-level JSON body keys that identify an LLM request payload. */
 export const LLM_BODY_KEYS: ReadonlyArray<string> = [
-  "messages",
-  "contents",
-  "input",
-  "prompt",
-  "inputs",
+ "messages",
+ "contents",
+ "input",
+ "prompt",
+ "inputs",
 ];
 
 /**
@@ -550,62 +509,62 @@ export const LLM_BODY_KEYS: ReadonlyArray<string> = [
  * proxy consult the same list on the Go side (see internal/gateway/shape.go).
  */
 export const KNOWN_SAFE_DOMAINS: ReadonlyArray<string> = [
-  "github.com",
-  "raw.githubusercontent.com",
-  "codeload.github.com",
-  "objects.githubusercontent.com",
-  "registry.npmjs.org",
-  "npmjs.org",
-  "yarnpkg.com",
-  "pypi.org",
-  "files.pythonhosted.org",
-  "crates.io",
-  "rubygems.org",
-  "sentry.io",
-  "datadoghq.com",
-  "segment.io",
-  "segment.com",
+ "github.com",
+ "raw.githubusercontent.com",
+ "codeload.github.com",
+ "objects.githubusercontent.com",
+ "registry.npmjs.org",
+ "npmjs.org",
+ "yarnpkg.com",
+ "pypi.org",
+ "files.pythonhosted.org",
+ "crates.io",
+ "rubygems.org",
+ "sentry.io",
+ "datadoghq.com",
+ "segment.io",
+ "segment.com",
 ];
 
 export type LLMBodyShape = "messages" | "prompt" | "input" | "contents" | "none";
 
 /** Classify a parsed JSON body into one of the known LLM shapes. */
 export function classifyBodyShape(body: unknown): LLMBodyShape {
-  if (!body || typeof body !== "object") return "none";
-  const obj = body as Record<string, unknown>;
-  if (Array.isArray(obj.messages)) return "messages";
-  if (Array.isArray(obj.contents)) return "contents";
-  if (typeof obj.input === "string" || Array.isArray(obj.input)) return "input";
-  if (Array.isArray(obj.inputs)) return "input";
-  if (typeof obj.prompt === "string") return "prompt";
-  return "none";
+ if (!body || typeof body !== "object") return "none";
+ const obj = body as Record<string, unknown>;
+ if (Array.isArray(obj.messages)) return "messages";
+ if (Array.isArray(obj.contents)) return "contents";
+ if (typeof obj.input === "string" || Array.isArray(obj.input)) return "input";
+ if (Array.isArray(obj.inputs)) return "input";
+ if (typeof obj.prompt === "string") return "prompt";
+ return "none";
 }
 
 function extractPath(urlStr: string): string {
-  try {
-    return new URL(urlStr).pathname;
-  } catch {
-    // options-bag style without an absolute URL; treat the raw path as-is
-    return urlStr;
-  }
+ try {
+ return new URL(urlStr).pathname;
+ } catch {
+ // options-bag style without an absolute URL; treat the raw path as-is
+ return urlStr;
+ }
 }
 
 /** Returns true when the URL ends with (or contains) a known LLM path fragment. */
 export function hasLLMPathSuffix(urlStr: string): boolean {
-  const path = extractPath(urlStr);
-  return LLM_PATH_SUFFIXES.some(s => path.endsWith(s) || path.includes(s));
+ const path = extractPath(urlStr);
+ return LLM_PATH_SUFFIXES.some(s => path.endsWith(s) || path.includes(s));
 }
 
 /** Returns true when the hostname is on the package-registry / telemetry allowlist. */
 export function isKnownSafeDomain(urlStr: string): boolean {
-  let host = "";
-  try {
-    host = new URL(urlStr).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  if (!host) return false;
-  return KNOWN_SAFE_DOMAINS.some(d => host === d || host.endsWith("." + d));
+ let host = "";
+ try {
+ host = new URL(urlStr).hostname.toLowerCase();
+ } catch {
+ return false;
+ }
+ if (!host) return false;
+ return KNOWN_SAFE_DOMAINS.some(d => host === d || host.endsWith("." + d));
 }
 
 /**
@@ -613,25 +572,23 @@ export function isKnownSafeDomain(urlStr: string): boolean {
  * hostname is not in providers.json? We require either an LLM-looking
  * path or an LLM-looking body key, and we always skip GET requests and
  * known-safe hostnames.
- *
- * Callers pass the best body shape they could cheaply compute — when no
+ * * Callers pass the best body shape they could cheaply compute — when no
  * body was available (e.g. https.request, streaming body) that degrades
  * to path-only detection, which is still better than fail-open.
  */
-export function isLLMShapedRequest(
-  urlStr: string,
-  method: string,
-  bodyShape: LLMBodyShape,
-  guardrailPort: number,
+export function isLLMShapedRequest( urlStr: string,
+ method: string,
+ bodyShape: LLMBodyShape,
+ guardrailPort: number,
 ): boolean {
-  if (!urlStr) return false;
-  if (isAlreadyProxied(urlStr, guardrailPort)) return false;
-  const m = (method || "GET").toUpperCase();
-  if (m === "GET" || m === "HEAD" || m === "OPTIONS") return false;
-  if (isKnownSafeDomain(urlStr)) return false;
-  if (hasLLMPathSuffix(urlStr)) return true;
-  if (bodyShape !== "none") return true;
-  return false;
+ if (!urlStr) return false;
+ if (isAlreadyProxied(urlStr, guardrailPort)) return false;
+ const m = (method || "GET").toUpperCase();
+ if (m === "GET" || m === "HEAD" || m === "OPTIONS") return false;
+ if (isKnownSafeDomain(urlStr)) return false;
+ if (hasLLMPathSuffix(urlStr)) return true;
+ if (bodyShape !== "none") return true;
+ return false;
 }
 
 /**
@@ -640,8 +597,7 @@ export function isLLMShapedRequest(
  * JSON-parsed; anything else (ReadableStream, FormData, Blob) returns
  * "none" rather than consuming the stream and breaking the downstream
  * fetch.
- *
- * Limit is 64 KiB: an LLM payload's shape is always visible in the
+ * * Limit is 64 KiB: an LLM payload's shape is always visible in the
  * first page of JSON, and capping the peek prevents a hostile caller
  * from fouling heap via a multi-GB body.
  */
@@ -654,7 +610,7 @@ const BODY_PEEK_CAP_BYTES = 64 * 1024;
  * shape.
  */
 function decodeUtf8Safe(buf: ArrayBufferView): string {
-  return new TextDecoder("utf-8", { fatal: false }).decode(buf);
+ return new TextDecoder("utf-8", { fatal: false }).decode(buf);
 }
 
 /**
@@ -664,152 +620,149 @@ function decodeUtf8Safe(buf: ArrayBufferView): string {
  * (GBs) never allocates past `cap` bytes. Returns the raw byte
  * sequence so the caller can decide on encoding.
  */
-async function readStreamBounded(
-  stream: ReadableStream<Uint8Array>,
-  cap: number,
+async function readStreamBounded( stream: ReadableStream<Uint8Array>,
+ cap: number,
 ): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (total < cap) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      if (total + value.byteLength > cap) {
-        chunks.push(value.subarray(0, cap - total));
-        total = cap;
-        break;
-      }
-      chunks.push(value);
-      total += value.byteLength;
-    }
-  } finally {
-    // Cancel the rest of the stream so the underlying transport
-    // does not keep delivering bytes we will never consume.
-    try {
-      await reader.cancel();
-    } catch {
-      /* ignore */
-    }
-    try {
-      reader.releaseLock();
-    } catch {
-      /* ignore */
-    }
-  }
-  const out = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) {
-    out.set(c, off);
-    off += c.byteLength;
-  }
-  return out;
+ const reader = stream.getReader();
+ const chunks: Uint8Array[] = [];
+ let total = 0;
+ try {
+ while (total < cap) {
+ const { value, done } = await reader.read();
+ if (done) break;
+ if (!value) continue;
+ if (total + value.byteLength > cap) {
+ chunks.push(value.subarray(0, cap - total));
+ total = cap;
+ break;
+ }
+ chunks.push(value);
+ total += value.byteLength;
+ }
+ } finally {
+ // Cancel the rest of the stream so the underlying transport
+ // does not keep delivering bytes we will never consume.
+ try {
+ await reader.cancel();
+ } catch {
+ /* ignore */
+ }
+ try {
+ reader.releaseLock();
+ } catch {
+ /* ignore */
+ }
+ }
+ const out = new Uint8Array(total);
+ let off = 0;
+ for (const c of chunks) {
+ out.set(c, off);
+ off += c.byteLength;
+ }
+ return out;
 }
 
-export async function peekBodyForShape(
-  input: RequestInfo | URL,
-  init?: RequestInit,
+export async function peekBodyForShape( input: RequestInfo | URL,
+ init?: RequestInit,
 ): Promise<LLMBodyShape> {
-  try {
-    if (input instanceof Request) {
-      // input.clone() keeps the caller's Request body intact for the
-      // downstream originalFetch call. Prefer a streaming read
-      // capped at BODY_PEEK_CAP_BYTES so a multi-GB body cannot
-      // exhaust the extension host's memory; only fall back to a
-      // full-body .text() if the runtime does not expose
-      // Request.body (older Node / test mocks).
-      const cloned = input.clone();
-      const stream = (cloned as unknown as { body?: ReadableStream<Uint8Array> })
-        .body;
-      let bytes: Uint8Array;
-      if (stream && typeof stream.getReader === "function") {
-        bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES);
-      } else {
-        const text = await cloned.text().catch(() => "");
-        if (!text) return "none";
-        // Text path: cap on character count as a byte upper-bound
-        // (UTF-16 char count ≥ UTF-8 byte count in practice for
-        // typical ASCII-dominant LLM payloads; worst case 4-byte
-        // codepoints still fit well under 64 KiB).
-        const capped = text.length > BODY_PEEK_CAP_BYTES
-          ? text.slice(0, BODY_PEEK_CAP_BYTES)
-          : text;
-        try {
-          return classifyBodyShape(JSON.parse(capped));
-        } catch {
-          return "none";
-        }
-      }
-      if (bytes.byteLength === 0) return "none";
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(bytes)));
-      } catch {
-        return "none";
-      }
-    }
-    const body = init?.body as unknown;
-    if (body == null) return "none";
-    if (typeof body === "string") {
-      try {
-        return classifyBodyShape(JSON.parse(body.slice(0, BODY_PEEK_CAP_BYTES)));
-      } catch {
-        return "none";
-      }
-    }
-    if (body instanceof Uint8Array) {
-      const slice = body.subarray(0, BODY_PEEK_CAP_BYTES);
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(slice)));
-      } catch {
-        return "none";
-      }
-    }
-    if (body instanceof ArrayBuffer) {
-      const view = new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES);
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(view)));
-      } catch {
-        return "none";
-      }
-    }
-    // ReadableStream, FormData, Blob, etc. — consuming them would break
-    // the downstream fetch. Fall back to path-only detection.
-    return "none";
-  } catch {
-    return "none";
-  }
+ try {
+ if (input instanceof Request) {
+ // input.clone() keeps the caller's Request body intact for the
+ // downstream originalFetch call. Prefer a streaming read
+ // capped at BODY_PEEK_CAP_BYTES so a multi-GB body cannot
+ // exhaust the extension host's memory; only fall back to a
+ // full-body .text() if the runtime does not expose
+ // Request.body (older Node / test mocks).
+ const cloned = input.clone();
+ const stream = (cloned as unknown as { body?: ReadableStream<Uint8Array> })
+ .body;
+ let bytes: Uint8Array;
+ if (stream && typeof stream.getReader === "function") {
+ bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES);
+ } else {
+ const text = await cloned.text().catch(() => "");
+ if (!text) return "none";
+ // Text path: cap on character count as a byte upper-bound
+ // (UTF-16 char count ≥ UTF-8 byte count in practice for
+ // typical ASCII-dominant LLM payloads; worst case 4-byte
+ // codepoints still fit well under 64 KiB).
+ const capped = text.length > BODY_PEEK_CAP_BYTES
+ ? text.slice(0, BODY_PEEK_CAP_BYTES)
+ : text;
+ try {
+ return classifyBodyShape(JSON.parse(capped));
+ } catch {
+ return "none";
+ }
+ }
+ if (bytes.byteLength === 0) return "none";
+ try {
+ return classifyBodyShape(JSON.parse(decodeUtf8Safe(bytes)));
+ } catch {
+ return "none";
+ }
+ }
+ const body = init?.body as unknown;
+ if (body == null) return "none";
+ if (typeof body === "string") {
+ try {
+ return classifyBodyShape(JSON.parse(body.slice(0, BODY_PEEK_CAP_BYTES)));
+ } catch {
+ return "none";
+ }
+ }
+ if (body instanceof Uint8Array) {
+ const slice = body.subarray(0, BODY_PEEK_CAP_BYTES);
+ try {
+ return classifyBodyShape(JSON.parse(decodeUtf8Safe(slice)));
+ } catch {
+ return "none";
+ }
+ }
+ if (body instanceof ArrayBuffer) {
+ const view = new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES);
+ try {
+ return classifyBodyShape(JSON.parse(decodeUtf8Safe(view)));
+ } catch {
+ return "none";
+ }
+ }
+ // ReadableStream, FormData, Blob, etc. — consuming them would break
+ // the downstream fetch. Fall back to path-only detection.
+ return "none";
+ } catch {
+ return "none";
+ }
 }
 
 /**
  * Extract the provider API key from whichever header the provider SDK uses.
  * Different providers use different auth mechanisms:
- *   - OpenAI / OpenRouter / Gemini compat: Authorization: Bearer <key>
- *   - Anthropic: x-api-key: <key>
- *   - Azure OpenAI: api-key: <key>
- *   - Gemini native: ?key= query param (handled separately, not in headers)
- *   - Bedrock: AWS SigV4 (multiple headers, not a simple key)
- *   - Ollama: no auth
- *
- * Returns the key prefixed with "Bearer " for consistency, or empty string.
+ * - OpenAI / OpenRouter / Gemini compat: Authorization: Bearer <key>
+ * - Anthropic: x-api-key: <key>
+ * - Azure OpenAI: api-key: <key>
+ * - Gemini native: ?key= query param (handled separately, not in headers)
+ * - Bedrock: AWS SigV4 (multiple headers, not a simple key)
+ * - Ollama: no auth
+ * * Returns the key prefixed with "Bearer " for consistency, or empty string.
  */
 function extractProviderKey(headers: Headers): string {
-  // Authorization: Bearer <key> — most providers
-  const auth = headers.get("Authorization") ?? "";
-  if (auth && !auth.startsWith("Bearer sk-dc-")) {
-    return auth;
-  }
-  // x-api-key — Anthropic
-  const xApiKey = headers.get("x-api-key") ?? "";
-  if (xApiKey) {
-    return `Bearer ${xApiKey}`;
-  }
-  // api-key — Azure OpenAI
-  const apiKey = headers.get("api-key") ?? "";
-  if (apiKey) {
-    return `Bearer ${apiKey}`;
-  }
-  return "";
+ // Authorization: Bearer <key> — most providers
+ const auth = headers.get("Authorization") ?? "";
+ if (auth && !auth.startsWith("Bearer sk-dc-")) {
+ return auth;
+ }
+ // x-api-key — Anthropic
+ const xApiKey = headers.get("x-api-key") ?? "";
+ if (xApiKey) {
+ return `Bearer ${xApiKey}`;
+ }
+ // api-key — Azure OpenAI
+ const apiKey = headers.get("api-key") ?? "";
+ if (apiKey) {
+ return `Bearer ${apiKey}`;
+ }
+ return "";
 }
 
 /**
@@ -817,19 +770,19 @@ function extractProviderKey(headers: Headers): string {
  * case-sensitive keys).
  */
 function extractProviderKeyFromRecord(hdrs: Record<string, string>): string {
-  const auth = hdrs["Authorization"] ?? hdrs["authorization"] ?? "";
-  if (auth && !auth.startsWith("Bearer sk-dc-")) {
-    return auth;
-  }
-  const xApiKey = hdrs["x-api-key"] ?? hdrs["X-Api-Key"] ?? "";
-  if (xApiKey) {
-    return `Bearer ${xApiKey}`;
-  }
-  const apiKey = hdrs["api-key"] ?? hdrs["Api-Key"] ?? "";
-  if (apiKey) {
-    return `Bearer ${apiKey}`;
-  }
-  return "";
+ const auth = hdrs["Authorization"] ?? hdrs["authorization"] ?? "";
+ if (auth && !auth.startsWith("Bearer sk-dc-")) {
+ return auth;
+ }
+ const xApiKey = hdrs["x-api-key"] ?? hdrs["X-Api-Key"] ?? "";
+ if (xApiKey) {
+ return `Bearer ${xApiKey}`;
+ }
+ const apiKey = hdrs["api-key"] ?? hdrs["Api-Key"] ?? "";
+ if (apiKey) {
+ return `Bearer ${apiKey}`;
+ }
+ return "";
 }
 
 /**
@@ -845,50 +798,48 @@ export type CorrelationHeadersGetter = () => Record<string, string>;
  * Build the proxy-hop headers (X-DC-Target-URL, X-AI-Auth, X-DC-Auth) plus
  * any caller-supplied correlation headers (X-DefenseClaw-*) the guardrail
  * proxy's CorrelationMiddleware stamps onto the audit envelope.
- *
- * OpenClaw already resolves the real provider API key and sets it in the
+ * * OpenClaw already resolves the real provider API key and sets it in the
  * appropriate header for each provider SDK. We extract it from whichever
  * header is used and forward it as X-AI-Auth for uniform proxy handling.
  */
-function buildProxyHeaders(
-  targetOrigin: string,
-  providerKey: string,
-  getCorrelationHeaders: CorrelationHeadersGetter,
+function buildProxyHeaders( targetOrigin: string,
+ providerKey: string,
+ getCorrelationHeaders: CorrelationHeadersGetter,
 ): Record<string, string> {
-  const hdrs: Record<string, string> = {
-    [TARGET_URL_HEADER]: targetOrigin,
-  };
+ const hdrs: Record<string, string> = {
+ [TARGET_URL_HEADER]: targetOrigin,
+ };
 
-  if (providerKey) {
-    hdrs[AI_AUTH_HEADER] = providerKey;
-  }
+ if (providerKey) {
+ hdrs[AI_AUTH_HEADER] = providerKey;
+ }
 
-  // X-DC-Auth: proxy authentication token for remote deployments.
-  const sidecarToken = loadSidecarConfig().token;
-  if (sidecarToken) {
-    hdrs[DC_AUTH_HEADER] = `Bearer ${sidecarToken}`;
-  }
+ // X-DC-Auth: proxy authentication token for remote deployments.
+ const sidecarToken = loadSidecarConfig().token;
+ if (sidecarToken) {
+ hdrs[DC_AUTH_HEADER] = `Bearer ${sidecarToken}`;
+ }
 
-  // v7 correlation: inject X-DefenseClaw-* headers so the proxy's
-  // CorrelationMiddleware can stamp agent_id / session_id / run_id /
-  // trace_id / policy_id on every guardrail-* audit row. Without this,
-  // every LLM request emitted via the fetch interceptor landed in
-  // SQLite with those columns NULL because the proxy has no other way
-  // to learn plugin-side identity on an intercepted hop.
-  let corr: Record<string, string> | undefined;
-  try {
-    corr = getCorrelationHeaders();
-  } catch {
-    // Never let a misbehaving getter break LLM traffic — missing
-    // correlation headers are recoverable, blocked LLM calls are not.
-  }
-  if (corr) {
-    for (const [k, v] of Object.entries(corr)) {
-      if (v !== undefined && v !== "") hdrs[k] = v;
-    }
-  }
+ // v7 correlation: inject X-DefenseClaw-* headers so the proxy's
+ // CorrelationMiddleware can stamp agent_id / session_id / run_id /
+ // trace_id / policy_id on every guardrail-* audit row. Without this,
+ // every LLM request emitted via the fetch interceptor landed in
+ // SQLite with those columns NULL because the proxy has no other way
+ // to learn plugin-side identity on an intercepted hop.
+ let corr: Record<string, string> | undefined;
+ try {
+ corr = getCorrelationHeaders();
+ } catch {
+ // Never let a misbehaving getter break LLM traffic — missing
+ // correlation headers are recoverable, blocked LLM calls are not.
+ }
+ if (corr) {
+ for (const [k, v] of Object.entries(corr)) {
+ if (v !== undefined && v !== "") hdrs[k] = v;
+ }
+ }
 
-  return hdrs;
+ return hdrs;
 }
 
 /**
@@ -899,672 +850,649 @@ const emptyCorrelationHeaders: CorrelationHeadersGetter = () => ({});
 
 /** Canonical header-name set so callers outside this module can stay DRY. */
 export const DEFENSECLAW_CORRELATION_HEADER_NAMES = [
-  HEADER_DEFENSECLAW_AGENT_ID,
-  HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
-  HEADER_DEFENSECLAW_AGENT_NAME,
-  HEADER_DEFENSECLAW_POLICY_ID,
-  HEADER_DEFENSECLAW_RUN_ID,
-  HEADER_DEFENSECLAW_SESSION_ID,
-  HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
-  HEADER_DEFENSECLAW_TRACE_ID,
+ HEADER_DEFENSECLAW_AGENT_ID,
+ HEADER_DEFENSECLAW_AGENT_INSTANCE_ID,
+ HEADER_DEFENSECLAW_AGENT_NAME,
+ HEADER_DEFENSECLAW_POLICY_ID,
+ HEADER_DEFENSECLAW_RUN_ID,
+ HEADER_DEFENSECLAW_SESSION_ID,
+ HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
+ HEADER_DEFENSECLAW_TRACE_ID,
 ] as const;
 
 export interface CreateFetchInterceptorOptions {
-  guardrailPort: number;
-  /**
-   * Synchronous snapshot of DefenseClaw X-DefenseClaw-* correlation
-   * headers to stamp on every intercepted LLM request. Called once per
-   * request — implementations should return cached values rather than
-   * performing I/O.
-   */
-  getCorrelationHeaders?: CorrelationHeadersGetter;
+ guardrailPort: number;
+ /**
+ * Synchronous snapshot of DefenseClaw X-DefenseClaw-* correlation
+ * headers to stamp on every intercepted LLM request. Called once per
+ * request — implementations should return cached values rather than
+ * performing I/O.
+ */
+ getCorrelationHeaders?: CorrelationHeadersGetter;
 }
 
 /**
  * Creates an interceptor that, when started, patches globalThis.fetch to
  * redirect LLM API calls through the guardrail proxy.
  * Call stop() to restore the original fetch.
- *
- * Accepts either a legacy `guardrailPort` number (backwards-compatible
+ * * Accepts either a legacy `guardrailPort` number (backwards-compatible
  * with existing tests) or a structured options bag that additionally
  * carries a correlation-headers getter.
  */
-export function createFetchInterceptor(
-  portOrOpts: number | CreateFetchInterceptorOptions,
+export function createFetchInterceptor( portOrOpts: number | CreateFetchInterceptorOptions,
 ) {
-  const interceptorOpts: CreateFetchInterceptorOptions =
-    typeof portOrOpts === "number"
-      ? { guardrailPort: portOrOpts }
-      : portOrOpts;
-  const guardrailPort = interceptorOpts.guardrailPort;
-  const getCorrelationHeaders =
-    interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
-  const proxyBase = `http://127.0.0.1:${guardrailPort}`;
-  let originalFetch: typeof globalThis.fetch | null = null;
-  let originalHttpsRequest: typeof https.request | null = null;
-  let originalHttpRequest: typeof http.request | null = null;
-  let originalHttpGet: typeof http.get | null = null;
-  let egressReporter: EgressReporter | null = null;
+ const interceptorOpts: CreateFetchInterceptorOptions =
+ typeof portOrOpts === "number"
+ ? { guardrailPort: portOrOpts }
+ : portOrOpts;
+ const guardrailPort = interceptorOpts.guardrailPort;
+ const getCorrelationHeaders =
+ interceptorOpts.getCorrelationHeaders ?? emptyCorrelationHeaders;
+ const proxyBase = `http://127.0.0.1:${guardrailPort}`;
+ let originalFetch: typeof globalThis.fetch | null = null;
+ let originalHttpsRequest: typeof https.request | null = null;
+ let originalHttpRequest: typeof http.request | null = null;
+ let originalHttpGet: typeof http.get | null = null;
+ let egressReporter: EgressReporter | null = null;
 
-  // Extract { host, path } from a URL string without throwing. Missing
-  // pieces are tolerated so the caller's downstream fetch is never
-  // perturbed by a malformed URL in telemetry.
-  function extractHostPath(urlStr: string): { host: string; path: string } {
-    try {
-      const u = new URL(urlStr);
-      return { host: u.hostname, path: `${u.pathname}${u.search}` };
-    } catch {
-      return { host: "", path: urlStr };
-    }
-  }
+ // Extract { host, path } from a URL string without throwing. Missing
+ // pieces are tolerated so the caller's downstream fetch is never
+ // perturbed by a malformed URL in telemetry.
+ function extractHostPath(urlStr: string): { host: string; path: string } {
+ try {
+ const u = new URL(urlStr);
+ return { host: u.hostname, path: `${u.pathname}${u.search}` };
+ } catch {
+ return { host: "", path: urlStr };
+ }
+ }
 
-  function start(): void {
-    if (originalFetch) return; // already started
-    originalFetch = globalThis.fetch;
-    egressReporter = createEgressReporter({ guardrailPort });
+ function start(): void {
+ if (originalFetch) return; // already started
+ originalFetch = globalThis.fetch;
+ egressReporter = createEgressReporter({ guardrailPort });
 
-    // Layer 4 (governance): pull the sidecar's merged provider
-    // registry so operator-added domains (via `defenseclaw setup
-    // provider add` or a hand-edited custom-providers.json) take
-    // effect without rebuilding the plugin. Best-effort, short
-    // timeout; we use the process-supplied fetch BEFORE we swap it
-    // out below so the bootstrap call is not intercepted by the
-    // wrapper we're about to install.
-    void bootstrapProviderOverlay(guardrailPort, {
-      fetchImpl: originalFetch,
-    });
+ // Layer 4 (governance): pull the sidecar's merged provider
+ // registry so operator-added domains (via `defenseclaw setup
+ // provider add` or a hand-edited custom-providers.json) take
+ // effect without rebuilding the plugin. Best-effort, short
+ // timeout; we use the process-supplied fetch BEFORE we swap it
+ // out below so the bootstrap call is not intercepted by the
+ // wrapper we're about to install.
+ void bootstrapProviderOverlay(guardrailPort, {
+ fetchImpl: originalFetch,
+ });
 
-    globalThis.fetch = async (
-      input: RequestInfo | URL,
-      init?: RequestInit,
-    ): Promise<Response> => {
-      const urlStr = String(input instanceof Request ? input.url : input);
+ globalThis.fetch = async ( input: RequestInfo | URL,
+ init?: RequestInit,
+): Promise<Response> => {
+ const urlStr = String(input instanceof Request ? input.url : input);
 
-      // Never self-loop: a request already aimed at the guardrail proxy
-      // short-circuits before any shape inspection so we don't peek its body.
-      if (isAlreadyProxied(urlStr, guardrailPort)) {
-        return originalFetch!(input, init);
-      }
+ // Never self-loop: a request already aimed at the guardrail proxy
+ // short-circuits before any shape inspection so we don't peek its body.
+ if (isAlreadyProxied(urlStr, guardrailPort)) {
+ return originalFetch!(input, init);
+ }
 
-      // Layer 0: the known-provider allowlist is cheap and path-free.
-      const knownLLM = isLLMUrl(urlStr, guardrailPort);
-      let shouldIntercept = knownLLM;
-      let shapeBranch: "known" | "shape" | "passthrough" = knownLLM ? "known" : "passthrough";
-      let bodyShape: LLMBodyShape = "none";
+ // Layer 0: the known-provider allowlist is cheap and path-free.
+ const knownLLM = isLLMUrl(urlStr, guardrailPort);
+ let shouldIntercept = knownLLM;
+ let shapeBranch: "known" | "shape" | "passthrough" = knownLLM ? "known" : "passthrough";
+ let bodyShape: LLMBodyShape = "none";
 
-      // Layer 1: request-shape detection. Only peek the body when the
-      // allowlist didn't already match — peeking costs a clone().
-      if (!knownLLM) {
-        const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
-        bodyShape = await peekBodyForShape(input, init);
-        if (isLLMShapedRequest(urlStr, method, bodyShape, guardrailPort)) {
-          shouldIntercept = true;
-          shapeBranch = "shape";
-        }
-      }
+ // Layer 1: request-shape detection. Only peek the body when the
+ // allowlist didn't already match — peeking costs a clone().
+ if (!knownLLM) {
+ const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
+ bodyShape = await peekBodyForShape(input, init);
+ if (isLLMShapedRequest(urlStr, method, bodyShape, guardrailPort)) {
+ shouldIntercept = true;
+ shapeBranch = "shape";
+ }
+ }
 
-      if (!shouldIntercept) {
-        // Layer 3: silent-bypass telemetry. Report every request that
-        // left our interceptor without being rewritten so operators
-        // can spot "known LLM-shaped call to unknown host" cases.
-        const hp = extractHostPath(urlStr);
-        egressReporter?.report({
-          targetHost: hp.host,
-          targetPath: scrubPathForLog(hp.path),
-          bodyShape,
-          looksLikeLLM: bodyShape !== "none" || hasLLMPathSuffix(urlStr),
-          branch: "passthrough",
-          decision: "allow",
-          reason: "no-match",
-        });
-        return originalFetch!(input, init);
-      }
+ if (!shouldIntercept) {
+ // Layer 3: silent-bypass telemetry. Report every request that
+ // left our interceptor without being rewritten so operators
+ // can spot "known LLM-shaped call to unknown host" cases.
+ const hp = extractHostPath(urlStr);
+ egressReporter?.report({
+ targetHost: hp.host,
+ targetPath: scrubPathForLog(hp.path),
+ bodyShape,
+ looksLikeLLM: bodyShape !== "none" || hasLLMPathSuffix(urlStr),
+ branch: "passthrough",
+ decision: "allow",
+ reason: "no-match",
+ });
+ return originalFetch!(input, init);
+ }
 
-      let original: URL;
-      try {
-        original = new URL(urlStr);
-      } catch {
-        return originalFetch!(input, init);
-      }
+ let original: URL;
+ try {
+ original = new URL(urlStr);
+ } catch {
+ return originalFetch!(input, init);
+ }
 
-      // Rewrite: keep path + query, replace scheme://host with proxy.
-      const proxied = `${proxyBase}${original.pathname}${original.search}`;
+ // Rewrite: keep path + query, replace scheme://host with proxy.
+ const proxied = `${proxyBase}${original.pathname}${original.search}`;
 
-      // Merge all original headers and add proxy-hop headers.
-      const headers = new Headers(
-        input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
-      );
-      const providerKey = extractProviderKey(headers);
-      const proxyHdrs = buildProxyHeaders(
-        original.origin,
-        providerKey,
-        getCorrelationHeaders,
-      );
-      for (const [k, v] of Object.entries(proxyHdrs)) {
-        headers.set(k, v);
-      }
+ // Merge all original headers and add proxy-hop headers.
+ const headers = new Headers( input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
+);
+ const providerKey = extractProviderKey(headers);
+ const proxyHdrs = buildProxyHeaders( original.origin,
+ providerKey,
+ getCorrelationHeaders,
+);
+ for (const [k, v] of Object.entries(proxyHdrs)) {
+ headers.set(k, v);
+ }
 
-      // Build new init, preserving all original properties.
-      const newInit: RequestInit =
-        input instanceof Request
-          ? { method: input.method, body: input.body, headers }
-          : { ...(init ?? {}), headers };
+ // Build new init, preserving all original properties.
+ const newInit: RequestInit =
+ input instanceof Request
+ ? { method: input.method, body: input.body, headers }
+ : { ...(init ?? {}), headers };
 
-      // Always log the SCRUBBED URL: the raw URL frequently carries
-      // Gemini-style ?key=<api-key> or other secret query parameters
-      // that the upstream LLM provider expects (DeepSec finding
-      // "Intercepted LLM URLs are logged with credential-bearing
-      // query strings"). The scrubbed copy preserves scheme, host,
-      // path and non-secret query parameters so logs remain useful.
-      const scrubbedUrl = scrubUrlForLog(urlStr);
-      if (shapeBranch === "shape") {
-        console.log(
-          `[defenseclaw] intercepted LLM-shaped call → ${scrubbedUrl} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
-        );
-      } else {
-        console.log(
-          `[defenseclaw] intercepted LLM call → ${scrubbedUrl} proxied via ${proxyBase}`,
-        );
-      }
+ // Always log the SCRUBBED URL: the raw URL frequently carries
+ // Gemini-style ?key=<api-key> or other secret query parameters
+ // that the upstream LLM provider expects (security finding
+ // "Intercepted LLM URLs are logged with credential-bearing
+ // query strings"). The scrubbed copy preserves scheme, host,
+ // path and non-secret query parameters so logs remain useful.
+ const scrubbedUrl = scrubUrlForLog(urlStr);
+ if (shapeBranch === "shape") {
+ console.log( `[defenseclaw] intercepted LLM-shaped call → ${scrubbedUrl} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
+);
+ } else {
+ console.log( `[defenseclaw] intercepted LLM call → ${scrubbedUrl} proxied via ${proxyBase}`,
+);
+ }
 
-      const response = await originalFetch!(proxied, newInit);
+ const response = await originalFetch!(proxied, newInit);
 
-      const blocked = response.headers.get("x-defenseclaw-blocked") === "true";
-      if (blocked) {
-        console.warn(
-          "[defenseclaw] REQUEST BLOCKED by guardrail policy",
-        );
-      }
+ const blocked = response.headers.get("x-defenseclaw-blocked") === "true";
+ if (blocked) {
+ console.warn( "[defenseclaw] REQUEST BLOCKED by guardrail policy",
+);
+ }
 
-      // Report the routed-through-proxy call so egress telemetry
-      // reflects both the "known" and "shape" branches the Go
-      // passthrough reports for server-originated traffic.
-      const hp = extractHostPath(urlStr);
-      egressReporter?.report({
-        targetHost: hp.host,
-        targetPath: scrubPathForLog(hp.path),
-        bodyShape,
-        looksLikeLLM: true,
-        branch: shapeBranch === "shape" ? "shape" : "known",
-        decision: blocked ? "block" : "allow",
-        reason: shapeBranch === "shape" ? "shape-match" : "known-provider",
-      });
+ // Report the routed-through-proxy call so egress telemetry
+ // reflects both the "known" and "shape" branches the Go
+ // passthrough reports for server-originated traffic.
+ const hp = extractHostPath(urlStr);
+ egressReporter?.report({
+ targetHost: hp.host,
+ targetPath: scrubPathForLog(hp.path),
+ bodyShape,
+ looksLikeLLM: true,
+ branch: shapeBranch === "shape" ? "shape" : "known",
+ decision: blocked ? "block" : "allow",
+ reason: shapeBranch === "shape" ? "shape-match" : "known-provider",
+ });
 
-      return response;
-    };
+ return response;
+ };
 
-    // Also patch https.request so axios, undici, and other non-fetch HTTP
-    // clients are intercepted. All of them ultimately use node:https.request.
-    originalHttpsRequest = https.request.bind(https);
-    originalHttpRequest = http.request.bind(http);
-    originalHttpGet = http.get.bind(http);
+ // Also patch https.request so axios, undici, and other non-fetch HTTP
+ // clients are intercepted. All of them ultimately use node:https.request.
+ originalHttpsRequest = https.request.bind(https);
+ originalHttpRequest = http.request.bind(http);
+ originalHttpGet = http.get.bind(http);
 
-    type NodeRequestOptions = Record<string, unknown>;
-    type NodeIncomingMessage = unknown;
-    type NodeClientRequest = ReturnType<typeof http.request>;
+ type NodeRequestOptions = Record<string, unknown>;
+ type NodeIncomingMessage = unknown;
+ type NodeClientRequest = ReturnType<typeof http.request>;
 
-    /**
-     * Normalize the varied `https.request` / `http.request` call shapes
-     * into a single URL string we can match against LLM provider
-     * domains. Callers may pass:
-     *   - request(url: string)
-     *   - request(url: URL)
-     *   - request(options)                   // { host|hostname, port, path, protocol }
-     *   - request(url, options)              // URL first, then extra options
-     * @smithy/node-http-handler v4 passes an options object with `host`
-     * (NOT `hostname`), separate `port`, and separate `path`, so we must
-     * read both `host` and `hostname` and fold `path` back in to match
-     * on domain + path.
-     *
-     * defaultProtocol is the scheme to assume when neither the options
-     * nor the overlay carry one — "https:" for https.request callers,
-     * "http:" for http.request callers.
-     */
-    function buildUrlStringFromArgs(
-      urlOrOptions: string | URL | NodeRequestOptions,
-      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
-      defaultProtocol: string,
-    ): string {
-      // Avarice F-1587: when the first argument is a URL string or
-      // URL object, Node still merges the second options object's
-      // hostname/port/path/protocol overrides on top of it. The
-      // legacy code returned the first argument verbatim, so a
-      // caller could pass a benign URL ("https://example.com/foo")
-      // alongside an options bag containing
-      //   { hostname: "api.openai.com", path: "/v1/messages" }
-      // and the interceptor classified the request using only the
-      // benign URL. Force-merge the options overlay here so the
-      // shape and known-provider checks see the actual
-      // post-merge target.
-      const overlay = (typeof secondArg === "object" && secondArg !== null
-        ? (secondArg as {
-            host?: unknown;
-            hostname?: unknown;
-            port?: unknown;
-            path?: unknown;
-            protocol?: unknown;
-          })
-        : null);
+ /**
+ * Normalize the varied `https.request` / `http.request` call shapes
+ * into a single URL string we can match against LLM provider
+ * domains. Callers may pass:
+ * - request(url: string)
+ * - request(url: URL)
+ * - request(options) // { host|hostname, port, path, protocol }
+ * - request(url, options) // URL first, then extra options
+ * @smithy/node-http-handler v4 passes an options object with `host`
+ * (NOT `hostname`), separate `port`, and separate `path`, so we must
+ * read both `host` and `hostname` and fold `path` back in to match
+ * on domain + path.
+ * * defaultProtocol is the scheme to assume when neither the options
+ * nor the overlay carry one — "https:" for https.request callers,
+ * "http:" for http.request callers.
+ */
+ function buildUrlStringFromArgs( urlOrOptions: string | URL | NodeRequestOptions,
+ secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+ defaultProtocol: string,
+): string {
+ // when the first argument is a URL string or
+ // URL object, Node still merges the second options object's
+ // hostname/port/path/protocol overrides on top of it. The
+ // legacy code returned the first argument verbatim, so a
+ // caller could pass a benign URL ("https://example.com/foo")
+ // alongside an options bag containing
+ // { hostname: "api.openai.com", path: "/v1/messages" }
+ // and the interceptor classified the request using only the
+ // benign URL. Force-merge the options overlay here so the
+ // shape and known-provider checks see the actual
+ // post-merge target.
+ const overlay = (typeof secondArg === "object" && secondArg !== null
+ ? (secondArg as {
+ host?: unknown;
+ hostname?: unknown;
+ port?: unknown;
+ path?: unknown;
+ protocol?: unknown;
+ })
+ : null);
 
-      if (typeof urlOrOptions === "string" || urlOrOptions instanceof URL) {
-        const base =
-          typeof urlOrOptions === "string" ? urlOrOptions : urlOrOptions.toString();
-        if (!overlay) return base;
-        let parsed: URL;
-        try {
-          parsed = new URL(base);
-        } catch {
-          return base;
-        }
-        if (typeof overlay.hostname === "string" && overlay.hostname) {
-          parsed.hostname = overlay.hostname;
-        } else if (typeof overlay.host === "string" && overlay.host) {
-          // overlay.host may include a port; fold it into hostname.
-          const colon = overlay.host.lastIndexOf(":");
-          if (colon > -1) {
-            parsed.hostname = overlay.host.slice(0, colon);
-            parsed.port = overlay.host.slice(colon + 1);
-          } else {
-            parsed.hostname = overlay.host;
-          }
-        }
-        if (overlay.port !== undefined && overlay.port !== null) {
-          parsed.port = String(overlay.port);
-        }
-        if (typeof overlay.path === "string" && overlay.path) {
-          // overlay.path is path+search per Node convention; take the
-          // first '?' as the search separator if present.
-          const q = overlay.path.indexOf("?");
-          if (q >= 0) {
-            parsed.pathname = overlay.path.slice(0, q);
-            parsed.search = overlay.path.slice(q);
-          } else {
-            parsed.pathname = overlay.path;
-            parsed.search = "";
-          }
-        }
-        if (typeof overlay.protocol === "string" && overlay.protocol) {
-          parsed.protocol = overlay.protocol;
-        }
-        return parsed.toString();
-      }
+ if (typeof urlOrOptions === "string" || urlOrOptions instanceof URL) {
+ const base =
+ typeof urlOrOptions === "string" ? urlOrOptions : urlOrOptions.toString();
+ if (!overlay) return base;
+ let parsed: URL;
+ try {
+ parsed = new URL(base);
+ } catch {
+ return base;
+ }
+ if (typeof overlay.hostname === "string" && overlay.hostname) {
+ parsed.hostname = overlay.hostname;
+ } else if (typeof overlay.host === "string" && overlay.host) {
+ // overlay.host may include a port; fold it into hostname.
+ const colon = overlay.host.lastIndexOf(":");
+ if (colon > -1) {
+ parsed.hostname = overlay.host.slice(0, colon);
+ parsed.port = overlay.host.slice(colon + 1);
+ } else {
+ parsed.hostname = overlay.host;
+ }
+ }
+ if (overlay.port !== undefined && overlay.port !== null) {
+ parsed.port = String(overlay.port);
+ }
+ if (typeof overlay.path === "string" && overlay.path) {
+ // overlay.path is path+search per Node convention; take the
+ // first '?' as the search separator if present.
+ const q = overlay.path.indexOf("?");
+ if (q >= 0) {
+ parsed.pathname = overlay.path.slice(0, q);
+ parsed.search = overlay.path.slice(q);
+ } else {
+ parsed.pathname = overlay.path;
+ parsed.search = "";
+ }
+ }
+ if (typeof overlay.protocol === "string" && overlay.protocol) {
+ parsed.protocol = overlay.protocol;
+ }
+ return parsed.toString();
+ }
 
-      const opts = urlOrOptions as {
-        host?: unknown;
-        hostname?: unknown;
-        port?: unknown;
-        path?: unknown;
-        protocol?: unknown;
-      };
-      const optsOverlay: typeof opts = (typeof secondArg === "object" && secondArg !== null
-        ? (secondArg as typeof opts)
-        : {});
+ const opts = urlOrOptions as {
+ host?: unknown;
+ hostname?: unknown;
+ port?: unknown;
+ path?: unknown;
+ protocol?: unknown;
+ };
+ const optsOverlay: typeof opts = (typeof secondArg === "object" && secondArg !== null
+ ? (secondArg as typeof opts)
+ : {});
 
-      const host =
-        (typeof optsOverlay.hostname === "string" && optsOverlay.hostname) ||
-        (typeof optsOverlay.host === "string" && optsOverlay.host) ||
-        (typeof opts.hostname === "string" && opts.hostname) ||
-        (typeof opts.host === "string" && opts.host) ||
-        "";
-      const port =
-        (optsOverlay.port !== undefined ? String(optsOverlay.port) : "") ||
-        (opts.port !== undefined ? String(opts.port) : "");
-      const path =
-        (typeof optsOverlay.path === "string" && optsOverlay.path) ||
-        (typeof opts.path === "string" && opts.path) ||
-        "/";
-      const proto =
-        (typeof optsOverlay.protocol === "string" && optsOverlay.protocol) ||
-        (typeof opts.protocol === "string" && opts.protocol) ||
-        defaultProtocol;
+ const host =
+ (typeof optsOverlay.hostname === "string" && optsOverlay.hostname) ||
+ (typeof optsOverlay.host === "string" && optsOverlay.host) ||
+ (typeof opts.hostname === "string" && opts.hostname) ||
+ (typeof opts.host === "string" && opts.host) ||
+ "";
+ const port =
+ (optsOverlay.port !== undefined ? String(optsOverlay.port) : "") ||
+ (opts.port !== undefined ? String(opts.port) : "");
+ const path =
+ (typeof optsOverlay.path === "string" && optsOverlay.path) ||
+ (typeof opts.path === "string" && opts.path) ||
+ "/";
+ const proto =
+ (typeof optsOverlay.protocol === "string" && optsOverlay.protocol) ||
+ (typeof opts.protocol === "string" && opts.protocol) ||
+ defaultProtocol;
 
-      if (!host) return "";
-      const hostPart = port ? `${host}:${port}` : host;
-      return `${proto}//${hostPart}${path}`;
-    }
+ if (!host) return "";
+ const hostPart = port ? `${host}:${port}` : host;
+ return `${proto}//${hostPart}${path}`;
+ }
 
-    function buildHttpsUrlStringFromArgs(
-      urlOrOptions: string | URL | NodeRequestOptions,
-      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
-    ): string {
-      return buildUrlStringFromArgs(urlOrOptions, secondArg, "https:");
-    }
+ function buildHttpsUrlStringFromArgs( urlOrOptions: string | URL | NodeRequestOptions,
+ secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+): string {
+ return buildUrlStringFromArgs(urlOrOptions, secondArg, "https:");
+ }
 
-    function buildHttpUrlStringFromArgs(
-      urlOrOptions: string | URL | NodeRequestOptions,
-      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
-    ): string {
-      return buildUrlStringFromArgs(urlOrOptions, secondArg, "http:");
-    }
+ function buildHttpUrlStringFromArgs( urlOrOptions: string | URL | NodeRequestOptions,
+ secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+): string {
+ return buildUrlStringFromArgs(urlOrOptions, secondArg, "http:");
+ }
 
-    function patchedHttpsRequest(
-      urlOrOptions: string | URL | NodeRequestOptions,
-      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
-      callback?: (res: NodeIncomingMessage) => void,
-    ): NodeClientRequest {
-      const urlStr = buildHttpsUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+ function patchedHttpsRequest( urlOrOptions: string | URL | NodeRequestOptions,
+ optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+ callback?: (res: NodeIncomingMessage) => void,
+): NodeClientRequest {
+ const urlStr = buildHttpsUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
-      // Path-only shape detection for https.request — the body is
-      // written via req.write after this call returns, so peeking is
-      // not an option. hasLLMPathSuffix still catches the overwhelming
-      // majority of unknown-provider SDKs (Bedrock converse-stream,
-      // Anthropic /messages, Gemini :generateContent, ollama /api/chat).
-      const shapedForHTTPS = Boolean(
-        urlStr &&
-          !isKnownSafeDomain(urlStr) &&
-          !isAlreadyProxied(urlStr, guardrailPort) &&
-          hasLLMPathSuffix(urlStr),
-      );
-      const knownForHTTPS = Boolean(
-        urlStr && isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort),
-      );
+ // Path-only shape detection for https.request — the body is
+ // written via req.write after this call returns, so peeking is
+ // not an option. hasLLMPathSuffix still catches the overwhelming
+ // majority of unknown-provider SDKs (Bedrock converse-stream,
+ // Anthropic /messages, Gemini :generateContent, ollama /api/chat).
+ const shapedForHTTPS = Boolean( urlStr &&
+ !isKnownSafeDomain(urlStr) &&
+ !isAlreadyProxied(urlStr, guardrailPort) &&
+ hasLLMPathSuffix(urlStr),
+);
+ const knownForHTTPS = Boolean( urlStr && isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort),
+);
 
-      if (urlStr && (knownForHTTPS || shapedForHTTPS)) {
-        let opts: NodeRequestOptions = {};
-        let cb = callback;
+ if (urlStr && (knownForHTTPS || shapedForHTTPS)) {
+ let opts: NodeRequestOptions = {};
+ let cb = callback;
 
-        if (typeof optionsOrCallback === "function") {
-          cb = optionsOrCallback;
-          opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
-            ? {} : urlOrOptions as NodeRequestOptions;
-        } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
-          opts = optionsOrCallback as NodeRequestOptions;
-        }
+ if (typeof optionsOrCallback === "function") {
+ cb = optionsOrCallback;
+ opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
+ ? {} : urlOrOptions as NodeRequestOptions;
+ } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
+ opts = optionsOrCallback as NodeRequestOptions;
+ }
 
-        let originalUrl: URL;
-        try {
-          originalUrl = new URL(urlStr);
-        } catch {
-          return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
-        }
+ let originalUrl: URL;
+ try {
+ originalUrl = new URL(urlStr);
+ } catch {
+ return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+ }
 
-        const hdrs = opts.headers as Record<string, string> ?? {};
-        const providerKey = extractProviderKeyFromRecord(hdrs);
-        const proxyHdrs = buildProxyHeaders(
-          originalUrl.origin,
-          providerKey,
-          getCorrelationHeaders,
-        );
+ const hdrs = opts.headers as Record<string, string> ?? {};
+ const providerKey = extractProviderKeyFromRecord(hdrs);
+ const proxyHdrs = buildProxyHeaders( originalUrl.origin,
+ providerKey,
+ getCorrelationHeaders,
+);
 
-        // Spread `opts` first, then overwrite target fields. Crucially, drop:
-        //
-        //  - `host` (smithy passes `host` not `hostname`; Node's `host` wins
-        //    over `hostname` in some paths, which would send traffic to the
-        //    original LLM domain instead of the proxy);
-        //  - `agent` (callers like @smithy/node-http-handler pass an
-        //    `https.Agent`. Node's `http.request` rejects an agent whose
-        //    `protocol === "https:"` with `ERR_INVALID_PROTOCOL`: "Protocol
-        //    'http:' not supported. Expected 'https:'". We want Node to use
-        //    the default http agent for the proxy hop, so set `agent: false`);
-        //  - TLS-only options (`ca`, `cert`, `key`, ...) which have no meaning
-        //    on a plain http.request and could still drag protocol checks in.
-        const {
-          host: _legacyHost,
-          agent: _legacyAgent,
-          ca: _ca,
-          cert: _cert,
-          key: _key,
-          pfx: _pfx,
-          passphrase: _passphrase,
-          servername: _servername,
-          ciphers: _ciphers,
-          ecdhCurve: _ecdhCurve,
-          secureProtocol: _secureProtocol,
-          minVersion: _minVersion,
-          maxVersion: _maxVersion,
-          sigalgs: _sigalgs,
-          crl: _crl,
-          dhparam: _dhparam,
-          rejectUnauthorized: _rejectUnauthorized,
-          checkServerIdentity: _checkServerIdentity,
-          session: _session,
-          allowPartialTrustChain: _allowPartialTrustChain,
-          ...restOpts
-        } = opts as { host?: unknown; agent?: unknown } & Record<string, unknown>;
-        void _legacyHost;
-        void _legacyAgent;
-        void _ca;
-        void _cert;
-        void _key;
-        void _pfx;
-        void _passphrase;
-        void _servername;
-        void _ciphers;
-        void _ecdhCurve;
-        void _secureProtocol;
-        void _minVersion;
-        void _maxVersion;
-        void _sigalgs;
-        void _crl;
-        void _dhparam;
-        void _rejectUnauthorized;
-        void _checkServerIdentity;
-        void _session;
-        void _allowPartialTrustChain;
-        const newOpts: NodeRequestOptions = {
-          ...restOpts,
-          hostname: "127.0.0.1",
-          port: guardrailPort,
-          protocol: "http:",
-          path: `${originalUrl.pathname}${originalUrl.search}`,
-          headers: { ...hdrs, ...proxyHdrs },
-          // Force Node to pick a default http.Agent for this request. Leaving
-          // the caller's https.Agent in place would throw at socket allocation.
-          agent: false,
-        };
+ // Spread `opts` first, then overwrite target fields. Crucially, drop:
+ // - `host` (smithy passes `host` not `hostname`; Node's `host` wins
+ // over `hostname` in some paths, which would send traffic to the
+ // original LLM domain instead of the proxy);
+ // - `agent` (callers like @smithy/node-http-handler pass an
+ // `https.Agent`. Node's `http.request` rejects an agent whose
+ // `protocol === "https:"` with `ERR_INVALID_PROTOCOL`: "Protocol
+ // 'http:' not supported. Expected 'https:'". We want Node to use
+ // the default http agent for the proxy hop, so set `agent: false`);
+ // - TLS-only options (`ca`, `cert`, `key`, ...) which have no meaning
+ // on a plain http.request and could still drag protocol checks in.
+ const {
+ host: _legacyHost,
+ agent: _legacyAgent,
+ ca: _ca,
+ cert: _cert,
+ key: _key,
+ pfx: _pfx,
+ passphrase: _passphrase,
+ servername: _servername,
+ ciphers: _ciphers,
+ ecdhCurve: _ecdhCurve,
+ secureProtocol: _secureProtocol,
+ minVersion: _minVersion,
+ maxVersion: _maxVersion,
+ sigalgs: _sigalgs,
+ crl: _crl,
+ dhparam: _dhparam,
+ rejectUnauthorized: _rejectUnauthorized,
+ checkServerIdentity: _checkServerIdentity,
+ session: _session,
+ allowPartialTrustChain: _allowPartialTrustChain,
+ ...restOpts
+ } = opts as { host?: unknown; agent?: unknown } & Record<string, unknown>;
+ void _legacyHost;
+ void _legacyAgent;
+ void _ca;
+ void _cert;
+ void _key;
+ void _pfx;
+ void _passphrase;
+ void _servername;
+ void _ciphers;
+ void _ecdhCurve;
+ void _secureProtocol;
+ void _minVersion;
+ void _maxVersion;
+ void _sigalgs;
+ void _crl;
+ void _dhparam;
+ void _rejectUnauthorized;
+ void _checkServerIdentity;
+ void _session;
+ void _allowPartialTrustChain;
+ const newOpts: NodeRequestOptions = {
+ ...restOpts,
+ hostname: "127.0.0.1",
+ port: guardrailPort,
+ protocol: "http:",
+ path: `${originalUrl.pathname}${originalUrl.search}`,
+ headers: { ...hdrs, ...proxyHdrs },
+ // Force Node to pick a default http.Agent for this request. Leaving
+ // the caller's https.Agent in place would throw at socket allocation.
+ agent: false,
+ };
 
-        const scrubbedUrl = scrubUrlForLog(urlStr);
-        if (!knownForHTTPS && shapedForHTTPS) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubbedUrl} (path-match) proxied via ${proxyBase}`);
-        } else {
-          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubbedUrl} proxied via ${proxyBase}`);
-        }
-        // Egress telemetry for the https.request branches. body_shape
-        // is intentionally "none" because req.write happens after we
-        // return — the body is not observable here.
-        {
-          const hp = extractHostPath(urlStr);
-          egressReporter?.report({
-            targetHost: hp.host,
-            targetPath: scrubPathForLog(hp.path),
-            bodyShape: "none",
-            looksLikeLLM: true,
-            branch: !knownForHTTPS && shapedForHTTPS ? "shape" : "known",
-            decision: "allow",
-            reason: !knownForHTTPS && shapedForHTTPS ? "shape-match" : "known-provider",
-          });
-        }
-        // Use originalHttpRequest (the saved bound copy) for the
-        // proxy hop. Since http.request is also patched, recursing
-        // through our own wrapper would re-enter this branch.
-        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
-      }
+ const scrubbedUrl = scrubUrlForLog(urlStr);
+ if (!knownForHTTPS && shapedForHTTPS) {
+ console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubbedUrl} (path-match) proxied via ${proxyBase}`);
+ } else {
+ console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubbedUrl} proxied via ${proxyBase}`);
+ }
+ // Egress telemetry for the https.request branches. body_shape
+ // is intentionally "none" because req.write happens after we
+ // return — the body is not observable here.
+ {
+ const hp = extractHostPath(urlStr);
+ egressReporter?.report({
+ targetHost: hp.host,
+ targetPath: scrubPathForLog(hp.path),
+ bodyShape: "none",
+ looksLikeLLM: true,
+ branch: !knownForHTTPS && shapedForHTTPS ? "shape" : "known",
+ decision: "allow",
+ reason: !knownForHTTPS && shapedForHTTPS ? "shape-match" : "known-provider",
+ });
+ }
+ // Use originalHttpRequest (the saved bound copy) for the
+ // proxy hop. Since http.request is also patched, recursing
+ // through our own wrapper would re-enter this branch.
+ return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+ }
 
-      // Non-intercepted https.request — report silent passthrough so
-      // the TUI/egress event log sees LLM-looking calls slipping past
-      // the known-provider + shape rails (e.g. an unknown SDK we
-      // have never classified).
-      if (urlStr) {
-        const hp = extractHostPath(urlStr);
-        egressReporter?.report({
-          targetHost: hp.host,
-          targetPath: scrubPathForLog(hp.path),
-          bodyShape: "none",
-          looksLikeLLM: hasLLMPathSuffix(urlStr),
-          branch: "passthrough",
-          decision: "allow",
-          reason: "no-match",
-        });
-      }
-      return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
-    }
+ // Non-intercepted https.request — report silent passthrough so
+ // the TUI/egress event log sees LLM-looking calls slipping past
+ // the known-provider + shape rails (e.g. an unknown SDK we
+ // have never classified).
+ if (urlStr) {
+ const hp = extractHostPath(urlStr);
+ egressReporter?.report({
+ targetHost: hp.host,
+ targetPath: scrubPathForLog(hp.path),
+ bodyShape: "none",
+ looksLikeLLM: hasLLMPathSuffix(urlStr),
+ branch: "passthrough",
+ decision: "allow",
+ reason: "no-match",
+ });
+ }
+ return originalHttpsRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+ }
 
-    https.request = patchedHttpsRequest as typeof https.request;
+ https.request = patchedHttpsRequest as typeof https.request;
 
-    // Apply the same shape/host/body-shape rails to plain
-    // http.request so a Node client that talks to Ollama (HTTP) or
-    // an HTTP-only LLM endpoint is intercepted instead of bypassing
-    // the guardrail entirely. Without this, plain `http.request`
-    // callers (e.g. local Ollama clients hitting
-    // http://127.0.0.1:11434/api/chat) sail past the interceptor
-    // because only `https.request` and `globalThis.fetch` were
-    // patched. The wrapper preserves the parsed self-proxy
-    // exclusion so we never loop traffic that already targets
-    // 127.0.0.1:<guardrail>.
-    function patchedHttpRequest(
-      urlOrOptions: string | URL | NodeRequestOptions,
-      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
-      callback?: (res: NodeIncomingMessage) => void,
-    ): NodeClientRequest {
-      const urlStr = buildHttpUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+ // Apply the same shape/host/body-shape rails to plain
+ // http.request so a Node client that talks to Ollama (HTTP) or
+ // an HTTP-only LLM endpoint is intercepted instead of bypassing
+ // the guardrail entirely. Without this, plain `http.request`
+ // callers (e.g. local Ollama clients hitting
+ // http://127.0.0.1:11434/api/chat) sail past the interceptor
+ // because only `https.request` and `globalThis.fetch` were
+ // patched. The wrapper preserves the parsed self-proxy
+ // exclusion so we never loop traffic that already targets
+ // 127.0.0.1:<guardrail>.
+ function patchedHttpRequest( urlOrOptions: string | URL | NodeRequestOptions,
+ optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+ callback?: (res: NodeIncomingMessage) => void,
+): NodeClientRequest {
+ const urlStr = buildHttpUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
-      const shapedForHTTP = Boolean(
-        urlStr &&
-          !isKnownSafeDomain(urlStr) &&
-          !isAlreadyProxied(urlStr, guardrailPort) &&
-          hasLLMPathSuffix(urlStr),
-      );
-      const knownForHTTP = Boolean(
-        urlStr && isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort),
-      );
+ const shapedForHTTP = Boolean( urlStr &&
+ !isKnownSafeDomain(urlStr) &&
+ !isAlreadyProxied(urlStr, guardrailPort) &&
+ hasLLMPathSuffix(urlStr),
+);
+ const knownForHTTP = Boolean( urlStr && isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort),
+);
 
-      if (urlStr && (knownForHTTP || shapedForHTTP)) {
-        let opts: NodeRequestOptions = {};
-        let cb = callback;
+ if (urlStr && (knownForHTTP || shapedForHTTP)) {
+ let opts: NodeRequestOptions = {};
+ let cb = callback;
 
-        if (typeof optionsOrCallback === "function") {
-          cb = optionsOrCallback;
-          opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
-            ? {} : urlOrOptions as NodeRequestOptions;
-        } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
-          opts = optionsOrCallback as NodeRequestOptions;
-        }
+ if (typeof optionsOrCallback === "function") {
+ cb = optionsOrCallback;
+ opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
+ ? {} : urlOrOptions as NodeRequestOptions;
+ } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
+ opts = optionsOrCallback as NodeRequestOptions;
+ }
 
-        let originalUrl: URL;
-        try {
-          originalUrl = new URL(urlStr);
-        } catch {
-          return originalHttpRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
-        }
+ let originalUrl: URL;
+ try {
+ originalUrl = new URL(urlStr);
+ } catch {
+ return originalHttpRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+ }
 
-        const hdrs = opts.headers as Record<string, string> ?? {};
-        const providerKey = extractProviderKeyFromRecord(hdrs);
-        const proxyHdrs = buildProxyHeaders(
-          originalUrl.origin,
-          providerKey,
-          getCorrelationHeaders,
-        );
+ const hdrs = opts.headers as Record<string, string> ?? {};
+ const providerKey = extractProviderKeyFromRecord(hdrs);
+ const proxyHdrs = buildProxyHeaders( originalUrl.origin,
+ providerKey,
+ getCorrelationHeaders,
+);
 
-        // We need to drop the caller's `host` (smithy-style) and any
-        // `agent` so Node uses the default http.Agent for the proxy
-        // hop. TLS-only options are irrelevant for http but we still
-        // strip them defensively to keep downstream Node versions
-        // happy.
-        const {
-          host: _legacyHost,
-          agent: _legacyAgent,
-          ...restOpts
-        } = opts as { host?: unknown; agent?: unknown } & Record<string, unknown>;
-        void _legacyHost;
-        void _legacyAgent;
+ // We need to drop the caller's `host` (smithy-style) and any
+ // `agent` so Node uses the default http.Agent for the proxy
+ // hop. TLS-only options are irrelevant for http but we still
+ // strip them defensively to keep downstream Node versions
+ // happy.
+ const {
+ host: _legacyHost,
+ agent: _legacyAgent,
+ ...restOpts
+ } = opts as { host?: unknown; agent?: unknown } & Record<string, unknown>;
+ void _legacyHost;
+ void _legacyAgent;
 
-        const newOpts: NodeRequestOptions = {
-          ...restOpts,
-          hostname: "127.0.0.1",
-          port: guardrailPort,
-          protocol: "http:",
-          path: `${originalUrl.pathname}${originalUrl.search}`,
-          headers: { ...hdrs, ...proxyHdrs },
-          agent: false,
-        };
+ const newOpts: NodeRequestOptions = {
+ ...restOpts,
+ hostname: "127.0.0.1",
+ port: guardrailPort,
+ protocol: "http:",
+ path: `${originalUrl.pathname}${originalUrl.search}`,
+ headers: { ...hdrs, ...proxyHdrs },
+ agent: false,
+ };
 
-        const scrubbedUrl = scrubUrlForLog(urlStr);
-        if (!knownForHTTP && shapedForHTTP) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (http.request) → ${scrubbedUrl} (path-match) proxied via ${proxyBase}`);
-        } else {
-          console.log(`[defenseclaw] intercepted LLM call (http.request) → ${scrubbedUrl} proxied via ${proxyBase}`);
-        }
-        {
-          const hp = extractHostPath(urlStr);
-          egressReporter?.report({
-            targetHost: hp.host,
-            targetPath: scrubPathForLog(hp.path),
-            bodyShape: "none",
-            looksLikeLLM: true,
-            branch: !knownForHTTP && shapedForHTTP ? "shape" : "known",
-            decision: "allow",
-            reason: !knownForHTTP && shapedForHTTP ? "shape-match" : "known-provider",
-          });
-        }
-        // Use the saved bound copy (originalHttpRequest) explicitly so
-        // we never recurse through our own patch when the proxy hop
-        // happens to look like a loopback URL.
-        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
-      }
+ const scrubbedUrl = scrubUrlForLog(urlStr);
+ if (!knownForHTTP && shapedForHTTP) {
+ console.log(`[defenseclaw] intercepted LLM-shaped call (http.request) → ${scrubbedUrl} (path-match) proxied via ${proxyBase}`);
+ } else {
+ console.log(`[defenseclaw] intercepted LLM call (http.request) → ${scrubbedUrl} proxied via ${proxyBase}`);
+ }
+ {
+ const hp = extractHostPath(urlStr);
+ egressReporter?.report({
+ targetHost: hp.host,
+ targetPath: scrubPathForLog(hp.path),
+ bodyShape: "none",
+ looksLikeLLM: true,
+ branch: !knownForHTTP && shapedForHTTP ? "shape" : "known",
+ decision: "allow",
+ reason: !knownForHTTP && shapedForHTTP ? "shape-match" : "known-provider",
+ });
+ }
+ // Use the saved bound copy (originalHttpRequest) explicitly so
+ // we never recurse through our own patch when the proxy hop
+ // happens to look like a loopback URL.
+ return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+ }
 
-      if (urlStr) {
-        const hp = extractHostPath(urlStr);
-        egressReporter?.report({
-          targetHost: hp.host,
-          targetPath: scrubPathForLog(hp.path),
-          bodyShape: "none",
-          looksLikeLLM: hasLLMPathSuffix(urlStr),
-          branch: "passthrough",
-          decision: "allow",
-          reason: "no-match",
-        });
-      }
-      return originalHttpRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
-    }
+ if (urlStr) {
+ const hp = extractHostPath(urlStr);
+ egressReporter?.report({
+ targetHost: hp.host,
+ targetPath: scrubPathForLog(hp.path),
+ bodyShape: "none",
+ looksLikeLLM: hasLLMPathSuffix(urlStr),
+ branch: "passthrough",
+ decision: "allow",
+ reason: "no-match",
+ });
+ }
+ return originalHttpRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+ }
 
-    http.request = patchedHttpRequest as typeof http.request;
-    // http.get is just a thin convenience around http.request (it sets
-    // method=GET and immediately calls .end()). Re-implement on top of
-    // the patched request so a Node client using http.get to call
-    // Ollama also goes through the guardrail.
-    http.get = ((
-      urlOrOptions: string | URL | NodeRequestOptions,
-      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
-      callback?: (res: NodeIncomingMessage) => void,
-    ): NodeClientRequest => {
-      const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback) as NodeClientRequest & {
-        end: () => void;
-      };
-      try { req.end(); } catch { /* noop -- caller handled */ }
-      return req;
-    }) as typeof http.get;
+ http.request = patchedHttpRequest as typeof http.request;
+ // http.get is just a thin convenience around http.request (it sets
+ // method=GET and immediately calls .end()). Re-implement on top of
+ // the patched request so a Node client using http.get to call
+ // Ollama also goes through the guardrail.
+ http.get = (( urlOrOptions: string | URL | NodeRequestOptions,
+ optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+ callback?: (res: NodeIncomingMessage) => void,
+): NodeClientRequest => {
+ const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback) as NodeClientRequest & {
+ end: () => void;
+ };
+ try { req.end(); } catch { /* noop -- caller handled */ }
+ return req;
+ }) as typeof http.get;
 
-    console.log(
-      `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
-    );
-  }
+ console.log( `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
+);
+ }
 
-  function stop(): void {
-    if (originalFetch) {
-      globalThis.fetch = originalFetch;
-      originalFetch = null;
-    }
-    // Restore https/http (safe because we used CJS require, not frozen ESM)
-    if (originalHttpsRequest) {
-      https.request = originalHttpsRequest;
-      originalHttpsRequest = null;
-    }
-    // Restore the http.request and http.get patches so test
-    // teardown leaves the runtime clean.
-    if (originalHttpRequest) {
-      http.request = originalHttpRequest;
-      originalHttpRequest = null;
-    }
-    if (originalHttpGet) {
-      http.get = originalHttpGet;
-      originalHttpGet = null;
-    }
-    if (egressReporter) {
-      egressReporter.stop();
-      egressReporter = null;
-    }
-    console.log("[defenseclaw] LLM fetch interceptor stopped");
-  }
+ function stop(): void {
+ if (originalFetch) {
+ globalThis.fetch = originalFetch;
+ originalFetch = null;
+ }
+ // Restore https/http (safe because we used CJS require, not frozen ESM)
+ if (originalHttpsRequest) {
+ https.request = originalHttpsRequest;
+ originalHttpsRequest = null;
+ }
+ // Restore the http.request and http.get patches so test
+ // teardown leaves the runtime clean.
+ if (originalHttpRequest) {
+ http.request = originalHttpRequest;
+ originalHttpRequest = null;
+ }
+ if (originalHttpGet) {
+ http.get = originalHttpGet;
+ originalHttpGet = null;
+ }
+ if (egressReporter) {
+ egressReporter.stop();
+ egressReporter = null;
+ }
+ console.log("[defenseclaw] LLM fetch interceptor stopped");
+ }
 
-  return { start, stop };
+ return { start, stop };
 }

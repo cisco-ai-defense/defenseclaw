@@ -239,7 +239,7 @@ func TestScan_NonexistentPath(t *testing.T) {
 }
 
 // TestScan_OversizeLineSurfacedAsScanError is the regression for
-// DeepSec finding "codeguard scan silently skips files when a line
+// finding "codeguard scan silently skips files when a line
 // exceeds the default bufio.Scanner buffer". Before the fix, an
 // attacker could hide a hard-coded private key, AKIA key, or other
 // secret by emitting it on a single line longer than the 64 KiB

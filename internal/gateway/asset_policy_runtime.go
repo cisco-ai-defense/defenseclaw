@@ -143,7 +143,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		Args:           probe.Args,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	})
-	// Avarice F-1510: when MCP.Default is "deny" and the asset
+	// when MCP.Default is "deny" and the asset
 	// policy is itself in action mode, an unknown terminal MCP
 	// command MUST NOT be silently downgraded to allow just
 	// because the secondary `runtime_detection.unknown_terminal_mcp`
@@ -204,7 +204,7 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		SourcePath:     probe.SourcePath,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	})
-	// Avarice F-1506: a Claude Code agent can pass a crafted
+	// a Claude Code agent can pass a crafted
 	// skill_name like "/tmp/attacker/trusted-skill/SKILL.md" and
 	// the previous code stripped it down to the basename
 	// "trusted-skill", which matches the operator's registered
@@ -220,7 +220,7 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		decision.RegistryStatus = "unregistered"
 		// If the operator runs registry_required=true and the
 		// configured default for unknowns is deny (the policy
-		// the test in F-1506 sets up), assetPolicyViolation
+		// the test in sets up), assetPolicyViolation
 		// already produces a block; we just need to make sure
 		// we don't reuse the cached "allow" path. Re-evaluate.
 		decision.RawAction = "block"
@@ -231,7 +231,7 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 			decision.WouldBlock = true
 		}
 		decision.Reason = appendVerdictReason(decision.Reason,
-			"path-shaped skill_name input forced unregistered match (F-1506)")
+			"path-shaped skill_name input forced unregistered match")
 		if strings.TrimSpace(decision.Source) == "" {
 			decision.Source = "skill-path-shaped"
 		}
@@ -326,7 +326,7 @@ func isUnknownTerminalMCP(probe mcpRuntimeProbe) bool {
 }
 
 // assetMCPModeFor returns the effective AssetPolicy mode and whether
-// the operator's MCP.Default is "deny". Used by F-1510 to refuse the
+// the operator's MCP.Default is "deny". Used by to refuse the
 // `unknown_terminal_mcp=observe` downgrade when the operator has
 // already opted into MCP default-deny in action mode.
 func assetMCPModeFor(a *APIServer, decision config.AssetPolicyDecision) (string, bool) {

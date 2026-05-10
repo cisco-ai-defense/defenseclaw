@@ -122,7 +122,7 @@ def evaluate_admission(
 
     allowed_reason = _action_reason(action_entry, default=f"{target_type} '{name}' is on the allow list — scan skipped")
     if pe.is_allowed(target_type, name):
-        # Avarice F-2487 / F-2867: an explicit operator allow that
+        # an explicit operator allow that
         # was registered with a source_path MUST NOT auto-allow a
         # different on-disk asset just because it shares the
         # registered name. Look up the stored entry and compare its
@@ -140,7 +140,7 @@ def evaluate_admission(
                 (
                     f"allow entry for {target_type} '{name}' is pinned to "
                     f"{existing_path!r}, but the presented asset is at "
-                    f"{source_path!r} — failing closed (F-2487)"
+                    f"{source_path!r} — failing closed"
                 ),
                 source="manual-allow-path-mismatch",
             )
@@ -463,7 +463,7 @@ def _matches_provenance(constraints: list[str], source_path: str) -> bool:
     """True if no constraints exist, or if source_path is a path
     *component* match against one of them.
 
-    Avarice F-2488: the previous implementation compared each
+    The previous implementation compared each
     constraint with ``in normalised``, which is a substring test on
     the entire path string. That accepted attacker-controlled
     paths whose components incidentally embed the constraint

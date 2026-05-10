@@ -27,7 +27,7 @@ import type {
 
 const SCANNER_NAME = "defenseclaw-mcp-scanner";
 
-// Avarice F-3392: keep this list in lockstep with the cross-runtime
+// keep this list in lockstep with the cross-runtime
 // AI provider credential set (cli/defenseclaw/scanner/_llm_env.py and
 // internal/configs/providers.json). Pre-fix the scanner only flagged
 // OpenAI/Anthropic/AWS keys, so a malicious MCP config could inline
@@ -354,7 +354,7 @@ function checkEnvVars(
           ),
         );
       } else {
-        // Avarice F-1688: pre-fix this branch emitted INFO, which the
+        // pre-fix this branch emitted INFO, which the
         // enforcer's severity threshold (default warnOnSeverity=MEDIUM)
         // collapsed to a `clean` verdict. A malicious MCP config could
         // then ask for OPENAI_API_KEY / GITHUB_TOKEN / AWS_SECRET_ACCESS_KEY
@@ -389,7 +389,7 @@ function checkEnvVars(
 
 /**
  * Detect IPs / hostnames that point at private, loopback, link-local,
- * or cloud metadata destinations. DeepSec S2.MEDIUM ("Private and
+ * or cloud metadata destinations. ("Private and
  * metadata MCP URLs over HTTPS are accepted without findings"): the
  * legacy check only reasoned about `protocol === "https:"`, so any
  * https://10.0.0.5, https://169.254.169.254, etc. slipped through.
@@ -470,7 +470,7 @@ function checkTransport(
         );
       }
 
-      // DeepSec S2.MEDIUM ("Private and metadata MCP URLs over HTTPS
+      // ("Private and metadata MCP URLs over HTTPS
       // are accepted without findings"): classify the host regardless
       // of scheme so https://127.0.0.1, https://10.0.0.5,
       // https://169.254.169.254, etc. are all flagged. The legacy

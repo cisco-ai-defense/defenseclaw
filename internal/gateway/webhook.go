@@ -101,7 +101,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 			continue
 		}
 		if err := validateWebhookURL(c.URL); err != nil {
-			// DeepSec S2.MEDIUM ("Webhook URLs containing
+			// ("Webhook URLs containing
 			// credentials are logged verbatim"): even on
 			// validation failure the raw URL must not hit
 			// stderr; webhook URLs (Slack/Discord style) can
@@ -261,7 +261,7 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		}
 		cooldownKey := event.Target + "\x00" + action
 		if !ep.claimSlot(cooldownKey) {
-			// DeepSec S2.MEDIUM ("Webhook URLs containing
+			// ("Webhook URLs containing
 			// credentials are logged verbatim"): log the
 			// stable target hash + scrubbed URL instead of
 			// the raw URL so Slack/Discord-style path tokens
@@ -442,7 +442,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	default:
 		payload, err = formatGenericPayload(event)
 	}
-	// DeepSec S2.MEDIUM ("Webhook URLs containing credentials are
+	// ("Webhook URLs containing credentials are
 	// logged verbatim"): bind a stable hash + scrubbed URL once and
 	// reuse them across every per-attempt log line. Slack/Discord
 	// path tokens, query secrets, and userinfo never reach stderr.

@@ -85,7 +85,7 @@ type InspectVerdict = {
   approval_timeout_ms?: number;
 };
 
-// Avarice F-1605: when the sidecar cannot deliver a verdict we MUST
+// when the sidecar cannot deliver a verdict we MUST
 // fail closed instead of returning {allow,observe}. The legacy
 // {allow,observe} fallback turned every sidecar outage, non-2xx
 // response, malformed JSON body, or fetch rejection into a tool-call

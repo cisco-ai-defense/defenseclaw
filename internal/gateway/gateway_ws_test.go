@@ -876,7 +876,7 @@ func TestRouteApprovalNoAutoApprove(t *testing.T) {
 	}
 }
 
-// Avarice F-1145: an approval frame with no SystemRunPlan, nested
+// an approval frame with no SystemRunPlan, nested
 // request, raw command, OR argv carries no command context for the
 // dangerous-pattern scanner. Pre-fix the autoApprove branch returned
 // allow-once for that case ("empty rawCmd is not dangerous"). The
@@ -900,7 +900,7 @@ func TestRouteApprovalEmptyContextDenied(t *testing.T) {
 	var params ApprovalResolveParams
 	json.Unmarshal(rpc.Params, &params)
 	if params.Decision != "deny" {
-		t.Errorf("Decision = %q, want deny (F-1145 fail-closed on empty context)", params.Decision)
+		t.Errorf("Decision = %q, want deny (fail-closed on empty context)", params.Decision)
 	}
 }
 

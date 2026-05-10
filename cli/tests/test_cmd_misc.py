@@ -827,7 +827,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
         self.assertIn("kind: splunk_hec", cfg)
         self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
-        # F-0286: production preset relies on the Go sink's secure
+        # production preset relies on the Go sink's secure
         # default (TLS verification ON) and must not emit any
         # insecure_skip_verify opt-out. The legacy verify_tls flag is
         # likewise silent — operators with a real cert do not need

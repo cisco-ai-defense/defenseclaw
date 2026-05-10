@@ -107,7 +107,7 @@ from defenseclaw.paths import (
 )
 @click.option("--llm-provider", default="", help="Unified LLM provider (openai, anthropic, ollama, etc.).")
 @click.option("--llm-model", default="", help="Unified LLM model, preferably provider/model.")
-# DeepSec S2.MEDIUM ("Initialization accepts API keys as command-line
+# ("Initialization accepts API keys as command-line
 # arguments"): raw secret values on argv leak via shell history, terminal
 # scrollback, CI logs, and `ps`/`/proc/<pid>/cmdline`. The flag stays for
 # backward compatibility but is deprecated; init_cmd warns operators when
@@ -219,7 +219,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     """
     import platform
 
-    # DeepSec S2.MEDIUM ("Initialization accepts API keys as command-line
+    # ("Initialization accepts API keys as command-line
     # arguments"): resolve secret-valued options through the env / stdin /
     # file alternatives before any downstream code touches them. Argv path
     # still works but emits a deprecation warning so operators migrate.
@@ -369,7 +369,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     ux.banner("Skills")
     click.echo("  CodeGuard:     skipped (opt in with 'defenseclaw codeguard install --target skill')")
 
-    # DeepSec S3.BUG ("Notification onboarding runs twice during
+    # ("Notification onboarding runs twice during
     # init"): the legacy init path used to render the Notifications
     # banner and call _onboard_notifications twice in a row with
     # identical arguments. On a fresh interactive run that prompted
@@ -475,7 +475,7 @@ def _resolve_secret_arg(
 ) -> str:
     """Resolve secret-valued init options from safe sources.
 
-    DeepSec S2.MEDIUM ("Initialization accepts API keys as command-line
+    ("Initialization accepts API keys as command-line
     arguments"): explicit argv values still work for backward
     compatibility but emit a deprecation warning. Stdin and file inputs
     avoid argv exposure entirely. The file path is required to be a
@@ -1272,7 +1272,7 @@ def _onboard_notifications(
 ) -> None:
     """Surface the desktop-notifications opt-in prompt on first run.
 
-    DeepSec S3.BUG ("Notification onboarding runs twice during init")
+    ("Notification onboarding runs twice during init")
     closure: the legacy file shipped this helper twice (Python keeps
     only the second binding), and the init flow called it twice in
     succession. Both copies have been collapsed to a single canonical
@@ -1489,7 +1489,7 @@ def _is_sidecar_running(pid_file: str) -> bool:
     """Check if the gateway sidecar process is alive AND its
     process command line looks like the DefenseClaw gateway.
 
-    Avarice F-2189: a stale or planted gateway.pid containing the
+    a stale or planted gateway.pid containing the
     PID of an unrelated live process used to convince the legacy
     init flow that the sidecar was already running. Generated
     hooks then forwarded uninspected traffic because their default

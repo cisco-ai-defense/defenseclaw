@@ -1310,7 +1310,7 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 		t.Error("expected non-loopback auth to fail when token configured")
 	}
 
-	// Avarice F-1365: with a gateway token configured, a loopback
+	// with a gateway token configured, a loopback
 	// request that carries no X-DC-Auth, no master-key Authorization,
 	// and no recognized provider Authorization header MUST be
 	// rejected. The legacy code unconditionally trusted loopback
@@ -1323,7 +1323,7 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 	r4 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	r4.RemoteAddr = "127.0.0.1:54321"
 	if c.Authenticate(r4) {
-		t.Error("loopback without X-DC-Auth/master-key/provider key must fail closed when gateway token is configured (F-1365)")
+		t.Error("loopback without X-DC-Auth/master-key/provider key must fail closed when gateway token is configured")
 	}
 
 	// Operator-explicit opt-in path: DEFENSECLAW_CODEX_LOOPBACK_TRUST=1
@@ -1344,7 +1344,7 @@ func TestCodex_Authenticate_Loopback(t *testing.T) {
 // gateway token is configured — otherwise codex sees a 401 and no
 // traffic is ever inspected.
 //
-// Avarice F-1365: the connector now requires the Authorization Bearer
+// the connector now requires the Authorization Bearer
 // to match a recorded codex provider key (operator-supplied via
 // SetProviderSnapshot), not just any string. This keeps the native
 // codex CLI working while denying arbitrary local processes that do
@@ -1366,7 +1366,7 @@ func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 			"otherwise codex → proxy traffic gets 401'd and guardrail never runs")
 	}
 
-	// Avarice F-1365 negative: an Authorization Bearer that does NOT
+	// negative: an Authorization Bearer that does NOT
 	// match any recorded provider key must be rejected (this is the
 	// shared-host bypass that the finding documented).
 	c2 := NewCodexConnector()
@@ -1375,7 +1375,7 @@ func TestCodex_Authenticate_NativeBinaryLoopback(t *testing.T) {
 	r2.RemoteAddr = "127.0.0.1:54321"
 	r2.Header.Set("Authorization", "Bearer sk-attacker-supplied")
 	if c2.Authenticate(r2) {
-		t.Fatal("loopback Authorization that does not match any recorded provider key must be rejected (F-1365)")
+		t.Fatal("loopback Authorization that does not match any recorded provider key must be rejected")
 	}
 }
 
@@ -1396,7 +1396,7 @@ func TestCodex_Authenticate_NoCredentials(t *testing.T) {
 }
 
 // TestCodex_Authenticate_LoopbackWarnOnce pins the warn-once
-// telemetry behavior for the F-1365 fail-closed default. When a
+// telemetry behavior for the fail-closed default. When a
 // gateway token is configured and a loopback caller fails the
 // known-provider check, the connector logs a single
 // `[SECURITY] codex: rejecting loopback /c/codex/* request — ...`
@@ -1422,7 +1422,7 @@ func TestCodex_Authenticate_LoopbackWarnOnce(t *testing.T) {
 		// once.
 		r.Header.Set("Authorization", "Bearer sk-attacker-key")
 		if c.Authenticate(r) {
-			t.Fatalf("iter %d: codex loopback auth must reject when bearer is not a known provider key (F-1365)", i)
+			t.Fatalf("iter %d: codex loopback auth must reject when bearer is not a known provider key", i)
 		}
 	}
 
@@ -4118,7 +4118,7 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 		// No creds on loopback should fail for every connector now —
 		// closes the local-process bypass vector.
 		//
-		// Avarice F-1365: codex previously trusted loopback
+		// codex previously trusted loopback
 		// unconditionally because the native Rust binary has no
 		// fetch-interceptor seam for X-DC-Auth. That was a shared-host
 		// local-IDOR vector. The connector now requires the loopback
@@ -4129,7 +4129,7 @@ func TestAllConnectors_Auth_Parity(t *testing.T) {
 		r3 := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 		r3.RemoteAddr = "127.0.0.1:54321"
 		if c.Authenticate(r3) {
-			t.Errorf("%s: should fail without credentials when token configured (F-1365)", c.Name())
+			t.Errorf("%s: should fail without credentials when token configured", c.Name())
 		}
 	}
 }
@@ -5093,7 +5093,7 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 //
 // NOTE on fail_mode in the failure log: this is metadata recording
 // the configured response-layer fail mode at write time, not the
-// transport-layer behavior under test. Post-F-0681, the safer default
+// transport-layer behavior under test. Post-, the safer default
 // for response-layer failures is "closed", so the metadata reflects
 // that. The transport-layer fail-open behavior remains unchanged.
 func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
@@ -5137,7 +5137,7 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		// Closes avarice F-0681. The response-layer default is now
+		// Closes . The response-layer default is now
 		// "closed" so the failure log metadata reflects that.
 		// Functional invariant under test (hook exits 0 / allows
 		// agent on transport failure) is unchanged — that is the
@@ -5408,7 +5408,7 @@ func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			// Closes avarice F-0681. After v4 the safer default is
+			// Closes . After v4 the safer default is
 			// "closed" — empty SetupOpts.HookFailMode renders the
 			// hook with FAIL_MODE=closed so response-layer failures
 			// (4xx, malformed JSON, missing action) BLOCK rather than
@@ -5435,7 +5435,7 @@ func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			// Closes avarice F-0681. Garbage / typo values
+			// Closes . Garbage / typo values
 			// normalize to the safer "closed" sentinel so a
 			// misconfigured operator value never silently puts the
 			// agent into fail-OPEN mode.
@@ -5513,7 +5513,7 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		// Closes avarice F-0681. Response-layer default flipped to
+		// Closes . Response-layer default flipped to
 		// "closed" — transport-layer fail-open behavior under test
 		// here is unchanged (the hook still exits 0 and the agent
 		// still proceeds when the gateway is unreachable).

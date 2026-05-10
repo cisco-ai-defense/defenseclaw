@@ -23,8 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
 )
 
-// TestCompile_F2907_EmitsIPv6Section is a regression test for avarice
-// F-2907. The compiler must emit an `# v6:` divider followed by an
+// TestCompile_F2907_EmitsIPv6Section is a regression test for // . The compiler must emit an `# v6:` divider followed by an
 // ip6tables ruleset so dual-stack hosts apply default-deny to IPv6
 // traffic, not just IPv4.
 func TestCompile_F2907_EmitsIPv6Section(t *testing.T) {

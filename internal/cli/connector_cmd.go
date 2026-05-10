@@ -186,7 +186,7 @@ func resolveConnectorDataDir() string {
 // newConnectorRegistryWithPlugins mirrors the sidecar startup path
 // (NewGuardrailProxy / APIServer.Run) by registering both the
 // built-in connectors AND any plugin connectors discovered under the
-// configured plugin directory. DeepSec S3.BUG ("Connector lifecycle
+// configured plugin directory. ("Connector lifecycle
 // commands cannot operate on plugin connectors"): without this, a
 // plugin connector named in active_connector.json or via --connector
 // is reported as unknown by `connector teardown` and `connector

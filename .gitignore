@@ -96,9 +96,8 @@ output/playwright/
 AGENTS.md
 CLAUDE.md
 
-# DeepSec scan tool output (`npx deepsec scan` writes data/ here).
-# The reports under .deepsec/data/.../reports/ are local audit
-# artifacts the tool regenerates per run; never check them in.
+# Local security-audit tool output directories. These are
+# regenerated per run and never checked in.
 .deepsec/
 
 # Local smoke-test scratch directory used by manual REPL/curl runs

@@ -312,7 +312,7 @@ const trustedProxyEnvVar = "DEFENSECLAW_TRUSTED_PROXY_CIDRS"
 // ClientIPRedacted returns a privacy-preserving client address for logs
 // (IPv4 /24, IPv6 prefix simplified to first 4 hextets + "::/48" style stub).
 //
-// DeepSec S2.MEDIUM ("Authentication failure logs trust spoofable
+// ("Authentication failure logs trust spoofable
 // X-Forwarded-For"): the legacy implementation always preferred the
 // first “X-Forwarded-For“ value over the socket “RemoteAddr“, and
 // returned the raw header bytes when they failed to parse as an IP.

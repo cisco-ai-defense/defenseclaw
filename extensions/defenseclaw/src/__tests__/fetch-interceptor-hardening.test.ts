@@ -5,7 +5,7 @@
  */
 
 /**
- * DeepSec hardening regressions for fetch-interceptor.ts.
+ * hardening regressions for fetch-interceptor.ts.
  *
  * Locks in:
  *   1. isAlreadyProxied parses the URL and only matches loopback host
@@ -13,8 +13,7 @@
  *   2. matchesLLMDomain accepts the wildcard entry
  *      "bedrock-runtime.*.amazonaws.com" for real regional Bedrock
  *      hosts and refuses spoofs like "bedrock-runtime.evil.example".
- *      The legacy trailing-dot prefix syntax is NOT honoured (DeepSec
- *      finding "Provider allowlist can be spoofed to forward to
+ *      The legacy trailing-dot prefix syntax is NOT honoured (*      finding "Provider allowlist can be spoofed to forward to
  *      internal hosts").
  *   3. URL scrubbing strips secret-bearing query parameters before any
  *      console.log / egress telemetry hop.
@@ -61,7 +60,7 @@ describe("isLLMUrl + Bedrock wildcard", () => {
   });
 
   it("refuses prefix-only spoofs that the legacy trailing-dot syntax accepted", () => {
-    // DeepSec finding "Provider allowlist can be spoofed to forward
+    // finding "Provider allowlist can be spoofed to forward
     // to internal hosts": the legacy "bedrock-runtime." trailing-dot
     // entry happily matched any host that simply started with the
     // string. The new "bedrock-runtime.*.amazonaws.com" wildcard
@@ -124,7 +123,7 @@ describe("isAlreadyProxied: no substring bypass", () => {
   });
 
   it("still intercepts a Bedrock URL whose query param contains '127.0.0.1:<guardrailPort>'", () => {
-    // DeepSec finding "Substring self-proxy check lets LLM requests
+    // finding "Substring self-proxy check lets LLM requests
     // bypass interception": the URL below contains the literal
     // "127.0.0.1:14010" inside its query string, but the request
     // really targets bedrock-runtime.us-east-1.amazonaws.com. The old

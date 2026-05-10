@@ -543,7 +543,7 @@ func readMCPServersCodex() ([]MCPServerEntry, error) {
 	// so that, when a project and global config both declare the
 	// same server name, the project-local command/URL is the one
 	// retained for inventory, watcher, snapshot, and admission.
-	// Reversing this order regresses DeepSec finding "Codex
+	// Reversing this order regresses finding "Codex
 	// project-local MCP overrides are shadowed by global entries":
 	// a malicious user-global config that re-uses a benign
 	// project-local server name would otherwise hide the active

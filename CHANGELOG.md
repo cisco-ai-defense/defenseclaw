@@ -4,14 +4,13 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — DeepSec audit closure (75 findings → 0)
+## [Unreleased] — Pre-launch security hardening
 
-This rollup closes every actionable finding from the DeepSec security
-audit (`.deepsec/data/defenseclaw/reports/report.md`): 1 CRITICAL,
-26 HIGH, 24 MEDIUM, 9 HIGH_BUG, and 15 BUG. The two findings tagged
-"FP" by reviewers are also remediated because their underlying code
-paths required changes anyway. No protections were removed; the audit
-strictly tightens existing guards.
+This release tightens the SSRF, supply-chain, and runtime-integrity
+defenses across the gateway, watcher, scanner, and connector
+surfaces in preparation for the public launch. No protections were
+removed; every change strictly narrows existing guards or adds new
+ones with safe defaults.
 
 ### ⚠️ Operator-visible behaviour changes (read this before upgrading)
 
@@ -55,46 +54,46 @@ unified through `isUnsafeIP`, so misconfigurations surface at
 `defenseclaw config webhook add` / `update` time instead of at first
 delivery. Existing valid webhook URLs (public hosts) are unaffected.
 
-### Security — DeepSec hardening (selected highlights)
+### Security — hardening (selected highlights)
 
-- **CRITICAL S0** Codex git-scan hardening: hostile repository config,
+- **Critical:** Codex git-scan hardening: hostile repository config,
   external diff, and `core.fsmonitor` injection paths are sanitized
   through `internal/gitsafe`; safe-flag set audited against
   `git --help`.
-- **HIGH S2** Workflow integrity: `.github/workflows/{ci,docs-site,e2e,release}.yml`
+- **High:** Workflow integrity: `.github/workflows/{ci,docs-site,e2e,release}.yml`
   pin every third-party action by SHA, drop unused `permissions`
   scopes, and quote / sanitize all input expansions.
-- **HIGH S2** Gateway HTTP egress: `internal/gateway/proxy.go` enforces
+- **High:** Gateway HTTP egress: `internal/gateway/proxy.go` enforces
   SSRF refusal across known/unknown branches with `ResolveAndPin`,
   exact provider matching, IP/CIDR pinned dialer, userinfo / control-
   byte rejection, and structured URL scrubbing on every log/metric
   surface.
-- **HIGH S2** Connector subprocess + plugin loader: token-aware hook
+- **High:** Connector subprocess + plugin loader: token-aware hook
   templates, plugin loader TOCTOU closed (open-then-stat pinned to the
   same fd), embedded plugin canonical token derivation.
-- **HIGH S2** Gateway scanners (mcp / plugin / skill) now fail-closed
+- **High:** Gateway scanners (mcp / plugin / skill) now fail-closed
   on non-zero subprocess exit; `policy.ScanResultInput` extended so the
   policy engine sees the full scanner verdict shape.
-- **HIGH S2** Watcher routes rescan + baseline through admission and
+- **High:** Watcher routes rescan + baseline through admission and
   installs recursive watches on every admitted directory; skipping a
   policy file no longer suppresses unrelated change activity.
-- **HIGH S3 BUG** Sandbox cleanup is scoped to per-request directories;
+- **High (bug fix):** Sandbox cleanup is scoped to per-request directories;
   the surgical 0.3 migration replaced the destructive prior path; the
   `http_jsonl` sink retries synchronously on transient failures;
   watchdog uses flock + binary fingerprint to recognise stale
   processes; `RepairPairing` is fail-closed and atomic.
-- **MEDIUM S4** Webhook URLs are hashed (`scrubURLSecrets`,
+- **Medium:** Webhook URLs are hashed (`scrubURLSecrets`,
   `hashWebhookTargetURL`) on every log path; AI-discovery path
   fingerprints are HMAC-keyed; MCP scan target URLs are validated as
   loopback / private / metadata; endpoint ignore-list switched from
   prefix matching to exact hostname / loopback IP literal matching.
-- **MEDIUM S4** `CorrelationMiddleware` no longer mints unauthenticated
+- **Medium:** `CorrelationMiddleware` no longer mints unauthenticated
   agent sessions: it calls `AgentRegistry.ResolvePeek`, then handlers
   call `PromoteSessionIfAuthenticated` after `tokenAuth` succeeds.
   Combined with the LRU cap on `AgentRegistry`, unauthenticated
   callers can no longer amplify in-memory state by flooding distinct
   `X-DefenseClaw-Session-Id` headers.
-- **BUG S5** `cli/defenseclaw/commands/cmd_init.py` no longer runs
+- **Bug fix:** `cli/defenseclaw/commands/cmd_init.py` no longer runs
   notifications onboarding twice; `cli/defenseclaw/provenance.py` now
   hashes nested policy bundle files; `internal/cli/connector_cmd.go`
   discovers plugin connectors before lifecycle commands run;

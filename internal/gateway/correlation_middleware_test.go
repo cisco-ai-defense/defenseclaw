@@ -129,7 +129,7 @@ func TestSessionIDFromHeaders_Bounded(t *testing.T) {
 // an end-to-end HTTP test and asserts session/trace/agent identity
 // land in the downstream context.
 //
-// DeepSec S2.MEDIUM ("CorrelationMiddleware mints unauthenticated
+// ("CorrelationMiddleware mints unauthenticated
 // agent sessions") closure: the middleware now uses ResolvePeek
 // (not Resolve), so unauthenticated traffic does NOT mint a
 // session-scoped agent_instance_id. The downstream handler stays
@@ -177,7 +177,7 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 			preAuthIdentity.SidecarInstanceID, reg.SidecarInstanceID())
 	}
 	if preAuthIdentity.AgentInstanceID != "" {
-		t.Errorf("pre-auth agent_instance_id=%q want empty (DeepSec S2.MEDIUM): unauthenticated traffic must not mint a session entry",
+		t.Errorf("pre-auth agent_instance_id=%q want empty (S2.MEDIUM): unauthenticated traffic must not mint a session entry",
 			preAuthIdentity.AgentInstanceID)
 	}
 	if postAuthIdentity.AgentInstanceID == "" {
@@ -204,7 +204,7 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 		// CorrelationMiddleware and, on success, promotes the
 		// peeked identity to a real registry entry. Until that
 		// happens the envelope must NOT carry an
-		// agent_instance_id (DeepSec S2.MEDIUM closure).
+		// agent_instance_id (closure).
 		ctx := PromoteSessionIfAuthenticated(r.Context())
 		postAuthEnv = audit.EnvelopeFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
@@ -228,7 +228,7 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 		t.Errorf("AgentID=%q want agent-env", preAuthEnv.AgentID)
 	}
 	if preAuthEnv.AgentInstanceID != "" {
-		t.Errorf("pre-auth AgentInstanceID=%q want empty (DeepSec S2.MEDIUM)",
+		t.Errorf("pre-auth AgentInstanceID=%q want empty (S2.MEDIUM)",
 			preAuthEnv.AgentInstanceID)
 	}
 	if postAuthEnv.AgentInstanceID == "" {

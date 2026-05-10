@@ -54,7 +54,7 @@ def _doctor_subsection(title: str) -> None:
 
     Format: blank line, then ``  ── <title> ──`` with the title bold
     and the box-drawing dashes dimmed in TTY mode. Plain mode keeps
-    the legacy uncolored layout so cron logs and log shippers see
+    The legacy uncolored layout so cron logs and log shippers see
     the same byte stream they always have.
     """
     click.echo()

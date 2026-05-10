@@ -272,7 +272,7 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 // on X-DC-Auth or the master key. The gateway token exists to protect
 // those paths, not to break the local-only native binary path.
 func (c *CodexConnector) Authenticate(r *http.Request) bool {
-	// Avarice F-1365: the legacy code unconditionally trusted any
+	// the legacy code unconditionally trusted any
 	// loopback caller. On a shared-user host, that allowed any
 	// local process to use /c/codex/* as an unauthenticated
 	// provider relay (the connector copies the operator's
@@ -313,7 +313,7 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 				fmt.Fprintf(os.Stderr,
 					"[SECURITY] codex: DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 — accepting "+
 						"loopback /c/codex/* requests without X-DC-Auth. Any process on "+
-						"this host can route through the codex relay (F-1365).\n")
+						"this host can route through the codex relay.\n")
 			})
 			return true
 		}
@@ -331,7 +331,7 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 					"no X-DC-Auth, no matching master key, and no recognized "+
 					"provider Authorization header. Set "+
 					"DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 to opt back into "+
-					"the legacy loose behavior on a single-user host (F-1365).\n")
+					"the legacy loose behavior on a single-user host.\n")
 		})
 		return false
 	}

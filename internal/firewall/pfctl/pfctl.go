@@ -105,7 +105,7 @@ func (c *Compiler) Compile(cfg *firewall.FirewallConfig) ([]string, error) {
 
 	// Always allow: established connections, DNS, loopback.
 	//
-	// Avarice F-2908: the legacy ruleset emitted
+	// the legacy ruleset emitted
 	//   pass out quick inet proto udp keep state
 	// before the DNS allow rules. UDP has no TCP-style established
 	// flag, so that rule unconditionally permitted any new outbound
@@ -118,7 +118,7 @@ func (c *Compiler) Compile(cfg *firewall.FirewallConfig) ([]string, error) {
 	// the DNS allow rules below to admit new UDP datagrams.
 	rules = append(rules,
 		"",
-		"# Allow established connections (F-2908: keep stateful TCP only)",
+		"# Allow established connections (keep stateful TCP only)",
 		"pass out quick inet proto tcp flags A/A keep state",
 		"# Reply traffic for already-established UDP flows is admitted by",
 		"# PF's per-flow state created when a matching outbound rule first",

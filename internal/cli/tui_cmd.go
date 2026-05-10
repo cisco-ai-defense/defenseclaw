@@ -314,7 +314,7 @@ func promptFirstRunBeforeTUI(
 
 	reader := bufio.NewReader(in)
 	line, rerr := reader.ReadString('\n')
-	// DeepSec S3.BUG ("Ctrl-D/empty EOF is treated as yes despite
+	// ("Ctrl-D/empty EOF is treated as yes despite
 	// the safety comment"): the comment below correctly states
 	// that an empty EOF should be treated as "no" to avoid
 	// spawning an interactive `defenseclaw init` against a closed

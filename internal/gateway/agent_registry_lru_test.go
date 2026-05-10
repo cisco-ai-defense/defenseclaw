@@ -17,7 +17,7 @@ import (
 // Resolve evicts the oldest entry (by LastSeen) and admits the new
 // one. Without this test, a refactor that silently lifted or removed
 // the cap would not fail CI — and the cap is the entire point of the
-// DeepSec resource-exhaustion fix.
+// resource-exhaustion fix.
 func TestAgentRegistry_LRUEvictionAtCap(t *testing.T) {
 	r := NewAgentRegistry("test-agent", "test-agent-name")
 	want := agentRegistryMaxSessions

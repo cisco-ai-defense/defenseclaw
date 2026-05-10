@@ -97,7 +97,7 @@ func (e *SkillEnforcer) IsQuarantined(skillName string) bool {
 }
 
 func copyFile(src, dst string) error {
-	// Avarice F-2869: os.ReadFile follows symlinks. The caller
+	// os.ReadFile follows symlinks. The caller
 	// (copyDir) already filters out symlink entries with Lstat
 	// before reaching us, so this branch should only see regular
 	// files. We still defensively re-check to keep this helper
@@ -120,7 +120,7 @@ func copyFile(src, dst string) error {
 }
 
 func copyDir(src, dst string) error {
-	// Avarice F-2869: a malicious skill or plugin package can place
+	// a malicious skill or plugin package can place
 	// a symlink in its installed tree (e.g.
 	// `malicious-skill/leaked-secret -> /etc/passwd`). The previous
 	// copyDir handled `d.IsDir()` and sent every other entry to
@@ -154,7 +154,7 @@ func copyDir(src, dst string) error {
 
 		if mode&fs.ModeSymlink != 0 {
 			fmt.Fprintf(os.Stderr,
-				"[enforce] skipping symlink during quarantine: %s -> (target hidden, F-2869)\n",
+				"[enforce] skipping symlink during quarantine: %s -> (target hidden, )\n",
 				path)
 			return nil
 		}
@@ -163,7 +163,7 @@ func copyDir(src, dst string) error {
 		}
 		if !mode.IsRegular() {
 			fmt.Fprintf(os.Stderr,
-				"[enforce] skipping non-regular file during quarantine: %s mode=%s (F-2869)\n",
+				"[enforce] skipping non-regular file during quarantine: %s mode=%s\n",
 				path, mode)
 			return nil
 		}

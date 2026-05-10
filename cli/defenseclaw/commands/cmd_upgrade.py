@@ -280,7 +280,7 @@ def _preflight_check(version: str, os_name: str, arch: str) -> None:
 
 
 def _verify_artifact_sha256(path: str, name: str, pinned_env: str, sidecar_url: str) -> None:
-    """Avarice F-2267 / F-1827: verify a downloaded release artifact
+    """verify a downloaded release artifact
     against either an operator-pinned digest (env var) or a published
     `<artifact>.sha256` sidecar in the same release. Fail closed if
     neither is available unless DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.
@@ -297,7 +297,7 @@ def _verify_artifact_sha256(path: str, name: str, pinned_env: str, sidecar_url: 
     if pinned:
         if pinned != actual:
             raise click.ClickException(
-                f"checksum mismatch for {name}: expected {pinned} got {actual} (F-2267)"
+                f"checksum mismatch for {name}: expected {pinned} got {actual}"
             )
         ux.ok(f"{name}: pinned sha256 match")
         return
@@ -310,7 +310,7 @@ def _verify_artifact_sha256(path: str, name: str, pinned_env: str, sidecar_url: 
                 ux.ok(f"{name}: published .sha256 sidecar match")
                 return
             raise click.ClickException(
-                f"checksum mismatch for {name}: published {published} got {actual} (F-2267)"
+                f"checksum mismatch for {name}: published {published} got {actual}"
             )
     except requests.RequestException:
         pass
@@ -318,13 +318,13 @@ def _verify_artifact_sha256(path: str, name: str, pinned_env: str, sidecar_url: 
     if os.environ.get("DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "").strip() == "1":
         ux.warn(
             f"{name}: no checksum available and DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 — "
-            "proceeding without verification (F-2267)",
+            "proceeding without verification",
             indent="  ",
         )
         return
     raise click.ClickException(
         f"no published .sha256 for {name} and no pinned {pinned_env}; "
-        f"refusing to install unverified artifact (F-2267)"
+        f"refusing to install unverified artifact"
     )
 
 
@@ -336,7 +336,7 @@ def _download_gateway(version: str, os_name: str, arch: str, staging_dir: str) -
     click.echo(f"  {ux.dim('→')} Downloading gateway binary ({os_name}/{arch}) ...")
     dest = os.path.join(staging_dir, tarball)
     _download_file(url, dest)
-    # Avarice F-2267: verify integrity BEFORE extracting / installing.
+    # verify integrity BEFORE extracting / installing.
     _verify_artifact_sha256(dest, "gateway tarball",
                             "DEFENSECLAW_UPGRADE_TARBALL_SHA256",
                             url + ".sha256")

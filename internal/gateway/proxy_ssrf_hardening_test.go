@@ -27,7 +27,7 @@ import (
 )
 
 // TestMatchProviderDomain_BedrockWildcard pins the new
-// matchWildcardDomain behaviour. The DeepSec audit found that the
+// matchWildcardDomain behaviour. The audit found that the
 // previous trailing-dot prefix syntax (domains: ["bedrock-runtime."])
 // matched "bedrock-runtime.evil.example", letting an attacker spoof a
 // known-provider host and bypass the SSRF private-host gate. The
@@ -47,7 +47,7 @@ func TestMatchProviderDomain_BedrockWildcard(t *testing.T) {
 		{"bedrock-runtime.us-east-1.amazonaws.com", true},
 		{"bedrock-runtime.eu-west-2.amazonaws.com", true},
 		{"bedrock-runtime.ap-southeast-1.amazonaws.com", true},
-		// DeepSec-flagged spoofs — every one of these matched the
+		// -flagged spoofs — every one of these matched the
 		// legacy "bedrock-runtime." prefix entry.
 		{"bedrock-runtime.evil.example", false},
 		{"bedrock-runtime.attacker.amazonaws.com.evil.com", false},
@@ -76,7 +76,7 @@ func TestMatchProviderDomain_BedrockWildcard(t *testing.T) {
 // will silently disappear from the allow-list.
 func TestMatchProviderDomain_TrailingDotRefused(t *testing.T) {
 	if matchProviderDomain("bedrock-runtime.us-east-1.amazonaws.com", "/x", "bedrock-runtime.") {
-		t.Errorf("legacy trailing-dot prefix should no longer match (DeepSec)")
+		t.Errorf("legacy trailing-dot prefix should no longer match ()")
 	}
 }
 

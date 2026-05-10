@@ -80,7 +80,7 @@ func TestPolicyFilePoll_TransitionGate_UnreadableThenReadable(t *testing.T) {
 	}
 
 	// Mutate `good` while `bad` is still unreadable — must still see
-	// the change to `good` (the original DeepSec bug was that one
+	// the change to `good` (the original bug was that one
 	// unreadable file blanked all detection).
 	if err := os.WriteFile(good, []byte("- target_type: skill\n  target_name: aaa\n"), 0o600); err != nil {
 		t.Fatal(err)

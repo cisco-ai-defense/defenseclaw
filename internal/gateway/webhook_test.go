@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1366,5 +1367,38 @@ func TestWebhookRevealFlagDoesNotUnmaskPayloads(t *testing.T) {
 	defer mu.Unlock()
 	if strings.Contains(body, "4155551234") {
 		t.Fatalf("webhook unmasked under reveal flag: %s", body)
+	}
+}
+
+// TestIsPrivateIP_IPv4MappedIPv6 pins isPrivateIP's behavior across the
+// IPv4-mapped IPv6 surface. Without the To4() collapse, the v6-mapped
+// form of a v4 private literal would not match the explicit /8 /12 /16
+// CIDRs because the dotted-quad bytes live inside the v6 representation.
+// After the collapse, every mapped form is correctly classified.
+func TestIsPrivateIP_IPv4MappedIPv6(t *testing.T) {
+	cases := map[string]bool{
+		"::ffff:127.0.0.1":       true,
+		"::ffff:10.0.0.1":        true,
+		"::ffff:192.168.0.10":    true,
+		"::ffff:169.254.169.254": true, // cloud IMDS via v6-mapped
+		"::ffff:172.16.0.1":      true,
+		"::ffff:8.8.8.8":         false,
+		"::ffff:1.2.3.4":         false,
+		"127.0.0.1":              true,
+		"169.254.169.254":        true,
+		"::1":                    true,
+		"fe80::1":                true,
+		"fc00::1":                true,
+		"2001:db8::1":            false,
+		"8.8.8.8":                false,
+	}
+	for s, want := range cases {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("test fixture %q is not a valid IP literal", s)
+		}
+		if got := isPrivateIP(ip); got != want {
+			t.Errorf("isPrivateIP(%q) = %v, want %v", s, got, want)
+		}
 	}
 }

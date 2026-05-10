@@ -1106,7 +1106,7 @@ type GuardrailConfig struct {
 // the _migrate_0_4_0_seed_hook_fail_mode migration in
 // cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
 // into config.yaml on first upgrade. New installs and explicit-empty
-// values get the safer default. Closes avarice F-0681.
+// values get the safer default. Closes .
 func (g *GuardrailConfig) EffectiveHookFailMode() string {
 	if g == nil {
 		return "closed"
@@ -2166,7 +2166,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.mode", "observe")
 	// "closed" is the safer default — response-layer failures (4xx,
 	// malformed JSON, missing action) BLOCK the tool/prompt rather
-	// than silently allowing it. Closes avarice F-0681. Existing
+	// than silently allowing it. Closes . Existing
 	// operators on v3 are protected by
 	// _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which writes
 	// ``hook_fail_mode: open`` to existing config.yaml so prior

@@ -65,8 +65,7 @@ func TestDeriveAIInventoryHashKeyContract(t *testing.T) {
 // TestDeriveAIInventoryHashKeyActivatesKeyedHashPath wires the derived
 // key into `inventory.SetPathHashKey` and confirms `inventory.HashPath`
 // (the package-level helper) switches to the keyed `hmac-sha256:`
-// digest form. This is the regression test for DeepSec S2.MEDIUM
-// "Redacted AI discovery events expose reversible path fingerprints":
+// digest form. This is the regression test for // "Redacted AI discovery events expose reversible path fingerprints":
 // without the wiring, `hashPath` falls back to plain `sha256:` and a
 // recipient of a redacted event can dictionary-attack predictable paths.
 //

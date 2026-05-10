@@ -16,7 +16,7 @@
 
 """Hardening tests for the plugin LLM analyzer.
 
-Locks in the post-DeepSec contract:
+Locks in the post-contract:
 
 * ``run_meta_llm`` must wrap source/evidence in random delimiters and
   carry an "untrusted input" preamble in the system prompt.

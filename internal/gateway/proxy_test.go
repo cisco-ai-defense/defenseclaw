@@ -153,7 +153,7 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 	store, logger := testStoreAndLogger(t)
 	health := NewSidecarHealth()
 
-	// DeepSec hardening (S2.proxy SSRF): handlePassthrough now
+	// hardening (S2.proxy SSRF): handlePassthrough now
 	// hard-blocks any upstream that resolves to a private/loopback
 	// address, including the "known" provider branch. Legacy fixtures
 	// in this file simulate "known providers" by appending "127.0.0.1"
@@ -1986,7 +1986,7 @@ func TestIsKnownProviderDomain(t *testing.T) {
 		{"chatgpt backend-api full", "https://chatgpt.com/backend-api/codex/responses", true},
 		{"chatgpt backend-api origin only", "https://chatgpt.com/", false},
 		{"chatgpt wrong path", "https://chatgpt.com/static/app.js", false},
-		// Avarice F-1185: pre-fix the legacy "bedrock-runtime." prefix
+		// pre-fix the legacy "bedrock-runtime." prefix
 		// matched any host that began with that string, including
 		// attacker-controlled domains. The wildcard form pins the AWS
 		// suffix and rejects host shapes that don't terminate in
@@ -2682,7 +2682,7 @@ func TestHandlePassthrough_SSRFHardening(t *testing.T) {
 		{"private 192.168.x.x", "http://192.168.1.1/admin", http.StatusForbidden},
 		{"link-local", "http://169.254.169.254/latest/meta-data/", http.StatusForbidden},
 		// file:// and ftp:// are now rejected at the X-DC-Target-URL
-		// validation gate (DeepSec hardening) before branch
+		// validation gate (hardening) before branch
 		// classification, returning 400 ("scheme must be http or
 		// https") rather than the legacy 403 ("unknown domain"). Both
 		// are equally good security signals; updated expectation

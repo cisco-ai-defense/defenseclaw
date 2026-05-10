@@ -299,7 +299,7 @@ func compositeModelForUpstream(urlInferredPrefix string, bodyModel string) strin
 // No client-level Timeout is set because each call site passes a
 // context.WithTimeout — a client-level timeout would race with that.
 //
-// DeepSec hardening (S2.proxy SSRF):
+// hardening (S2.proxy SSRF):
 //
 //   - DialContext resolves the destination hostname and refuses any
 //     attempt to connect to a loopback / private / link-local /

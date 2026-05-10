@@ -214,7 +214,7 @@ func loadYAML[T any](dir, relPath string) *T {
 		}
 	}
 
-	// DeepSec S3.BUG ("Embedded rule-pack fallback uses
+	// ("Embedded rule-pack fallback uses
 	// OS-specific paths"): embed.FS paths are always slash-
 	// separated regardless of GOOS. The previous filepath.Join
 	// produced `defaults\sensitive-tools.yaml` on Windows, so

@@ -148,7 +148,7 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 			// incomplete. Previously these errors were silently
 			// swallowed (`if err != nil { continue }`), which let an
 			// attacker hide payloads behind oversize lines, unreadable
-			// files, or other read errors. See DeepSec finding
+			// files, or other read errors. See finding
 			// "codeguard scan silently skips files on error".
 			result.Findings = append(result.Findings, Finding{
 				ID:          "CG-SCAN-001",

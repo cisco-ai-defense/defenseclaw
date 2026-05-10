@@ -1103,7 +1103,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
             click.echo(
                 f"[scan] extracting prefix={skill_prefix!r} → {skill_dir!s}"
             )
-        # DeepSec S2.MEDIUM ("Untrusted skill archives can decompress
+        # ("Untrusted skill archives can decompress
         # without an output cap"): _safe_tar_extract enforces the same
         # post-decompression caps as _scan_from_http; surface the
         # rejection cleanly so the temp tree (cleaned in `finally`) does
@@ -1216,7 +1216,7 @@ def _scan_from_http(
         extract_dir = os.path.join(tmpdir, "skill")
         os.makedirs(extract_dir, exist_ok=True)
 
-        # DeepSec S2.MEDIUM ("Untrusted skill archives can decompress
+        # ("Untrusted skill archives can decompress
         # without an output cap"): replace the legacy `tf.extractall` /
         # `zf.extractall` calls with capped streaming extractors so a
         # malicious registry or scan URL cannot turn a small compressed
@@ -1308,7 +1308,7 @@ def _parse_clawhub_uri(uri: str) -> tuple[str, str | None]:
     return (name, version)
 
 
-# DeepSec S2.MEDIUM ("Untrusted skill archives can decompress without an
+# ("Untrusted skill archives can decompress without an
 # output cap"): MAX_SKILL_ARCHIVE_BYTES only caps the *compressed*
 # response body (128 MiB); a tiny tar/zip can still expand into many GB
 # or millions of members. The constants below bound total uncompressed
@@ -1453,8 +1453,7 @@ def _safe_tar_extract(
 
     Each member name is validated after stripping *strip* leading path
     components to prevent path traversal (``..`` segments, absolute paths,
-    or symlinks escaping *dest_dir*). DeepSec S2.MEDIUM
-    ("Untrusted skill archives can decompress without an output cap"):
+    or symlinks escaping *dest_dir*). ("Untrusted skill archives can decompress without an output cap"):
     enforces the same global member-count, per-file, and total-bytes
     caps that the HTTP scan path applies via
     :func:`_safe_tar_extractall_capped`.
@@ -2027,21 +2026,21 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
 
     # Locate and scan
     skill_path = _resolve_path(app, skill_name)
-    # Avarice F-2327: when the post-install scan cannot run (skill
+    # when the post-install scan cannot run (skill
     # unresolved, scanner crash) we must NOT leave the installed
     # package on disk with no policy decision. Roll back the
     # clawhub install before exiting.
     if not skill_path:
         click.echo(
             f"[install] could not locate installed skill {skill_name!r} for scan — "
-            "rolling back via clawhub uninstall (F-2327)",
+            "rolling back via clawhub uninstall",
             err=True,
         )
         _run_clawhub_uninstall(skill_name)
         if app.logger:
             app.logger.log_action(
                 "install-rolled-back", skill_name,
-                "reason=skill-unresolved scan=skipped (F-2327)",
+                "reason=skill-unresolved scan=skipped",
             )
         raise SystemExit(1)
 
@@ -2056,14 +2055,14 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         result = scanner.scan(skill_path)
     except Exception as exc:
         click.echo(
-            f"error: scan failed: {exc} — rolling back via clawhub uninstall (F-2327)",
+            f"error: scan failed: {exc} — rolling back via clawhub uninstall",
             err=True,
         )
         _run_clawhub_uninstall(skill_name)
         if app.logger:
             app.logger.log_action(
                 "install-rolled-back", skill_name,
-                f"reason=scan-failed exc={type(exc).__name__} (F-2327)",
+                f"reason=scan-failed exc={type(exc).__name__}",
             )
         raise SystemExit(1)
 
@@ -2169,7 +2168,7 @@ def _run_clawhub_install(skill_name: str, force: bool) -> None:
 
 
 def _run_clawhub_uninstall(skill_name: str) -> None:
-    """Best-effort rollback for a partial install (F-2327).
+    """Best-effort rollback for a partial install.
 
     Runs `npx clawhub uninstall <skill>` with a short timeout. We
     intentionally do not raise on rollback failures — the caller is
@@ -2182,12 +2181,12 @@ def _run_clawhub_uninstall(skill_name: str) -> None:
     except subprocess.TimeoutExpired:
         click.echo(
             f"[install] warning: clawhub uninstall of {skill_name!r} timed out — "
-            "manual cleanup may be required (F-2327)",
+            "manual cleanup may be required",
             err=True,
         )
     except (FileNotFoundError, OSError) as exc:
         click.echo(
             f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — "
-            "manual cleanup may be required (F-2327)",
+            "manual cleanup may be required",
             err=True,
         )

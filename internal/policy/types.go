@@ -35,7 +35,7 @@ type ListEntry struct {
 
 // ScanResultInput is the scan result subset needed by OPA.
 //
-// DeepSec hardening (S2.scanners): ExitCode and ScanError are
+// hardening (S2.scanners): ExitCode and ScanError are
 // surfaced into the policy input so admission decisions cannot
 // silently treat a failed scan as clean. Callers building this
 // input from a ScanResult MUST copy ScanResult.ExitCode and

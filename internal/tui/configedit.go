@@ -234,8 +234,7 @@ func applyConfigField(c *config.Config, key, val string) {
 		// boundary (CodeGuard rule
 		// codeguard-0-authorization-access-control: deny by default).
 		// A typo in the form input must NEVER put the agent into a
-		// LOOSER posture than the operator intended. Closes avarice
-		// F-0681. Mirrors normalizeHookFailMode in
+		// LOOSER posture than the operator intended. Closes // . Mirrors normalizeHookFailMode in
 		// internal/gateway/connector/subprocess.go and
 		// _normalize_hook_fail_mode in cli/defenseclaw/config.py.
 		if strings.TrimSpace(val) == "open" {

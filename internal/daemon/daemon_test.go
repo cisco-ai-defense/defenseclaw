@@ -241,7 +241,7 @@ func TestVerifyProcessDarwinUsesPS(t *testing.T) {
 		t.Skipf("darwin process inspection unavailable in this environment: %v", err)
 	}
 	// Capture the live start identity so verifyStartIdentity passes —
-	// otherwise the chain F-3399 hardening (PID-reuse detection) would
+	// otherwise the chain hardening (PID-reuse detection) would
 	// reject the current process for not having a recorded identity.
 	ident, _ := processStartIdentity(os.Getpid())
 
@@ -275,7 +275,7 @@ func TestVerifyProcessDarwinRejectsBadPID(t *testing.T) {
 }
 
 // TestVerifyProcessRejectsMismatchedStartIdentity pins the second half of
-// avarice chain F-3399 (F-0942). A PID file written for a process that
+// chain . A PID file written for a process that
 // later exited and had its PID reused must NOT verify as the original —
 // the start-identity tokens differ even when the executable name happens
 // to match. We simulate this by recording an identity that intentionally
@@ -358,7 +358,7 @@ func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 	}
 }
 
-// TestStripTokenArgs is the regression for DeepSec finding "daemon
+// TestStripTokenArgs is the regression for finding "daemon
 // start propagates gateway token on the child process command line".
 // Daemon.Start now scrubs --token / --token=<value> from the argv
 // before exec'ing the long-lived child so the secret never reaches
@@ -433,7 +433,7 @@ func TestStripTokenArgs(t *testing.T) {
 	}
 }
 
-// TestDaemonEnvMatchesDataDir is the regression for DeepSec finding
+// TestDaemonEnvMatchesDataDir is the regression for finding
 // "killStaleProcesses can terminate unrelated processes". Before
 // signalling a candidate stale daemon, killStaleProcesses verifies the
 // process's /proc/<pid>/environ contains BOTH DEFENSECLAW_DAEMON=1 AND

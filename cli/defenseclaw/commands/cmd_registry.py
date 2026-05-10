@@ -928,7 +928,7 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
         return _scan_skill_via_clawhub(cmd_skill, app, target)
     if target.startswith(("http://", "https://")):
         require_sha256 = source.kind in _HASH_REQUIRED_SKILL_SOURCE_KINDS
-        # Avarice F-2388: source.auth_env is the bearer token reserved
+        # source.auth_env is the bearer token reserved
         # for the registry/catalog origin. The legacy code forwarded it
         # to entry.source_url, which a malicious manifest can point at
         # an arbitrary HTTPS host. The first request would carry the
@@ -941,7 +941,7 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
                 click.echo(
                     f"[registry] dropping bearer token before fetching cross-origin "
                     f"skill source_url {target!r} (registry source: {source.url!r}; "
-                    f"F-2388)",
+                    f")",
                     err=True,
                 )
             forward_auth_env = ""
@@ -958,7 +958,7 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
 
 
 def _registry_same_origin(registry_url: str, manifest_url: str) -> bool:
-    """Avarice F-2388: True if the manifest-supplied skill source_url
+    """True if the manifest-supplied skill source_url
     has the same scheme + host (case-insensitive) + port as the
     registry source URL. We use this as the gate for forwarding
     operator-supplied bearer tokens."""
@@ -1046,7 +1046,7 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
     if transport == "stdio":
         if not entry.command:
             return None
-        # Avarice F-2387: a registry manifest is publisher-controlled.
+        # a registry manifest is publisher-controlled.
         # The legacy code passed publisher-supplied entry.command and
         # entry.args straight to MCPScannerWrapper, which spawned the
         # process during scan-mcp-config-file. A malicious catalog can
@@ -1059,7 +1059,7 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
         if not _is_safe_stdio_scan_command(entry.command, list(entry.args)):
             click.echo(
                 f"[registry] refusing to spawn manifest-supplied stdio command for "
-                f"scan: name={entry.name!r} command={entry.command!r} (F-2387)",
+                f"scan: name={entry.name!r} command={entry.command!r}",
                 err=True,
             )
             return None
@@ -1077,13 +1077,13 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
             return None
     if not entry.url:
         return None
-    # Avarice F-2409: validate generic registry MCP URLs against
+    # validate generic registry MCP URLs against
     # the SSRF guard (loopback / link-local / private-IP rejection)
     # before the remote scanner reaches them.
     if not _registry_mcp_url_allowed(entry.url):
         click.echo(
             f"[registry] refusing to scan manifest MCP URL {entry.url!r} — "
-            f"resolves to loopback/private/link-local (F-2409). Use "
+            f"resolves to loopback/private/link-local. Use "
             f"`defenseclaw registry sync --allow-private` to opt in.",
             err=True,
         )
@@ -1097,7 +1097,7 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
 
 
 def _is_safe_stdio_scan_command(command: str, args: list[str]) -> bool:
-    """Avarice F-2387 / F-2967: only allow stdio MCP scan when the
+    """only allow stdio MCP scan when the
     publisher-supplied command is a recognized MCP runner that does
     NOT take arbitrary shell strings as arguments. Shell interpreters
     (bash, sh, zsh, fish, dash, ksh, csh, tcsh, python*, perl, ruby,
@@ -1133,7 +1133,7 @@ def _is_safe_stdio_scan_command(command: str, args: list[str]) -> bool:
 
 
 def _registry_mcp_url_allowed(url: str) -> bool:
-    """Avarice F-2409: reject loopback/link-local/private addresses
+    """reject loopback/link-local/private addresses
     so a manifest cannot steer the remote scanner at internal hosts.
     Operators that legitimately want to scan internal MCP services
     can opt in via `--allow-private` (handled by the caller before

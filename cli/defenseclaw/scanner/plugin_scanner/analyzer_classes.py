@@ -107,7 +107,7 @@ class SourceAnalyzer:
         # meta LLM analyzer) can see the actual plugin source. Before
         # this change ``ctx.source_files`` stayed empty for the entire
         # pipeline and the LLM path silently degraded to manifest-only
-        # analysis (DeepSec finding "LLM plugin analysis receives no
+        # analysis (finding "LLM plugin analysis receives no
         # source files" / other-scanner-coverage-gap).
         file_count, total_bytes = scan_source_files(
             ctx.plugin_dir,
@@ -457,12 +457,12 @@ class MetaAnalyzer:
         #   * The model's false-positive verdicts are ADVISORY ONLY. We
         #     never mutate ``f.suppressed`` based on LLM output -- a
         #     prompt-injected plugin could otherwise hide its own static
-        #     findings (DeepSec "Meta LLM can be prompt-injected into
+        #     findings ("Meta LLM can be prompt-injected into
         #     suppressing static findings"). Suggestions are surfaced as
         #     INFO findings so analysts can review them.
         #   * If the LLM ran without source files we explicitly emit a
         #     SCAN-LLM-NO-SOURCE finding instead of silently degrading
-        #     to manifest-only meta-analysis (DeepSec "LLM plugin
+        #     to manifest-only meta-analysis ("LLM plugin
         #     analysis receives no source files").
         if self._llm_policy and self._llm_policy.get("enabled"):
             try:

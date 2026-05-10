@@ -1,7 +1,7 @@
 version: 1
 category: sensitive-path
 # Home-prefix sub-pattern shared across the credential-file rules
-# below. Closes avarice F-1726 by adding `\$\{?HOME\}?` so the braced
+# below. Closes by adding `\$\{?HOME\}?` so the braced
 # shell form `${HOME}/.aws/credentials` matches in addition to `~`,
 # `$HOME`, `/home/<user>`, and `/root`. Keep this sub-pattern in sync
 # with the compiled-in defaults in `internal/gateway/rules.go`.
@@ -73,7 +73,7 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
-    # Closes avarice F-1727: `;` (shell command separator) added to
+    # Closes `;` (shell command separator) added to
     # the suffix delimiter class so `cat .env; true` also matches.
     pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,;\]})]'
     title: "Environment file"

@@ -2742,7 +2742,7 @@ func SanitizeEvidenceForWire(signals []AISignal, disableRedaction, storeRawLocal
 // Both formats are exactly 64 hex chars after the prefix because
 // HMAC-SHA256 has the same 32-byte output as plain SHA-256. Accepting
 // both keeps validateAIDiscoveryReport from rejecting payloads emitted
-// by a fully-configured gateway (DeepSec S2.MEDIUM remediation), while
+// by a fully-configured gateway (remediation), while
 // still rejecting raw paths, truncated digests, and unrelated formats.
 func isSHA256Hash(value string) bool {
 	for _, prefix := range [...]string{"sha256:", "hmac-sha256:"} {
@@ -3244,7 +3244,7 @@ func shouldSkipDiscoveryDir(name string) bool {
 
 // pathHashKey is the per-installation HMAC key that turns the
 // otherwise-reversible path SHA-256 fingerprint into an
-// installation-scoped opaque digest. DeepSec S2.MEDIUM ("Redacted AI
+// installation-scoped opaque digest. ("Redacted AI
 // discovery events expose reversible path fingerprints"): without a
 // key, a recipient of a redacted gateway event can dictionary-attack
 // well-known paths (~/.aws/credentials, repo roots, package manifest

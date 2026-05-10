@@ -317,7 +317,7 @@ func collectDaemonArgs(cmd *cobra.Command) []string {
 	// a secret. Passing the token on argv would leave it visible in
 	// the long-lived daemon process via ps(1) and /proc/<pid>/cmdline
 	// for any local user that can see same-user processes -- closing
-	// DeepSec finding "daemon start propagates gateway token on the
+	// finding "daemon start propagates gateway token on the
 	// child process command line".
 	//
 	// Instead, when --token was supplied we promote it into the

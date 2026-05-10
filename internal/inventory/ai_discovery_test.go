@@ -1354,7 +1354,7 @@ func TestRunScan_RespectsCancelledContext(t *testing.T) {
 }
 
 // TestIsSHA256Hash_AcceptsKeyedAndUnsalted is a regression test for the
-// DeepSec S2.MEDIUM remediation (SetPathHashKey wiring). When the
+// remediation (SetPathHashKey wiring). When the
 // sidecar boots with a gateway token, inventory.hashPath emits the
 // keyed digest form `hmac-sha256:<64 hex>`. validateAIDiscoveryReport
 // must accept that prefix in addition to the legacy `sha256:` form,
@@ -1379,7 +1379,7 @@ func TestIsSHA256Hash_AcceptsKeyedAndUnsalted(t *testing.T) {
 		// Accepted (legacy unsalted, set when SetPathHashKey is nil).
 		{"legacy_sha256_good", "sha256:" + goodHex, true},
 		// Accepted (per-installation keyed, set when SetPathHashKey
-		// is wired from sidecar boot — DeepSec S2.MEDIUM fix).
+		// is wired from sidecar boot — fix).
 		{"keyed_hmac_sha256_good", "hmac-sha256:" + goodHex, true},
 
 		// Rejected: empty.
@@ -1417,7 +1417,7 @@ func TestIsSHA256Hash_AcceptsKeyedAndUnsalted(t *testing.T) {
 // SetPathHashKey contract. It is the assertion the cross-package
 // sidecar test deliberately can't make (hashPath is unexported), and
 // guards against future refactors that quietly drop keyed-mode
-// emission — which would re-introduce DeepSec S2.MEDIUM (reversible
+// emission — which would re-introduce (reversible
 // path fingerprints).
 //
 // Properties asserted:

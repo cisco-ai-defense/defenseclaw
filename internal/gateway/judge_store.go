@@ -34,7 +34,7 @@ func (j *JudgeStore) PersistJudgeEvent(ctx context.Context, dir gatewaylog.Direc
 	prov := version.Current()
 	ident := AgentIdentityFromContext(ctx)
 	body := p.RawResponse
-	// DeepSec S3.BUG ("Judge input_hash is computed from the
+	// ("Judge input_hash is computed from the
 	// response body"): the previous implementation hashed
 	// p.RawResponse and stored that as InputHash, which violates
 	// the audit contract (InputHash must be the SHA-256 of the

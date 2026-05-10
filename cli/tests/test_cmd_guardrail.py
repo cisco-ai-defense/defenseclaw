@@ -39,8 +39,7 @@ def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
 
     ``hook_fail_mode`` mirrors the v4 ``guardrail.hook_fail_mode`` field
     (defaults to "closed" so fixtures without explicit fail-mode wiring
-    behave like a fresh, secure-by-default install — closes avarice
-    F-0681). Tests that need to exercise the legacy fail-open path
+    behave like a fresh, secure-by-default install — closes ). Tests that need to exercise the legacy fail-open path
     pass ``hook_fail_mode="open"`` explicitly.
     """
     guardrail_cfg = SimpleNamespace(

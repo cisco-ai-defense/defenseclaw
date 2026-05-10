@@ -1020,7 +1020,7 @@ inspect_tool() {
     sidecar_post "/api/v1/inspect/tool" "$payload"
 }
 
-# Avarice F-1866: dump_artifacts is invoked from an EXIT trap when
+# dump_artifacts is invoked from an EXIT trap when
 # any phase records FAIL>0. The legacy implementation cat'd
 # ~/.defenseclaw/config.yaml and ~/.openclaw/openclaw.json directly
 # and tail'd gateway.log / gateway.jsonl without redaction. The
@@ -1052,7 +1052,7 @@ _redact_secrets() {
 
 dump_artifacts() {
     echo ""
-    echo "=== Artifact Dump (on failure, secrets redacted — F-1866) ==="
+    echo "=== Artifact Dump (on failure, secrets redacted) ==="
     echo "--- Run Context ---"
     echo "profile=$E2E_PROFILE"
     echo "run_id=$DEFENSECLAW_RUN_ID"
@@ -3197,7 +3197,7 @@ phase_plugin_lifecycle() {
         fail "plugin lifecycle: malicious plugin scan produced findings" "scanner did not produce valid JSON"
     fi
 
-    # Avarice F-0683: `defenseclaw plugin install` now refuses to copy a
+    # `defenseclaw plugin install` now refuses to copy a
     # plugin tree to plugin_dir when the install-time scan reports
     # HIGH/CRITICAL findings without an explicit risk-acceptance flag.
     # The malicious fixture is *deliberately* malicious so subsequent
@@ -3207,7 +3207,7 @@ phase_plugin_lifecycle() {
     # path — `defenseclaw plugin allow` — to pre-accept risk before
     # invoking install. This is the same flow the new error message
     # tells operators to use.
-    defenseclaw plugin allow "$malicious_plugin" --reason "E2E governance fixture: deliberately malicious (F-0683)" >/dev/null 2>&1 || true
+    defenseclaw plugin allow "$malicious_plugin" --reason "E2E governance fixture: deliberately malicious" >/dev/null 2>&1 || true
     install_out=$(defenseclaw plugin install "$malicious_source" --force 2>&1 || true)
     echo "$install_out"
     malicious_path=$(find_governance_plugin_path "$malicious_plugin" || true)

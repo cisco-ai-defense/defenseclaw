@@ -21,8 +21,7 @@ import (
 	"testing"
 )
 
-// TestF3327_NativeWriteAliases is a regression test for avarice
-// F-3327. Native connector aliases (Write/Edit/MultiEdit/applyDiff/
+// TestF3327_NativeWriteAliases is a regression test for // . Native connector aliases (Write/Edit/MultiEdit/applyDiff/
 // patch) must trigger CodeGuard scanning the same way write_file
 // and edit_file do.
 func TestF3327_NativeWriteAliases(t *testing.T) {
@@ -33,7 +32,7 @@ func TestF3327_NativeWriteAliases(t *testing.T) {
 	} {
 		t.Run(tool, func(t *testing.T) {
 			if !isWriteToolName(toLower(tool)) {
-				t.Fatalf("F-3327 regression: %q not recognised as a write tool", tool)
+				t.Fatalf("regression: %q not recognised as a write tool", tool)
 			}
 		})
 	}
@@ -48,7 +47,7 @@ func TestF3327_NonWriteToolsAreNotScanned(t *testing.T) {
 	} {
 		t.Run(tool, func(t *testing.T) {
 			if isWriteToolName(toLower(tool)) {
-				t.Fatalf("F-3327 regression: %q must NOT trigger CodeGuard", tool)
+				t.Fatalf("regression: %q must NOT trigger CodeGuard", tool)
 			}
 		})
 	}
@@ -68,7 +67,7 @@ func TestF3328_StringEncodedArgsParsed(t *testing.T) {
 
 	parsed, ok := unmarshalArgsObject(asString)
 	if !ok {
-		t.Fatalf("F-3328 regression: string-encoded args was not parsed")
+		t.Fatalf("regression: string-encoded args was not parsed")
 	}
 	if parsed["path"] != "/tmp/x.py" {
 		t.Fatalf("path mismatch: %v", parsed["path"])
