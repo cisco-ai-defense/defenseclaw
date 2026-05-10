@@ -68,7 +68,9 @@ rules:
     confidence: 0.95
     tags: [ssrf, credential]
   - id: C2-METADATA-GCP
-    pattern: 'metadata\.google\.internal'
+    # Closes avarice F-1725 (parity with default pack): DNS hostnames
+    # are case-insensitive so we cannot rely on the lowercase literal.
+    pattern: '(?i)metadata\.google\.internal'
     title: "GCP metadata endpoint (SSRF)"
     severity: CRITICAL
     confidence: 0.95

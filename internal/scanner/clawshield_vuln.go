@@ -61,7 +61,9 @@ var csVulnRules = []csVulnRule{
 
 	// SSRF
 	{id: "CS-VLN-SSRF-AWS-META", category: "ssrf", pattern: regexp.MustCompile(`169\.254\.169\.254`), severity: SeverityCritical, remediation: "Block requests to cloud metadata endpoints at the network layer"},
-	{id: "CS-VLN-SSRF-GCP-META", category: "ssrf", pattern: regexp.MustCompile(`metadata\.google\.internal`), severity: SeverityCritical, remediation: "Block requests to GCP metadata endpoint"},
+	// Closes avarice F-1725 (parity with internal/gateway/rules.go):
+	// case-insensitive so uppercase DNS host variants cannot bypass.
+	{id: "CS-VLN-SSRF-GCP-META", category: "ssrf", pattern: regexp.MustCompile(`(?i)metadata\.google\.internal`), severity: SeverityCritical, remediation: "Block requests to GCP metadata endpoint"},
 	{id: "CS-VLN-SSRF-AZ-META", category: "ssrf", pattern: regexp.MustCompile(`169\.254\.169\.254.*metadata`), severity: SeverityCritical, remediation: "Block requests to Azure IMDS endpoint"},
 	{id: "CS-VLN-SSRF-ALI-META", category: "ssrf", pattern: regexp.MustCompile(`100\.100\.100\.200`), severity: SeverityCritical, remediation: "Block requests to Alibaba Cloud metadata endpoint"},
 	{id: "CS-VLN-SSRF-PRIV-10", category: "ssrf", pattern: regexp.MustCompile(`\b10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\b`), severity: SeverityHigh, remediation: "Validate URLs against an allowlist; block private RFC1918 ranges"},
