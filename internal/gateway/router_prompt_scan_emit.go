@@ -22,13 +22,13 @@ import (
 func (r *EventRouter) streamScanCorrelation(sessionKey string) audit.ScanCorrelation {
 	env := r.streamEnvelope(context.Background(), sessionKey)
 	return audit.ScanCorrelation{
-		RunID:             env.RunID,
-		RequestID:         env.RequestID,
-		SessionID:         env.SessionID,
-		TraceID:           env.TraceID,
-		AgentID:           env.AgentID,
-		AgentName:         env.AgentName,
-		AgentInstanceID:   env.AgentInstanceID,
+		RunID:           env.RunID,
+		RequestID:       env.RequestID,
+		SessionID:       env.SessionID,
+		TraceID:         env.TraceID,
+		AgentID:         env.AgentID,
+		AgentName:       env.AgentName,
+		AgentInstanceID: env.AgentInstanceID,
 	}
 }
 

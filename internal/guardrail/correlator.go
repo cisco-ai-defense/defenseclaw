@@ -55,13 +55,13 @@ type CorrelationFinding struct {
 // of findings in a session's sliding window. At most one of `AllOf`
 // or `Sequence` should be non-empty.
 type CorrelationPattern struct {
-	ID              string             `yaml:"id"`
-	Description     string             `yaml:"description,omitempty"`
-	WindowEvents    int                `yaml:"window_events"`
-	SeverityOnMatch string             `yaml:"severity_on_match"`
-	AllOf           []PatternClause    `yaml:"all_of,omitempty"`
-	Sequence        []SequenceClause   `yaml:"sequence,omitempty"`
-	FingerprintLink []PatternClause    `yaml:"fingerprint_chain,omitempty"`
+	ID              string           `yaml:"id"`
+	Description     string           `yaml:"description,omitempty"`
+	WindowEvents    int              `yaml:"window_events"`
+	SeverityOnMatch string           `yaml:"severity_on_match"`
+	AllOf           []PatternClause  `yaml:"all_of,omitempty"`
+	Sequence        []SequenceClause `yaml:"sequence,omitempty"`
+	FingerprintLink []PatternClause  `yaml:"fingerprint_chain,omitempty"`
 }
 
 // PatternClause matches any single finding in the window. A clause

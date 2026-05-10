@@ -57,10 +57,10 @@ type SessionFindingRow struct {
 // library against a session's recent findings and writes back CORR-*
 // synthetic findings when any pattern fires.
 type SessionCorrelator struct {
-	reader        SessionFindingReader
-	patterns      []CorrelationPattern
-	windowLimit   int
-	firedPerSess  sync.Map // map[sessKey]map[patternID]struct{} to avoid firing the same pattern repeatedly in a session
+	reader       SessionFindingReader
+	patterns     []CorrelationPattern
+	windowLimit  int
+	firedPerSess sync.Map // map[sessKey]map[patternID]struct{} to avoid firing the same pattern repeatedly in a session
 }
 
 // NewSessionCorrelator builds a correlator from a reader and a

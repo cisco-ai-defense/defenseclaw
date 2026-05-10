@@ -133,7 +133,7 @@ func TestProfile_HighWithHILTConfirms(t *testing.T) {
 		profile    string
 		wantAction string
 	}{
-		{"policies/guardrail/strict", "block"},   // HIGH >= MEDIUM block threshold
+		{"policies/guardrail/strict", "block"},    // HIGH >= MEDIUM block threshold
 		{"policies/guardrail/default", "confirm"}, // HIGH gets HILT
 		{"policies/guardrail/permissive", "confirm"},
 	}

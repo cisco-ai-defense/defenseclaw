@@ -32,11 +32,11 @@ type flowEvent struct {
 }
 
 type flowCase struct {
-	ID              string      `json:"id"`
-	Description     string      `json:"description,omitempty"`
-	Events          []flowEvent `json:"events"`
-	ExpectFires     []string    `json:"expect_fires,omitempty"`
-	ExpectNotFires  []string    `json:"expect_not_fires,omitempty"`
+	ID             string      `json:"id"`
+	Description    string      `json:"description,omitempty"`
+	Events         []flowEvent `json:"events"`
+	ExpectFires    []string    `json:"expect_fires,omitempty"`
+	ExpectNotFires []string    `json:"expect_not_fires,omitempty"`
 }
 
 type flowsFile struct {

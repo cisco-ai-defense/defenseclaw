@@ -27,12 +27,12 @@ import "strings"
 type ToolCapabilityClass string
 
 const (
-	CapReadFS        ToolCapabilityClass = "read_fs"
-	CapWriteFS       ToolCapabilityClass = "write_fs"
-	CapExecShell     ToolCapabilityClass = "exec_shell"
-	CapNetworkFetch  ToolCapabilityClass = "network_fetch"
-	CapSendMessage   ToolCapabilityClass = "send_message"
-	CapUnknown       ToolCapabilityClass = ""
+	CapReadFS       ToolCapabilityClass = "read_fs"
+	CapWriteFS      ToolCapabilityClass = "write_fs"
+	CapExecShell    ToolCapabilityClass = "exec_shell"
+	CapNetworkFetch ToolCapabilityClass = "network_fetch"
+	CapSendMessage  ToolCapabilityClass = "send_message"
+	CapUnknown      ToolCapabilityClass = ""
 )
 
 // ClassifyToolName maps a well-known MCP tool name to its capability
