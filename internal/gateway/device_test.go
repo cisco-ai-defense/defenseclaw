@@ -139,14 +139,17 @@ func TestIsAuthError(t *testing.T) {
 		{fmt.Errorf("Pairing_Required"), true},
 		{fmt.Errorf("device not paired with gateway"), true},
 
-		// Real OpenClaw NOT_PAIRED messages — the four sub-reasons
-		// (not-paired, metadata-upgrade, role-upgrade, scope-upgrade)
-		// — must all trigger auto-repair. Anything less leaves the
-		// gateway flapping in RECONNECTING.
+		// Real OpenClaw NOT_PAIRED messages — only the transport
+		// sub-reasons (not-paired, metadata-upgrade) trigger
+		// auto-repair. Avarice F-1527 / F-1165 explicitly require
+		// role-upgrade and scope-upgrade rejections to surface to the
+		// operator instead, because RepairPairing hard-codes
+		// operator.admin / operator.approvals into the pairing
+		// record and would otherwise self-elevate.
 		{fmt.Errorf("gateway: connect handshake: pairing required: device pairing required (NOT_PAIRED)"), true},
 		{fmt.Errorf("gateway: connect handshake: pairing required: device identity changed and must be re-approved (NOT_PAIRED)"), true},
-		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for a higher role than currently approved (NOT_PAIRED)"), true},
-		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for more scopes than currently approved (NOT_PAIRED)"), true},
+		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for a higher role than currently approved (NOT_PAIRED)"), false},
+		{fmt.Errorf("gateway: connect handshake: pairing required: device is asking for more scopes than currently approved (NOT_PAIRED)"), false},
 		{fmt.Errorf("websocket: close 1008 (policy violation): pairing required: device identity changed and must be re-approved (requestId: eabe39af-7a72-4331-8271-03e16e635db2)"), true},
 
 		{fmt.Errorf("connection refused"), false},
