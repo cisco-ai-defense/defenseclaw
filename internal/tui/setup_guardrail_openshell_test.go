@@ -44,11 +44,14 @@ func TestApplyConfigField_GuardrailNewSurface(t *testing.T) {
 		{"guardrail.hook_fail_mode", "closed", func(c *config.Config) bool { return c.Guardrail.HookFailMode == "closed" }},
 		// Hook fail mode round-trip: explicit "open" persists.
 		{"guardrail.hook_fail_mode_open", "open", func(c *config.Config) bool { return c.Guardrail.HookFailMode == "open" }},
-		// Hook fail mode garbage normalizes to "open" — the form
-		// MUST NEVER silently put the agent into a stricter posture
-		// than the operator typed. Mirrors the same normalization
-		// rule on both Python and Go config loaders.
-		{"guardrail.hook_fail_mode_garbage", "klosed", func(c *config.Config) bool { return c.Guardrail.HookFailMode == "open" }},
+		// Hook fail mode garbage normalizes to "closed" (avarice
+		// F-0681) — silently fail-CLOSED is strictly safer than
+		// silently fail-OPEN at the response-layer boundary, so a
+		// typo or invalid value MUST collapse to the safer sentinel.
+		// Mirrors normalizeHookFailMode in
+		// internal/gateway/connector/subprocess.go and
+		// _normalize_hook_fail_mode in cli/defenseclaw/config.py.
+		{"guardrail.hook_fail_mode_garbage", "klosed", func(c *config.Config) bool { return c.Guardrail.HookFailMode == "closed" }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.key, func(t *testing.T) {

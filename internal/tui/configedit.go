@@ -228,18 +228,20 @@ func applyConfigField(c *config.Config, key, val string) {
 	case "guardrail.mode":
 		c.Guardrail.Mode = val
 	case "guardrail.hook_fail_mode":
-		// Normalize anything other than the canonical "closed"
-		// sentinel down to "open" — silently fail-open is strictly
-		// safer than silently fail-closed for response-layer
-		// failures, and a typo in the form input must never put the
-		// agent into a stricter posture than the operator intended.
-		// Mirrors normalizeHookFailMode in
+		// Normalize anything other than the canonical "open"
+		// sentinel up to "closed" — silently fail-CLOSED is strictly
+		// safer than silently fail-OPEN at the response-layer
+		// boundary (CodeGuard rule
+		// codeguard-0-authorization-access-control: deny by default).
+		// A typo in the form input must NEVER put the agent into a
+		// LOOSER posture than the operator intended. Closes avarice
+		// F-0681. Mirrors normalizeHookFailMode in
 		// internal/gateway/connector/subprocess.go and
 		// _normalize_hook_fail_mode in cli/defenseclaw/config.py.
-		if strings.TrimSpace(val) == "closed" {
-			c.Guardrail.HookFailMode = "closed"
-		} else {
+		if strings.TrimSpace(val) == "open" {
 			c.Guardrail.HookFailMode = "open"
+		} else {
+			c.Guardrail.HookFailMode = "closed"
 		}
 	case "guardrail.scanner_mode":
 		c.Guardrail.ScannerMode = val

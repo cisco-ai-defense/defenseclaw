@@ -1543,22 +1543,22 @@ class TestInitFailModeFlag(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
-        # "open" is the canonical default; YAML may or may not
-        # serialize it depending on whether the dataclass treats it
-        # as default. The contract that matters is that it ends up
-        # as effectively-open in config.
+        # Operator passed --fail-mode open explicitly — result must
+        # round-trip as "open" regardless of the new safer default
+        # ("closed"). This pins that operator intent is honored.
         from defenseclaw.config import _normalize_hook_fail_mode
         self.assertEqual(
-            _normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "open")),
+            _normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "")),
             "open",
         )
 
     def test_omitting_flag_is_noninvasive(self):
-        # No --fail-mode means "leave existing alone." On a brand
-        # new config, that resolves to the default ("open") via
-        # default_config(). The point of this test is to make sure
-        # the wiring does NOT clobber the default with empty
-        # string, which would be a serialization bug.
+        # Closes avarice F-0681. No --fail-mode means "leave existing
+        # alone." On a brand-new config, that resolves to the secure
+        # default ("closed") via default_config(). The point of this
+        # test is to make sure the wiring does NOT clobber the default
+        # with empty string (which would be a serialization bug) AND
+        # that the new install gets the safer fail-mode.
         result = self._invoke([
             "--non-interactive",
             "--yes",
@@ -1579,10 +1579,12 @@ class TestInitFailModeFlag(unittest.TestCase):
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         # Whatever the YAML serializer wrote, the loader-level
-        # normalizer must resolve it to "open".
+        # normalizer must resolve it to "closed" for new installs.
+        # Existing v3 installs are pinned to "open" by
+        # _migrate_0_4_0_seed_hook_fail_mode in migrations.py.
         from defenseclaw.config import _normalize_hook_fail_mode
-        raw = cfg["guardrail"].get("hook_fail_mode", "open")
-        self.assertEqual(_normalize_hook_fail_mode(raw), "open")
+        raw = cfg["guardrail"].get("hook_fail_mode", "")
+        self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
 
 class TestInitHITLFlags(unittest.TestCase):

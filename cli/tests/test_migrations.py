@@ -775,12 +775,17 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
     """Migration 0.4.0 surfaces ``guardrail.hook_fail_mode`` in
     pre-existing config.yaml so operators discover the new knob.
 
-    The runtime default is "open" (matches the Go-side
-    EffectiveHookFailMode + viper default) and so is the seeded
-    value. The migration MUST NOT overwrite an explicit operator
-    choice — including a "closed" choice we'd ourselves recommend
-    against — because operators have explicit override authority over
-    a no-touch upgrade migration.
+    Backwards-compat contract (closes avarice F-0681): pre-v3 installs
+    had no concept of a hook fail mode and shipped fail-OPEN
+    response-layer behavior at the gateway. The new v4 default is
+    fail-CLOSED, but flipping behavior under existing operators on
+    upgrade would be a noisy regression. So the seed migration writes
+    ``hook_fail_mode: open`` to ANY pre-existing config.yaml — pinning
+    legacy behavior for upgraders while letting NEW installs (which
+    skip this migration entirely) get the safer default. The migration
+    MUST NOT overwrite an explicit operator choice — including a
+    "closed" choice we'd ourselves recommend — because operators have
+    explicit override authority over a no-touch upgrade migration.
     """
 
     def setUp(self):
@@ -953,27 +958,36 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
     silently change the agent's policy posture.
     """
 
-    def test_loader_normalizes_typos_to_open(self):
+    def test_loader_normalizes_typos_to_closed(self):
+        # Closes avarice F-0681. After v4 the secure default is
+        # "closed". A typo or any non-canonical value collapses to
+        # "closed" so a misconfigured config.yaml never silently puts
+        # the agent into fail-OPEN mode at the response-layer
+        # boundary. The "open" sentinel still round-trips because it
+        # is the documented opt-in.
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"hook_fail_mode": "OpEn"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "open")
 
         gc = _merge_guardrail({"hook_fail_mode": "klosed"}, "/tmp")
-        # Anything other than the canonical "closed" sentinel falls
-        # back to "open" — silently fail-open is strictly safer than
-        # silently fail-closed. Mirrors normalizeHookFailMode in
+        # Anything other than the canonical "open" sentinel falls
+        # back to "closed" — silently fail-closed is strictly safer
+        # than silently fail-open. Mirrors normalizeHookFailMode in
         # internal/gateway/connector/subprocess.go.
-        self.assertEqual(gc.hook_fail_mode, "open")
+        self.assertEqual(gc.hook_fail_mode, "closed")
 
     def test_loader_accepts_explicit_closed(self):
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"hook_fail_mode": "closed"}, "/tmp")
         self.assertEqual(gc.hook_fail_mode, "closed")
 
-    def test_default_is_open_when_missing(self):
+    def test_default_is_closed_when_missing(self):
+        # Fresh install: no ``hook_fail_mode`` key in YAML at all.
+        # New v4 default is the safer "closed". Existing v3 installs
+        # are pinned to "open" by _migrate_0_4_0_seed_hook_fail_mode.
         from defenseclaw.config import _merge_guardrail
         gc = _merge_guardrail({"enabled": True}, "/tmp")
-        self.assertEqual(gc.hook_fail_mode, "open")
+        self.assertEqual(gc.hook_fail_mode, "closed")
 
 
 class TestMigrate050PurgeLegacyFlatPolicyBundle(unittest.TestCase):
