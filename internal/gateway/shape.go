@@ -1,13 +1,17 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-// http://www.apache.org/licenses/LICENSE-2.0
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
 // SPDX-License-Identifier: Apache-2.0
 
 package gateway
 
-import (	"bytes"
+import (
+	"bytes"
 	"encoding/json"
 	"net"
 	"net/url"
@@ -65,10 +69,11 @@ var KnownSafeDomains = []string{
 // Keep identical to the TS LLMBodyShape union.
 type BodyShape string
 
-const (	BodyShapeNone BodyShape = "none"
+const (
+	BodyShapeNone     BodyShape = "none"
 	BodyShapeMessages BodyShape = "messages"
-	BodyShapePrompt BodyShape = "prompt"
-	BodyShapeInput BodyShape = "input"
+	BodyShapePrompt   BodyShape = "prompt"
+	BodyShapeInput    BodyShape = "input"
 	BodyShapeContents BodyShape = "contents"
 )
 
