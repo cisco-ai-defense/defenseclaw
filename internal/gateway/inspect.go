@@ -619,9 +619,19 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	}
 	verdict.ApprovalTimeoutMS = int(timeout / time.Millisecond)
 
+	// Avarice F-1526: a HIGH-severity tool call that policy escalated
+	// to `confirm` MUST NOT be downgraded to `alert` when the caller
+	// cannot deliver a human-in-the-loop approval. The previous
+	// behavior (alert + would_block=false) caused hook callers that
+	// only block on action==block to forward the tool call as audit
+	// telemetry. Failing closed here turns "no native approval
+	// surface" into a BLOCK with would_block tracking the original
+	// confirm decision.
 	if !strings.EqualFold(a.connectorName(), "openclaw") {
-		verdict.Action = guardrailActionAlert
-		verdict.Reason = appendVerdictReason(verdict.Reason, "human approval unsupported on this connector surface")
+		verdict.Action = guardrailActionBlock
+		verdict.WouldBlock = true
+		verdict.Reason = appendVerdictReason(verdict.Reason,
+			"human approval unsupported on this connector surface; failing closed (F-1526)")
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "connector="+a.connectorName())
 		}
@@ -631,8 +641,10 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 		return
 	}
 
-	verdict.Action = guardrailActionAlert
-	verdict.Reason = appendVerdictReason(verdict.Reason, "human approval requires native OpenClaw approval; audited as alert")
+	verdict.Action = guardrailActionBlock
+	verdict.WouldBlock = true
+	verdict.Reason = appendVerdictReason(verdict.Reason,
+		"human approval requires native OpenClaw approval; failing closed (F-1526)")
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "surface="+req.ApprovalSurface)
 	}
