@@ -91,15 +91,17 @@ type APIServer struct {
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
 
-	claudeCodeMu                 sync.Mutex
-	claudeCodeLastComponentScan  time.Time
-	codexMu                      sync.Mutex
-	codexLastComponentScan       time.Time
-	rawTelemetryMu               sync.Mutex
-	rawTelemetryDedupe           *rawTelemetryDeduper
-	llmPromptMu                  sync.Mutex
-	llmPromptBySourceSession     map[string]string
-	llmPromptBySourceSessionTurn map[string]string
+	claudeCodeMu                      sync.Mutex
+	claudeCodeLastComponentScan       time.Time
+	codexMu                           sync.Mutex
+	codexLastComponentScan            time.Time
+	rawTelemetryMu                    sync.Mutex
+	rawTelemetryDedupe                *rawTelemetryDeduper
+	llmPromptMu                       sync.Mutex
+	llmPromptBySourceSession          map[string]string
+	llmPromptBySourceSessionOrder     []string
+	llmPromptBySourceSessionTurn      map[string]string
+	llmPromptBySourceSessionTurnOrder []string
 
 	connectorRegistry *connector.Registry
 }
@@ -845,6 +847,12 @@ type policyEvaluateInput struct {
 type policyEvaluateScanResult struct {
 	MaxSeverity   string `json:"max_severity"`
 	TotalFindings int    `json:"total_findings"`
+	// DeepSec hardening (S2.scanners): expose the scanner failure
+	// signal so callers driving this debug endpoint can reproduce
+	// the post-scan admission decision a non-zero scanner exit
+	// would yield. Mirrors policy.ScanResultInput.
+	ExitCode  int    `json:"exit_code,omitempty"`
+	ScanError string `json:"scan_error,omitempty"`
 }
 
 func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
@@ -1218,6 +1226,8 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		input.ScanResult = &policy.ScanResultInput{
 			MaxSeverity:   req.Input.ScanResult.MaxSeverity,
 			TotalFindings: req.Input.ScanResult.TotalFindings,
+			ExitCode:      req.Input.ScanResult.ExitCode,
+			ScanError:     req.Input.ScanResult.ScanError,
 		}
 	}
 
@@ -2214,12 +2224,19 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				// it cannot be replayed against /api/v1/* routes
 				// and is bound to a single connector's OTLP
 				// namespace. See connector/otlp_token.go.
+				//
+				// DeepSec follow-up: parity with the bearer branch
+				// below — promote the peeked agent identity once
+				// auth has succeeded so audit rows on path-token
+				// authed traffic still carry agent_instance_id.
 				if subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
+					r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 					next.ServeHTTP(w, r)
 					return
 				}
 				if scoped := a.lookupOTLPPathToken(source); scoped != "" &&
 					subtle.ConstantTimeCompare([]byte(pathToken), []byte(scoped)) == 1 {
+					r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -2236,6 +2253,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 
+		// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+		// unauthenticated agent sessions"): now that auth has
+		// succeeded, upgrade the previously peeked agent identity
+		// to a fully minted entry so authenticated traffic still
+		// gets a stable agent_instance_id on its emissions.
+		r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -2804,6 +2827,30 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.logger != nil {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+	}
+
+	// DeepSec H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
+	// findings"): the persistent path (LogScanWithCorrelation →
+	// audit.scan_persist.go) already runs Description / Location /
+	// Remediation through redaction.ForSinkString before INSERT, and
+	// `defenseclaw scan code --json` (internal/cli/scan_v7.go::findingToV7)
+	// applies the same redaction before serialization. The REST API used
+	// to bypass both — serializing the raw scanner.ScanResult straight to
+	// the response body and leaking matched source lines, raw absolute
+	// paths, and operator-supplied remediation text to any caller. Apply
+	// the same field-level redaction here so all three surfaces (DB row,
+	// CLI JSON, REST response) treat scanner output identically. We
+	// redact AFTER LogScanWithCorrelation has been called: scan_persist.go
+	// re-applies its own redaction before INSERT, so the in-place mutation
+	// here only affects the response body — keeping the existing audit
+	// DB contract untouched. Title is intentionally NOT redacted to stay
+	// symmetric with the persistence path (Title is the rule-name /
+	// operator-searchable summary, not the matched bytes).
+	for i := range result.Findings {
+		f := &result.Findings[i]
+		f.Description = redaction.ForSinkString(f.Description)
+		f.Location = redaction.ForSinkString(f.Location)
+		f.Remediation = redaction.ForSinkString(f.Remediation)
 	}
 
 	a.writeJSON(w, http.StatusOK, result)

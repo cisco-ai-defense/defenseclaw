@@ -101,7 +101,13 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 			continue
 		}
 		if err := validateWebhookURL(c.URL); err != nil {
-			logger.Printf("rejected endpoint %s: %v", c.URL, err)
+			// DeepSec S2.MEDIUM ("Webhook URLs containing
+			// credentials are logged verbatim"): even on
+			// validation failure the raw URL must not hit
+			// stderr; webhook URLs (Slack/Discord style) can
+			// embed bearer tokens in the path or query.
+			logger.Printf("rejected endpoint %s [%s]: %v",
+				scrubURLSecrets(c.URL), hashWebhookTargetURL(c.URL), err)
 			continue
 		}
 		evts := make(map[string]bool)
@@ -136,10 +142,25 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 	if len(endpoints) == 0 {
 		return nil
 	}
-	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 	return &WebhookDispatcher{
-		endpoints:    endpoints,
-		client:       newWebhookHTTPClient(allowLoopback, logger),
+		endpoints: endpoints,
+		// The legacy http.Client used the default Transport (which
+		// re-resolves DNS at dial time) and the default redirect
+		// policy (which follows arbitrary 30x targets).
+		// validateWebhookURL only inspected the host at configuration
+		// time, so an attacker who could (a) flip DNS for a
+		// previously-public webhook host or (b) return a 30x redirect
+		// to http://169.254.169.254 / http://127.0.0.1 could re-aim
+		// delivery at internal/cloud-metadata services.
+		//
+		// The hardened client uses ssrfSafeDialContext to refuse any
+		// dial whose resolved IP is loopback / private / link-local /
+		// CGNAT / IMDS / IPv6-ULA, and follows at most 5 redirect hops
+		// via ssrfSafeCheckRedirect — every hop is restricted to
+		// http/https and re-checked against the same private-host set,
+		// so an attacker who controls a 30x response cannot bounce
+		// delivery to an internal address.
+		client:       newWebhookHTTPClient(30 * time.Second),
 		retryBackoff: webhookRetryBackoff,
 		sem:          make(chan struct{}, webhookMaxConcurrency),
 		logger:       logger,
@@ -148,50 +169,30 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 	}
 }
 
-// newWebhookHTTPClient builds the http.Client used to deliver webhooks. It
-// installs:
+// newWebhookHTTPClient builds an http.Client whose transport refuses
+// to dial private/loopback/link-local destinations and whose redirect
+// policy follows at most 5 hops, http(s)-only, with the same
+// private-host check applied to each redirected destination
+// (ssrfSafeCheckRedirect, see internal/gateway/provider.go).
 //
-//   - secureDialContext: every TCP dial re-resolves the destination and
-//     rejects private/loopback/link-local/cloud-metadata addresses. This
-//     defeats the F-1306 DNS-rebinding window where validateWebhookURL
-//     saw a public IP at config time but Go's default dialer later
-//     resolved a private IP.
-//
-//   - CheckRedirect: every redirect target is re-validated through
-//     validateWebhookURL. Pre-fix, an attacker-controlled webhook
-//     endpoint could 302 the dispatcher to http://127.0.0.1:6379/
-//     (Redis) or http://169.254.169.254/ (cloud IMDS) and have Go's
-//     default redirect policy follow it.
-//
-// allowLoopback is wired from DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 so dev
-// workflows that intentionally point at 127.0.0.1 still work.
-func newWebhookHTTPClient(allowLoopback bool, logger *log.Logger) *http.Client {
-	transport := &http.Transport{
-		DialContext:           secureDialContext(allowLoopback, 10*time.Second),
-		MaxIdleConns:          10,
-		MaxIdleConnsPerHost:   5,
-		IdleConnTimeout:       30 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,
+// When the operator has explicitly opted into local-development
+// testing via DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 (the same env
+// switch that validateWebhookURL honours for config-time acceptance
+// of localhost/loopback hosts), the dial-time guard is relaxed to
+// match — otherwise webhook delivery to a localhost mock would be
+// rejected after passing config validation, which is incoherent.
+// Production deployments keep both guards active by default.
+func newWebhookHTTPClient(timeout time.Duration) *http.Client {
+	dial := ssrfSafeDialContext
+	if os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1" {
+		dial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
 	}
 	return &http.Client{
-		Timeout:   30 * time.Second,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Conservative cap (Go's default is 10) and cheap.
-			if len(via) >= 5 {
-				return fmt.Errorf("webhook: redirect chain length %d exceeded", len(via))
-			}
-			if err := validateWebhookURL(req.URL.String()); err != nil {
-				if logger != nil {
-					logger.Printf("rejected redirect to %s: %v",
-						req.URL.Redacted(), err)
-				}
-				return fmt.Errorf("webhook redirect rejected: %w", err)
-			}
-			return nil
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: dial,
 		},
+		CheckRedirect: ssrfSafeCheckRedirect,
 	}
 }
 
@@ -260,8 +261,15 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		}
 		cooldownKey := event.Target + "\x00" + action
 		if !ep.claimSlot(cooldownKey) {
-			d.logger.Printf("suppressed duplicate %s/%s for %s (cooldown %s)",
-				event.Target, action, ep.url, ep.cooldown)
+			// DeepSec S2.MEDIUM ("Webhook URLs containing
+			// credentials are logged verbatim"): log the
+			// stable target hash + scrubbed URL instead of
+			// the raw URL so Slack/Discord-style path tokens
+			// and userinfo never leak into stderr.
+			d.logger.Printf("suppressed duplicate %s/%s for %s [%s] (cooldown %s)",
+				event.Target, action,
+				scrubURLSecrets(ep.url), hashWebhookTargetURL(ep.url),
+				ep.cooldown)
 			ctx := context.Background()
 			tHash := hashWebhookTargetURL(ep.url)
 			if d.otel != nil {
@@ -434,8 +442,14 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	default:
 		payload, err = formatGenericPayload(event)
 	}
+	// DeepSec S2.MEDIUM ("Webhook URLs containing credentials are
+	// logged verbatim"): bind a stable hash + scrubbed URL once and
+	// reuse them across every per-attempt log line. Slack/Discord
+	// path tokens, query secrets, and userinfo never reach stderr.
+	urlHash := hashWebhookTargetURL(ep.url)
+	urlSafe := scrubURLSecrets(ep.url)
 	if err != nil {
-		d.logger.Printf("format error for %s: %v", ep.url, err)
+		d.logger.Printf("format error for %s [%s]: %v", urlSafe, urlHash, err)
 		record(0, 0, "failed")
 		ep.noteWebhookFailure(d, targetHash)
 		return false
@@ -454,7 +468,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, ep.url, bytes.NewReader(payload))
 		if reqErr != nil {
 			cancel()
-			d.logger.Printf("request error for %s: %v", ep.url, reqErr)
+			d.logger.Printf("request error for %s [%s]: %v", urlSafe, urlHash, reqErr)
 			lastStatus = 0
 			continue
 		}
@@ -464,8 +478,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		resp, doErr := d.client.Do(req)
 		cancel()
 		if doErr != nil {
-			d.logger.Printf("send to %s attempt %d/%d failed: %v",
-				ep.url, attempt+1, webhookMaxRetries+1, doErr)
+			d.logger.Printf("send to %s [%s] attempt %d/%d failed: %v",
+				urlSafe, urlHash, attempt+1, webhookMaxRetries+1, doErr)
 			lastStatus = 0
 			continue
 		}
@@ -476,8 +490,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			ms := time.Since(start).Milliseconds()
 			if d.debug {
-				d.logger.Printf("sent to %s (status=%d action=%s severity=%s)",
-					ep.url, resp.StatusCode, event.Action, event.Severity)
+				d.logger.Printf("sent to %s [%s] (status=%d action=%s severity=%s)",
+					urlSafe, urlHash, resp.StatusCode, event.Action, event.Severity)
 			}
 			record(resp.StatusCode, float64(ms), "delivered")
 			ep.noteWebhookSuccess(d, targetHash)
@@ -485,8 +499,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		}
 
 		if !isRetryable(resp.StatusCode) {
-			d.logger.Printf("%s returned %d (permanent failure), not retrying",
-				ep.url, resp.StatusCode)
+			d.logger.Printf("%s [%s] returned %d (permanent failure), not retrying",
+				urlSafe, urlHash, resp.StatusCode)
 			ms := time.Since(start).Milliseconds()
 			record(lastStatus, float64(ms), "failed")
 			ep.noteWebhookFailure(d, targetHash)
@@ -502,10 +516,10 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 			}
 		}
 
-		d.logger.Printf("%s returned %d, attempt %d/%d",
-			ep.url, resp.StatusCode, attempt+1, webhookMaxRetries+1)
+		d.logger.Printf("%s [%s] returned %d, attempt %d/%d",
+			urlSafe, urlHash, resp.StatusCode, attempt+1, webhookMaxRetries+1)
 	}
-	d.logger.Printf("exhausted retries for %s", ep.url)
+	d.logger.Printf("exhausted retries for %s [%s]", urlSafe, urlHash)
 	ms := time.Since(start).Milliseconds()
 	record(lastStatus, float64(ms), "failed")
 	ep.noteWebhookFailure(d, targetHash)
@@ -594,47 +608,27 @@ func validateWebhookURL(rawURL string) error {
 	return nil
 }
 
+// isPrivateIP returns true for any IP the webhook dispatcher refuses
+// to dial. This is a thin wrapper over provider.go::isUnsafeIP so the
+// config-time validator (validateWebhookURL) and the dispatch-time
+// dial guard (ssrfSafeDialContext / isUnsafeIP) classify the same set
+// of addresses as private — historically they diverged, with
+// isPrivateIP missing CGNAT 100.64.0.0/10 (RFC 6598), the ECS task
+// metadata endpoint 169.254.170.2/32, and IPv6 ULA fd00::/8 (a
+// superset of the fc00::/7 it did cover). The drift meant an operator
+// could configure a webhook URL whose hostname resolved to e.g. a
+// Tailscale CGNAT address — config validation would accept it and
+// dispatch would then refuse the dial, surfacing as an opaque
+// "ssrf-dial: ... private host" error at delivery time instead of a
+// clear configuration-time rejection. Routing both call sites through
+// isUnsafeIP keeps them in lockstep.
+//
+// CGNAT escape hatch: when DEFENSECLAW_ALLOW_CGNAT=1 is set, the
+// 100.64.0.0/10 range is treated as public (matching isUnsafeIP's
+// behaviour). Operators running over Tailscale or other CGNAT-routed
+// overlays opt in there, not here.
 func isPrivateIP(ip net.IP) bool {
-	if ip == nil {
-		return false
-	}
-	// F-1225 (parity): collapse IPv4-mapped IPv6 ("::ffff:127.0.0.1") to
-	// its canonical IPv4 form so the IPv4 private-range checks below
-	// catch it. Without this, an attacker can use the v6-mapped form to
-	// route around the IPv4 ranges via dial syntax like
-	// http://[::ffff:127.0.0.1]/.
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	// Use the standard library's classification helpers first — they
-	// reflect the kernel's view of "address class" and are kept current
-	// with new RFCs. The explicit CIDR list below is belt-and-suspenders
-	// in case future Go versions lag.
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() ||
-		ip.IsMulticast() || ip.IsPrivate() {
-		return true
-	}
-	privateRanges := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16", // link-local / cloud metadata
-		"::1/128",
-		"fc00::/7",
-		"fe80::/10",
-	}
-	for _, cidr := range privateRanges {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return isUnsafeIP(ip)
 }
 
 // ---------------------------------------------------------------------------

@@ -78,6 +78,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"unicode/utf8"
@@ -225,15 +226,40 @@ func ForSinkString(s string) string {
 	return fmt.Sprintf("<redacted len=%d sha=%s>", n, hashPrefix(s))
 }
 
+// Strict placeholder grammar. Only strings produced by our own
+// formatters above are recognized as already-redacted; anything that
+// merely starts with `<redacted` and ends with `>` is treated as raw
+// attacker-controlled data and re-redacted on the next sink pass.
+//
+// The four exact shapes (anchored, no whitespace tolerance):
+//
+//	<empty>
+//	<redacted len=N>
+//	<redacted len=N sha=8hex>
+//	<redacted len=N prefix="X" sha=8hex>           (entity rune preview)
+//	<redacted-evidence len=N sha=8hex>
+//	<redacted-evidence len=N match=[A:B] sha=8hex> (evidence)
+//
+// `prefix=%q` escapes the inner rune via Go's strconv quoting, so
+// the inner field can contain Go escape sequences like `\u00e9`,
+// `\xff`, `\\`, `\"`. We cap the inner field at 16 bytes so
+// pathological prefix values cannot inflate the placeholder past
+// the documented bound.
+var (
+	placeholderShortRe    = regexp.MustCompile(`^<redacted len=\d{1,12}>$`)
+	placeholderStandardRe = regexp.MustCompile(`^<redacted len=\d{1,12} sha=[0-9a-f]{8}>$`)
+	placeholderEntityRe   = regexp.MustCompile(`^<redacted len=\d{1,12} prefix="(?:[^"\\]|\\.){1,16}" sha=[0-9a-f]{8}>$`)
+	placeholderEvidenceRe = regexp.MustCompile(`^<redacted-evidence len=\d{1,12}(?: match=\[\d{1,12}:\d{1,12}\])? sha=[0-9a-f]{8}>$`)
+)
+
 // isPlaceholder reports whether s is one of our own redaction
 // placeholder shapes. Used to make the ForSink* helpers idempotent.
 //
-// The recognizer is intentionally narrow: the longest placeholder we
-// emit is an Evidence one like
-// `<redacted-evidence len=1234567 match=[12:34] sha=abcdef12>` at
-// about 60 bytes, so a hard cap of 80 keeps attacker-controlled
-// strings that merely start with `<redacted` and end with `>` (with
-// arbitrary payload in between) from being treated as safe.
+// The recognizer is grammar-anchored: a string like
+// `<redacted sk-ant-secret>` or `<redacted alice@example.com>` looks
+// vaguely placeholder-shaped but does NOT match any of the four
+// strict shapes above, so it is correctly treated as raw data and
+// redacted again at every sink boundary.
 func isPlaceholder(s string) bool {
 	if s == "<empty>" {
 		return true
@@ -241,18 +267,34 @@ func isPlaceholder(s string) bool {
 	if !strings.HasPrefix(s, "<redacted") || !strings.HasSuffix(s, ">") {
 		return false
 	}
-	if len(s) > 80 {
+	if len(s) > 96 {
 		return false
 	}
 	if strings.ContainsAny(s, "\n\r\t") {
 		return false
 	}
-	// The body between the opening `<redacted` and the final `>`
-	// must not embed another `<` — that's a sign the caller
-	// concatenated a fresh literal onto an already-redacted
-	// placeholder and handed it back to us.
-	inner := s[len("<redacted") : len(s)-1]
-	return !strings.ContainsAny(inner, "<>")
+	switch {
+	case strings.HasPrefix(s, "<redacted-evidence"):
+		return placeholderEvidenceRe.MatchString(s)
+	case placeholderEntityRe.MatchString(s):
+		return true
+	case placeholderStandardRe.MatchString(s):
+		return true
+	case placeholderShortRe.MatchString(s):
+		return true
+	}
+	return false
+}
+
+// isEvidencePlaceholder reports whether s is the strict evidence
+// placeholder shape. ForSinkEvidence uses this for idempotency
+// instead of a loose prefix/suffix check so that an attacker-supplied
+// `<redacted-evidence sk-secret>` is re-redacted instead of preserved.
+func isEvidencePlaceholder(s string) bool {
+	if len(s) > 96 || strings.ContainsAny(s, "\n\r\t") {
+		return false
+	}
+	return placeholderEvidenceRe.MatchString(s)
 }
 
 // Entity redacts a PII entity (phone, SSN, email, token, etc.)
@@ -417,18 +459,18 @@ func isAlreadyRedacted(s string) bool {
 }
 
 // isRedactedToken reports whether tok is one of our placeholder
-// shapes or a "key: <redacted...>" pair.
+// shapes or a "key: <redacted...>" pair. Uses the strict
+// isPlaceholder grammar so a spoofed `<redacted alice@example.com>`
+// or `rule: <redacted secret>` token is NOT treated as already-safe
+// during the idempotency check on incoming reasons.
 func isRedactedToken(tok string) bool {
-	switch {
-	case strings.HasPrefix(tok, "<redacted"):
-		return strings.HasSuffix(tok, ">")
-	case tok == "<empty>":
+	if isPlaceholder(tok) {
 		return true
 	}
 	if idx := strings.Index(tok, ": "); idx > 0 {
 		prefix := tok[:idx]
 		rest := tok[idx+2:]
-		if isRuleIDChars(prefix) && strings.HasPrefix(rest, "<redacted") && strings.HasSuffix(rest, ">") {
+		if isRuleIDChars(prefix) && isPlaceholder(rest) {
 			return true
 		}
 	}
@@ -676,7 +718,7 @@ func ForSinkEvidence(content string, matchStart, matchEnd int) string {
 	if content == "" {
 		return "<empty>"
 	}
-	if strings.HasPrefix(content, "<redacted-evidence") && strings.HasSuffix(content, ">") {
+	if isEvidencePlaceholder(content) {
 		return content
 	}
 	if matchStart >= 0 && matchEnd > matchStart {
@@ -694,25 +736,203 @@ func hashPrefix(s string) string {
 	return hex.EncodeToString(sum[:])[:hashPrefixHex]
 }
 
-// isSafeReasonToken is the allow-list for plain reason tokens
-// (i.e. no '=' pair). Rule IDs and canonical IDs are the only
-// hand-authored shapes we trust here; everything else must go
-// through the redactor.
+// safeEnumValues is the positive catalog of operator-trusted enum
+// constants that pass through reason redaction unchanged on either
+// the value side of audit "key=value" pairs OR as standalone tokens.
 //
-// Two independent caps apply:
+// Hand-curated. Extend with review when new enum constants ship.
+// Every entry must be either a documented policy enum, severity
+// label, target kind, connector name, transport / HTTP verb, or
+// boolean / outcome word. Anything that could plausibly hold
+// user-supplied content (paths, IDs, names, URLs, model names with
+// version numbers, prompt fragments) MUST NOT be added here.
+var safeEnumValues = map[string]struct{}{
+	// policy verdicts and modes
+	"allow": {}, "allowed": {}, "block": {}, "blocked": {}, "deny": {}, "denied": {},
+	"observe": {}, "action": {}, "warn": {}, "warning": {}, "monitor": {}, "enforce": {},
+	"learn": {}, "off": {}, "on": {}, "true": {}, "false": {}, "none": {}, "null": {},
+	// outcome states
+	"unknown": {}, "error": {}, "ok": {}, "success": {}, "failure": {}, "partial": {},
+	"clean": {}, "rejected": {}, "quarantine": {}, "quarantined": {}, "skip": {}, "skipped": {},
+	"inherit": {}, "require": {}, "optional": {}, "enabled": {}, "disabled": {},
+	// direction / phase
+	"prompt": {}, "response": {}, "request": {}, "completion": {}, "tool": {}, "tool_use": {},
+	"tool_result": {}, "inspect": {}, "admit": {}, "drift": {}, "baseline": {}, "new": {},
+	"removed": {}, "updated": {}, "modified": {}, "added": {}, "deleted": {}, "created": {},
+	// severity (uppercase)
+	"INFO": {}, "LOW": {}, "MEDIUM": {}, "HIGH": {}, "HIGH_BUG": {}, "CRITICAL": {},
+	"BUG": {}, "UNKNOWN": {}, "ERROR": {}, "DEBUG": {}, "TRACE": {}, "WARN": {},
+	"WARNING": {}, "FATAL": {},
+	// target kinds and connectors
+	"skill": {}, "plugin": {}, "mcp": {}, "codeguard": {}, "scanner": {},
+	"openai": {}, "anthropic": {}, "google": {}, "bedrock": {}, "azure": {}, "ollama": {},
+	"geminicli": {}, "codex": {}, "openclaw": {}, "cursor": {}, "claudecode": {},
+	"zeptoclaw": {}, "litellm": {}, "bifrost": {}, "openrouter": {}, "vertex": {},
+	// transport / wire format
+	"stdio": {}, "sse": {}, "websocket": {}, "http": {}, "https": {}, "tcp": {}, "udp": {},
+	"json": {}, "yaml": {}, "toml": {}, "form": {}, "text": {},
+	// HTTP verbs
+	"GET": {}, "POST": {}, "PUT": {}, "DELETE": {}, "PATCH": {}, "HEAD": {}, "OPTIONS": {},
+	// LLM message roles
+	"user": {}, "system": {}, "assistant": {}, "developer": {}, "tool_calls": {},
+	// generic boolean / discoverable defaults
+	"yes": {}, "no": {}, "auto": {}, "manual": {}, "any": {}, "all": {},
+	// asset / registry policy single-word enums (multi-word forms
+	// like "not-in-approved-registry" go through isLowercaseKebabReason)
+	"unregistered": {}, "registered": {}, "configured": {}, "unconfigured": {},
+	"required": {}, "approved": {}, "pending": {},
+	"baselined": {}, "snapshot": {}, "current": {}, "stale": {},
+}
+
+// isCanonicalID reports whether s is an UPPER-CASE rule/canonical
+// identifier that contains at least one separator from the rule-ID
+// character class. Used as a safe-pass shape on the value side of
+// audit "key=value" pairs and as a standalone reason token.
 //
-//  1. Tokens with at least one separator (`-`, `.`, `:`, `/`, `_`)
-//     may be up to 32 bytes — this covers every real rule ID in
-//     the catalog (SEC-ANTHROPIC, PII-SSN-US, CODEGUARD-0-XSS …).
-//  2. Tokens with no separator at all are capped at
-//     compactRuleIDMaxBytes (11) so a bare high-entropy token
-//     like `AKIAIOSFODNN7EXAMPLE` (20 bytes, rule-id charset) or
-//     `MySecretP4ssword` (16 bytes) is routed through the
-//     redactor instead of passing verbatim.
+// The two requirements work together to reject the credential
+// shapes from the report:
 //
-// Real rule IDs top out around 20 bytes with separators; the
-// 32-byte cap leaves headroom for canonical-id extensions like
-// SEC-GITHUB-APP-TOKEN without letting genuine secrets pass.
+//   - "AKIAIOSFODNN7EXAMPLE" — uppercase but NO separator → rejected
+//   - "sk-test-123"          — has separator but lowercase → rejected
+//   - "hunter-2"             — lowercase + separator        → rejected
+//   - "SEC-AWS-KEY"          — uppercase + separator        → ACCEPTED
+//   - "PII-SSN-US"           — uppercase + separator        → ACCEPTED
+//   - "CODEGUARD-0-XSS"      — uppercase digits + separator → ACCEPTED
+func isCanonicalID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	hasUpper := false
+	hasSeparator := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z':
+			hasUpper = true
+		case c >= '0' && c <= '9':
+		case c == '-' || c == '_' || c == '.' || c == '/' || c == ':':
+			hasSeparator = true
+		default:
+			return false
+		}
+	}
+	return hasUpper && hasSeparator
+}
+
+// engineRuleIDPrefixes is the bounded catalog of dotted lowercase
+// rule-ID prefixes that the DefenseClaw engine actually emits
+// (`pii.phone`, `policy.admission`, `scan.skill.installed`, …).
+// Anything that looks dotted but does NOT start with one of these
+// prefixes is treated as user-supplied content (URLs, hostnames,
+// version strings, free-form session tokens) and routed to the
+// redactor.
+var engineRuleIDPrefixes = []string{
+	"pii.", "policy.", "scan.", "audit.", "judge.", "guardrail.",
+	"sec.", "firewall.", "sandbox.", "inspect.", "tool.", "prompt.",
+	"code.", "event.", "admission.", "drift.", "watcher.", "engine.",
+	"connector.", "rule.",
+}
+
+// isLowercaseKebabReason reports whether s is a multi-word
+// lowercase reason / status / surface enum that uses '-' or '_' to
+// separate purely alphabetic segments. Used to keep operator-facing
+// policy reason codes readable (`not-in-approved-registry`,
+// `registry-required-but-empty`, `default-deny`, `prompt_expansion`,
+// `pre_tool_use`).
+//
+// The "no digits" rule is the security boundary that distinguishes
+// these enums from credential shapes called out in the report:
+//
+//   - sk-test-123  → digits      → rejected
+//   - hunter-2     → digit       → rejected
+//   - abc.def      → wrong sep   → rejected
+//   - api_key      → no sep word → rejected (only single segment)
+//   - default-deny → all letters → ACCEPTED
+//
+// We also require at least two segments (so a bare lowercase word
+// without a separator falls back to the safeEnumValues catalog).
+func isLowercaseKebabReason(s string) bool {
+	if len(s) == 0 || len(s) > 40 {
+		return false
+	}
+	hasSep := false
+	prevWasSep := true
+	segCount := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			if prevWasSep {
+				segCount++
+			}
+			prevWasSep = false
+		case c == '-' || c == '_':
+			if prevWasSep {
+				return false
+			}
+			hasSep = true
+			prevWasSep = true
+		default:
+			return false
+		}
+	}
+	if prevWasSep {
+		return false
+	}
+	return hasSep && segCount >= 2
+}
+
+// isLowercaseDottedRuleID reports whether s is a documented engine
+// rule-ID shape that uses '.' as the segment separator (the
+// convention used for `pii.phone`, `pii.email`, `policy.admission`,
+// `scan.skill.installed`, …). The narrow "must start with a known
+// engine prefix" requirement keeps short hyphenated credentials
+// like `sk-test-123` and free-form session tokens like `abc.def`
+// from being mistaken for engine rule IDs.
+func isLowercaseDottedRuleID(s string) bool {
+	if len(s) == 0 || len(s) > 32 {
+		return false
+	}
+	matched := false
+	for _, p := range engineRuleIDPrefixes {
+		if strings.HasPrefix(s, p) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false
+	}
+	hasDot := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+		case c >= '0' && c <= '9':
+		case c == '_':
+		case c == '.':
+			hasDot = true
+		default:
+			return false
+		}
+	}
+	return hasDot
+}
+
+// isSafeReasonToken is the positive-catalog allow-list for plain
+// reason tokens. Replaces the previous "any rule-id-shape with a
+// separator up to 32 bytes" predicate, which let credential shapes
+// like `sk-test-123` or `password=hunter-2` pass unchanged.
+//
+// A token passes only if one of the following holds:
+//
+//  1. It is a `key=value` pair where the key is well-formed and the
+//     value matches isSafeKVValue (which itself uses positive catalogs).
+//  2. It is a known enum constant (safeEnumValues — case-sensitive).
+//  3. It is an UPPER-CASE canonical ID with at least one separator.
+//  4. It is a lowercase dotted engine rule ID (pii.phone, pii.email).
+//
+// Anything else routes through the per-token redactor.
 func isSafeReasonToken(t string) bool {
 	t = strings.TrimSpace(t)
 	if t == "" {
@@ -721,50 +941,38 @@ func isSafeReasonToken(t string) bool {
 	if eq := strings.IndexByte(t, '='); eq > 0 {
 		k := t[:eq]
 		v := t[eq+1:]
-		if len(k) > 32 {
+		if !isReasonKey(k) {
 			return false
 		}
-		return isRuleIDChars(k) && isSafeKVValue(v)
+		return isSafeKVValue(v)
 	}
-	if len(t) > 32 {
+	if len(t) > 64 {
 		return false
 	}
-	if !isRuleIDChars(t) {
-		return false
+	if _, ok := safeEnumValues[t]; ok {
+		return true
 	}
-	if !hasRuleIDSeparator(t) && len(t) > compactRuleIDMaxBytes {
-		return false
+	if isCanonicalID(t) {
+		return true
 	}
-	return true
+	return isLowercaseDottedRuleID(t)
 }
 
-// hasRuleIDSeparator reports whether s contains at least one byte
-// from the rule-ID separator class. Used to distinguish hand-authored
-// multi-segment identifiers (SEC-AWS-KEY) from bare alphanumeric
-// runs that are almost always secrets or free-form user content.
-func hasRuleIDSeparator(s string) bool {
-	for i := 0; i < len(s); i++ {
-		switch s[i] {
-		case '-', '.', ':', '/', '_':
-			return true
-		}
+// isReasonKey reports whether k is a well-formed key on the left side
+// of an audit "key=value" pair. The security boundary lives on the
+// value side (isSafeKVValue); keys may use the broad rule-id charset
+// because they are field names rather than user content.
+func isReasonKey(k string) bool {
+	if len(k) == 0 || len(k) > 32 {
+		return false
 	}
-	return false
+	return isRuleIDChars(k)
 }
 
-// isSafeKVValue is the value-side allow-list for "key=value" tokens.
-// Letter-bearing values follow the rule-id charset (≤32 chars);
-// letter-less values (pure digits, digits+hyphen, digits+colon) are
-// capped at 6 characters so phone numbers, SSNs, and dates are
-// always redacted.
-//
-// Comma is treated as a list separator so that audit fields like
-//
-//	canonical=SEC-AWS-KEY,SEC-GITHUB-TOKEN
-//
-// pass verbatim. Every comma-separated segment must itself be a
-// safe value under the same rules; the whole list is capped at 256
-// characters to keep pathological inputs from surfacing as "safe".
+// isSafeKVValue is the positive-catalog allow-list for the value side
+// of an audit "key=value" pair. Comma-separated lists pass when every
+// segment passes individually; the whole list is capped at 256 bytes
+// so pathological inputs cannot inflate the safe surface.
 func isSafeKVValue(v string) bool {
 	if v == "" {
 		return false
@@ -783,43 +991,82 @@ func isSafeKVValue(v string) bool {
 	return isSafeSingleKVValue(v)
 }
 
-// isSafeSingleKVValue is the single-token form of isSafeKVValue.
-// The character class and length caps mirror isSafeReasonToken: a
-// letter-bearing value up to 32 bytes passes when it has at least
-// one separator, otherwise it must be ≤ compactRuleIDMaxBytes. This
-// keeps enumerable metadata (action=allow, mode=observe,
-// canonical=SEC-AWS-KEY) readable while forcing long bare tokens
-// (api_key=AKIAIOSFODNN7EXAMPLE) through the redactor.
+// isSafeSingleKVValue is the single-segment form of isSafeKVValue.
+// Accepts (in order):
+//
+//   - Pure-digit values up to 6 chars (counts, exit codes, ports).
+//   - Known enum constants (safeEnumValues — case-sensitive).
+//   - Lowercase kebab/snake reason codes (`not-in-approved-registry`).
+//   - UPPER-CASE canonical IDs with a separator (SEC-AWS-KEY, …).
+//   - Lowercase dotted engine rule IDs (pii.phone, …).
+//   - Short bare alphanumeric tokens (asset names, surfaces) up to
+//     compactRuleIDMaxBytes / 11 bytes — long enough for "rogue",
+//     "tool", "prompt", "skill", short MCP names, but well below the
+//     length of any credential the report calls out (AWS=20, OpenAI=51+).
+//
+// All credential-shaped strings called out by the deepsec report
+// (sk-test-123, hunter-2, dev/token, abc.def with non-engine prefix,
+// MySecretP4ssword) fail every positive check and route to the
+// redactor.
 func isSafeSingleKVValue(v string) bool {
 	if v == "" {
 		return false
 	}
-	hasLetter := false
-	hasSeparator := false
+	onlyDigits := true
+	for i := 0; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '9' {
+			onlyDigits = false
+			break
+		}
+	}
+	if onlyDigits {
+		return len(v) <= 6
+	}
+	if _, ok := safeEnumValues[v]; ok {
+		return true
+	}
+	if isLowercaseKebabReason(v) {
+		return true
+	}
+	if isCanonicalID(v) {
+		return true
+	}
+	if isLowercaseDottedRuleID(v) {
+		return true
+	}
+	return isShortAlphanumericToken(v)
+}
+
+// isShortAlphanumericToken reports whether v is a bare alphanumeric
+// token short enough that it cannot encode a credential of interest.
+// The 11-byte cap is the same compactRuleIDMaxBytes used by the
+// standalone-token check; tokens at or below this length are
+// considered safe to display verbatim because:
+//
+//   - AWS access keys are 20 chars (AKIAIOSFODNN7EXAMPLE).
+//   - OpenAI keys are 51+ chars (sk-…48 hex…).
+//   - GitHub PATs are 40 chars (ghp_…).
+//   - JWT tokens are 200+ chars.
+//   - Session IDs are typically ≥22 base64 chars.
+//
+// Asset / surface / role identifiers that legitimately appear in
+// audit reasons (rogue, tool, skill, prompt, mcp, none) are well
+// under the cap.
+func isShortAlphanumericToken(v string) bool {
+	if len(v) == 0 || len(v) > compactRuleIDMaxBytes {
+		return false
+	}
 	for i := 0; i < len(v); i++ {
 		c := v[i]
 		switch {
 		case c >= 'a' && c <= 'z':
-			hasLetter = true
 		case c >= 'A' && c <= 'Z':
-			hasLetter = true
 		case c >= '0' && c <= '9':
-		case c == '_' || c == '-' || c == '.' || c == ':' || c == '/':
-			hasSeparator = true
 		default:
 			return false
 		}
 	}
-	if hasLetter {
-		if len(v) > 32 {
-			return false
-		}
-		if !hasSeparator && len(v) > compactRuleIDMaxBytes {
-			return false
-		}
-		return true
-	}
-	return len(v) <= 6
+	return true
 }
 
 // isRuleIDChars reports whether every byte of s is in the allow-list

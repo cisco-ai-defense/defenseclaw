@@ -78,14 +78,25 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 
 	out := io.Writer(os.Stdout)
 	if auditExportOut != "" && auditExportOut != "-" {
-		f, err := os.Create(auditExportOut)
+		// DeepSec S2.MEDIUM ("Audit export output file is created with
+		// default-readable permissions before chmod"): os.Create uses
+		// O_CREATE|O_TRUNC with mode 0666 masked by the process umask,
+		// so on a 022 umask host the file briefly exists as 0644
+		// before the os.Chmod tightens it. A local attacker watching
+		// a shared directory (or holding an FD opened during that
+		// window) could read sensitive audit content written
+		// afterwards. Open with O_CREATE|O_EXCL|0o600 so the file is
+		// 0600 from creation and we refuse to clobber an existing
+		// file (which could be an attacker-pre-created decoy).
+		f, err := os.OpenFile(
+			auditExportOut,
+			os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC,
+			0o600,
+		)
 		if err != nil {
 			return fmt.Errorf("audit export: create output: %w", err)
 		}
 		defer f.Close()
-		if err := os.Chmod(auditExportOut, 0o600); err != nil {
-			return fmt.Errorf("audit export: chmod: %w", err)
-		}
 		out = f
 	}
 

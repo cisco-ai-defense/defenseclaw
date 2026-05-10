@@ -399,7 +399,11 @@ export default function (api: DefenseClawPluginHost) {
       try {
         return (await res.json()) as InspectVerdict;
       } catch {
-        return failClosedVerdict("sidecar returned malformed verdict");
+        // Body parse failure: the sidecar accepted the request but
+        // returned malformed JSON. Treat this exactly like a transport
+        // error so deployments fail closed by default
+        // (DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN=1 to opt out).
+        return failClosedVerdict("sidecar returned malformed JSON");
       }
     } catch (err) {
       const duration_ms = Math.round(performance.now() - started);

@@ -411,8 +411,24 @@ def scan_source_files(
     findings: list[Finding],
     capabilities: set[str],
     profile: str,
+    source_files_out: list | None = None,
 ) -> tuple[int, int]:
-    """Returns (file_count, total_bytes)."""
+    """Returns (file_count, total_bytes).
+
+    If ``source_files_out`` is provided, each successfully read file is
+    appended as a ``SourceFile`` instance so downstream analyzers (in
+    particular the LLM analyzer and the meta LLM analyzer) can reason
+    about the actual plugin source instead of falling back to a
+    manifest-only view. The list is mutated in place so the caller can
+    keep its existing pre-allocated reference (typically
+    ``ctx.source_files``). When ``None`` is passed we behave exactly
+    as before so the public surface stays backwards compatible.
+    """
+    # Imported here to avoid a hard dependency at module import time and
+    # to keep the analyzer/analyzer-context coupling localised to the
+    # functions that need it.
+    from defenseclaw.scanner.plugin_scanner.analyzer import SourceFile  # noqa: PLC0415
+
     symlink_escapes: list[str] = []
     depth_truncations: list[str] = []
     oversized_files: list[str] = []
@@ -441,7 +457,6 @@ def scan_source_files(
 
         total_bytes += len(content)
 
-        # Normalise path separators for consistent matching
         rel_path = file_path.replace(directory + os.sep, "").replace(os.sep, "/")
         if not rel_path.startswith("/"):
             rel_path_slash = file_path.replace(directory + "/", "")
@@ -451,6 +466,18 @@ def scan_source_files(
         in_test = is_test_path(rel_path)
         lines = content.split("\n")
         code_lines = [strip_comment(line) for line in lines]
+
+        if source_files_out is not None:
+            source_files_out.append(
+                SourceFile(
+                    path=file_path,
+                    rel_path=rel_path,
+                    content=content,
+                    lines=lines,
+                    code_lines=code_lines,
+                    in_test_path=in_test,
+                )
+            )
 
         _scan_suspicious_patterns(code_lines, rel_path, findings, capabilities, profile, in_test)
         _check_for_hardcoded_secrets(lines, rel_path, findings, in_test)

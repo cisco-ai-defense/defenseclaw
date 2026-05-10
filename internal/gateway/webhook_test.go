@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -411,8 +410,8 @@ func TestNewWebhookDispatcherRejectsUnsafeURL(t *testing.T) {
 	}
 }
 
-// TestWebhookCheckRedirect_RejectsPrivate pins F-1306 (avarice) at the
-// CheckRedirect closure layer.
+// TestWebhookCheckRedirect_RejectsPrivate pins the SSRF defence at the
+// CheckRedirect closure layer of the webhook HTTP client.
 //
 // Pre-fix: webhooks were validated only at NewWebhookDispatcher time. The
 // http.Client used for actual delivery had no CheckRedirect, so a webhook
@@ -424,10 +423,9 @@ func TestNewWebhookDispatcherRejectsUnsafeURL(t *testing.T) {
 // validateWebhookURL on every redirect target.
 func TestWebhookCheckRedirect_RejectsPrivate(t *testing.T) {
 	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "0")
-	logger := log.New(io.Discard, "", 0)
-	client := newWebhookHTTPClient(false, logger)
+	client := newWebhookHTTPClient(30 * time.Second)
 	if client.CheckRedirect == nil {
-		t.Fatalf("F-1306: CheckRedirect not installed on webhook client")
+		t.Fatalf("CheckRedirect not installed on webhook client")
 	}
 	type tc struct {
 		target  string
@@ -436,16 +434,16 @@ func TestWebhookCheckRedirect_RejectsPrivate(t *testing.T) {
 	cases := []tc{
 		{"https://example.com/path", false},
 		{"https://hooks.slack.com/services/T0/B0/abc", false},
-		// Cloud IMDS / loopback / RFC1918 / link-local — F-1306 cases.
+		// Cloud IMDS / loopback / RFC1918 / link-local — must reject.
 		{"http://169.254.169.254/", true},
 		{"http://127.0.0.1/", true},
 		{"http://[::1]/", true},
 		{"http://10.0.0.5/", true},
 		{"http://192.168.1.50/", true},
 		{"http://[fe80::1]/", true},
-		// F-1225 parity: scoped IPv6 must also be rejected.
+		// Scoped IPv6 must also be rejected.
 		{"http://[::1%25lo0]/", true},
-		// F-1225 parity: IPv4-mapped IPv6 must also be rejected.
+		// IPv4-mapped IPv6 must also be rejected.
 		{"http://[::ffff:127.0.0.1]/", true},
 	}
 	for _, c := range cases {
@@ -468,19 +466,20 @@ func TestWebhookCheckRedirect_RejectsPrivate(t *testing.T) {
 // (defense-in-depth: even if every hop is public, an attacker can stall the
 // dispatcher with a redirect storm).
 func TestWebhookCheckRedirect_RejectsLongChain(t *testing.T) {
-	logger := log.New(io.Discard, "", 0)
-	client := newWebhookHTTPClient(false, logger)
+	client := newWebhookHTTPClient(30 * time.Second)
 	u, err := url.Parse("https://example.com/path")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
 	req := &http.Request{URL: u, Method: "POST"}
-	via := make([]*http.Request, 5)
+	// ssrfSafeCheckRedirect caps the chain at 5 redirects; 6 hops in
+	// `via` is the first that exceeds it.
+	via := make([]*http.Request, 6)
 	for i := range via {
 		via[i] = &http.Request{URL: u, Method: "POST"}
 	}
 	if err := client.CheckRedirect(req, via); err == nil {
-		t.Errorf("CheckRedirect(via len=5) = nil, want error (chain cap)")
+		t.Errorf("CheckRedirect(via len=6) = nil, want error (chain cap)")
 	}
 }
 

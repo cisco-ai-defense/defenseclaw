@@ -34,6 +34,8 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
+	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -171,6 +173,16 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 }
 
 // rescanTarget scans a single target, compares with baseline, and emits drift alerts.
+//
+// DeepSec hardening (S2.watcher, "Rescan findings are baselined without
+// admission enforcement"): both the initial-baseline path
+// (no prior baseline) and the drift-detected path now route the fresh
+// scan result through the same admission/enforcement gate as
+// runAdmission via evaluatePostScanForRescan. The baseline is only
+// updated when the verdict is NOT rejected/blocked, so a malicious
+// component that appears while the watcher is down -- or one that
+// mutates after a clean admission -- cannot become the accepted
+// baseline by relying on the periodic rescan path being alert-only.
 func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 	currentSnap, err := w.snapshotForEvent(evt)
 	if errors.Is(err, os.ErrNotExist) {
@@ -194,14 +206,13 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 
 	var deltas []DriftDelta
 
-	// Avarice F-3188: keep the legacy "retry scan persistence" recovery
-	// path so a target that was first-baselined without a scan id can
-	// upgrade to a real baseline scan once the scanner recovers. The
-	// reason the legacy code was a vulnerability is that storeBaseline
-	// previously rewrote the baseline with scan_id="" on scanner
+	// Retry-scan-persistence recovery: a target that was first-
+	// baselined without a scan id can upgrade to a real baseline once
+	// the scanner recovers. This used to be a vulnerability because
+	// storeBaseline rewrote the baseline with scan_id="" on scanner
 	// failure even when a prior trusted scan existed. The hardened
 	// storeBaseline below now refuses that downgrade, so calling it
-	// here is safe: it ONLY rewrites when (a) the scanner succeeded
+	// here is safe: it only rewrites when (a) the scanner succeeded
 	// and produced a real scan id, or (b) there was no prior trust
 	// state to overwrite (prior.ScanID == "").
 	if baseline.ScanID == "" {
@@ -211,8 +222,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 	// Compare content-level drift (deps, config, endpoints).
 	deltas = append(deltas, compareSnapshots(baseline, currentSnap)...)
 
-	// Run scanner and compare findings against last stored scan.
-	scanDeltas := w.compareScanResults(ctx, evt)
+	// Run scanner and compare findings against last stored scan. We
+	// also retain the freshly computed ScanResult so we can route it
+	// through admission below without paying for a second scan.
+	scanDeltas, freshResult := w.compareScanResults(ctx, evt)
 	deltas = append(deltas, scanDeltas...)
 
 	if len(deltas) == 0 {
@@ -220,19 +233,44 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 	}
 
 	w.emitDriftAlerts(evt, deltas)
+
+	// DeepSec hardening: route drift through admission. If the fresh
+	// scan would be rejected/blocked by current policy, refuse to
+	// promote the new snapshot to the baseline so we keep alerting on
+	// every subsequent rescan (and any operator-configured auto-block
+	// gets applied via applyPostScanEnforcement).
+	if freshResult != nil {
+		decision := w.evaluatePostScanForRescan(ctx, evt, freshResult)
+		if decision != nil && shouldRejectAdmissionVerdict(decision.Verdict) {
+			_ = w.logger.LogAction("rescan-rejected", evt.Path,
+				fmt.Sprintf("type=%s verdict=%s reason=%s",
+					evt.Type, decision.Verdict, decision.Reason))
+			return
+		}
+	}
+
 	w.storeBaseline(ctx, evt, currentSnap)
 }
 
-// storeBaseline runs a scan and persists the snapshot as the new baseline.
+// storeBaseline runs a scan, routes the result through the admission
+// gate, and persists the snapshot as the new baseline only when:
+//   - the scanner succeeded (no error from Scan()), AND
+//   - the admission verdict is not rejected/blocked, AND
+//   - either the scanner produced a non-empty scan id, or no prior
+//     baseline exists to be downgraded.
 //
-// Avarice F-3188: we now refuse to persist a baseline whose scan id
-// is empty unless the prior row already lacked a scan id. Without
-// this, scanner failures during a rescan would silently rewrite the
-// stored baseline to point at the mutated target with `scan_id=""`,
-// and the next rescan would treat the mutated content as the trusted
-// baseline. The recovery path (operator successfully scans the
-// target later) still works because storeBaseline is called again
-// with a real scan id.
+// This closes two intersecting risks against the baseline state:
+//
+//  1. A scanner failure during rescan must not silently rewrite the
+//     stored baseline to point at the mutated target with scan_id="".
+//     The next rescan would otherwise treat the mutated content as
+//     the trusted baseline. Recovery still works because storeBaseline
+//     is called again with a real scan id once the scanner recovers.
+//  2. Rescan findings whose verdict would be rejected/blocked by the
+//     current admission policy must not be accepted as the new
+//     baseline — we keep alerting on every subsequent rescan, and
+//     any operator-configured auto-block applies via the post-scan
+//     enforcement path.
 func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, snap *TargetSnapshot) {
 	s := w.scannerFor(evt)
 	scanID := ""
@@ -242,7 +280,23 @@ func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, sn
 		defer cancel()
 
 		result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
-		if err == nil && result != nil {
+		if err != nil {
+			// The scanner Scan() now fails closed on any
+			// non-zero subprocess exit. Refuse to baseline so we
+			// keep retrying on the next rescan rather than
+			// silently accepting an unscanned target.
+			_ = w.logger.LogAction("baseline-rejected", evt.Path,
+				fmt.Sprintf("type=%s reason=scan-error error=%v", evt.Type, err))
+			return
+		}
+		if result != nil {
+			decision := w.evaluatePostScanForRescan(ctx, evt, result)
+			if decision != nil && shouldRejectAdmissionVerdict(decision.Verdict) {
+				_ = w.logger.LogAction("baseline-rejected", evt.Path,
+					fmt.Sprintf("type=%s verdict=%s reason=%s",
+						evt.Type, decision.Verdict, decision.Reason))
+				return
+			}
 			scanID = w.persistScanResult(result)
 			scannerOK = scanID != ""
 		}
@@ -258,7 +312,7 @@ func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, sn
 		prior, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
 		if err == nil && prior != nil && prior.ScanID != "" {
 			fmt.Fprintf(os.Stderr,
-				"[rescan] refusing to overwrite baseline for %s without scanner evidence (F-3188)\n",
+				"[rescan] refusing to overwrite baseline for %s without scanner evidence\n",
 				evt.Path)
 			return
 		}
@@ -274,11 +328,79 @@ func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, sn
 	)
 }
 
-// compareScanResults runs a fresh scan and diffs findings against the last stored scan.
-func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEvent) []DriftDelta {
+// evaluatePostScanForRescan runs the same OPA -> fallback -> enforcement
+// pipeline as runAdmission's post-scan phase, but for a result that was
+// produced by the rescan/baseline path rather than an install event.
+//
+// The returned AdmissionOutput tells the caller whether the fresh scan
+// is acceptable as a new baseline (clean/warning/allowed) or whether it
+// must be rejected (rejected/blocked). Side-effects like quarantine,
+// disable, and audit logging are performed via applyPostScanEnforcement
+// so rescan parity with the install path is automatic.
+func (w *InstallWatcher) evaluatePostScanForRescan(ctx context.Context, evt InstallEvent, result *scanner.ScanResult) *policy.AdmissionOutput {
+	if result == nil {
+		return nil
+	}
+	targetType := string(evt.Type)
+	pe := enforce.NewPolicyEngine(w.store)
+	blockList := w.buildListEntries(pe, "block")
+	allowList := w.buildListEntries(pe, "allow")
+	fallbackProfile := policy.LoadFallbackProfile(w.cfg.PolicyDir)
+
+	scanInput := &policy.ScanResultInput{
+		MaxSeverity:   string(result.MaxSeverity()),
+		TotalFindings: len(result.Findings),
+		ScannerName:   result.Scanner,
+		Findings:      toFindingInputs(result.Findings),
+		ExitCode:      result.ExitCode,
+		ScanError:     result.ScanError,
+	}
+	input := policy.AdmissionInput{
+		TargetType: targetType,
+		TargetName: evt.Name,
+		Path:       evt.Path,
+		BlockList:  blockList,
+		AllowList:  allowList,
+		ScanResult: scanInput,
+	}
+
+	var out *policy.AdmissionOutput
+	if w.opa != nil {
+		if rOut, err := w.opa.Evaluate(ctx, input); err == nil {
+			out = rOut
+		}
+	}
+	if out == nil {
+		out = policy.EvaluateAdmissionFallback(input, fallbackProfile)
+	}
+
+	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, result.Scanner)
+	_ = w.logger.LogScanWithVerdict(result, out.Verdict)
+	w.recordAdmission(ctx, out.Verdict, targetType)
+	return out
+}
+
+// shouldRejectAdmissionVerdict returns true for verdicts that must NOT
+// be accepted as a new rescan/baseline. Anything else (clean, warning,
+// allowed, or unknown verdict) is treated as acceptable so we don't
+// accidentally over-block on a verdict the policy engine introduced
+// after a code update.
+func shouldRejectAdmissionVerdict(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "blocked", "rejected":
+		return true
+	}
+	return false
+}
+
+// compareScanResults runs a fresh scan, diffs findings against the
+// last stored scan, and returns both the drift deltas and the fresh
+// result so callers can route it through admission without paying for
+// a second scan.
+func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEvent) ([]DriftDelta, *scanner.ScanResult) {
 	s := w.scannerFor(evt)
 	if s == nil {
-		return nil
+		return nil, nil
 	}
 
 	baseline, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
@@ -286,19 +408,19 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 		if !errors.Is(err, sql.ErrNoRows) {
 			fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: get baseline %s: %v\n", evt.Path, err)
 		}
-		return nil
+		return nil, nil
 	}
 	if baseline.ScanID == "" {
-		return nil
+		return nil, nil
 	}
 
 	prevScan, err := w.loadScanResult(baseline.ScanID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: load baseline scan %s: %v\n", baseline.ScanID, err)
-		return nil
+		return nil, nil
 	}
 	if prevScan == nil {
-		return nil
+		return nil, nil
 	}
 
 	scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -306,11 +428,20 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 
 	current, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 	if err != nil {
+		// DeepSec hardening (S2.watcher): scanner Scan() now
+		// fails closed on non-zero exit. Surface that as a
+		// drift signal so the operator can act, but do NOT
+		// silently swap the baseline; a nil result here causes
+		// rescanTarget to skip the baseline update path.
 		fmt.Fprintf(os.Stderr, "[rescan] compareScanResults: scan %s: %v\n", evt.Path, err)
-		return nil
+		return []DriftDelta{{
+			Type:        DriftContentChange,
+			Severity:    "HIGH",
+			Description: fmt.Sprintf("rescan failed: %v", err),
+		}}, nil
 	}
 	if current == nil {
-		return nil
+		return nil, nil
 	}
 
 	deltas := diffFindings(prevScan.Findings, current.Findings)
@@ -327,7 +458,7 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 		})
 	}
 
-	return deltas
+	return deltas, current
 }
 
 // loadScanResult retrieves a past scan result from the audit store.

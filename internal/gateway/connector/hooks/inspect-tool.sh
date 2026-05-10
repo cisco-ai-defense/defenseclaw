@@ -23,7 +23,7 @@ DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-tool"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-# Avarice F-2025 / chain F-3397: load the gateway bearer token before
+# load the gateway bearer token before
 # any agent-controlled input is touched. See inspect-request.sh for
 # the full rationale (hook now authenticates and treats 401/403 as a
 # fail-closed event regardless of FAIL_MODE).
@@ -37,7 +37,10 @@ fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
-TOOL_INPUT=$(cat)
+TOOL_INPUT=$(defenseclaw_read_stdin_capped) || {
+  echo "defenseclaw: inspect-tool refusing oversized payload" >&2
+  exit 0
+}
 
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
@@ -64,7 +67,7 @@ fail_response() {
   exit 2
 }
 
-# Avarice F-2025 / chain F-3397: 401/403 means the gateway is
+# 401/403 means the gateway is
 # reachable but rejecting the hook's auth — a misconfiguration that
 # an attacker can rely on. Always fail closed (override FAIL_MODE).
 fail_unauthorized() {

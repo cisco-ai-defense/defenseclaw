@@ -22,12 +22,97 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
+
+// mcpScanTargetLooksLikeURL returns true when “target“ parses as a
+// remote URL (http/https/ws/wss/sse). Local paths and stdio targets
+// fall through unchanged so the scanner still accepts them.
+func mcpScanTargetLooksLikeURL(target string) bool {
+	if target == "" {
+		return false
+	}
+	lower := strings.ToLower(target)
+	for _, scheme := range []string{"http://", "https://", "ws://", "wss://", "sse://"} {
+		if strings.HasPrefix(lower, scheme) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateMCPScanTargetURL refuses MCP scan URLs that point at
+// loopback / private / link-local / cloud metadata destinations, or
+// that embed inline credentials. The check is opt-out via
+// DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS=1 for local development only.
+func validateMCPScanTargetURL(target string) error {
+	if os.Getenv("DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS") == "1" {
+		return nil
+	}
+	u, err := url.Parse(target)
+	if err != nil {
+		return fmt.Errorf("invalid MCP scan target URL: %w", err)
+	}
+	if u.User != nil {
+		return errors.New("MCP scan target URL must not contain inline credentials")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return errors.New("MCP scan target URL has empty host")
+	}
+	lowerHost := strings.ToLower(host)
+	if lowerHost == "localhost" ||
+		lowerHost == "ip6-localhost" ||
+		lowerHost == "ip6-loopback" ||
+		strings.HasSuffix(lowerHost, ".localhost") {
+		return fmt.Errorf("MCP scan target %q points at loopback host", host)
+	}
+	if lowerHost == "metadata.google.internal" {
+		return fmt.Errorf("MCP scan target %q points at cloud metadata host", host)
+	}
+	if literal := net.ParseIP(host); literal != nil {
+		if literal.IsLoopback() ||
+			literal.IsPrivate() ||
+			literal.IsLinkLocalUnicast() ||
+			literal.IsLinkLocalMulticast() ||
+			literal.IsUnspecified() ||
+			literal.IsMulticast() {
+			return fmt.Errorf("MCP scan target IP %s is loopback/private/link-local/multicast", literal)
+		}
+		// AWS / Oracle / DO IMDS literals.
+		if literal.String() == "169.254.169.254" || literal.String() == "fd00:ec2::254" {
+			return fmt.Errorf("MCP scan target %s is a cloud metadata endpoint", literal)
+		}
+		return nil
+	}
+	addrs, err := net.LookupIP(host)
+	if err != nil {
+		// DNS failure is treated as fatal here: an unresolvable host
+		// would be revalidated at dial time and we cannot rely on the
+		// downstream scanner to do that.
+		return fmt.Errorf("MCP scan target %q does not resolve: %w", host, err)
+	}
+	for _, ip := range addrs {
+		if ip.IsLoopback() ||
+			ip.IsPrivate() ||
+			ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() ||
+			ip.IsUnspecified() ||
+			ip.IsMulticast() ||
+			ip.String() == "169.254.169.254" ||
+			ip.String() == "fd00:ec2::254" {
+			return fmt.Errorf("MCP scan target %q resolves to private/loopback IP %s", host, ip)
+		}
+	}
+	return nil
+}
 
 // MCPScanner shells out to the Python “cisco-ai-mcp-scanner“ CLI.
 // Mirrors “SkillScanner“: the LLM-facing surface is driven by the
@@ -150,6 +235,30 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		FinishScanSpan(sp, result, exitCode, scanErr)
 	}()
 
+	// DeepSec S2.MEDIUM ("MCP scan target is passed to a remote-
+	// capable scanner without URL guarding"): mcp-scanner accepts
+	// either a local path or a URL. When it's a URL, it dials the
+	// host from the sidecar's network context. Apply the same
+	// outbound-URL guard that webhook validation and the proxy use:
+	// reject loopback, private, link-local, metadata, and
+	// userinfo-bearing URLs unless the caller opts in via
+	// DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS=1 (only useful for local
+	// dev; never enable in production).
+	if mcpScanTargetLooksLikeURL(target) {
+		if err := validateMCPScanTargetURL(target); err != nil {
+			result = &ScanResult{
+				Scanner:   s.Name(),
+				Target:    target,
+				Timestamp: start,
+				ScanError: err.Error(),
+				ExitCode:  -1,
+			}
+			scanErr = err
+			exitCode = -1
+			return result, scanErr
+		}
+	}
+
 	args := s.buildArgs(target)
 	cmd := exec.CommandContext(ctx, s.Config.Binary, args...)
 	cmd.Env = s.scanEnv()
@@ -200,6 +309,20 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			return nil, scanErr
 		}
 		result.Findings = findings
+	}
+
+	// DeepSec hardening (S2.scanners): fail closed on any non-zero
+	// scanner exit, even when stdout was parseable. Previously a
+	// scanner that exited non-zero with `{"findings":[]}` was treated
+	// as a clean scan because admission callers branched only on the
+	// returned error. The returned result is preserved so callers can
+	// observe ExitCode/ScanError/partial findings for diagnostics,
+	// but the non-nil error guarantees fail-closed behaviour in the
+	// watcher and REST scan handlers. See finding "Non-zero MCP
+	// scanner exits can be treated as successful scans".
+	if exitCode != 0 {
+		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, stderrStr)
+		return result, scanErr
 	}
 
 	return result, nil

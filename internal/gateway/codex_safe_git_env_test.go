@@ -22,13 +22,12 @@ import (
 	"testing"
 )
 
-// TestF3347_SafeGitEnv_OverridesRepoLocalConfig verifies safeGitEnv()
-// emits a self-consistent GIT_CONFIG_COUNT/KEY_<n>/VALUE_<n> trio.
-// Avarice F-3347: without this trio git's repo-local config is the
-// only override layer, so a hostile workspace could re-enable
-// core.fsmonitor / core.hooksPath even after we set
-// GIT_CONFIG_NOSYSTEM=1.
-func TestF3347_SafeGitEnv_OverridesRepoLocalConfig(t *testing.T) {
+// TestSafeGitEnv_OverridesRepoLocalConfig verifies safeGitEnv() emits
+// a self-consistent GIT_CONFIG_COUNT/KEY_<n>/VALUE_<n> trio. Without
+// this trio git's repo-local config is the only override layer, so a
+// hostile workspace could re-enable core.fsmonitor / core.hooksPath
+// even after we set GIT_CONFIG_NOSYSTEM=1.
+func TestSafeGitEnv_OverridesRepoLocalConfig(t *testing.T) {
 	env := safeGitEnv()
 
 	want := map[string]string{

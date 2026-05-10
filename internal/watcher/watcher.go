@@ -19,6 +19,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,11 +109,29 @@ type InstallWatcher struct {
 	onAdmit    OnAdmission
 
 	mu      sync.Mutex
-	pending map[string]time.Time // path → first-seen, for debounce
+	pending map[string]time.Time // path → last-seen, for debounce
+
+	// fsw is the active fsnotify watcher; populated for the lifetime
+	// of Run so subtree-add helpers triggered by post-admission
+	// recursion can extend the watch graph. Nil before Run starts.
+	fsw *fsnotify.Watcher
+
+	// watchMu guards watchedDirs.
+	watchMu sync.Mutex
+	// watchedDirs tracks every directory we have asked fsnotify to
+	// monitor. Used by addSubtreeWatch to skip duplicates and avoid
+	// thrashing the kernel on every nested-event.
+	watchedDirs map[string]bool
 
 	policyFileMu     sync.Mutex
 	policyFileHashes map[string]string   // path → sha256 hex of file contents (policy / list YAML watch)
 	policyListSnap   map[string][]string // path → sorted rule keys for list YAML diffs
+	// policyFileUnreadable tracks which paths returned a non-IsNotExist
+	// read error on the most recent poll. Used as a transition gate by
+	// recordPolicyFileReadFailure so a persistent EACCES/EPERM emits
+	// exactly one audit/telemetry activity (on entry) and one more
+	// (on recovery) instead of one per ~2s tick.
+	policyFileUnreadable map[string]struct{}
 }
 
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
@@ -124,19 +143,21 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		debounce = 500 * time.Millisecond
 	}
 	return &InstallWatcher{
-		cfg:              cfg,
-		skillDirs:        skillDirs,
-		pluginDirs:       pluginDirs,
-		store:            store,
-		logger:           logger,
-		shell:            shell,
-		opa:              opa,
-		otel:             otel,
-		debounce:         debounce,
-		onAdmit:          onAdmit,
-		pending:          make(map[string]time.Time),
-		policyFileHashes: make(map[string]string),
-		policyListSnap:   make(map[string][]string),
+		cfg:                  cfg,
+		skillDirs:            skillDirs,
+		pluginDirs:           pluginDirs,
+		store:                store,
+		logger:               logger,
+		shell:                shell,
+		opa:                  opa,
+		otel:                 otel,
+		debounce:             debounce,
+		onAdmit:              onAdmit,
+		pending:              make(map[string]time.Time),
+		watchedDirs:          make(map[string]bool),
+		policyFileHashes:     make(map[string]string),
+		policyListSnap:       make(map[string][]string),
+		policyFileUnreadable: make(map[string]struct{}),
 	}
 }
 
@@ -158,12 +179,20 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	}
 	defer fsw.Close()
 
+	// Publish the watcher so post-admission hooks (and any future
+	// helpers) can extend the watch graph for newly admitted child
+	// directories. Unset on shutdown so other goroutines don't try
+	// to use a closed watcher.
+	w.fsw = fsw
+	defer func() { w.fsw = nil }()
+
 	watched := 0
 	for _, dir := range w.skillDirs {
 		if err := ensureAndWatch(fsw, dir); err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (skipping)\n", dir, err)
 			continue
 		}
+		w.markWatched(dir)
 		watched++
 		fmt.Printf("[watch] monitoring skill dir: %s\n", dir)
 	}
@@ -172,12 +201,32 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[watch] plugin dir %s: %v (skipping)\n", dir, err)
 			continue
 		}
+		w.markWatched(dir)
 		watched++
 		fmt.Printf("[watch] monitoring plugin dir: %s\n", dir)
 	}
 
 	if watched == 0 {
 		return fmt.Errorf("watcher: no directories to watch — check claw.mode and claw.home_dir")
+	}
+
+	// DeepSec hardening (S2.watcher, "Post-admission file changes
+	// inside installed skills/plugins are not watched"): seed
+	// recursive subtree watches for every already-installed child
+	// directory under the watched roots. Without this, a fresh
+	// daemon restart would leave existing skills/plugins unprotected
+	// against post-admission file mutations until the next install.
+	for _, root := range append(append([]string{}, w.skillDirs...), w.pluginDirs...) {
+		entries, derr := os.ReadDir(root)
+		if derr != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+				continue
+			}
+			w.addSubtreeWatch(filepath.Join(root, entry.Name()))
+		}
 	}
 
 	_ = w.logger.LogAction("watch-start", "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
@@ -204,23 +253,61 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
+			// DeepSec hardening (S2.watcher): accept Write/Remove
+			// events in addition to Create/Rename. Nested file
+			// mutations inside an already-admitted child dir
+			// must re-arm the debounce so admission re-runs once
+			// the writes settle.
+			if event.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write|fsnotify.Remove) == 0 {
 				continue
 			}
-			if !w.isDirectChildDir(event.Name) {
+
+			// If a brand-new directory appears anywhere in the
+			// watched subtree, extend the watch graph to it so
+			// any nested writes also generate events.
+			if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+				if info, statErr := os.Stat(event.Name); statErr == nil && info.IsDir() {
+					w.addSubtreeWatch(event.Name)
+				}
+			}
+
+			// Resolve the event path to its top-level child dir
+			// (the unit at which admission is run). If the event
+			// is on a watched root itself, isDirectChildDir
+			// already covered the legacy direct-child case for
+			// initial installs; resolveTopLevelChild handles the
+			// new nested-write case.
+			pendingPath := ""
+			if w.isDirectChildDir(event.Name) {
+				pendingPath = event.Name
+			} else if top := w.resolveTopLevelChild(event.Name); top != "" {
+				pendingPath = top
+			}
+			if pendingPath == "" {
 				continue
 			}
+
 			if w.otel != nil {
 				evtType := "create"
-				if event.Op&fsnotify.Rename != 0 {
+				switch {
+				case event.Op&fsnotify.Rename != 0:
 					evtType = "rename"
+				case event.Op&fsnotify.Write != 0:
+					evtType = "write"
+				case event.Op&fsnotify.Remove != 0:
+					evtType = "remove"
 				}
-				w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String())
+				w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(pendingPath).Type.String())
 			}
 			w.mu.Lock()
-			if _, exists := w.pending[event.Name]; !exists {
-				w.pending[event.Name] = time.Now()
-			}
+			// Always bump the timestamp to NOW so processPending
+			// uses last-seen semantics: admission only fires when
+			// the directory has been quiet for a full debounce
+			// window. This both catches the legacy "single create
+			// then settle" case and the new "create + many nested
+			// writes" case without re-running admission for every
+			// write.
+			w.pending[pendingPath] = time.Now()
 			w.mu.Unlock()
 
 		case err, ok := <-fsw.Errors:
@@ -300,6 +387,26 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		enforce.EndAdmissionDecideSpan(admSpan, string(res.Verdict), res.Reason, policyID, nil)
 		if w.otel != nil {
 			w.otel.RecordBlockSLO(ctx, targetType, float64(time.Since(admissionStart).Milliseconds()))
+		}
+		// DeepSec hardening (S2.watcher, "Post-admission file
+		// changes inside installed skills/plugins are not
+		// watched"): for any non-rejected verdict on a
+		// directory-rooted event, recursively register fsnotify
+		// watches so future writes inside the admitted child
+		// re-arm the debounce timer in Run's event loop and
+		// re-trigger admission via processPending. MCP installs
+		// are not directory-backed so the addSubtreeWatch is
+		// skipped; runAdmission itself will be re-invoked by
+		// the rescan path on configuration drift.
+		switch res.Verdict {
+		case VerdictBlocked, VerdictRejected, VerdictScanError:
+			// Install rejected; nothing to start watching.
+		default:
+			if evt.Type != InstallMCP && evt.Path != "" {
+				if info, statErr := os.Stat(evt.Path); statErr == nil && info.IsDir() {
+					w.addSubtreeWatch(evt.Path)
+				}
+			}
 		}
 	}()
 
@@ -529,11 +636,21 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	// Phase 3: post-scan OPA evaluation with scan_result.
 	if w.opa != nil {
+		// DeepSec hardening (S2.scanners): propagate the scanner
+		// failure signal so OPA / fallback policies can fail closed
+		// even if a future caller forgets to check the Scan() Go
+		// error. With the scanner Scan() change, a non-zero exit
+		// already short-circuits above into the err != nil path,
+		// but ExitCode/ScanError are still copied here for
+		// defence-in-depth and so the rendered policy input
+		// matches what the API debug endpoint produces.
 		scanInput := &policy.ScanResultInput{
 			MaxSeverity:   string(result.MaxSeverity()),
 			TotalFindings: len(result.Findings),
 			ScannerName:   s.Name(),
 			Findings:      toFindingInputs(result.Findings),
+			ExitCode:      result.ExitCode,
+			ScanError:     result.ScanError,
 		}
 		input := policy.AdmissionInput{
 			TargetType: targetType,
@@ -579,6 +696,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		TotalFindings: len(result.Findings),
 		ScannerName:   s.Name(),
 		Findings:      toFindingInputs(result.Findings),
+		ExitCode:      result.ExitCode,
+		ScanError:     result.ScanError,
 	}
 	out := policy.EvaluateAdmissionFallback(policy.AdmissionInput{
 		TargetType: targetType,
@@ -896,4 +1015,146 @@ func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
 	}
 
 	return nil
+}
+
+// markWatched records `dir` as already covered by fsnotify.Add so the
+// recursive subtree-add helpers do not re-Add it (which would be a
+// noop on Linux but is wasted syscall traffic and hides legitimate
+// errors when traversing freshly-created subtrees with thousands of
+// directories).
+func (w *InstallWatcher) markWatched(dir string) {
+	if dir == "" {
+		return
+	}
+	abs, _ := filepath.Abs(dir)
+	w.watchMu.Lock()
+	defer w.watchMu.Unlock()
+	if w.watchedDirs == nil {
+		w.watchedDirs = make(map[string]bool)
+	}
+	w.watchedDirs[abs] = true
+}
+
+// addSubtreeWatch recursively registers `root` and every directory
+// underneath it with the active fsnotify watcher.
+//
+// DeepSec hardening (S2.watcher, "Post-admission file changes inside
+// installed skills/plugins are not watched"): the legacy Run loop only
+// added watches for the configured skill/plugin root directories.
+// fsnotify is non-recursive on Linux, so writes inside a freshly
+// admitted skill/plugin directory generated no events and admission
+// never re-ran. addSubtreeWatch is invoked at startup for already
+// installed children, on every directory Create event, and from
+// runAdmission once a child directory passes admission, so any
+// post-admission file mutation re-arms the debounce timer for that
+// child and re-triggers admission via processPending.
+//
+// The helper is idempotent and safe to call from multiple goroutines:
+// duplicate Add calls are skipped via watchedDirs, and dotfiles are
+// pruned to avoid noise from editors and VCS metadata.
+func (w *InstallWatcher) addSubtreeWatch(root string) {
+	if root == "" || w.fsw == nil {
+		return
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return
+	}
+	// Bound the per-subtree fsnotify watch count so an admitted
+	// directory containing a huge file tree (e.g. a vendored
+	// node_modules with 50k subdirectories) cannot exhaust the
+	// kernel's per-process inotify watch limit
+	// (fs.inotify.max_user_watches, typically 8k–64k on Linux). We
+	// cap at addSubtreeWatchMaxDirs and emit a single warning when
+	// hit so operators can either raise the kernel limit or scope the
+	// admitted root more tightly. Per-process watches across all
+	// admitted subtrees are still bounded by the kernel; this cap is
+	// per-call defense-in-depth.
+	const addSubtreeWatchMaxDirs = 4096
+	added := 0
+	capped := false
+	_ = filepath.WalkDir(rootAbs, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d == nil {
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		// Skip dotfiles, but only after we have already accepted
+		// the root (since the root may itself live under a path
+		// component that starts with a dot in test fixtures).
+		if path != rootAbs && strings.HasPrefix(filepath.Base(path), ".") {
+			return filepath.SkipDir
+		}
+		if added >= addSubtreeWatchMaxDirs {
+			capped = true
+			return filepath.SkipDir
+		}
+		w.watchMu.Lock()
+		if w.watchedDirs == nil {
+			w.watchedDirs = make(map[string]bool)
+		}
+		if w.watchedDirs[path] {
+			w.watchMu.Unlock()
+			return nil
+		}
+		if addErr := w.fsw.Add(path); addErr == nil {
+			w.watchedDirs[path] = true
+			added++
+		}
+		w.watchMu.Unlock()
+		return nil
+	})
+	if capped {
+		fmt.Fprintf(os.Stderr,
+			"[watcher] addSubtreeWatch: capped at %d directories under %s; "+
+				"deeper subdirectories will not receive fsnotify events. "+
+				"Reduce admitted root scope or raise fs.inotify.max_user_watches.\n",
+			addSubtreeWatchMaxDirs, rootAbs)
+	}
+}
+
+// resolveTopLevelChild returns the absolute path of a watched
+// top-level child directory that contains evtPath. Returns "" if
+// evtPath is not inside any watched root subtree, or if it is the
+// watched root itself (handled by isDirectChildDir).
+//
+// "Top-level child" means the first directory under a watched
+// skillDirs/pluginDirs root: that is the unit at which admission
+// runs. Any nested file/directory event under a child is remapped to
+// its enclosing child so processPending re-runs admission for the
+// whole skill/plugin once writes settle.
+func (w *InstallWatcher) resolveTopLevelChild(evtPath string) string {
+	abs, err := filepath.Abs(evtPath)
+	if err != nil {
+		return ""
+	}
+	roots := append([]string{}, w.skillDirs...)
+	roots = append(roots, w.pluginDirs...)
+	sep := string(filepath.Separator)
+	for _, root := range roots {
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		rel, relErr := filepath.Rel(rootAbs, abs)
+		if relErr != nil {
+			continue
+		}
+		// filepath.Rel returns "." when the paths are equal; ".."
+		// or a path starting with ".." means abs is outside the
+		// root. Both cases mean "not a descendant".
+		if rel == "." || rel == "" || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		first := strings.SplitN(rel, sep, 2)[0]
+		// A leading dot at the top level marks a hidden file or
+		// dir; we deliberately do not admit those (they are
+		// editor scratch, VCS metadata, etc).
+		if strings.HasPrefix(first, ".") {
+			return ""
+		}
+		return filepath.Join(rootAbs, first)
+	}
+	return ""
 }

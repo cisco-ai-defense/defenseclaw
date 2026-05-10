@@ -331,6 +331,68 @@
       ],
       "since": "0.4.0"
     },
+    {
+      "name": "DEFENSECLAW_ALLOW_CGNAT",
+      "category": "security_opt_out",
+      "purpose": "Permit dialing into the RFC 6598 carrier-grade NAT range (100.64.0.0/10) from gateway- and netguard-side SSRF/dial-time guards. Required only on Tailscale meshes (which use 100.64/10 for endpoints) or other private overlays addressed in CGNAT space.",
+      "default": "unset (CGNAT range is treated as unsafe)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/netguard/netguard.go:74", "description": "cgnatAllowed() gates the 100.64.0.0/10 deny-list entry at init"},
+        {"location": "internal/gateway/provider.go", "description": "extraReservedNets mirrors the same opt-out so dial-time and config-time predicates classify identically"}
+      ],
+      "since": "0.5.0",
+      "security_note": "RFC 6598 CGNAT space is the canonical 'private overlay' address pool used by AWS Cloud WAN, GCP private overlays, and most carrier NAT deployments — leaving it on the allow-list opens an SSRF/exfil channel to those overlays.",
+      "replacement_hint": "Allow-list only the specific Tailscale / overlay subnets your deployment needs in custom-providers.json instead of opting out of the entire /10."
+    },
+    {
+      "name": "DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS",
+      "category": "security_opt_out",
+      "purpose": "Disable URL safety validation for `defenseclaw scan mcp` targets. Allows scanning loopback, RFC1918, link-local, and cloud-metadata destinations.",
+      "default": "unset (loopback / private / metadata targets rejected)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/scanner/mcp.go:56", "description": "validateMCPScanTargetURL short-circuits when set"}
+      ],
+      "since": "0.5.0",
+      "security_note": "Without this guard the scanner can be redirected against internal RFC1918 services or cloud IMDS (169.254.169.254) and exfiltrate metadata or pivot inside the network.",
+      "replacement_hint": "Run the local MCP server on a public-by-design loopback bridge (e.g. expose via an ngrok-style tunnel) instead of scanning loopback directly."
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP",
+      "category": "security_opt_out",
+      "purpose": "Re-enable the legacy regex-based namespace cleanup in pre-sandbox shell scripts. Default cleanup uses a recorded namespace name file (sandbox.netns.txt) which scopes cleanup to namespaces this install actually created.",
+      "default": "unset (namespace-file scoped cleanup)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1258", "description": "pre-sandbox cleanup script honours the opt-in"},
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1440", "description": "post-sandbox cleanup script (templated)"},
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1481", "description": "post-sandbox cleanup script (templated)"}
+      ],
+      "since": "0.5.0",
+      "security_note": "Regex-matched cleanup (`grep -E 'sandbox|openshell'`) tears down ANY namespace whose name happens to contain those substrings — including unrelated containers run by other operators on the same host."
+    },
+    {
+      "name": "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
+      "category": "security_opt_out",
+      "purpose": "Comma-separated CIDR list whose immediate-peer X-Forwarded-For headers are trusted by the gateway. Default is empty: forwarded headers are ignored entirely and the socket peer address is the only authoritative client IP.",
+      "default": "unset (XFF ignored, RemoteAddr only)",
+      "accepted_values": ["comma-separated CIDR list, e.g. 10.0.0.0/8,172.16.0.0/12", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/gateway/requestctx.go:310", "description": "trustedProxyEnvVar constant"},
+        {"location": "internal/gateway/requestctx.go:327", "description": "ClientIPRedacted honours XFF only when peer is in this list"}
+      ],
+      "since": "0.5.0",
+      "security_note": "Trusting forwarded headers from arbitrary peers lets unauthenticated callers spoof the client_ip recorded for auth-failure alerting and forensics."
+    },
 
     {
       "name": "DEFENSECLAW_DEBUG",
@@ -784,6 +846,20 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "internal/daemon/daemon.go:35", "description": "EnvDaemon constant"}],
       "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_DATA_DIR",
+      "category": "hook_internal",
+      "purpose": "Set by Daemon.Start in the spawned child's environment so killStaleProcesses can verify a candidate process belongs to THIS data directory before signalling it. Required so two legitimate DefenseClaw daemons running from different profiles can be told apart by /proc/<pid>/environ inspection.",
+      "default": "(set by daemon launcher; child only)",
+      "accepted_values": ["absolute path"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/daemon/daemon.go:44", "description": "EnvDataDir constant"},
+        {"location": "internal/daemon/proc_unix.go", "description": "killStaleProcesses verifies match before SIGTERM"}
+      ],
+      "since": "0.5.0"
     },
     {
       "name": "DEFENSECLAW_AGENT_ID",

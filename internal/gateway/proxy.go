@@ -661,6 +661,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
+	// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+	// unauthenticated agent sessions"): now that the proxy has
+	// authenticated the request, upgrade the previously peeked
+	// agent identity to a fully minted entry so downstream
+	// handlers see a stable agent_instance_id.
+	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 
 	// OpenAI-compatible paths (e.g. /api/v1/chat/completions from OpenRouter)
 	// must use handleChatCompletion which has proper streaming SSE support.
@@ -703,6 +709,42 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// provider entries in providers.json (e.g. "chatgpt.com/backend-api") can
 	// be matched correctly by the allowlist and the provider inference.
 	targetForMatch := targetOrigin + r.URL.Path
+
+	// DeepSec hardening (S2.proxy): refuse target URLs that embed
+	// userinfo. "https://attacker:password@evil.com/..." is parseable
+	// but the userinfo segment is exfiltrated in the upstream
+	// Authorization header; an attacker who can influence
+	// X-DC-Target-URL gets a free credential-leak primitive even on
+	// known providers. Always strip-and-refuse here.
+	if u, perr := url.Parse(targetOrigin); perr == nil {
+		if u.User != nil {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   u.Hostname(),
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: false,
+				Branch:       "passthrough",
+				Decision:     "block",
+				Reason:       "userinfo-in-target-url",
+				Source:       "go",
+			})
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough: userinfo in X-DC-Target-URL\n")
+			writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must not contain userinfo")
+			return
+		}
+		if u.Scheme != "https" && u.Scheme != "http" {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   u.Hostname(),
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: false,
+				Branch:       "passthrough",
+				Decision:     "block",
+				Reason:       "non-http-scheme",
+				Source:       "go",
+			})
+			writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must use http or https")
+			return
+		}
+	}
 
 	// Three-branch passthrough policy:
 	//   known       → forward and audit as normal (legacy behavior)
@@ -750,18 +792,35 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if branch == "shape" {
-		// SSRF defense-in-depth: never forward an LLM-shaped request
-		// to a private / link-local IP even when AllowUnknownLLMDomains
-		// is on. A malicious skill could point the LLM SDK at the cloud
-		// IMDS endpoint (169.254.169.254) and happen to send a
-		// `messages`-shaped body.
-		if isPrivateHost(targetHost) {
-			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED LLM-shaped passthrough to private IP: %s\n", targetHost)
+	// SSRF defense-in-depth (DeepSec finding "Provider allowlist can
+	// be spoofed to forward to internal hosts"): apply the
+	// private/link-local resolution check to BOTH the shape AND known
+	// branches. The previous code only ran isPrivateHost in the
+	// "shape" branch; a known provider's hostname could still be
+	// CNAME'd or DNS-rebound to point to an internal/IMDS address,
+	// and the proxy would happily forward there. We now reject any
+	// passthrough whose target host resolves to a private IP --
+	// loopback Ollama is exempted by isOllamaLoopback in
+	// isKnownProviderDomain, which also handles 11434 explicitly.
+	//
+	// Test bypass: legacy tests that point a "known provider" entry
+	// at an httptest server bound on 127.0.0.1 set
+	// passthroughAllowPrivateForTest to true. The bypass only
+	// applies to the "known" branch -- the "shape" and "passthrough"
+	// branches still hard-block private IPs, so the dedicated SSRF
+	// hardening tests that pass private IPs via X-DC-Target-URL
+	// continue to expect 403.
+	if isPrivateHost(targetHost) && !isOllamaLoopback(targetForMatch, 0) {
+		bypass := branch == "known" && passthroughAllowPrivateForTest
+		if !bypass {
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s-branch passthrough to private IP: %s\n", branch, targetHost)
 			emitEgress(r.Context(), mkEgress("block", "private-ip"))
 			writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
 			return
 		}
+	}
+
+	if branch == "shape" {
 		allow := false
 		if p.cfg != nil {
 			allow = p.cfg.AllowUnknownLLMDomains
@@ -1728,6 +1787,17 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
+// passthroughAllowPrivateForTest is a TEST-ONLY override that
+// disables the universal SSRF private-host check in
+// handlePassthrough. Production code never flips this. Tests that
+// need to forward a "known provider" request to an httptest.NewServer
+// (bound on 127.0.0.1) flip this to true and reset it via t.Cleanup.
+//
+// Keeping the toggle here -- rather than as a build-tag _test.go
+// helper -- means the safety check stays in a single place and we do
+// not maintain two copies of handlePassthrough.
+var passthroughAllowPrivateForTest bool
+
 // providerRegistryMu guards providerDomains / ollamaPorts / providerRegistry.
 // The registry can be rebuilt at runtime via ReloadProviderRegistry() when
 // the operator overlay at ~/.defenseclaw/custom-providers.json changes.
@@ -1937,6 +2007,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
+	// DeepSec S2.MEDIUM ("CorrelationMiddleware mints
+	// unauthenticated agent sessions"): mint-after-auth.
+	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
@@ -1985,10 +2058,22 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Native-binary connectors (zeptoclaw) have no fetch interceptor, so the
-	// request arrives without X-DC-Target-URL / X-AI-Auth. Ask the active
-	// connector to resolve them from its captured config snapshot. Existing
-	// header values win — fetch-interceptor paths are unchanged.
+	// Native-binary connectors (zeptoclaw, codex) have no fetch interceptor,
+	// so the request arrives without X-DC-Target-URL / X-AI-Auth. Ask the
+	// active connector to resolve them from its captured config snapshot.
+	// Existing header values win — fetch-interceptor paths are unchanged.
+	//
+	// IMPORTANT: hydrateConnectorSignals MUST run BEFORE the SSRF guards
+	// below. A previous version of this handler ran the guards immediately
+	// after reading X-DC-Target-URL from the header, which meant the
+	// connector-hydrated path (the only path used by native-binary
+	// connectors) bypassed the structured 400/403 + labeled egress event
+	// entirely — Bifrost's ssrfSafeDialContext caught the actual dial, but
+	// callers got an opaque dial-failure error and the audit pipeline lost
+	// the "chat / block / private-ip" breadcrumb. Now both code paths
+	// (header-supplied and connector-hydrated TargetURL) hit the same
+	// guards, mirroring handlePassthrough at proxy.go:687–747. See
+	// proxy_chat_ssrf_hydrated_test.go for the regression assertion.
 	if !localKeyResolutionDisabled {
 		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
 			if req.TargetURL == "" {
@@ -1996,6 +2081,62 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			if req.TargetAPIKey == "" {
 				req.TargetAPIKey = connKey
+			}
+		}
+	}
+
+	// DeepSec hardening (mirror of handlePassthrough at proxy.go:713–747):
+	// the chat-completion path also forwards req.TargetURL into the upstream
+	// provider (Bifrost handles the actual dial); apply the same userinfo /
+	// scheme / private-host guards so an authenticated caller (or a
+	// compromised plugin / connector snapshot) cannot SSRF the gateway into
+	// IMDS / loopback / CGNAT space, and cannot smuggle credentials via
+	// userinfo. This block runs AFTER hydrateConnectorSignals so it covers
+	// both the header-supplied and the connector-hydrated TargetURL.
+	if req.TargetURL != "" {
+		if u, perr := url.Parse(req.TargetURL); perr == nil {
+			if u.User != nil {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   u.Hostname(),
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "userinfo-in-target-url",
+					Source:       "go",
+				})
+				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in X-DC-Target-URL\n")
+				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must not contain userinfo")
+				return
+			}
+			if u.Scheme != "https" && u.Scheme != "http" {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   u.Hostname(),
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "non-http-scheme",
+					Source:       "go",
+				})
+				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must use http or https")
+				return
+			}
+			if host := u.Hostname(); host != "" && isPrivateHost(host) &&
+				!isOllamaLoopback(req.TargetURL+r.URL.Path, 0) &&
+				!passthroughAllowPrivateForTest {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   host,
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "private-ip",
+					Source:       "go",
+				})
+				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+				writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+				return
 			}
 		}
 	}
@@ -3649,22 +3790,67 @@ func redactAuthValue(val string) string {
 	return "[set]"
 }
 
-// scrubURLSecrets removes sensitive query parameters (key, api-key, apikey,
-// token) from a URL string before logging.  Returns the original string
-// unmodified when it contains no query string.
+// scrubURLSecrets removes sensitive userinfo and query parameters
+// from a URL string before logging.
+//
+// DeepSec S2.MEDIUM ("Credential-bearing upstream URLs can be logged"):
+// the legacy implementation returned the original string unchanged
+// when “RawQuery“ was empty, so URLs with userinfo
+// (“https://user:pass@host“) leaked verbatim. It also only redacted
+// four exact lower-case keys ("key", "api-key", "apikey", "token"),
+// missing common credential names like “access_token“,
+// “client_secret“, “X-Amz-Signature“, and “X-Amz-Credential“.
+//
+// The hardened implementation:
+//   - Always parses, so userinfo is rejected even on bare URLs.
+//   - Replaces “url.Userinfo“ with the literal "REDACTED:REDACTED"
+//     when present, preserving the URL shape so log readers can still
+//     correlate by host without the credential bytes.
+//   - Matches query keys case-insensitively against a richer
+//     credential vocabulary.
 func scrubURLSecrets(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.RawQuery == "" {
+	if raw == "" {
 		return raw
 	}
-	q := u.Query()
-	for _, k := range []string{"key", "api-key", "apikey", "token"} {
-		if q.Has(k) {
-			q.Set(k, "REDACTED")
-		}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
 	}
-	u.RawQuery = q.Encode()
+	if u.User != nil {
+		u.User = url.UserPassword("REDACTED", "REDACTED")
+	}
+	if u.RawQuery != "" {
+		q := u.Query()
+		for key := range q {
+			if isSensitiveQueryKey(key) {
+				q.Set(key, "REDACTED")
+			}
+		}
+		u.RawQuery = q.Encode()
+	}
 	return u.String()
+}
+
+// isSensitiveQueryKey reports whether the case-insensitive query key
+// “k“ carries a credential we never want to print to logs. The list
+// covers OAuth2 flows (“access_token“, “refresh_token“,
+// “client_secret“), AWS signature query parameters
+// (“X-Amz-Signature“, “X-Amz-Credential“,
+// “X-Amz-Security-Token“), GCS V4 signed URLs (“X-Goog-Signature“),
+// shared-access signatures (“sig“, “signature“), webhook tokens
+// (“token“, “hub.token“), and the legacy short forms.
+func isSensitiveQueryKey(k string) bool {
+	switch strings.ToLower(k) {
+	case "key", "api-key", "apikey", "api_key",
+		"token", "auth", "authorization", "secret", "password",
+		"access_token", "refresh_token", "id_token", "client_secret",
+		"x-amz-signature", "x-amz-credential", "x-amz-security-token",
+		"x-goog-signature", "x-goog-credential",
+		"sig", "signature", "hub.token", "hub_token",
+		"sas", "se", "sv":
+		return true
+	}
+	return false
 }
 
 // isOllamaLoopback returns true when targetURL points at a loopback
@@ -3728,28 +3914,34 @@ func isKnownProviderDomain(targetURL string) bool {
 }
 
 // matchProviderDomain performs safe domain matching:
-//   - Domains containing "*" wildcard a single DNS label
-//     (e.g. "bedrock-runtime.*.amazonaws.com" matches
-//     "bedrock-runtime.us-east-1.amazonaws.com" but rejects
-//     "bedrock-runtime.attacker.example").
-//   - Domains containing "/" match hostname+path prefix.
-//   - All others require exact hostname or subdomain match.
 //
-// Avarice F-1185: pre-fix the "ends-with-dot" form was treated as a
-// raw hostname prefix, so "bedrock-runtime." matched any host that
-// began with that string — e.g. "bedrock-runtime.attacker.example".
-// An attacker-chosen X-DC-Target-URL could be admitted as a known
-// provider, bypass the unknown-domain / private-host checks, and
-// receive the upstream Authorization header. The new wildcard form
-// pins the trailing TLD, which is what the original Bedrock entry
-// always meant.
+//   - Domains containing "*" use a single-label wildcard match. The "*"
+//     MUST stand for exactly one DNS label between two literal dots
+//     (e.g. "bedrock-runtime.*.amazonaws.com" matches
+//     "bedrock-runtime.us-east-1.amazonaws.com" but NOT
+//     "bedrock-runtime.evil.example" or
+//     "bedrock-runtime.attacker.amazonaws.com.evil.com").
+//   - Domains containing "/" match hostname+path prefix where the
+//     hostname part is exact-or-subdomain (".example.com").
+//   - Domains ending in "." are LEGACY raw-prefix entries. The matcher
+//     refuses trailing-dot entries outright because they were
+//     exploitable: an attacker-chosen X-DC-Target-URL whose hostname
+//     began with "bedrock-runtime." (e.g. "bedrock-runtime.evil.example")
+//     was admitted as a known provider, bypassed the unknown-domain /
+//     private-host checks, and received the upstream Authorization
+//     header. Any operator-supplied custom-providers.json entry of
+//     that form must be updated to a wildcard pattern.
+//   - All others require exact hostname or subdomain match.
 func matchProviderDomain(host, urlPath, domain string) bool {
 	d := strings.ToLower(domain)
-	// Reject the legacy bare-prefix form ("bedrock-runtime.") so an
-	// older operator-supplied providers.json that still uses it
-	// can never be silently honoured: callers must migrate to the
-	// wildcard form ("bedrock-runtime.*.amazonaws.com").
-	if strings.HasSuffix(d, ".") && !strings.Contains(d, "*") {
+	if d == "" {
+		return false
+	}
+	if strings.HasSuffix(d, ".") {
+		// LEGACY trailing-dot prefix syntax. Refused — this branch
+		// previously matched bedrock-runtime.evil.example to
+		// "bedrock-runtime." and bypassed the SSRF private-host
+		// check.
 		return false
 	}
 	if strings.Contains(d, "*") {
@@ -3766,27 +3958,34 @@ func matchProviderDomain(host, urlPath, domain string) bool {
 	return host == d || strings.HasSuffix(host, "."+d)
 }
 
-// matchWildcardDomain compares a hostname against a domain containing
-// one or more "*" wildcards. Each "*" matches exactly one DNS label
-// (no embedded dot, non-empty). Pattern and host are dot-split and
-// compared label-for-label so a wildcard cannot smuggle a malicious
-// suffix into the trailing components.
+// matchWildcardDomain implements one-label wildcard matching. A
+// pattern like "a.*.b.c" matches a host iff:
+//   - the host has the literal prefix "a." (the part before the "*")
+//   - the host has the literal suffix ".b.c" (the part after the "*")
+//   - the host is long enough that the prefix and suffix do NOT
+//     overlap (otherwise the "*" matches zero labels, which we refuse)
+//   - the substring of the host between those anchors contains no
+//     "." (so "*" matches exactly one DNS label)
+//
+// Multiple "*" are not supported; such patterns return false.
 func matchWildcardDomain(host, pattern string) bool {
-	hostLabels := strings.Split(host, ".")
-	patternLabels := strings.Split(pattern, ".")
-	if len(hostLabels) != len(patternLabels) {
+	parts := strings.Split(pattern, "*")
+	if len(parts) != 2 {
 		return false
 	}
-	for i := range patternLabels {
-		if patternLabels[i] == "*" {
-			if hostLabels[i] == "" {
-				return false
-			}
-			continue
-		}
-		if hostLabels[i] != patternLabels[i] {
-			return false
-		}
+	prefix, suffix := parts[0], parts[1]
+	if prefix == "" || suffix == "" {
+		return false
+	}
+	if len(host) < len(prefix)+len(suffix) {
+		return false
+	}
+	if !strings.HasPrefix(host, prefix) || !strings.HasSuffix(host, suffix) {
+		return false
+	}
+	middle := host[len(prefix) : len(host)-len(suffix)]
+	if middle == "" || strings.Contains(middle, ".") {
+		return false
 	}
 	return true
 }

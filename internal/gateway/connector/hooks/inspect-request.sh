@@ -26,7 +26,7 @@ DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-request"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-# Avarice F-2025 / chain F-3397: include the gateway bearer token on
+# include the gateway bearer token on
 # every inspection call. Pre-fix the hook never sent Authorization,
 # so a sidecar that required token auth would 401 every request and
 # (with FAIL_MODE=open) silently allow them. The token lives in
@@ -67,7 +67,7 @@ fail_response() {
   exit 2
 }
 
-# Avarice F-2025 / chain F-3397: HTTP 401/403 from the gateway means
+# HTTP 401/403 from the gateway means
 # the hook's token is missing or wrong. That is a misconfiguration the
 # attacker can rely on (curl shim or rogue runtime can race the auth
 # rotation), so we fail CLOSED unconditionally — bypassing FAIL_MODE.

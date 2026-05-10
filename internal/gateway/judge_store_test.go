@@ -48,6 +48,13 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 		Action:      "allow",
 		Severity:    gatewaylog.SeverityInfo,
 		RawResponse: `{"Instruction Manipulation":{"label":false}}`,
+		// DeepSec S3.BUG ("Judge input_hash is computed from
+		// the response body") closure: callers now pre-compute
+		// the digest of the inspected judge *input* and put it
+		// in InputHash. The persistor stores this verbatim
+		// instead of hashing the response body, so the audit
+		// row's InputHash genuinely identifies the input.
+		InputHash: "sha256:e9f4a4f5c0b8e0a2cb8a4f3a76b8e0a2cb8a4f3a76b8e0a2cb8a4f3a76b8e0a2",
 	}
 	if err := js.PersistJudgeEvent(ctx, gatewaylog.DirectionPrompt, p, "my_tool", "tid-1", "pol-1", "app:x"); err != nil {
 		t.Fatalf("PersistJudgeEvent: %v", err)

@@ -98,6 +98,83 @@ func (p *OpenShellPolicy) HasEndpointForHost(host string) bool {
 	return false
 }
 
+// HasEndpointForHostPort returns true only when at least one
+// network_policies entry covers (host, port). DeepSec S3.BUG
+// ("Sandbox policy diff ignores endpoint ports"): the previous
+// `HasEndpointForHost`-only path reported `api.example.com:8443` as
+// covered by an entry that allowlisted `api.example.com` on
+// `[443]`, hiding a real sandbox policy gap. An empty `ports` list
+// inside the matching entry is treated as a wildcard (the
+// OpenShell schema lets an entry omit `ports` to mean "any TCP").
+func (p *OpenShellPolicy) HasEndpointForHostPort(host string, port int) bool {
+	for _, entry := range p.networkPolicyMap() {
+		if policyMatchesHostPort(entry, host, port) {
+			return true
+		}
+	}
+	return false
+}
+
+// policyMatchesHostPort returns true when the policy entry has at
+// least one endpoint whose host matches AND whose ports list either
+// contains `port` or is empty (wildcard). Wildcard hosts ("*",
+// ".*", "*.example.com" -> matched as suffix) are honored on the
+// host comparison the same way policyMatchesHost does today.
+func policyMatchesHostPort(policy map[string]interface{}, host string, port int) bool {
+	endpointsRaw, ok := policy["endpoints"]
+	if !ok {
+		return false
+	}
+	endpoints, ok := endpointsRaw.([]interface{})
+	if !ok {
+		return false
+	}
+	for _, epRaw := range endpoints {
+		ep, ok := epRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		epHost, _ := ep["host"].(string)
+		if epHost == "" || epHost != host {
+			continue
+		}
+		// Wildcard ports list = any TCP port.
+		portsRaw, present := ep["ports"]
+		if !present {
+			return true
+		}
+		ports, ok := portsRaw.([]interface{})
+		if !ok || len(ports) == 0 {
+			return true
+		}
+		for _, pRaw := range ports {
+			switch v := pRaw.(type) {
+			case int:
+				if v == port {
+					return true
+				}
+			case int64:
+				if int(v) == port {
+					return true
+				}
+			case float64:
+				if int(v) == port {
+					return true
+				}
+			case string:
+				if v == "*" {
+					return true
+				}
+				var pInt int
+				if _, err := fmt.Sscanf(v, "%d", &pInt); err == nil && pInt == port {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // networkPolicyMap returns the network_policies section as a map of
 // policy-name -> policy-object. The YAML structure is:
 //

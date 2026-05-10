@@ -330,6 +330,100 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertNotIn("getaddrinfo", content)
         self.assertIn("openclaw gateway run", content)
 
+    # --- DeepSec S3.HIGH_BUG: scoped sandbox cleanup regressions ---
+
+    def test_cleanup_sandbox_uses_saved_namespace_marker(self):
+        """cleanup-sandbox.sh must read the per-instance namespace marker
+        rather than regex-matching all sandbox|openshell namespaces."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("SAVED_NS=", content)
+        # Legacy regex must only run when the operator explicitly opts in.
+        self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
+
+    def test_cleanup_sandbox_no_unconditional_regex_namespace_delete(self):
+        """The regex-based 'sandbox|openshell' namespace delete must NOT
+        run unconditionally in cleanup-sandbox.sh."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        # The legacy block, if present, MUST be guarded by the opt-in env var.
+        if "grep -E 'sandbox|openshell'" in content:
+            # Must appear inside an opt-in branch.
+            self.assertIn(
+                'DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP:-0}" = "1"',
+                content,
+            )
+
+    def test_cleanup_sandbox_no_blanket_veth_delete(self):
+        """Blanket `veth-h-*` delete is disallowed: it would remove other
+        sandbox instances' interfaces."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertNotIn("grep -oP 'veth-h-", content)
+
+    def test_cleanup_iptables_restores_route_localnet(self):
+        """cleanup-sandbox.sh must restore the saved route_localnet value
+        instead of forcing it to 0."""
+        self._gen(True, True)
+        content = self._read_script("cleanup-sandbox.sh")
+        self.assertIn("saved.route_localnet", content)
+        self.assertNotIn(
+            "sysctl -w net.ipv4.conf.all.route_localnet=0", content
+        )
+
+    def test_post_sandbox_saves_route_localnet(self):
+        """post-sandbox.sh must capture the prior route_localnet value
+        before flipping it to 1."""
+        self._gen(True, True)
+        content = self._read_script("post-sandbox.sh")
+        self.assertIn("saved.route_localnet", content)
+        self.assertIn("sysctl -n net.ipv4.conf.all.route_localnet", content)
+
+    def _gen_run_sandbox(self):
+        from defenseclaw.commands.cmd_setup_sandbox import (
+            _generate_run_sandbox_script,
+        )
+
+        cfg = _CfgFactory.make(True, True)
+        _generate_run_sandbox_script(self.data_dir, "10.200.0.1", cfg)
+
+    def test_run_sandbox_records_namespace_marker(self):
+        """run-sandbox.sh must persist the discovered namespace name into
+        $DATA_DIR/sandbox.netns so cleanup is scoped to this instance."""
+        self._gen_run_sandbox()
+        content = self._read_script("run-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("SANDBOX_NS=", content)
+
+    def test_run_sandbox_strays_are_scoped_to_data_dir(self):
+        """run-sandbox.sh stop must not kill processes by name only.
+        The DeepSec finding (#5) was that pgrep -f matches across the
+        host. The replacement must verify processes belong to this
+        instance via /proc/<pid>/cmdline or cwd referencing $DATA_DIR."""
+        self._gen_run_sandbox()
+        content = self._read_script("run-sandbox.sh")
+        self.assertIn("_proc_is_ours", content)
+        self.assertIn("_kill_scoped_strays", content)
+        self.assertIn("/proc/$pid/cmdline", content)
+        # The legacy unscoped helper must be gone.
+        self.assertNotIn("_kill_strays openshell-sandbox", content)
+        self.assertNotIn("_kill_strays defenseclaw-gateway", content)
+
+    def test_pre_sandbox_skips_blanket_veth_delete(self):
+        """pre-sandbox.sh must not delete every veth-h-* on the host."""
+        self._gen(True, True)
+        content = self._read_script("pre-sandbox.sh")
+        self.assertNotIn("grep -oP 'veth-h-", content)
+
+    def test_pre_sandbox_uses_saved_namespace_marker(self):
+        """pre-sandbox.sh must prefer the saved namespace marker over
+        regex-matching shared host state."""
+        self._gen(True, True)
+        content = self._read_script("pre-sandbox.sh")
+        self.assertIn("sandbox.netns", content)
+        self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
+
 
 
 class TestPrePairDevice(unittest.TestCase):

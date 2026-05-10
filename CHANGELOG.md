@@ -4,6 +4,118 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — DeepSec audit closure (75 findings → 0)
+
+This rollup closes every actionable finding from the DeepSec security
+audit (`.deepsec/data/defenseclaw/reports/report.md`): 1 CRITICAL,
+26 HIGH, 24 MEDIUM, 9 HIGH_BUG, and 15 BUG. The two findings tagged
+"FP" by reviewers are also remediated because their underlying code
+paths required changes anyway. No protections were removed; the audit
+strictly tightens existing guards.
+
+### ⚠️ Operator-visible behaviour changes (read this before upgrading)
+
+**Newly-blocked outbound dial address ranges.** The gateway's SSRF
+defenses (`internal/gateway/provider.go::isUnsafeIP`,
+`internal/netguard/netguard.go::IsPrivateOrReserved`, and the webhook
+dispatcher's `validateWebhookURL` predicate) now refuse to dial:
+
+- `100.64.0.0/10` — RFC 6598 carrier-grade NAT (Tailscale mesh,
+  T-Mobile/Comcast carrier NAT, AWS Cloud WAN private overlay)
+- `169.254.170.2/32` — ECS task metadata endpoint (was previously
+  redundantly covered by `IsLinkLocalUnicast`; now an explicit entry)
+- `fd00::/8` — IPv6 Unique Local Addresses (broader than the
+  `fc00::/7` subset Go's `IsPrivate()` already reported)
+
+**If you were running a local LLM (e.g. Ollama on a NAS at
+`100.64.0.5:11434`) or a webhook receiver over a Tailscale tunnel,
+upgrades will start returning `HTTP 403 target host resolves to a
+private address` from the chat-completion / passthrough proxy and
+`hostname resolves to private IP …` from `defenseclaw config webhook
+test` against those targets.**
+
+To opt back into CGNAT dialing, set `DEFENSECLAW_ALLOW_CGNAT=1` in the
+sidecar environment and restart. This drops 100.64.0.0/10 from the
+deny-list and prints a one-line `[gateway] DEFENSECLAW_ALLOW_CGNAT=1
+…` notice to stderr at boot so the change is auditable from the boot
+log. Loopback, RFC 1918, link-local, IMDS (`169.254.169.254`), ECS
+task metadata (`169.254.170.2`), and IPv6 ULA stay blocked
+unconditionally — the hatch widens CGNAT only.
+
+**No equivalent escape hatch is offered for IMDS or ECS metadata.**
+Those endpoints carry IAM credentials by design; the SSRF block is
+the entire point.
+
+The webhook dispatcher's config-time validator
+(`webhook.go::isPrivateIP`) was previously a separate predicate that
+did NOT cover these new ranges, so a webhook URL pointing at a
+Tailscale receiver would pass config validation and then fail at
+dispatch time with an opaque error. The two predicates are now
+unified through `isUnsafeIP`, so misconfigurations surface at
+`defenseclaw config webhook add` / `update` time instead of at first
+delivery. Existing valid webhook URLs (public hosts) are unaffected.
+
+### Security — DeepSec hardening (selected highlights)
+
+- **CRITICAL S0** Codex git-scan hardening: hostile repository config,
+  external diff, and `core.fsmonitor` injection paths are sanitized
+  through `internal/gitsafe`; safe-flag set audited against
+  `git --help`.
+- **HIGH S2** Workflow integrity: `.github/workflows/{ci,docs-site,e2e,release}.yml`
+  pin every third-party action by SHA, drop unused `permissions`
+  scopes, and quote / sanitize all input expansions.
+- **HIGH S2** Gateway HTTP egress: `internal/gateway/proxy.go` enforces
+  SSRF refusal across known/unknown branches with `ResolveAndPin`,
+  exact provider matching, IP/CIDR pinned dialer, userinfo / control-
+  byte rejection, and structured URL scrubbing on every log/metric
+  surface.
+- **HIGH S2** Connector subprocess + plugin loader: token-aware hook
+  templates, plugin loader TOCTOU closed (open-then-stat pinned to the
+  same fd), embedded plugin canonical token derivation.
+- **HIGH S2** Gateway scanners (mcp / plugin / skill) now fail-closed
+  on non-zero subprocess exit; `policy.ScanResultInput` extended so the
+  policy engine sees the full scanner verdict shape.
+- **HIGH S2** Watcher routes rescan + baseline through admission and
+  installs recursive watches on every admitted directory; skipping a
+  policy file no longer suppresses unrelated change activity.
+- **HIGH S3 BUG** Sandbox cleanup is scoped to per-request directories;
+  the surgical 0.3 migration replaced the destructive prior path; the
+  `http_jsonl` sink retries synchronously on transient failures;
+  watchdog uses flock + binary fingerprint to recognise stale
+  processes; `RepairPairing` is fail-closed and atomic.
+- **MEDIUM S4** Webhook URLs are hashed (`scrubURLSecrets`,
+  `hashWebhookTargetURL`) on every log path; AI-discovery path
+  fingerprints are HMAC-keyed; MCP scan target URLs are validated as
+  loopback / private / metadata; endpoint ignore-list switched from
+  prefix matching to exact hostname / loopback IP literal matching.
+- **MEDIUM S4** `CorrelationMiddleware` no longer mints unauthenticated
+  agent sessions: it calls `AgentRegistry.ResolvePeek`, then handlers
+  call `PromoteSessionIfAuthenticated` after `tokenAuth` succeeds.
+  Combined with the LRU cap on `AgentRegistry`, unauthenticated
+  callers can no longer amplify in-memory state by flooding distinct
+  `X-DefenseClaw-Session-Id` headers.
+- **BUG S5** `cli/defenseclaw/commands/cmd_init.py` no longer runs
+  notifications onboarding twice; `cli/defenseclaw/provenance.py` now
+  hashes nested policy bundle files; `internal/cli/connector_cmd.go`
+  discovers plugin connectors before lifecycle commands run;
+  `internal/cli/{policy,status}.go` attach the gateway bearer / token
+  header on outbound API calls; `internal/cli/policy_diff.go` +
+  `internal/sandbox/network_policy.go` make endpoint coverage
+  port-aware; `internal/cli/tui_cmd.go` treats EOF + empty input as
+  decline; `internal/gateway/api_ratelimit.go` resolves a `time.Time`
+  data race with `atomic.Int64`; `internal/gateway/connector/otlp_token.go`
+  is now `flock`-synchronized for cross-process token minting;
+  `internal/gateway/judge_store.go` + `internal/gatewaylog/events.go`
+  fix `JudgeResponse.input_hash` to hash the *input* (not the response
+  body), with `JudgeEmitOpts.InputContent` automatically populating
+  the digest; `internal/gateway/llm_event_emit.go` + `api.go` add a
+  bounded LRU cache for hook prompt correlation maps;
+  `internal/gateway/provider_bifrost.go` adds a bounded LRU cache for
+  per-tenant Bifrost clients with proper `Shutdown()` on eviction;
+  `internal/guardrail/rulepack.go` uses slash-separated paths for
+  `embed.FS` lookups; `internal/watcher/policy_files_watch.go` records
+  per-file unreadable errors instead of suppressing the whole poll.
+
 ## [Unreleased] — PR #194 single-rollup (security floor + connector polymorphism + test parity)
 
 This rollup closes the audit gaps identified in the v3 connector

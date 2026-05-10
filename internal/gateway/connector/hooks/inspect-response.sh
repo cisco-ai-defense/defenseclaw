@@ -20,7 +20,7 @@ DEFENSECLAW_HOOK_CONNECTOR="inspect"
 DEFENSECLAW_HOOK_NAME="inspect-response"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-# Avarice F-2025 / chain F-3397: authenticate inspection calls. See
+# authenticate inspection calls. See
 # inspect-request.sh for the full rationale.
 if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token inspect inspect-response "response"
@@ -57,7 +57,7 @@ fail_response() {
   exit 2
 }
 
-# Avarice F-2025 / chain F-3397: 401/403 always fail closed.
+# 401/403 always fail closed.
 fail_unauthorized() {
   defenseclaw_log_hook_failure inspect inspect-response "$1" response "closed"
   echo "defenseclaw: inspect-response hook auth rejected: $1 (fail-closed override)" >&2
