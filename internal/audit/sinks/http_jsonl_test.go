@@ -320,9 +320,9 @@ func TestMaxHTTPJSONLQueue_HasFloor(t *testing.T) {
 // InsecureSkipVerify) MUST construct an http.Client that verifies TLS
 // certificates. Pre-fix the same shape silently downgraded
 // verification and any bearer token would have been observable to a
-// MITM peer. The legacy ``verify_tls`` field is now ignored when set
+// MITM peer. The legacy “verify_tls“ field is now ignored when set
 // to false; operators that want the old insecure mode must use the
-// new explicit ``insecure_skip_verify`` opt-out.
+// new explicit “insecure_skip_verify“ opt-out.
 func TestHTTPJSONLSink_TLSSecureByDefault(t *testing.T) {
 	cases := []struct {
 		name     string

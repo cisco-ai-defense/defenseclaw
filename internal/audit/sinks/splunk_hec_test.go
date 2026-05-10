@@ -420,9 +420,9 @@ func TestDefaultSourceTypeOverrides_IsIsolated(t *testing.T) {
 // any MITM peer.
 func TestSplunkHECSink_TLSSecureByDefault(t *testing.T) {
 	cases := []struct {
-		name      string
-		cfg       SplunkHECConfig
-		wantSkip  bool
+		name     string
+		cfg      SplunkHECConfig
+		wantSkip bool
 	}{
 		{
 			name:     "zero-value defaults to verify",
