@@ -2090,6 +2090,15 @@ func TestIsKnownProviderDomain(t *testing.T) {
 		{"chatgpt backend-api full", "https://chatgpt.com/backend-api/codex/responses", true},
 		{"chatgpt backend-api origin only", "https://chatgpt.com/", false},
 		{"chatgpt wrong path", "https://chatgpt.com/static/app.js", false},
+		// Avarice F-1185: pre-fix the legacy "bedrock-runtime." prefix
+		// matched any host that began with that string, including
+		// attacker-controlled domains. The wildcard form pins the AWS
+		// suffix and rejects host shapes that don't terminate in
+		// .amazonaws.com.
+		{"bedrock attacker prefix spoof", "https://bedrock-runtime.attacker.example", false},
+		{"bedrock missing aws tld", "https://bedrock-runtime.us-east-1.evil.com", false},
+		{"bedrock label injection", "https://bedrock-runtime.us-east-1.evil.amazonaws.com.evil.com", false},
+		{"bedrock case insensitive", "https://Bedrock-Runtime.us-east-1.amazonaws.com/model/invoke", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
