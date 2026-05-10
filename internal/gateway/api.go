@@ -1988,16 +1988,35 @@ func (a *APIServer) writeGuardrailRuntime() error {
 }
 
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
+	// Avarice F-3288: when a policy bundle is configured but
+	// either the engine constructor or evaluation fails, the
+	// previous code silently fell back to a built-in
+	// severity-derived decision that allows clean/missing scanner
+	// results and downgrades MEDIUM/HIGH to alert. That converted
+	// every policy outage into a quiet enforcement bypass for
+	// action-mode prompts. We now fail closed: any configured
+	// policy directory whose engine/eval fails returns block in
+	// action mode (and an explicit alert in observe mode for
+	// audit visibility).
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
 		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err == nil {
-			out, evalErr := engine.EvaluateGuardrail(ctx, input)
-			if evalErr == nil {
-				return out, nil
-			}
+		if err != nil {
+			return policyOutageVerdict(input,
+				fmt.Sprintf("policy engine load failed: %v", err)), nil
 		}
+		out, evalErr := engine.EvaluateGuardrail(ctx, input)
+		if evalErr != nil {
+			return policyOutageVerdict(input,
+				fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
+		}
+		return out, nil
 	}
 
+	// No policy directory configured at all — keep the legacy
+	// severity-derived fallback. Operators that want strict
+	// fail-closed behavior on missing policy must configure a
+	// PolicyDir; the absence of one is treated as "no policy"
+	// rather than "policy outage".
 	sev := "NONE"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
@@ -2021,9 +2040,26 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	return &policy.GuardrailOutput{
 		Action:         action,
 		Severity:       sev,
-		Reason:         "built-in fallback (OPA unavailable)",
+		Reason:         "built-in fallback (no policy configured)",
 		ScannerSources: sources,
 	}, nil
+}
+
+// policyOutageVerdict builds a fail-closed verdict for guardrail
+// evaluations when a configured policy bundle cannot be loaded or
+// evaluated. Action mode blocks; observe mode keeps the request
+// flowing but loud-flags it via alert + would_block-style telemetry.
+func policyOutageVerdict(input policy.GuardrailInput, reason string) *policy.GuardrailOutput {
+	action := "block"
+	if input.Mode == "observe" {
+		action = "alert"
+	}
+	return &policy.GuardrailOutput{
+		Action:         action,
+		Severity:       "HIGH",
+		Reason:         "guardrail failing closed: " + reason,
+		ScannerSources: []string{"policy-outage"},
+	}
 }
 
 // metricsMiddleware records HTTP request count and duration via OTel.

@@ -978,8 +978,22 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
     try:
         with open(data_json_path) as f:
             opa_data = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return
+    except OSError as exc:
+        # Avarice F-2369: silently returning on read failures hid
+        # malformed/stale data.json from `policy activate`. The
+        # caller has already updated config to the new policy
+        # selection, so leaving sync skipped left the gateway
+        # running with stale OPA data that would not match the
+        # advertised activation. Surface the failure and let
+        # activate exit non-zero.
+        raise click.ClickException(
+            f"failed to read OPA data file at {data_json_path}: {exc} (F-2369)"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(
+            f"OPA data file at {data_json_path} is not valid JSON: {exc}; "
+            f"run `defenseclaw policy validate` and repair before activating (F-2369)"
+        ) from exc
 
     # --- config section ---
     opa_data.setdefault("config", {})
@@ -1110,9 +1124,25 @@ def _try_rego_compile(rego_dir: str) -> bool:
                 click.echo(result.stdout.rstrip())
             return False
     except FileNotFoundError:
-        click.echo("  'opa' binary not found — skipping Rego compilation check.")
+        # Avarice F-2368: returning True here turned a missing `opa`
+        # binary into a clean "Rego compilation: OK" verdict, so a
+        # malformed bundle could pass `defenseclaw policy validate`
+        # in any environment where OPA was not installed. Operators
+        # can opt out of strict mode (and accept that no compilation
+        # actually happened) with DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1,
+        # but the default is to fail closed because the bundle is
+        # being validated for activation.
+        if os.environ.get("DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA", "").strip() == "1":
+            click.echo("  'opa' binary not found — skipping Rego compilation (opt-in).")
+            click.echo("  Install OPA for full validation: brew install opa")
+            return True
+        ux.err("FAIL: 'opa' binary not found — install OPA to validate Rego bundles.")
         click.echo("  Install OPA for full validation: brew install opa")
-        return True
+        click.echo(
+            "  Set DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA=1 to bypass "
+            "(NOT recommended for production)."
+        )
+        return False
     except subprocess.TimeoutExpired:
         ux.err("FAIL: opa check timed out")
         return False
