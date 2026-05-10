@@ -876,7 +876,12 @@ func TestRouteApprovalNoAutoApprove(t *testing.T) {
 	}
 }
 
-func TestRouteApprovalNoPlan(t *testing.T) {
+// Avarice F-1145: an approval frame with no SystemRunPlan, nested
+// request, raw command, OR argv carries no command context for the
+// dangerous-pattern scanner. Pre-fix the autoApprove branch returned
+// allow-once for that case ("empty rawCmd is not dangerous"). The
+// new contract is fail-closed: empty context -> deny.
+func TestRouteApprovalEmptyContextDenied(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
@@ -891,12 +896,11 @@ func TestRouteApprovalNoPlan(t *testing.T) {
 		Payload: payload,
 	})
 
-	// Empty rawCmd is not dangerous, so auto-approve fires
 	rpc := drainRPC(t, received)
 	var params ApprovalResolveParams
 	json.Unmarshal(rpc.Params, &params)
-	if params.Decision != "allow-once" {
-		t.Errorf("Decision = %q, want allow-once", params.Decision)
+	if params.Decision != "deny" {
+		t.Errorf("Decision = %q, want deny (F-1145 fail-closed on empty context)", params.Decision)
 	}
 }
 

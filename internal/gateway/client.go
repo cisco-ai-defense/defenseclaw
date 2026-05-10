@@ -717,6 +717,19 @@ func isAuthError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	// Avarice F-1527 / F-1165: role-upgrade and scope-upgrade rejections
+	// MUST NOT trigger auto-repair. RepairPairing hard-codes
+	// operator.admin and operator.approvals into the pairing record,
+	// so treating "higher role than" / "more scopes than" as a
+	// repairable auth failure converted an explicit-approval reject
+	// from OpenClaw into a local self-elevation. We short-circuit
+	// these explicit-approval-only sub-reasons to false BEFORE the
+	// generic "pairing required" needle below would otherwise match
+	// them.
+	if strings.Contains(msg, "higher role than") ||
+		strings.Contains(msg, "more scopes than") {
+		return false
+	}
 	for _, needle := range []string{
 		"token_missing", "token_mismatch",
 		"auth_token_mismatch", "auth_unauthorized", "auth_required",
@@ -726,8 +739,6 @@ func isAuthError(err error) bool {
 		"pairing required",
 		"pairing_required",
 		"device identity changed",
-		"higher role than",
-		"more scopes than",
 	} {
 		if strings.Contains(msg, needle) {
 			return true
