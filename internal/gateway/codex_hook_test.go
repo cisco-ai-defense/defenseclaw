@@ -450,7 +450,7 @@ func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
 }
 
 // TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock pins the
-// F-1510 fix: when AssetPolicy is in action mode and MCP.Default is
+// fix: when AssetPolicy is in action mode and MCP.Default is
 // "deny", an unknown terminal MCP command MUST block even when the
 // secondary `runtime_detection.unknown_terminal_mcp` knob is left at
 // its observe default. Operators that explicitly opt into
@@ -476,7 +476,7 @@ func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) 
 	resp := api.evaluateCodexHook(context.Background(), req)
 
 	if resp.Action != "block" || resp.RawAction != "block" {
-		t.Fatalf("action=%q raw=%q, want block/block — MCP.Default=deny in action mode must not be silently downgraded by unknown_terminal_mcp=observe (F-1510)",
+		t.Fatalf("action=%q raw=%q, want block/block — MCP.Default=deny in action mode must not be silently downgraded by unknown_terminal_mcp=observe",
 			resp.Action, resp.RawAction)
 	}
 }

@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for avarice F-2410 (verdict cache reuses approvals
+"""Regression tests for (verdict cache reuses approvals
 after payload change).
 
 The vulnerability allowed a registry publisher to keep the same
@@ -84,7 +84,7 @@ class VerdictCachePayloadTests(unittest.TestCase):
         self.assertEqual(v.scan_id, "prior-scan-id")
 
     def test_approval_dropped_when_command_changes(self):
-        """F-2410: command swap MUST drop prior approval."""
+        """command swap MUST drop prior approval."""
         prior = _approved_verdict(
             name="watch", type="mcp",
             command="watcher", args=["--port", "1234"], url="",
@@ -99,7 +99,7 @@ class VerdictCachePayloadTests(unittest.TestCase):
         )])
         new_idx = merge_manifest_into_index(idx, manifest)
         v = new_idx.verdicts[0]
-        self.assertFalse(v.approved, "F-2410: approval must drop when command changes")
+        self.assertFalse(v.approved, "approval must drop when command changes")
         self.assertEqual(v.status, "pending")
         self.assertEqual(v.scan_id, "")
 
@@ -164,7 +164,7 @@ class VerdictCachePayloadTests(unittest.TestCase):
         new_idx = merge_manifest_into_index(idx, manifest)
         v = new_idx.verdicts[0]
         self.assertFalse(v.rejected,
-                         "F-2410: rejection must not apply to a different binary")
+                         "rejection must not apply to a different binary")
 
 
 if __name__ == "__main__":

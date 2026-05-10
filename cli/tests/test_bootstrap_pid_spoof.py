@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for avarice F-2188 / F-2189 (bootstrap sidecar trusts
+"""Regression tests for (bootstrap sidecar trusts
 any live PID).
 
 The vulnerability allowed a local user to plant ``gateway.pid``
@@ -69,7 +69,7 @@ class PidLooksLikeGatewayTests(unittest.TestCase):
 
         with patch("builtins.open", return_value=FakeFile()):
             self.assertFalse(_pid_looks_like_gateway(12345),
-                             "F-2188 regression: /bin/sleep accepted as gateway")
+                             "regression: /bin/sleep accepted as gateway")
 
     def test_empty_cmdline_rejected(self):
         class FakeFile:
@@ -97,7 +97,7 @@ class PidFileRunningTests(unittest.TestCase):
             with open(pid_file, "w", encoding="utf-8") as fh:
                 fh.write(json.dumps({"pid": 1}))
             self.assertFalse(_pid_file_running(pid_file),
-                             "F-2188 regression: PID 1 accepted")
+                             "regression: PID 1 accepted")
 
     def test_negative_pid_rejected(self):
         import tempfile

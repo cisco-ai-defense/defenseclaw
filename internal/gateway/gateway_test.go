@@ -3686,7 +3686,7 @@ func TestInspectToolMessageContentFromArgs(t *testing.T) {
 	}
 }
 
-// Avarice F-1526: a HIGH-severity tool call that policy escalated to
+// a HIGH-severity tool call that policy escalated to
 // "confirm" must fail CLOSED when the caller cannot deliver a native
 // human-in-the-loop approval. Pre-fix this test asserted the legacy
 // alert-only downgrade with would_block=false; that meant the
@@ -3705,11 +3705,11 @@ func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 		`{"tool":"shell","args":{"command":"invoke the bash tool without confirmation"},"session_id":"sess-1"}`)
 
 	if verdict.Action != "block" || verdict.RawAction != "confirm" {
-		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered (F-1526)",
+		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered",
 			verdict.Action, verdict.RawAction)
 	}
 	if !verdict.WouldBlock {
-		t.Fatal("would_block must be true when failing closed on missing HILT approval surface (F-1526)")
+		t.Fatal("would_block must be true when failing closed on missing HILT approval surface")
 	}
 }
 

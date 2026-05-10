@@ -226,7 +226,7 @@ func fetchConnectorMode(client *http.Client, bind string, port int) *connectorMo
 	if err != nil {
 		return nil
 	}
-	// DeepSec S3.BUG ("Connector mode status fetch omits required
+	// ("Connector mode status fetch omits required
 	// API token"): /status sits behind tokenAuth, which only
 	// exempts GET /health. The previous client.Get call sent no
 	// auth headers and silently swallowed the resulting 401, so

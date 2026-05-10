@@ -105,7 +105,7 @@ func findingToV7(f *scanner.Finding, scannerName string) scanFindingV7 {
 		t := append([]string(nil), f.Tags...)
 		tags = &t
 	}
-	// DeepSec H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
+	// H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
 	// findings"): findings produced by CodeGuard / plugin scanners can
 	// embed the raw matched source line in Description, the raw path in
 	// Location, and operator-supplied text in Remediation. The persistent

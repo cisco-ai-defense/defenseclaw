@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 # `grp` is POSIX-only. We import it lazily-but-at-module-load so the
-# F-2507 group-ownership check below can run without an inline import,
+# group-ownership check below can run without an inline import,
 # while still keeping Windows hosts importable.
 try:  # pragma: no cover - Windows path
     import grp as _grp
@@ -54,7 +54,7 @@ VERSION_TIMEOUT_SECONDS = 2.0
 # binary as part of a passive discovery scan. Operators with bespoke
 # install layouts can extend the allow-list at runtime via the
 # ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (colon-separated).
-# Avarice F-2507: the default trusted-prefix list previously included
+# the default trusted-prefix list previously included
 # normal user-writable tool directories (~/.local/bin, ~/.cargo/bin,
 # ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx, ~/Library/Application Support,
 # /Applications) and the only post-resolution check rejected
@@ -326,7 +326,7 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
     # could swap the binary at any time. Treat as untrusted.
     if parent_st.st_mode & 0o002:
         return False
-    # Avarice F-2507: also reject group-writable parents unless the
+    # also reject group-writable parents unless the
     # group is the system root group. A non-root user that shares a
     # group with the parent dir can swap the binary.
     if parent_st.st_mode & 0o020:
@@ -338,7 +338,7 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
                 grp_name = ""
         if grp_name not in ("root", "wheel", "admin"):
             return False
-    # Avarice F-2507: refuse a binary whose own file is writable by
+    # refuse a binary whose own file is writable by
     # anyone other than the trusted system owner. The user-writable
     # ~/.local/bin/* case is the canonical exploit path; even if an
     # operator extends DEFENSECLAW_TRUSTED_BIN_PREFIXES to include it,

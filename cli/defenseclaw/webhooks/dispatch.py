@@ -341,7 +341,7 @@ def send_synthetic(
         elif webhook_type == "generic":
             headers["X-Hub-Signature-256"] = "sha256=" + compute_hmac(payload, secret)
 
-    # DeepSec S2.MEDIUM ("PagerDuty routing key is exposed in webhook
+    # ("PagerDuty routing key is exposed in webhook
     # payload previews"): the PagerDuty Events API requires routing_key
     # as a top-level field, so payload[:200] always captures it. Webex
     # does the same with `markdown` content -- harmless -- but PagerDuty
@@ -367,7 +367,7 @@ def send_synthetic(
     )
     status: int | None = None
     err: str | None = None
-    # DeepSec S2.MEDIUM ("PagerDuty routing key is exposed in webhook
+    # ("PagerDuty routing key is exposed in webhook
     # payload previews", related "resolve-and-pin" recommendation): the
     # builtin opener follows 30x redirects to arbitrary destinations,
     # which would let a remote receiver (or an attacker who can spoof
@@ -405,7 +405,7 @@ def send_synthetic(
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Block 3xx redirects so dispatched webhooks cannot be re-aimed.
 
-    DeepSec S2.MEDIUM (related to "resolve-and-pin"): refuse all 30x
+    (related to "resolve-and-pin"): refuse all 30x
     responses by raising a ``urllib.error.HTTPError``; callers see a
     deterministic non-2xx outcome and the request body never reaches
     a different (potentially private) destination than the one
@@ -443,7 +443,7 @@ _SECRET_PAYLOAD_FIELDS = ("routing_key", "token", "api_key", "access_token")
 def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> str:
     """Return a 200-char preview with known secret fields scrubbed.
 
-    DeepSec S2.MEDIUM ("PagerDuty routing key is exposed in webhook
+    ("PagerDuty routing key is exposed in webhook
     payload previews"). The preview is a debugging aid, not a fidelity
     re-rendering, so we don't try to round-trip JSON; a regex sweep
     over the prefix is sufficient and avoids the cost of parsing the

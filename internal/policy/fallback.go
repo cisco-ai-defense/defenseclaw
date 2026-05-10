@@ -152,7 +152,7 @@ func EvaluateAdmissionFallback(input AdmissionInput, profile *FallbackProfile) *
 		return &AdmissionOutput{Verdict: "scan", Reason: "scan required"}
 	}
 
-	// DeepSec hardening (S2.scanners): fail closed on any scanner
+	// hardening (S2.scanners): fail closed on any scanner
 	// failure even when the parsed findings list is empty. Previously
 	// a non-zero scanner exit with `{"findings":[]}` evaluated as a
 	// clean scan because we only branched on TotalFindings/MaxSeverity.

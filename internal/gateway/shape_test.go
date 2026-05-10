@@ -159,7 +159,7 @@ func TestIsPrivateHost_HostnameResolvesToLoopback(t *testing.T) {
 	}
 }
 
-// TestIsPrivateHost_IPv6Zones pins F-1225 (avarice).
+// TestIsPrivateHost_IPv6Zones pins ().
 //
 // Pre-fix: net.ParseIP returns nil on a zone-qualified IPv6 literal like
 // "::1%lo0" or "fe80::1%lo0", so isPrivateHost fell through to DNS
@@ -171,7 +171,7 @@ func TestIsPrivateHost_HostnameResolvesToLoopback(t *testing.T) {
 // every scoped form of a private literal is correctly classified.
 func TestIsPrivateHost_IPv6Zones(t *testing.T) {
 	cases := map[string]bool{
-		// Bare scoped loopback / link-local — F-1225 bypass surface.
+		// Bare scoped loopback / link-local — bypass surface.
 		"::1%lo0":             true,
 		"fe80::1%lo0":         true,
 		"fe80::1%eth0":        true,
@@ -191,7 +191,7 @@ func TestIsPrivateHost_IPv6Zones(t *testing.T) {
 	}
 }
 
-// TestStripIPv6Zone unit-tests the F-1225 zone-strip helper.
+// TestStripIPv6Zone unit-tests the zone-strip helper.
 func TestStripIPv6Zone(t *testing.T) {
 	cases := map[string]string{
 		"::1%lo0":             "::1",

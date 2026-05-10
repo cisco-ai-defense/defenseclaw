@@ -235,7 +235,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		FinishScanSpan(sp, result, exitCode, scanErr)
 	}()
 
-	// DeepSec S2.MEDIUM ("MCP scan target is passed to a remote-
+	// ("MCP scan target is passed to a remote-
 	// capable scanner without URL guarding"): mcp-scanner accepts
 	// either a local path or a URL. When it's a URL, it dials the
 	// host from the sidecar's network context. Apply the same
@@ -311,7 +311,7 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 		result.Findings = findings
 	}
 
-	// DeepSec hardening (S2.scanners): fail closed on any non-zero
+	// hardening (S2.scanners): fail closed on any non-zero
 	// scanner exit, even when stdout was parseable. Previously a
 	// scanner that exited non-zero with `{"findings":[]}` was treated
 	// as a clean scan because admission callers branched only on the

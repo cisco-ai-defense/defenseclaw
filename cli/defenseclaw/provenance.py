@@ -18,7 +18,7 @@ def _resolve_active_rego_dir(policy_dir: str) -> str:
     """Mirror the Go loader's resolveRegoDir: prefer policy_dir/rego when it
     contains .rego files, otherwise fall back to policy_dir itself.
 
-    DeepSec S3.BUG ("Provenance hash omits active nested policy bundle"):
+    ("Provenance hash omits active nested policy bundle"):
     the active Go engine prefers `cfg.policy_dir/rego/*.rego` (and
     `data.json`) when that directory exists, and the bootstrap path
     seeds bundled Rego there. The Python AIBOM provenance therefore

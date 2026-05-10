@@ -36,7 +36,7 @@ const (
 	// EnvDataDir is set by Daemon.Start in the spawned child's
 	// environment so killStaleProcesses can verify that a candidate
 	// process belongs to THIS data directory before signalling it.
-	// Required for the DeepSec S3.HIGH_BUG fix
+	// Required for the S3.HIGH_BUG fix
 	// "killStaleProcesses can terminate unrelated processes": without
 	// a per-data-dir marker, two legitimate DefenseClaw daemons
 	// running from different profiles cannot tell each other apart by
@@ -103,7 +103,7 @@ type pidInfo struct {
 	// at a different time, so it's a DIFFERENT process that happens to
 	// have inherited our PID". Empty when the platform doesn't support
 	// the lookup (e.g. FreeBSD), in which case the check is skipped.
-	// Closes the second half of avarice chain F-3399 (F-0942).
+	// Closes the second half of chain .
 	StartIdentity string `json:"start_identity,omitempty"`
 }
 
@@ -117,7 +117,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 		return false, 0
 	}
 	if !d.verifyProcess(info) {
-		// Closes avarice F-0942 (chain F-3399): a stale gateway.pid
+		// Closes (chain ): a stale gateway.pid
 		// pointing at a reused PID must NOT keep status/stop/restart
 		// pinned to the unrelated process. Treat the file as garbage
 		// and remove it so the next operation gets a clean slate.
@@ -136,7 +136,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 // to fail-CLOSED when their respective metadata is genuinely unavailable for
 // a process we *can* signal: the previous implementation fell back to "true"
 // on `os.Readlink` errors (Linux) and on `ps` errors (Darwin), which let any
-// unreaped zombie pass verification. Closes avarice F-3399.
+// unreaped zombie pass verification. Closes .
 func (d *Daemon) verifyProcess(info pidInfo) bool {
 	if !d.verifyExecutable(info) {
 		return false
@@ -287,7 +287,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// these, we strip them here too so any future caller (or stale
 	// systemd unit, supervisord script, etc.) cannot regress and
 	// leave the gateway token visible via `ps` / /proc/<pid>/cmdline
-	// for the lifetime of the daemon. See DeepSec finding "daemon
+	// for the lifetime of the daemon. See finding "daemon
 	// start propagates gateway token on the child process command
 	// line".
 	args = stripTokenArgs(args)
@@ -327,8 +327,8 @@ func (d *Daemon) Start(args []string) (int, error) {
 
 	// Spawn an exit-watcher BEFORE writing the PID file so we can
 	// detect immediate-exit children and avoid leaving a stale
-	// gateway.pid behind. Closes the first half of avarice chain
-	// F-3399 (F-0941): processExists() alone returned true for
+	// gateway.pid behind. Closes the first half of chain
+	// processExists() alone returned true for
 	// unreaped zombies, so the previous startup verification
 	// recorded a stale PID file for a process that had already died.
 	exitCh := make(chan error, 1)
@@ -338,7 +338,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 
 	// Capture the kernel's view of the process start identity right
 	// after spawn so verifyProcess() can detect PID reuse later.
-	// Closes the second half of chain F-3399 (F-0942). Errors are
+	// Closes the second half of chain . Errors are
 	// not fatal — falling back to executable-only matching mirrors
 	// the legacy behavior on platforms without /proc.
 	startIdentity, _ := processStartIdentity(pid)
@@ -363,7 +363,7 @@ func (d *Daemon) Start(args []string) (int, error) {
 	// with the exit status. The previous implementation slept blindly
 	// and called processExists(), which returned true for zombies — so
 	// fast-fail config errors (bind-in-use, missing config) silently
-	// left a stale PID file (avarice F-0941).
+	// left a stale PID file ().
 	select {
 	case waitErr := <-exitCh:
 		_ = os.Remove(d.pidFile)

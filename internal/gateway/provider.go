@@ -560,3 +560,38 @@ func isUnsafeIP(ip net.IP) bool {
 // leave this at false; the dedicated SSRF tests still route private
 // targets through the shape-branch which is not subject to this gate.
 var passthroughAllowPrivateForTest bool
+
+// secureDialContext returns a DialContext that re-resolves the
+// destination at dial time and rejects private/loopback/link-local/
+// cloud-metadata IPs (closes F-1306 DNS rebinding). When
+// allowLoopback is true, loopback destinations are permitted (used
+// for test webhooks pointing at httptest.Server).
+func secureDialContext(allowLoopback bool, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, ip := range ips {
+			if isUnsafeIP(ip.IP) {
+				if allowLoopback && ip.IP.IsLoopback() {
+					continue
+				}
+				return nil, fmt.Errorf("secureDialContext: refusing dial to %s (resolved to unsafe IP %s)", host, ip.IP)
+			}
+		}
+		// Use the first safe IP literal so we don't re-resolve and
+		// give an attacker a second chance to return a private IP.
+		for _, ip := range ips {
+			if !isUnsafeIP(ip.IP) || (allowLoopback && ip.IP.IsLoopback()) {
+				return d.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			}
+		}
+		return nil, fmt.Errorf("secureDialContext: no safe IP for %s", host)
+	}
+}

@@ -501,7 +501,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		}
 	}
 
-	// DeepSec S2.MEDIUM ("Redacted AI discovery events expose reversible
+	// ("Redacted AI discovery events expose reversible
 	// path fingerprints"): the AI-discovery service runs in goroutine 5
 	// below and calls runScan(..., "startup") immediately, so it can
 	// produce path digests BEFORE any code inside runGuardrail
@@ -509,7 +509,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// until runGuardrail (which is goroutine 4 and may even error out
 	// on bad connector config), the first round of AI-discovery payloads
 	// will leak the legacy reversible `sha256:` digests — exactly the
-	// regression DeepSec flagged.
+	// regression flagged.
 	//
 	// Solve this by resolving (and persisting if needed) the gateway
 	// token SYNCHRONOUSLY here, then installing the inventory hash key
@@ -1346,7 +1346,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// ensureGatewayTokenSynthesis is idempotent: if Sidecar.Run already
 	// resolved/synthesized the token synchronously (which it does so the
 	// AI-discovery goroutine can use the keyed path-hash digest from
-	// the very first scan — DeepSec S2.MEDIUM), this call returns the
+	// the very first scan — S2.MEDIUM), this call returns the
 	// already-resolved value without re-reading .env or regenerating.
 	apiToken, err := s.ensureGatewayTokenSynthesis()
 	if err != nil {
@@ -2231,7 +2231,7 @@ func (s *Sidecar) Health() *SidecarHealth {
 //
 // Sidecar.Run calls this BEFORE spawning any goroutine so the
 // AI-discovery service can install its keyed path-hash digest from the
-// very first scan (DeepSec S2.MEDIUM). runGuardrail then calls it
+// very first scan (S2.MEDIUM). runGuardrail then calls it
 // again on its own goroutine and gets the same already-resolved value
 // — preserving the existing call sequence (Setup → API → guardrail
 // proxy) without race or double-write.

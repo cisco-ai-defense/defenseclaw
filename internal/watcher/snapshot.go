@@ -80,7 +80,7 @@ var urlPattern = regexp.MustCompile(
 )
 
 // Well-known non-actionable hostnames excluded from endpoint drift
-// detection. DeepSec S2.MEDIUM ("Endpoint ignore list uses unsafe
+// detection. ("Endpoint ignore list uses unsafe
 // string-prefix matching"): the legacy implementation tested
 // strings.HasPrefix against `http://localhost`, so URLs like
 // `http://localhost@attacker.example/...` and

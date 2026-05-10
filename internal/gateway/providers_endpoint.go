@@ -92,7 +92,7 @@ func (p *GuardrailProxy) handleReloadProviders(w http.ResponseWriter, r *http.Re
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	// DeepSec follow-up: promote peeked agent identity now that auth
+	// follow-up: promote peeked agent identity now that auth
 	// succeeded so emitLifecycleReload below stamps a stable
 	// agent_instance_id on its lifecycle event.
 	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))

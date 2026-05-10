@@ -68,7 +68,7 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
-    # Closes avarice F-1727 (parity with default pack): `;` (shell
+    # Closes (parity with default pack): `;` (shell
     # command separator) added to the suffix delimiter classes.
     pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,;\]})]'
     title: "Environment file"

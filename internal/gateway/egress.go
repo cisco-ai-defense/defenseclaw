@@ -63,7 +63,7 @@ func (p *GuardrailProxy) handleEgressEvent(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	// DeepSec follow-up: promote peeked agent identity now that auth
+	// follow-up: promote peeked agent identity now that auth
 	// succeeded so emitEgress below stamps a stable agent_instance_id.
 	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 	// Reject non-JSON content types explicitly. Any caller that

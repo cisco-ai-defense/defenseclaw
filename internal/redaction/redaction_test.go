@@ -440,7 +440,7 @@ func TestIsPlaceholder_SpoofedFakeRedaction(t *testing.T) {
 	}
 }
 
-// TestForSinkReason_SeparatorSecretShapes pins the deepsec finding:
+// TestForSinkReason_SeparatorSecretShapes pins the contract:
 // short separator-bearing credentials must be redacted, not
 // preserved by the safe-token allow-list.
 func TestForSinkReason_SeparatorSecretShapes(t *testing.T) {

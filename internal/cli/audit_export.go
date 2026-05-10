@@ -89,7 +89,7 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 
 	out := io.Writer(os.Stdout)
 	if auditExportOut != "" && auditExportOut != "-" {
-		// DeepSec S2.MEDIUM ("Audit export output file is created with
+		// ("Audit export output file is created with
 		// default-readable permissions before chmod"): os.Create uses
 		// O_CREATE|O_TRUNC with mode 0666 masked by the process umask,
 		// so on a 022 umask host the file briefly exists as 0644

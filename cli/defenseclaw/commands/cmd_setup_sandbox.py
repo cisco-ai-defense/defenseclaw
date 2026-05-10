@@ -492,7 +492,7 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
         click.echo("  Ownership:     invalid backup data")
         return
 
-    # Avarice F-2231: the backup file lives under data_dir, which
+    # the backup file lives under data_dir, which
     # init/setup later chowns back to SUDO_USER, so a same-user
     # process can rewrite openclaw_home/original_uid/original_gid
     # before disable runs and steer the privileged `chown -R` at
@@ -510,10 +510,10 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
         uid_int = int(uid)
         gid_int = int(gid)
     except (TypeError, ValueError):
-        click.echo("  Ownership:     refusing restore — non-integer uid/gid in backup (F-2231)")
+        click.echo("  Ownership:     refusing restore — non-integer uid/gid in backup")
         return
     if uid_int < 0 or gid_int < 0:
-        click.echo("  Ownership:     refusing restore — negative uid/gid in backup (F-2231)")
+        click.echo("  Ownership:     refusing restore — negative uid/gid in backup")
         return
     real_backup_home = os.path.realpath(openclaw_home)
     if pinned_oc:
@@ -521,7 +521,7 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
         if real_backup_home != real_pinned:
             click.echo(
                 f"  Ownership:     refusing restore — backup path {real_backup_home!r} "
-                f"diverges from pinned {real_pinned!r} (F-2231)"
+                f"diverges from pinned {real_pinned!r}"
             )
             return
     # Defense-in-depth: never allow the recursive chown to target a
@@ -547,7 +547,7 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
     if rejected:
         click.echo(
             f"  Ownership:     refusing restore — refusing recursive chown of "
-            f"system path {real_backup_home!r} (F-2231)"
+            f"system path {real_backup_home!r}"
         )
         return
 
@@ -1149,7 +1149,7 @@ def _generate_launcher_scripts(
     q_sandbox_home = shlex.quote(sandbox_home)
     q_data_dir = shlex.quote(data_dir)
     q_host_ip = shlex.quote(host_ip)
-    # Avarice F-2227: pin OC_REAL to the openclaw home that was
+    # pin OC_REAL to the openclaw home that was
     # confirmed by the operator at sandbox-init time. Without this
     # pin, sandbox-controlled code can replace
     # /home/sandbox/.openclaw with a symlink to any host path
@@ -1167,7 +1167,7 @@ SANDBOX_HOME={q_sandbox_home}
 OC_LINK="$SANDBOX_HOME/.openclaw"
 OC_PINNED={q_pinned_openclaw_home}
 
-# Avarice F-2227: refuse to follow an attacker-controlled symlink.
+# refuse to follow an attacker-controlled symlink.
 # The sandbox user owns $SANDBOX_HOME, so .openclaw can be replaced
 # with a symlink pointing anywhere on the host. We accept either:
 #   * a regular directory whose realpath equals the pinned home
@@ -1178,14 +1178,14 @@ if [ -L "$OC_LINK" ]; then
     OC_REAL=$(readlink -f "$OC_LINK" || true)
     if [ -z "$OC_PINNED" ] || [ "$OC_REAL" != "$OC_PINNED" ]; then
         echo "[pre-sandbox] refusing privileged repair: $OC_LINK -> $OC_REAL " \\
-             "diverges from pinned $OC_PINNED (F-2227)" >&2
+             "diverges from pinned $OC_PINNED" >&2
         exit 0
     fi
 elif [ -d "$OC_LINK" ]; then
     OC_REAL=$(readlink -f "$OC_LINK" || true)
     if [ -n "$OC_PINNED" ] && [ "$OC_REAL" != "$OC_PINNED" ]; then
         echo "[pre-sandbox] refusing privileged repair: $OC_LINK realpath " \\
-             "$OC_REAL diverges from pinned $OC_PINNED (F-2227)" >&2
+             "$OC_REAL diverges from pinned $OC_PINNED" >&2
         exit 0
     fi
 else
@@ -1239,7 +1239,7 @@ if command -v setfacl >/dev/null 2>&1; then
     done
 fi
 
-# DeepSec scoped pre-sandbox cleanup: only delete the previously
+# scoped pre-sandbox cleanup: only delete the previously
 # recorded namespace (if any). Foreign namespaces created by other
 # DefenseClaw/OpenClaw instances on a shared host are left untouched.
 DEFENSECLAW_DIR={q_data_dir}
@@ -1343,7 +1343,7 @@ $NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
 iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || \\
     iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
 
-# DeepSec scoped cleanup: capture the prior route_localnet value once so
+# scoped cleanup: capture the prior route_localnet value once so
 # cleanup-sandbox.sh can restore it instead of forcing 0 (which would
 # disable the sysctl for any other instances on the same host).
 SAVED_ROUTE_LOCALNET="$DEFENSECLAW_DIR/saved.route_localnet"
@@ -1428,7 +1428,7 @@ echo "Injected iptables rules via $NSENTER"
 exit 0
 """
 
-    # DeepSec S3.HIGH_BUG ("Generated sandbox cleanup can stop unrelated host
+    # S3.HIGH_BUG ("Generated sandbox cleanup can stop unrelated host
     # services"): scope cleanup to THIS instance.
     #   1. Restore the prior route_localnet sysctl rather than forcing 0.
     #      post-sandbox.sh saves the previous value to
@@ -1452,7 +1452,7 @@ iptables -t nat -D POSTROUTING -d {sandbox_ip} -p tcp --dport {openclaw_port} \\
 # Remove DNS MASQUERADE
 iptables -t nat -D POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
 
-# Restore route_localnet to its pre-sandbox value (DeepSec scoped cleanup).
+# Restore route_localnet to its pre-sandbox value (scoped cleanup).
 SAVED_ROUTE_LOCALNET={q_data_dir}/saved.route_localnet
 if [ -r "$SAVED_ROUTE_LOCALNET" ]; then
     PRIOR_VAL=$(cat "$SAVED_ROUTE_LOCALNET" 2>/dev/null || echo "")
@@ -1629,8 +1629,7 @@ stop_sandbox() {{
     # 3. Kill any orphaned sandbox-related processes that are clearly part
     #    of THIS instance. Orphans are identified by checking that the
     #    process's cwd or cmdline references our $DATA_DIR — never by a
-    #    bare process name. Cross-instance kills (DeepSec
-    #    "Generated sandbox cleanup can stop unrelated host services")
+    #    bare process name. Cross-instance kills (#    "Generated sandbox cleanup can stop unrelated host services")
     #    are explicitly disallowed: a process whose cmdline does not
     #    reference our $DATA_DIR is left alone, even if it shares a
     #    binary name.
@@ -1731,7 +1730,7 @@ if [ -z "$SANDBOX_NS" ]; then
     exit 1
 fi
 
-# DeepSec scoped cleanup: persist this instance's namespace name so
+# scoped cleanup: persist this instance's namespace name so
 # pre-sandbox.sh / cleanup-sandbox.sh / run-sandbox.sh stop only touch
 # the namespace WE created. Other DefenseClaw instances on the same
 # host will write their own marker into their own data dir.
@@ -1826,7 +1825,7 @@ def _extract_ed25519_pubkey(key_data: bytes) -> bytes | None:
 def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
     """Pre-inject the sidecar's device key into OpenClaw's devices/paired.json.
 
-    Avarice F-2551: the legacy implementation accepted any 32-byte
+    The legacy implementation accepted any 32-byte
     blob written to ``data_dir/device.key`` as a gateway-generated
     Ed25519 public key and minted an *operator.admin* + *operator.approvals*
     pairing record from it. A local attacker that could write
@@ -1857,14 +1856,14 @@ def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
         return False
     if not stat.S_ISREG(st.st_mode):
         click.echo(
-            f"    device pairing:       refused — {device_key_file} is not a regular file (F-2551)",
+            f"    device pairing:       refused — {device_key_file} is not a regular file",
             err=True,
         )
         return False
     if st.st_mode & 0o077:
         click.echo(
             f"    device pairing:       refused — {device_key_file} mode {oct(st.st_mode & 0o777)} "
-            f"is too permissive (must be 0o600 or stricter, F-2551)",
+            f"is too permissive (must be 0o600 or stricter, )",
             err=True,
         )
         return False
@@ -1875,7 +1874,7 @@ def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
     if running_uid >= 0 and st.st_uid not in (0, running_uid):
         click.echo(
             f"    device pairing:       refused — {device_key_file} is owned by uid={st.st_uid}, "
-            f"expected uid={running_uid} or 0 (F-2551)",
+            f"expected uid={running_uid} or 0",
             err=True,
         )
         return False
@@ -1888,7 +1887,7 @@ def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
     if not os.path.isfile(provenance_path) and not legacy_opt_in:
         click.echo(
             f"    device pairing:       refused — no gateway provenance sentinel at "
-            f"{provenance_path}; refusing to mint operator pairing from arbitrary device.key (F-2551). "
+            f"{provenance_path}; refusing to mint operator pairing from arbitrary device.key. "
             f"Set DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 to opt back into legacy behavior.",
             err=True,
         )

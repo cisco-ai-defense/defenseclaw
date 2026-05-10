@@ -17,6 +17,8 @@ package netguard
 import (
 	"net"
 	"net/url"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -103,5 +105,79 @@ func TestScrubURL(t *testing.T) {
 				t.Errorf("ScrubURLString(%q) = %q; missing %q", tc.in, got, k)
 			}
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// DEFENSECLAW_ALLOW_CGNAT — operator escape hatch for Tailscale and other
+// 100.64.0.0/10 overlay deployments.
+//
+// extraReservedCIDRs is computed once at package init() time, so the
+// opt-in path can only be observed in a sub-process that boots with
+// the env var set. The default path (CGNAT blocked) is already covered
+// by TestIsPrivateOrReserved above.
+// ---------------------------------------------------------------------------
+
+func TestCgnatAllowed_RespectsEnv(t *testing.T) {
+	// cgnatAllowed reads the env at call time and is the same
+	// predicate consulted by init(). Verifying it pins the
+	// contract so a refactor that drops the env check would
+	// flip this assertion immediately.
+	t.Setenv("DEFENSECLAW_ALLOW_CGNAT", "")
+	if cgnatAllowed() {
+		t.Errorf("cgnatAllowed()=true with env unset; default must block CGNAT")
+	}
+	t.Setenv("DEFENSECLAW_ALLOW_CGNAT", "1")
+	if !cgnatAllowed() {
+		t.Errorf("cgnatAllowed()=false with env=1; opt-in must take effect")
+	}
+	// Anything other than "1" is treated as not-set, so a typo
+	// like "true" or "yes" leaves CGNAT blocked.
+	for _, v := range []string{"true", "yes", "0", "false", " 1 "} {
+		t.Setenv("DEFENSECLAW_ALLOW_CGNAT", v)
+		if cgnatAllowed() {
+			t.Errorf("cgnatAllowed()=true for env=%q; only %q must opt in", v, "1")
+		}
+	}
+}
+
+func TestExtraReservedCIDRs_DefaultIncludesCGNAT(t *testing.T) {
+	// Sanity check: 100.64.0.0/10 must be in the default deny-list.
+	// Pair this with the subprocess test below that verifies it's
+	// dropped when DEFENSECLAW_ALLOW_CGNAT=1 is set before init().
+	cgnat := net.ParseIP("100.64.0.1")
+	if !IsPrivateOrReserved(cgnat) {
+		t.Errorf("default build: 100.64.0.1 must be reserved (CGNAT default-deny)")
+	}
+}
+
+// TestAllowCgnatOptIn_SubprocessFlipsClassification verifies the opt-in
+// path by re-executing this binary with DEFENSECLAW_ALLOW_CGNAT=1 so
+// the init-time decision actually takes effect.
+func TestAllowCgnatOptIn_SubprocessFlipsClassification(t *testing.T) {
+	if os.Getenv("DC_NETGUARD_CGNAT_CHILD") == "1" {
+		// Child process: classify 100.64.0.1 and report.
+		if IsPrivateOrReserved(net.ParseIP("100.64.0.1")) {
+			os.Stdout.WriteString("BLOCKED")
+		} else {
+			os.Stdout.WriteString("ALLOWED")
+		}
+		os.Exit(0)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("os.Executable() failed: %v", err)
+	}
+	cmd := exec.Command(exe, "-test.run=TestAllowCgnatOptIn_SubprocessFlipsClassification", "-test.v=false")
+	cmd.Env = append(os.Environ(),
+		"DC_NETGUARD_CGNAT_CHILD=1",
+		"DEFENSECLAW_ALLOW_CGNAT=1",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("subprocess failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "ALLOWED") {
+		t.Errorf("expected child to classify 100.64.0.1 as ALLOWED under DEFENSECLAW_ALLOW_CGNAT=1; got %q", out)
 	}
 }

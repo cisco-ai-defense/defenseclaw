@@ -14,7 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Regression tests for the DeepSec S3.HIGH_BUG fix
+// Regression tests for the S3.HIGH_BUG fix
 // "Stale watchdog PID file can stop an unrelated process".
 //
 // The watchdog now writes a JSON fingerprint (pid + executable + start
@@ -105,7 +105,7 @@ func TestWatchdogPIDFile_RejectsMalformed(t *testing.T) {
 }
 
 func TestAcquireWatchdogPIDFile_RejectsConcurrentAcquire(t *testing.T) {
-	// DeepSec hardening: the flock prevents a second watchdog from
+	// hardening: the flock prevents a second watchdog from
 	// taking ownership of the same data dir. The first acquirer holds
 	// the lock for the lifetime of its process; the second acquirer
 	// MUST fail immediately rather than overwrite the fingerprint.
@@ -185,7 +185,7 @@ func TestVerifyWatchdogProcess_StaleFingerprintRejected(t *testing.T) {
 	// On Linux, /proc/self/exe resolves to the test binary path.
 	// Recording a different "executable" for our own PID must make
 	// verifyWatchdogProcess return false -- this is the exact
-	// scenario the DeepSec finding warned about (PID reuse where the
+	// scenario the finding warned about (PID reuse where the
 	// recorded fingerprint no longer matches the live process).
 	if _, err := os.Readlink("/proc/self/exe"); err != nil {
 		t.Skipf("/proc/self/exe not readable on this platform: %v", err)

@@ -23,8 +23,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/firewall"
 )
 
-// TestCompile_F2908_NoBlanketUDPPass is a regression test for avarice
-// F-2908. The compiled ruleset must NOT contain a blanket
+// TestCompile_F2908_NoBlanketUDPPass is a regression test for // . The compiled ruleset must NOT contain a blanket
 // `pass out quick inet proto udp keep state` rule before the default
 // deny — that rule made all outbound UDP/QUIC bypass the firewall.
 func TestCompile_F2908_NoBlanketUDPPass(t *testing.T) {
@@ -40,12 +39,12 @@ func TestCompile_F2908_NoBlanketUDPPass(t *testing.T) {
 	for _, r := range rules {
 		trimmed := strings.TrimSpace(r)
 		if trimmed == "pass out quick inet proto udp keep state" {
-			t.Fatalf("F-2908 regression: blanket UDP pass rule re-introduced")
+			t.Fatalf("regression: blanket UDP pass rule re-introduced")
 		}
 		// Also reject any UDP pass rule without a `to` clause.
 		if strings.HasPrefix(trimmed, "pass out quick inet proto udp ") &&
 			!strings.Contains(trimmed, " to ") {
-			t.Fatalf("F-2908 regression: UDP pass rule without destination: %q", trimmed)
+			t.Fatalf("regression: UDP pass rule without destination: %q", trimmed)
 		}
 	}
 }

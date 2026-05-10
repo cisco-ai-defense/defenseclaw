@@ -8,7 +8,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for avarice F-2467 / F-2967 (local MCP scans
+"""Regression tests for (local MCP scans
 expose LLM API keys / scan subprocess gets API keys).
 
 The vulnerability allowed a malicious local MCP server to read every
@@ -51,7 +51,7 @@ class IsSensitiveEnvNameTests(unittest.TestCase):
         ]:
             with self.subTest(name=name):
                 self.assertTrue(_is_sensitive_env_name(name),
-                                f"{name!r} must be flagged sensitive (F-2467)")
+                                f"{name!r} must be flagged sensitive")
 
     def test_safe_names_not_blocked(self):
         for name in [
@@ -66,7 +66,7 @@ class IsSensitiveEnvNameTests(unittest.TestCase):
 class SafeSubprocessEnvTests(unittest.TestCase):
 
     def test_does_not_inherit_api_keys(self):
-        """F-2467: the spawned subprocess MUST NOT inherit operator
+        """the spawned subprocess MUST NOT inherit operator
         secret env vars from os.environ."""
         sentinel = "test-scrub-must-not-leak"
         with patch.dict(os.environ, {
@@ -77,11 +77,11 @@ class SafeSubprocessEnvTests(unittest.TestCase):
         }, clear=False):
             env = _safe_subprocess_env(None)
         self.assertNotIn("OPENAI_API_KEY", env,
-                         "F-2467 regression: OPENAI_API_KEY leaked")
+                         "regression: OPENAI_API_KEY leaked")
         self.assertNotIn("ANTHROPIC_API_KEY", env,
-                         "F-2467 regression: ANTHROPIC_API_KEY leaked")
+                         "regression: ANTHROPIC_API_KEY leaked")
         self.assertNotIn("GITHUB_TOKEN", env,
-                         "F-2467 regression: GITHUB_TOKEN leaked")
+                         "regression: GITHUB_TOKEN leaked")
         self.assertEqual(env.get("PATH"), "/usr/bin:/bin",
                          "PATH should be inherited from baseline")
 

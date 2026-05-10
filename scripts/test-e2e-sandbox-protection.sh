@@ -507,7 +507,7 @@ bold "14. In-Process Sandbox Probe"
 _PROBE_SCRIPT="/home/sandbox/sandbox-probe.sh"
 _TOKEN=$(grep OPENCLAW_GATEWAY_TOKEN /root/.defenseclaw/.env 2>/dev/null | cut -d= -f2)
 
-# Avarice F-1905: a sandbox-owned process can pre-create
+# a sandbox-owned process can pre-create
 # /home/sandbox/sandbox-probe.sh as a symlink to a privileged target
 # (e.g. /etc/cron.d/foo). The subsequent `cat > $_PROBE_SCRIPT`,
 # `chmod +x`, and `chown sandbox:sandbox` then follow the symlink and
@@ -522,7 +522,7 @@ elif [ -e "$_PROBE_SCRIPT" ] && [ ! -f "$_PROBE_SCRIPT" ]; then
 fi
 rm -f -- "$_PROBE_SCRIPT" 2>/dev/null || true
 if [ "$_F1905_OK" != "yes" ]; then
-    fail "F-1905: refusing to write probe — pre-existing $_PROBE_SCRIPT was unsafe ($_F1905_OK)"
+    fail "refusing to write probe — pre-existing $_PROBE_SCRIPT was unsafe ($_F1905_OK)"
 elif true; then
     cat > "$_PROBE_SCRIPT" << 'PROBE_EOF'
 #!/bin/bash

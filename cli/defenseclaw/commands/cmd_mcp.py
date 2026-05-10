@@ -730,7 +730,7 @@ def set_server(
     scan_required = (not skip_scan) and pre_decision.verdict != "allowed"
     if scan_required:
         scan_target = url or name
-        # Avarice F-2348: the legacy code constructed the scan
+        # the legacy code constructed the scan
         # entry WITHOUT env=, so the install-time scan spawned the
         # MCP subprocess in a different environment from what was
         # ultimately written to the connector config. Malicious

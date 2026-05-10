@@ -77,7 +77,7 @@ func (c *Compiler) ValidateArg(arg string) error {
 }
 
 // ApplyCommand returns the shell snippet that loads the generated
-// rules. Avarice F-2907: the rules file now contains two sections —
+// rules. the rules file now contains two sections —
 // the IPv4 ruleset, then a `# v6:` divider, then the IPv6 ruleset.
 // We split the file at apply time with awk and pipe each half to the
 // matching restore binary. The IPv6 step is best-effort: hosts with
@@ -96,7 +96,7 @@ func (c *Compiler) ApplyCommand(rulesPath string) string {
 }
 
 func (c *Compiler) RemoveCommand() string {
-	// Avarice F-2907: also flush the IPv6 chain when removing. Use
+	// also flush the IPv6 chain when removing. Use
 	// `command -v` to keep IPv4-only hosts working — the IPv6
 	// teardown is a no-op when ip6tables is absent.
 	return "sudo iptables -F OUTPUT && sudo iptables -P OUTPUT ACCEPT && " +
@@ -202,7 +202,7 @@ func (c *Compiler) Compile(cfg *firewall.FirewallConfig) ([]string, error) {
 
 	rules = append(rules, "COMMIT")
 
-	// Avarice F-2907: emit the IPv6 ruleset after a sentinel divider
+	// emit the IPv6 ruleset after a sentinel divider
 	// (`# v6:`). ApplyCommand splits the file at this divider and
 	// loads the second half through `ip6tables-restore`. Without this
 	// IPv6 traffic was governed by whatever pre-existing ip6tables
@@ -225,7 +225,7 @@ func (c *Compiler) Compile(cfg *firewall.FirewallConfig) ([]string, error) {
 // that contain ":") plus DNS over IPv6 + ICMPv6 essentials.
 func (c *Compiler) compileIPv6(cfg *firewall.FirewallConfig) ([]string, error) {
 	out := []string{
-		"# DefenseClaw IPv6 egress firewall rules (F-2907)",
+		"# DefenseClaw IPv6 egress firewall rules",
 		fmt.Sprintf("# default_action: %s", cfg.DefaultAction),
 		"*filter",
 		":INPUT ACCEPT [0:0]",

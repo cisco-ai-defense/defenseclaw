@@ -32,7 +32,7 @@ import (
 // last request seen from that IP, so the eviction sweep can drop stale
 // entries without locking the entire map for the duration of the scan.
 //
-// DeepSec S3.BUG ("Rate limiter timestamp has an unsynchronized data
+// ("Rate limiter timestamp has an unsynchronized data
 // race"): the previous implementation stored `time.Time` directly,
 // which is a multiword struct that is not safe for concurrent
 // unsynchronized read/write under the Go memory model. The sweeper

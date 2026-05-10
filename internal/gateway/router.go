@@ -1450,7 +1450,7 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		rawCmd = strings.Join(argv, " ")
 	}
 
-	// Avarice F-1145: a sparse approval frame with no SystemRunPlan,
+	// a sparse approval frame with no SystemRunPlan,
 	// nested `request`, raw command text, OR argv carries no
 	// command context for the dangerous-pattern scanner to inspect.
 	// Pre-fix the autoApprove branch treated that as a "safe
@@ -1461,7 +1461,7 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	// empty context regardless of autoApprove.
 	if rawCmd == "" && len(argv) == 0 {
 		fmt.Fprintf(os.Stderr,
-			"[sidecar] DENIED exec approval: id=%s reason=empty-command-context (F-1145)\n",
+			"[sidecar] DENIED exec approval: id=%s reason=empty-command-context\n",
 			payload.ID)
 		approvalSession, _ := r.activeAgentCorrelation()
 		r.logStreamAction(approvalSession, "gateway-approval-denied", payload.ID,

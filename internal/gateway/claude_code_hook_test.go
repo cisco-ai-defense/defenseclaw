@@ -477,7 +477,7 @@ func TestEvaluateClaudeCodeHook_SkillCraftedPathStillBlocksWhenUnregistered(t *t
 }
 
 // TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename
-// pins the F-1506 fix: when the agent supplies a path-shaped
+// pins the fix: when the agent supplies a path-shaped
 // skill_name like "/tmp/attacker/trusted-skill/SKILL.md", the
 // connector MUST treat the request as unregistered regardless of
 // whether the basename matches a registry entry. The legacy
@@ -506,7 +506,7 @@ func TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename(t *testi
 	resp := api.evaluateClaudeCodeHook(context.Background(), req)
 
 	if resp.Action != "block" || resp.RawAction != "block" {
-		t.Fatalf("action=%q raw=%q, want block/block — path-shaped skill_name must force unregistered match (F-1506)", resp.Action, resp.RawAction)
+		t.Fatalf("action=%q raw=%q, want block/block — path-shaped skill_name must force unregistered match", resp.Action, resp.RawAction)
 	}
 }
 

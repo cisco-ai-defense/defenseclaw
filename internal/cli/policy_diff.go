@@ -59,7 +59,7 @@ func runPolicyDiff(_ *cobra.Command, _ []string) error {
 
 	missing := 0
 	for _, ep := range required {
-		// DeepSec S3.BUG ("Sandbox policy diff ignores endpoint
+		// ("Sandbox policy diff ignores endpoint
 		// ports"): the legacy implementation called
 		// HasEndpointForHost, so a policy entry for the same
 		// host on a different port wrongly reported the diff as

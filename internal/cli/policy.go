@@ -267,7 +267,7 @@ var policyReloadCmd = &cobra.Command{
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-DefenseClaw-Client", "cli")
-		// DeepSec S3.BUG ("policy reload client omits the
+		// ("policy reload client omits the
 		// required gateway token"): /policy/reload is wrapped
 		// in tokenAuth, which exempts only GET /health. Without
 		// these headers the sidecar returns 401 and the CLI

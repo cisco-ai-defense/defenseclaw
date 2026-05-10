@@ -131,7 +131,7 @@ func (a *APIServer) handleOTLPPathToken(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	// DeepSec S2.MEDIUM ("Scoped OTLP path-token source can be
+	// ("Scoped OTLP path-token source can be
 	// spoofed with x-defenseclaw-source"): the path-token route
 	// authenticates a *specific* connector source via the URL, so
 	// the authenticated source is the one parsed from the path.
@@ -224,7 +224,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	sessionID := extractOTLPSessionID(summaryBody, signal)
 	if sessionID != "" {
 		ctx = ContextWithSessionID(ctx, sessionID)
-		// DeepSec follow-up: when session_id arrives in the OTLP body
+		// follow-up: when session_id arrives in the OTLP body
 		// (after auth has already happened), the request envelope was
 		// promoted with no session_id. Re-promote now so persisted
 		// events carry both session_id AND a stable agent_instance_id

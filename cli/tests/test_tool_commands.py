@@ -63,7 +63,7 @@ class TestToolBlock(ToolCommandTestBase):
         self.assertTrue(self.pe().is_tool_blocked("delete_file"))
 
     def test_block_scoped_writes_both_global_and_scoped_audit(self):
-        """Avarice F-2347: scoped tool blocks were silently never
+        """scoped tool blocks were silently never
         enforced because the runtime only consults unscoped rows. Until
         scope-aware enforcement lands, --source requests upgrade to
         the global block (with a scoped audit row preserved)."""
@@ -73,13 +73,13 @@ class TestToolBlock(ToolCommandTestBase):
         self.assertIn("filesystem", result.output)
         # Scoped audit entry exists for operator visibility.
         self.assertTrue(self.pe().is_tool_blocked("write_file", source="filesystem"))
-        # F-2347: global block IS now set so the runtime actually
+        # global block IS now set so the runtime actually
         # enforces — operators that genuinely want a scope-only
         # block must wait for runtime support.
         self.assertTrue(self.pe().is_tool_blocked("write_file"))
 
     def test_block_scoped_blocks_unrelated_source_for_safety(self):
-        """F-2347: with the runtime not honouring scoped blocks, a
+        """with the runtime not honouring scoped blocks, a
         --source request must fail closed and block ALL sources for
         that tool name."""
         self.invoke(["block", "write_file", "--source", "filesystem"])

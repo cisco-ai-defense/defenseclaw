@@ -377,7 +377,7 @@ export class PolicyEnforcer {
    * everything synced from the daemon today) are stored but never used
    * to skip the scan -- they exist so the operator's intent is
    * preserved through restarts and so the audit trail can show the
-   * original reason. This closes DeepSec finding "Name-only allow-list
+   * original reason. This closes finding "Name-only allow-list
    * entries skip scanning for unrelated plugins": a malicious target
    * can no longer reuse the name of a previously allowed benign target
    * to bypass the scanner.

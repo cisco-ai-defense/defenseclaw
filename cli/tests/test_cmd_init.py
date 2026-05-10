@@ -1214,7 +1214,7 @@ class TestInitStartsGateway(unittest.TestCase):
         with open(pid_file, "w") as f:
             f.write(str(os.getpid()))
 
-        # Avarice F-2189: _is_sidecar_running now also checks
+        # _is_sidecar_running now also checks
         # /proc/<pid>/cmdline against known gateway binary names. Tests
         # use os.getpid() (the python test runner) which won't match;
         # stub the cmdline check to keep this test focused on the
@@ -1283,7 +1283,7 @@ class TestIsSidecarRunning(unittest.TestCase):
         pid_file = os.path.join(self.tmp_dir, "gateway.pid")
         with open(pid_file, "w") as f:
             f.write(str(os.getpid()))
-        # Avarice F-2189: stub the cmdline check — see test_cmd_init_pid_spoof
+        # stub the cmdline check — see test_cmd_init_pid_spoof
         # for the dedicated regression coverage.
         with patch("defenseclaw.commands.cmd_init._pid_looks_like_gateway", return_value=True):
             self.assertTrue(_is_sidecar_running(pid_file))
@@ -1572,7 +1572,7 @@ class TestInitFailModeFlag(unittest.TestCase):
         )
 
     def test_omitting_flag_is_noninvasive(self):
-        # Closes avarice F-0681. No --fail-mode means "leave existing
+        # Closes . No --fail-mode means "leave existing
         # alone." On a brand-new config, that resolves to the secure
         # default ("closed") via default_config(). The point of this
         # test is to make sure the wiring does NOT clobber the default

@@ -625,7 +625,7 @@ class SplunkConfig:
     index: str = "defenseclaw"
     source: str = "defenseclaw"
     sourcetype: str = "_json"
-    # F-0286 (and parity with Go F-2787): TLS verification is now ON by
+    # (and parity with Go ): TLS verification is now ON by
     # default. ``verify_tls`` is the LEGACY opt-in-to-security flag and
     # is honoured when explicitly true (no-op against the new secure
     # default); explicit false is silently IGNORED. Operators that
@@ -640,7 +640,7 @@ class SplunkConfig:
     def tls_verify_enabled(self) -> bool:
         """Resolve effective TLS verification posture.
 
-        F-0286: returns False only when ``insecure_skip_verify`` is
+        returns False only when ``insecure_skip_verify`` is
         explicitly true. ``verify_tls=False`` no longer downgrades the
         sink — operators must move the explicit opt-out to the new
         ``insecure_skip_verify`` flag. Any other combination yields a
@@ -1149,7 +1149,7 @@ class GuardrailConfig:
     #     with a 4xx, malformed JSON, or a missing action field,
     #     hooks BLOCK the tool/prompt at the response-layer boundary.
     #     CodeGuard rule codeguard-0-authorization-access-control:
-    #     deny by default. Closes avarice F-0681.
+    #     deny by default. Closes .
     #
     #   - ``"open"``: the same response-layer failures ALLOW the
     #     tool/prompt with a stderr warning and a record in
@@ -2612,7 +2612,7 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     typo in config.yaml never accidentally puts the agent into
     fail-OPEN mode at the response-layer boundary (CodeGuard rule
     codeguard-0-authorization-access-control: deny by default).
-    Closes avarice F-0681.
+    Closes .
     """
     if isinstance(value, str) and value.strip().lower() == "open":
         return "open"
@@ -2999,7 +2999,7 @@ def load() -> Config:
                 "index": hec.get("index", "defenseclaw"),
                 "source": hec.get("source", "defenseclaw"),
                 "sourcetype": hec.get("sourcetype", "_json"),
-                # F-0286: default verify_tls to True so promoting an
+                # default verify_tls to True so promoting an
                 # audit_sinks declaration into the legacy SplunkConfig
                 # block never silently downgrades verification. The
                 # explicit opt-out lives on the new
@@ -3073,7 +3073,7 @@ def load() -> Config:
             index=splunk_raw.get("index", "defenseclaw"),
             source=splunk_raw.get("source", "defenseclaw"),
             sourcetype=splunk_raw.get("sourcetype", "_json"),
-            # F-0286: default verify_tls to True so callers that load a
+            # default verify_tls to True so callers that load a
             # legacy config without the new field still get certificate
             # verification. The explicit dev-mode opt-out lives on
             # ``insecure_skip_verify`` and is wired separately.

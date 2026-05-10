@@ -506,7 +506,7 @@ type JudgePayload struct {
 	// InputHash is the SHA-256 of the inspected judge *input*
 	// (the prompt/request bytes the judge was asked to evaluate),
 	// hex-encoded with the "sha256:" prefix when populated.
-	// DeepSec S3.BUG ("Judge input_hash is computed from the
+	// ("Judge input_hash is computed from the
 	// response body") closure: the persistor previously hashed
 	// RawResponse and stored the resulting digest as InputHash,
 	// breaking dedup/pivot semantics. Callers that have the

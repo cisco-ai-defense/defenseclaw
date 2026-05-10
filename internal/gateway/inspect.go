@@ -280,7 +280,7 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
-	// Avarice F-3327: the legacy gate matched only the canonical
+	// the legacy gate matched only the canonical
 	// `write_file` / `edit_file` names, but native connector events
 	// emit aliases like Claude Code "Write" / "Edit" / "MultiEdit",
 	// Codex "patch", and Cursor "applyDiff". Those bypassed CodeGuard
@@ -355,7 +355,7 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 
 // unmarshalArgsObject decodes a tool-call args payload that may
 // arrive either as a JSON object directly OR as a JSON string whose
-// content is the object. Avarice F-3328: the managed inspect-tool
+// content is the object. the managed inspect-tool
 // hook builds the request body with `jq --arg args "$TOOL_INPUT"`,
 // so well-formed tool input becomes a string field. Returns ok=false
 // when neither form yields a non-nil object.
@@ -378,7 +378,7 @@ func unmarshalArgsObject(raw json.RawMessage) (map[string]interface{}, bool) {
 }
 
 // isWriteToolName reports whether the lowercased tool name should
-// trigger CodeGuard inspection. Avarice F-3327: includes native
+// trigger CodeGuard inspection. includes native
 // connector aliases that previously bypassed CodeGuard (Write/Edit/
 // MultiEdit/applyDiff/patch).
 func isWriteToolName(tool string) bool {
@@ -395,7 +395,7 @@ func isWriteToolName(tool string) bool {
 // runCodeGuardOnArgs extracts path/content from write_file/edit_file args
 // and runs CodeGuard content scanning.
 func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Finding {
-	// Avarice F-3328: the managed inspect-tool hook serializes
+	// the managed inspect-tool hook serializes
 	// TOOL_INPUT with `jq -n --arg args "$TOOL_INPUT"`, which yields
 	// {"args": "<json-string>"} where `args` is a JSON STRING that
 	// itself contains the object. The legacy code unmarshalled
@@ -414,7 +414,7 @@ func (a *APIServer) runCodeGuardOnArgs(req *ToolInspectRequest) []scanner.Findin
 		content, _ = parsed["new_string"].(string)
 	}
 	if filePath == "" || content == "" {
-		// Avarice F-3327: native aliases use different field names.
+		// native aliases use different field names.
 		if filePath == "" {
 			filePath, _ = parsed["file_path"].(string)
 		}
@@ -679,7 +679,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	}
 	verdict.ApprovalTimeoutMS = int(timeout / time.Millisecond)
 
-	// Avarice F-1526: a HIGH-severity tool call that policy escalated
+	// a HIGH-severity tool call that policy escalated
 	// to `confirm` MUST NOT be downgraded to `alert` when the caller
 	// cannot deliver a human-in-the-loop approval. The previous
 	// behavior (alert + would_block=false) caused hook callers that
@@ -691,7 +691,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 		verdict.Action = guardrailActionBlock
 		verdict.WouldBlock = true
 		verdict.Reason = appendVerdictReason(verdict.Reason,
-			"human approval unsupported on this connector surface; failing closed (F-1526)")
+			"human approval unsupported on this connector surface; failing closed")
 		if a.logger != nil {
 			_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "connector="+a.connectorName())
 		}
@@ -704,7 +704,7 @@ func (a *APIServer) resolveOpenClawInspectConfirm(ctx context.Context, req *Tool
 	verdict.Action = guardrailActionBlock
 	verdict.WouldBlock = true
 	verdict.Reason = appendVerdictReason(verdict.Reason,
-		"human approval requires native OpenClaw approval; failing closed (F-1526)")
+		"human approval requires native OpenClaw approval; failing closed")
 	if a.logger != nil {
 		_ = a.logger.LogActionCtx(ctx, hiltStatusUnsupported, req.Tool, "surface="+req.ApprovalSurface)
 	}

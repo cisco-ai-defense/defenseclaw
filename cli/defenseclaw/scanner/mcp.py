@@ -51,7 +51,7 @@ if TYPE_CHECKING:
     pass
 
 
-# Avarice F-2467 / F-2967: env vars whose names contain any of these
+# env vars whose names contain any of these
 # substrings are treated as potentially sensitive and never inherited
 # into the spawned MCP subprocess during a local scan. This is a
 # deliberately broad allowlist because LLM SDKs ship dozens of
@@ -95,7 +95,7 @@ def _is_sensitive_env_name(name: str) -> bool:
 def _safe_subprocess_env(operator_env: dict | None) -> dict:
     """Build a scrubbed environment for a spawned MCP subprocess.
 
-    Avarice F-2467 / F-2967: a full ``os.environ`` inheritance leaks
+    a full ``os.environ`` inheritance leaks
     every operator-set secret to the scanned server. We start from an
     allowlisted baseline (``PATH``, ``HOME``, ``LANG``, …), strip any
     name that looks sensitive, then layer on top whatever the operator
@@ -200,7 +200,7 @@ class MCPScannerWrapper:
         llm = self._llm
         aid = self.cisco_ai_defense
 
-        # Avarice F-2467 / F-2967: when scanning a LOCAL stdio MCP
+        # when scanning a LOCAL stdio MCP
         # server we MUST NOT inject the operator's LLM API key into
         # os.environ — the mcp-scanner SDK spawns the MCP subprocess
         # with the parent process's full environment, so any env var
@@ -290,7 +290,7 @@ class MCPScannerWrapper:
         server_def: dict = {"command": entry.command}
         if entry.args:
             server_def["args"] = entry.args
-        # Avarice F-2467 / F-2967: ALWAYS hand the spawned MCP
+        # ALWAYS hand the spawned MCP
         # subprocess an explicit, scrubbed env dict. When the MCP SDK
         # spawns a stdio server with env=None the child inherits the
         # parent's process environment — including OPENAI_API_KEY,

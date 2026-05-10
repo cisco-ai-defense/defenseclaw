@@ -717,7 +717,7 @@ func isAuthError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	// Avarice F-1527 / F-1165: role-upgrade and scope-upgrade rejections
+	// role-upgrade and scope-upgrade rejections
 	// MUST NOT trigger auto-repair. RepairPairing hard-codes
 	// operator.admin and operator.approvals into the pairing record,
 	// so treating "higher role than" / "more scopes than" as a
