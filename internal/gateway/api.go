@@ -2731,6 +2731,30 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
+	// DeepSec H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
+	// findings"): the persistent path (LogScanWithCorrelation →
+	// audit.scan_persist.go) already runs Description / Location /
+	// Remediation through redaction.ForSinkString before INSERT, and
+	// `defenseclaw scan code --json` (internal/cli/scan_v7.go::findingToV7)
+	// applies the same redaction before serialization. The REST API used
+	// to bypass both — serializing the raw scanner.ScanResult straight to
+	// the response body and leaking matched source lines, raw absolute
+	// paths, and operator-supplied remediation text to any caller. Apply
+	// the same field-level redaction here so all three surfaces (DB row,
+	// CLI JSON, REST response) treat scanner output identically. We
+	// redact AFTER LogScanWithCorrelation has been called: scan_persist.go
+	// re-applies its own redaction before INSERT, so the in-place mutation
+	// here only affects the response body — keeping the existing audit
+	// DB contract untouched. Title is intentionally NOT redacted to stay
+	// symmetric with the persistence path (Title is the rule-name /
+	// operator-searchable summary, not the matched bytes).
+	for i := range result.Findings {
+		f := &result.Findings[i]
+		f.Description = redaction.ForSinkString(f.Description)
+		f.Location = redaction.ForSinkString(f.Location)
+		f.Remediation = redaction.ForSinkString(f.Remediation)
+	}
+
 	a.writeJSON(w, http.StatusOK, result)
 }
 
