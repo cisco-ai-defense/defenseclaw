@@ -32,6 +32,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -64,11 +65,33 @@ var ErrUnsupportedScheme = errors.New("netguard: only http/https schemes are sup
 // attack surfaces in practice. Cloud metadata endpoints, the IMDSv1
 // IPv6 magic address, the AWS Service Endpoint reserved space, and
 // the IPv6 ULA range round out the deny-list.
-var extraReservedCIDRs = []string{
-	"169.254.169.254/32", // EC2/Azure/GCP metadata service
-	"169.254.170.2/32",   // ECS task metadata endpoint
-	"100.64.0.0/10",      // RFC 6598 carrier-grade NAT
-	"fd00::/8",           // IPv6 ULA
+//
+// 100.64.0.0/10 (RFC 6598 carrier-grade NAT) is included by default
+// because it is the canonical "private overlay" address space —
+// AWS Cloud WAN, GCP private overlay, and most carrier NAT deploys
+// land here. Operators running over Tailscale (which uses 100.64/10
+// for its mesh addresses) opt out of CGNAT blocking with
+// DEFENSECLAW_ALLOW_CGNAT=1, which mirrors the gateway-side hatch
+// in internal/gateway/provider.go::extraReservedNets so both
+// predicates classify the same set of IPs as unsafe under the same
+// configuration. Loopback, RFC 1918, link-local, IMDS, ECS task
+// metadata, and IPv6 ULA stay blocked unconditionally.
+var extraReservedCIDRs = func() []string {
+	base := []string{
+		"169.254.169.254/32", // EC2/Azure/GCP metadata service
+		"169.254.170.2/32",   // ECS task metadata endpoint
+		"fd00::/8",           // IPv6 ULA
+	}
+	if !cgnatAllowed() {
+		base = append(base, "100.64.0.0/10") // RFC 6598 carrier-grade NAT
+	}
+	return base
+}()
+
+// cgnatAllowed mirrors the gateway-side check; broken out so the
+// init-time decision is auditable from a single call site.
+func cgnatAllowed() bool {
+	return os.Getenv("DEFENSECLAW_ALLOW_CGNAT") == "1"
 }
 
 var parsedExtraReserved []*net.IPNet

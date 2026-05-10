@@ -1770,12 +1770,51 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	req.TargetURL = r.Header.Get("X-DC-Target-URL")
 	req.TargetPath = r.URL.Path
 
+	// X-AI-Auth carries the real provider API key, normalized to
+	// "Bearer <key>" by the fetch interceptor regardless of which header
+	// the provider SDK originally used (Authorization, x-api-key, api-key).
+	// Skip extraction when local key resolution is disabled (enterprise mode).
+	if !localKeyResolutionDisabled {
+		if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
+			req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
+		}
+	}
+
+	// Native-binary connectors (zeptoclaw, codex) have no fetch interceptor,
+	// so the request arrives without X-DC-Target-URL / X-AI-Auth. Ask the
+	// active connector to resolve them from its captured config snapshot.
+	// Existing header values win — fetch-interceptor paths are unchanged.
+	//
+	// IMPORTANT: hydrateConnectorSignals MUST run BEFORE the SSRF guards
+	// below. A previous version of this handler ran the guards immediately
+	// after reading X-DC-Target-URL from the header, which meant the
+	// connector-hydrated path (the only path used by native-binary
+	// connectors) bypassed the structured 400/403 + labeled egress event
+	// entirely — Bifrost's ssrfSafeDialContext caught the actual dial, but
+	// callers got an opaque dial-failure error and the audit pipeline lost
+	// the "chat / block / private-ip" breadcrumb. Now both code paths
+	// (header-supplied and connector-hydrated TargetURL) hit the same
+	// guards, mirroring handlePassthrough at proxy.go:687–747. See
+	// proxy_chat_ssrf_hydrated_test.go for the regression assertion.
+	if !localKeyResolutionDisabled {
+		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
+			if req.TargetURL == "" {
+				req.TargetURL = connUpstream
+			}
+			if req.TargetAPIKey == "" {
+				req.TargetAPIKey = connKey
+			}
+		}
+	}
+
 	// DeepSec hardening (mirror of handlePassthrough at proxy.go:713–747):
 	// the chat-completion path also forwards req.TargetURL into the upstream
 	// provider (Bifrost handles the actual dial); apply the same userinfo /
 	// scheme / private-host guards so an authenticated caller (or a
-	// compromised plugin) cannot SSRF the gateway into IMDS / loopback /
-	// CGNAT space, and cannot smuggle credentials via userinfo.
+	// compromised plugin / connector snapshot) cannot SSRF the gateway into
+	// IMDS / loopback / CGNAT space, and cannot smuggle credentials via
+	// userinfo. This block runs AFTER hydrateConnectorSignals so it covers
+	// both the header-supplied and the connector-hydrated TargetURL.
 	if req.TargetURL != "" {
 		if u, perr := url.Parse(req.TargetURL); perr == nil {
 			if u.User != nil {
@@ -1820,31 +1859,6 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
 				writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
 				return
-			}
-		}
-	}
-
-	// X-AI-Auth carries the real provider API key, normalized to
-	// "Bearer <key>" by the fetch interceptor regardless of which header
-	// the provider SDK originally used (Authorization, x-api-key, api-key).
-	// Skip extraction when local key resolution is disabled (enterprise mode).
-	if !localKeyResolutionDisabled {
-		if aiAuth := r.Header.Get("X-AI-Auth"); strings.HasPrefix(aiAuth, "Bearer ") {
-			req.TargetAPIKey = strings.TrimPrefix(aiAuth, "Bearer ")
-		}
-	}
-
-	// Native-binary connectors (zeptoclaw) have no fetch interceptor, so the
-	// request arrives without X-DC-Target-URL / X-AI-Auth. Ask the active
-	// connector to resolve them from its captured config snapshot. Existing
-	// header values win — fetch-interceptor paths are unchanged.
-	if !localKeyResolutionDisabled {
-		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
-			if req.TargetURL == "" {
-				req.TargetURL = connUpstream
-			}
-			if req.TargetAPIKey == "" {
-				req.TargetAPIKey = connKey
 			}
 		}
 	}

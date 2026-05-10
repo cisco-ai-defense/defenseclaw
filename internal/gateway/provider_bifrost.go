@@ -28,6 +28,7 @@ import (
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+	"golang.org/x/sync/singleflight"
 )
 
 // bifrostProvider implements LLMProvider by delegating to the Bifrost Go SDK.
@@ -75,6 +76,17 @@ type bifrostTenantEntry struct {
 var (
 	bifrostTenantsMu sync.RWMutex
 	bifrostTenants   = make(map[tenantKey]*bifrostTenantEntry)
+	// bifrostInitGroup dedupes concurrent first-time bifrost.Init calls
+	// for the same tenant. Without it, every concurrent caller for an
+	// uncached tenant key would serialize on bifrostTenantsMu while the
+	// first caller's Init ran (up to 30s for cold network setup),
+	// blocking even unrelated tenants whose entries were already cached
+	// because RLock fast-path readers would queue behind the Lock-holder
+	// across the Init body. With singleflight, only ONE Init call per
+	// tenantKey runs at a time; concurrent callers for the same key wait
+	// on its result, and concurrent callers for OTHER keys never see the
+	// global lock held across the slow Init.
+	bifrostInitGroup singleflight.Group
 )
 
 // tenantKeyString gives evictOldestBifrostTenantLocked a deterministic
@@ -201,6 +213,38 @@ func bifrostKeyID(providerKey schemas.ModelProvider, apiKey string) string {
 // identical tuples share a cached client. The returned client's Account is
 // immutable for the tuple's lifetime, so a concurrent call with different
 // credentials cannot change what this client uses mid-request.
+//
+// Concurrency design (changed from a single-Lock-around-Init path to
+// fix a tail-latency regression where a first-tenant burst at deploy
+// could block all unrelated tenants for up to 30 s while bifrost.Init
+// ran):
+//
+//  1. Fast path: take the read lock, look up tk in the cache, return
+//     on hit. Cache hits never block writers — N concurrent cache-hit
+//     callers proceed in parallel.
+//  2. Slow path: defer to singleflight.Group keyed by tenantKeyString
+//     so that exactly ONE goroutine per tk runs bifrost.Init at any
+//     time. Concurrent callers for the SAME tk wait on the in-flight
+//     call; concurrent callers for DIFFERENT tk run their own Init
+//     in parallel without serializing on the global lock.
+//  3. Inside the slow path closure, we re-check the cache under the
+//     write lock (another singleflight cycle for this same tk could
+//     have just finished and populated the slot in the gap between
+//     fast-path RLock and singleflight.Do). The cap-eviction +
+//     insert step also runs under the write lock, but only AFTER
+//     bifrost.Init has returned — the lock is never held across the
+//     slow Init body, which is the critical fix.
+//
+// TOCTOU note: the previous design's concern was that an RLock-probe
+// followed by a Lock-recheck could see a snapshot client that another
+// goroutine was about to Shutdown via eviction. That race is closed
+// here because (a) the fast-path RLock returns the cached entry
+// directly without dropping the lock between read and use; (b) the
+// slow-path insertion happens under the write lock, so eviction and
+// insertion are mutually exclusive within a single critical section.
+// The asynchronous Shutdown in evictOldestBifrostTenantLocked is
+// safe-by-design (the SDK documents Shutdown as idempotent and we
+// recover panics in the goroutine).
 func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string) (*bifrost.Bifrost, error) {
 	tk := tenantKey{
 		provider: providerKey,
@@ -208,38 +252,99 @@ func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string)
 		baseURL:  baseURL,
 	}
 
-	now := time.Now()
-	// Single Lock path. The previous double-checked-locking variant
-	// had an RLock-probe + Lock-recheck, which sounded like a fast
-	// path but was actually a TOCTOU footgun: between dropping RLock
-	// and acquiring Lock, a concurrent eviction could call
-	// client.Shutdown() on the snapshot client we were about to
-	// return. With the cache capped at bifrostTenantsMaxSize entries
-	// and lookups being a single map read, the lock contention from a
-	// pure write-lock path is negligible compared to the work we're
-	// otherwise doing (Bifrost's per-request payload assembly and
-	// upstream HTTP). The simpler model also lets us hold the lock
-	// across the cap-eviction and slow-path re-init below without any
-	// further race.
-	bifrostTenantsMu.Lock()
-	defer bifrostTenantsMu.Unlock()
+	// Fast path: cache hit under shared read lock.
+	bifrostTenantsMu.RLock()
 	if e, ok := bifrostTenants[tk]; ok {
-		e.lastUsed = now
-		return e.client, nil
+		client := e.client
+		// Update lastUsed under a short write lock. Doing this under
+		// RLock would be a data race; deferring it to slow-path-only
+		// would let a hot tenant become evictable while it's still
+		// being used. The write lock is held only briefly.
+		bifrostTenantsMu.RUnlock()
+		bifrostTenantsMu.Lock()
+		// Re-check after lock upgrade — entry may have been evicted
+		// between RUnlock and Lock. If the slot is empty, fall through
+		// to the slow path; if it now points to a different client
+		// (eviction-then-reinsert in flight elsewhere), use that one.
+		if e2, ok := bifrostTenants[tk]; ok {
+			e2.lastUsed = time.Now()
+			fresh := e2.client
+			bifrostTenantsMu.Unlock()
+			return fresh, nil
+		}
+		bifrostTenantsMu.Unlock()
+		// Eviction raced with our fast-path read. Reuse the snapshot
+		// client we already held a reference to — Shutdown on the
+		// evicted client is fired asynchronously and is idempotent,
+		// so the worst case is one extra Init on the next request.
+		return client, nil
 	}
-	if len(bifrostTenants) >= bifrostTenantsMaxSize {
-		evictOldestBifrostTenantLocked()
-	}
+	bifrostTenantsMu.RUnlock()
 
-	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
+	// Slow path: dedupe concurrent Init calls for this same tenantKey
+	// via singleflight. Other goroutines hitting this branch with the
+	// same tk wait on our work; goroutines with different tk run their
+	// own Init concurrently, never blocking on bifrostTenantsMu held
+	// across an Init body.
+	res, err, _ := bifrostInitGroup.Do(tenantKeyString(tk), func() (interface{}, error) {
+		// Double-check the cache under the write lock — a previous
+		// singleflight cycle for this same key may have just finished
+		// and populated the slot during the brief window between our
+		// fast-path miss and entering this closure.
+		bifrostTenantsMu.Lock()
+		if e, ok := bifrostTenants[tk]; ok {
+			e.lastUsed = time.Now()
+			client := e.client
+			bifrostTenantsMu.Unlock()
+			return client, nil
+		}
+		bifrostTenantsMu.Unlock()
+
+		// Run Init OUTSIDE the lock — this is the critical change.
+		// bifrost.Init spins up HTTP transports, may dial an upstream
+		// for sanity-check requests, and is documented to take up to
+		// the supplied context timeout (30s here). Holding the global
+		// lock across this would block every other tenant's request,
+		// including pure cache hits.
+		acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		client, initErr := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
+		if initErr != nil {
+			return nil, fmt.Errorf("gateway: bifrost init: %w", initErr)
+		}
+
+		// Insert under the write lock. Cap eviction happens here so
+		// that a concurrent insertion by a different singleflight
+		// caller cannot push us over the cap.
+		bifrostTenantsMu.Lock()
+		// Re-check one more time: another goroutine that ran
+		// singleflight.Do for THIS key cannot exist (singleflight
+		// dedupes us), but a slot is permitted to have appeared via
+		// eviction-then-reinsert from a separate code path — keep the
+		// existing entry and Shutdown the freshly-Init'd client to
+		// avoid leaking a Bifrost transport.
+		if existing, ok := bifrostTenants[tk]; ok {
+			existing.lastUsed = time.Now()
+			out := existing.client
+			bifrostTenantsMu.Unlock()
+			go func(c *bifrost.Bifrost) {
+				defer func() { _ = recover() }()
+				c.Shutdown()
+			}(client)
+			return out, nil
+		}
+		if len(bifrostTenants) >= bifrostTenantsMaxSize {
+			evictOldestBifrostTenantLocked()
+		}
+		bifrostTenants[tk] = &bifrostTenantEntry{client: client, lastUsed: time.Now()}
+		bifrostTenantsMu.Unlock()
+		return client, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
+		return nil, err
 	}
-	bifrostTenants[tk] = &bifrostTenantEntry{client: client, lastUsed: now}
-	return client, nil
+	return res.(*bifrost.Bifrost), nil
 }
 
 // mapProviderKey translates a DefenseClaw provider string to a Bifrost

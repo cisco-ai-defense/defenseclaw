@@ -156,8 +156,11 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 		//
 		// The hardened client uses ssrfSafeDialContext to refuse any
 		// dial whose resolved IP is loopback / private / link-local /
-		// metadata, and disables redirects entirely so the connection
-		// always terminates at the validated host.
+		// CGNAT / IMDS / IPv6-ULA, and follows at most 5 redirect hops
+		// via ssrfSafeCheckRedirect — every hop is restricted to
+		// http/https and re-checked against the same private-host set,
+		// so an attacker who controls a 30x response cannot bounce
+		// delivery to an internal address.
 		client:       newWebhookHTTPClient(30 * time.Second),
 		retryBackoff: webhookRetryBackoff,
 		sem:          make(chan struct{}, webhookMaxConcurrency),
@@ -606,27 +609,27 @@ func validateWebhookURL(rawURL string) error {
 	return nil
 }
 
+// isPrivateIP returns true for any IP the webhook dispatcher refuses
+// to dial. This is a thin wrapper over provider.go::isUnsafeIP so the
+// config-time validator (validateWebhookURL) and the dispatch-time
+// dial guard (ssrfSafeDialContext / isUnsafeIP) classify the same set
+// of addresses as private — historically they diverged, with
+// isPrivateIP missing CGNAT 100.64.0.0/10 (RFC 6598), the ECS task
+// metadata endpoint 169.254.170.2/32, and IPv6 ULA fd00::/8 (a
+// superset of the fc00::/7 it did cover). The drift meant an operator
+// could configure a webhook URL whose hostname resolved to e.g. a
+// Tailscale CGNAT address — config validation would accept it and
+// dispatch would then refuse the dial, surfacing as an opaque
+// "ssrf-dial: ... private host" error at delivery time instead of a
+// clear configuration-time rejection. Routing both call sites through
+// isUnsafeIP keeps them in lockstep.
+//
+// CGNAT escape hatch: when DEFENSECLAW_ALLOW_CGNAT=1 is set, the
+// 100.64.0.0/10 range is treated as public (matching isUnsafeIP's
+// behaviour). Operators running over Tailscale or other CGNAT-routed
+// overlays opt in there, not here.
 func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"127.0.0.0/8",
-		"169.254.0.0/16", // link-local / cloud metadata
-		"::1/128",
-		"fc00::/7",
-		"fe80::/10",
-	}
-	for _, cidr := range privateRanges {
-		_, network, err := net.ParseCIDR(cidr)
-		if err != nil {
-			continue
-		}
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return isUnsafeIP(ip)
 }
 
 // ---------------------------------------------------------------------------

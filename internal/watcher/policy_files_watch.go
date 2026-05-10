@@ -103,15 +103,34 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 		}
 	}
 	for p := range w.policyFileUnreadable {
-		if _, stillBad := unreadable[p]; !stillBad {
-			// File became readable again (or was removed entirely
-			// — the next-iteration block-removed diff will handle
-			// the latter). Emit a one-shot recovery activity then
-			// drop the path from the unreadable set so future
-			// regressions re-trigger the entry transition.
-			w.recordPolicyFileReadRecovery(ctx, p)
-			delete(w.policyFileUnreadable, p)
+		if _, stillBad := unreadable[p]; stillBad {
+			continue
 		}
+		// Path left the unreadable set. Two ways this can happen:
+		//
+		//   a. File became readable again — it appears in `next`
+		//      with a fresh hash. Emit a one-shot "recovered"
+		//      activity so audit consumers see the EACCES window
+		//      close, then drop the path so future regressions
+		//      re-trigger the entry transition.
+		//
+		//   b. File was deleted while in the unreadable set — it
+		//      will NOT appear in `next`. Emitting "recovered" here
+		//      would be misleading: the loop further down already
+		//      emits a "policy_file removed" activity (the missing
+		//      key in policyFileHashes path), so a recovery emit
+		//      would produce the misleading audit trail
+		//      "recovered" → "removed" for the same file in the
+		//      same tick. Suppress recovery in this case and let
+		//      the removed-event correlation stand on its own.
+		//
+		// Either way, drop the path from the unreadable set so a
+		// future EACCES on the same path re-triggers the entry
+		// transition cleanly.
+		if _, stillTracked := next[p]; stillTracked {
+			w.recordPolicyFileReadRecovery(ctx, p)
+		}
+		delete(w.policyFileUnreadable, p)
 	}
 	if len(w.policyFileHashes) == 0 {
 		for p, s := range next {

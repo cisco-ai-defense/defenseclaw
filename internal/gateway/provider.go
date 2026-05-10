@@ -389,12 +389,30 @@ func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 // the two predicates must classify the same set of IPs as "unsafe" so
 // the gateway's own dial guard cannot be weaker than the shared
 // netguard helper used by other subsystems.
+//
+// Operator escape hatch: 100.64.0.0/10 is dropped from this list when
+// DEFENSECLAW_ALLOW_CGNAT=1 is set in the gateway's environment.
+// Tailscale (100.64.0.0/10), T-Mobile/Comcast carrier NAT, and AWS
+// Cloud WAN overlays all live in this range; operators running a local
+// LLM (e.g. Ollama) or webhook receiver over a Tailscale tunnel need
+// the gateway to dial those addresses. Loopback / RFC 1918 / IMDS /
+// link-local / IPv6 ULA stay blocked unconditionally — this hatch
+// only widens CGNAT, nothing else. Resolved once at process start;
+// flipping the env var requires a sidecar restart so the dial guard's
+// behaviour is visible in the boot log instead of changing under
+// concurrent traffic.
 var extraReservedNets = func() []*net.IPNet {
 	cidrs := []string{
-		"100.64.0.0/10",
 		"169.254.169.254/32",
 		"169.254.170.2/32",
 		"fd00::/8",
+	}
+	if os.Getenv("DEFENSECLAW_ALLOW_CGNAT") != "1" {
+		// Prepend so log ordering matches the comment above.
+		cidrs = append([]string{"100.64.0.0/10"}, cidrs...)
+	} else {
+		fmt.Fprintln(os.Stderr,
+			"[gateway] DEFENSECLAW_ALLOW_CGNAT=1 — 100.64.0.0/10 (RFC 6598 CGNAT) is permitted as a dial target")
 	}
 	out := make([]*net.IPNet, 0, len(cidrs))
 	for _, s := range cidrs {

@@ -13,6 +13,48 @@ audit (`.deepsec/data/defenseclaw/reports/report.md`): 1 CRITICAL,
 paths required changes anyway. No protections were removed; the audit
 strictly tightens existing guards.
 
+### ⚠️ Operator-visible behaviour changes (read this before upgrading)
+
+**Newly-blocked outbound dial address ranges.** The gateway's SSRF
+defenses (`internal/gateway/provider.go::isUnsafeIP`,
+`internal/netguard/netguard.go::IsPrivateOrReserved`, and the webhook
+dispatcher's `validateWebhookURL` predicate) now refuse to dial:
+
+- `100.64.0.0/10` — RFC 6598 carrier-grade NAT (Tailscale mesh,
+  T-Mobile/Comcast carrier NAT, AWS Cloud WAN private overlay)
+- `169.254.170.2/32` — ECS task metadata endpoint (was previously
+  redundantly covered by `IsLinkLocalUnicast`; now an explicit entry)
+- `fd00::/8` — IPv6 Unique Local Addresses (broader than the
+  `fc00::/7` subset Go's `IsPrivate()` already reported)
+
+**If you were running a local LLM (e.g. Ollama on a NAS at
+`100.64.0.5:11434`) or a webhook receiver over a Tailscale tunnel,
+upgrades will start returning `HTTP 403 target host resolves to a
+private address` from the chat-completion / passthrough proxy and
+`hostname resolves to private IP …` from `defenseclaw config webhook
+test` against those targets.**
+
+To opt back into CGNAT dialing, set `DEFENSECLAW_ALLOW_CGNAT=1` in the
+sidecar environment and restart. This drops 100.64.0.0/10 from the
+deny-list and prints a one-line `[gateway] DEFENSECLAW_ALLOW_CGNAT=1
+…` notice to stderr at boot so the change is auditable from the boot
+log. Loopback, RFC 1918, link-local, IMDS (`169.254.169.254`), ECS
+task metadata (`169.254.170.2`), and IPv6 ULA stay blocked
+unconditionally — the hatch widens CGNAT only.
+
+**No equivalent escape hatch is offered for IMDS or ECS metadata.**
+Those endpoints carry IAM credentials by design; the SSRF block is
+the entire point.
+
+The webhook dispatcher's config-time validator
+(`webhook.go::isPrivateIP`) was previously a separate predicate that
+did NOT cover these new ranges, so a webhook URL pointing at a
+Tailscale receiver would pass config validation and then fail at
+dispatch time with an opaque error. The two predicates are now
+unified through `isUnsafeIP`, so misconfigurations surface at
+`defenseclaw config webhook add` / `update` time instead of at first
+delivery. Existing valid webhook URLs (public hosts) are unaffected.
+
 ### Security — DeepSec hardening (selected highlights)
 
 - **CRITICAL S0** Codex git-scan hardening: hostile repository config,
