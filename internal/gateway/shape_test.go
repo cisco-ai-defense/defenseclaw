@@ -172,17 +172,17 @@ func TestIsPrivateHost_HostnameResolvesToLoopback(t *testing.T) {
 func TestIsPrivateHost_IPv6Zones(t *testing.T) {
 	cases := map[string]bool{
 		// Bare scoped loopback / link-local — F-1225 bypass surface.
-		"::1%lo0":                  true,
-		"fe80::1%lo0":              true,
-		"fe80::1%eth0":             true,
-		"fe80::dead:beef%en0":      true,
+		"::1%lo0":             true,
+		"fe80::1%lo0":         true,
+		"fe80::1%eth0":        true,
+		"fe80::dead:beef%en0": true,
 		// Bracketed forms with port — same surface, different syntax.
 		"[::1%lo0]:8080":           true,
 		"[fe80::1%lo0]:443":        true,
 		"[fe80::dead:beef%en0]:80": true,
 		// Public IPv6 should still pass through (no false positives).
-		"2001:db8::1":              false,
-		"[2001:db8::1]:443":        false,
+		"2001:db8::1":       false,
+		"[2001:db8::1]:443": false,
 	}
 	for h, want := range cases {
 		if got := isPrivateHost(h); got != want {
@@ -198,10 +198,10 @@ func TestStripIPv6Zone(t *testing.T) {
 		"fe80::1%eth0":        "fe80::1",
 		"fe80::dead:beef%en0": "fe80::dead:beef",
 		// IPv4 / unscoped IPv6 / hostnames pass through unchanged.
-		"127.0.0.1":           "127.0.0.1",
-		"2001:db8::1":         "2001:db8::1",
-		"api.openai.com":      "api.openai.com",
-		"":                    "",
+		"127.0.0.1":      "127.0.0.1",
+		"2001:db8::1":    "2001:db8::1",
+		"api.openai.com": "api.openai.com",
+		"":               "",
 	}
 	for in, want := range cases {
 		if got := stripIPv6Zone(in); got != want {

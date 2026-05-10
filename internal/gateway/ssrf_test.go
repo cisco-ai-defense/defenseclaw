@@ -29,22 +29,22 @@ func TestIsPrivateIP_IPv4MappedIPv6(t *testing.T) {
 		// would not match any of the explicit /8 /12 /16 CIDRs because
 		// the dotted-quad bytes lived in the v6 representation. After
 		// the To4()-collapse, every mapped form is rejected.
-		"::ffff:127.0.0.1":     true,
-		"::ffff:10.0.0.1":      true,
-		"::ffff:192.168.0.10":  true,
+		"::ffff:127.0.0.1":       true,
+		"::ffff:10.0.0.1":        true,
+		"::ffff:192.168.0.10":    true,
 		"::ffff:169.254.169.254": true, // cloud IMDS via v6-mapped
-		"::ffff:172.16.0.1":    true,
+		"::ffff:172.16.0.1":      true,
 		// Public v4-mapped — still public.
-		"::ffff:8.8.8.8":       false,
-		"::ffff:1.2.3.4":       false,
+		"::ffff:8.8.8.8": false,
+		"::ffff:1.2.3.4": false,
 		// Native v4 / v6 still classified correctly.
-		"127.0.0.1":            true,
-		"169.254.169.254":      true,
-		"::1":                  true,
-		"fe80::1":              true,
-		"fc00::1":              true,
-		"2001:db8::1":          false,
-		"8.8.8.8":              false,
+		"127.0.0.1":       true,
+		"169.254.169.254": true,
+		"::1":             true,
+		"fe80::1":         true,
+		"fc00::1":         true,
+		"2001:db8::1":     false,
+		"8.8.8.8":         false,
 	}
 	for s, want := range cases {
 		ip := net.ParseIP(s)
@@ -90,12 +90,12 @@ func TestSecureDialContext_RejectsPrivateLiterals(t *testing.T) {
 	cases := []string{
 		"127.0.0.1:80",
 		"10.0.0.1:443",
-		"169.254.169.254:80",       // cloud IMDS
+		"169.254.169.254:80", // cloud IMDS
 		"[::1]:80",
 		"[fe80::1]:80",
-		"[::1%lo0]:80",             // F-1225 — scoped IPv6 zone
+		"[::1%lo0]:80", // F-1225 — scoped IPv6 zone
 		"[fe80::1%lo0]:80",
-		"[::ffff:127.0.0.1]:80",    // F-1225 parity — IPv4-mapped IPv6
+		"[::ffff:127.0.0.1]:80", // F-1225 parity — IPv4-mapped IPv6
 		"[::ffff:169.254.169.254]:80",
 	}
 	for _, addr := range cases {
@@ -146,12 +146,12 @@ func TestSecureDialContext_AllowLoopbackBypassesLoopbackOnly(t *testing.T) {
 		wantErr bool
 	}
 	cases := []tc{
-		{"127.0.0.1", false},                   // loopback — allowed
-		{"::1", false},                         // loopback v6 — allowed
-		{"10.0.0.1", true},                     // RFC1918 — still blocked
-		{"192.168.1.5", true},                  // RFC1918 — still blocked
-		{"169.254.169.254", true},              // cloud IMDS — still blocked
-		{"fe80::1", true},                      // link-local v6 — still blocked
+		{"127.0.0.1", false},      // loopback — allowed
+		{"::1", false},            // loopback v6 — allowed
+		{"10.0.0.1", true},        // RFC1918 — still blocked
+		{"192.168.1.5", true},     // RFC1918 — still blocked
+		{"169.254.169.254", true}, // cloud IMDS — still blocked
+		{"fe80::1", true},         // link-local v6 — still blocked
 	}
 	for _, c := range cases {
 		// We can't actually complete a TCP connect in unit tests; we
