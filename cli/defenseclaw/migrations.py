@@ -930,12 +930,22 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
 
     The new implementation:
 
-    * Tightens the parent directory to 0o700 *before* writing, including
-      when the directory already exists with a more permissive mode (the
-      old code only set 0o700 on creation via ``mode=`` to ``makedirs``).
-    * Uses :func:`tempfile.mkstemp` in the *target* directory with mode
-      0o600 from creation, so the secret bytes never exist on disk with
-      a broader mode and the temp pathname is unpredictable.
+    * For *secret-bearing* writes (``mode <= 0o600``), tightens the
+      parent directory to 0o700 *before* writing, including when the
+      directory already exists with a more permissive mode (the old
+      code only set 0o700 on creation via ``mode=`` to ``makedirs``).
+      Non-sensitive writes (``mode > 0o600``, e.g. the surgical
+      ``openclaw.json`` migration at 0o644) intentionally leave the
+      parent permissions alone — restricting the parent of a
+      world-readable file to 0o700 would break unrelated readers
+      (e.g. another user reading the same shared config dir) without
+      improving the file's confidentiality, since the file itself is
+      already world-readable by design.
+    * Uses :func:`tempfile.mkstemp` in the *target* directory with the
+      requested ``mode`` from creation (0o600 for secrets, the
+      caller-supplied mode otherwise), so the secret bytes never
+      exist on disk with a broader mode and the temp pathname is
+      unpredictable.
     * Refuses pre-existing symlinks at the final ``path`` to avoid
       writing through to an attacker-controlled target.
     * Calls :func:`os.fsync` before :func:`os.replace` to durably flush
