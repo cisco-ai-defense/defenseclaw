@@ -20,20 +20,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-// TestProfilePosture_InjectionJudge is a contract test that pins the
-// relative strictness ordering of the shipped policy profiles:
-//
-//	permissive  ≥  default  ≥  strict   (in terms of single-category cap)
-//
-// A regression here means an operator could flip to the strict
-// profile and unknowingly inherit the default profile's tolerance
-// for single-category injection hits (MEDIUM/alert instead of
-// HIGH/block). The concrete attack class this defends against is
-// the "cat my etc passwd" bypass — see TestHasSensitiveFileContext
-// and TestInjectionToVerdictCtx_SensitiveContextUnCapsSingleCategory
-// for the runtime-side un-cap when a sensitive-file token is in the
-// prompt. This test guards the YAML contract so the boost isn't
-// the only thing protecting that class.
+// TestProfilePosture_InjectionJudge pins the injection-judge labeling
+// contract: every profile assigns HIGH on a single category and
+// CRITICAL on two+ categories. Action mapping (block/alert/allow) is
+// the profile-scoped knob and lives in decision.go.
 func TestProfilePosture_InjectionJudge(t *testing.T) {
 	_, selfPath, _, ok := runtime.Caller(0)
 	if !ok {
@@ -44,18 +34,14 @@ func TestProfilePosture_InjectionJudge(t *testing.T) {
 	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
 
 	cases := []struct {
-		profile               string
-		wantMinCats           int
-		wantSingleCategoryCap string
+		profile                   string
+		wantMinCats               int
+		wantSingleCategoryCap     string
+		wantMinCategoriesCritical int
 	}{
-		// Strict: block on a single injection category; no MEDIUM cap.
-		{"strict", 1, "HIGH"},
-		// Default: require two categories or rely on the sensitive-
-		// file-context runtime boost.
-		{"default", 2, "MEDIUM"},
-		// Permissive: same cap as default — the permissive posture is
-		// about rule-set breadth, not injection-cap leniency.
-		{"permissive", 2, "MEDIUM"},
+		{"strict", 1, "HIGH", 2},
+		{"default", 1, "HIGH", 2},
+		{"permissive", 1, "HIGH", 2},
 	}
 
 	for _, tc := range cases {
@@ -78,6 +64,10 @@ func TestProfilePosture_InjectionJudge(t *testing.T) {
 			if ij.SingleCategoryMaxSev != tc.wantSingleCategoryCap {
 				t.Errorf("profile=%s: single_category_max_severity = %q, want %q",
 					tc.profile, ij.SingleCategoryMaxSev, tc.wantSingleCategoryCap)
+			}
+			if ij.MinCategoriesForCritical != tc.wantMinCategoriesCritical {
+				t.Errorf("profile=%s: min_categories_for_critical = %d, want %d",
+					tc.profile, ij.MinCategoriesForCritical, tc.wantMinCategoriesCritical)
 			}
 		})
 	}
@@ -110,27 +100,33 @@ func TestGuardrailPolicyProfilesHaveGoCompatibleRegexes(t *testing.T) {
 	}
 }
 
-// TestProfilePosture_StrictIsStricterThanDefault makes the ordering
-// constraint explicit: flipping the numbers in default/ to match
-// strict/ would silently pass the individual-profile assertions
-// above, so we also assert the relation between the two.
-func TestProfilePosture_StrictIsStricterThanDefault(t *testing.T) {
+// TestProfilePosture_InjectionLabelingIsUnified asserts that injection-
+// judge labeling does not vary across profiles. A single category is
+// HIGH everywhere; two+ categories is CRITICAL everywhere. Posture
+// differences live in decision.go (block/alert thresholds).
+func TestProfilePosture_InjectionLabelingIsUnified(t *testing.T) {
 	_, selfPath, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
 	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
 
-	strict := guardrail.LoadRulePack(filepath.Join(policiesRoot, "strict")).InjectionJudge()
-	def := guardrail.LoadRulePack(filepath.Join(policiesRoot, "default")).InjectionJudge()
-
-	if strict.MinCategoriesForHigh > def.MinCategoriesForHigh {
-		t.Errorf("strict.min_categories_for_high (%d) > default (%d); strict must be ≤ default",
-			strict.MinCategoriesForHigh, def.MinCategoriesForHigh)
-	}
-
-	// severityRank is the runtime source of truth for the cap comparison.
-	if severityRank[strict.SingleCategoryMaxSev] < severityRank[def.SingleCategoryMaxSev] {
-		t.Errorf("strict single-category cap %q is softer than default %q",
-			strict.SingleCategoryMaxSev, def.SingleCategoryMaxSev)
+	profiles := []string{"strict", "default", "permissive"}
+	var first *guardrail.JudgeYAML
+	for _, profile := range profiles {
+		ij := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile)).InjectionJudge()
+		if ij == nil {
+			t.Fatalf("profile=%s missing injection judge config", profile)
+		}
+		if first == nil {
+			first = ij
+			continue
+		}
+		if ij.MinCategoriesForHigh != first.MinCategoriesForHigh ||
+			ij.SingleCategoryMaxSev != first.SingleCategoryMaxSev ||
+			ij.MinCategoriesForCritical != first.MinCategoriesForCritical {
+			t.Errorf("profile=%s labeling diverges: min_high=%d cap=%q min_crit=%d; want match with first profile (%d/%q/%d)",
+				profile, ij.MinCategoriesForHigh, ij.SingleCategoryMaxSev, ij.MinCategoriesForCritical,
+				first.MinCategoriesForHigh, first.SingleCategoryMaxSev, first.MinCategoriesForCritical)
+		}
 	}
 }
 

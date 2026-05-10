@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -1602,6 +1603,11 @@ func mergeWithJudge(base, judge *ScanVerdict) *ScanVerdict {
 	}
 	sources = append(sources, "llm-judge")
 
+	if disagreement := crossLayerDisagreement(base, judge); disagreement != "" {
+		recordCrossLayerDisagreement(base, judge)
+		reasons = append(reasons, disagreement)
+	}
+
 	return &ScanVerdict{
 		Action:         winner.Action,
 		Severity:       winner.Severity,
@@ -1609,6 +1615,50 @@ func mergeWithJudge(base, judge *ScanVerdict) *ScanVerdict {
 		Findings:       combined,
 		ScannerSources: sources,
 	}
+}
+
+// crossLayerDisagreement returns a human-readable annotation when the
+// regex layer and the LLM judge disagree on severity by two or more
+// ranks for the same content (e.g. regex says CRITICAL, judge says
+// MEDIUM). Empty string means no meaningful disagreement.
+//
+// Two-rank threshold is intentional — a one-rank gap (HIGH vs MEDIUM)
+// is often legitimate calibration noise, but a two-rank gap (CRITICAL
+// vs MEDIUM) signals the judge is miscalibrated against the regex
+// floor and is worth an operator investigation.
+func crossLayerDisagreement(regex, judge *ScanVerdict) string {
+	if regex == nil || judge == nil {
+		return ""
+	}
+	rRank := severityRank[regex.Severity]
+	jRank := severityRank[judge.Severity]
+	gap := rRank - jRank
+	if gap < 0 {
+		gap = -gap
+	}
+	if gap < 2 {
+		return ""
+	}
+	return fmt.Sprintf("[cross-layer-disagreement regex=%s judge=%s gap=%d]",
+		regex.Severity, judge.Severity, gap)
+}
+
+// crossLayerDisagreementCount is a process-lifetime counter of how
+// many times the regex and judge layers disagreed by 2+ severity
+// ranks. Tests assert on it; an OTel metric can be wired on top of
+// atomic.Int64 reads without changing the call sites.
+var crossLayerDisagreementCount atomic.Int64
+
+// CrossLayerDisagreementCount exports the counter for test assertions
+// and observability scrapers.
+func CrossLayerDisagreementCount() int64 {
+	return crossLayerDisagreementCount.Load()
+}
+
+func recordCrossLayerDisagreement(regex, judge *ScanVerdict) {
+	crossLayerDisagreementCount.Add(1)
+	_ = regex
+	_ = judge
 }
 
 // ---------------------------------------------------------------------------

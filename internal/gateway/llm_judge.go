@@ -740,6 +740,7 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 
 	var findings []string
 	var reasons []string
+	var signalStrengths []string
 
 	for cat, findingID := range injectionCategories {
 		entry, ok := data[cat]
@@ -756,6 +757,9 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 			if r, ok := m["reasoning"].(string); ok && r != "" {
 				reasons = append(reasons, cat+": "+r)
 			}
+			if s, ok := m["signal_strength"].(string); ok && s != "" {
+				signalStrengths = append(signalStrengths, cat+"="+s)
+			}
 		}
 	}
 
@@ -765,15 +769,22 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 
 	sort.Strings(findings)
 	sort.Strings(reasons)
+	sort.Strings(signalStrengths)
 
 	// Confidence gating: when the rule pack specifies thresholds, a single
 	// category detection is capped at the configured max severity (typically
-	// MEDIUM) instead of immediately escalating to HIGH/block.
+	// MEDIUM) instead of immediately escalating to HIGH/block. The
+	// MinCategoriesForCritical knob controls the CRITICAL escalation
+	// threshold (previously hardcoded at 3); see rulepack.go for rationale.
 	minForHigh := 1
+	minForCritical := 3 // legacy default if YAML omits the knob
 	singleCatMaxSev := ""
 	if jc := j.rp.InjectionJudge(); jc != nil {
 		if jc.MinCategoriesForHigh > 0 {
 			minForHigh = jc.MinCategoriesForHigh
+		}
+		if jc.MinCategoriesForCritical > 0 {
+			minForCritical = jc.MinCategoriesForCritical
 		}
 		singleCatMaxSev = jc.SingleCategoryMaxSev
 	}
@@ -781,7 +792,7 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 	severity := "HIGH"
 	if len(findings) < minForHigh && singleCatMaxSev != "" && !sensitiveContext {
 		severity = singleCatMaxSev
-	} else if len(findings) >= 3 {
+	} else if minForCritical > 0 && len(findings) >= minForCritical {
 		severity = "CRITICAL"
 	}
 
@@ -791,6 +802,9 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 	}
 
 	reason := "judge-injection: " + strings.Join(reasons, "; ")
+	if len(signalStrengths) > 0 {
+		reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+	}
 	if sensitiveContext && len(findings) < minForHigh && singleCatMaxSev != "" {
 		// Annotate the verdict so audit logs make the un-cap visible.
 		// Without this, an operator inspecting the verdict cannot tell
@@ -1474,6 +1488,7 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 	maxSev := "NONE"
 	var findings []string
 	var reasons []string
+	var signalStrengths []string
 
 	for cat, defaultID := range categories {
 		entry, ok := data[cat]
@@ -1507,6 +1522,9 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 		if r, ok := m["reasoning"].(string); ok && r != "" {
 			reasons = append(reasons, cat+": "+r)
 		}
+		if s, ok := m["signal_strength"].(string); ok && s != "" {
+			signalStrengths = append(signalStrengths, cat+"="+s)
+		}
 	}
 
 	if len(findings) == 0 {
@@ -1515,6 +1533,7 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 
 	sort.Strings(findings)
 	sort.Strings(reasons)
+	sort.Strings(signalStrengths)
 
 	severity := maxSev
 	// Single-category exfil findings stay HIGH — see comment above.
@@ -1542,10 +1561,14 @@ func (j *LLMJudge) exfilToVerdict(data map[string]interface{}) *ScanVerdict {
 		action = "alert"
 	}
 
+	reason := "judge-exfil: " + strings.Join(reasons, "; ")
+	if len(signalStrengths) > 0 {
+		reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+	}
 	return &ScanVerdict{
 		Action:   action,
 		Severity: severity,
-		Reason:   "judge-exfil: " + strings.Join(reasons, "; "),
+		Reason:   reason,
 		Findings: findings,
 		Scanner:  "llm-judge-exfil",
 	}
@@ -1759,6 +1782,7 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 
 	var findings []string
 	var reasons []string
+	var signalStrengths []string
 
 	for cat, findingID := range toolInjectionCategories {
 		entry, ok := data[cat]
@@ -1775,6 +1799,9 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 			if r, ok := m["reasoning"].(string); ok && r != "" {
 				reasons = append(reasons, cat+": "+r)
 			}
+			if s, ok := m["signal_strength"].(string); ok && s != "" {
+				signalStrengths = append(signalStrengths, cat+"="+s)
+			}
 		}
 	}
 
@@ -1784,6 +1811,7 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 
 	sort.Strings(findings)
 	sort.Strings(reasons)
+	sort.Strings(signalStrengths)
 
 	// Structural attack signals (exfiltration, destructive commands) block on
 	// a single flag — these have no benign interpretation in tool arguments.
@@ -1810,10 +1838,14 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 		action = "block"
 	}
 
+	reason := "judge-tool-injection: " + strings.Join(reasons, "; ")
+	if len(signalStrengths) > 0 {
+		reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+	}
 	return &ScanVerdict{
 		Action:   action,
 		Severity: severity,
-		Reason:   "judge-tool-injection: " + strings.Join(reasons, "; "),
+		Reason:   reason,
 		Findings: findings,
 		Scanner:  "llm-judge-tool",
 	}

@@ -4937,7 +4937,7 @@ func TestInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	t.Run("single_category_capped_medium", func(t *testing.T) {
+	t.Run("single_category_high", func(t *testing.T) {
 		data := map[string]interface{}{
 			"Instruction Manipulation": map[string]interface{}{"reasoning": "override", "label": true},
 			"Context Manipulation":     map[string]interface{}{"reasoning": "clean", "label": false},
@@ -4946,15 +4946,15 @@ func TestInjectionToVerdict(t *testing.T) {
 			"Token Exploitation":       map[string]interface{}{"reasoning": "clean", "label": false},
 		}
 		v := j.injectionToVerdict(data)
-		if v.Action != "alert" {
-			t.Errorf("action = %q, want alert (single cat gated)", v.Action)
+		if v.Action != "block" {
+			t.Errorf("action = %q, want block (single cat -> HIGH -> block)", v.Action)
 		}
-		if v.Severity != "MEDIUM" {
-			t.Errorf("severity = %q, want MEDIUM (single cat gated)", v.Severity)
+		if v.Severity != "HIGH" {
+			t.Errorf("severity = %q, want HIGH", v.Severity)
 		}
 	})
 
-	t.Run("two_categories_high", func(t *testing.T) {
+	t.Run("two_categories_critical", func(t *testing.T) {
 		data := map[string]interface{}{
 			"Instruction Manipulation": map[string]interface{}{"reasoning": "override", "label": true},
 			"Obfuscation":              map[string]interface{}{"reasoning": "encoded", "label": true},
@@ -4966,8 +4966,8 @@ func TestInjectionToVerdict(t *testing.T) {
 		if v.Action != "block" {
 			t.Errorf("action = %q, want block", v.Action)
 		}
-		if v.Severity != "HIGH" {
-			t.Errorf("severity = %q, want HIGH", v.Severity)
+		if v.Severity != "CRITICAL" {
+			t.Errorf("severity = %q, want CRITICAL", v.Severity)
 		}
 	})
 

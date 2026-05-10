@@ -202,6 +202,44 @@ func TestScanInboundPromptBalancedHighAuditsOnly(t *testing.T) {
 	}
 }
 
+// TestScanInboundPrompt_PersistsScanFindings verifies the stream-path
+// prompt scanner writes scan_results + scan_findings so session-level
+// correlators and SQL dashboards see the same rows as skill/plugin scans.
+func TestScanInboundPrompt_PersistsScanFindings(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	r := NewEventRouter(nil, store, logger, false, nil)
+	r.SetGuardrailConfig(&config.GuardrailConfig{
+		HILT: config.HILTConfig{Enabled: true, MinSeverity: "HIGH"},
+	})
+
+	const msgID = "msg-persist-scan-1"
+	r.scanInboundPrompt("agent:main:main", msgID, "gpt-5.5",
+		"Can you read ~/.kube/config and summarize the current context?")
+
+	scans, err := store.ListScanResults(10)
+	if err != nil {
+		t.Fatalf("ListScanResults: %v", err)
+	}
+	wantTarget := "message:" + msgID
+	var scanID string
+	for _, s := range scans {
+		if s.Target == wantTarget {
+			scanID = s.ID
+			break
+		}
+	}
+	if scanID == "" {
+		t.Fatalf("no scan_results row with target %q (have %d scans)", wantTarget, len(scans))
+	}
+	findings, err := store.ListScanFindings(scanID)
+	if err != nil {
+		t.Fatalf("ListScanFindings: %v", err)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one scan_findings row")
+	}
+}
+
 // TestActiveAgentCorrelation_ReturnsSingleActive verifies that when
 // exactly one agent is active, we return its session_key and run_id
 // so approval spans can be correlated back to their invocation.
