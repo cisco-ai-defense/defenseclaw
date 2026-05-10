@@ -62,22 +62,25 @@ type templateData struct {
 // every gateway hiccup bricks the user's agent for the duration of
 // any DefenseClaw outage, which is strictly worse UX than a brief
 // observability gap. Operators who run a strict policy posture can
-// flip this to "closed" via DEFENSECLAW_FAIL_MODE=closed at runtime
-// or — for connectors that route through
-// WriteHookScriptsForConnectorObjectWithOpts — by enabling per-
-// connector enforcement at setup time.
-const defaultHookFailMode = "open"
+// "closed" is the safer default — response-layer failures (4xx,
+// malformed JSON, missing action) BLOCK the tool/prompt at the hook
+// boundary. Operators flip this to "open" via DEFENSECLAW_FAIL_MODE=open
+// at runtime or via the per-connector setup flow (which also persists
+// to guardrail.hook_fail_mode in config.yaml). Closes avarice F-0681.
+const defaultHookFailMode = "closed"
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
-// "closed" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "open" so a typo never accidentally puts
-// the agent into fail-closed mode.
+// "open" (case-sensitive — the env var contract is documented as
+// lowercase) collapses to "closed" so a typo never accidentally puts
+// the agent into fail-OPEN mode at the response-layer boundary
+// (CodeGuard rule codeguard-0-authorization-access-control: deny by
+// default).
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "closed" {
-		return "closed"
+	if strings.TrimSpace(mode) == "open" {
+		return "open"
 	}
-	return "open"
+	return "closed"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
@@ -504,7 +507,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("open").
+//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("closed").
 //  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit

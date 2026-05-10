@@ -551,19 +551,19 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     """Surface ``guardrail.hook_fail_mode`` in pre-existing config.yaml.
 
     Pre-v3 installs had no concept of a hook fail mode — every hook
-    was hardcoded to fail-closed on any gateway error, which gave
-    operators a strictly-bad UX whenever the gateway was down. The v3
-    wave introduces a dedicated config field; the runtime default is
-    ``"open"`` (set in defaultsFor() and EffectiveHookFailMode), but
-    we also write the explicit value to YAML on upgrade so:
+    was hardcoded to fail-OPEN on any gateway error, which made the
+    response-layer boundary silently leakable. The v3 wave introduced
+    a dedicated config field, and v4 (avarice F-0681) flipped the
+    BUILT-IN default to ``"closed"`` so new installs deny by default.
 
-    1. Operators inspecting ~/.defenseclaw/config.yaml after upgrade
-       SEE the new field and discover the knob exists. A field that
-       only lives in defaults is invisible — operators reach for
-       ``defenseclaw guardrail fail-mode`` only when they know it's
-       a thing.
-    2. The on-disk state is self-describing — no surprise behavior
-       change if a future release changes the runtime default.
+    To avoid a noisy behavior change under existing operators, this
+    migration writes ``hook_fail_mode: open`` into ANY pre-existing
+    config.yaml that doesn't already pin the field. That preserves
+    the legacy fail-OPEN behavior for upgraders while letting fresh
+    installs (which never run any migration on v4+) inherit the safer
+    default. Operators see the new field on next ``cat config.yaml``
+    and can opt into "closed" via ``defenseclaw guardrail fail-mode``
+    or by hand-editing the YAML.
 
     Skipped silently when the operator has already set a value (any
     value — we never overwrite an explicit choice, even one we
@@ -622,8 +622,8 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
     if _atomic_write_text(cfg_path, new_text):
         ctx.changes.append(
             "seeded guardrail.hook_fail_mode='open' in config.yaml "
-            "(pre-v3 hooks were always fail-closed; new default is fail-open "
-            "to avoid bricking the agent on a gateway outage)"
+            "(legacy fail-open behavior preserved for upgraders; v4 "
+            "fresh installs default to 'closed' per avarice F-0681)"
         )
 
 

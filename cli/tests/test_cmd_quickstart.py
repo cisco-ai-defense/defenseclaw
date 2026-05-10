@@ -109,7 +109,14 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             cfg = yaml.safe_load(fh)
         self.assertEqual(cfg["guardrail"]["hook_fail_mode"], "closed")
 
-    def test_omitting_fail_mode_resolves_to_open(self):
+    def test_omitting_fail_mode_resolves_to_closed(self):
+        # Closes avarice F-0681: when the operator omits ``--fail-mode``
+        # at quickstart, the resulting config must default to the safer
+        # "closed" sentinel so response-layer failures (4xx, malformed
+        # JSON, missing action) BLOCK the tool/prompt rather than
+        # silently allowing it. Existing v3 installs are protected by
+        # _migrate_0_4_0_seed_hook_fail_mode (migrations.py), so this
+        # behavior change is new-install-only.
         result = self._invoke([
             "--connector",
             "codex",
@@ -122,8 +129,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         from defenseclaw.config import _normalize_hook_fail_mode
-        raw = cfg["guardrail"].get("hook_fail_mode", "open")
-        self.assertEqual(_normalize_hook_fail_mode(raw), "open")
+        raw = cfg["guardrail"].get("hook_fail_mode", "")
+        self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
 
 if __name__ == "__main__":

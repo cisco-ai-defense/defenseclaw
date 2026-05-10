@@ -1193,17 +1193,21 @@ class GuardrailConfig:
     # mode for every generated hook (codex-hook, claude-code-hook,
     # inspect-*). Two values are supported:
     #
-    #   - ``"open"`` (default): when the gateway answers with a 4xx,
-    #     malformed JSON, or a missing action field, hooks ALLOW the
-    #     tool/prompt with a stderr warning and a record in
-    #     ``$DEFENSECLAW_HOME/logs/hook-failures.jsonl``. A
-    #     misbehaving gateway that bricks every agent interaction is
-    #     strictly worse UX than a brief observability gap.
+    #   - ``"closed"`` (default, safer): when the gateway answers
+    #     with a 4xx, malformed JSON, or a missing action field,
+    #     hooks BLOCK the tool/prompt at the response-layer boundary.
+    #     CodeGuard rule codeguard-0-authorization-access-control:
+    #     deny by default. Closes avarice F-0681.
     #
-    #   - ``"closed"``: the same response-layer failures BLOCK the
-    #     tool/prompt. Choose when you'd rather take the agent
-    #     offline than miss a policy decision (regulated workflows
-    #     where every prompt MUST be inspected).
+    #   - ``"open"``: the same response-layer failures ALLOW the
+    #     tool/prompt with a stderr warning and a record in
+    #     ``$DEFENSECLAW_HOME/logs/hook-failures.jsonl``. Choose when
+    #     a brief observability gap is preferable to bricking the
+    #     agent on a gateway hiccup.
+    #
+    # Backwards compat: existing v3 installs are pinned to ``"open"``
+    # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
+    # NEW-INSTALL-ONLY behavior change.
     #
     # Transport-layer failures (gateway unreachable / 5xx) are
     # handled separately by each hook's ``fail_unreachable`` helper
@@ -1211,7 +1215,7 @@ class GuardrailConfig:
     # availability via ``DEFENSECLAW_STRICT_AVAILABILITY=1`` —
     # regardless of this field's value. Mirrors
     # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
-    hook_fail_mode: str = "open"
+    hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2927,14 +2931,15 @@ def _normalize_hook_fail_mode(value: Any) -> str:
 
     Mirrors ``normalizeHookFailMode`` in
     ``internal/gateway/connector/subprocess.go``. Anything other than
-    the explicit ``"closed"`` sentinel collapses to ``"open"`` so a
+    the explicit ``"open"`` sentinel collapses to ``"closed"`` so a
     typo in config.yaml never accidentally puts the agent into
-    fail-closed mode — silently fail-open is strictly safer than
-    silently fail-closed for response-layer failures.
+    fail-OPEN mode at the response-layer boundary (CodeGuard rule
+    codeguard-0-authorization-access-control: deny by default).
+    Closes avarice F-0681.
     """
-    if isinstance(value, str) and value.strip().lower() == "closed":
-        return "closed"
-    return "open"
+    if isinstance(value, str) and value.strip().lower() == "open":
+        return "open"
+    return "closed"
 
 
 def _merge_hilt(raw: dict[str, Any] | None) -> HILTConfig:
