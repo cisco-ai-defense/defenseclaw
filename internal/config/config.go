@@ -390,30 +390,39 @@ func (l LLMConfig) IsLocalProvider() bool {
 
 // recognizedLLMProviders lists the "provider/" prefixes the gateway and
 // LiteLLM both understand. Unknown prefixes emit a one-shot warning.
+//
+// Keep in lockstep with _RECOGNIZED_LLM_PROVIDERS in
+// cli/defenseclaw/config.py. The "gemini-openai" entry in particular
+// is a Bifrost routing key for Google's OpenAI-compatible Gemini
+// endpoint — the gateway routes it through Bifrost's Gemini handler
+// (see internal/gateway/provider_bifrost.go), while the Python
+// LiteLLM bridge maps it to the same GOOGLE_API_KEY env var via
+// cli/defenseclaw/scanner/_llm_env.py.
 var recognizedLLMProviders = map[string]struct{}{
-	"openai":       {},
-	"anthropic":    {},
-	"azure":        {},
-	"gemini":       {},
-	"vertex_ai":    {},
-	"bedrock":      {},
-	"groq":         {},
-	"mistral":      {},
-	"cohere":       {},
-	"ollama":       {},
-	"vllm":         {},
-	"deepseek":     {},
-	"xai":          {},
-	"fireworks_ai": {},
-	"perplexity":   {},
-	"huggingface":  {},
-	"replicate":    {},
-	"openrouter":   {},
-	"together_ai":  {},
-	"cerebras":     {},
-	"lm_studio":    {},
-	"lmstudio":     {},
-	"local":        {},
+	"openai":        {},
+	"anthropic":     {},
+	"azure":         {},
+	"gemini":        {},
+	"gemini-openai": {},
+	"vertex_ai":     {},
+	"bedrock":       {},
+	"groq":          {},
+	"mistral":       {},
+	"cohere":        {},
+	"ollama":        {},
+	"vllm":          {},
+	"deepseek":      {},
+	"xai":           {},
+	"fireworks_ai":  {},
+	"perplexity":    {},
+	"huggingface":   {},
+	"replicate":     {},
+	"openrouter":    {},
+	"together_ai":   {},
+	"cerebras":      {},
+	"lm_studio":     {},
+	"lmstudio":      {},
+	"local":         {},
 }
 
 // warnedPrefixes keeps one-shot-per-process warning state.

@@ -1420,3 +1420,32 @@ func TestViperDefaultGuardrailHostIsEmpty(t *testing.T) {
 		t.Fatalf("EffectiveHost() = %q, want 127.0.0.1", got)
 	}
 }
+
+// TestRecognizedLLMProvidersLockstep guards against drift between the
+// Go-side recognizedLLMProviders set and the Python-side
+// _RECOGNIZED_LLM_PROVIDERS in cli/defenseclaw/config.py. A missing
+// entry on either side surfaces as a one-shot "unknown provider"
+// warning even when the prefix is wired through Bifrost — exactly the
+// regression we hit when "gemini-openai" was added to the gateway and
+// the wizards but never to either recognized-providers map.
+//
+// The Bifrost gateway (internal/gateway/provider.go,
+// internal/gateway/provider_bifrost.go) and both wizards
+// (cli/defenseclaw/commands/cmd_setup.py, internal/tui/setup.go)
+// already accept these prefixes; the recognized-providers maps must
+// follow.
+func TestRecognizedLLMProvidersLockstep(t *testing.T) {
+	mustHave := []string{
+		"openai", "anthropic", "azure", "gemini", "gemini-openai",
+		"vertex_ai", "bedrock", "groq", "mistral", "cohere",
+		"ollama", "vllm", "deepseek", "xai",
+		"fireworks_ai", "perplexity", "huggingface", "replicate",
+		"openrouter", "together_ai", "cerebras",
+		"lm_studio", "lmstudio", "local",
+	}
+	for _, p := range mustHave {
+		if _, ok := recognizedLLMProviders[p]; !ok {
+			t.Errorf("recognizedLLMProviders missing %q — keep this set in lockstep with cli/defenseclaw/config.py:_RECOGNIZED_LLM_PROVIDERS", p)
+		}
+	}
+}
