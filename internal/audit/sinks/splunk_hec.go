@@ -69,7 +69,7 @@ type SplunkHECConfig struct {
 	Index      string
 	Source     string
 	SourceType string
-	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-F-2787 the
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
 	// transport defaulted to InsecureSkipVerify and operators had to set
 	// verify_tls=true to enable certificate validation. The field is
 	// retained for backward compatibility — when present and true it is
@@ -77,7 +77,7 @@ type SplunkHECConfig struct {
 	// false it is IGNORED (the secure default wins) and the user is
 	// directed to InsecureSkipVerify.
 	VerifyTLS bool
-	// InsecureSkipVerify is the F-2787 fix: TLS verification is ON by
+	// InsecureSkipVerify is the fix: TLS verification is ON by
 	// default and operators must explicitly set this true to disable it
 	// (e.g. dev environments with self-signed HEC). Closes the silent
 	// downgrade where omitting verify_tls leaked the HEC token to any
@@ -286,7 +286,7 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		cfg.SourceTypeOverrides = merged
 	}
 
-	// F-2787: TLS certificate verification is ON by default. Operators
+	// TLS certificate verification is ON by default. Operators
 	// must opt INTO insecurity via InsecureSkipVerify. The legacy
 	// VerifyTLS field is honoured only when explicitly true (a no-op
 	// since the new default is secure); explicit false is ignored.
@@ -313,8 +313,7 @@ func NewSplunkHECSink(cfg SplunkHECConfig) (*SplunkHECSink, error) {
 		go s.flushLoop()
 	}
 
-	// Production HEC endpoints sit behind a real certificate. F-2787:
-	// loud warning when verification is explicitly disabled and the
+	// Production HEC endpoints sit behind a real certificate. // loud warning when verification is explicitly disabled and the
 	// endpoint is HTTPS — operators must see this in boot logs so
 	// silent downgrades don't slip through review. URL schemes are
 	// case-insensitive per RFC 3986 §3.1, so we normalize the prefix.

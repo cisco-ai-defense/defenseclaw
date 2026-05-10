@@ -110,7 +110,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertEqual(cfg["guardrail"]["hook_fail_mode"], "closed")
 
     def test_omitting_fail_mode_resolves_to_closed(self):
-        # Closes avarice F-0681: when the operator omits ``--fail-mode``
+        # Closes when the operator omits ``--fail-mode``
         # at quickstart, the resulting config must default to the safer
         # "closed" sentinel so response-layer failures (4xx, malformed
         # JSON, missing action) BLOCK the tool/prompt rather than

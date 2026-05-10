@@ -66,7 +66,7 @@ type templateData struct {
 // malformed JSON, missing action) BLOCK the tool/prompt at the hook
 // boundary. Operators flip this to "open" via DEFENSECLAW_FAIL_MODE=open
 // at runtime or via the per-connector setup flow (which also persists
-// to guardrail.hook_fail_mode in config.yaml). Closes avarice F-0681.
+// to guardrail.hook_fail_mode in config.yaml). Closes .
 const defaultHookFailMode = "closed"
 
 // normalizeHookFailMode coerces a caller-supplied string to one of

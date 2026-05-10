@@ -44,13 +44,13 @@ type HTTPJSONLConfig struct {
 	Method      string
 	Headers     map[string]string
 	BearerToken string
-	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-F-2788 the
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
 	// transport defaulted to InsecureSkipVerify and operators had to set
 	// verify_tls=true. Retained for backward compatibility — when present
 	// and true it is honoured (no-op against the new secure default);
 	// when present and false it is IGNORED (the secure default wins).
 	VerifyTLS bool
-	// InsecureSkipVerify is the F-2788 fix: TLS verification is ON by
+	// InsecureSkipVerify is the fix: TLS verification is ON by
 	// default and operators must explicitly set this true to disable it
 	// (e.g. dev environments with self-signed log shippers). Closes the
 	// silent downgrade where omitting verify_tls leaked bearer tokens
@@ -92,7 +92,7 @@ func NewHTTPJSONLSink(cfg HTTPJSONLConfig) (*HTTPJSONLSink, error) {
 		cfg.TimeoutS = 10
 	}
 
-	// F-2788: TLS certificate verification is ON by default. Operators
+	// TLS certificate verification is ON by default. Operators
 	// must opt INTO insecurity via InsecureSkipVerify. Legacy
 	// verify_tls=false in operator YAML is silently ignored (the secure
 	// default wins) — the explicit warning below tells operators which
@@ -114,7 +114,7 @@ func NewHTTPJSONLSink(cfg HTTPJSONLConfig) (*HTTPJSONLSink, error) {
 		done: make(chan struct{}),
 	}
 
-	// DeepSec S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+	// S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
 	// deliveries"): the bounded-retry queue is now shared between
 	// batched and synchronous modes. The flush loop must run for every
 	// BatchSize so events queued by Forward (including BatchSize<=1)
@@ -125,7 +125,7 @@ func NewHTTPJSONLSink(cfg HTTPJSONLConfig) (*HTTPJSONLSink, error) {
 		go s.flushLoop()
 	}
 
-	// F-2788: surface an explicit warning when operators point an HTTPS
+	// surface an explicit warning when operators point an HTTPS
 	// sink at an unvalidated endpoint. The insecure default has been
 	// flipped — operators must opt in via insecure_skip_verify=true and
 	// will see this warning in the boot logs whenever they do.
@@ -146,7 +146,7 @@ func (s *HTTPJSONLSink) Forward(ctx context.Context, e Event) error {
 		return nil
 	}
 
-	// DeepSec S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+	// S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
 	// deliveries"): every event is now queued before any send attempt,
 	// regardless of BatchSize. The bounded-retry queue inside Flush is
 	// the single source of truth for retry semantics. The previous

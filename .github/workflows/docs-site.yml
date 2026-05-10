@@ -12,8 +12,9 @@ on:
       - '.github/workflows/docs-site.yml'
   workflow_dispatch:
 
-# DeepSec S2.MEDIUM ("Pull request docs build inherits Pages and OIDC
-# write permissions"): workflow-scope permissions are inherited by the
+# Least-privilege workflow permissions: pull-request docs builds must
+# not inherit Pages and OIDC write permissions. Workflow-scope
+# permissions are otherwise inherited by the
 # build job, which runs PR-controlled `npm ci` + `npm run build`
 # (including arbitrary lifecycle scripts). Granting `pages: write` /
 # `id-token: write` at workflow scope let a malicious PR exfiltrate the

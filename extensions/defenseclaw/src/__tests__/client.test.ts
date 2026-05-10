@@ -393,7 +393,7 @@ describe("DaemonClient", () => {
 
     it("uses sticky agent instance id from first response on subsequent requests", async () => {
       let call = 0;
-      const client = makeClient((req) => {
+      const client = makeClient(() => {
         call += 1;
         if (call === 1) {
           return {

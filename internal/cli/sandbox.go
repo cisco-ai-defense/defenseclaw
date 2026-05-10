@@ -138,7 +138,7 @@ func runSandboxExec(_ *cobra.Command, args []string) error {
 		return sandboxExecInNetns(cmdArgs)
 	}
 
-	// DeepSec S2.MEDIUM ("sandbox exec arguments can be interpreted
+	// ("sandbox exec arguments can be interpreted
 	// as sudo options"): sudo parses options before the command, so
 	// any cmdArgs[0] starting with `-` (e.g. `-u root`) is consumed
 	// by sudo itself rather than executed as the sandbox user. The
@@ -168,7 +168,7 @@ func sandboxExecInNetns(args []string) error {
 		return err
 	}
 
-	// DeepSec S2.MEDIUM ("sandbox exec arguments can be interpreted
+	// ("sandbox exec arguments can be interpreted
 	// as sudo options"): same `--` terminator hardening as the
 	// non-netns path above.
 	nsArgs := []string{"netns", "exec", ns, "sudo", "-u", "sandbox", "--"}

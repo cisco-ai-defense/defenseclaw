@@ -400,7 +400,7 @@ describe("PolicyEnforcer", () => {
     });
 
     it("name-only allow does NOT short-circuit scan (provenance gate)", async () => {
-      // Regression for DeepSec finding "name-only allow-list bypasses
+      // Regression for finding "name-only allow-list bypasses
       // scan for unrelated plugins": an attacker can no longer reuse
       // the name of a previously-allowed benign target to bypass the
       // scanner via the *local* cache. The local allow entry is

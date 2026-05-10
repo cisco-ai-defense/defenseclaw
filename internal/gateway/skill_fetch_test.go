@@ -28,7 +28,7 @@ import (
 )
 
 // TestF3287_SkillFetch_RejectsOutsideRoots is a regression test for
-// avarice F-3287. The /v1/skill/fetch handler must refuse any target
+// . The /v1/skill/fetch handler must refuse any target
 // directory that does not live under one of the configured skill or
 // plugin roots, even if the gateway process can read the path.
 func TestF3287_SkillFetch_RejectsOutsideRoots(t *testing.T) {

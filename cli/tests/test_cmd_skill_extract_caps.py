@@ -10,7 +10,7 @@
 
 """Decompression-cap regression tests for cmd_skill.
 
-DeepSec follow-up from #256 review: the implementation in cmd_skill.py
+follow-up from #256 review: the implementation in cmd_skill.py
 defines `_safe_tar_extractall_capped`, `_safe_zip_extractall_capped`,
 and `_check_extract_caps`, but the original PR only had a happy-path
 test (test_scan_from_url_tar). These tests pin every rejection branch

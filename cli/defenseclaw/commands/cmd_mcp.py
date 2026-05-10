@@ -898,13 +898,13 @@ def set_server(
     # the whole fan-out.
     result = None
     if (not skip_scan) and any(d.verdict == "scan" for d in pre.values()):
-        # Avarice F-2348: propagate entry["env"] into the install-time
-        # scan entry. The scanner spawns the local MCP subprocess to
-        # probe it; building the scan entry WITHOUT env= means
-        # install-time scanning runs in a different environment from
-        # what is ultimately written to the connector config, so a
-        # malicious publisher could hide dangerous behavior behind an
-        # env gate that only triggers at runtime. Mirror runtime env.
+        # Propagate entry["env"] into the install-time scan entry. The
+        # scanner spawns the local MCP subprocess to probe it; building
+        # the scan entry WITHOUT env= means install-time scanning runs in
+        # a different environment from what is ultimately written to the
+        # connector config, so a malicious publisher could hide dangerous
+        # behavior behind an env gate that only triggers at runtime.
+        # Mirror runtime env.
         scan_env = entry.get("env") if isinstance(entry.get("env"), dict) else {}
         scan_entry = MCPServerEntry(
             name=name, command=cmd, args=parsed_args, url=url, transport=transport,

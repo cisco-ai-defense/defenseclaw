@@ -171,7 +171,7 @@ describe("loadSidecarConfig", () => {
   });
 
   // -------------------------------------------------------------------
-  // DeepSec S3.HIGH_BUG ("Embedded OpenClaw plugin misses the canonical
+  // S3.HIGH_BUG ("Embedded OpenClaw plugin misses the canonical
   // first-boot token"): the embedded extension's token resolver MUST
   // accept the canonical DEFENSECLAW_GATEWAY_TOKEN written by the Go
   // sidecar's first-boot bootstrap into ~/.defenseclaw/.env, even when
@@ -180,7 +180,7 @@ describe("loadSidecarConfig", () => {
   // and the OpenClaw process had no token, which silently 401'd every
   // /api/v1/inspect/* request and let tool calls bypass inspection.
   // -------------------------------------------------------------------
-  describe("token resolution (DeepSec first-boot regression)", () => {
+  describe("token resolution (first-boot regression)", () => {
     const ENV_KEYS = [
       "DEFENSECLAW_GATEWAY_TOKEN",
       "OPENCLAW_GATEWAY_TOKEN",

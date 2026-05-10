@@ -331,7 +331,7 @@ class WriterAuditSinksPresetTests(unittest.TestCase):
         )
         self.assertEqual(hec.get("token_env"), "DEFENSECLAW_SPLUNK_HEC_TOKEN")
         self.assertEqual(hec.get("index"), "defenseclaw")
-        # F-0286: production preset must NOT carry insecure_skip_verify;
+        # production preset must NOT carry insecure_skip_verify;
         # the Go sink's secure default (TLS verification ON) wins.
         self.assertNotIn("insecure_skip_verify", hec)
         # And the legacy verify_tls field is no longer emitted by the

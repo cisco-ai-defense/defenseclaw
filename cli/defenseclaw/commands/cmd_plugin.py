@@ -437,7 +437,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                     if app.logger:
                         app.logger.log_action("install-allowed", plugin_name, "reason=allow-listed-post-scan")
                 elif not take_action:
-                    # Avarice F-0683: the legacy code printed
+                    # the legacy code printed
                     # "no action taken" and STILL fell through to
                     # `shutil.copytree(source_path, dest)`, so a
                     # registry plugin with a CRITICAL scan finding was
@@ -450,7 +450,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                         click.echo(
                             f"error: refusing to install {plugin_name!r} — "
                             f"{len(result.findings)} {sev_norm} findings detected and "
-                            f"--action was not passed (F-0683). Run with --action to "
+                            f"--action was not passed. Run with --action to "
                             f"enforce, or `defenseclaw plugin allow {plugin_name}` to "
                             f"explicitly accept the risk.",
                             err=True,
@@ -458,7 +458,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                         if app.logger:
                             app.logger.log_action(
                                 "install-refused", plugin_name,
-                                f"{detail} reason=critical-without-action (F-0683)",
+                                f"{detail} reason=critical-without-action",
                             )
                         raise SystemExit(1)
                     click.echo(

@@ -15,7 +15,7 @@ import (
 )
 
 // TestScanners_FailClosedOnNonZeroExitWithParseableStdout is the
-// regression for DeepSec finding "Non-zero {mcp,plugin,skill} scanner
+// regression for finding "Non-zero {mcp,plugin,skill} scanner
 // exits can be treated as successful scans".
 //
 // Before the fix, a scanner subprocess that wrote `{"findings":[]}`

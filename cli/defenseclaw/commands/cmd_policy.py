@@ -1030,7 +1030,7 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         with open(data_json_path) as f:
             opa_data = json.load(f)
     except OSError as exc:
-        # Avarice F-2369: silently returning on read failures hid
+        # silently returning on read failures hid
         # malformed/stale data.json from `policy activate`. The
         # caller has already updated config to the new policy
         # selection, so leaving sync skipped left the gateway
@@ -1038,12 +1038,12 @@ def _sync_opa_data(app: AppContext, policy_data: dict) -> None:
         # advertised activation. Surface the failure and let
         # activate exit non-zero.
         raise click.ClickException(
-            f"failed to read OPA data file at {data_json_path}: {exc} (F-2369)"
+            f"failed to read OPA data file at {data_json_path}: {exc}"
         ) from exc
     except json.JSONDecodeError as exc:
         raise click.ClickException(
             f"OPA data file at {data_json_path} is not valid JSON: {exc}; "
-            f"run `defenseclaw policy validate` and repair before activating (F-2369)"
+            f"run `defenseclaw policy validate` and repair before activating"
         ) from exc
 
     # --- config section ---
@@ -1175,7 +1175,7 @@ def _try_rego_compile(rego_dir: str) -> bool:
                 click.echo(result.stdout.rstrip())
             return False
     except FileNotFoundError:
-        # Avarice F-2368: returning True here turned a missing `opa`
+        # returning True here turned a missing `opa`
         # binary into a clean "Rego compilation: OK" verdict, so a
         # malformed bundle could pass `defenseclaw policy validate`
         # in any environment where OPA was not installed. Operators

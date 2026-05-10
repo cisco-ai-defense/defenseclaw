@@ -56,7 +56,7 @@ def _ctx(openclaw_home: str, data_dir: str | None = None) -> MigrationContext:
 
 
 class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
-    """DeepSec S3.HIGH_BUG ("Migration can overwrite live OpenClaw config
+    """S3.HIGH_BUG ("Migration can overwrite live OpenClaw config
     with a stale pristine snapshot"): the 0.3.0 migration MUST NOT replace
     the live config with a pristine snapshot. Operator-added providers,
     plugin entries, and model/workspace settings made AFTER the pristine
@@ -81,7 +81,7 @@ class TestMigrate030PreservesOperatorChanges(unittest.TestCase):
         from defenseclaw import migrations
         self.assertFalse(
             hasattr(migrations, "_migrate_0_3_0_from_pristine"),
-            "_migrate_0_3_0_from_pristine must remain removed (DeepSec)",
+            "_migrate_0_3_0_from_pristine must remain removed ()",
         )
 
     def test_operator_added_provider_is_preserved(self):
@@ -276,7 +276,7 @@ class TestMigrate030Dispatch(unittest.TestCase):
 
     @patch("defenseclaw.migrations._migrate_0_3_0_surgical")
     def test_always_uses_surgical_path(self, mock_surgical):
-        """DeepSec S3.HIGH_BUG: the pristine-restore branch is gone.
+        """S3.HIGH_BUG: the pristine-restore branch is gone.
         Even if a pristine backup file exists, the migration MUST take
         the surgical path so operator changes are preserved."""
         _write_json(self.oc_json, {})
@@ -804,7 +804,7 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
     """Migration 0.4.0 surfaces ``guardrail.hook_fail_mode`` in
     pre-existing config.yaml so operators discover the new knob.
 
-    Backwards-compat contract (closes avarice F-0681): pre-v3 installs
+    Backwards-compat contract (closes ): pre-v3 installs
     had no concept of a hook fail mode and shipped fail-OPEN
     response-layer behavior at the gateway. The new v4 default is
     fail-CLOSED, but flipping behavior under existing operators on
@@ -1012,7 +1012,7 @@ class TestGuardrailConfigHookFailModeRoundTrip(unittest.TestCase):
     """
 
     def test_loader_normalizes_typos_to_closed(self):
-        # Closes avarice F-0681. After v4 the secure default is
+        # Closes . After v4 the secure default is
         # "closed". A typo or any non-canonical value collapses to
         # "closed" so a misconfigured config.yaml never silently puts
         # the agent into fail-OPEN mode at the response-layer

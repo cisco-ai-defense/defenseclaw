@@ -105,7 +105,7 @@ func (t tlsOverrides) id() string {
 }
 
 // bifrostTenantsMaxSize bounds the in-memory tenant client cache.
-// DeepSec S3.BUG ("Bifrost tenant client cache grows without
+// ("Bifrost tenant client cache grows without
 // eviction"): the previous package-level map grew on every cache
 // miss with no LRU/TTL/Shutdown, and authenticated callers can vary
 // `X-AI-Auth` (and Azure/Bedrock can also vary baseURL) per request.

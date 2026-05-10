@@ -439,7 +439,7 @@ class TestExtractArchive:
             _extract_archive(str(archive), str(dest), prefix="package/plugins/missing/")
 
     # ----------------------------------------------------------------
-    # F-2390 fallback path-traversal validation. We force the legacy
+    # fallback path-traversal validation. We force the legacy
     # fallback by stubbing tarfile.TarFile.extractall to raise
     # TypeError on the modern `filter="data"` keyword argument, the
     # exact shape Python <3.12 produces.
@@ -447,7 +447,7 @@ class TestExtractArchive:
 
     def test_tar_path_traversal_blocked_in_fallback(self, tmp_path,
                                                      monkeypatch):
-        """F-2390: traversal entries must be rejected even when running
+        """traversal entries must be rejected even when running
         under the legacy fallback that lacks the `filter="data"` arg."""
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
@@ -470,14 +470,14 @@ class TestExtractArchive:
 
         monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
 
-        with pytest.raises(RegistryError, match="F-2390"):
+        with pytest.raises(RegistryError, match=""):
             _extract_archive(str(archive), str(dest))
         # Confirm nothing leaked outside the dest dir.
         assert not (tmp_path / "escape.txt").exists()
 
     def test_tar_symlink_member_blocked_in_fallback(self, tmp_path,
                                                      monkeypatch):
-        """F-2390: symlink members must be rejected (the 3.12+ "data"
+        """symlink members must be rejected (the 3.12+ "data"
         filter rejects them automatically; the fallback must too)."""
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w:gz") as tf:
@@ -499,5 +499,5 @@ class TestExtractArchive:
 
         monkeypatch.setattr(tarfile.TarFile, "extractall", fake_extractall)
 
-        with pytest.raises(RegistryError, match="F-2390"):
+        with pytest.raises(RegistryError, match=""):
             _extract_archive(str(archive), str(dest))

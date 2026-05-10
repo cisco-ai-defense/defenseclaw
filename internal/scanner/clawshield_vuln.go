@@ -61,7 +61,7 @@ var csVulnRules = []csVulnRule{
 
 	// SSRF
 	{id: "CS-VLN-SSRF-AWS-META", category: "ssrf", pattern: regexp.MustCompile(`169\.254\.169\.254`), severity: SeverityCritical, remediation: "Block requests to cloud metadata endpoints at the network layer"},
-	// Closes avarice F-1725 (parity with internal/gateway/rules.go):
+	// Closes (parity with internal/gateway/rules.go):
 	// case-insensitive so uppercase DNS host variants cannot bypass.
 	{id: "CS-VLN-SSRF-GCP-META", category: "ssrf", pattern: regexp.MustCompile(`(?i)metadata\.google\.internal`), severity: SeverityCritical, remediation: "Block requests to GCP metadata endpoint"},
 	{id: "CS-VLN-SSRF-AZ-META", category: "ssrf", pattern: regexp.MustCompile(`169\.254\.169\.254.*metadata`), severity: SeverityCritical, remediation: "Block requests to Azure IMDS endpoint"},

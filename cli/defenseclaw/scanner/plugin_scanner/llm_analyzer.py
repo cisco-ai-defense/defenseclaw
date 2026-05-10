@@ -442,7 +442,7 @@ def run_meta_llm(
     # underlying finding the model named. A malicious plugin with a
     # prompt-injected source line could otherwise convince the model to
     # mark a real eval/exfil finding as a "false positive" and the host
-    # would silently drop it (DeepSec finding "Meta LLM can be
+    # would silently drop it (finding "Meta LLM can be
     # prompt-injected into suppressing static findings").
     fps_raw = result.get("false_positives", [])
     advisories: list[dict[str, str]] = []

@@ -493,7 +493,7 @@ fetch_artifact "${WHL_URL}" "${STAGING_DIR}/${whl_name}"
 verify_checksum "${STAGING_DIR}/${whl_name}" "${whl_name}"
 ok "Python CLI wheel downloaded"
 
-# Avarice F-1827: a download alone is not proof of integrity. The
+# a download alone is not proof of integrity. The
 # legacy upgrade flow extracted the tarball and pip-installed the
 # wheel without ever comparing the artifact bytes to a published
 # checksum or signature. We now require either:
@@ -517,11 +517,11 @@ verify_artifact_sha256() {
     elif command -v shasum >/dev/null 2>&1; then
         actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
     else
-        die "no sha256sum/shasum available — refusing to install unverified ${name} (F-1827)"
+        die "no sha256sum/shasum available — refusing to install unverified ${name}"
     fi
     if [[ -n "${pinned}" ]]; then
         if [[ "${pinned,,}" != "${actual,,}" ]]; then
-            die "checksum mismatch for ${name}: expected ${pinned} got ${actual} (F-1827)"
+            die "checksum mismatch for ${name}: expected ${pinned} got ${actual}"
         fi
         ok "${name}: pinned sha256 match"
         return 0
@@ -536,14 +536,14 @@ verify_artifact_sha256() {
                 ok "${name}: published .sha256 sidecar match"
                 return 0
             fi
-            die "checksum mismatch for ${name}: published ${published} got ${actual} (F-1827)"
+            die "checksum mismatch for ${name}: published ${published} got ${actual}"
         fi
     fi
     if [[ "${DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
-        warn "${name}: no checksum available and DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 — proceeding without verification (F-1827)"
+        warn "${name}: no checksum available and DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 — proceeding without verification"
         return 0
     fi
-    die "no published .sha256 for ${name} and no pinned ${pinned_env}; refusing to install unverified artifact (F-1827)
+    die "no published .sha256 for ${name} and no pinned ${pinned_env}; refusing to install unverified artifact
   Set DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 to proceed anyway (NOT recommended)."
 }
 

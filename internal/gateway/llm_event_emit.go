@@ -375,7 +375,7 @@ func hookToolDestinationApp(serverName, toolName string) string {
 // authenticated hook caller cannot drive the sidecar OOM by spamming
 // distinct (source, session) or (source, session, turn) keys.
 //
-// DeepSec S3.BUG ("Hook prompt correlation maps grow without
+// ("Hook prompt correlation maps grow without
 // eviction"): the previous implementation appended forever, with
 // keys derived directly from hook JSON (session_id, task_id,
 // turn_id, execution_id, tool_call_id) and no Stop/SessionEnd

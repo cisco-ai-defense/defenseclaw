@@ -17,8 +17,8 @@ import (
 // JudgePayload.InputHash is derived from JudgeEmitOpts.InputContent
 // (the inspected judge input), NOT from the raw response body.
 //
-// Regression context (DeepSec follow-up from PR #256 review): the
-// original DeepSec fix added the InputContent field but only updated
+// Regression context (follow-up from PR #256 review): the
+// original fix added the InputContent field but only updated
 // the SQLite store unit test to set p.InputHash directly. None of the
 // 16 production call sites in llm_judge.go populated InputContent and
 // no test asserted the end-to-end digest. This test closes that loop:

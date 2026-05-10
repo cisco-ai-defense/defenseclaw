@@ -28,10 +28,10 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          # DeepSec S2.MEDIUM ("CI executes mutable action and tool
-          # versions"): drop the GitHub credential after fetch so
-          # downstream `make` steps cannot push or fetch on our
-          # behalf if a transient compromise injects shell.
+          # CI action / tool version pinning: drop the GitHub
+          # credential after fetch so downstream `make` steps cannot
+          # push or fetch on our behalf if a transient compromise
+          # injects shell.
           persist-credentials: false
       # Catches drift between the four in-repo version sources (Makefile,
       # pyproject.toml, cli/__init__.py, package.json) before it can ship
@@ -229,10 +229,10 @@ jobs:
           persist-credentials: false
       - uses: open-policy-agent/setup-opa@b2b258e089860efaadaaf71bf6e3aecb4a3eeff1 # v2.4.0
         with:
-          # DeepSec S2.MEDIUM ("CI executes mutable action and tool versions"):
-          # version: latest let a malicious OPA release run inside CI and
-          # tamper with policy test results. Pin to a known-good release
-          # and refresh through reviewed dependency updates (Dependabot).
+          # CI action / tool version pinning: a `version: latest`
+          # value let a malicious OPA release run inside CI and tamper
+          # with policy test results. Pin to a known-good release and
+          # refresh through reviewed dependency updates (Dependabot).
           version: 0.70.0
       - run: make rego-test
 

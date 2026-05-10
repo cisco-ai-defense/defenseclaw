@@ -128,7 +128,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	fmt.Fprintf(os.Stderr, "[watchdog] starting: poll=%s debounce=%d url=%s\n",
 		interval, debounce, healthURL)
 
-	// DeepSec S3.HIGH_BUG ("Stale watchdog PID file can stop an
+	// S3.HIGH_BUG ("Stale watchdog PID file can stop an
 	// unrelated process"): hold an exclusive lock on the PID file for the
 	// watchdog's entire lifetime so a second instance refuses to start,
 	// and record a JSON fingerprint (pid + executable + start time) so
@@ -338,11 +338,11 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	dataDir := config.DefaultDataPath()
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 
-	// DeepSec hardening: probe for a running watchdog by attempting to
-	// take the PID-file lock. If the lock is held, the watchdog is alive.
-	// If the lock is free, any old PID file content is by definition
-	// stale (a live watchdog holds the lock for its whole lifetime) so we
-	// drop it before spawning the new child.
+	// Probe for a running watchdog by attempting to take the PID-file
+	// lock. If the lock is held, the watchdog is alive. If the lock is
+	// free, any old PID file content is by definition stale (a live
+	// watchdog holds the lock for its whole lifetime) so we drop it
+	// before spawning the new child.
 	if locked, info := watchdogIsLocked(pidPath); locked {
 		Warn(fmt.Sprintf("Watchdog is already running (PID %d)", info.PID))
 		return nil
@@ -409,7 +409,7 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// DeepSec S3.HIGH_BUG ("Stale watchdog PID file can stop an unrelated
+	// S3.HIGH_BUG ("Stale watchdog PID file can stop an unrelated
 	// process"): verify the recorded fingerprint BEFORE signalling. A
 	// PID-reuse race (the watchdog crashed and the kernel handed its PID
 	// to an unrelated user-owned process) used to send SIGTERM/SIGKILL to
@@ -477,9 +477,9 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// DeepSec hardening: same fingerprint check as stop. If the recorded
-	// executable no longer matches the live process the PID was reused by
-	// an unrelated process; report not-running and clear the stale file.
+	// Same fingerprint check as stop. If the recorded executable no
+	// longer matches the live process the PID was reused by an unrelated
+	// process; report not-running and clear the stale file.
 	if !verifyWatchdogProcess(info) {
 		Warn(fmt.Sprintf("Watchdog: not running (PID %d does not match recorded fingerprint)", info.PID))
 		_ = os.Remove(pidPath)
@@ -497,8 +497,8 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 // watchdogPIDInfo is the JSON payload of watchdog.pid. The fingerprint
 // (Executable + StartTime) lets stop/status verify that the recorded PID
 // is still the same process that wrote the file rather than a recycled
-// PID owned by an unrelated process. See DeepSec S3.HIGH_BUG "Stale
-// watchdog PID file can stop an unrelated process".
+// PID owned by an unrelated process. See S3.HIGH_BUG "Stale watchdog PID
+// file can stop an unrelated process".
 type watchdogPIDInfo struct {
 	PID        int    `json:"pid"`
 	Executable string `json:"executable,omitempty"`

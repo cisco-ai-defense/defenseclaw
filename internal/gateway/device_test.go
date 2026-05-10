@@ -121,7 +121,7 @@ func TestRepairPairing(t *testing.T) {
 }
 
 // TestRepairPairing_FailsClosedOnCorruptPairedJSON is the regression
-// for DeepSec S3.HIGH_BUG ("RepairPairing can erase unrelated paired
+// for S3.HIGH_BUG ("RepairPairing can erase unrelated paired
 // devices"). Before the fix, json.Unmarshal errors on paired.json were
 // silently swallowed, the in-memory map was treated as empty, and the
 // subsequent rewrite ERASED every other paired device. The hardened
@@ -145,7 +145,7 @@ func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
 	}
 
 	if err := device.RepairPairing(home); err == nil {
-		t.Fatal("RepairPairing must fail closed on unparseable paired.json (DeepSec)")
+		t.Fatal("RepairPairing must fail closed on unparseable paired.json ()")
 	}
 
 	// The original bytes MUST remain intact -- the previous code path
@@ -191,12 +191,12 @@ func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
 		}
 	}
 	if !foundBackup {
-		t.Fatal("expected a paired.json.corrupt.<ts> backup to be present (DeepSec forensics)")
+		t.Fatal("expected a paired.json.corrupt.<ts> backup to be present (forensics)")
 	}
 }
 
 // TestRepairPairing_AtomicWriteAndPerms covers the second half of the
-// DeepSec recommendation: writes go through a same-directory temp +
+// recommendation: writes go through a same-directory temp +
 // rename so a crash cannot leave a half-written file, and the final
 // file is 0600 (no longer world-readable 0644).
 func TestRepairPairing_AtomicWriteAndPerms(t *testing.T) {
@@ -249,7 +249,7 @@ func TestIsAuthError(t *testing.T) {
 
 		// Real OpenClaw NOT_PAIRED messages — only the transport
 		// sub-reasons (not-paired, metadata-upgrade) trigger
-		// auto-repair. Avarice F-1527 / F-1165 explicitly require
+		// auto-repair. explicitly require
 		// role-upgrade and scope-upgrade rejections to surface to the
 		// operator instead, because RepairPairing hard-codes
 		// operator.admin / operator.approvals into the pairing

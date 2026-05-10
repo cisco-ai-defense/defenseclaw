@@ -7,7 +7,7 @@ package policy
 import "testing"
 
 // TestEvaluateAdmissionFallback_RejectsScanError is the policy-side
-// defence-in-depth for DeepSec finding "Non-zero scanner exits can be
+// defence-in-depth for finding "Non-zero scanner exits can be
 // treated as successful scans". Even if a future caller forgets to
 // check the Scan() Go error and feeds a ScanResultInput whose
 // ExitCode != 0 or ScanError is set into the admission policy, the

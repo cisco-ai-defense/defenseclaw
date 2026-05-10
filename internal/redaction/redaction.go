@@ -1004,7 +1004,7 @@ func isSafeKVValue(v string) bool {
 //     "tool", "prompt", "skill", short MCP names, but well below the
 //     length of any credential the report calls out (AWS=20, OpenAI=51+).
 //
-// All credential-shaped strings called out by the deepsec report
+// All credential-shaped strings the redactor must catch
 // (sk-test-123, hunter-2, dev/token, abc.def with non-engine prefix,
 // MySecretP4ssword) fail every positive check and route to the
 // redactor.

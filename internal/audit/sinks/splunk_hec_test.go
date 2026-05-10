@@ -453,7 +453,7 @@ func TestDefaultSourceTypeOverrides_IsIsolated(t *testing.T) {
 	}
 }
 
-// TestSplunkHECSink_TLSSecureByDefault pins the F-2787 fix: a sink
+// TestSplunkHECSink_TLSSecureByDefault pins the fix: a sink
 // built with the zero-value config (no VerifyTLS, no
 // InsecureSkipVerify) must construct an http.Client whose TLS
 // transport REJECTS unverified peers. Pre-fix the same shape silently

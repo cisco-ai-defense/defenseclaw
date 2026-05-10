@@ -218,7 +218,7 @@ class _SplunkForwarder:
                     "Content-Type": "application/json",
                 },
             )
-            # F-0286: default to verifying TLS certificates so this
+            # default to verifying TLS certificates so this
             # legacy forwarder cannot leak the HEC token to a MITM peer.
             # Operators must explicitly set ``insecure_skip_verify=True``
             # on the SplunkConfig (or the underlying audit_sinks block)

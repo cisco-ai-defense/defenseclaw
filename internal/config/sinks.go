@@ -105,7 +105,7 @@ type SplunkHECSinkConfig struct {
 	Index      string `mapstructure:"index"       yaml:"index,omitempty"`
 	Source     string `mapstructure:"source"      yaml:"source,omitempty"`
 	SourceType string `mapstructure:"sourcetype"  yaml:"sourcetype,omitempty"`
-	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-F-2787 the
+	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-the
 	// transport defaulted to InsecureSkipVerify and operators had to
 	// set verify_tls=true to enable certificate validation. The field
 	// is retained for backward compatibility — if explicitly true it
@@ -113,7 +113,7 @@ type SplunkHECSinkConfig struct {
 	// false is silently IGNORED. Operators who want the old insecure
 	// behaviour must set insecure_skip_verify=true.
 	VerifyTLS bool `mapstructure:"verify_tls"  yaml:"verify_tls,omitempty"`
-	// InsecureSkipVerify is the F-2787 fix. When true, the sink does
+	// InsecureSkipVerify is the fix. When true, the sink does
 	// NOT validate the HEC server's certificate — required only for
 	// dev environments with self-signed HEC. Defaults to false (TLS
 	// verification enabled) so omitting the field never silently
@@ -201,11 +201,11 @@ type HTTPJSONLSinkConfig struct {
 	BearerEnv   string            `mapstructure:"bearer_env"   yaml:"bearer_env,omitempty"`
 	BearerToken string            `mapstructure:"bearer_token" yaml:"bearer_token,omitempty"`
 	// VerifyTLS is the LEGACY opt-in-to-security flag (see
-	// SplunkHECSinkConfig.VerifyTLS for the F-2788 history). Retained
+	// SplunkHECSinkConfig.VerifyTLS for the history). Retained
 	// for backward compatibility; operators who want the old insecure
 	// behaviour must set insecure_skip_verify=true.
 	VerifyTLS bool `mapstructure:"verify_tls"   yaml:"verify_tls,omitempty"`
-	// InsecureSkipVerify is the F-2788 fix. When true, the sink does
+	// InsecureSkipVerify is the fix. When true, the sink does
 	// NOT validate the HTTPS endpoint's certificate. Defaults to false
 	// so audit payloads (and any bearer token) cannot be silently
 	// captured by an on-path attacker.

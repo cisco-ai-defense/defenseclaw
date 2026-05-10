@@ -34,7 +34,7 @@ Coverage:
 * ``--json`` mode silences all of the above and emits the unchanged
   ``ScanResult.to_json()`` contract — *not* the new
   ``render_json_payload`` shape, because automation still parses
-  the legacy contract.
+  The legacy contract.
 """
 
 from __future__ import annotations

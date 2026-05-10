@@ -90,7 +90,7 @@ def block(app: AppContext, name: str, source: str, reason: str) -> None:
 
     pe = PolicyEngine(app.store)
 
-    # Avarice F-2347: the gateway runtime only checks unscoped
+    # the gateway runtime only checks unscoped
     # `target_name = <tool>` rows, so a scoped entry like
     # `filesystem/write_file` was silently never enforced. Until
     # the runtime grows source-aware tool checks, we honor a
@@ -101,11 +101,11 @@ def block(app: AppContext, name: str, source: str, reason: str) -> None:
     if source:
         # Keep the scoped audit row for operator visibility.
         pe.block("tool", _target_name(name, source),
-                 f"{reason} (scoped audit; runtime enforces globally — F-2347)")
+                 f"{reason} (scoped audit; runtime enforces globally)")
         click.echo(
             f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
             f"{ux._style('added to block list', fg='red')} (global; "
-            f"--source {source!r} kept for audit but the runtime cannot scope tool blocks today — F-2347)"
+            f"--source {source!r} kept for audit but the runtime cannot scope tool blocks today)"
         )
     else:
         click.echo(

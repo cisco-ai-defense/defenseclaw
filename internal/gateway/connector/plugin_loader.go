@@ -1,23 +1,18 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
+// http://www.apache.org/licenses/LICENSE-2.0
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 // SPDX-License-Identifier: Apache-2.0
 
 package connector
 
-import (
-	"context"
+import (	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -37,7 +32,6 @@ import (
 // the plugin loader can emit audit-pipeline events on rejection without
 // the connector package importing gatewaylog (which would create a
 // dependency cycle once handlers move into this package per Phase C1).
-//
 // Implementations forward to gatewaylog.Event{EventType: EventError,
 // Subsystem: SubsystemPlugin, Code: ...} via the same writer choke
 // point as emitGatewayError. When unset, the loader falls back to
@@ -74,42 +68,41 @@ func emitPluginRejection(code, msg, soPath string, cause error) {
 
 // pluginManifest is the structure of plugin.yaml in each connector plugin dir.
 type pluginManifest struct {
-	Name        string `yaml:"name"`
-	Version     string `yaml:"version"`
+	Name string `yaml:"name"`
+	Version string `yaml:"version"`
 	Description string `yaml:"description"`
-	Entry       string `yaml:"entry"`
-	SHA256      string `yaml:"sha256"`
+	Entry string `yaml:"entry"`
+	SHA256 string `yaml:"sha256"`
 }
 
 // LoadPlugins scans a directory for connector plugin subdirectories, each
 // containing a plugin.yaml manifest and a compiled Go .so file. Returns
 // all successfully loaded connectors.
-//
 // Security invariants enforced before plugin.Open (which runs init()):
-//   - manifest.SHA256 must be present and match the .so contents read
-//     from the open file descriptor (not just the pathname).
-//   - the .so real path must resolve inside the plugin directory
-//     (no symlink escape).
-//   - the .so itself must NOT be a symlink (refused via Lstat). The
-//     previous loader resolved symlinks instead of refusing them,
-//     which let an unprivileged local user point a writable name
-//     at an unrelated trusted .so and confuse the audit log.
-//   - the .so must not be group-writable or world-writable.
-//   - the .so must be owned by the gateway UID.
-//   - every directory ancestor of the plugin root (up to "/") must be
-//     owned by the gateway UID or root, and must NOT be group- or
-//     world-writable. This blocks the directory-entry race where an
-//     unprivileged user with write access on a parent directory swaps
-//     the verified .so out for an attacker-controlled one between the
-//     hash check and plugin.Open (DeepSec finding "Plugin validation
-//     is raceable before plugin.Open executes code").
-//   - plugin.Open is invoked on an immutable copy in a DefenseClaw-
-//     owned 0o700 cache directory, not on the original path. The
-//     cache copy is hashed-on-write from the same file descriptor we
-//     verified, and the copied file is re-validated for owner and
-//     mode before plugin.Open runs init code. Even if an attacker
-//     races the source path between any two checks, the loaded code
-//     is the bytes we hashed.
+// - manifest.SHA256 must be present and match the .so contents read
+// from the open file descriptor (not just the pathname).
+// - the .so real path must resolve inside the plugin directory
+// (no symlink escape).
+// - the .so itself must NOT be a symlink (refused via Lstat). The
+// previous loader resolved symlinks instead of refusing them,
+// which let an unprivileged local user point a writable name
+// at an unrelated trusted .so and confuse the audit log.
+// - the .so must not be group-writable or world-writable.
+// - the .so must be owned by the gateway UID.
+// - every directory ancestor of the plugin root (up to "/") must be
+// owned by the gateway UID or root, and must NOT be group- or
+// world-writable. This blocks the directory-entry race where an
+// unprivileged user with write access on a parent directory swaps
+// the verified .so out for an attacker-controlled one between the
+// hash check and plugin.Open (security finding "Plugin validation
+// is raceable before plugin.Open executes code").
+// - plugin.Open is invoked on an immutable copy in a DefenseClaw-
+// owned 0o700 cache directory, not on the original path. The
+// cache copy is hashed-on-write from the same file descriptor we
+// verified, and the copied file is re-validated for owner and
+// mode before plugin.Open runs init code. Even if an attacker
+// races the source path between any two checks, the loaded code
+// is the bytes we hashed.
 func LoadPlugins(dir string) ([]Connector, error) {
 	if dir == "" {
 		return nil, nil
@@ -388,15 +381,13 @@ func validatePluginRootChain(dirPath string) error {
 
 // safeOpenPluginSO opens the plugin .so while refusing symlinks and
 // closing the lstat-vs-open inode race.
-//
-//   - Lstat refuses any non-regular file (symlink, fifo, device, etc.).
-//   - We then os.Open the path. On unix os.Open follows symlinks,
-//     but since the previous Lstat saw a regular file, an attacker
-//     swapping the entry to a symlink between Lstat and Open is
-//     caught by the post-open Fstat: the inode and dev numbers from
-//     the open file descriptor MUST match what Lstat observed,
-//     otherwise the entry was raced and we refuse.
-//
+// - Lstat refuses any non-regular file (symlink, fifo, device, etc.).
+// - We then os.Open the path. On unix os.Open follows symlinks,
+// but since the previous Lstat saw a regular file, an attacker
+// swapping the entry to a symlink between Lstat and Open is
+// caught by the post-open Fstat: the inode and dev numbers from
+// the open file descriptor MUST match what Lstat observed,
+// otherwise the entry was raced and we refuse.
 // The caller must Close the returned fd. The returned FileInfo comes
 // from the open fd (Stat), which is the authoritative one for any
 // downstream owner/permission checks.
@@ -483,7 +474,6 @@ func ensurePluginCacheDir() (string, error) {
 // "<sha256>.so" under cacheDir. Returns the absolute path of the
 // cached file. The hash MUST match expectedHex from the manifest;
 // mismatch returns an error and removes the partial copy.
-//
 // The atomic-rename pattern (write to "<sha256>.so.tmp.<pid>" then
 // rename) means that even if multiple gateway processes race on the
 // same plugin we converge on a single immutable file. Plugin .so
@@ -582,27 +572,6 @@ func hashReader(r io.Reader) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
-}
-
-// validatePluginHash computes the SHA-256 digest of the file and compares it
-// against the expected hex string from the manifest.
-func validatePluginHash(soPath, expectedHex string) error {
-	f, err := os.Open(soPath)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", soPath, err)
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return fmt.Errorf("hash %s: %w", soPath, err)
-	}
-
-	actual := hex.EncodeToString(h.Sum(nil))
-	if !strings.EqualFold(actual, strings.TrimSpace(expectedHex)) {
-		return fmt.Errorf("sha256 mismatch: manifest=%s actual=%s", expectedHex, actual)
-	}
-	return nil
 }
 
 // loadPluginSO opens a compiled Go shared library and looks up the

@@ -99,8 +99,7 @@ func (p *OpenShellPolicy) HasEndpointForHost(host string) bool {
 }
 
 // HasEndpointForHostPort returns true only when at least one
-// network_policies entry covers (host, port). DeepSec S3.BUG
-// ("Sandbox policy diff ignores endpoint ports"): the previous
+// network_policies entry covers (host, port). // ("Sandbox policy diff ignores endpoint ports"): the previous
 // `HasEndpointForHost`-only path reported `api.example.com:8443` as
 // covered by an entry that allowlisted `api.example.com` on
 // `[443]`, hiding a real sandbox policy gap. An empty `ports` list

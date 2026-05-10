@@ -343,7 +343,7 @@ type JudgeEmitOpts struct {
 	// (the prompt/request text the judge was asked to evaluate).
 	// emitJudge computes its sha256 digest and stores the result in
 	// JudgePayload.InputHash so the audit row carries an InputHash
-	// that actually represents the *input*. DeepSec S3.BUG ("Judge
+	// that actually represents the *input*. ("Judge
 	// input_hash is computed from the response body") closure: the
 	// previous implementation hashed the response, which corrupted
 	// dedup/pivot semantics. emitJudge intentionally does not log
@@ -381,7 +381,7 @@ func emitJudge(
 		RawResponse: raw,
 		Findings:    opts.Findings,
 	}
-	// DeepSec S3.BUG ("Judge input_hash is computed from the
+	// ("Judge input_hash is computed from the
 	// response body") closure: when callers supply the inspected
 	// judge input via opts.InputContent, derive the canonical
 	// "sha256:<hex>" digest of that content here. Persistence

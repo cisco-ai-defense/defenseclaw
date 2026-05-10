@@ -125,7 +125,7 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 		result.Findings = findings
 	}
 
-	// DeepSec hardening (S2.scanners): fail closed on any non-zero
+	// hardening (S2.scanners): fail closed on any non-zero
 	// scanner exit even when stdout parsed cleanly. See the matching
 	// comment in mcp.go and finding "Non-zero plugin scanner exits
 	// can be treated as successful scans".

@@ -184,7 +184,7 @@ SOURCE_PATTERN_RULES: list[SourcePatternRule] = [
         tags=["code-execution"],
         capability="eval",
     ),
-    # Avarice F-2431: SRC-CHILD-PROC was INFO and SRC-EXEC was INFO
+    # SRC-CHILD-PROC was INFO and SRC-EXEC was INFO
     # AND only enabled in strict. compute_assessment downgrades a
     # finding set with only LOW/INFO severities to "benign", so a
     # plugin that imported node:child_process and called

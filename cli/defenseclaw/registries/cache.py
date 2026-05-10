@@ -268,7 +268,7 @@ def merge_manifest_into_index(
         prior = keep.get(key)
         fresh = _verdict_from_entry(entry)
         if prior is not None:
-            # Avarice F-2410: the legacy code matched prior verdicts
+            # the legacy code matched prior verdicts
             # by (type, name) only and copied approved/rejected flags
             # plus prior clean/warning/blocked scan state onto the new
             # entry. A registry publisher could keep the same name but
@@ -302,7 +302,7 @@ def merge_manifest_into_index(
 def _entry_payload_changed(prior: EntryVerdict, entry: ManifestEntry) -> bool:
     """Return True if the executable shape of `entry` differs from
     `prior` enough that a previous trust decision should not carry
-    over (Avarice F-2410). We compare every field that affects what
+    over (). We compare every field that affects what
     the runtime ends up executing/connecting to.
     """
     if prior.source_url != entry.source_url:

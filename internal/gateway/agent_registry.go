@@ -98,7 +98,7 @@ type AgentRegistry struct {
 	sessions map[string]sessionEntry // session_id -> instance
 }
 
-// DeepSec S2.MEDIUM ("Unauthenticated requests can grow the agent
+// ("Unauthenticated requests can grow the agent
 // session registry"): the legacy registry minted and retained an entry
 // for every distinct X-DefenseClaw-Session-Id, with no TTL or LRU cap.
 // CorrelationMiddleware ran before tokenAuth, so an unauthenticated
@@ -180,7 +180,7 @@ func (r *AgentRegistry) AgentName() string {
 // per-session identity) — callers should surface that as a missing
 // agent_instance_id field rather than synthesising one.
 //
-// DeepSec S2.MEDIUM ("Unauthenticated requests can grow the agent
+// ("Unauthenticated requests can grow the agent
 // session registry"): updates LastSeen on every lookup and enforces a
 // bounded LRU eviction so a flood of unique session IDs cannot
 // permanently grow the registry.
@@ -266,8 +266,7 @@ func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID s
 // ResolvePeek returns the three-tier identity for a request context
 // WITHOUT minting a new entry when sessionID is unknown. The
 // AgentInstanceID is left empty for unknown sessions; callers can
-// upgrade to Resolve once authentication has succeeded. DeepSec
-// S2.MEDIUM ("CorrelationMiddleware mints unauthenticated agent
+// upgrade to Resolve once authentication has succeeded. // S2.MEDIUM ("CorrelationMiddleware mints unauthenticated agent
 // sessions") closure: combined with the AgentRegistry LRU cap, this
 // stops unauthenticated requests from amplifying memory usage by
 // flooding distinct X-DefenseClaw-Session-Id headers.

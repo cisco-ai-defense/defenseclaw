@@ -42,7 +42,7 @@ func TestValidatePluginRootChain_HappyPath(t *testing.T) {
 }
 
 // TestValidatePluginRootChain_WorldWritable refuses a 0o777 leaf.
-// This is the canonical foothold the DeepSec report calls out: a
+// This is the canonical foothold the report calls out: a
 // shared-host attacker swaps directory entries because the parent is
 // writable.
 func TestValidatePluginRootChain_WorldWritable(t *testing.T) {
@@ -74,7 +74,7 @@ func TestValidatePluginRootChain_WorldWritable(t *testing.T) {
 // narrow (only sticky-bit dirs like /tmp are allowed); without this
 // negative test, a future "loosen the check" change could quietly
 // accept arbitrary world-writable ancestors and reintroduce the
-// shared-host TOCTOU foothold the original DeepSec finding called out.
+// shared-host TOCTOU foothold the original finding called out.
 func TestValidatePluginRootChain_NonStickyWorldWritableAncestor(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("ancestry walk is unix-only")
