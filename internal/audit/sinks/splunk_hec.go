@@ -63,12 +63,12 @@ func (c circuitState) String() string {
 // hardcoding (token comes from cfg.Token via env-resolution at the
 // config layer).
 type SplunkHECConfig struct {
-	Name           string
-	Endpoint       string
-	Token          string
-	Index          string
-	Source         string
-	SourceType     string
+	Name       string
+	Endpoint   string
+	Token      string
+	Index      string
+	Source     string
+	SourceType string
 	// VerifyTLS is the LEGACY opt-in-to-security flag. Pre-F-2787 the
 	// transport defaulted to InsecureSkipVerify and operators had to set
 	// verify_tls=true to enable certificate validation. The field is

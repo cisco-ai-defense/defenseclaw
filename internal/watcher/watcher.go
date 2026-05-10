@@ -500,7 +500,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 				targetType, s.Name()))
 		w.recordAdmission(ctx, "scan-error", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked,
-			Reason: fmt.Sprintf("scanner failure (fail-closed): %v", err),
+			Reason:        fmt.Sprintf("scanner failure (fail-closed): %v", err),
 			InstallAction: "block",
 		}
 		return res

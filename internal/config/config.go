@@ -1568,7 +1568,7 @@ func validateGuardrailMinSeverity(sev string) error {
 //
 // Backwards compatibility: existing operators on v3 are protected by
 // the _migrate_0_4_0_seed_hook_fail_mode migration in
-// cli/defenseclaw/migrations.py, which writes ``hook_fail_mode: open``
+// cli/defenseclaw/migrations.py, which writes “hook_fail_mode: open“
 // into config.yaml on first upgrade. New installs and explicit-empty
 // values get the safer default. Closes avarice F-0681.
 func (g *GuardrailConfig) EffectiveHookFailMode() string {
