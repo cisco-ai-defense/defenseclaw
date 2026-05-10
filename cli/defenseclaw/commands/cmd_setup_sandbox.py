@@ -1151,13 +1151,32 @@ if command -v setfacl >/dev/null 2>&1; then
     done
 fi
 
-for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
-    ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
-done
+# DeepSec scoped pre-sandbox cleanup: only delete the previously
+# recorded namespace (if any). Foreign namespaces created by other
+# DefenseClaw/OpenClaw instances on a shared host are left untouched.
+DEFENSECLAW_DIR={q_data_dir}
+SANDBOX_NETNS_FILE="$DEFENSECLAW_DIR/sandbox.netns"
+SAVED_NS=""
+if [ -r "$SANDBOX_NETNS_FILE" ]; then
+    SAVED_NS=$(head -1 "$SANDBOX_NETNS_FILE" 2>/dev/null | tr -d '[:space:]')
+fi
 
-for veth in $(ip link show 2>/dev/null | grep -oP 'veth-h-\\S+(?=@)'); do
-    ip link delete "$veth" 2>/dev/null && echo "Cleaned stale veth: $veth"
-done
+if [ -n "$SAVED_NS" ]; then
+    if ip netns list 2>/dev/null | awk '{{print $1}}' | grep -qx "$SAVED_NS"; then
+        ip netns delete "$SAVED_NS" 2>/dev/null \\
+            && echo "pre-sandbox: cleaned previous namespace: $SAVED_NS"
+    fi
+    rm -f "$SANDBOX_NETNS_FILE" 2>/dev/null || true
+elif [ "${{DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP:-0}}" = "1" ]; then
+    echo "pre-sandbox: WARNING: legacy regex cleanup opted in" >&2
+    for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
+        ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
+    done
+fi
+
+# Skip blanket veth-h-* deletion. Veth pairs created in a deleted
+# namespace are auto-removed by the kernel when the netns dies, and
+# matching by `veth-h-*` would also delete other instances' veths.
 
 find "$SANDBOX_HOME/.openclaw/agents/" -name "*.lock" -delete 2>/dev/null || true
 
@@ -1236,6 +1255,20 @@ $NSENTER iptables -I OUTPUT 1 -p tcp -d "$HOST_IP" \\
 iptables -t nat -C POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || \\
     iptables -t nat -A POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
 
+# DeepSec scoped cleanup: capture the prior route_localnet value once so
+# cleanup-sandbox.sh can restore it instead of forcing 0 (which would
+# disable the sysctl for any other instances on the same host).
+SAVED_ROUTE_LOCALNET="$DEFENSECLAW_DIR/saved.route_localnet"
+if [ ! -e "$SAVED_ROUTE_LOCALNET" ]; then
+    PRIOR=$(sysctl -n net.ipv4.conf.all.route_localnet 2>/dev/null || echo "")
+    case "$PRIOR" in
+        0|1)
+            printf '%s\\n' "$PRIOR" > "$SAVED_ROUTE_LOCALNET" 2>/dev/null || true
+            chmod 0600 "$SAVED_ROUTE_LOCALNET" 2>/dev/null || true
+            ;;
+    esac
+fi
+
 # Allow DNAT from localhost to non-loopback addresses (required for UI forwarding).
 sysctl -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
 
@@ -1307,6 +1340,18 @@ echo "Injected iptables rules via $NSENTER"
 exit 0
 """
 
+    # DeepSec S3.HIGH_BUG ("Generated sandbox cleanup can stop unrelated host
+    # services"): scope cleanup to THIS instance.
+    #   1. Restore the prior route_localnet sysctl rather than forcing 0.
+    #      post-sandbox.sh saves the previous value to
+    #      "$DEFENSECLAW_DIR/saved.route_localnet" before flipping it to 1.
+    #   2. Only delete the namespace recorded in
+    #      "$DEFENSECLAW_DIR/sandbox.netns" (written by run-sandbox.sh once
+    #      openshell-sandbox publishes the namespace). Refuse to use the
+    #      legacy regex match by default; sysadmins can opt-in by setting
+    #      DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP=1.
+    #   3. Only delete veths whose peer is in the recorded namespace -- this
+    #      naturally excludes other sandboxes' veth-h-* interfaces.
     cleanup_iptables = ""
     if host_networking:
         cleanup_iptables = f"""
@@ -1319,19 +1364,62 @@ iptables -t nat -D POSTROUTING -d {sandbox_ip} -p tcp --dport {openclaw_port} \\
 # Remove DNS MASQUERADE
 iptables -t nat -D POSTROUTING -s 10.200.0.0/24 -p udp --dport 53 -j MASQUERADE 2>/dev/null || true
 
-# Restore route_localnet
-sysctl -w net.ipv4.conf.all.route_localnet=0 >/dev/null 2>&1 || true
+# Restore route_localnet to its pre-sandbox value (DeepSec scoped cleanup).
+SAVED_ROUTE_LOCALNET={q_data_dir}/saved.route_localnet
+if [ -r "$SAVED_ROUTE_LOCALNET" ]; then
+    PRIOR_VAL=$(cat "$SAVED_ROUTE_LOCALNET" 2>/dev/null || echo "")
+    case "$PRIOR_VAL" in
+        0|1)
+            sysctl -w "net.ipv4.conf.all.route_localnet=$PRIOR_VAL" >/dev/null 2>&1 || true
+            ;;
+    esac
+    rm -f "$SAVED_ROUTE_LOCALNET" 2>/dev/null || true
+fi
 """
 
     cleanup_sandbox = f"""#!/bin/bash
 {cleanup_iptables}
-for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
-    ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
-done
 
-for veth in $(ip link show 2>/dev/null | grep -oP 'veth-h-\\S+(?=@)'); do
-    ip link delete "$veth" 2>/dev/null && echo "Cleaned stale veth: $veth"
-done
+DEFENSECLAW_DIR={q_data_dir}
+SANDBOX_NETNS_FILE="$DEFENSECLAW_DIR/sandbox.netns"
+SAVED_NS=""
+if [ -r "$SANDBOX_NETNS_FILE" ]; then
+    SAVED_NS=$(head -1 "$SANDBOX_NETNS_FILE" 2>/dev/null | tr -d '[:space:]')
+fi
+
+# Only fall back to broad regex if explicitly opted in. The default
+# is fail-closed: an unknown namespace name means we leave foreign
+# namespaces untouched on shared hosts.
+if [ -z "$SAVED_NS" ] && [ "${{DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP:-0}}" = "1" ]; then
+    echo "WARNING: cleanup-sandbox.sh: no saved namespace; legacy regex match enabled" >&2
+    for ns in $(ip netns list 2>/dev/null | grep -E 'sandbox|openshell' | awk '{{print $1}}'); do
+        ip netns delete "$ns" 2>/dev/null && echo "Cleaned orphan namespace: $ns"
+    done
+elif [ -n "$SAVED_NS" ]; then
+    # Capture peer veth indices BEFORE deleting the namespace; once
+    # the netns is gone its host-side veths become orphaned and we
+    # can no longer correlate them safely.
+    PEER_IDXS=""
+    if ip netns exec "$SAVED_NS" true 2>/dev/null; then
+        PEER_IDXS=$(ip -n "$SAVED_NS" -o link show type veth 2>/dev/null \\
+            | sed -nE 's/^[0-9]+: [^@:]+@if([0-9]+).*$/\\1/p')
+    fi
+
+    ip netns delete "$SAVED_NS" 2>/dev/null && echo "Cleaned scoped namespace: $SAVED_NS"
+    rm -f "$SANDBOX_NETNS_FILE" 2>/dev/null || true
+
+    # Delete only the host-side veths whose ifindex matched our namespace peer.
+    for idx in $PEER_IDXS; do
+        host_if=$(ip -o link show 2>/dev/null \\
+            | sed -nE "s/^${{idx}}: ([^@:]+).*$/\\1/p")
+        if [ -n "$host_if" ]; then
+            ip link delete "$host_if" 2>/dev/null \\
+                && echo "Cleaned scoped veth: $host_if (peer idx $idx)"
+        fi
+    done
+else
+    echo "cleanup-sandbox.sh: no recorded sandbox namespace; nothing to remove (fail-safe)"
+fi
 """
 
     # start-openclaw.sh: conditionally include DNS wait loop
@@ -1450,25 +1538,53 @@ stop_sandbox() {{
         rm -f "$PIDFILE"
     fi
 
-    # 3. Kill any orphaned sandbox-related processes not tracked in the PID file.
-    #    These can accumulate when previous runs used an older stop mechanism
-    #    or when the script was killed without cleanup.
-    _kill_strays() {{
+    # 3. Kill any orphaned sandbox-related processes that are clearly part
+    #    of THIS instance. Orphans are identified by checking that the
+    #    process's cwd or cmdline references our $DATA_DIR — never by a
+    #    bare process name. Cross-instance kills (DeepSec
+    #    "Generated sandbox cleanup can stop unrelated host services")
+    #    are explicitly disallowed: a process whose cmdline does not
+    #    reference our $DATA_DIR is left alone, even if it shares a
+    #    binary name.
+    _proc_is_ours() {{
+        local pid="$1"
+        # Check command line first (most reliable: data dir is unique).
+        local cmd
+        if cmd=$(tr '\\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null); then
+            case "$cmd" in
+                *"$DATA_DIR"*) return 0 ;;
+            esac
+        fi
+        # Fall back to cwd: if the process is running under our data dir,
+        # it's also ours.
+        local cwd
+        if cwd=$(readlink -f "/proc/$pid/cwd" 2>/dev/null); then
+            case "$cwd" in
+                "$DATA_DIR"|"$DATA_DIR"/*) return 0 ;;
+            esac
+        fi
+        return 1
+    }}
+
+    _kill_scoped_strays() {{
         local pat="$1"
         local pids
         pids=$(pgrep -f "$pat" 2>/dev/null || true)
         for p in $pids; do
-            # Don't kill ourselves or our parent
             [ "$p" = "$$" ] && continue
             [ "$p" = "$PPID" ] && continue
-            kill "$p" 2>/dev/null && echo "  killed stray $pat (pid $p)"
+            if _proc_is_ours "$p"; then
+                kill "$p" 2>/dev/null \\
+                    && echo "  killed scoped stray $pat (pid $p)"
+            fi
         done
     }}
-    _kill_strays openshell-sandbox
-    _kill_strays defenseclaw-gateway
-    _kill_strays "openclaw$"
-    _kill_strays openclaw-gateway
-    _kill_strays "dmesg --follow"
+
+    _kill_scoped_strays openshell-sandbox
+    _kill_scoped_strays defenseclaw-gateway
+    _kill_scoped_strays "openclaw$"
+    _kill_scoped_strays openclaw-gateway
+    _kill_scoped_strays "dmesg --follow"
 
     # 4. Clean up network namespace and veth pairs
     "$SCRIPTS_DIR/cleanup-sandbox.sh" 2>/dev/null || true
@@ -1506,23 +1622,35 @@ echo "  openshell-sandbox started (pid $SANDBOX_PID)"
 
 # 3. Wait for sandbox namespace to appear
 echo "==> Waiting for sandbox namespace..."
+SANDBOX_NS=""
 for i in $(seq 1 30); do
     if ! kill -0 "$SANDBOX_PID" 2>/dev/null; then
         echo "ERROR: openshell-sandbox exited prematurely" >&2
         wait "$SANDBOX_PID" 2>/dev/null
         exit 1
     fi
-    if ip netns list 2>/dev/null | grep -qE 'sandbox|openshell'; then
+    SANDBOX_NS=$(ip netns list 2>/dev/null \\
+        | grep -E 'sandbox|openshell' \\
+        | awk '{{print $1}}' | head -1)
+    if [ -n "$SANDBOX_NS" ]; then
         break
     fi
     sleep 1
 done
 
-if ! ip netns list 2>/dev/null | grep -qE 'sandbox|openshell'; then
+if [ -z "$SANDBOX_NS" ]; then
     echo "ERROR: sandbox namespace not created after 30s" >&2
     exit 1
 fi
-echo "  namespace ready"
+
+# DeepSec scoped cleanup: persist this instance's namespace name so
+# pre-sandbox.sh / cleanup-sandbox.sh / run-sandbox.sh stop only touch
+# the namespace WE created. Other DefenseClaw instances on the same
+# host will write their own marker into their own data dir.
+if printf '%s\\n' "$SANDBOX_NS" > "$DATA_DIR/sandbox.netns" 2>/dev/null; then
+    chmod 0600 "$DATA_DIR/sandbox.netns" 2>/dev/null || true
+fi
+echo "  namespace ready: $SANDBOX_NS"
 
 # 4. Inject iptables rules
 echo "==> Injecting iptables rules..."

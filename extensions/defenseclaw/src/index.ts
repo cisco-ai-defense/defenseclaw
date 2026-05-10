@@ -329,6 +329,35 @@ export default function (api: DefenseClawPluginHost) {
     },
   });
 
+  /**
+   * Build the verdict the host returns when sidecar inspection itself
+   * fails (transport error, non-2xx response, JSON parse error,
+   * timeout). Behaviour depends on the configured guardrail mode:
+   *
+   *   - action / enforce  -> fail CLOSED. Return a block verdict in
+   *     "action" mode so the existing `verdict.action === "block" &&
+   *     verdict.mode === "action"` checks fire and the original tool
+   *     call is denied. Without this, an attacker who can knock the
+   *     sidecar offline (DoS, oversized payload, expired token, etc.)
+   *     could silently bypass guardrail enforcement (DeepSec finding
+   *     "Tool inspection fails open on sidecar errors").
+   *   - observe (default) -> fall open. Returns an allow verdict in
+   *     "observe" mode so dev environments without the sidecar still
+   *     see tool calls succeed. The host explicitly opts into this by
+   *     leaving `guardrail.mode` at "observe".
+   */
+  function inspectionFailureVerdict(reason: string): InspectVerdict {
+    if (sidecarConfig.enforcementMode === "action") {
+      return {
+        action: "block",
+        severity: "HIGH",
+        reason: `inspection unavailable (fail-closed): ${reason}`,
+        mode: "action",
+      };
+    }
+    return { action: "allow", severity: "NONE", reason, mode: "observe" };
+  }
+
   async function inspectTool(
     payload: Record<string, unknown>,
     toolCtx?: ToolContext,
@@ -365,9 +394,16 @@ export default function (api: DefenseClawPluginHost) {
         duration_ms,
       });
       if (!res.ok) {
-        return { action: "allow", severity: "NONE", reason: `sidecar returned ${res.status}`, mode: "observe" };
+        return inspectionFailureVerdict(`sidecar returned ${res.status}`);
       }
-      return (await res.json()) as InspectVerdict;
+      try {
+        return (await res.json()) as InspectVerdict;
+      } catch {
+        // Body parse failure: the sidecar accepted the request but
+        // returned malformed JSON. Treat this exactly like a transport
+        // error so action-mode deployments fail closed.
+        return inspectionFailureVerdict("sidecar returned malformed JSON");
+      }
     } catch {
       const duration_ms = Math.round(performance.now() - started);
       logOutboundRequest({
@@ -377,7 +413,7 @@ export default function (api: DefenseClawPluginHost) {
         status_code: 0,
         duration_ms,
       });
-      return { action: "allow", severity: "NONE", reason: "sidecar unreachable", mode: "observe" };
+      return inspectionFailureVerdict("sidecar unreachable");
     } finally {
       clearTimeout(timer);
     }

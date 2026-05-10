@@ -180,6 +180,117 @@ args = ["/opt/global-fs.js"]
 	}
 }
 
+// TestReadMCPServersCodex_ProjectLocalOverridesGlobal is the
+// regression for DeepSec finding "Codex project-local MCP overrides
+// are shadowed by global entries". Before the fix, when both
+// `~/.codex/config.toml` and `./.mcp.json` declared the same MCP
+// server name, the global TOML entry was retained and the
+// project-local definition was silently dropped -- inverting the
+// precedence Codex itself uses at runtime. A malicious global
+// `~/.codex/config.toml` (e.g. one written by a compromised tool or
+// shared dotfiles repo) could therefore mask the project-local
+// command/URL from DefenseClaw's inventory, watcher, snapshot, and
+// admission paths even though Codex would actually invoke the
+// project-local override. This test asserts that the project-local
+// `command`/`args` win for a duplicate name.
+func TestReadMCPServersCodex_ProjectLocalOverridesGlobal(t *testing.T) {
+	homeDir := t.TempDir()
+	cwdDir := t.TempDir()
+
+	t.Setenv("HOME", homeDir)
+	chdir(t, cwdDir)
+
+	codexDir := filepath.Join(homeDir, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Global TOML registers an `fs` MCP server with the legitimate
+	// IT-managed binary.
+	tomlBody := `
+[mcp_servers.fs]
+command = "node"
+args = ["/opt/IT/global-fs.js"]
+
+[mcp_servers.fs.env]
+TOKEN = "global-token"
+`
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(tomlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Project-local .mcp.json re-declares `fs` with an attacker-
+	// controlled path. Codex would actually invoke this one at
+	// runtime, so DefenseClaw MUST scan and admit this one too.
+	dotmcp := []byte(`{
+		"mcpServers": {
+			"fs": {"command": "node", "args": ["/repo/.attacker/fs.js"]}
+		}
+	}`)
+	if err := os.WriteFile(filepath.Join(cwdDir, ".mcp.json"), dotmcp, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := readMCPServersCodex()
+	if err != nil {
+		t.Fatalf("readMCPServersCodex: %v", err)
+	}
+
+	if len(entries) != 1 {
+		t.Fatalf("want 1 deduped entry for `fs`, got %d (%v)", len(entries), entryNames(entries))
+	}
+	got := entries[0]
+	if got.Name != "fs" {
+		t.Fatalf("name = %q, want fs", got.Name)
+	}
+	if len(got.Args) != 1 || got.Args[0] != "/repo/.attacker/fs.js" {
+		t.Errorf(
+			"project-local override lost: args = %v, want [/repo/.attacker/fs.js] "+
+				"(global entry has shadowed the local one again)",
+			got.Args,
+		)
+	}
+	if v, ok := got.Env["TOKEN"]; ok {
+		t.Errorf(
+			"project-local entry inherited global env (TOKEN=%q); precedence merge "+
+				"should NOT splice fields across entries with the same name",
+			v,
+		)
+	}
+}
+
+// TestReadMCPServersCodex_GlobalOnlyEntriesStillReadWhenLocalAbsent
+// guards the merge behaviour when only one config is present: a
+// global-only entry must still be visible to inventory/admission.
+func TestReadMCPServersCodex_GlobalOnlyEntriesStillReadWhenLocalAbsent(t *testing.T) {
+	homeDir := t.TempDir()
+	cwdDir := t.TempDir()
+
+	t.Setenv("HOME", homeDir)
+	chdir(t, cwdDir)
+
+	codexDir := filepath.Join(homeDir, ".codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlBody := `
+[mcp_servers.global-only]
+command = "node"
+args = ["/opt/IT/global-only.js"]
+`
+	if err := os.WriteFile(filepath.Join(codexDir, "config.toml"), []byte(tomlBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := readMCPServersCodex()
+	if err != nil {
+		t.Fatalf("readMCPServersCodex: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "global-only" {
+		t.Fatalf("want [global-only], got %v", entryNames(entries))
+	}
+}
+
 func entryNames(es []MCPServerEntry) []string {
 	out := make([]string, 0, len(es))
 	for _, e := range es {

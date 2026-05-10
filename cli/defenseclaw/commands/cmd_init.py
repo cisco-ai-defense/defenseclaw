@@ -25,6 +25,8 @@ import json
 import os
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import click
 
@@ -105,7 +107,34 @@ from defenseclaw.paths import (
 )
 @click.option("--llm-provider", default="", help="Unified LLM provider (openai, anthropic, ollama, etc.).")
 @click.option("--llm-model", default="", help="Unified LLM model, preferably provider/model.")
-@click.option("--llm-api-key", default="", help="LLM API key to save into .env (config stores only the env name).")
+# DeepSec S2.MEDIUM ("Initialization accepts API keys as command-line
+# arguments"): raw secret values on argv leak via shell history, terminal
+# scrollback, CI logs, and `ps`/`/proc/<pid>/cmdline`. The flag stays for
+# backward compatibility but is deprecated; init_cmd warns operators when
+# it is used and prefers the env / stdin / file alternatives below.
+@click.option(
+    "--llm-api-key",
+    default="",
+    help=(
+        "DEPRECATED -- leaks via argv. Use $DEFENSECLAW_LLM_KEY, "
+        "--llm-api-key-stdin, or --llm-api-key-file instead."
+    ),
+)
+@click.option(
+    "--llm-api-key-stdin",
+    is_flag=True,
+    default=False,
+    help="Read the LLM API key from stdin (a single line). Avoids argv leak.",
+)
+@click.option(
+    "--llm-api-key-file",
+    default="",
+    type=click.Path(dir_okay=False),
+    help=(
+        "Path to a 0600-permission file containing the LLM API key. "
+        "The file is read and persisted into .env. Avoids argv leak."
+    ),
+)
 @click.option(
     "--llm-api-key-env",
     default="DEFENSECLAW_LLM_KEY",
@@ -114,7 +143,29 @@ from defenseclaw.paths import (
 )
 @click.option("--llm-base-url", default="", help="Local/proxy LLM base URL.")
 @click.option("--cisco-endpoint", default="", help="Cisco AI Defense endpoint.")
-@click.option("--cisco-api-key", default="", help="Cisco AI Defense key to save into .env.")
+@click.option(
+    "--cisco-api-key",
+    default="",
+    help=(
+        "DEPRECATED -- leaks via argv. Use $CISCO_AI_DEFENSE_API_KEY, "
+        "--cisco-api-key-stdin, or --cisco-api-key-file instead."
+    ),
+)
+@click.option(
+    "--cisco-api-key-stdin",
+    is_flag=True,
+    default=False,
+    help="Read the Cisco AI Defense key from stdin (a single line). Avoids argv leak.",
+)
+@click.option(
+    "--cisco-api-key-file",
+    default="",
+    type=click.Path(dir_okay=False),
+    help=(
+        "Path to a 0600-permission file containing the Cisco AI Defense "
+        "key. The file is read and persisted into .env. Avoids argv leak."
+    ),
+)
 @click.option(
     "--cisco-api-key-env",
     default="CISCO_AI_DEFENSE_API_KEY",
@@ -144,10 +195,14 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     llm_provider: str,
     llm_model: str,
     llm_api_key: str,
+    llm_api_key_stdin: bool,
+    llm_api_key_file: str,
     llm_api_key_env: str,
     llm_base_url: str,
     cisco_endpoint: str,
     cisco_api_key: str,
+    cisco_api_key_stdin: bool,
+    cisco_api_key_file: str,
     cisco_api_key_env: str,
     start_gateway: bool | None,
     verify: bool | None,
@@ -163,6 +218,23 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
     import platform
+
+    # DeepSec S2.MEDIUM ("Initialization accepts API keys as command-line
+    # arguments"): resolve secret-valued options through the env / stdin /
+    # file alternatives before any downstream code touches them. Argv path
+    # still works but emits a deprecation warning so operators migrate.
+    llm_api_key = _resolve_secret_arg(
+        "--llm-api-key",
+        argv_value=llm_api_key,
+        stdin_flag=llm_api_key_stdin,
+        file_path=llm_api_key_file,
+    )
+    cisco_api_key = _resolve_secret_arg(
+        "--cisco-api-key",
+        argv_value=cisco_api_key,
+        stdin_flag=cisco_api_key_stdin,
+        file_path=cisco_api_key_file,
+    )
 
     if _use_guided_first_run(
         non_interactive=non_interactive,
@@ -297,14 +369,14 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     ux.banner("Skills")
     click.echo("  CodeGuard:     skipped (opt in with 'defenseclaw codeguard install --target skill')")
 
-    ux.banner("Notifications")
-    _onboard_notifications(
-        cfg, logger,
-        non_interactive=non_interactive,
-        yes=yes,
-        is_new_config=is_new_config,
-    )
-
+    # DeepSec S3.BUG ("Notification onboarding runs twice during
+    # init"): the legacy init path used to render the Notifications
+    # banner and call _onboard_notifications twice in a row with
+    # identical arguments. On a fresh interactive run that prompted
+    # the operator twice and let the second answer silently
+    # override the first; on --non-interactive runs it printed the
+    # same status twice. We now invoke the helper exactly once per
+    # init run.
     ux.banner("Notifications")
     _onboard_notifications(
         cfg, logger,
@@ -399,6 +471,76 @@ def _stdin_is_tty() -> bool:
         return click.get_text_stream("stdin").isatty()
     except Exception:
         return False
+
+
+def _resolve_secret_arg(
+    flag: str,
+    *,
+    argv_value: str,
+    stdin_flag: bool,
+    file_path: str,
+) -> str:
+    """Resolve secret-valued init options from safe sources.
+
+    DeepSec S2.MEDIUM ("Initialization accepts API keys as command-line
+    arguments"): explicit argv values still work for backward
+    compatibility but emit a deprecation warning. Stdin and file inputs
+    avoid argv exposure entirely. The file path is required to be a
+    regular file (not a symlink) and not group/world readable.
+    """
+    sources = [
+        ("argv", bool(argv_value)),
+        ("stdin", bool(stdin_flag)),
+        ("file", bool(file_path)),
+    ]
+    chosen = [name for name, on in sources if on]
+    if len(chosen) > 1:
+        raise click.UsageError(
+            f"{flag}/{flag}-stdin/{flag}-file are mutually exclusive "
+            f"(got {', '.join(chosen)})."
+        )
+    if argv_value:
+        click.echo(
+            (
+                f"WARNING: {flag} accepts a secret on argv. The value can "
+                "leak via shell history, terminal scrollback, CI logs, "
+                "and `ps` listings. Prefer the env var, "
+                f"{flag}-stdin, or {flag}-file alternatives."
+            ),
+            err=True,
+        )
+        return argv_value.strip()
+    if stdin_flag:
+        if sys.stdin is None or sys.stdin.isatty():
+            raise click.UsageError(
+                f"{flag}-stdin requires the secret on stdin, but stdin is a TTY."
+            )
+        line = sys.stdin.readline()
+        if not line:
+            raise click.UsageError(f"{flag}-stdin received empty input.")
+        return line.rstrip("\r\n")
+    if file_path:
+        path = Path(file_path).expanduser()
+        if path.is_symlink():
+            raise click.UsageError(
+                f"{flag}-file refuses symlinks ({path}); use a regular file."
+            )
+        try:
+            st = path.stat()
+        except OSError as exc:
+            raise click.UsageError(f"{flag}-file: cannot stat {path}: {exc}") from exc
+        # Reject group/world-readable bits to avoid silently reading a key
+        # file that is already disclosed to other local users.
+        if (st.st_mode & 0o077) != 0:
+            raise click.UsageError(
+                f"{flag}-file ({path}) must be 0600 (got {oct(st.st_mode & 0o777)})."
+            )
+        try:
+            data = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise click.UsageError(f"{flag}-file: cannot read {path}: {exc}") from exc
+        return data.strip()
+    return ""
 
 
 def _use_guided_first_run(**kwargs) -> bool:
@@ -1137,97 +1279,11 @@ def _onboard_notifications(
 ) -> None:
     """Surface the desktop-notifications opt-in prompt on first run.
 
-    Mirrors the single-question contract documented in the
-    ``macos-block-and-hitl-notifications`` plan: a fresh install is
-    asked once, the answer is persisted to
-    ``notifications.enabled``, and subsequent ``defenseclaw init``
-    invocations stay quiet (the operator can rerun
-    ``defenseclaw setup notifications`` to flip it).
-
-    Decision tree:
-      * Existing config (``is_new_config=False``) → never prompt;
-        print the current state for visibility. Re-running ``init``
-        on a configured install must not re-litigate onboarding.
-      * ``--non-interactive`` or ``--yes`` or non-TTY stdin (CI) →
-        keep platform default, print a one-liner pointing at
-        ``setup notifications``.
-      * Otherwise → ``click.confirm`` with the platform-aware
-        default.
-
-    The ``cfg`` mutation is in-memory; the caller does the
-    ``cfg.save()`` so this helper composes with whatever else
-    ``init`` decides to write.
-    """
-    nc = cfg.notifications
-
-    if not is_new_config:
-        # Re-run of ``init`` against an existing config. We can't
-        # safely tell "operator said no last time" from "operator
-        # never saw the prompt" without a separate sentinel, and
-        # re-prompting on every init would be irritating, so the
-        # rule is: ask only at first-install. Operators flip the
-        # toggle later via ``defenseclaw setup notifications``.
-        state = "ON" if nc.enabled else "OFF"
-        click.echo(
-            f"  Notifications: {ux.dim('preserving current setting')} ({state})"
-        )
-        click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
-        return
-
-    if non_interactive or yes or not _stdin_is_tty():
-        state = "ON" if nc.enabled else "OFF"
-        click.echo(
-            f"  Notifications: {ux.dim('platform default')} ({state})"
-        )
-        click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
-        return
-
-    desired = click.confirm(
-        "  Show desktop notifications for blocks and approval requests?",
-        default=bool(nc.enabled),
-    )
-
-    if desired == bool(nc.enabled):
-        state = "ON" if desired else "OFF"
-        click.echo("  Notifications: " + ux._style(state, fg="green") +
-                   ux.dim(" (unchanged)"))
-        return
-
-    nc.enabled = desired
-    state = "ON" if desired else "OFF"
-    click.echo("  Notifications: " + ux._style(state, fg="green"))
-    click.echo("  " + ux.dim("Re-run: defenseclaw setup notifications"))
-    logger.log_action(
-        "init-notifications-toggle",
-        "config",
-        f"enabled={desired!s}",
-    )
-
-
-def _stdin_is_tty() -> bool:
-    """Best-effort TTY probe used by the notifications onboarding.
-
-    Wrapped so unit tests can monkey-patch a single point. ``init``
-    already routes around interactive prompts when ``--non-interactive``
-    or ``--yes`` is set, so this is the last-mile guard for piped /
-    redirected stdin.
-    """
-    import sys
-    try:
-        return sys.stdin.isatty()
-    except (AttributeError, ValueError, OSError):
-        return False
-
-
-def _onboard_notifications(
-    cfg,
-    logger,
-    *,
-    non_interactive: bool,
-    yes: bool,
-    is_new_config: bool,
-) -> None:
-    """Surface the desktop-notifications opt-in prompt on first run.
+    DeepSec S3.BUG ("Notification onboarding runs twice during init")
+    closure: the legacy file shipped this helper twice (Python keeps
+    only the second binding), and the init flow called it twice in
+    succession. Both copies have been collapsed to a single canonical
+    definition here.
 
     Mirrors the single-question contract documented in the
     ``macos-block-and-hitl-notifications`` plan: a fresh install is
@@ -1304,7 +1360,6 @@ def _stdin_is_tty() -> bool:
     or ``--yes`` is set, so this is the last-mile guard for piped /
     redirected stdin.
     """
-    import sys
     try:
         return sys.stdin.isatty()
     except (AttributeError, ValueError, OSError):

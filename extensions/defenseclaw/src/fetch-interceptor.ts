@@ -261,6 +261,22 @@ function extractHost(urlStr: string): string {
  * "api.openai.com.evil.test" or a substring match somewhere inside
  * the query string. Entries are stored lower-cased (see
  * applyProviderRegistry + providers.json build step).
+ *
+ * Wildcard entries ("bedrock-runtime.*.amazonaws.com") use a
+ * single-label "*", mirroring matchProviderDomain in the Go proxy.
+ * The wildcard MUST stand for exactly one DNS label between two
+ * literal anchors -- this handles AWS Bedrock's regional hosts
+ * without shipping a per-region allow-list while refusing the
+ * prefix-only spoof "bedrock-runtime.evil.example".
+ *
+ * The legacy trailing-dot prefix syntax ("bedrock-runtime.") is no
+ * longer honoured. The DeepSec audit found that
+ * host="bedrock-runtime.evil.example" matched the legacy
+ * "bedrock-runtime." prefix entry, allowing an attacker to spoof a
+ * known-provider host and bypass guardrails. Operators with
+ * custom-providers.json entries that still use the trailing-dot form
+ * MUST migrate to a wildcard pattern; otherwise their providers
+ * silently disappear from the allow-list.
  */
 function matchesLLMDomain(host: string): boolean {
   if (!host) return false;
@@ -272,19 +288,54 @@ function matchesLLMDomain(host: string): boolean {
     const slash = domain.indexOf("/");
     const bare = slash >= 0 ? domain.slice(0, slash) : domain;
     if (!bare) continue;
+    if (bare.endsWith(".")) {
+      // Legacy trailing-dot prefix syntax — refused (see DeepSec).
+      continue;
+    }
+    if (bare.includes("*")) {
+      if (matchWildcardDomain(host, bare)) return true;
+      continue;
+    }
     if (host === bare) return true;
     if (host.endsWith("." + bare)) return true;
   }
   return false;
 }
 
+/**
+ * matchWildcardDomain implements one-label wildcard matching. A
+ * pattern like "a.*.b.c" matches a host iff:
+ *  - the host has the literal prefix "a." (part before "*")
+ *  - the host has the literal suffix ".b.c" (part after "*")
+ *  - host length >= prefix.length + suffix.length (no overlap)
+ *  - the substring between those anchors contains no "." (single
+ *    DNS label)
+ *
+ * Multiple "*" are not supported; such patterns return false.
+ */
+function matchWildcardDomain(host: string, pattern: string): boolean {
+  const parts = pattern.split("*");
+  if (parts.length !== 2) return false;
+  const [prefix, suffix] = parts;
+  if (!prefix || !suffix) return false;
+  if (host.length < prefix.length + suffix.length) return false;
+  if (!host.startsWith(prefix) || !host.endsWith(suffix)) return false;
+  const middle = host.slice(prefix.length, host.length - suffix.length);
+  if (middle.length === 0 || middle.includes(".")) return false;
+  return true;
+}
+
+/**
+ * Loopback hostnames that mean "the local machine". We always treat
+ * the bracketed IPv6 form ("::1") and the unbracketed IPv4 form ("127.0.0.1")
+ * as loopback. URL parsing returns hostnames without brackets.
+ */
+const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1"]);
+
 export function isLLMUrl(url: string, guardrailPort: number): boolean {
   const host = extractHost(url);
   if (matchesLLMDomain(host)) return true;
-  // Ollama: localhost or 127.0.0.1 on known Ollama ports, but NOT the proxy port.
-  // Host-boundary matched so an attacker-controlled hostname with
-  // "localhost:11434" embedded cannot forge a hit.
-  if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+  if (LOOPBACK_HOSTNAMES.has(host)) {
     let port = "";
     try {
       port = new URL(url).port;
@@ -298,12 +349,122 @@ export function isLLMUrl(url: string, guardrailPort: number): boolean {
   return false;
 }
 
+/**
+ * Parse the URL and only treat it as "already pointed at the
+ * guardrail proxy" when the parsed hostname is exactly loopback AND
+ * the parsed port equals the guardrail port. The previous
+ * implementation used substring matching on the raw URL, so a real
+ * provider URL such as
+ *   https://api.openai.com/v1/chat/completions?cb=http://127.0.0.1:4000
+ * would short-circuit interception entirely (DeepSec finding
+ * "Substring self-proxy check lets LLM requests bypass interception").
+ *
+ * Returns false on any URL we cannot parse — that path falls through
+ * to the regular interception logic, which will either rewrite the
+ * URL or pass it through with the originalFetch path.
+ */
 function isAlreadyProxied(url: string, guardrailPort: number): boolean {
-  // Only skip requests already targeting the guardrail proxy itself.
-  return (
-    url.includes(`127.0.0.1:${guardrailPort}`) ||
-    url.includes(`localhost:${guardrailPort}`)
-  );
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!LOOPBACK_HOSTNAMES.has(parsed.hostname.toLowerCase())) return false;
+  // URL.port is "" for the protocol's default port. We never want a
+  // "default-port" loopback URL to count as already-proxied because
+  // the guardrail proxy never listens on 80/443 by accident.
+  if (!parsed.port) return false;
+  return parsed.port === String(guardrailPort);
+}
+
+/**
+ * Query parameter names that commonly carry secrets across LLM
+ * providers. The interceptor strips their values before logging /
+ * emitting telemetry. Compared case-insensitively so callers can
+ * register either casing.
+ *
+ * Known offenders:
+ *   - Gemini native: ?key=<api-key>
+ *   - Generic OpenAI-compatible proxies: ?api_key=, ?api-key=
+ *   - SAS-style URLs: ?token=, ?access_token=, ?sig=
+ *   - AWS pre-signed S3 URLs (referenced from Bedrock requests):
+ *     X-Amz-Signature, X-Amz-Security-Token
+ */
+const SECRET_QUERY_KEYS = new Set<string>([
+  "key",
+  "api_key",
+  "api-key",
+  "apikey",
+  "token",
+  "access_token",
+  "refresh_token",
+  "id_token",
+  "auth_token",
+  "auth",
+  "password",
+  "sig",
+  "signature",
+  "x-amz-signature",
+  "x-amz-security-token",
+  "x-amz-credential",
+]);
+
+const SECRET_REDACTION = "<redacted>";
+
+/**
+ * Strip userinfo and redact secret-bearing query parameters in place
+ * on a parsed URL. Returns the original input when parsing fails so
+ * callers never log a half-redacted string.
+ */
+function scrubUrlForLog(urlStr: string): string {
+  if (!urlStr) return urlStr;
+  let parsed: URL;
+  try {
+    parsed = new URL(urlStr);
+  } catch {
+    // Cannot parse -> just drop everything past the last "?" so we do
+    // not echo query secrets even if the URL is structurally wrong.
+    const q = urlStr.indexOf("?");
+    return q < 0 ? urlStr : `${urlStr.slice(0, q)}?<unparseable>`;
+  }
+  parsed.username = "";
+  parsed.password = "";
+  if (parsed.search) {
+    const params = parsed.searchParams;
+    const keys = Array.from(params.keys());
+    for (const k of keys) {
+      if (SECRET_QUERY_KEYS.has(k.toLowerCase())) {
+        params.set(k, SECRET_REDACTION);
+      }
+    }
+    // Re-encode through URLSearchParams to apply the redactions.
+    parsed.search = params.toString();
+  }
+  return parsed.toString();
+}
+
+/**
+ * Scrub a "/path?query" string (no scheme/host) the same way as a
+ * full URL. Used by egress telemetry which only forwards the
+ * path+query.
+ */
+function scrubPathForLog(pathWithQuery: string): string {
+  if (!pathWithQuery) return pathWithQuery;
+  const q = pathWithQuery.indexOf("?");
+  if (q < 0) return pathWithQuery;
+  // URLSearchParams accepts the bare query (without the leading "?").
+  const params = new URLSearchParams(pathWithQuery.slice(q + 1));
+  let mutated = false;
+  const keys = Array.from(params.keys());
+  for (const k of keys) {
+    if (SECRET_QUERY_KEYS.has(k.toLowerCase())) {
+      params.set(k, SECRET_REDACTION);
+      mutated = true;
+    }
+  }
+  if (!mutated) return pathWithQuery;
+  return `${pathWithQuery.slice(0, q)}?${params.toString()}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -335,6 +496,14 @@ export const LLM_PATH_SUFFIXES: ReadonlyArray<string> = [
   "/api/generate",
   "/responses",
   "/backend-api/codex/responses",
+  // Bedrock InvokeModel REST paths. The Go provider matcher catches
+  // bedrock-runtime.<region>.amazonaws.com via the trailing-dot
+  // prefix, but the TypeScript shape rail has to cover Bedrock SDKs
+  // that bypass the host registry too (DeepSec finding
+  // "Bedrock provider prefix is not matched by the TypeScript
+  // interceptor").
+  "/invoke",
+  "/invoke-with-response-stream",
 ];
 
 /** Top-level JSON body keys that identify an LLM request payload. */
@@ -744,6 +913,8 @@ export function createFetchInterceptor(
   const proxyBase = `http://127.0.0.1:${guardrailPort}`;
   let originalFetch: typeof globalThis.fetch | null = null;
   let originalHttpsRequest: typeof https.request | null = null;
+  let originalHttpRequest: typeof http.request | null = null;
+  let originalHttpGet: typeof http.get | null = null;
   let egressReporter: EgressReporter | null = null;
 
   // Extract { host, path } from a URL string without throwing. Missing
@@ -810,7 +981,7 @@ export function createFetchInterceptor(
         const hp = extractHostPath(urlStr);
         egressReporter?.report({
           targetHost: hp.host,
-          targetPath: hp.path,
+          targetPath: scrubPathForLog(hp.path),
           bodyShape,
           looksLikeLLM: bodyShape !== "none" || hasLLMPathSuffix(urlStr),
           branch: "passthrough",
@@ -850,13 +1021,20 @@ export function createFetchInterceptor(
           ? { method: input.method, body: input.body, headers }
           : { ...(init ?? {}), headers };
 
+      // Always log the SCRUBBED URL: the raw URL frequently carries
+      // Gemini-style ?key=<api-key> or other secret query parameters
+      // that the upstream LLM provider expects (DeepSec finding
+      // "Intercepted LLM URLs are logged with credential-bearing
+      // query strings"). The scrubbed copy preserves scheme, host,
+      // path and non-secret query parameters so logs remain useful.
+      const scrubbedUrl = scrubUrlForLog(urlStr);
       if (shapeBranch === "shape") {
         console.log(
-          `[defenseclaw] intercepted LLM-shaped call → ${urlStr} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
+          `[defenseclaw] intercepted LLM-shaped call → ${scrubbedUrl} (body_shape=${bodyShape}) proxied via ${proxyBase}`,
         );
       } else {
         console.log(
-          `[defenseclaw] intercepted LLM call → ${urlStr} proxied via ${proxyBase}`,
+          `[defenseclaw] intercepted LLM call → ${scrubbedUrl} proxied via ${proxyBase}`,
         );
       }
 
@@ -875,7 +1053,7 @@ export function createFetchInterceptor(
       const hp = extractHostPath(urlStr);
       egressReporter?.report({
         targetHost: hp.host,
-        targetPath: hp.path,
+        targetPath: scrubPathForLog(hp.path),
         bodyShape,
         looksLikeLLM: true,
         branch: shapeBranch === "shape" ? "shape" : "known",
@@ -889,26 +1067,34 @@ export function createFetchInterceptor(
     // Also patch https.request so axios, undici, and other non-fetch HTTP
     // clients are intercepted. All of them ultimately use node:https.request.
     originalHttpsRequest = https.request.bind(https);
-    const originalHttpRequest = http.request.bind(http);
+    originalHttpRequest = http.request.bind(http);
+    originalHttpGet = http.get.bind(http);
 
     type NodeRequestOptions = Record<string, unknown>;
     type NodeIncomingMessage = unknown;
     type NodeClientRequest = ReturnType<typeof http.request>;
 
     /**
-     * Normalize the varied `https.request` call shapes into a single URL string
-     * we can match against LLM provider domains. Callers may pass:
+     * Normalize the varied `https.request` / `http.request` call shapes
+     * into a single URL string we can match against LLM provider
+     * domains. Callers may pass:
      *   - request(url: string)
      *   - request(url: URL)
      *   - request(options)                   // { host|hostname, port, path, protocol }
      *   - request(url, options)              // URL first, then extra options
-     * @smithy/node-http-handler v4 passes an options object with `host` (NOT
-     * `hostname`), separate `port`, and separate `path`, so we must read both
-     * `host` and `hostname` and fold `path` back in to match on domain + path.
+     * @smithy/node-http-handler v4 passes an options object with `host`
+     * (NOT `hostname`), separate `port`, and separate `path`, so we must
+     * read both `host` and `hostname` and fold `path` back in to match
+     * on domain + path.
+     *
+     * defaultProtocol is the scheme to assume when neither the options
+     * nor the overlay carry one — "https:" for https.request callers,
+     * "http:" for http.request callers.
      */
     function buildUrlStringFromArgs(
       urlOrOptions: string | URL | NodeRequestOptions,
       secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+      defaultProtocol: string,
     ): string {
       if (typeof urlOrOptions === "string") return urlOrOptions;
       if (urlOrOptions instanceof URL) return urlOrOptions.toString();
@@ -940,11 +1126,25 @@ export function createFetchInterceptor(
       const proto =
         (typeof overlay.protocol === "string" && overlay.protocol) ||
         (typeof opts.protocol === "string" && opts.protocol) ||
-        "https:";
+        defaultProtocol;
 
       if (!host) return "";
       const hostPart = port ? `${host}:${port}` : host;
       return `${proto}//${hostPart}${path}`;
+    }
+
+    function buildHttpsUrlStringFromArgs(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+    ): string {
+      return buildUrlStringFromArgs(urlOrOptions, secondArg, "https:");
+    }
+
+    function buildHttpUrlStringFromArgs(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      secondArg: NodeRequestOptions | ((res: NodeIncomingMessage) => void) | undefined,
+    ): string {
+      return buildUrlStringFromArgs(urlOrOptions, secondArg, "http:");
     }
 
     function patchedHttpsRequest(
@@ -952,7 +1152,7 @@ export function createFetchInterceptor(
       optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
       callback?: (res: NodeIncomingMessage) => void,
     ): NodeClientRequest {
-      const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+      const urlStr = buildHttpsUrlStringFromArgs(urlOrOptions, optionsOrCallback);
 
       // Path-only shape detection for https.request — the body is
       // written via req.write after this call returns, so peeking is
@@ -1063,10 +1263,11 @@ export function createFetchInterceptor(
           agent: false,
         };
 
+        const scrubbedUrl = scrubUrlForLog(urlStr);
         if (!knownForHTTPS && shapedForHTTPS) {
-          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${urlStr} (path-match) proxied via ${proxyBase}`);
+          console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubbedUrl} (path-match) proxied via ${proxyBase}`);
         } else {
-          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${urlStr} proxied via ${proxyBase}`);
+          console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubbedUrl} proxied via ${proxyBase}`);
         }
         // Egress telemetry for the https.request branches. body_shape
         // is intentionally "none" because req.write happens after we
@@ -1075,7 +1276,7 @@ export function createFetchInterceptor(
           const hp = extractHostPath(urlStr);
           egressReporter?.report({
             targetHost: hp.host,
-            targetPath: hp.path,
+            targetPath: scrubPathForLog(hp.path),
             bodyShape: "none",
             looksLikeLLM: true,
             branch: !knownForHTTPS && shapedForHTTPS ? "shape" : "known",
@@ -1083,7 +1284,9 @@ export function createFetchInterceptor(
             reason: !knownForHTTPS && shapedForHTTPS ? "shape-match" : "known-provider",
           });
         }
-        return http.request(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+        // Use originalHttpRequest (the saved bound copy) for the proxy
+        // hop so we never recurse through our own patch on http.request.
+        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
       }
 
       // Non-intercepted https.request — report silent passthrough so
@@ -1094,7 +1297,7 @@ export function createFetchInterceptor(
         const hp = extractHostPath(urlStr);
         egressReporter?.report({
           targetHost: hp.host,
-          targetPath: hp.path,
+          targetPath: scrubPathForLog(hp.path),
           bodyShape: "none",
           looksLikeLLM: hasLLMPathSuffix(urlStr),
           branch: "passthrough",
@@ -1107,6 +1310,135 @@ export function createFetchInterceptor(
 
     https.request = patchedHttpsRequest as typeof https.request;
 
+    // Same shape/host/body-shape rails for plain http.request so a Node
+    // client that talks to Ollama (HTTP) or an HTTP-only LLM endpoint
+    // is intercepted instead of bypassing the guardrail entirely
+    // (DeepSec finding "Node http.request traffic is not intercepted").
+    // The wrapper preserves the existing parsed self-proxy exclusion
+    // so we never loop traffic that already targets 127.0.0.1:<guardrail>.
+    function patchedHttpRequest(
+      urlOrOptions: string | URL | NodeRequestOptions,
+      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+      callback?: (res: NodeIncomingMessage) => void,
+    ): NodeClientRequest {
+      const urlStr = buildHttpUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+
+      const shapedForHTTP = Boolean(
+        urlStr &&
+          !isKnownSafeDomain(urlStr) &&
+          !isAlreadyProxied(urlStr, guardrailPort) &&
+          hasLLMPathSuffix(urlStr),
+      );
+      const knownForHTTP = Boolean(
+        urlStr && isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort),
+      );
+
+      if (urlStr && (knownForHTTP || shapedForHTTP)) {
+        let opts: NodeRequestOptions = {};
+        let cb = callback;
+
+        if (typeof optionsOrCallback === "function") {
+          cb = optionsOrCallback;
+          opts = typeof urlOrOptions === "string" || urlOrOptions instanceof URL
+            ? {} : urlOrOptions as NodeRequestOptions;
+        } else if (optionsOrCallback && typeof optionsOrCallback === "object") {
+          opts = optionsOrCallback as NodeRequestOptions;
+        }
+
+        let originalUrl: URL;
+        try {
+          originalUrl = new URL(urlStr);
+        } catch {
+          return originalHttpRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+        }
+
+        const hdrs = opts.headers as Record<string, string> ?? {};
+        const providerKey = extractProviderKeyFromRecord(hdrs);
+        const proxyHdrs = buildProxyHeaders(
+          originalUrl.origin,
+          providerKey,
+          getCorrelationHeaders,
+        );
+
+        // We need to drop the caller's `host` (smithy-style) and any
+        // `agent` so Node uses the default http.Agent for the proxy
+        // hop. TLS-only options are irrelevant for http but we still
+        // strip them defensively to keep downstream Node versions
+        // happy.
+        const {
+          host: _legacyHost,
+          agent: _legacyAgent,
+          ...restOpts
+        } = opts as { host?: unknown; agent?: unknown } & Record<string, unknown>;
+        void _legacyHost;
+        void _legacyAgent;
+
+        const newOpts: NodeRequestOptions = {
+          ...restOpts,
+          hostname: "127.0.0.1",
+          port: guardrailPort,
+          protocol: "http:",
+          path: `${originalUrl.pathname}${originalUrl.search}`,
+          headers: { ...hdrs, ...proxyHdrs },
+          agent: false,
+        };
+
+        const scrubbedUrl = scrubUrlForLog(urlStr);
+        if (!knownForHTTP && shapedForHTTP) {
+          console.log(`[defenseclaw] intercepted LLM-shaped call (http.request) → ${scrubbedUrl} (path-match) proxied via ${proxyBase}`);
+        } else {
+          console.log(`[defenseclaw] intercepted LLM call (http.request) → ${scrubbedUrl} proxied via ${proxyBase}`);
+        }
+        {
+          const hp = extractHostPath(urlStr);
+          egressReporter?.report({
+            targetHost: hp.host,
+            targetPath: scrubPathForLog(hp.path),
+            bodyShape: "none",
+            looksLikeLLM: true,
+            branch: !knownForHTTP && shapedForHTTP ? "shape" : "known",
+            decision: "allow",
+            reason: !knownForHTTP && shapedForHTTP ? "shape-match" : "known-provider",
+          });
+        }
+        // Use the saved bound copy (originalHttpRequest) explicitly so
+        // we never recurse through our own patch when the proxy hop
+        // happens to look like a loopback URL.
+        return originalHttpRequest!(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+      }
+
+      if (urlStr) {
+        const hp = extractHostPath(urlStr);
+        egressReporter?.report({
+          targetHost: hp.host,
+          targetPath: scrubPathForLog(hp.path),
+          bodyShape: "none",
+          looksLikeLLM: hasLLMPathSuffix(urlStr),
+          branch: "passthrough",
+          decision: "allow",
+          reason: "no-match",
+        });
+      }
+      return originalHttpRequest!(urlOrOptions as string, optionsOrCallback as NodeRequestOptions, callback);
+    }
+
+    http.request = patchedHttpRequest as typeof http.request;
+    // http.get is just a thin convenience around http.request (it sets
+    // method=GET and immediately calls .end()). Re-implement on top of
+    // the patched request so a Node client using http.get to call
+    // Ollama also goes through the guardrail.
+    http.get = ((
+      urlOrOptions: string | URL | NodeRequestOptions,
+      optionsOrCallback?: NodeRequestOptions | ((res: NodeIncomingMessage) => void),
+      callback?: (res: NodeIncomingMessage) => void,
+    ): NodeClientRequest => {
+      const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback) as NodeClientRequest & {
+        end: () => void;
+      };
+      try { req.end(); } catch { /* noop -- caller handled */ }
+      return req;
+    }) as typeof http.get;
+
     console.log(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
@@ -1117,9 +1449,18 @@ export function createFetchInterceptor(
       globalThis.fetch = originalFetch;
       originalFetch = null;
     }
-    // Restore https.request (safe because we used CJS require, not frozen ESM)
+    // Restore https/http (safe because we used CJS require, not frozen ESM)
     if (originalHttpsRequest) {
       https.request = originalHttpsRequest;
+      originalHttpsRequest = null;
+    }
+    if (originalHttpRequest) {
+      http.request = originalHttpRequest;
+      originalHttpRequest = null;
+    }
+    if (originalHttpGet) {
+      http.get = originalHttpGet;
+      originalHttpGet = null;
     }
     if (egressReporter) {
       egressReporter.stop();

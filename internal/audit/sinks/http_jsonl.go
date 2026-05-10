@@ -102,7 +102,13 @@ func NewHTTPJSONLSink(cfg HTTPJSONLConfig) (*HTTPJSONLSink, error) {
 		done: make(chan struct{}),
 	}
 
-	if cfg.FlushIntervalS > 0 && cfg.BatchSize > 1 {
+	// DeepSec S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+	// deliveries"): the bounded-retry queue is now shared between
+	// batched and synchronous modes. The flush loop must run for every
+	// BatchSize so events queued by Forward (including BatchSize<=1)
+	// are retried in the background after a transient outage instead of
+	// sitting in s.batch forever waiting for the next Forward call.
+	if cfg.FlushIntervalS > 0 {
 		s.ticker = time.NewTicker(time.Duration(cfg.FlushIntervalS) * time.Second)
 		go s.flushLoop()
 	}
@@ -128,12 +134,14 @@ func (s *HTTPJSONLSink) Forward(ctx context.Context, e Event) error {
 	if !s.cfg.Filter.Matches(e) {
 		return nil
 	}
-	if s.cfg.BatchSize <= 1 {
-		// Synchronous mode: send each event immediately. Useful for
-		// low-volume audit pipelines that need real-time delivery.
-		return s.send(ctx, []Event{e})
-	}
 
+	// DeepSec S3.HIGH_BUG ("Default HTTP JSONL mode drops failed audit
+	// deliveries"): every event is now queued before any send attempt,
+	// regardless of BatchSize. The bounded-retry queue inside Flush is
+	// the single source of truth for retry semantics. The previous
+	// synchronous path (`return s.send(ctx, []Event{e})`) bypassed the
+	// queue entirely, so a single transient collector outage permanently
+	// dropped audit events from a SIEM/log-shipper pipeline.
 	s.mu.Lock()
 	s.batch = append(s.batch, e)
 	needsFlush := len(s.batch) >= s.cfg.BatchSize
@@ -264,6 +272,13 @@ func (s *HTTPJSONLSink) Close() error {
 	default:
 		close(s.done)
 	}
+	// Best-effort: try one final delivery of anything still queued so
+	// graceful shutdown does not silently drop in-flight audit events.
+	// The bounded-retry queue still applies; a failure leaves events
+	// in s.batch where the operator's Manager logs the loss.
+	flushCtx, cancel := context.WithTimeout(context.Background(), time.Duration(s.cfg.TimeoutS)*time.Second)
+	defer cancel()
+	_ = s.Flush(flushCtx)
 	return nil
 }
 

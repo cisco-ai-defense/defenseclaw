@@ -101,7 +101,13 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 			continue
 		}
 		if err := validateWebhookURL(c.URL); err != nil {
-			logger.Printf("rejected endpoint %s: %v", c.URL, err)
+			// DeepSec S2.MEDIUM ("Webhook URLs containing
+			// credentials are logged verbatim"): even on
+			// validation failure the raw URL must not hit
+			// stderr; webhook URLs (Slack/Discord style) can
+			// embed bearer tokens in the path or query.
+			logger.Printf("rejected endpoint %s [%s]: %v",
+				scrubURLSecrets(c.URL), hashWebhookTargetURL(c.URL), err)
 			continue
 		}
 		evts := make(map[string]bool)
@@ -138,14 +144,51 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 	}
 	return &WebhookDispatcher{
 		endpoints: endpoints,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		// DeepSec S2.MEDIUM ("Webhook SSRF validation is bypassable
+		// by redirects or DNS changes"): the legacy http.Client used
+		// the default Transport (which re-resolves DNS at dial time)
+		// and the default redirect policy (which follows arbitrary
+		// 30x targets). validateWebhookURL only inspected the host
+		// at configuration time, so an attacker who could (a) flip
+		// DNS for a previously-public webhook host or (b) return a
+		// 30x redirect to http://169.254.169.254 / http://127.0.0.1
+		// could re-aim delivery at internal/cloud-metadata services.
+		//
+		// The hardened client uses ssrfSafeDialContext to refuse any
+		// dial whose resolved IP is loopback / private / link-local /
+		// metadata, and disables redirects entirely so the connection
+		// always terminates at the validated host.
+		client: newWebhookHTTPClient(30 * time.Second),
 		retryBackoff: webhookRetryBackoff,
 		sem:          make(chan struct{}, webhookMaxConcurrency),
 		logger:       logger,
 		debug:        os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
 		done:         make(chan struct{}),
+	}
+}
+
+// newWebhookHTTPClient builds an http.Client whose transport refuses
+// to dial private/loopback/link-local destinations and whose redirect
+// policy refuses any 30x.
+//
+// When the operator has explicitly opted into local-development
+// testing via DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 (the same env
+// switch that validateWebhookURL honours for config-time acceptance
+// of localhost/loopback hosts), the dial-time guard is relaxed to
+// match — otherwise webhook delivery to a localhost mock would be
+// rejected after passing config validation, which is incoherent.
+// Production deployments keep both guards active by default.
+func newWebhookHTTPClient(timeout time.Duration) *http.Client {
+	dial := ssrfSafeDialContext
+	if os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1" {
+		dial = (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext: dial,
+		},
+		CheckRedirect: ssrfSafeCheckRedirect,
 	}
 }
 
@@ -214,8 +257,15 @@ func (d *WebhookDispatcher) Dispatch(event audit.Event) {
 		}
 		cooldownKey := event.Target + "\x00" + action
 		if !ep.claimSlot(cooldownKey) {
-			d.logger.Printf("suppressed duplicate %s/%s for %s (cooldown %s)",
-				event.Target, action, ep.url, ep.cooldown)
+			// DeepSec S2.MEDIUM ("Webhook URLs containing
+			// credentials are logged verbatim"): log the
+			// stable target hash + scrubbed URL instead of
+			// the raw URL so Slack/Discord-style path tokens
+			// and userinfo never leak into stderr.
+			d.logger.Printf("suppressed duplicate %s/%s for %s [%s] (cooldown %s)",
+				event.Target, action,
+				scrubURLSecrets(ep.url), hashWebhookTargetURL(ep.url),
+				ep.cooldown)
 			ctx := context.Background()
 			tHash := hashWebhookTargetURL(ep.url)
 			if d.otel != nil {
@@ -388,8 +438,14 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 	default:
 		payload, err = formatGenericPayload(event)
 	}
+	// DeepSec S2.MEDIUM ("Webhook URLs containing credentials are
+	// logged verbatim"): bind a stable hash + scrubbed URL once and
+	// reuse them across every per-attempt log line. Slack/Discord
+	// path tokens, query secrets, and userinfo never reach stderr.
+	urlHash := hashWebhookTargetURL(ep.url)
+	urlSafe := scrubURLSecrets(ep.url)
 	if err != nil {
-		d.logger.Printf("format error for %s: %v", ep.url, err)
+		d.logger.Printf("format error for %s [%s]: %v", urlSafe, urlHash, err)
 		record(0, 0, "failed")
 		ep.noteWebhookFailure(d, targetHash)
 		return false
@@ -408,7 +464,7 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, ep.url, bytes.NewReader(payload))
 		if reqErr != nil {
 			cancel()
-			d.logger.Printf("request error for %s: %v", ep.url, reqErr)
+			d.logger.Printf("request error for %s [%s]: %v", urlSafe, urlHash, reqErr)
 			lastStatus = 0
 			continue
 		}
@@ -418,8 +474,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		resp, doErr := d.client.Do(req)
 		cancel()
 		if doErr != nil {
-			d.logger.Printf("send to %s attempt %d/%d failed: %v",
-				ep.url, attempt+1, webhookMaxRetries+1, doErr)
+			d.logger.Printf("send to %s [%s] attempt %d/%d failed: %v",
+				urlSafe, urlHash, attempt+1, webhookMaxRetries+1, doErr)
 			lastStatus = 0
 			continue
 		}
@@ -430,8 +486,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			ms := time.Since(start).Milliseconds()
 			if d.debug {
-				d.logger.Printf("sent to %s (status=%d action=%s severity=%s)",
-					ep.url, resp.StatusCode, event.Action, event.Severity)
+				d.logger.Printf("sent to %s [%s] (status=%d action=%s severity=%s)",
+					urlSafe, urlHash, resp.StatusCode, event.Action, event.Severity)
 			}
 			record(resp.StatusCode, float64(ms), "delivered")
 			ep.noteWebhookSuccess(d, targetHash)
@@ -439,8 +495,8 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 		}
 
 		if !isRetryable(resp.StatusCode) {
-			d.logger.Printf("%s returned %d (permanent failure), not retrying",
-				ep.url, resp.StatusCode)
+			d.logger.Printf("%s [%s] returned %d (permanent failure), not retrying",
+				urlSafe, urlHash, resp.StatusCode)
 			ms := time.Since(start).Milliseconds()
 			record(lastStatus, float64(ms), "failed")
 			ep.noteWebhookFailure(d, targetHash)
@@ -456,10 +512,10 @@ func (d *WebhookDispatcher) send(ep *webhookEndpoint, event audit.Event) bool {
 			}
 		}
 
-		d.logger.Printf("%s returned %d, attempt %d/%d",
-			ep.url, resp.StatusCode, attempt+1, webhookMaxRetries+1)
+		d.logger.Printf("%s [%s] returned %d, attempt %d/%d",
+			urlSafe, urlHash, resp.StatusCode, attempt+1, webhookMaxRetries+1)
 	}
-	d.logger.Printf("exhausted retries for %s", ep.url)
+	d.logger.Printf("exhausted retries for %s [%s]", urlSafe, urlHash)
 	ms := time.Since(start).Milliseconds()
 	record(lastStatus, float64(ms), "failed")
 	ep.noteWebhookFailure(d, targetHash)

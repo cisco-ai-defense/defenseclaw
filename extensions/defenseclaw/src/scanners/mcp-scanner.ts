@@ -57,6 +57,11 @@ const SUSPICIOUS_ARG_PATTERNS = [
   { pattern: /--disable-security/i, title: "MCP server disables security controls" },
 ];
 
+interface MCPLoadResult {
+  configs: MCPServerConfig[];
+  parseErrors: { path: string; reason: string }[];
+}
+
 export async function scanMCPServer(
   configPathOrDir: string,
 ): Promise<ScanResult> {
@@ -64,11 +69,45 @@ export async function scanMCPServer(
   const target = resolve(configPathOrDir);
   const findings: Finding[] = [];
 
-  const configs = await loadMCPConfigs(target);
+  const { configs, parseErrors } = await loadMCPConfigs(target);
 
-  if (configs.length === 0) {
+  // DeepSec hardening (S3.HIGH_BUG, "Unreadable or malformed MCP
+  // configs are treated as no configuration"): every parse / read
+  // failure that previously was swallowed (returned []) MUST now
+  // surface as a real scanner finding. Severity HIGH so admission
+  // policies that block on HIGH (the default profile and stricter)
+  // refuse to admit the install instead of silently classifying
+  // the target as clean / "No MCP configurations found". An
+  // additional admission-side defence already exists from
+  // stage 2 (scanners fail closed on non-zero exit), but TS
+  // scanners run inside the Node host and cannot rely on a
+  // subprocess exit code, so the parse-error finding IS the
+  // signal admission consumes.
+  for (const err of parseErrors) {
     findings.push(
-      makeFinding(1, "INFO", "No MCP server configurations found", {
+      makeFinding(
+        findings.length + 1,
+        "HIGH",
+        `MCP config parse error: ${err.path.split("/").pop() ?? err.path}`,
+        {
+          description:
+            `Failed to read or parse MCP config "${err.path}": ${err.reason}. ` +
+            "An unparseable config means the scanner cannot inspect the " +
+            "server registration the runtime will actually load. The " +
+            "admission policy treats this as a scanner failure and refuses " +
+            "to admit the target.",
+          location: err.path,
+          remediation:
+            "Fix the YAML/JSON syntax, repair file permissions, or remove " +
+            "the unreadable file from the MCP config directory.",
+        },
+      ),
+    );
+  }
+
+  if (configs.length === 0 && parseErrors.length === 0) {
+    findings.push(
+      makeFinding(findings.length + 1, "INFO", "No MCP server configurations found", {
         description: `No MCP server configs found at "${target}".`,
         location: target,
       }),
@@ -83,15 +122,17 @@ export async function scanMCPServer(
   return buildResult(target, findings, start);
 }
 
-async function loadMCPConfigs(target: string): Promise<MCPServerConfig[]> {
+async function loadMCPConfigs(target: string): Promise<MCPLoadResult> {
   const configs: MCPServerConfig[] = [];
+  const parseErrors: { path: string; reason: string }[] = [];
 
   try {
     const info = await stat(target);
 
     if (info.isFile()) {
-      const parsed = await parseConfigFile(target);
-      configs.push(...parsed);
+      const result = await parseConfigFile(target);
+      configs.push(...result.configs);
+      if (result.error) parseErrors.push({ path: target, reason: result.error });
     } else if (info.isDirectory()) {
       const entries = await readdir(target);
       for (const entry of entries) {
@@ -99,18 +140,30 @@ async function loadMCPConfigs(target: string): Promise<MCPServerConfig[]> {
           continue;
 
         const fullPath = join(target, entry);
-        const parsed = await parseConfigFile(fullPath);
-        configs.push(...parsed);
+        const result = await parseConfigFile(fullPath);
+        configs.push(...result.configs);
+        if (result.error) parseErrors.push({ path: fullPath, reason: result.error });
       }
     }
-  } catch {
-    return configs;
+  } catch (err) {
+    // stat / readdir failure on the target itself is itself a
+    // scanner failure -- record it instead of silently returning
+    // an empty config set so admission can fail closed.
+    parseErrors.push({
+      path: target,
+      reason: err instanceof Error ? err.message : String(err),
+    });
   }
 
-  return configs;
+  return { configs, parseErrors };
 }
 
-async function parseConfigFile(filePath: string): Promise<MCPServerConfig[]> {
+interface ParseResult {
+  configs: MCPServerConfig[];
+  error?: string;
+}
+
+async function parseConfigFile(filePath: string): Promise<ParseResult> {
   try {
     const raw = await readFile(filePath, "utf-8");
     let parsed: Record<string, unknown>;
@@ -124,9 +177,12 @@ async function parseConfigFile(filePath: string): Promise<MCPServerConfig[]> {
     } else {
       parsed = JSON.parse(raw) as Record<string, unknown>;
     }
-    return extractMCPServers(parsed, filePath);
-  } catch {
-    return [];
+    return { configs: extractMCPServers(parsed, filePath) };
+  } catch (err) {
+    return {
+      configs: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -285,6 +341,61 @@ function checkEnvVars(
   }
 }
 
+/**
+ * Detect IPs / hostnames that point at private, loopback, link-local,
+ * or cloud metadata destinations. DeepSec S2.MEDIUM ("Private and
+ * metadata MCP URLs over HTTPS are accepted without findings"): the
+ * legacy check only reasoned about `protocol === "https:"`, so any
+ * https://10.0.0.5, https://169.254.169.254, etc. slipped through.
+ */
+function classifyMCPHost(hostname: string): "loopback" | "private" | "metadata" | "public" {
+  const host = hostname.toLowerCase();
+  if (
+    host === "localhost" ||
+    host === "ip6-localhost" ||
+    host === "ip6-loopback" ||
+    host.endsWith(".localhost")
+  ) {
+    return "loopback";
+  }
+
+  // IPv4 metadata endpoints used by AWS / GCP / Azure / Oracle / DO.
+  if (
+    host === "169.254.169.254" ||
+    host === "metadata.google.internal" ||
+    host === "fd00:ec2::254"
+  ) {
+    return "metadata";
+  }
+
+  // IPv4 dotted-quad classification.
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const oct = v4.slice(1, 5).map((s) => Number(s));
+    if (oct.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return "public";
+    const [a, b] = oct;
+    if (a === 127) return "loopback";
+    if (a === 10) return "private";
+    if (a === 172 && b >= 16 && b <= 31) return "private";
+    if (a === 192 && b === 168) return "private";
+    if (a === 169 && b === 254) return "private"; // link-local
+    if (a === 0) return "private"; // unspecified
+    return "public";
+  }
+
+  // IPv6 literals (RFC3986 bracket-stripped).
+  const stripped = host.startsWith("[") && host.endsWith("]")
+    ? host.slice(1, -1)
+    : host;
+  if (stripped === "::1" || stripped === "0:0:0:0:0:0:0:1") return "loopback";
+  if (stripped === "::" || stripped === "0:0:0:0:0:0:0:0") return "private";
+  if (stripped.startsWith("fc") || stripped.startsWith("fd")) return "private"; // ULA fc00::/7
+  if (stripped.startsWith("fe80:")) return "private"; // link-local
+  if (stripped.startsWith("::ffff:127.")) return "loopback"; // IPv4-mapped loopback
+
+  return "public";
+}
+
 function checkTransport(
   config: MCPServerConfig,
   findings: Finding[],
@@ -313,10 +424,75 @@ function checkTransport(
         );
       }
 
+      // DeepSec S2.MEDIUM ("Private and metadata MCP URLs over HTTPS
+      // are accepted without findings"): classify the host regardless
+      // of scheme so https://127.0.0.1, https://10.0.0.5,
+      // https://169.254.169.254, etc. are all flagged. The legacy
+      // "remote over HTTP" finding stays for plain-http remote
+      // endpoints.
+      const hostClass = classifyMCPHost(url.hostname);
+      if (hostClass === "metadata") {
+        findings.push(
+          makeFinding(
+            findings.length + 1,
+            "CRITICAL",
+            `MCP server "${config.name}" targets a cloud metadata endpoint`,
+            {
+              description:
+                `Server "${config.name}" points at metadata host "${url.hostname}". ` +
+                "Cloud metadata endpoints expose IAM credentials and host " +
+                "configuration; an MCP server connecting there can " +
+                "exfiltrate cloud secrets through tool calls.",
+              location: `${target} → mcp:${config.name}`,
+              remediation:
+                "Remove the metadata-host MCP entry. If the workload genuinely " +
+                "needs to read metadata, do it from a vetted server-side helper " +
+                "rather than expose it to an MCP client.",
+            },
+          ),
+        );
+      } else if (hostClass === "loopback") {
+        findings.push(
+          makeFinding(
+            findings.length + 1,
+            "MEDIUM",
+            `MCP server "${config.name}" targets a loopback host`,
+            {
+              description:
+                `Server "${config.name}" connects to loopback host "${url.hostname}". ` +
+                "Loopback MCP endpoints can be used to reach unauthenticated " +
+                "developer tooling running on the same host. Confirm that " +
+                "exposing this service to the agent is intentional.",
+              location: `${target} → mcp:${config.name}`,
+              remediation:
+                "Prefer stdio transport for local MCP servers, or pin to a " +
+                "trusted UNIX socket. Document the local-only intent.",
+            },
+          ),
+        );
+      } else if (hostClass === "private") {
+        findings.push(
+          makeFinding(
+            findings.length + 1,
+            "HIGH",
+            `MCP server "${config.name}" targets a private/link-local host`,
+            {
+              description:
+                `Server "${config.name}" connects to private host "${url.hostname}". ` +
+                "Private-range MCP endpoints can reach internal services " +
+                "(databases, admin panels, link-local self-targets) that " +
+                "should not normally be exposed to an agent.",
+              location: `${target} → mcp:${config.name}`,
+              remediation:
+                "Use a public, authenticated MCP endpoint or restrict the " +
+                "internal service with an explicit allow-list.",
+            },
+          ),
+        );
+      }
+
       if (
-        url.hostname !== "localhost" &&
-        url.hostname !== "127.0.0.1" &&
-        url.hostname !== "::1" &&
+        hostClass === "public" &&
         url.protocol !== "https:"
       ) {
         findings.push(
@@ -330,6 +506,27 @@ function checkTransport(
                 "This exposes all MCP traffic to interception.",
               location: `${target} → mcp:${config.name}`,
               remediation: "Use HTTPS for all remote MCP connections.",
+            },
+          ),
+        );
+      }
+
+      if (url.username || url.password) {
+        findings.push(
+          makeFinding(
+            findings.length + 1,
+            "HIGH",
+            `MCP server "${config.name}" embeds inline credentials in URL`,
+            {
+              description:
+                `Server "${config.name}" URL "${config.url}" carries inline ` +
+                "userinfo. URLs end up in browser history, proxy logs, " +
+                "process listings, and crash reports; embedded passwords " +
+                "are considered compromised.",
+              location: `${target} → mcp:${config.name}`,
+              remediation:
+                "Move the credential into the server's auth configuration " +
+                "(env vars, keyring, or an Authorization header).",
             },
           ),
         );

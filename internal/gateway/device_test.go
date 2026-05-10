@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -117,6 +118,113 @@ func TestRepairPairing(t *testing.T) {
 			t.Error("sidecar device entry not added")
 		}
 	})
+}
+
+// TestRepairPairing_FailsClosedOnCorruptPairedJSON is the regression
+// for DeepSec S3.HIGH_BUG ("RepairPairing can erase unrelated paired
+// devices"). Before the fix, json.Unmarshal errors on paired.json were
+// silently swallowed, the in-memory map was treated as empty, and the
+// subsequent rewrite ERASED every other paired device. The hardened
+// version refuses to overwrite, snapshots the corrupt bytes for
+// forensics, and returns an error to the caller.
+func TestRepairPairing_FailsClosedOnCorruptPairedJSON(t *testing.T) {
+	device, err := LoadOrCreateIdentity(filepath.Join(t.TempDir(), "device.key"))
+	if err != nil {
+		t.Fatalf("create identity: %v", err)
+	}
+
+	home := t.TempDir()
+	devicesDir := filepath.Join(home, ".openclaw", "devices")
+	if err := os.MkdirAll(devicesDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	pairedPath := filepath.Join(devicesDir, "paired.json")
+	original := []byte(`{"paired-but-truncated`)
+	if err := os.WriteFile(pairedPath, original, 0o600); err != nil {
+		t.Fatalf("seed corrupt paired.json: %v", err)
+	}
+
+	if err := device.RepairPairing(home); err == nil {
+		t.Fatal("RepairPairing must fail closed on unparseable paired.json (DeepSec)")
+	}
+
+	// The original bytes MUST remain intact -- the previous code path
+	// would have wiped the file. The byte-for-byte preservation is
+	// what protects existing pairings from being silently destroyed.
+	got, err := os.ReadFile(pairedPath)
+	if err != nil {
+		t.Fatalf("read paired.json: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("paired.json contents changed after fail-closed RepairPairing\noriginal: %s\ngot:      %s",
+			original, got)
+	}
+
+	// A snapshot of the corrupt bytes MUST exist beside the original
+	// so the operator can recover or post-mortem.
+	entries, err := os.ReadDir(devicesDir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	foundBackup := false
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// paired.json.corrupt.<unix-nanos>
+		if strings.HasPrefix(e.Name(), "paired.json.corrupt.") {
+			foundBackup = true
+			b, err := os.ReadFile(filepath.Join(devicesDir, e.Name()))
+			if err != nil {
+				t.Fatalf("read backup: %v", err)
+			}
+			if string(b) != string(original) {
+				t.Fatalf("backup contents differ from original\nwant: %s\ngot:  %s", original, b)
+			}
+			info, err := os.Stat(filepath.Join(devicesDir, e.Name()))
+			if err != nil {
+				t.Fatalf("stat backup: %v", err)
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Errorf("backup perm = %v, want 0600", info.Mode().Perm())
+			}
+		}
+	}
+	if !foundBackup {
+		t.Fatal("expected a paired.json.corrupt.<ts> backup to be present (DeepSec forensics)")
+	}
+}
+
+// TestRepairPairing_AtomicWriteAndPerms covers the second half of the
+// DeepSec recommendation: writes go through a same-directory temp +
+// rename so a crash cannot leave a half-written file, and the final
+// file is 0600 (no longer world-readable 0644).
+func TestRepairPairing_AtomicWriteAndPerms(t *testing.T) {
+	device, err := LoadOrCreateIdentity(filepath.Join(t.TempDir(), "device.key"))
+	if err != nil {
+		t.Fatalf("create identity: %v", err)
+	}
+	home := t.TempDir()
+
+	if err := device.RepairPairing(home); err != nil {
+		t.Fatalf("repair pairing: %v", err)
+	}
+	pairedPath := filepath.Join(home, ".openclaw", "devices", "paired.json")
+	info, err := os.Stat(pairedPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("paired.json perm = %v, want 0600 (no longer world-readable)", info.Mode().Perm())
+	}
+
+	// No temp-file remnants beside the destination.
+	entries, _ := os.ReadDir(filepath.Dir(pairedPath))
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".paired.json.tmp-") {
+			t.Errorf("leftover temp file %s -- atomic write did not clean up", e.Name())
+		}
+	}
 }
 
 func TestIsAuthError(t *testing.T) {

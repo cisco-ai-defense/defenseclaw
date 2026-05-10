@@ -3,6 +3,9 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -295,12 +298,119 @@ func compositeModelForUpstream(urlInferredPrefix string, bodyModel string) strin
 // providerHTTPClient is used for passthrough upstream requests in the proxy.
 // No client-level Timeout is set because each call site passes a
 // context.WithTimeout — a client-level timeout would race with that.
+//
+// DeepSec hardening (S2.proxy SSRF):
+//
+//   - DialContext resolves the destination hostname and refuses any
+//     attempt to connect to a loopback / private / link-local /
+//     unspecified address. This closes the SSRF gap where a known
+//     provider's hostname is CNAME'd or DNS-rebound to point at
+//     169.254.169.254 (cloud IMDS) or 127.0.0.1 (gateway loopback)
+//     between the application-level isPrivateHost check in
+//     handlePassthrough and the actual TCP connect.
+//   - CheckRedirect rejects any 3xx that lands on a private host (the
+//     server's Location header is otherwise opaque to the proxy and
+//     the default Go client would happily follow it). Redirects to
+//     other public hosts are also limited to the http/https schemes
+//     and a depth of 5.
 var providerHTTPClient = &http.Client{
 	Transport: &http.Transport{
 		MaxIdleConns:        20,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
+		DialContext:         ssrfSafeDialContext,
 	},
+	CheckRedirect: ssrfSafeCheckRedirect,
+}
+
+// errPrivateHost is returned by ssrfSafeDialContext when the
+// destination resolves to a non-public address. Distinct error type
+// makes it greppable in logs and enables higher-level handlers to
+// translate it into a uniform 502/badgateway response.
+var errPrivateHost = errors.New("ssrf: refusing to dial private/link-local/loopback address")
+
+// ssrfSafeDialContext is the providerHTTPClient.Transport.DialContext.
+// It resolves the host portion of `addr`, refuses any resolved
+// address that is loopback / private / link-local / unspecified, and
+// dials the first remaining public IP. The pin-and-dial pattern means
+// a DNS-rebinding attack that returns one public + one private answer
+// is caught: we either dial the public IP we picked OR fail closed.
+//
+// Test bypass: when passthroughAllowPrivateForTest is true (set
+// only by the in-tree newTestProxy helper for legacy fixtures that
+// point httptest servers at 127.0.0.1), the private-IP refusal is
+// skipped. The dedicated SSRF tests rely on the application-level
+// branch check inside handlePassthrough (which is not subject to the
+// bypass for the shape/passthrough branches), so this hook is safe.
+func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("ssrf-dial: parse addr %q: %w", addr, err)
+	}
+
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+
+	// IP literal: validate directly.
+	if ip := net.ParseIP(host); ip != nil {
+		if !passthroughAllowPrivateForTest && isUnsafeIP(ip) {
+			return nil, fmt.Errorf("%w: %s", errPrivateHost, ip.String())
+		}
+		return dialer.DialContext(ctx, network, addr)
+	}
+
+	// Hostname: resolve and pin to the first public address.
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("ssrf-dial: resolve %s: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("ssrf-dial: %s did not resolve", host)
+	}
+	if !passthroughAllowPrivateForTest {
+		for _, a := range addrs {
+			if isUnsafeIP(a.IP) {
+				return nil, fmt.Errorf("%w: %s -> %s", errPrivateHost, host, a.IP.String())
+			}
+		}
+	}
+	pinned := net.JoinHostPort(addrs[0].IP.String(), port)
+	return dialer.DialContext(ctx, network, pinned)
+}
+
+// isUnsafeIP returns true for any address class we never want the
+// proxy to dial: loopback, RFC1918 private, link-local (incl. cloud
+// IMDS 169.254.0.0/16), unspecified (0.0.0.0/::).
+func isUnsafeIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+}
+
+// ssrfSafeCheckRedirect rejects redirects to non-http/https schemes or
+// to private hosts. Caps depth at 5 (Go's default is 10, which is too
+// generous for a programmatic API client; LLM providers typically
+// require zero or one redirects).
+func ssrfSafeCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) > 5 {
+		return errors.New("ssrf-redirect: too many redirects")
+	}
+	if req.URL == nil {
+		return errors.New("ssrf-redirect: missing URL")
+	}
+	scheme := strings.ToLower(req.URL.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("ssrf-redirect: refusing scheme %q", scheme)
+	}
+	host := req.URL.Hostname()
+	if host == "" {
+		return errors.New("ssrf-redirect: missing host")
+	}
+	if isPrivateHost(host) {
+		return fmt.Errorf("ssrf-redirect: refusing private host %s", host)
+	}
+	return nil
 }
 
 // ResolveAPIKey reads the API key from the named environment variable,

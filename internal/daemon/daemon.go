@@ -33,6 +33,15 @@ const (
 	PIDFileName = "gateway.pid"
 	LogFileName = "gateway.log"
 	EnvDaemon   = "DEFENSECLAW_DAEMON"
+	// EnvDataDir is set by Daemon.Start in the spawned child's
+	// environment so killStaleProcesses can verify that a candidate
+	// process belongs to THIS data directory before signalling it.
+	// Required for the DeepSec S3.HIGH_BUG fix
+	// "killStaleProcesses can terminate unrelated processes": without
+	// a per-data-dir marker, two legitimate DefenseClaw daemons
+	// running from different profiles cannot tell each other apart by
+	// executable name alone.
+	EnvDataDir = "DEFENSECLAW_DATA_DIR"
 )
 
 var (
@@ -138,6 +147,41 @@ func (d *Daemon) verifyProcessDarwin(info pidInfo) bool {
 	return true
 }
 
+// stripTokenArgs removes any --token / -token argv pairs (both the
+// `--token <value>` two-arg form and the `--token=<value>` one-arg
+// form) from args. The matching is case-insensitive and applies to
+// both the single- and double-dash spellings since cobra accepts
+// both. This is a defence-in-depth helper used by Daemon.Start to
+// guarantee the gateway token never leaks into the long-lived child
+// process command line, regardless of how the caller assembled the
+// argv slice. Tested in daemon_test.go::TestStripTokenArgs.
+func stripTokenArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	skipNext := false
+	for _, a := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		lower := strings.ToLower(a)
+		if lower == "--token" || lower == "-token" {
+			// Eat the flag and its value (if any). If the user
+			// passed a bare `--token` with no follow-up, no value
+			// gets eaten and the loop just continues.
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(lower, "--token=") || strings.HasPrefix(lower, "-token=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func processExecutableDarwin(pid int) (string, error) {
 	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
 	if err != nil {
@@ -179,7 +223,30 @@ func (d *Daemon) Start(args []string) (int, error) {
 		return 0, fmt.Errorf("daemon: open /dev/null: %w", err)
 	}
 
-	env := append(os.Environ(), EnvDaemon+"=1")
+	// Defensive scrub: strip any --token / --token=<secret> argv pairs
+	// before exec'ing the long-lived child. Even though
+	// `internal/cli/daemon.go::collectDaemonArgs` no longer emits
+	// these, we strip them here too so any future caller (or stale
+	// systemd unit, supervisord script, etc.) cannot regress and
+	// leave the gateway token visible via `ps` / /proc/<pid>/cmdline
+	// for the lifetime of the daemon. See DeepSec finding "daemon
+	// start propagates gateway token on the child process command
+	// line".
+	args = stripTokenArgs(args)
+
+	// Strip any inherited DEFENSECLAW_DATA_DIR before re-setting so a
+	// caller that already had it in their environment cannot trick the
+	// child into recording a different data dir than the daemon
+	// actually uses.
+	parentEnv := os.Environ()
+	cleanEnv := make([]string, 0, len(parentEnv)+2)
+	for _, kv := range parentEnv {
+		if strings.HasPrefix(kv, EnvDataDir+"=") || strings.HasPrefix(kv, EnvDaemon+"=") {
+			continue
+		}
+		cleanEnv = append(cleanEnv, kv)
+	}
+	env := append(cleanEnv, EnvDaemon+"=1", EnvDataDir+"="+d.dataDir)
 	cmd := exec.Command(executable, args...)
 	cmd.Env = env
 	cmd.Stdin = devNull

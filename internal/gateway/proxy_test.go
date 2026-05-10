@@ -153,6 +153,18 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 	store, logger := testStoreAndLogger(t)
 	health := NewSidecarHealth()
 
+	// DeepSec hardening (S2.proxy SSRF): handlePassthrough now
+	// hard-blocks any upstream that resolves to a private/loopback
+	// address, including the "known" provider branch. Legacy fixtures
+	// in this file simulate "known providers" by appending "127.0.0.1"
+	// to providerDomains and pointing httptest servers there; flip
+	// the test-only known-branch bypass for them. The dedicated
+	// TestHandlePassthrough_SSRFHardening test bench still routes
+	// private-IP X-DC-Target-URL values through the "shape" branch,
+	// which is NOT subject to this bypass.
+	passthroughAllowPrivateForTest = true
+	t.Cleanup(func() { passthroughAllowPrivateForTest = false })
+
 	p := &GuardrailProxy{
 		cfg:       cfg,
 		logger:    logger,
@@ -2660,8 +2672,14 @@ func TestHandlePassthrough_SSRFHardening(t *testing.T) {
 		{"private 172.16.x.x", "http://172.16.0.1:9200/elasticsearch", http.StatusForbidden},
 		{"private 192.168.x.x", "http://192.168.1.1/admin", http.StatusForbidden},
 		{"link-local", "http://169.254.169.254/latest/meta-data/", http.StatusForbidden},
-		{"file protocol blocked", "file:///etc/passwd", http.StatusForbidden},
-		{"ftp protocol blocked", "ftp://evil.com/exfil", http.StatusForbidden},
+		// file:// and ftp:// are now rejected at the X-DC-Target-URL
+		// validation gate (DeepSec hardening) before branch
+		// classification, returning 400 ("scheme must be http or
+		// https") rather than the legacy 403 ("unknown domain"). Both
+		// are equally good security signals; updated expectation
+		// reflects the upstream rejection layer.
+		{"file protocol blocked", "file:///etc/passwd", http.StatusBadRequest},
+		{"ftp protocol blocked", "ftp://evil.com/exfil", http.StatusBadRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

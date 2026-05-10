@@ -238,6 +238,98 @@ func TestScan_NonexistentPath(t *testing.T) {
 	}
 }
 
+// TestScan_OversizeLineSurfacedAsScanError is the regression for
+// DeepSec finding "codeguard scan silently skips files when a line
+// exceeds the default bufio.Scanner buffer". Before the fix, an
+// attacker could hide a hard-coded private key, AKIA key, or other
+// secret by emitting it on a single line longer than the 64 KiB
+// default buffer -- bufio.Scanner stopped early, scanFileWithRules
+// returned bufio.ErrTooLong, and the parent loop swallowed the error
+// with `if err != nil { continue }`, producing zero findings. The
+// hardened scanner uses a 16 MiB buffer (so ordinary minified
+// JS / vendored lockfiles still scan cleanly) and surfaces any
+// remaining read error as a CG-SCAN-001 MEDIUM finding so the
+// operator and policy engine see that the file was incompletely
+// scanned and cannot be silently bypassed.
+func TestScan_OversizeLineSurfacedAsScanError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "obfuscated.js")
+
+	// Build a single line that is well above the old 64 KiB default
+	// AND above our 16 MiB ceiling so we can verify the scan-error
+	// finding is emitted instead of silently swallowed.
+	const lineSize = codeguardScanMaxBuf + 1024 // 16 MiB + 1 KiB
+	payload := make([]byte, 0, lineSize+64)
+	payload = append(payload, []byte("var leak = \"")...)
+	for len(payload) < lineSize {
+		payload = append(payload, 'A')
+	}
+	payload = append(payload, []byte("\"; AKIA0123456789ABCDEF\n")...)
+
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := NewCodeGuardScanner("")
+	result, err := cg.Scan(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+
+	var sawScanErr bool
+	for _, f := range result.Findings {
+		if f.ID == "CG-SCAN-001" {
+			sawScanErr = true
+			if f.Severity != SeverityMedium {
+				t.Errorf("CG-SCAN-001 severity = %s, want MEDIUM", f.Severity)
+			}
+			if f.Location != path {
+				t.Errorf("CG-SCAN-001 location = %s, want %s", f.Location, path)
+			}
+			break
+		}
+	}
+	if !sawScanErr {
+		ids := make([]string, len(result.Findings))
+		for i, f := range result.Findings {
+			ids[i] = f.ID
+		}
+		t.Fatalf("expected CG-SCAN-001 scan-error finding, got %v", ids)
+	}
+}
+
+// TestScan_LargeButValidLineStillScans verifies that non-adversarial
+// large inputs (e.g. a 1 MiB minified bundle) are still fully
+// scanned. The 16 MiB ceiling keeps memory bounded while tolerating
+// realistic content sizes.
+func TestScan_LargeButValidLineStillScans(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bundle.js")
+
+	const lineSize = 1 << 20 // 1 MiB
+	payload := make([]byte, 0, lineSize+64)
+	for len(payload) < lineSize {
+		payload = append(payload, 'a')
+	}
+	payload = append(payload, []byte(" /* AKIA0123456789ABCDEF */\n")...)
+
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cg := NewCodeGuardScanner("")
+	result, err := cg.Scan(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	for _, f := range result.Findings {
+		if f.ID == "CG-SCAN-001" {
+			t.Fatalf("did not expect CG-SCAN-001 for a 1 MiB line; got %+v", f)
+		}
+	}
+	assertFindingID(t, result.Findings, "CG-CRED-002")
+}
+
 func assertFindingID(t *testing.T, findings []Finding, wantID string) {
 	t.Helper()
 	for _, f := range findings {

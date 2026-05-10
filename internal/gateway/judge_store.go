@@ -6,8 +6,6 @@ package gateway
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -36,7 +34,15 @@ func (j *JudgeStore) PersistJudgeEvent(ctx context.Context, dir gatewaylog.Direc
 	prov := version.Current()
 	ident := AgentIdentityFromContext(ctx)
 	body := p.RawResponse
-	h := sha256.Sum256([]byte(body))
+	// DeepSec S3.BUG ("Judge input_hash is computed from the
+	// response body"): the previous implementation hashed
+	// p.RawResponse and stored that as InputHash, which violates
+	// the audit contract (InputHash must be the SHA-256 of the
+	// judge *input*) and corrupts forensic dedup/pivot semantics.
+	// We now consume the InputHash field that callers populate
+	// from the inspected prompt/request bytes; when the input is
+	// unavailable we leave InputHash empty rather than hashing the
+	// response body and pretending it represents the input.
 	row := audit.JudgeResponse{
 		Kind:       p.Kind,
 		Direction:  string(dir),
@@ -50,7 +56,7 @@ func (j *JudgeStore) PersistJudgeEvent(ctx context.Context, dir gatewaylog.Direc
 		TraceID:    TraceIDFromContext(ctx),
 		RunID:      gatewaylog.ProcessRunID(),
 		SessionID:  SessionIDFromContext(ctx),
-		InputHash:  "sha256:" + hex.EncodeToString(h[:]),
+		InputHash:  p.InputHash,
 		// InspectedModel is the upstream traffic model when known; judge model is p.Model.
 		InspectedModel:    p.Model,
 		SchemaVersion:     prov.SchemaVersion,

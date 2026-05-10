@@ -34,11 +34,21 @@ type ListEntry struct {
 }
 
 // ScanResultInput is the scan result subset needed by OPA.
+//
+// DeepSec hardening (S2.scanners): ExitCode and ScanError are
+// surfaced into the policy input so admission decisions cannot
+// silently treat a failed scan as clean. Callers building this
+// input from a ScanResult MUST copy ScanResult.ExitCode and
+// ScanResult.ScanError into these fields. The fallback evaluator
+// rejects any input with ScanError set or ExitCode != 0; Rego
+// policies SHOULD do the same with `input.scan_result.exit_code != 0`.
 type ScanResultInput struct {
 	MaxSeverity   string         `json:"max_severity"`
 	TotalFindings int            `json:"total_findings"`
 	ScannerName   string         `json:"scanner_name,omitempty"`
 	Findings      []FindingInput `json:"findings,omitempty"`
+	ExitCode      int            `json:"exit_code,omitempty"`
+	ScanError     string         `json:"scan_error,omitempty"`
 }
 
 // FindingInput is a single finding passed to OPA for fine-grained policy decisions.

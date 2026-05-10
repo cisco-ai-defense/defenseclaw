@@ -153,13 +153,49 @@ func (d *DeviceIdentity) ConnectDevice(p ConnectDeviceParams) map[string]interfa
 // next connect attempt.  This is called automatically when a connect
 // handshake fails with "token_missing" or "unauthorized", which happens
 // when openclaw regenerates its pairing state (e.g. after a restart).
+//
+// DeepSec S3.HIGH_BUG ("RepairPairing can erase unrelated paired
+// devices"): the previous implementation silently swallowed JSON parse
+// errors on paired.json. A truncated or partially-written file would
+// be treated as an empty map and the subsequent rewrite would erase
+// every other paired device. The hardened version:
+//
+//  1. Fails closed on parse errors -- the caller MUST surface the
+//     failure rather than silently corrupting OpenClaw's pairing
+//     database. A snapshot of the unparseable file is kept beside the
+//     original as paired.json.corrupt.<unix-nanos> for forensics so
+//     the operator can recover the original byte stream.
+//  2. Writes via a same-directory temp file, fsync, chmod 0600, then
+//     os.Rename for atomicity. A crash between truncate and write can
+//     no longer leave OpenClaw's pairing database half-empty.
+//  3. Tightens the on-disk perms from 0o644 to 0o600 so the device
+//     identity / token references are not world-readable.
 func (d *DeviceIdentity) RepairPairing(sandboxHome string) error {
 	devicesDir := filepath.Join(sandboxHome, ".openclaw", "devices")
 	pairedPath := filepath.Join(devicesDir, "paired.json")
 
 	paired := make(map[string]interface{})
-	if data, err := os.ReadFile(pairedPath); err == nil {
-		_ = json.Unmarshal(data, &paired)
+	existingData, readErr := os.ReadFile(pairedPath)
+	if readErr == nil && len(existingData) > 0 {
+		if unmarshalErr := json.Unmarshal(existingData, &paired); unmarshalErr != nil {
+			// Snapshot the corrupt file so the operator can recover
+			// or post-mortem the bytes; never overwrite blindly.
+			backup := fmt.Sprintf("%s.corrupt.%d", pairedPath, time.Now().UnixNano())
+			if backupErr := os.WriteFile(backup, existingData, 0o600); backupErr != nil {
+				fmt.Fprintf(os.Stderr,
+					"[gateway] repair pairing: failed to back up corrupt paired.json (%v); refusing to overwrite\n",
+					backupErr)
+			} else {
+				fmt.Fprintf(os.Stderr,
+					"[gateway] repair pairing: corrupt paired.json snapshotted to %s; refusing to overwrite\n",
+					backup)
+			}
+			return fmt.Errorf("gateway: repair pairing: paired.json is unparseable: %w", unmarshalErr)
+		}
+	} else if readErr != nil && !os.IsNotExist(readErr) {
+		// Read errors other than file-not-found are fatal -- a
+		// permission or I/O failure must not be silently ignored.
+		return fmt.Errorf("gateway: repair pairing: read existing paired.json: %w", readErr)
 	}
 
 	nowMs := time.Now().UnixMilli()
@@ -216,11 +252,53 @@ func (d *DeviceIdentity) RepairPairing(sandboxHome string) error {
 	}
 	data = append(data, '\n')
 
-	if err := os.WriteFile(pairedPath, data, 0o644); err != nil {
+	if err := atomicWritePairedJSON(pairedPath, data); err != nil {
 		return fmt.Errorf("gateway: repair pairing: write: %w", err)
 	}
 
 	fmt.Fprintf(os.Stderr, "[gateway] repaired device pairing in %s\n", pairedPath)
+	return nil
+}
+
+// atomicWritePairedJSON writes data to path through a same-directory
+// temp file, fsyncs the contents, chmods to 0600, and renames over the
+// destination. A crash anywhere before os.Rename leaves the original
+// file intact; a crash after rename leaves the new content intact.
+// The temp file is created with O_EXCL so a stale tmp from a prior
+// crash does not silently get reused.
+func atomicWritePairedJSON(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".paired.json.tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("fsync temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	cleanup = false
 	return nil
 }
 

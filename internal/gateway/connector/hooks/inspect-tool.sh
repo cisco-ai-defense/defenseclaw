@@ -14,12 +14,31 @@ fi
 # Plan B4 / S0.4: shell-side hook hardening. Source the helpers BEFORE
 # touching any agent-supplied data so resource caps + env sanitization
 # apply to every subprocess this hook spawns.
-. "$(dirname "${BASH_SOURCE[0]}")/_hardening.sh"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
+# DeepSec hardening (S2.5): source the gateway bearer token written
+# alongside this hook by `defenseclaw setup` so we can authenticate
+# against the API server's tokenAuth middleware. Without this the
+# inspect endpoint returns 401, fail-open kicks in, and the tool call
+# proceeds without inspection -- the exact bypass DeepSec finding
+# "Generated shims and generic inspect hooks cannot authenticate to
+# the inspect API" documents. The .token file is 0o600 and the env
+# var (when already set in the operator's environment) takes
+# precedence, matching the per-connector hooks.
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
+  # shellcheck source=/dev/null
+  . "${HOOK_DIR}/.token"
+fi
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+
 TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
-TOOL_INPUT=$(cat)
+TOOL_INPUT=$(defenseclaw_read_stdin_capped) || {
+  echo "defenseclaw: inspect-tool refusing oversized payload" >&2
+  exit 0
+}
 
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
@@ -46,11 +65,17 @@ fail_response() {
   exit 2
 }
 
+AUTH_HEADER_ARGS=()
+if [ -n "${API_TOKEN}" ]; then
+  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
+
 RESPONSE=$(jq -n --arg tool "$TOOL_NAME" --arg args "$TOOL_INPUT" \
   '{tool: $tool, args: $args}' | \
   curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/tool" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \
   --data-binary @- 2>/dev/null) || {

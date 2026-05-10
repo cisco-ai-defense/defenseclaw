@@ -128,18 +128,32 @@ func TestSessionIDFromHeaders_Bounded(t *testing.T) {
 // TestCorrelationMiddleware_PopulatesContext wires the middleware to
 // an end-to-end HTTP test and asserts session/trace/agent identity
 // land in the downstream context.
+//
+// DeepSec S2.MEDIUM ("CorrelationMiddleware mints unauthenticated
+// agent sessions") closure: the middleware now uses ResolvePeek
+// (not Resolve), so unauthenticated traffic does NOT mint a
+// session-scoped agent_instance_id. The downstream handler stays
+// responsible for calling PromoteSessionIfAuthenticated once auth
+// has succeeded; this test exercises both halves of that contract.
 func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 	reg := NewAgentRegistry("agent-ci", "CI Agent")
 	mw := CorrelationMiddleware(reg)
 
 	var (
 		gotSession, gotTrace string
-		gotIdentity          AgentIdentity
+		preAuthIdentity      AgentIdentity
+		postAuthIdentity     AgentIdentity
 	)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotSession = SessionIDFromContext(r.Context())
 		gotTrace = TraceIDFromContext(r.Context())
-		gotIdentity = AgentIdentityFromContext(r.Context())
+		preAuthIdentity = AgentIdentityFromContext(r.Context())
+		// Simulate the per-handler "auth succeeded" hook the
+		// gateway runs after tokenAuth: at this point the
+		// peeked identity is upgraded to a registered session
+		// entry with a stable agent_instance_id.
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		postAuthIdentity = AgentIdentityFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -155,15 +169,19 @@ func TestCorrelationMiddleware_PopulatesContext(t *testing.T) {
 	if gotTrace != "4bf92f3577b34da6a3ce929d0e0e4736" {
 		t.Errorf("trace=%q, want 4bf9...4736", gotTrace)
 	}
-	if gotIdentity.AgentID != "agent-ci" {
-		t.Errorf("agent_id=%q, want agent-ci", gotIdentity.AgentID)
+	if preAuthIdentity.AgentID != "agent-ci" {
+		t.Errorf("pre-auth agent_id=%q, want agent-ci", preAuthIdentity.AgentID)
 	}
-	if gotIdentity.SidecarInstanceID != reg.SidecarInstanceID() {
+	if preAuthIdentity.SidecarInstanceID != reg.SidecarInstanceID() {
 		t.Errorf("sidecar instance mismatch: mw=%q reg=%q",
-			gotIdentity.SidecarInstanceID, reg.SidecarInstanceID())
+			preAuthIdentity.SidecarInstanceID, reg.SidecarInstanceID())
 	}
-	if gotIdentity.AgentInstanceID == "" {
-		t.Error("agent_instance_id empty; want session-scoped uuid")
+	if preAuthIdentity.AgentInstanceID != "" {
+		t.Errorf("pre-auth agent_instance_id=%q want empty (DeepSec S2.MEDIUM): unauthenticated traffic must not mint a session entry",
+			preAuthIdentity.AgentInstanceID)
+	}
+	if postAuthIdentity.AgentInstanceID == "" {
+		t.Error("post-auth agent_instance_id empty; PromoteSessionIfAuthenticated should mint a session-scoped uuid")
 	}
 }
 
@@ -179,9 +197,16 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 
 	t.Setenv("DEFENSECLAW_RUN_ID", "run-env-1")
 
-	var env audit.CorrelationEnvelope
+	var preAuthEnv, postAuthEnv audit.CorrelationEnvelope
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		env = audit.EnvelopeFromContext(r.Context())
+		preAuthEnv = audit.EnvelopeFromContext(r.Context())
+		// Mirror the production sequence: tokenAuth runs after
+		// CorrelationMiddleware and, on success, promotes the
+		// peeked identity to a real registry entry. Until that
+		// happens the envelope must NOT carry an
+		// agent_instance_id (DeepSec S2.MEDIUM closure).
+		ctx := PromoteSessionIfAuthenticated(r.Context())
+		postAuthEnv = audit.EnvelopeFromContext(ctx)
 		w.WriteHeader(http.StatusOK)
 	}))
 
@@ -190,20 +215,24 @@ func TestCorrelationMiddleware_StampsAuditEnvelope(t *testing.T) {
 	req.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	if env.RunID != "run-env-1" {
-		t.Errorf("RunID=%q want run-env-1", env.RunID)
+	if preAuthEnv.RunID != "run-env-1" {
+		t.Errorf("RunID=%q want run-env-1", preAuthEnv.RunID)
 	}
-	if env.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
-		t.Errorf("TraceID=%q want 4bf9...4736", env.TraceID)
+	if preAuthEnv.TraceID != "4bf92f3577b34da6a3ce929d0e0e4736" {
+		t.Errorf("TraceID=%q want 4bf9...4736", preAuthEnv.TraceID)
 	}
-	if env.SessionID != "sess-env" {
-		t.Errorf("SessionID=%q want sess-env", env.SessionID)
+	if preAuthEnv.SessionID != "sess-env" {
+		t.Errorf("SessionID=%q want sess-env", preAuthEnv.SessionID)
 	}
-	if env.AgentID != "agent-env" {
-		t.Errorf("AgentID=%q want agent-env", env.AgentID)
+	if preAuthEnv.AgentID != "agent-env" {
+		t.Errorf("AgentID=%q want agent-env", preAuthEnv.AgentID)
 	}
-	if env.AgentInstanceID == "" {
-		t.Error("AgentInstanceID empty; want session-scoped uuid")
+	if preAuthEnv.AgentInstanceID != "" {
+		t.Errorf("pre-auth AgentInstanceID=%q want empty (DeepSec S2.MEDIUM)",
+			preAuthEnv.AgentInstanceID)
+	}
+	if postAuthEnv.AgentInstanceID == "" {
+		t.Error("post-auth AgentInstanceID empty; PromoteSessionIfAuthenticated should mint a session-scoped uuid")
 	}
 }
 

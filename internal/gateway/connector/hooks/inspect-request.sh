@@ -17,11 +17,24 @@ fi
 
 # Plan B4 / S0.4: shell-side hook hardening (sourced before reading
 # stdin so the bounded fd limit is in place when curl spawns).
-. "$(dirname "${BASH_SOURCE[0]}")/_hardening.sh"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "${HOOK_DIR}/_hardening.sh"
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-CONTENT=$(cat)
+# DeepSec hardening (S2.5): source the gateway bearer token. See
+# inspect-tool.sh for the rationale -- without this header the API
+# server returns 401 and fail-open silently bypasses inspection.
+if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
+  # shellcheck source=/dev/null
+  . "${HOOK_DIR}/.token"
+fi
+API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+
+CONTENT=$(defenseclaw_read_stdin_capped) || {
+  echo "defenseclaw: inspect-request refusing oversized payload" >&2
+  exit 0
+}
 
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
@@ -47,9 +60,15 @@ fail_response() {
   exit 2
 }
 
+AUTH_HEADER_ARGS=()
+if [ -n "${API_TOKEN}" ]; then
+  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
+fi
+
 RESPONSE=$(printf '%s' "$CONTENT" | curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/inspect/request" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: inspect-hook/1.0" \
+  "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \
   --data-binary @- 2>/dev/null) || {

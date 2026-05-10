@@ -133,19 +133,74 @@ mcpServers:
       ).toBe(false);
     });
 
-    it("handles non-existent path gracefully", async () => {
+    it("reports non-existent path as HIGH parse error (fail closed)", async () => {
+      // DeepSec S3.HIGH_BUG: a missing target is a scanner failure, not
+      // a clean "no configs found" verdict. Admission MUST treat this as
+      // an unparseable target and refuse to admit the install.
       const result = await scanMCPServer(join(tempDir, "nonexistent.json"));
-      expect(result.findings.length).toBe(1);
-      expect(result.findings[0].severity).toBe("INFO");
+      const parseErrors = result.findings.filter((f) =>
+        f.title.startsWith("MCP config parse error"),
+      );
+      expect(parseErrors.length).toBe(1);
+      expect(parseErrors[0].severity).toBe("HIGH");
+      expect(
+        result.findings.some((f) => f.title.includes("No MCP server configurations")),
+      ).toBe(false);
     });
 
-    it("handles invalid JSON gracefully", async () => {
+    it("reports invalid JSON as HIGH parse error (fail closed)", async () => {
+      // DeepSec S3.HIGH_BUG: silently swallowing parse errors lets an
+      // attacker hide a malicious MCP registration behind an
+      // intentionally malformed config. Surface the failure as HIGH.
       const configFile = join(tempDir, "bad.json");
       await writeFile(configFile, "not json {{{");
 
       const result = await scanMCPServer(configFile);
-      expect(result.findings.length).toBe(1);
-      expect(result.findings[0].title).toContain("No MCP server configurations");
+      const parseErrors = result.findings.filter((f) =>
+        f.title.startsWith("MCP config parse error"),
+      );
+      expect(parseErrors.length).toBe(1);
+      expect(parseErrors[0].severity).toBe("HIGH");
+      expect(parseErrors[0].location).toBe(configFile);
+      expect(
+        result.findings.some((f) => f.title.includes("No MCP server configurations")),
+      ).toBe(false);
+    });
+
+    it("reports invalid YAML as HIGH parse error", async () => {
+      const configFile = join(tempDir, "bad.yaml");
+      await writeFile(configFile, "::: not yaml :::\n  - [unclosed", "utf-8");
+
+      const result = await scanMCPServer(configFile);
+      const parseErrors = result.findings.filter((f) =>
+        f.title.startsWith("MCP config parse error"),
+      );
+      expect(parseErrors.length).toBe(1);
+      expect(parseErrors[0].severity).toBe("HIGH");
+    });
+
+    it("emits parse error per malformed file in a directory", async () => {
+      // Mixed dir: one good file, two malformed files. The scanner
+      // should still inspect the good file AND surface findings for
+      // each unreadable / unparseable file.
+      await writeFile(
+        join(tempDir, "good.json"),
+        JSON.stringify({
+          mcpServers: { ok: { command: "node", args: ["ok.js"] } },
+        }),
+      );
+      await writeFile(join(tempDir, "bad1.json"), "{{{");
+      await writeFile(join(tempDir, "bad2.yaml"), ": -- :: --\n[");
+
+      const result = await scanMCPServer(tempDir);
+      const parseErrors = result.findings.filter((f) =>
+        f.title.startsWith("MCP config parse error"),
+      );
+      expect(parseErrors.length).toBe(2);
+      // No "no configs" finding because we DID have a good config.
+      expect(
+        result.findings.some((f) => f.title.includes("No MCP server configurations")),
+      ).toBe(false);
     });
   });
 

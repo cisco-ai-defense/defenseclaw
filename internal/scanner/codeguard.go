@@ -138,10 +138,31 @@ func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult
 	rules := s.allRules()
 	for _, f := range files {
 		findings, err := scanFileWithRules(f, rules)
-		if err != nil {
-			continue
-		}
+		// Always append whatever findings the file produced -- the
+		// scanner may have matched rules on the lines it read before
+		// hitting an error, and we do not want to lose those.
 		result.Findings = append(result.Findings, findings...)
+		if err != nil {
+			// Surface per-file errors as a MEDIUM finding so operators,
+			// CI gates, and the policy engine see that the scan was
+			// incomplete. Previously these errors were silently
+			// swallowed (`if err != nil { continue }`), which let an
+			// attacker hide payloads behind oversize lines, unreadable
+			// files, or other read errors. See DeepSec finding
+			// "codeguard scan silently skips files on error".
+			result.Findings = append(result.Findings, Finding{
+				ID:          "CG-SCAN-001",
+				Severity:    SeverityMedium,
+				Title:       "CodeGuard scan incomplete for file",
+				Description: fmt.Sprintf("scan-error: %s", err.Error()),
+				Location:    f,
+				Remediation: "Inspect the file manually; if the line was too long, split or minify the source. An attacker may attempt to hide payloads behind oversize/unreadable lines.",
+				Scanner:     "codeguard",
+				Tags:        []string{"codeguard", "scan-error"},
+				RuleID:      "CG-SCAN-001",
+				Category:    "scan-error",
+			})
+		}
 	}
 
 	result.Duration = time.Since(start)
@@ -161,8 +182,32 @@ func IsCodeFile(ext string) bool {
 }
 
 func collectCodeFiles(root string) ([]string, error) {
+	// DeepSec S2.MEDIUM ("Directory scans follow symlinked files
+	// outside the requested target"): WalkDir does not follow
+	// directory symlinks (good), but it still emits regular file
+	// entries that are themselves symlinks. The legacy code then
+	// passed those paths to os.Open, which follows the link. An
+	// attacker-controlled repo could ship a symlink leak.py ->
+	// /etc/shadow and have the scanner read & emit lines from
+	// outside the scan root.
+	//
+	// Resolve the scan root so we can enforce containment, then
+	// reject any entry that is a symlink, a non-regular file, or a
+	// path whose evaluated target escapes the root.
+	cleanRoot, err := filepath.Abs(filepath.Clean(root))
+	if err != nil {
+		return nil, fmt.Errorf("scan root abs: %w", err)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(cleanRoot)
+	if err != nil {
+		// Root may itself be a regular file (single-file scan).
+		// Fall back to the cleaned absolute path.
+		resolvedRoot = cleanRoot
+	}
+	rootBoundary := resolvedRoot + string(filepath.Separator)
+
 	var files []string
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -173,9 +218,39 @@ func collectCodeFiles(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if codeExtensions[filepath.Ext(path)] {
-			files = append(files, path)
+		if !codeExtensions[filepath.Ext(path)] {
+			return nil
 		}
+		// Reject symlinks and non-regular files outright. Lstat
+		// (via DirEntry.Info()) returns the link's own metadata
+		// without following it.
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		// Defence-in-depth: even after rejecting symlink dirents,
+		// resolve and confirm the target stays under the scan root
+		// so a regular file whose path components include a
+		// directory symlink (rare; WalkDir does not follow them by
+		// default) cannot smuggle data from outside.
+		abs, absErr := filepath.Abs(path)
+		if absErr != nil {
+			return nil
+		}
+		resolved, resolveErr := filepath.EvalSymlinks(abs)
+		if resolveErr != nil {
+			return nil
+		}
+		if resolved != resolvedRoot && !strings.HasPrefix(resolved, rootBoundary) {
+			return nil
+		}
+		files = append(files, resolved)
 		return nil
 	})
 	return files, err
@@ -269,6 +344,18 @@ var builtinRules = []rule{
 	},
 }
 
+// codeguardScanInitialBuf is the initial line buffer for bufio.Scanner.
+// codeguardScanMaxBuf is the upper bound on a single line; lines longer
+// than this trigger bufio.ErrTooLong and a scan-error finding so that
+// an attacker cannot hide payloads behind a single oversize line. The
+// 16 MiB ceiling tolerates large but legitimate inputs (minified JS
+// bundles, vendored single-line lockfiles) without enabling unbounded
+// memory growth on adversarial input.
+const (
+	codeguardScanInitialBuf = 64 * 1024
+	codeguardScanMaxBuf     = 16 * 1024 * 1024
+)
+
 func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -280,6 +367,7 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	var findings []Finding
 
 	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, codeguardScanInitialBuf), codeguardScanMaxBuf)
 	lineNum := 0
 	for sc.Scan() {
 		lineNum++
@@ -308,7 +396,10 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 		}
 	}
 
-	return findings, sc.Err()
+	if err := sc.Err(); err != nil {
+		return findings, fmt.Errorf("read %s: %w", path, err)
+	}
+	return findings, nil
 }
 
 // RuleMeta exposes rule metadata for skill generation without leaking the

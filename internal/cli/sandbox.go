@@ -138,7 +138,16 @@ func runSandboxExec(_ *cobra.Command, args []string) error {
 		return sandboxExecInNetns(cmdArgs)
 	}
 
-	cmd := exec.Command("sudo", append([]string{"-u", "sandbox"}, cmdArgs...)...)
+	// DeepSec S2.MEDIUM ("sandbox exec arguments can be interpreted
+	// as sudo options"): sudo parses options before the command, so
+	// any cmdArgs[0] starting with `-` (e.g. `-u root`) is consumed
+	// by sudo itself rather than executed as the sandbox user. The
+	// `--` terminator forces sudo to treat everything that follows
+	// as the command vector, restoring the intended trust boundary.
+	cmd := exec.Command(
+		"sudo",
+		append([]string{"-u", "sandbox", "--"}, cmdArgs...)...,
+	)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -146,7 +155,7 @@ func runSandboxExec(_ *cobra.Command, args []string) error {
 }
 
 func runSandboxShell(_ *cobra.Command, _ []string) error {
-	cmd := exec.Command("sudo", "-u", "sandbox", "bash")
+	cmd := exec.Command("sudo", "-u", "sandbox", "--", "bash")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -159,7 +168,10 @@ func sandboxExecInNetns(args []string) error {
 		return err
 	}
 
-	nsArgs := []string{"netns", "exec", ns, "sudo", "-u", "sandbox"}
+	// DeepSec S2.MEDIUM ("sandbox exec arguments can be interpreted
+	// as sudo options"): same `--` terminator hardening as the
+	// non-netns path above.
+	nsArgs := []string{"netns", "exec", ns, "sudo", "-u", "sandbox", "--"}
 	nsArgs = append(nsArgs, args...)
 	cmd := exec.Command("ip", nsArgs...)
 	cmd.Stdin = os.Stdin

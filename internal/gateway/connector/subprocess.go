@@ -83,9 +83,40 @@ func normalizeHookFailMode(mode string) string {
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
 // into the given directory. Each shim calls /api/v1/inspect/tool before
 // delegating to the real binary.
+//
+// Kept for backward compatibility with callers (and tests) that have
+// not yet plumbed a gateway bearer token through. New call sites
+// SHOULD use WriteShimScriptsWithToken so the generated shims can
+// authenticate against the API server's tokenAuth middleware --
+// without an Authorization header the inspect endpoint returns 401,
+// the shim's `||` fallback exec's the real binary, and the inspection
+// is silently bypassed (DeepSec finding "Generated shims and generic
+// inspect hooks cannot authenticate to the inspect API").
 func WriteShimScripts(shimDir, apiAddr string) error {
+	return WriteShimScriptsWithToken(shimDir, apiAddr, "")
+}
+
+// WriteShimScriptsWithToken is the token-aware variant of
+// WriteShimScripts. It writes a 0o600 `.token` file alongside the
+// shims (sourced at runtime by every shim template) so the inspect
+// requests carry `Authorization: Bearer <token>` and survive the API
+// server's tokenAuth middleware. Empty token is supported -- in that
+// case the shim falls back to the loopback-allow path inside the
+// API server, matching pre-S2.5 behaviour.
+func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
+	}
+
+	// Companion .token file for shims to source at runtime. Mirrors
+	// the hook flow in WriteHookScriptsWithToken; never bake the
+	// secret into the script body. The file is 0o600 so the shimDir
+	// (0o755) does not expose the token to other local users via a
+	// world-readable file.
+	tokenPath := filepath.Join(shimDir, ".token")
+	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+		return fmt.Errorf("write shim token file: %w", err)
 	}
 
 	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
@@ -589,7 +620,11 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 }
 
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
-// tier based on the resolved policy.
+// tier based on the resolved policy. opts.APIToken is propagated to the
+// shim writer so generated curl/wget/ssh/nc/pip/npm shims can
+// authenticate against the API server's tokenAuth middleware --
+// without it the shim's `||` fallback exec's the real binary on a 401
+// and inspection is silently bypassed.
 func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 	switch policy {
 	case SubprocessSandbox:
@@ -597,13 +632,13 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 			return fmt.Errorf("sandbox policy: %w", err)
 		}
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
 		}
 
 	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 

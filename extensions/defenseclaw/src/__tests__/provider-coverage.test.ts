@@ -73,10 +73,58 @@ const OLLAMA_PORTS: string[] = (providersConfig.ollama_ports as number[]).map(
 // Mirrors fetch-interceptor.ts::isLLMUrl (but parameterless: the
 // classifier doesn't need a guardrail port — the corpus only covers
 // URLs that would not collide with the proxy).
+//
+// The substring `url.includes(domain)` fallback used to be enough,
+// but the DeepSec hardening (S2.proxy SSRF) replaced the legacy
+// trailing-dot prefix entry "bedrock-runtime." with the wildcard
+// pattern "bedrock-runtime.*.amazonaws.com". A literal substring
+// match never satisfies a "*", so the corpus mirror now parses the
+// URL's hostname and applies the same matcher semantics that
+// matchesLLMDomain in fetch-interceptor uses.
+function matchWildcardDomain(host: string, pattern: string): boolean {
+  const parts = pattern.split("*");
+  if (parts.length !== 2) return false;
+  const [prefix, suffix] = parts;
+  if (!prefix || !suffix) return false;
+  if (host.length < prefix.length + suffix.length) return false;
+  if (!host.startsWith(prefix) || !host.endsWith(suffix)) return false;
+  const middle = host.slice(prefix.length, host.length - suffix.length);
+  if (middle.length === 0 || middle.includes(".")) return false;
+  return true;
+}
+
 function isKnownProvider(url: string): boolean {
-  if (LLM_DOMAINS.some(d => url.includes(d))) return true;
+  let host = "";
+  let port = "";
+  let pathname = "";
+  try {
+    const u = new URL(url);
+    host = u.hostname.toLowerCase();
+    port = u.port;
+    pathname = u.pathname;
+  } catch {
+    return false;
+  }
+  if (host === "") return false;
+  for (const domain of LLM_DOMAINS) {
+    const slash = domain.indexOf("/");
+    const bare = (slash >= 0 ? domain.slice(0, slash) : domain).toLowerCase();
+    const pathPrefix = slash >= 0 ? domain.slice(slash) : "";
+    if (!bare) continue;
+    // Legacy trailing-dot syntax has been retired.
+    if (bare.endsWith(".")) continue;
+    let hostMatch = false;
+    if (bare.includes("*")) {
+      hostMatch = matchWildcardDomain(host, bare);
+    } else {
+      hostMatch = host === bare || host.endsWith("." + bare);
+    }
+    if (!hostMatch) continue;
+    if (pathPrefix === "") return true;
+    if (pathname.startsWith(pathPrefix)) return true;
+  }
   return OLLAMA_PORTS.some(
-    p => url.includes(`localhost:${p}`) || url.includes(`127.0.0.1:${p}`),
+    p => (host === "localhost" || host === "127.0.0.1") && port === p,
   );
 }
 
