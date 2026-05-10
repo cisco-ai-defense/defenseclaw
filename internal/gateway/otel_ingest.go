@@ -131,9 +131,17 @@ func (a *APIServer) handleOTLPPathToken(w http.ResponseWriter, r *http.Request) 
 		http.NotFound(w, r)
 		return
 	}
-	if strings.TrimSpace(r.Header.Get(otelSourceHeader)) == "" {
-		r.Header.Set(otelSourceHeader, source)
-	}
+	// DeepSec S2.MEDIUM ("Scoped OTLP path-token source can be
+	// spoofed with x-defenseclaw-source"): the path-token route
+	// authenticates a *specific* connector source via the URL, so
+	// the authenticated source is the one parsed from the path.
+	// The previous implementation only filled the header when it
+	// was empty, which let a loopback caller present the geminicli
+	// path token while setting `x-defenseclaw-source: codex` and
+	// have telemetry attributed to codex. Always overwrite so the
+	// audited Actor / AgentName / metrics labels match the
+	// authenticated path source.
+	r.Header.Set(otelSourceHeader, source)
 	switch {
 	case strings.HasSuffix(r.URL.Path, "/v1/logs"):
 		a.handleOTLPSignal(w, r, otelSignalLogs)

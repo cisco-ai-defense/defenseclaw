@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -30,9 +31,32 @@ import (
 // perIPLimiterEntry pairs a token-bucket limiter with the timestamp of the
 // last request seen from that IP, so the eviction sweep can drop stale
 // entries without locking the entire map for the duration of the scan.
+//
+// DeepSec S3.BUG ("Rate limiter timestamp has an unsynchronized data
+// race"): the previous implementation stored `time.Time` directly,
+// which is a multiword struct that is not safe for concurrent
+// unsynchronized read/write under the Go memory model. The sweeper
+// goroutine compared `e.lastSeen.Before(cutoff)` while request
+// goroutines wrote `entry.lastSeen = now()`, which the race detector
+// flags and which can produce torn reads in production. We now store
+// the last-seen UnixNano in an atomic int64 and convert at use sites
+// — the resulting limiter behaviour is unchanged but reads/writes
+// are race-free.
 type perIPLimiterEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
+	limiter      *rate.Limiter
+	lastSeenUnix atomic.Int64
+}
+
+// touch records a fresh last-seen timestamp on the entry. Callers
+// should always touch through this method so the atomic write site
+// is centralised.
+func (e *perIPLimiterEntry) touch(t time.Time) {
+	e.lastSeenUnix.Store(t.UnixNano())
+}
+
+// lastSeen returns the entry's last-seen wallclock timestamp.
+func (e *perIPLimiterEntry) lastSeen() time.Time {
+	return time.Unix(0, e.lastSeenUnix.Load())
 }
 
 // perIPRateLimiter returns an http.Handler middleware that throttles each
@@ -67,7 +91,7 @@ func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
 		for range ticker.C {
 			cutoff := now().Add(-idleEviction)
 			limiters.Range(func(k, v interface{}) bool {
-				if e, ok := v.(*perIPLimiterEntry); ok && e.lastSeen.Before(cutoff) {
+				if e, ok := v.(*perIPLimiterEntry); ok && e.lastSeen().Before(cutoff) {
 					limiters.Delete(k)
 				}
 				return true
@@ -88,12 +112,11 @@ func perIPRateLimiter(rps, burst int) func(http.Handler) http.Handler {
 				http.Error(w, `{"error":"unparseable client address"}`, http.StatusForbidden)
 				return
 			}
-			val, _ := limiters.LoadOrStore(ip, &perIPLimiterEntry{
-				limiter:  rate.NewLimiter(rate.Limit(rps), burst),
-				lastSeen: now(),
-			})
+			fresh := &perIPLimiterEntry{limiter: rate.NewLimiter(rate.Limit(rps), burst)}
+			fresh.touch(now())
+			val, _ := limiters.LoadOrStore(ip, fresh)
 			entry := val.(*perIPLimiterEntry)
-			entry.lastSeen = now()
+			entry.touch(now())
 			if !entry.limiter.Allow() {
 				http.Error(w, `{"error":"rate limit exceeded"}`, http.StatusTooManyRequests)
 				return

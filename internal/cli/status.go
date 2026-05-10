@@ -222,7 +222,28 @@ type connectorModeSummary struct {
 
 func fetchConnectorMode(client *http.Client, bind string, port int) *connectorModeSummary {
 	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
-	resp, err := client.Get(addr)
+	req, err := http.NewRequest(http.MethodGet, addr, nil)
+	if err != nil {
+		return nil
+	}
+	// DeepSec S3.BUG ("Connector mode status fetch omits required
+	// API token"): /status sits behind tokenAuth, which only
+	// exempts GET /health. The previous client.Get call sent no
+	// auth headers and silently swallowed the resulting 401, so
+	// the CLI status command always omitted the connector_mode
+	// section against a normally-configured sidecar. Attach the
+	// resolved gateway token (under both the bearer and the
+	// X-DefenseClaw-Token aliases for compatibility); when the
+	// token cannot be resolved, fall back to the previous
+	// best-effort behaviour rather than error out -- the rest of
+	// `defenseclaw status` is still useful without this section.
+	if cfg != nil {
+		if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+			req.Header.Set("X-DefenseClaw-Token", token)
+		}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil
 	}

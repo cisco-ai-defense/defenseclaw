@@ -318,6 +318,15 @@ func (s *SkillScanner) Scan(ctx context.Context, target string) (*ScanResult, er
 		result.Findings = findings
 	}
 
+	// DeepSec hardening (S2.scanners): fail closed on any non-zero
+	// scanner exit even when stdout parsed cleanly. See the matching
+	// comment in mcp.go and finding "Non-zero skill scanner exits
+	// can be treated as successful scans".
+	if exitCode != 0 {
+		scanErr = fmt.Errorf("scanner %s exited %d (stderr=%s)", s.Name(), exitCode, stderrStr)
+		return result, scanErr
+	}
+
 	return result, nil
 }
 

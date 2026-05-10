@@ -520,7 +520,7 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	failMode := normalizeHookFailMode(opts.HookFailMode)
+	failMode := resolveHookFailMode(opts, c)
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
 		if failMode == "closed" && !caps.SupportsFailClosed {
@@ -528,6 +528,31 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
+}
+
+// resolveHookFailMode picks the response-layer fail mode for a hook
+// render given the operator's setup opts and the connector identity.
+// The explicit string in opts.HookFailMode always wins; an empty
+// value falls back to the connector-default and is upgraded to
+// "closed" when the operator has set the matching enforcement flag
+// for codex / claudecode (avarice F-0681).
+func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		return normalizeHookFailMode(opts.HookFailMode)
+	}
+	if c != nil {
+		switch c.Name() {
+		case "codex":
+			if opts.CodexEnforcement {
+				return "closed"
+			}
+		case "claudecode":
+			if opts.ClaudeCodeEnforcement {
+				return "closed"
+			}
+		}
+	}
+	return defaultHookFailMode
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts

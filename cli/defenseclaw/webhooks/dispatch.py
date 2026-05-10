@@ -36,6 +36,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import urllib.error
 import urllib.request
 import uuid
@@ -340,7 +341,13 @@ def send_synthetic(
         elif webhook_type == "generic":
             headers["X-Hub-Signature-256"] = "sha256=" + compute_hmac(payload, secret)
 
-    preview = payload[:200].decode("utf-8", errors="replace")
+    # DeepSec S2.MEDIUM ("PagerDuty routing key is exposed in webhook
+    # payload previews"): the PagerDuty Events API requires routing_key
+    # as a top-level field, so payload[:200] always captures it. Webex
+    # does the same with `markdown` content -- harmless -- but PagerDuty
+    # routing keys grant the right to page on-call. Scrub known secret
+    # fields before exposing the preview to the CLI render layer.
+    preview = _redact_payload_preview(payload, webhook_type, secret)
 
     if preview_only:
         return DispatchResult(
@@ -360,9 +367,17 @@ def send_synthetic(
     )
     status: int | None = None
     err: str | None = None
+    # DeepSec S2.MEDIUM ("PagerDuty routing key is exposed in webhook
+    # payload previews", related "resolve-and-pin" recommendation): the
+    # builtin opener follows 30x redirects to arbitrary destinations,
+    # which would let a remote receiver (or an attacker who can spoof
+    # one) re-aim the delivery at a private/loopback host that
+    # ``validate_webhook_url`` never inspected. Disable redirects so
+    # the connection terminates at the validated host or fails loudly.
+    opener = urllib.request.build_opener(_NoRedirectHandler())
     with WebhookDeliveryTimer(webhook_type, url) as wt:
         try:
-            with urllib.request.urlopen(req, timeout=max(1, int(timeout_seconds))) as resp:  # noqa: S310
+            with opener.open(req, timeout=max(1, int(timeout_seconds))) as resp:  # noqa: S310
                 status = int(resp.getcode())
                 wt.status_code = status
         except urllib.error.HTTPError as exc:
@@ -387,6 +402,27 @@ def send_synthetic(
     )
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Block 3xx redirects so dispatched webhooks cannot be re-aimed.
+
+    DeepSec S2.MEDIUM (related to "resolve-and-pin"): refuse all 30x
+    responses by raising a ``urllib.error.HTTPError``; callers see a
+    deterministic non-2xx outcome and the request body never reaches
+    a different (potentially private) destination than the one
+    ``validate_webhook_url`` approved.
+    """
+
+    def http_error_301(self, req, fp, code, msg, headers):
+        raise urllib.error.HTTPError(
+            req.full_url, code, "redirects disabled (resolve-and-pin)", headers, fp,
+        )
+
+    http_error_302 = http_error_301
+    http_error_303 = http_error_301
+    http_error_307 = http_error_301
+    http_error_308 = http_error_301
+
+
 def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
     """Redact Authorization / signature values before handing back to
     the CLI render layer — tests and ``--show`` must never print raw
@@ -396,5 +432,36 @@ def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
     for key, value in headers.items():
         safe[key] = "<redacted>" if key.lower() in sensitive else value
     return safe
+
+
+# Known JSON keys that carry secrets in the supported webhook payloads.
+# Order matters: we scrub the JSON form ("\"routing_key\":") so the
+# preview shows ``"routing_key": "<redacted>"`` rather than the raw key.
+_SECRET_PAYLOAD_FIELDS = ("routing_key", "token", "api_key", "access_token")
+
+
+def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> str:
+    """Return a 200-char preview with known secret fields scrubbed.
+
+    DeepSec S2.MEDIUM ("PagerDuty routing key is exposed in webhook
+    payload previews"). The preview is a debugging aid, not a fidelity
+    re-rendering, so we don't try to round-trip JSON; a regex sweep
+    over the prefix is sufficient and avoids the cost of parsing the
+    body. The literal ``secret`` value is also redacted defensively in
+    case future formats embed it elsewhere in the payload.
+    """
+    raw = payload[:400].decode("utf-8", errors="replace")
+    scrubbed = raw
+    for field_name in _SECRET_PAYLOAD_FIELDS:
+        scrubbed = re.sub(
+            rf'"{field_name}"\s*:\s*"[^"]*"',
+            f'"{field_name}": "<redacted>"',
+            scrubbed,
+        )
+    if secret and secret in scrubbed:
+        scrubbed = scrubbed.replace(secret, "<redacted>")
+    # Keep the same ~200-char target as before so existing callers that
+    # truncate further still see a short preview.
+    return scrubbed[:200]
 
 

@@ -46,7 +46,19 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 		hash string
 		keys []string
 	}
+	// DeepSec S3.BUG ("One unreadable policy file suppresses all
+	// policy change activity"): the previous implementation
+	// returned immediately on any non-IsNotExist os.ReadFile error,
+	// which meant a single permission-denied .yaml under
+	// policy_dir hid every other policy/list change from the
+	// audit log until that error was resolved -- a real
+	// audit/provenance blind spot. We now record an error
+	// activity for the unreadable path, leave its cached state
+	// untouched (so we re-attempt next tick without poisoning the
+	// next-snapshot diff), and continue processing the remaining
+	// files so legitimate policy edits are still observed.
 	next := make(map[string]snap, len(paths))
+	unreadable := make(map[string]struct{}, 0)
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -54,13 +66,21 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 				next[p] = snap{hash: "", keys: nil}
 				continue
 			}
-			return
+			w.recordPolicyFileReadFailure(ctx, p, err)
+			// Track separately so we never fire a spurious
+			// "removed" diff for a transient EACCES/EPERM
+			// while keeping the prior cached hash intact.
+			unreadable[p] = struct{}{}
+			continue
 		}
 		sum := sha256.Sum256(b)
 		next[p] = snap{
 			hash: hex.EncodeToString(sum[:]),
 			keys: listKeysFromYAMLBytes(b),
 		}
+	}
+	if len(next) == 0 && len(unreadable) == 0 {
+		return
 	}
 
 	w.policyFileMu.Lock()
@@ -81,6 +101,13 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 	}
 	for p := range w.policyFileHashes {
 		if _, ok := next[p]; !ok {
+			// Don't treat an unreadable file as "removed"
+			// -- we couldn't read it this tick, so we have
+			// no evidence it's gone. The recorded read
+			// failure activity is the audit signal here.
+			if _, isUnreadable := unreadable[p]; isUnreadable {
+				continue
+			}
 			changed = append(changed, p)
 		}
 	}
@@ -226,6 +253,39 @@ func (w *InstallWatcher) policyWatchPaths() []string {
 		})
 	}
 	return out
+}
+
+// recordPolicyFileReadFailure emits a single audit + telemetry
+// activity for an unreadable policy file so operators see *that the
+// file is unreadable* without losing change detection on the rest of
+// the watched set. DeepSec S3.BUG ("One unreadable policy file
+// suppresses all policy change activity") closure: this is the
+// per-file error signal the watcher previously dropped.
+func (w *InstallWatcher) recordPolicyFileReadFailure(ctx context.Context, path string, err error) {
+	targetID := filepath.Base(path)
+	reason := fmt.Sprintf("policy file unreadable: %v", err)
+	_ = w.logger.LogActivity(audit.ActivityInput{
+		Actor:      "watcher",
+		Action:     audit.ActionPolicyReload,
+		TargetType: "policy_file",
+		TargetID:   targetID,
+		Reason:     reason,
+	})
+	if w.otel != nil {
+		w.otel.RecordActivity(ctx, string(audit.ActionPolicyReload), "policy_file", "watcher", 0)
+		w.otel.EmitGatewayEvent(gatewaylog.Event{
+			Timestamp: time.Now().UTC(),
+			EventType: gatewaylog.EventActivity,
+			Severity:  gatewaylog.SeverityWarn,
+			Activity: &gatewaylog.ActivityPayload{
+				Actor:      "watcher",
+				Action:     string(audit.ActionPolicyReload),
+				TargetType: "policy_file",
+				TargetID:   targetID,
+				Reason:     reason,
+			},
+		})
+	}
 }
 
 func listKeysFromYAMLBytes(b []byte) []string {
