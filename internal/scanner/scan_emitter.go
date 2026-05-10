@@ -17,7 +17,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
-// redactedScanResultJSON serializes a copy of ``result`` whose finding
+// redactedScanResultJSON serializes a copy of “result“ whose finding
 // description / location / remediation fields have been passed through
 // redaction.ForSinkString. DeepSec S2.MEDIUM ("Raw scan JSON stores
 // unredacted secret-bearing findings"): callers persist this JSON into

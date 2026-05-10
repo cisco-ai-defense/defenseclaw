@@ -32,7 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// mcpScanTargetLooksLikeURL returns true when ``target`` parses as a
+// mcpScanTargetLooksLikeURL returns true when “target“ parses as a
 // remote URL (http/https/ws/wss/sse). Local paths and stdio targets
 // fall through unchanged so the scanner still accepts them.
 func mcpScanTargetLooksLikeURL(target string) bool {

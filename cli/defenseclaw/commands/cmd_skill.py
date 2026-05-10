@@ -1110,7 +1110,7 @@ def _scan_from_clawhub(app: AppContext, uri: str, as_json: bool) -> Any:
         # not appear to have completed extraction.
         try:
             _safe_tar_extract(archive_path, skill_dir, skill_prefix, strip=3)
-        except _SkillExtractTooLarge as exc:
+        except _SkillExtractTooLargeError as exc:
             click.echo(f"error: clawhub skill archive rejected: {exc}", err=True)
             raise SystemExit(1)
 
@@ -1245,7 +1245,7 @@ def _scan_from_http(
             else:
                 click.echo("error: unsupported archive format (expected .tar.gz or .zip)", err=True)
                 raise SystemExit(1)
-        except _SkillExtractTooLarge as exc:
+        except _SkillExtractTooLargeError as exc:
             click.echo(f"error: skill archive rejected: {exc}", err=True)
             raise SystemExit(1)
 
@@ -1320,23 +1320,23 @@ MAX_SKILL_MEMBER_COUNT = 10_000
 MAX_SKILL_PER_FILE_BYTES = 64 * 1024 * 1024  # 64 MiB
 
 
-class _SkillExtractTooLarge(Exception):
+class _SkillExtractTooLargeError(Exception):
     """Raised when a tar/zip archive exceeds the post-decompression caps."""
 
 
 def _check_extract_caps(member_count: int, total_bytes: int, member_size: int, member_name: str) -> None:
     if member_count > MAX_SKILL_MEMBER_COUNT:
-        raise _SkillExtractTooLarge(
+        raise _SkillExtractTooLargeError(
             f"archive exceeds member-count cap "
             f"({member_count} > {MAX_SKILL_MEMBER_COUNT})"
         )
     if member_size > MAX_SKILL_PER_FILE_BYTES:
-        raise _SkillExtractTooLarge(
+        raise _SkillExtractTooLargeError(
             f"archive entry {member_name!r} exceeds per-file cap "
             f"({member_size} > {MAX_SKILL_PER_FILE_BYTES})"
         )
     if total_bytes > MAX_SKILL_UNCOMPRESSED_BYTES:
-        raise _SkillExtractTooLarge(
+        raise _SkillExtractTooLargeError(
             f"archive total uncompressed size exceeds cap "
             f"({total_bytes} > {MAX_SKILL_UNCOMPRESSED_BYTES})"
         )
@@ -1348,13 +1348,13 @@ def _safe_tar_extractall_capped(tf, extract_dir: str) -> None:
     Enforces `MAX_SKILL_MEMBER_COUNT`, `MAX_SKILL_PER_FILE_BYTES`, and
     `MAX_SKILL_UNCOMPRESSED_BYTES`. Uses ``filter="data"`` semantics
     (skip symlinks/hardlinks/devices) to avoid path-traversal and
-    privileged-bit smuggling. Raises `_SkillExtractTooLarge` on cap
+    privileged-bit smuggling. Raises `_SkillExtractTooLargeError` on cap
     violation; callers must propagate so the temp directory is removed.
     """
     safe_root = os.path.realpath(extract_dir)
     members = tf.getmembers()
     if len(members) > MAX_SKILL_MEMBER_COUNT:
-        raise _SkillExtractTooLarge(
+        raise _SkillExtractTooLargeError(
             f"tar archive lists {len(members)} members "
             f"(> {MAX_SKILL_MEMBER_COUNT})"
         )
@@ -1365,7 +1365,7 @@ def _safe_tar_extractall_capped(tf, extract_dir: str) -> None:
             continue
         target = os.path.realpath(os.path.join(extract_dir, member.name))
         if not (target == safe_root or target.startswith(safe_root + os.sep)):
-            raise _SkillExtractTooLarge(
+            raise _SkillExtractTooLargeError(
                 f"tar archive contains path-traversal entry {member.name!r}"
             )
         if member.isdir():
@@ -1390,7 +1390,7 @@ def _safe_tar_extractall_capped(tf, extract_dir: str) -> None:
                         break
                     written += len(chunk)
                     if written > MAX_SKILL_PER_FILE_BYTES:
-                        raise _SkillExtractTooLarge(
+                        raise _SkillExtractTooLargeError(
                             f"tar entry {member.name!r} streamed "
                             f"more bytes than per-file cap "
                             f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
@@ -1410,7 +1410,7 @@ def _safe_zip_extractall_capped(zf, extract_dir: str) -> None:
     safe_root = os.path.realpath(extract_dir)
     infolist = zf.infolist()
     if len(infolist) > MAX_SKILL_MEMBER_COUNT:
-        raise _SkillExtractTooLarge(
+        raise _SkillExtractTooLargeError(
             f"zip archive lists {len(infolist)} members "
             f"(> {MAX_SKILL_MEMBER_COUNT})"
         )
@@ -1419,7 +1419,7 @@ def _safe_zip_extractall_capped(zf, extract_dir: str) -> None:
     for member in infolist:
         target = os.path.realpath(os.path.join(extract_dir, member.filename))
         if not (target == safe_root or target.startswith(safe_root + os.sep)):
-            raise _SkillExtractTooLarge(
+            raise _SkillExtractTooLargeError(
                 f"zip archive contains path-traversal entry {member.filename!r}"
             )
         if member.is_dir():
@@ -1438,7 +1438,7 @@ def _safe_zip_extractall_capped(zf, extract_dir: str) -> None:
                     break
                 written += len(chunk)
                 if written > MAX_SKILL_PER_FILE_BYTES:
-                    raise _SkillExtractTooLarge(
+                    raise _SkillExtractTooLargeError(
                         f"zip entry {member.filename!r} streamed more "
                         f"bytes than per-file cap "
                         f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
@@ -1465,7 +1465,7 @@ def _safe_tar_extract(
     with tarfile.open(archive_path, "r:gz") as tf:
         members = tf.getmembers()
         if len(members) > MAX_SKILL_MEMBER_COUNT:
-            raise _SkillExtractTooLarge(
+            raise _SkillExtractTooLargeError(
                 f"tar archive lists {len(members)} members "
                 f"(> {MAX_SKILL_MEMBER_COUNT})"
             )
@@ -1506,7 +1506,7 @@ def _safe_tar_extract(
                                 break
                             written += len(chunk)
                             if written > MAX_SKILL_PER_FILE_BYTES:
-                                raise _SkillExtractTooLarge(
+                                raise _SkillExtractTooLargeError(
                                     f"tar entry {member.name!r} streamed "
                                     f"more bytes than per-file cap "
                                     f"({written} > {MAX_SKILL_PER_FILE_BYTES})"
