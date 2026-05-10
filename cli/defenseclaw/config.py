@@ -625,10 +625,29 @@ class SplunkConfig:
     index: str = "defenseclaw"
     source: str = "defenseclaw"
     sourcetype: str = "_json"
-    verify_tls: bool = False
+    # F-0286 (and parity with Go F-2787): TLS verification is now ON by
+    # default. ``verify_tls`` is the LEGACY opt-in-to-security flag and
+    # is honoured when explicitly true (no-op against the new secure
+    # default); explicit false is silently IGNORED. Operators that
+    # genuinely need to bypass certificate validation (dev environments
+    # with self-signed HEC) must set ``insecure_skip_verify=True``.
+    verify_tls: bool = True
+    insecure_skip_verify: bool = False
     enabled: bool = False
     batch_size: int = 50
     flush_interval_s: int = 5
+
+    def tls_verify_enabled(self) -> bool:
+        """Resolve effective TLS verification posture.
+
+        F-0286: returns False only when ``insecure_skip_verify`` is
+        explicitly true. ``verify_tls=False`` no longer downgrades the
+        sink — operators must move the explicit opt-out to the new
+        ``insecure_skip_verify`` flag. Any other combination yields a
+        secure default of True so omitting the field never silently
+        leaks the HEC token to a MITM peer.
+        """
+        return not self.insecure_skip_verify
 
     def resolved_hec_token(self) -> str:
         """Return HEC token from env var (if set) or direct value."""
@@ -2980,7 +2999,13 @@ def load() -> Config:
                 "index": hec.get("index", "defenseclaw"),
                 "source": hec.get("source", "defenseclaw"),
                 "sourcetype": hec.get("sourcetype", "_json"),
-                "verify_tls": bool(hec.get("verify_tls", False)),
+                # F-0286: default verify_tls to True so promoting an
+                # audit_sinks declaration into the legacy SplunkConfig
+                # block never silently downgrades verification. The
+                # explicit opt-out lives on the new
+                # ``insecure_skip_verify`` field.
+                "verify_tls": bool(hec.get("verify_tls", True)),
+                "insecure_skip_verify": bool(hec.get("insecure_skip_verify", False)),
             }
             break
 
@@ -3048,7 +3073,12 @@ def load() -> Config:
             index=splunk_raw.get("index", "defenseclaw"),
             source=splunk_raw.get("source", "defenseclaw"),
             sourcetype=splunk_raw.get("sourcetype", "_json"),
-            verify_tls=splunk_raw.get("verify_tls", False),
+            # F-0286: default verify_tls to True so callers that load a
+            # legacy config without the new field still get certificate
+            # verification. The explicit dev-mode opt-out lives on
+            # ``insecure_skip_verify`` and is wired separately.
+            verify_tls=splunk_raw.get("verify_tls", True),
+            insecure_skip_verify=splunk_raw.get("insecure_skip_verify", False),
             enabled=splunk_raw.get("enabled", False),
             batch_size=splunk_raw.get("batch_size", 50),
             flush_interval_s=splunk_raw.get("flush_interval_s", 5),
