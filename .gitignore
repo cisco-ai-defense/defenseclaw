@@ -95,3 +95,14 @@ output/playwright/
 # between personal workflow notes and the project's canonical docs.
 AGENTS.md
 CLAUDE.md
+
+# DeepSec scan tool output (`npx deepsec scan` writes data/ here).
+# The reports under .deepsec/data/.../reports/ are local audit
+# artifacts the tool regenerates per run; never check them in.
+.deepsec/
+
+# Local smoke-test scratch directory used by manual REPL/curl runs
+# against an isolated DEFENSECLAW_HOME. Holds bin/, home/, logs/, and
+# operator-authored sweep-*.sh helpers — none of these are project
+# source.
+.smoke/
