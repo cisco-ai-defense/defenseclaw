@@ -2664,11 +2664,11 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		}
 		for _, value := range sig.PathHashes {
 			if value != "" && !isSHA256Hash(value) {
-				return errors.New("path hashes must be sha256:<64 hex>")
+				return errors.New("path hashes must be sha256:<64 hex> or hmac-sha256:<64 hex>")
 			}
 		}
 		if sig.WorkspaceHash != "" && !isSHA256Hash(sig.WorkspaceHash) {
-			return errors.New("workspace_hash must be sha256:<64 hex>")
+			return errors.New("workspace_hash must be sha256:<64 hex> or hmac-sha256:<64 hex>")
 		}
 		for _, value := range sig.Basenames {
 			if strings.Contains(value, "/") || strings.Contains(value, "\\") {
@@ -2684,7 +2684,7 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 		}
 		for _, ev := range sig.Evidence {
 			if ev.PathHash != "" && !isSHA256Hash(ev.PathHash) {
-				return errors.New("evidence path_hash must be sha256:<64 hex>")
+				return errors.New("evidence path_hash must be sha256:<64 hex> or hmac-sha256:<64 hex>")
 			}
 			if ev.Basename != "" && (strings.Contains(ev.Basename, "/") || strings.Contains(ev.Basename, "\\")) {
 				return errors.New("evidence basename must not contain path separators")
@@ -2725,18 +2725,44 @@ func SanitizeEvidenceForWire(signals []AISignal, disableRedaction, storeRawLocal
 	}
 }
 
+// isSHA256Hash returns true for the two opaque-digest formats that
+// AI-discovery payloads are allowed to carry in PathHashes,
+// WorkspaceHash, and evidence.PathHash:
+//
+//	sha256:<64 lowercase hex>       — legacy unsalted form (hashPath
+//	                                   when SetPathHashKey is unset, e.g.
+//	                                   detached scans, tests).
+//	hmac-sha256:<64 lowercase hex>  — per-installation keyed form
+//	                                   activated by SetPathHashKey at
+//	                                   sidecar boot. See
+//	                                   inventory.hashPath and the
+//	                                   sidecar's deriveAIInventoryHashKey
+//	                                   for the derivation contract.
+//
+// Both formats are exactly 64 hex chars after the prefix because
+// HMAC-SHA256 has the same 32-byte output as plain SHA-256. Accepting
+// both keeps validateAIDiscoveryReport from rejecting payloads emitted
+// by a fully-configured gateway (DeepSec S2.MEDIUM remediation), while
+// still rejecting raw paths, truncated digests, and unrelated formats.
 func isSHA256Hash(value string) bool {
-	const prefix = "sha256:"
-	if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
-		return false
-	}
-	for _, ch := range value[len(prefix):] {
-		if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+	for _, prefix := range [...]string{"sha256:", "hmac-sha256:"} {
+		if !strings.HasPrefix(value, prefix) || len(value) != len(prefix)+64 {
 			continue
 		}
-		return false
+		hex := value[len(prefix):]
+		ok := true
+		for _, ch := range hex {
+			if (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') {
+				continue
+			}
+			ok = false
+			break
+		}
+		if ok {
+			return true
+		}
 	}
-	return true
+	return false
 }
 
 // AIStateStore persists local discovery deltas under the DefenseClaw data dir.

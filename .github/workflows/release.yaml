@@ -252,10 +252,18 @@ jobs:
       # release. We must instead create the release atomically with all
       # assets at the end of the job, because Immutable Releases rejects
       # post-create asset uploads.
+      # DeepSec H ("Privileged release pipeline executes mutable actions"):
+      # the goreleaser-action binary is SHA-pinned above, but the `version:`
+      # parameter previously selected a mutable semver range ("~> v2"),
+      # which lets a compromised GoReleaser v2.x release execute inside this
+      # job and tamper with signed/SBOM'd artifacts. Pin to an exact
+      # released version. Bump deliberately by editing this string and
+      # verifying the matching GoReleaser release notes — never widen back
+      # to a range.
       - name: Build artifacts with GoReleaser
         uses: goreleaser/goreleaser-action@9ed2f89a662bf1735a48bc8557fd212fa902bebf # v6.1.0
         with:
-          version: "~> v2"
+          version: "v2.15.4"
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

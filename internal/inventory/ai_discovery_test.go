@@ -1352,3 +1352,63 @@ func TestRunScan_RespectsCancelledContext(t *testing.T) {
 		t.Fatalf("got err=%v, want context.Canceled", err)
 	}
 }
+
+// TestIsSHA256Hash_AcceptsKeyedAndUnsalted is a regression test for the
+// DeepSec S2.MEDIUM remediation (SetPathHashKey wiring). When the
+// sidecar boots with a gateway token, inventory.hashPath emits the
+// keyed digest form `hmac-sha256:<64 hex>`. validateAIDiscoveryReport
+// must accept that prefix in addition to the legacy `sha256:` form,
+// otherwise every AI-discovery payload from a fully-configured gateway
+// would be rejected by validation.
+//
+// The test enumerates the prefix matrix (legacy / keyed / unrelated)
+// crossed with shape problems (good, short, long, non-hex) and
+// asserts only the two well-formed prefixes pass.
+func TestIsSHA256Hash_AcceptsKeyedAndUnsalted(t *testing.T) {
+	t.Parallel()
+	const goodHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"  // 64 hex
+	const shortHex = "0123456789abcdef"                                                 // 16 hex
+	const upperHex = "0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef" // mixed case rejected
+	const nonHex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"   // 'g'
+
+	cases := []struct {
+		name   string
+		input  string
+		expect bool
+	}{
+		// Accepted (legacy unsalted, set when SetPathHashKey is nil).
+		{"legacy_sha256_good", "sha256:" + goodHex, true},
+		// Accepted (per-installation keyed, set when SetPathHashKey
+		// is wired from sidecar boot — DeepSec S2.MEDIUM fix).
+		{"keyed_hmac_sha256_good", "hmac-sha256:" + goodHex, true},
+
+		// Rejected: empty.
+		{"empty", "", false},
+		// Rejected: missing prefix.
+		{"raw_hex_no_prefix", goodHex, false},
+		// Rejected: wrong prefix (only the two formats above are valid).
+		{"unrelated_prefix", "sha512:" + goodHex, false},
+		// Rejected: too short hex tail.
+		{"short_legacy", "sha256:" + shortHex, false},
+		{"short_keyed", "hmac-sha256:" + shortHex, false},
+		// Rejected: too long (would let a raw path through).
+		{"long_legacy", "sha256:" + goodHex + "00", false},
+		// Rejected: uppercase hex (we render lowercase deliberately).
+		{"upper_legacy", "sha256:" + upperHex, false},
+		{"upper_keyed", "hmac-sha256:" + upperHex, false},
+		// Rejected: non-hex byte sneaks past length check.
+		{"nonhex_legacy", "sha256:" + nonHex, false},
+		{"nonhex_keyed", "hmac-sha256:" + nonHex, false},
+		// Rejected: prefix only.
+		{"prefix_only_legacy", "sha256:", false},
+		{"prefix_only_keyed", "hmac-sha256:", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isSHA256Hash(tc.input)
+			if got != tc.expect {
+				t.Fatalf("isSHA256Hash(%q) = %v, want %v", tc.input, got, tc.expect)
+			}
+		})
+	}
+}
