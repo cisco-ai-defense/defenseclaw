@@ -2321,13 +2321,16 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
 
     for entry in active:
         tag = _OVERRIDE_TAG_BY_IMPACT.get(entry.security_impact, "warn")
-        # Detail format: "<purpose-headline> (impact=<level>[, F-XXXX])"
+        # Detail format: "<name>: <purpose-headline> | impact=<level> | <security-note> | fix: <hint>"
         purpose_one_liner = entry.purpose.split(".")[0].strip()
         if len(purpose_one_liner) > 100:
             purpose_one_liner = purpose_one_liner[:97] + "..."
         bits = [purpose_one_liner, f"impact={entry.security_impact}"]
-        if entry.finding_id:
-            bits.append(entry.finding_id)
+        if entry.security_note:
+            note = entry.security_note
+            if len(note) > 90:
+                note = note[:87] + "..."
+            bits.append(note)
         if entry.replacement_hint:
             # Truncated replacement hint; full text lives in the
             # auto-generated docs page.

@@ -105,7 +105,7 @@ type EnvVar struct {
 	SurfaceInDoctor bool       `json:"surface_in_doctor"`
 	Consumers       []Consumer `json:"consumers"`
 	Since           string     `json:"since"`
-	FindingID       string     `json:"finding_id,omitempty"`
+	SecurityNote    string     `json:"security_note,omitempty"`
 	ReplacementHint string     `json:"replacement_hint,omitempty"`
 	Deprecated      bool       `json:"deprecated,omitempty"`
 }

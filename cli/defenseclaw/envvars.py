@@ -113,7 +113,7 @@ class EnvVar:
     surface_in_doctor: bool
     consumers: tuple[Consumer, ...]
     since: str
-    finding_id: str = ""
+    security_note: str = ""
     replacement_hint: str = ""
     deprecated: bool = False
 
@@ -262,7 +262,7 @@ def _validate_entry(raw: dict[str, Any], path: Path) -> EnvVar:
         surface_in_doctor=bool(raw["surface_in_doctor"]),
         consumers=consumers,
         since=str(raw["since"]),
-        finding_id=str(raw.get("finding_id", "")),
+        security_note=str(raw.get("security_note", "")),
         replacement_hint=str(raw.get("replacement_hint", "")),
         deprecated=bool(raw.get("deprecated", False)),
     )
