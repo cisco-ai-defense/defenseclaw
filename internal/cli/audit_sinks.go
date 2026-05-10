@@ -89,6 +89,7 @@ func buildOneSink(ctx context.Context, decl config.AuditSink, res *resource.Reso
 			Source:              c.Source,
 			SourceType:          c.SourceType,
 			VerifyTLS:           c.VerifyTLS,
+			InsecureSkipVerify:  c.InsecureSkipVerify,
 			BatchSize:           decl.BatchSize,
 			FlushIntervalS:      decl.FlushIntervalS,
 			TimeoutS:            decl.TimeoutS,
@@ -102,16 +103,17 @@ func buildOneSink(ctx context.Context, decl config.AuditSink, res *resource.Reso
 			return nil, fmt.Errorf("missing http_jsonl block")
 		}
 		return sinks.NewHTTPJSONLSink(sinks.HTTPJSONLConfig{
-			Name:           decl.Name,
-			URL:            c.URL,
-			Method:         c.Method,
-			Headers:        c.Headers,
-			BearerToken:    c.ResolvedBearer(),
-			VerifyTLS:      c.VerifyTLS,
-			BatchSize:      decl.BatchSize,
-			FlushIntervalS: decl.FlushIntervalS,
-			TimeoutS:       decl.TimeoutS,
-			Filter:         filter,
+			Name:               decl.Name,
+			URL:                c.URL,
+			Method:             c.Method,
+			Headers:            c.Headers,
+			BearerToken:        c.ResolvedBearer(),
+			VerifyTLS:          c.VerifyTLS,
+			InsecureSkipVerify: c.InsecureSkipVerify,
+			BatchSize:          decl.BatchSize,
+			FlushIntervalS:     decl.FlushIntervalS,
+			TimeoutS:           decl.TimeoutS,
+			Filter:             filter,
 		})
 
 	case config.SinkKindOTLPLogs:

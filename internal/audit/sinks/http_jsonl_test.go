@@ -12,6 +12,7 @@ package sinks
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -311,6 +312,71 @@ func TestMaxHTTPJSONLQueue_HasFloor(t *testing.T) {
 	}
 	if got := maxHTTPJSONLQueue(500); got != 50_000 {
 		t.Fatalf("scaled cap wrong for BatchSize=500: got %d want 50000", got)
+	}
+}
+
+// TestHTTPJSONLSink_TLSSecureByDefault pins the F-2788 fix: a sink
+// built with the zero-value config (no VerifyTLS, no
+// InsecureSkipVerify) MUST construct an http.Client that verifies TLS
+// certificates. Pre-fix the same shape silently downgraded
+// verification and any bearer token would have been observable to a
+// MITM peer. The legacy ``verify_tls`` field is now ignored when set
+// to false; operators that want the old insecure mode must use the
+// new explicit ``insecure_skip_verify`` opt-out.
+func TestHTTPJSONLSink_TLSSecureByDefault(t *testing.T) {
+	cases := []struct {
+		name     string
+		cfg      HTTPJSONLConfig
+		wantSkip bool
+	}{
+		{
+			name:     "zero-value defaults to verify",
+			cfg:      HTTPJSONLConfig{URL: "https://siem.example/ingest"},
+			wantSkip: false,
+		},
+		{
+			name: "legacy verify_tls=true is honoured (no-op vs new default)",
+			cfg: HTTPJSONLConfig{
+				URL: "https://siem.example/ingest", VerifyTLS: true,
+			},
+			wantSkip: false,
+		},
+		{
+			name: "legacy verify_tls=false is IGNORED (new default wins)",
+			cfg: HTTPJSONLConfig{
+				URL: "https://siem.example/ingest", VerifyTLS: false,
+			},
+			wantSkip: false,
+		},
+		{
+			name: "explicit insecure_skip_verify=true honoured (dev opt-out)",
+			cfg: HTTPJSONLConfig{
+				URL: "https://siem.example/ingest", InsecureSkipVerify: true,
+			},
+			wantSkip: true,
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			sink, err := NewHTTPJSONLSink(tt.cfg)
+			if err != nil {
+				t.Fatalf("NewHTTPJSONLSink err=%v", err)
+			}
+			defer sink.Close()
+			tr, ok := sink.client.Transport.(*http.Transport)
+			if !ok {
+				t.Fatalf("unexpected transport type %T", sink.client.Transport)
+			}
+			if tr.TLSClientConfig == nil {
+				t.Fatal("TLSClientConfig must be set")
+			}
+			if got := tr.TLSClientConfig.InsecureSkipVerify; got != tt.wantSkip {
+				t.Fatalf("InsecureSkipVerify=%v want %v", got, tt.wantSkip)
+			}
+			if tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+				t.Fatalf("MinVersion=%d must be >=TLS1.2", tr.TLSClientConfig.MinVersion)
+			}
+		})
 	}
 }
 

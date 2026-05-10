@@ -218,12 +218,28 @@ class _SplunkForwarder:
                     "Content-Type": "application/json",
                 },
             )
+            # F-0286: default to verifying TLS certificates so this
+            # legacy forwarder cannot leak the HEC token to a MITM peer.
+            # Operators must explicitly set ``insecure_skip_verify=True``
+            # on the SplunkConfig (or the underlying audit_sinks block)
+            # to opt into the unverified path. ``tls_verify_enabled``
+            # collapses the legacy ``verify_tls`` field and the new
+            # ``insecure_skip_verify`` field into a single secure-by-
+            # default decision.
             ctx = None
-            if not getattr(self.cfg, "verify_tls", False):
+            verify_enabled = True
+            if hasattr(self.cfg, "tls_verify_enabled"):
+                verify_enabled = bool(self.cfg.tls_verify_enabled())
+            else:
+                # Fall back conservatively: only disable verification
+                # when the caller passes a config that explicitly
+                # sets ``insecure_skip_verify``.
+                verify_enabled = not bool(getattr(self.cfg, "insecure_skip_verify", False))
+            if not verify_enabled:
                 import ssl
 
                 ctx = ssl._create_unverified_context()
-            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=5, context=ctx) as resp:  # noqa: S310
                 if getattr(resp, "status", 200) >= 400:
                     raise urllib.error.HTTPError(
                         endpoint,
