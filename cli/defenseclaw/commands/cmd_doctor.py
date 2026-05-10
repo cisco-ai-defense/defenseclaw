@@ -35,6 +35,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.envvars import active_security_overrides
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
 # Doctor status markers, recomputed per emission so the per-call
@@ -2216,6 +2217,69 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Security-overrides check (env-var registry-driven)
+# ---------------------------------------------------------------------------
+
+# Severity → doctor-tag mapping. Anything we surface in doctor is at
+# minimum a 'warn' because the operator made a deliberate choice; we
+# don't want to FAIL on legitimate dev/test overrides. High-impact
+# overrides still warn loudly so they stand out in the summary line.
+_OVERRIDE_TAG_BY_IMPACT = {
+    "high": "warn",
+    "medium": "warn",
+    "low": "warn",
+}
+
+
+def _check_security_overrides(cfg, r: _DoctorResult) -> None:
+    """Surface DEFENSECLAW_* env vars that weaken security defaults.
+
+    Reads the centralized registry (``cli/defenseclaw/envvars.py``) and
+    emits one warn per active opt-out so operators can see at a glance
+    which bypasses are in effect. Idle installs see a single PASS row
+    ("none active") — typical for production deployments.
+
+    Why this matters: the codebase has ~70 ``DEFENSECLAW_*`` env vars
+    and several of them (``DEFENSECLAW_DISABLE_REDACTION``,
+    ``DEFENSECLAW_OTEL_TLS_INSECURE``, ``DEFENSECLAW_CODEX_LOOPBACK_TRUST``,
+    ...) materially weaken security defaults. Without this check an
+    operator has no way to spot a forgotten override left over from a
+    debugging session.
+    """
+    try:
+        active = active_security_overrides()
+    except (FileNotFoundError, ValueError) as exc:
+        # Registry load failure is a programmer error (malformed JSON,
+        # missing file) — surface it loudly without bringing down the
+        # rest of doctor.
+        _emit("fail", "Security overrides", f"registry load failed: {exc}", r=r)
+        return
+
+    if not active:
+        _emit("pass", "Security overrides", "none active", r=r)
+        return
+
+    for entry in active:
+        tag = _OVERRIDE_TAG_BY_IMPACT.get(entry.security_impact, "warn")
+        # Detail format: "<purpose-headline> (impact=<level>[, F-XXXX])"
+        purpose_one_liner = entry.purpose.split(".")[0].strip()
+        if len(purpose_one_liner) > 100:
+            purpose_one_liner = purpose_one_liner[:97] + "..."
+        bits = [purpose_one_liner, f"impact={entry.security_impact}"]
+        if entry.finding_id:
+            bits.append(entry.finding_id)
+        if entry.replacement_hint:
+            # Truncated replacement hint; full text lives in the
+            # auto-generated docs page.
+            hint = entry.replacement_hint
+            if len(hint) > 80:
+                hint = hint[:77] + "..."
+            bits.append(f"fix: {hint}")
+        detail = f"{entry.name}: " + " | ".join(bits)
+        _emit(tag, "Security override", detail, r=r)
+
+
+# ---------------------------------------------------------------------------
 # Main command
 # ---------------------------------------------------------------------------
 
@@ -2327,6 +2391,14 @@ def doctor(
     if not json_out:
         _doctor_subsection("Webhooks")
     _check_webhooks(cfg, r)
+
+    # Surface any DEFENSECLAW_* env-var bypass that's currently active.
+    # The registry at internal/envvars/registry.json is the single
+    # source of truth; operators with no overrides set see a single
+    # PASS row here.
+    if not json_out:
+        _doctor_subsection("Security Overrides")
+    _check_security_overrides(cfg, r)
 
     if do_fix:
         if not json_out:
