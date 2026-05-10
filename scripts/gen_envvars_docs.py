@@ -82,10 +82,16 @@ _SENTINEL_END_MDX = "{/* AUTOGEN-END: env-vars */}"
 _SENTINEL_BEGIN_MD = "<!-- AUTOGEN-BEGIN: env-vars -->"
 _SENTINEL_END_MD = "<!-- AUTOGEN-END: env-vars -->"
 
-_AUTOGEN_NOTE = (
+_AUTOGEN_NOTE_MD = (
     "<!-- The block below is auto-generated from "
     "`internal/envvars/registry.json` via `scripts/gen_envvars_docs.py`. "
     "Edit the JSON, not this file. -->"
+)
+# MDX does not allow HTML comments inside JSX/MDX content; use a block comment.
+_AUTOGEN_NOTE_MDX = (
+    "{/* The block below is auto-generated from "
+    "`internal/envvars/registry.json` via `scripts/gen_envvars_docs.py`. "
+    "Edit the JSON, not this file. */}"
 )
 
 
@@ -211,7 +217,7 @@ def _render_table(category: str, *, mdx: bool) -> str:
 def _render_block(*, mdx: bool) -> str:
     """Build the full auto-generated block (one section per category)."""
     chunks: list[str] = []
-    chunks.append(_AUTOGEN_NOTE)
+    chunks.append(_AUTOGEN_NOTE_MDX if mdx else _AUTOGEN_NOTE_MD)
     chunks.append("")
     for category in _CATEGORY_ORDER:
         title = _CATEGORY_TITLES[category]
