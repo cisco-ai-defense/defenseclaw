@@ -1412,3 +1412,72 @@ func TestIsSHA256Hash_AcceptsKeyedAndUnsalted(t *testing.T) {
 		})
 	}
 }
+
+// TestHashPath_KeyedVsUnsalted is the end-to-end coverage for the
+// SetPathHashKey contract. It is the assertion the cross-package
+// sidecar test deliberately can't make (hashPath is unexported), and
+// guards against future refactors that quietly drop keyed-mode
+// emission — which would re-introduce DeepSec S2.MEDIUM (reversible
+// path fingerprints).
+//
+// Properties asserted:
+//
+//  1. Default state (no key installed) returns the legacy
+//     "sha256:<64 hex>" form so detached scan utilities, tests, and
+//     pre-boot code continue to produce the documented digest.
+//  2. After SetPathHashKey(non-nil), hashPath transitions to the
+//     "hmac-sha256:<64 hex>" form with the same hex length, and the
+//     digest itself differs from the unsalted SHA-256 of the same
+//     path (which proves the key is actually feeding into HMAC and
+//     not being silently ignored).
+//  3. SetPathHashKey(nil) restores the legacy form, byte-for-byte
+//     identical to the pre-key digest — proving the rollback path
+//     used by tests and `disable_redaction` modes is symmetric.
+//
+// This test does NOT run with t.Parallel() because SetPathHashKey
+// mutates package-level state shared across the entire process.
+// Other tests in this package that depend on hashPath stay
+// well-defined as long as we restore the nil key on cleanup, which
+// the t.Cleanup hook guarantees.
+func TestHashPath_KeyedVsUnsalted(t *testing.T) {
+	// Save and restore any pre-existing key so this test is hermetic
+	// when run alongside others that may have set one (sidecar tests,
+	// future regression tests).
+	saved := currentPathHashKey()
+	t.Cleanup(func() { SetPathHashKey(saved) })
+
+	const samplePath = "/Users/example/.codex/config.toml"
+
+	// Property 1: legacy mode (no key installed).
+	SetPathHashKey(nil)
+	legacy := hashPath(samplePath)
+	if !strings.HasPrefix(legacy, "sha256:") {
+		t.Fatalf("legacy mode: hashPath returned %q, want sha256: prefix", legacy)
+	}
+	if len(legacy) != len("sha256:")+64 {
+		t.Fatalf("legacy mode: hashPath length = %d, want %d", len(legacy), len("sha256:")+64)
+	}
+
+	// Property 2: keyed mode (after SetPathHashKey).
+	key := []byte("test-installation-key-32-bytes-ok!!")
+	SetPathHashKey(key)
+	keyed := hashPath(samplePath)
+	if !strings.HasPrefix(keyed, "hmac-sha256:") {
+		t.Fatalf("keyed mode: hashPath returned %q, want hmac-sha256: prefix — SetPathHashKey wiring is broken", keyed)
+	}
+	if len(keyed) != len("hmac-sha256:")+64 {
+		t.Fatalf("keyed mode: hashPath length = %d, want %d", len(keyed), len("hmac-sha256:")+64)
+	}
+	// Critical anti-regression: the keyed digest must differ from the
+	// legacy SHA-256, otherwise SetPathHashKey is silently a no-op.
+	if keyed[len("hmac-sha256:"):] == legacy[len("sha256:"):] {
+		t.Fatal("keyed digest equals unsalted digest — SetPathHashKey is not affecting output, which means dictionary attacks are still possible against the redacted path hash")
+	}
+
+	// Property 3: SetPathHashKey(nil) restores legacy mode exactly.
+	SetPathHashKey(nil)
+	legacy2 := hashPath(samplePath)
+	if legacy2 != legacy {
+		t.Fatalf("after key removal, legacy digest changed: was %q, now %q — SetPathHashKey(nil) rollback is broken", legacy, legacy2)
+	}
+}
