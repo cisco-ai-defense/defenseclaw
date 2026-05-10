@@ -15,7 +15,20 @@ concurrency:
 jobs:
   core:
     name: Core E2E
-    if: ${{ github.event_name != 'schedule' }}
+    # Closes avarice F-2067 (HIGH): the self-hosted runner has access
+    # to OPENCLAW_GATEWAY_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+    # BIFROST_API_KEY, and SPLUNK_ACCESS_TOKEN via the env block
+    # below. Allowing fork PRs to dispatch this job hands attacker-
+    # controlled workflow code (e.g. a malicious test that prints
+    # secrets, or a workflow_run hijack) the keys to the kingdom AND
+    # persistent shell access on a long-lived ARM64 runner.
+    #
+    # Guard rail: only run on push, schedule, workflow_dispatch, or
+    # PRs whose head ref lives on this repo (i.e. internal PRs).
+    # External contributors instead rely on the GitHub-hosted shadow
+    # job further down the file. Mirrors the guard already in
+    # `full-live` below — we just forgot to clone it onto `core`.
+    if: ${{ github.event_name != 'schedule' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
