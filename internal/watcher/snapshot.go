@@ -89,12 +89,12 @@ var urlPattern = regexp.MustCompile(
 // and ignore only when the host is one of these *exact* hostnames
 // or a loopback IP literal.
 var ignoredHostnames = map[string]struct{}{
-	"localhost":     {},
-	"example.com":   {},
+	"localhost":       {},
+	"example.com":     {},
 	"www.example.com": {},
-	"127.0.0.1":     {},
-	"::1":           {},
-	"0.0.0.0":       {},
+	"127.0.0.1":       {},
+	"::1":             {},
+	"0.0.0.0":         {},
 }
 
 func isIgnoredEndpoint(raw string) bool {

@@ -16,7 +16,7 @@
 // mode: no system or global config, no repository-local fsmonitor /
 // hooks / external diff helpers, no optional locks, no replace-refs.
 //
-// Background
+// # Background
 //
 // Codex / connector hook scanning runs `git diff`, `git ls-files`,
 // and `git rev-parse` inside attacker-supplied working trees. Stock
@@ -48,16 +48,16 @@ import (
 // are emulated via `-c diff.external=` instead so the same flag
 // list works for ls-files, rev-parse, diff, log, etc.
 //
-//   -c protocol.version=2          stable wire format, avoids legacy v1 helpers
-//   -c core.fsmonitor=false        no helper invoked on index/working-tree IO
-//   -c core.hooksPath=/dev/null    repository hooks are bypassed
-//   -c core.useReplaceRefs=false   `replace` refs cannot redirect history reads
-//   -c protocol.file.allow=user    file:// submodules require explicit opt-in
-//   -c diff.external=              empty external diff helper (overrides config)
-//   -c core.editor=true            harmless editor (overrides hostile config)
-//   -c core.pager=cat              non-interactive pager
-//   -c uploadpack.packObjectsHook= empty pack-objects hook (overrides config)
-//   --no-optional-locks            avoids triggering helper-touching paths
+//	-c protocol.version=2          stable wire format, avoids legacy v1 helpers
+//	-c core.fsmonitor=false        no helper invoked on index/working-tree IO
+//	-c core.hooksPath=/dev/null    repository hooks are bypassed
+//	-c core.useReplaceRefs=false   `replace` refs cannot redirect history reads
+//	-c protocol.file.allow=user    file:// submodules require explicit opt-in
+//	-c diff.external=              empty external diff helper (overrides config)
+//	-c core.editor=true            harmless editor (overrides hostile config)
+//	-c core.pager=cat              non-interactive pager
+//	-c uploadpack.packObjectsHook= empty pack-objects hook (overrides config)
+//	--no-optional-locks            avoids triggering helper-touching paths
 //
 // The command-name is appended after this slice.
 var safeGitFlags = []string{
