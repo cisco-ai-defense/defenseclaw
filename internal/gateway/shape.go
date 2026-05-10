@@ -234,14 +234,19 @@ func isPrivateHost(host string) bool {
 	// loopback / link-local destinations.
 	h = stripIPv6Zone(h)
 	if ip := net.ParseIP(h); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return true
-		}
-		return false
+		// Delegate to isUnsafeIP (provider.go) so isPrivateHost
+		// classifies the same set of unsafe IPs as the dial guard.
+		// This was historically two divergent predicates: isUnsafeIP
+		// covered CGNAT 100.64/10, ECS 169.254.170.2, and IPv6
+		// ULA fd00::/8 while isPrivateHost did not. Routing both
+		// through the same predicate eliminates the gap so a
+		// CNAME / Host-header attack that lands on a public IP
+		// at the application check but resolves to private at
+		// dial time is still refused at the application check.
+		return isUnsafeIP(ip)
 	}
 	// Hostname — resolve and check every returned address. A single
-	// private result is enough to flag the host: an attacker who
+	// unsafe result is enough to flag the host: an attacker who
 	// returns multiple A records (one public, one 127.0.0.1) is
 	// trying exactly the rebinding trick this branch closes.
 	addrs, err := net.LookupHost(h)
@@ -253,8 +258,7 @@ func isPrivateHost(host string) bool {
 		if resolved == nil {
 			continue
 		}
-		if resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast() ||
-			resolved.IsLinkLocalMulticast() || resolved.IsUnspecified() {
+		if isUnsafeIP(resolved) {
 			return true
 		}
 	}

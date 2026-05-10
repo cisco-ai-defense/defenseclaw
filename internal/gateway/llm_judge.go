@@ -521,7 +521,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{})
+			err.Error(), "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -529,7 +529,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{})
+			"empty-response", "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -557,7 +557,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-injection")
 	}
 
@@ -573,7 +573,7 @@ func (j *LLMJudge) runInjectionJudge(ctx context.Context, content string) *ScanV
 		verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict)})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), InputContent: content})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, "prompt", content, verdictSnapshotFrom(verdict))
 	}
@@ -990,7 +990,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{ToolName: toolName})
+			err.Error(), "", JudgeEmitOpts{ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 	fmt.Fprintf(defaultLogWriter, "  [llm-judge] pii: provider returned (dir=%s, choices=%d)\n", direction, len(resp.Choices))
@@ -999,7 +999,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{ToolName: toolName})
+			"empty-response", "", JudgeEmitOpts{ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 
@@ -1027,7 +1027,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName, InputContent: content})
 		return errorVerdict("llm-judge-pii")
 	}
 
@@ -1053,7 +1053,7 @@ func (j *LLMJudge) runPIIJudge(ctx context.Context, content, direction, toolName
 		direction, verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.Direction(direction),
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName, InputContent: content})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, dir, content, verdictSnapshotFrom(verdict))
 	}
@@ -1477,7 +1477,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{})
+			err.Error(), "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -1485,7 +1485,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{})
+			"empty-response", "", JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -1509,7 +1509,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 			len(content), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{InputContent: content})
 		return errorVerdict("llm-judge-exfil")
 	}
 
@@ -1519,7 +1519,7 @@ func (j *LLMJudge) runExfilJudge(ctx context.Context, content string) *ScanVerdi
 		verdict.Action, verdict.Severity, verdict.Findings)
 	emitJudge(ctx, kind, j.model, gatewaylog.DirectionPrompt,
 		len(content), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict)})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), InputContent: content})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, "prompt", content, verdictSnapshotFrom(verdict))
 	}
@@ -1774,7 +1774,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			err.Error(), "", JudgeEmitOpts{ToolName: toolName})
+			err.Error(), "", JudgeEmitOpts{ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
@@ -1786,7 +1786,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		recordJudgeMetrics(nil, false)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			"empty-response", "", JudgeEmitOpts{ToolName: toolName})
+			"empty-response", "", JudgeEmitOpts{ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
@@ -1798,7 +1798,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 		recordJudgeMetrics(nil, true)
 		emitJudge(ctx, kind, j.model, dir,
 			len(args), latencyMs, "error", gatewaylog.SeverityHigh,
-			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName})
+			"parse-failed", judgeRawForEmit(rawResponse), JudgeEmitOpts{ToolName: toolName, InputContent: args})
 		return errorVerdict("llm-judge-tool")
 	}
 
@@ -1806,7 +1806,7 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 	recordJudgeMetrics(verdict, false)
 	emitJudge(ctx, kind, j.model, dir,
 		len(args), latencyMs, verdict.Action, deriveSeverity(verdict.Severity),
-		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName})
+		"", judgeRawForEmit(rawResponse), JudgeEmitOpts{Findings: judgeFindingsPayload(verdict), ToolName: toolName, InputContent: args})
 	if c := judgeVerdictCache(); c != nil {
 		c.Put(kind, j.model, "tool_call", cacheBody, verdictSnapshotFrom(verdict))
 	}

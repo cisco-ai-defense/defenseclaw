@@ -225,6 +225,13 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	sessionID := extractOTLPSessionID(summaryBody, signal)
 	if sessionID != "" {
 		ctx = ContextWithSessionID(ctx, sessionID)
+		// DeepSec follow-up: when session_id arrives in the OTLP body
+		// (after auth has already happened), the request envelope was
+		// promoted with no session_id. Re-promote now so persisted
+		// events carry both session_id AND a stable agent_instance_id
+		// — otherwise downstream joins on (session_id, instance_id)
+		// fail because instance_id is empty.
+		ctx = PromoteSessionIfAuthenticated(ctx)
 		enrichHTTPSpanFromContext(ctx)
 		enrichOTLPIngestSpan(ctx, sessionID)
 	}
