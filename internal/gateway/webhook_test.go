@@ -23,8 +23,10 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -413,6 +415,79 @@ func TestNewWebhookDispatcherRejectsUnsafeURL(t *testing.T) {
 	})
 	if d != nil {
 		t.Error("expected nil dispatcher when URL is private IP")
+	}
+}
+
+// TestWebhookCheckRedirect_RejectsPrivate pins F-1306 (avarice) at the
+// CheckRedirect closure layer.
+//
+// Pre-fix: webhooks were validated only at NewWebhookDispatcher time. The
+// http.Client used for actual delivery had no CheckRedirect, so a webhook
+// endpoint could 302 the dispatcher to http://127.0.0.1:6379/ (Redis) or
+// http://169.254.169.254/ (cloud IMDS) and Go's default redirect policy
+// would happily follow it.
+//
+// Post-fix: newWebhookHTTPClient installs a CheckRedirect that re-runs
+// validateWebhookURL on every redirect target.
+func TestWebhookCheckRedirect_RejectsPrivate(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "0")
+	logger := log.New(io.Discard, "", 0)
+	client := newWebhookHTTPClient(false, logger)
+	if client.CheckRedirect == nil {
+		t.Fatalf("F-1306: CheckRedirect not installed on webhook client")
+	}
+	type tc struct {
+		target  string
+		wantErr bool
+	}
+	cases := []tc{
+		{"https://example.com/path", false},
+		{"https://hooks.slack.com/services/T0/B0/abc", false},
+		// Cloud IMDS / loopback / RFC1918 / link-local — F-1306 cases.
+		{"http://169.254.169.254/", true},
+		{"http://127.0.0.1/", true},
+		{"http://[::1]/", true},
+		{"http://10.0.0.5/", true},
+		{"http://192.168.1.50/", true},
+		{"http://[fe80::1]/", true},
+		// F-1225 parity: scoped IPv6 must also be rejected.
+		{"http://[::1%25lo0]/", true},
+		// F-1225 parity: IPv4-mapped IPv6 must also be rejected.
+		{"http://[::ffff:127.0.0.1]/", true},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.target)
+		if err != nil {
+			t.Fatalf("parse %s: %v", c.target, err)
+		}
+		req := &http.Request{URL: u, Method: "POST"}
+		gotErr := client.CheckRedirect(req, nil)
+		if c.wantErr && gotErr == nil {
+			t.Errorf("CheckRedirect(%s) = nil, want error (private/loopback target)", c.target)
+		}
+		if !c.wantErr && gotErr != nil {
+			t.Errorf("CheckRedirect(%s) = %v, want nil (public target)", c.target, gotErr)
+		}
+	}
+}
+
+// TestWebhookCheckRedirect_RejectsLongChain pins the redirect-chain cap
+// (defense-in-depth: even if every hop is public, an attacker can stall the
+// dispatcher with a redirect storm).
+func TestWebhookCheckRedirect_RejectsLongChain(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	client := newWebhookHTTPClient(false, logger)
+	u, err := url.Parse("https://example.com/path")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	req := &http.Request{URL: u, Method: "POST"}
+	via := make([]*http.Request, 5)
+	for i := range via {
+		via[i] = &http.Request{URL: u, Method: "POST"}
+	}
+	if err := client.CheckRedirect(req, via); err == nil {
+		t.Errorf("CheckRedirect(via len=5) = nil, want error (chain cap)")
 	}
 }
 
