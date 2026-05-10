@@ -132,15 +132,27 @@ def _accepted_values_cell(entry: EnvVar) -> str:
     return ", ".join(bits)
 
 
-def _default_cell(entry: EnvVar) -> str:
-    d = entry.default
+def _mdx_default_needs_backticks(text: str) -> bool:
+    """MDX interprets ``${...}`` and ``{ident}`` in table cells as JS."""
+    return bool(text) and ("$" in text or "{" in text)
+
+
+def _default_cell(entry: EnvVar, *, mdx: bool) -> str:
+    d = entry.default or ""
     if not d or d.lower() == "unset" or d.lower().startswith("unset "):
-        return "`unset`" + (
+        suffix = (
             f" {_escape_table_cell(d[len('unset'):]).strip()}"
             if len(d) > len("unset")
             else ""
         )
-    return _escape_table_cell(d)
+        combined = f"`unset`{suffix}"
+        if mdx and suffix and _mdx_default_needs_backticks(suffix):
+            return f"`{_escape_table_cell(d)}`"
+        return combined
+    rendered = _escape_table_cell(d)
+    if mdx and _mdx_default_needs_backticks(rendered):
+        return f"`{rendered}`"
+    return rendered
 
 
 def _consumer_cell(entry: EnvVar) -> str:
@@ -204,7 +216,7 @@ def _render_table(category: str, *, mdx: bool) -> str:
         consumer_cell = _consumer_cell(e).replace("<br/>", br)
         row = (
             f"| {name} | {_impact_badge(e.security_impact)} | "
-            f"{_default_cell(e)} | "
+            f"{_default_cell(e, mdx=mdx)} | "
             f"{_accepted_values_cell(e)} | "
             f"{purpose} | "
             f"{_finding_cell(e)} | "
