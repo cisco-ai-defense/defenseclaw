@@ -30,6 +30,14 @@ from io import StringIO
 from pathlib import Path
 from typing import NamedTuple
 
+# `grp` is POSIX-only. We import it lazily-but-at-module-load so the
+# F-2507 group-ownership check below can run without an inline import,
+# while still keeping Windows hosts importable.
+try:  # pragma: no cover - Windows path
+    import grp as _grp
+except ImportError:  # pragma: no cover - non-POSIX
+    _grp = None  # type: ignore[assignment]
+
 from defenseclaw.config import default_data_path
 from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand
 
@@ -46,6 +54,17 @@ VERSION_TIMEOUT_SECONDS = 2.0
 # binary as part of a passive discovery scan. Operators with bespoke
 # install layouts can extend the allow-list at runtime via the
 # ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (colon-separated).
+# Avarice F-2507: the default trusted-prefix list previously included
+# normal user-writable tool directories (~/.local/bin, ~/.cargo/bin,
+# ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx, ~/Library/Application Support,
+# /Applications) and the only post-resolution check rejected
+# *world-writable* parents. A local agent process that can write to
+# the operator's tool dir could plant `codex` (or any other discovery
+# target) and DefenseClaw's passive scan would exec it. We restrict
+# the default list to system-managed prefixes that require root /
+# package-manager privilege to write. Operators with bespoke install
+# layouts can extend the list at runtime via
+# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` (colon-separated).
 _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/usr/bin",
     "/usr/local/bin",
@@ -61,30 +80,16 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/usr/local/lib/node_modules",
     "/opt/local/bin",
     "/opt/local/sbin",
-    "~/.local/bin",
-    "~/.local/share/claude",
-    "~/.local/share/uv/tools",
-    # Codex CLI standalone install root. The installer drops a launcher
-    # symlink in ~/.local/bin but the real binary lives under
-    # ~/.codex/packages/standalone/releases/<ver>/bin/codex, and
-    # _is_trusted_binary_path resolves symlinks before the prefix check —
-    # so without this entry the modern Codex CLI is rejected as "not in a
-    # trusted install prefix" and `setup codex --mode action` fails out of
-    # the box. Scoped to packages/ (not all of ~/.codex, which also holds
-    # auth.json, session DBs, and caches) and still subject to the
-    # world-writable-parent guard, so this is a user-owned tool root in
-    # the same category as the npm/cargo/volta entries below.
-    "~/.codex/packages",
-    "~/.cargo/bin",
-    "~/.npm-global/bin",
-    "~/.volta/bin",
-    "~/.nvm",
-    "~/.fnm",
-    "~/.asdf",
-    "~/.pyenv",
-    "~/.pipx",
-    "~/Library/Application Support",
-    "/Applications",
+    # Avarice F-2507: user-writable tool dirs (~/.local/bin, ~/.codex/
+    # packages, ~/.cargo/bin, ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx,
+    # ~/Library/Application Support, /Applications, …) are intentionally
+    # NOT trusted by default — a local agent running as the operator can
+    # plant a binary there (e.g. `codex`) and the passive scan would exec
+    # it. Operators who install discovery targets under a user-owned tool
+    # root (modern Codex CLI lives in ~/.codex/packages/standalone/...)
+    # must opt in explicitly via DEFENSECLAW_TRUSTED_BIN_PREFIXES
+    # (colon-separated); the per-file/parent permission checks in
+    # _is_trusted_binary_path still apply on top of any extension.
 )
 
 DISCOVERY_PRECEDENCE: tuple[str, ...] = (
@@ -330,6 +335,30 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
     # World-writable parent → an attacker who can write to that dir
     # could swap the binary at any time. Treat as untrusted.
     if parent_st.st_mode & 0o002:
+        return False
+    # Avarice F-2507: also reject group-writable parents unless the
+    # group is the system root group. A non-root user that shares a
+    # group with the parent dir can swap the binary.
+    if parent_st.st_mode & 0o020:
+        grp_name = ""
+        if _grp is not None:
+            try:
+                grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
+            except (KeyError, OSError):
+                grp_name = ""
+        if grp_name not in ("root", "wheel", "admin"):
+            return False
+    # Avarice F-2507: refuse a binary whose own file is writable by
+    # anyone other than the trusted system owner. The user-writable
+    # ~/.local/bin/* case is the canonical exploit path; even if an
+    # operator extends DEFENSECLAW_TRUSTED_BIN_PREFIXES to include it,
+    # we still refuse the individual file when its mode bits expose
+    # group/world write.
+    try:
+        bin_st = os.stat(resolved)
+    except OSError:
+        return False
+    if bin_st.st_mode & 0o022:
         return False
     prefixes = _trusted_bin_prefixes()
     for prefix in prefixes:

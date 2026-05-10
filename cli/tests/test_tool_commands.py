@@ -62,20 +62,30 @@ class TestToolBlock(ToolCommandTestBase):
         self.assertIn("block list", result.output)
         self.assertTrue(self.pe().is_tool_blocked("delete_file"))
 
-    def test_block_scoped_adds_scoped_entry(self):
+    def test_block_scoped_writes_both_global_and_scoped_audit(self):
+        """Avarice F-2347: scoped tool blocks were silently never
+        enforced because the runtime only consults unscoped rows. Until
+        scope-aware enforcement lands, --source requests upgrade to
+        the global block (with a scoped audit row preserved)."""
         result = self.invoke(["block", "write_file", "--source", "filesystem"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("filesystem", result.output)
-        # Scoped entry should block when source matches
+        # Scoped audit entry exists for operator visibility.
         self.assertTrue(self.pe().is_tool_blocked("write_file", source="filesystem"))
-        # Global entry should NOT be set
-        self.assertFalse(self.pe().is_tool_blocked("write_file"))
+        # F-2347: global block IS now set so the runtime actually
+        # enforces — operators that genuinely want a scope-only
+        # block must wait for runtime support.
+        self.assertTrue(self.pe().is_tool_blocked("write_file"))
 
-    def test_block_scoped_does_not_affect_other_source(self):
+    def test_block_scoped_blocks_unrelated_source_for_safety(self):
+        """F-2347: with the runtime not honouring scoped blocks, a
+        --source request must fail closed and block ALL sources for
+        that tool name."""
         self.invoke(["block", "write_file", "--source", "filesystem"])
-        # A different source should not be blocked
-        self.assertFalse(self.pe().is_tool_blocked("write_file", source="other-source"))
+        # Defense-in-depth: any source resolves to blocked because the
+        # global row exists. A future runtime upgrade can tighten this.
+        self.assertTrue(self.pe().is_tool_blocked("write_file", source="other-source"))
 
     def test_block_default_reason(self):
         self.invoke(["block", "exec_cmd"])

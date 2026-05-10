@@ -161,6 +161,15 @@ func IsCodeFile(ext string) bool {
 }
 
 func collectCodeFiles(root string) ([]string, error) {
+	// Avarice F-2952: a malicious skill or plugin tree can place a
+	// symlink with a code-extension name pointed at a readable
+	// file outside the scan root (e.g. `attacker.py -> /etc/passwd`).
+	// The previous walker called codeExtensions[filepath.Ext(path)]
+	// without rejecting the symlink, and scanFileWithRules then
+	// opened the link target and surfaced its lines as Finding
+	// descriptions. We now Lstat each entry, skip symlinks, and
+	// also reject any non-regular file just in case.
+	absRoot, _ := filepath.Abs(root)
 	var files []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -173,9 +182,32 @@ func collectCodeFiles(root string) ([]string, error) {
 			}
 			return nil
 		}
-		if codeExtensions[filepath.Ext(path)] {
-			files = append(files, path)
+		if !codeExtensions[filepath.Ext(path)] {
+			return nil
 		}
+		info, lerr := os.Lstat(path)
+		if lerr != nil {
+			return nil
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			// Defensive: refuse to follow symlinks during scan.
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		// Defense-in-depth: even after rejecting symlinks, ensure
+		// the resolved path stays under the scan root.
+		if absRoot != "" {
+			abs, aerr := filepath.Abs(path)
+			if aerr == nil {
+				rel, rerr := filepath.Rel(absRoot, abs)
+				if rerr != nil || strings.HasPrefix(rel, "..") {
+					return nil
+				}
+			}
+		}
+		files = append(files, path)
 		return nil
 	})
 	return files, err
@@ -270,6 +302,13 @@ var builtinRules = []rule{
 }
 
 func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
+	// Avarice F-2952 (defense-in-depth): re-check that path is not
+	// a symlink before opening it. The collectCodeFiles walker
+	// already rejects symlinks, but this entry point can also be
+	// called with a single-file target by Scan().
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("codeguard: refusing to scan symlink %s", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -280,6 +319,14 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 	var findings []Finding
 
 	sc := bufio.NewScanner(f)
+	// Avarice F-2953: bufio.Scanner's default token size (64 KiB)
+	// makes a single oversized line stop scanning and silently
+	// hide every subsequent line from CodeGuard. Generated code
+	// can use that to suppress findings — place an oversized
+	// line BEFORE the real payload and the rest of the file is
+	// scanner-invisible. Raise the buffer to 8 MiB which is well
+	// above any realistic source-line length.
+	sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
 	lineNum := 0
 	for sc.Scan() {
 		lineNum++

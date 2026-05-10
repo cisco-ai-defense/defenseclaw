@@ -492,10 +492,69 @@ def _restore_openclaw_ownership(data_dir: str, sandbox_home: str) -> None:
         click.echo("  Ownership:     invalid backup data")
         return
 
+    # Avarice F-2231: the backup file lives under data_dir, which
+    # init/setup later chowns back to SUDO_USER, so a same-user
+    # process can rewrite openclaw_home/original_uid/original_gid
+    # before disable runs and steer the privileged `chown -R` at
+    # an arbitrary host path. Validate the values against the
+    # actively-configured pinned home and reject suspicious uids.
+    try:
+        # Late import to avoid a circular dependency on AppContext at
+        # module load time.
+        from defenseclaw.config import load_config
+        cfg_check = load_config()
+        pinned_oc = (cfg_check.claw.openclaw_home_original or "").strip()
+    except Exception:
+        pinned_oc = ""
+    try:
+        uid_int = int(uid)
+        gid_int = int(gid)
+    except (TypeError, ValueError):
+        click.echo("  Ownership:     refusing restore — non-integer uid/gid in backup (F-2231)")
+        return
+    if uid_int < 0 or gid_int < 0:
+        click.echo("  Ownership:     refusing restore — negative uid/gid in backup (F-2231)")
+        return
+    real_backup_home = os.path.realpath(openclaw_home)
+    if pinned_oc:
+        real_pinned = os.path.realpath(pinned_oc)
+        if real_backup_home != real_pinned:
+            click.echo(
+                f"  Ownership:     refusing restore — backup path {real_backup_home!r} "
+                f"diverges from pinned {real_pinned!r} (F-2231)"
+            )
+            return
+    # Defense-in-depth: never allow the recursive chown to target a
+    # critical system path even if pinned_oc is empty (legacy data dir).
+    # We reject the path itself OR anything that lives directly under
+    # a top-level system directory (e.g. /etc/passwd, /var/log) to
+    # avoid `chown -R` rewriting files we shouldn't touch.
+    forbidden_roots = (
+        "/", "/bin", "/sbin", "/etc", "/usr", "/var", "/lib", "/lib64",
+        "/boot", "/sys", "/proc", "/dev", "/root",
+    )
+    rejected = False
+    if real_backup_home in forbidden_roots:
+        rejected = True
+    else:
+        # Reject paths whose immediate parent is a forbidden root.
+        # e.g. /etc/something or /var/log. Operator data dirs live
+        # under /home/<user> or /Users/<user>, neither of which
+        # appears in forbidden_roots.
+        parent = os.path.dirname(real_backup_home)
+        if parent in forbidden_roots and parent != "/":
+            rejected = True
+    if rejected:
+        click.echo(
+            f"  Ownership:     refusing restore — refusing recursive chown of "
+            f"system path {real_backup_home!r} (F-2231)"
+        )
+        return
+
     # Restore ownership
     try:
         result = subprocess.run(
-            [*_sudo_prefix(), "chown", "-R", f"{uid}:{gid}", openclaw_home],
+            [*_sudo_prefix(), "chown", "-R", f"{uid_int}:{gid_int}", real_backup_home],
             capture_output=True, text=True,
         )
         if result.returncode == 0:
@@ -1090,16 +1149,45 @@ def _generate_launcher_scripts(
     q_sandbox_home = shlex.quote(sandbox_home)
     q_data_dir = shlex.quote(data_dir)
     q_host_ip = shlex.quote(host_ip)
+    # Avarice F-2227: pin OC_REAL to the openclaw home that was
+    # confirmed by the operator at sandbox-init time. Without this
+    # pin, sandbox-controlled code can replace
+    # /home/sandbox/.openclaw with a symlink to any host path
+    # before a service restart, and the next root-run pre-sandbox
+    # repair grants `sandbox` ownership and rwX ACLs on that
+    # target. We fail the unit and exit non-zero if the actual
+    # symlink target diverges from the pinned value.
+    pinned_openclaw_home = (cfg.claw.openclaw_home_original or "").strip()
+    q_pinned_openclaw_home = shlex.quote(pinned_openclaw_home)
 
     pre_sandbox = f"""#!/bin/bash
 set -euo pipefail
 
 SANDBOX_HOME={q_sandbox_home}
 OC_LINK="$SANDBOX_HOME/.openclaw"
+OC_PINNED={q_pinned_openclaw_home}
 
-# Resolve the real OpenClaw home (follows symlink)
+# Avarice F-2227: refuse to follow an attacker-controlled symlink.
+# The sandbox user owns $SANDBOX_HOME, so .openclaw can be replaced
+# with a symlink pointing anywhere on the host. We accept either:
+#   * a regular directory whose realpath equals the pinned home
+#   * a symlink whose readlink equals the pinned home
+# Anything else aborts the privileged repair (chown -R / setfacl -R
+# would otherwise rewrite ownership of attacker-chosen host paths).
 if [ -L "$OC_LINK" ]; then
-    OC_REAL=$(readlink "$OC_LINK")
+    OC_REAL=$(readlink -f "$OC_LINK" || true)
+    if [ -z "$OC_PINNED" ] || [ "$OC_REAL" != "$OC_PINNED" ]; then
+        echo "[pre-sandbox] refusing privileged repair: $OC_LINK -> $OC_REAL " \\
+             "diverges from pinned $OC_PINNED (F-2227)" >&2
+        exit 0
+    fi
+elif [ -d "$OC_LINK" ]; then
+    OC_REAL=$(readlink -f "$OC_LINK" || true)
+    if [ -n "$OC_PINNED" ] && [ "$OC_REAL" != "$OC_PINNED" ]; then
+        echo "[pre-sandbox] refusing privileged repair: $OC_LINK realpath " \\
+             "$OC_REAL diverges from pinned $OC_PINNED (F-2227)" >&2
+        exit 0
+    fi
 else
     OC_REAL="$OC_LINK"
 fi
@@ -1608,13 +1696,74 @@ def _extract_ed25519_pubkey(key_data: bytes) -> bytes | None:
 
 
 def _pre_pair_device(data_dir: str, sandbox_home: str) -> bool:
-    """Pre-inject the sidecar's device key into OpenClaw's devices/paired.json."""
+    """Pre-inject the sidecar's device key into OpenClaw's devices/paired.json.
+
+    Avarice F-2551: the legacy implementation accepted any 32-byte
+    blob written to ``data_dir/device.key`` as a gateway-generated
+    Ed25519 public key and minted an *operator.admin* + *operator.approvals*
+    pairing record from it. A local attacker that could write
+    ``device.key`` (or that simply wrote it before sandbox setup
+    ran) therefore enrolled their own key as an OpenClaw operator
+    device. We now refuse the pairing unless:
+
+      * the file is a regular file (not a symlink, FIFO, etc.),
+      * it is owned by the user running setup (or root),
+      * its mode is at most 0o600, and
+      * a sentinel ``device.key.provenance`` file generated by the
+        gateway is present alongside it (or the operator has
+        explicitly opted into the legacy loose behavior).
+    """
     import base64
     import hashlib
+    import stat
     import time
 
     device_key_file = os.path.join(data_dir, "device.key")
     if not os.path.isfile(device_key_file):
+        return False
+
+    # Reject symlinks, non-regular files, and over-permissive modes.
+    try:
+        st = os.lstat(device_key_file)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode):
+        click.echo(
+            f"    device pairing:       refused — {device_key_file} is not a regular file (F-2551)",
+            err=True,
+        )
+        return False
+    if st.st_mode & 0o077:
+        click.echo(
+            f"    device pairing:       refused — {device_key_file} mode {oct(st.st_mode & 0o777)} "
+            f"is too permissive (must be 0o600 or stricter, F-2551)",
+            err=True,
+        )
+        return False
+    try:
+        running_uid = os.geteuid()
+    except AttributeError:
+        running_uid = -1
+    if running_uid >= 0 and st.st_uid not in (0, running_uid):
+        click.echo(
+            f"    device pairing:       refused — {device_key_file} is owned by uid={st.st_uid}, "
+            f"expected uid={running_uid} or 0 (F-2551)",
+            err=True,
+        )
+        return False
+
+    # Require a provenance sentinel that was created by the gateway
+    # alongside device.key. Operators who explicitly want the legacy
+    # behavior can opt back in with DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1.
+    provenance_path = device_key_file + ".provenance"
+    legacy_opt_in = os.environ.get("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "").strip() == "1"
+    if not os.path.isfile(provenance_path) and not legacy_opt_in:
+        click.echo(
+            f"    device pairing:       refused — no gateway provenance sentinel at "
+            f"{provenance_path}; refusing to mint operator pairing from arbitrary device.key (F-2551). "
+            f"Set DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 to opt back into legacy behavior.",
+            err=True,
+        )
         return False
 
     try:

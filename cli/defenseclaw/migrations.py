@@ -291,6 +291,7 @@ def _migrate_0_4_0(ctx: MigrationContext) -> None:
         return
 
     _migrate_0_4_0_token_bootstrap(ctx)
+    _migrate_0_4_0_token_env_in_config(ctx)
     _migrate_0_4_0_tighten_perms(ctx)
     _migrate_0_4_0_remove_legacy_codex_env(ctx)
     _migrate_0_4_0_normalize_claw_mode(ctx)
@@ -355,6 +356,65 @@ def _migrate_0_4_0_token_bootstrap(ctx: MigrationContext) -> None:
             "generated first-boot DEFENSECLAW_GATEWAY_TOKEN at "
             f"{env_path} (mode 0600, 32-byte CSPRNG)"
         )
+
+
+def _migrate_0_4_0_token_env_in_config(ctx: MigrationContext) -> None:
+    """Avarice F-3395: migrate stale ``gateway.token_env`` references.
+
+    The 0.4.0 migration above renames ``OPENCLAW_GATEWAY_TOKEN`` to
+    ``DEFENSECLAW_GATEWAY_TOKEN`` in ``~/.defenseclaw/.env`` but the
+    legacy installer also wrote ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN``
+    into ``config.yaml``. Python and TypeScript clients honour an
+    explicit ``token_env`` first, so on upgraded installs they kept
+    reading the (now deleted) env name and sent unauthenticated
+    ``/api/v1/inspect/*`` requests. The OpenClaw plugin's tool
+    inspection path turns those 401s into ``allow/observe``, so the
+    enforcement bypass is silent. We rewrite ``token_env`` in
+    ``config.yaml`` to the new name so the upgraded clients read the
+    same key the sidecar minted.
+    """
+    config_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(config_path):
+        return
+    try:
+        with open(config_path, encoding="utf-8") as fh:
+            content = fh.read()
+    except OSError:
+        return
+    if "OPENCLAW_GATEWAY_TOKEN" not in content:
+        return
+    # Conservative line-rewriter that only touches the right-hand
+    # side of `token_env:` lines pointing at the legacy name. We
+    # avoid a full YAML round-trip to preserve operator comments and
+    # ordering byte-for-byte.
+    new_lines: list[str] = []
+    rewritten = 0
+    for line in content.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if (stripped.startswith("token_env:")
+                and "OPENCLAW_GATEWAY_TOKEN" in line):
+            new_lines.append(line.replace(
+                "OPENCLAW_GATEWAY_TOKEN", "DEFENSECLAW_GATEWAY_TOKEN", 1))
+            rewritten += 1
+            continue
+        new_lines.append(line)
+    if rewritten == 0:
+        return
+    try:
+        # Atomic rewrite via tempfile + rename to avoid a partial
+        # write if the operator interrupts us mid-migration.
+        tmp = config_path + ".tmp-f3395"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.writelines(new_lines)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, config_path)
+    except OSError as exc:
+        ux.warn(f"could not migrate token_env in {config_path}: {exc}", indent="    ")
+        return
+    ctx.changes.append(
+        f"migrated {rewritten} stale gateway.token_env reference(s) in config.yaml "
+        "(F-3395)"
+    )
 
 
 # Files under data_dir that carry credentials or pristine backups and
