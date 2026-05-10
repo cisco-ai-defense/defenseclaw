@@ -133,19 +133,27 @@ mcpServers:
       ).toBe(false);
     });
 
-    it("handles non-existent path gracefully", async () => {
+    it("fails closed on non-existent path (F-1645)", async () => {
       const result = await scanMCPServer(join(tempDir, "nonexistent.json"));
       expect(result.findings.length).toBe(1);
-      expect(result.findings[0].severity).toBe("INFO");
+      // Pre-fix this returned an INFO finding and the local enforcer
+      // collapsed admission to `clean`. The scanner now emits CRITICAL
+      // for unreadable inputs so a dropped file fails closed.
+      expect(result.findings[0].severity).toBe("CRITICAL");
+      expect(result.findings[0].title).toContain("Malformed MCP config");
     });
 
-    it("handles invalid JSON gracefully", async () => {
+    it("fails closed on invalid JSON (F-1645)", async () => {
       const configFile = join(tempDir, "bad.json");
       await writeFile(configFile, "not json {{{");
 
       const result = await scanMCPServer(configFile);
       expect(result.findings.length).toBe(1);
-      expect(result.findings[0].title).toContain("No MCP server configurations");
+      // Malformed JSON used to be silently swallowed; the scanner
+      // now emits a CRITICAL "Malformed MCP config rejected" finding
+      // so the enforcer cannot admit the corrupted file as clean.
+      expect(result.findings[0].severity).toBe("CRITICAL");
+      expect(result.findings[0].title).toContain("Malformed MCP config");
     });
   });
 
@@ -280,7 +288,7 @@ mcpServers:
       expect(secrets.length).toBe(2);
     });
 
-    it("allows env var references (${...})", async () => {
+    it("flags env var references (${...}) as HIGH (F-1688)", async () => {
       const configFile = join(tempDir, "envref.json");
       await writeFile(
         configFile,
@@ -297,16 +305,25 @@ mcpServers:
       );
 
       const result = await scanMCPServer(configFile);
+      // No CRITICAL hardcoded-secret finding because the value is by
+      // reference, but the scanner must still flag the request loudly
+      // enough that admission cannot fall back to `clean`.
       const secrets = result.findings.filter(
         (f) => f.severity === "CRITICAL" && f.title.includes("Hardcoded secret"),
       );
-
       expect(secrets.length).toBe(0);
 
-      const info = result.findings.filter(
-        (f) => f.severity === "INFO" && f.title.includes("passes sensitive env var"),
+      // F-1688: previously this branch emitted INFO and the local
+      // enforcer collapsed it to `clean` at the default warnOnSeverity
+      // threshold. We now require HIGH so admission falls into the
+      // warn/block path and operators must explicitly approve the
+      // server before its env reference is honoured.
+      const sensitive = result.findings.filter(
+        (f) =>
+          f.severity === "HIGH" &&
+          f.title.includes("requests sensitive env var by reference"),
       );
-      expect(info.length).toBe(1);
+      expect(sensitive.length).toBe(1);
     });
 
     it("does not flag non-sensitive env vars", async () => {
