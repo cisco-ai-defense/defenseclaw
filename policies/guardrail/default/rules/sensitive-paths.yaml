@@ -1,8 +1,13 @@
 version: 1
 category: sensitive-path
+# Home-prefix sub-pattern shared across the credential-file rules
+# below. Closes avarice F-1726 by adding `\$\{?HOME\}?` so the braced
+# shell form `${HOME}/.aws/credentials` matches in addition to `~`,
+# `$HOME`, `/home/<user>`, and `/root`. Keep this sub-pattern in sync
+# with the compiled-in defaults in `internal/gateway/rules.go`.
 rules:
   - id: PATH-SSH-DIR
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.ssh/'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.ssh/'
     title: "SSH directory access"
     severity: HIGH
     confidence: 0.95
@@ -14,61 +19,63 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-AWS-CREDS
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.aws/credentials'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.aws/credentials'
     title: "AWS credentials file"
     severity: CRITICAL
     confidence: 0.98
     tags: [credential, file-sensitive]
   - id: PATH-AWS-CONFIG
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.aws/config'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.aws/config'
     title: "AWS config file"
     severity: HIGH
     confidence: 0.85
     tags: [credential, file-sensitive]
   - id: PATH-KUBE
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.kube/config'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.kube/config'
     title: "Kubernetes config"
     severity: HIGH
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-DOCKER
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.docker/config\.json'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.docker/config\.json'
     title: "Docker config"
     severity: HIGH
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-GNUPG
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.gnupg/'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.gnupg/'
     title: "GPG keyring access"
     severity: HIGH
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NPMRC
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.npmrc'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.npmrc'
     title: "npm config (may contain tokens)"
     severity: MEDIUM
     confidence: 0.80
     tags: [credential, file-sensitive]
   - id: PATH-PYPIRC
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.pypirc'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.pypirc'
     title: "PyPI config (may contain tokens)"
     severity: MEDIUM
     confidence: 0.80
     tags: [credential, file-sensitive]
   - id: PATH-GIT-CREDS
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.git-credentials'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.git-credentials'
     title: "Git credentials file"
     severity: CRITICAL
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NETRC
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.netrc'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.netrc'
     title: "netrc credentials file"
     severity: CRITICAL
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
-    pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,\]})]'
+    # Closes avarice F-1727: `;` (shell command separator) added to
+    # the suffix delimiter class so `cat .env; true` also matches.
+    pattern: '(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["''\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["''\s,;\]})]'
     title: "Environment file"
     severity: HIGH
     confidence: 0.85
@@ -106,7 +113,7 @@ rules:
     confidence: 0.90
     tags: [credential]
   - id: PATH-HISTORY
-    pattern: '(?:~|\$HOME|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)'
+    pattern: '(?:~|\$\{?HOME\}?|/home/\w+|/root)/\.(?:bash_history|zsh_history|python_history)'
     title: "Shell history file"
     severity: MEDIUM
     confidence: 0.80
