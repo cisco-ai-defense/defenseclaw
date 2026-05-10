@@ -314,17 +314,17 @@ const trustedProxyEnvVar = "DEFENSECLAW_TRUSTED_PROXY_CIDRS"
 //
 // DeepSec S2.MEDIUM ("Authentication failure logs trust spoofable
 // X-Forwarded-For"): the legacy implementation always preferred the
-// first ``X-Forwarded-For`` value over the socket ``RemoteAddr``, and
+// first “X-Forwarded-For“ value over the socket “RemoteAddr“, and
 // returned the raw header bytes when they failed to parse as an IP.
 // Any unauthenticated caller could therefore choose the
-// ``client_ip`` recorded for failed-auth alerting and forensics.
+// “client_ip“ recorded for failed-auth alerting and forensics.
 //
-// We now only honour ``X-Forwarded-For`` when the immediate peer
-// (``r.RemoteAddr``) is inside an explicitly configured trusted-proxy
+// We now only honour “X-Forwarded-For“ when the immediate peer
+// (“r.RemoteAddr“) is inside an explicitly configured trusted-proxy
 // CIDR list. The default is empty (no trusted proxies), which is the
 // safest behaviour for sidecars that run on loopback only. Operators
 // fronting the sidecar with a reverse proxy can opt in via the
-// ``DEFENSECLAW_TRUSTED_PROXY_CIDRS`` env var.
+// “DEFENSECLAW_TRUSTED_PROXY_CIDRS“ env var.
 func ClientIPRedacted(r *http.Request) string {
 	if r == nil {
 		return ""

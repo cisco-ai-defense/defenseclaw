@@ -158,7 +158,7 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 		// dial whose resolved IP is loopback / private / link-local /
 		// metadata, and disables redirects entirely so the connection
 		// always terminates at the validated host.
-		client: newWebhookHTTPClient(30 * time.Second),
+		client:       newWebhookHTTPClient(30 * time.Second),
 		retryBackoff: webhookRetryBackoff,
 		sem:          make(chan struct{}, webhookMaxConcurrency),
 		logger:       logger,

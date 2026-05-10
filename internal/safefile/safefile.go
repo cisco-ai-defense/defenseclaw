@@ -16,7 +16,7 @@
 // atomically with mode 0600 so they cannot be observed in a
 // world-readable state by another local user.
 //
-// Background
+// # Background
 //
 // Multiple call-sites in DefenseClaw (gateway token persistence,
 // device pairing, audit exports, OTLP scoped tokens) historically

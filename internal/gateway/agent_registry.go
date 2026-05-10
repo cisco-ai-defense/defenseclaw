@@ -116,9 +116,9 @@ type AgentRegistry struct {
 // shedding rotated/spoofed IDs.
 const agentRegistryMaxSessions = 4096
 
-// sessionEntry is the per-session record kept in-memory. ``LastSeen``
+// sessionEntry is the per-session record kept in-memory. “LastSeen“
 // powers oldest-first eviction once the registry grows past the cap;
-// ``AgentInstanceID`` is the value surfaced to observability today.
+// “AgentInstanceID“ is the value surfaced to observability today.
 type sessionEntry struct {
 	AgentInstanceID string
 	LastSeen        time.Time

@@ -66,9 +66,9 @@ func TestRejectInlineCredentials(t *testing.T) {
 
 func TestScrubURL(t *testing.T) {
 	cases := []struct {
-		in        string
-		mustHide  []string
-		mustKeep  []string
+		in       string
+		mustHide []string
+		mustKeep []string
 	}{
 		{
 			in:       "https://api.openai.com/v1/chat?api_key=sk-secret&temperature=0.7",

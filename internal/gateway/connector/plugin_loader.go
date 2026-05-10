@@ -376,7 +376,27 @@ func validatePluginRootChain(dirPath string) error {
 		}
 		mode := info.Mode().Perm()
 		if mode&0o022 != 0 {
-			return fmt.Errorf("ancestor %s is group- or world-writable (mode %04o); refuse to load plugins from a directory tree another local user can modify", cur, mode)
+			// World-/group-writable ancestors are normally
+			// rejected — a peer user could swap the plugin
+			// directory entry between hash check and
+			// plugin.Open. The exception is the sticky bit
+			// (os.ModeSticky / S_ISVTX, drwxrwxrwt): on
+			// Unix this restricts unlink/rename inside the
+			// directory to the file's owner, which is
+			// exactly the property we need from /tmp,
+			// /var/tmp, and any other standard shared
+			// scratch directory. Without this exception,
+			// every `t.TempDir()` invocation on Linux
+			// (which lives under /tmp at mode 1777) would
+			// be rejected, even though Go's stdlib uses it
+			// as the canonical safe temp root. Production
+			// installs should still keep plugin trees out
+			// of sticky-shared roots; this only relaxes
+			// the *ancestor* walk, not the plugin
+			// directory itself.
+			if info.Mode()&os.ModeSticky == 0 {
+				return fmt.Errorf("ancestor %s is group- or world-writable (mode %04o); refuse to load plugins from a directory tree another local user can modify", cur, mode)
+			}
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {

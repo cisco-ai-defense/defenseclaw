@@ -3435,15 +3435,15 @@ func redactAuthValue(val string) string {
 //
 // DeepSec S2.MEDIUM ("Credential-bearing upstream URLs can be logged"):
 // the legacy implementation returned the original string unchanged
-// when ``RawQuery`` was empty, so URLs with userinfo
-// (``https://user:pass@host``) leaked verbatim. It also only redacted
+// when “RawQuery“ was empty, so URLs with userinfo
+// (“https://user:pass@host“) leaked verbatim. It also only redacted
 // four exact lower-case keys ("key", "api-key", "apikey", "token"),
-// missing common credential names like ``access_token``,
-// ``client_secret``, ``X-Amz-Signature``, and ``X-Amz-Credential``.
+// missing common credential names like “access_token“,
+// “client_secret“, “X-Amz-Signature“, and “X-Amz-Credential“.
 //
 // The hardened implementation:
 //   - Always parses, so userinfo is rejected even on bare URLs.
-//   - Replaces ``url.Userinfo`` with the literal "REDACTED:REDACTED"
+//   - Replaces “url.Userinfo“ with the literal "REDACTED:REDACTED"
 //     when present, preserving the URL shape so log readers can still
 //     correlate by host without the credential bytes.
 //   - Matches query keys case-insensitively against a richer
@@ -3472,13 +3472,13 @@ func scrubURLSecrets(raw string) string {
 }
 
 // isSensitiveQueryKey reports whether the case-insensitive query key
-// ``k`` carries a credential we never want to print to logs. The list
-// covers OAuth2 flows (``access_token``, ``refresh_token``,
-// ``client_secret``), AWS signature query parameters
-// (``X-Amz-Signature``, ``X-Amz-Credential``,
-// ``X-Amz-Security-Token``), GCS V4 signed URLs (``X-Goog-Signature``),
-// shared-access signatures (``sig``, ``signature``), webhook tokens
-// (``token``, ``hub.token``), and the legacy short forms.
+// “k“ carries a credential we never want to print to logs. The list
+// covers OAuth2 flows (“access_token“, “refresh_token“,
+// “client_secret“), AWS signature query parameters
+// (“X-Amz-Signature“, “X-Amz-Credential“,
+// “X-Amz-Security-Token“), GCS V4 signed URLs (“X-Goog-Signature“),
+// shared-access signatures (“sig“, “signature“), webhook tokens
+// (“token“, “hub.token“), and the legacy short forms.
 func isSensitiveQueryKey(k string) bool {
 	switch strings.ToLower(k) {
 	case "key", "api-key", "apikey", "api_key",
