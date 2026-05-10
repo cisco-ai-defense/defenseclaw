@@ -752,6 +752,18 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
 
 def _pid_file_running(pid_file: str) -> bool:
+    """Return True only when pid_file points at a live process whose
+    /proc/<pid>/cmdline argv0 looks like the DefenseClaw gateway.
+
+    Avarice F-2188 / F-2189: the legacy implementation accepted any
+    PID that passed `os.kill(pid, 0)` as proof that the gateway was
+    running. A local process that planted or staled gateway.pid
+    could therefore make `quickstart`/`init` skip starting the
+    sidecar — generated hooks then forwarded uninspected traffic
+    because the default fail mode for the inspect hook is "open"
+    until the gateway is up. We require the PID's process to be
+    alive AND its argv0 to match a known gateway binary name.
+    """
     try:
         with open(pid_file, encoding="utf-8") as fh:
             raw = fh.read().strip()
@@ -761,11 +773,46 @@ def _pid_file_running(pid_file: str) -> bool:
             pid = int(json.loads(raw)["pid"])
     except (FileNotFoundError, ValueError, KeyError, OSError, TypeError):
         return False
+    if pid <= 1:
+        return False
     try:
         os.kill(pid, 0)
-        return True
     except (ProcessLookupError, PermissionError, OSError):
         return False
+    return _pid_looks_like_gateway(pid)
+
+
+def _pid_looks_like_gateway(pid: int) -> bool:
+    """Verify that /proc/<pid>/cmdline (Linux) or `ps -o command=`
+    (macOS) advertises one of the expected DefenseClaw gateway
+    binary names. This blocks the F-2188/F-2189 stale-PID
+    spoofing attacks where a planted gateway.pid points at an
+    unrelated long-running process (e.g. /bin/sleep)."""
+    candidates = ("defenseclaw-gateway", "defenseclaw_gateway", "defenseclaw")
+    proc_cmdline = f"/proc/{pid}/cmdline"
+    try:
+        with open(proc_cmdline, "rb") as fh:
+            raw = fh.read()
+        argv0 = raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
+    except FileNotFoundError:
+        # /proc not present (macOS) — fall back to ps.
+        try:
+            out = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            # No ps either — fail closed.
+            return False
+        if out.returncode != 0:
+            return False
+        argv0 = out.stdout.strip().split(None, 1)[0] if out.stdout.strip() else ""
+    except OSError:
+        return False
+    base = os.path.basename(argv0).strip()
+    if not base:
+        return False
+    return any(base == c or base.startswith(c) for c in candidates)
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:

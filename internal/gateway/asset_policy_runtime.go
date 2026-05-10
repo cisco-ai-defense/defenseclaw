@@ -143,7 +143,21 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		Args:           probe.Args,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	})
-	if isUnknownTerminalMCP(probe) && !assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) && decision.RawAction == "block" {
+	// Avarice F-1510: when MCP.Default is "deny" and the asset
+	// policy is itself in action mode, an unknown terminal MCP
+	// command MUST NOT be silently downgraded to allow just
+	// because the secondary `runtime_detection.unknown_terminal_mcp`
+	// knob defaults to observe. Operators who explicitly set
+	// MCP.Default=deny expect default-deny semantics. We only
+	// honor the downgrade for runtime detections that are NOT
+	// already covered by the operator's default-deny posture
+	// (i.e. when the asset policy is in observe mode OR
+	// MCP.Default isn't deny).
+	mcpAssetMode, mcpDefaultDeny := assetMCPModeFor(a, decision)
+	if isUnknownTerminalMCP(probe) &&
+		!assetRuntimeModeIsAction(runtimeDetection.UnknownTerminalMCP) &&
+		decision.RawAction == "block" &&
+		!(mcpAssetMode == config.AssetPolicyModeAction && mcpDefaultDeny) {
 		decision.Action = "allow"
 		decision.Mode = config.AssetPolicyModeObserve
 		decision.WouldBlock = true
@@ -190,6 +204,38 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		SourcePath:     probe.SourcePath,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	})
+	// Avarice F-1506: a Claude Code agent can pass a crafted
+	// skill_name like "/tmp/attacker/trusted-skill/SKILL.md" and
+	// the previous code stripped it down to the basename
+	// "trusted-skill", which matches the operator's registered
+	// skill by name only. The path itself is attacker-controlled
+	// so the registry match is meaningless. We force-rewrite the
+	// decision to "unregistered" whenever the agent's literal
+	// input was path-shaped (probe.RawName carries the original
+	// when normalization changed it). This makes the decision
+	// fall through the registry-required guard the operator
+	// already configured.
+	if probe.RawName != "" && strings.ContainsAny(probe.RawName, `/\`) {
+		// Mark unregistered so registry-required policy denies.
+		decision.RegistryStatus = "unregistered"
+		// If the operator runs registry_required=true and the
+		// configured default for unknowns is deny (the policy
+		// the test in F-1506 sets up), assetPolicyViolation
+		// already produces a block; we just need to make sure
+		// we don't reuse the cached "allow" path. Re-evaluate.
+		decision.RawAction = "block"
+		if decision.Mode == config.AssetPolicyModeAction {
+			decision.Action = "block"
+		} else {
+			decision.Action = "allow"
+			decision.WouldBlock = true
+		}
+		decision.Reason = appendVerdictReason(decision.Reason,
+			"path-shaped skill_name input forced unregistered match (F-1506)")
+		if strings.TrimSpace(decision.Source) == "" {
+			decision.Source = "skill-path-shaped"
+		}
+	}
 	if !decision.Enabled || decision.RawAction != "block" {
 		return decision, false
 	}
@@ -277,6 +323,24 @@ func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyD
 
 func isUnknownTerminalMCP(probe mcpRuntimeProbe) bool {
 	return probe.Surface == "terminal" && strings.EqualFold(strings.TrimSpace(probe.ServerName), "terminal-mcp")
+}
+
+// assetMCPModeFor returns the effective AssetPolicy mode and whether
+// the operator's MCP.Default is "deny". Used by F-1510 to refuse the
+// `unknown_terminal_mcp=observe` downgrade when the operator has
+// already opted into MCP default-deny in action mode.
+func assetMCPModeFor(a *APIServer, decision config.AssetPolicyDecision) (string, bool) {
+	if a == nil || a.scannerCfg == nil {
+		return decision.Mode, false
+	}
+	mode := strings.TrimSpace(a.scannerCfg.AssetPolicy.Mode)
+	if mode == "" {
+		mode = decision.Mode
+	}
+	defaultDeny := strings.EqualFold(
+		strings.TrimSpace(a.scannerCfg.AssetPolicy.MCP.Default),
+		"deny")
+	return mode, defaultDeny
 }
 
 func assetRuntimeModeIsAction(mode string) bool {

@@ -377,6 +377,16 @@ class StartGatewayStructuredDriftTests(unittest.TestCase):
         stack = ExitStack()
         stack.enter_context(patch("shutil.which", return_value="/usr/bin/defenseclaw-gateway"))
         stack.enter_context(patch.object(subprocess, "run", side_effect=fake_run))
+        # Avarice F-2188 / F-2189: _pid_file_running now also checks
+        # /proc/<pid>/cmdline against known gateway binary names.
+        # Tests use os.getpid() (the python test runner) which won't
+        # match — stub the cmdline check to keep the test focused on
+        # drift detection, not on the new spoof guard. The spoof
+        # guard has its own dedicated tests.
+        stack.enter_context(patch(
+            "defenseclaw.bootstrap._pid_looks_like_gateway",
+            return_value=True,
+        ))
         return stack
 
     def test_already_running_no_drift_does_not_restart(self):

@@ -449,6 +449,13 @@ func TestEvaluateCodexHook_RuntimeDetectionCanDisableTerminalMCP(t *testing.T) {
 	}
 }
 
+// TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock pins the
+// F-1510 fix: when AssetPolicy is in action mode and MCP.Default is
+// "deny", an unknown terminal MCP command MUST block even when the
+// secondary `runtime_detection.unknown_terminal_mcp` knob is left at
+// its observe default. Operators that explicitly opt into
+// MCP.Default=deny should not have to discover and override the
+// secondary knob to get default-deny semantics.
 func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
@@ -468,11 +475,9 @@ func TestEvaluateCodexHook_UnknownTerminalMCPDefaultsToWouldBlock(t *testing.T) 
 	}
 	resp := api.evaluateCodexHook(context.Background(), req)
 
-	if resp.Action != "allow" || resp.RawAction != "block" {
-		t.Fatalf("action=%q raw=%q, want allow/block", resp.Action, resp.RawAction)
-	}
-	if !resp.WouldBlock {
-		t.Fatal("unknown terminal MCP should default to would_block")
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block — MCP.Default=deny in action mode must not be silently downgraded by unknown_terminal_mcp=observe (F-1510)",
+			resp.Action, resp.RawAction)
 	}
 }
 

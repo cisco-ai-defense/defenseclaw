@@ -76,12 +76,33 @@ func (c *Compiler) ValidateArg(arg string) error {
 	return nil
 }
 
+// ApplyCommand returns the shell snippet that loads the generated
+// rules. Avarice F-2907: the rules file now contains two sections —
+// the IPv4 ruleset, then a `# v6:` divider, then the IPv6 ruleset.
+// We split the file at apply time with awk and pipe each half to the
+// matching restore binary. The IPv6 step is best-effort: hosts with
+// IPv6 disabled don't have ip6tables-restore on $PATH, and
+// `command -v` is used to skip it in that case so the IPv4 default-
+// deny still applies. Operators can verify the IPv6 ruleset was
+// loaded by checking `sudo ip6tables -S OUTPUT` after apply.
 func (c *Compiler) ApplyCommand(rulesPath string) string {
-	return fmt.Sprintf("sudo iptables-restore < %s", rulesPath)
+	return fmt.Sprintf(
+		"awk '/^# v6:$/{f=1;next} !f' %[1]s | sudo iptables-restore && "+
+			"if command -v ip6tables-restore >/dev/null 2>&1; then "+
+			"awk '/^# v6:$/{f=1;next} f' %[1]s | sudo ip6tables-restore; "+
+			"fi",
+		rulesPath,
+	)
 }
 
 func (c *Compiler) RemoveCommand() string {
-	return "sudo iptables -F OUTPUT && sudo iptables -P OUTPUT ACCEPT"
+	// Avarice F-2907: also flush the IPv6 chain when removing. Use
+	// `command -v` to keep IPv4-only hosts working — the IPv6
+	// teardown is a no-op when ip6tables is absent.
+	return "sudo iptables -F OUTPUT && sudo iptables -P OUTPUT ACCEPT && " +
+		"if command -v ip6tables >/dev/null 2>&1; then " +
+		"sudo ip6tables -F OUTPUT && sudo ip6tables -P OUTPUT ACCEPT; " +
+		"fi"
 }
 
 // Compile generates iptables-restore format rules from the configuration.
@@ -180,7 +201,108 @@ func (c *Compiler) Compile(cfg *firewall.FirewallConfig) ([]string, error) {
 	}
 
 	rules = append(rules, "COMMIT")
+
+	// Avarice F-2907: emit the IPv6 ruleset after a sentinel divider
+	// (`# v6:`). ApplyCommand splits the file at this divider and
+	// loads the second half through `ip6tables-restore`. Without this
+	// IPv6 traffic was governed by whatever pre-existing ip6tables
+	// policy happened to be installed (typically ACCEPT-by-default on
+	// fresh kernels), which an attacker could use to bypass the IPv4
+	// default-deny on a dual-stack host.
+	v6, err := c.compileIPv6(cfg)
+	if err != nil {
+		return nil, err
+	}
+	rules = append(rules, "")
+	rules = append(rules, "# v6:")
+	rules = append(rules, v6...)
 	return rules, nil
+}
+
+// compileIPv6 returns an ip6tables-restore ruleset that mirrors the
+// IPv4 default-deny / allowlist policy. We deliberately keep this
+// minimal and rely on the operator's IPv6 allowlist (any cfg entries
+// that contain ":") plus DNS over IPv6 + ICMPv6 essentials.
+func (c *Compiler) compileIPv6(cfg *firewall.FirewallConfig) ([]string, error) {
+	out := []string{
+		"# DefenseClaw IPv6 egress firewall rules (F-2907)",
+		fmt.Sprintf("# default_action: %s", cfg.DefaultAction),
+		"*filter",
+		":INPUT ACCEPT [0:0]",
+		":FORWARD ACCEPT [0:0]",
+		":OUTPUT ACCEPT [0:0]",
+		"",
+		"# Allow loopback",
+		"-A OUTPUT -o lo -j ACCEPT",
+		"",
+		"# Allow ICMPv6 (NDP, PMTU, etc — required for IPv6 to function)",
+		"-A OUTPUT -p ipv6-icmp -j ACCEPT",
+		"",
+		"# Allow DNS over IPv6",
+		"-A OUTPUT -p udp --dport 53 -j ACCEPT",
+		"-A OUTPUT -p tcp --dport 53 -j ACCEPT",
+		"",
+		"# Allow established/related connections",
+		"-A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT",
+		"",
+	}
+	if len(cfg.Allowlist.IPs) > 0 {
+		out = append(out, "# Allowlist: IPs (v6)")
+		for _, ip := range cfg.Allowlist.IPs {
+			if !strings.Contains(ip, ":") {
+				continue
+			}
+			if len(cfg.Allowlist.Ports) == 0 {
+				out = append(out, fmt.Sprintf("-A OUTPUT -d %s -j ACCEPT", ip))
+				continue
+			}
+			for _, port := range cfg.Allowlist.Ports {
+				out = append(out, fmt.Sprintf("-A OUTPUT -d %s -p tcp --dport %d -j ACCEPT", ip, port))
+			}
+		}
+	}
+	if len(cfg.Allowlist.Domains) > 0 {
+		out = append(out, "", "# Allowlist: domains (v6)")
+		for _, domain := range cfg.Allowlist.Domains {
+			if strings.HasPrefix(domain, "*.") {
+				out = append(out, fmt.Sprintf("# Wildcard domain (resolve manually): %s", domain))
+				continue
+			}
+			ips, err := net.LookupHost(domain)
+			if err != nil {
+				out = append(out, fmt.Sprintf("# Failed to resolve: %s (%v)", domain, err))
+				continue
+			}
+			for _, ip := range ips {
+				if !strings.Contains(ip, ":") {
+					continue
+				}
+				if len(cfg.Allowlist.Ports) == 0 {
+					out = append(out, fmt.Sprintf("-A OUTPUT -d %s -j ACCEPT # %s", ip, domain))
+					continue
+				}
+				for _, port := range cfg.Allowlist.Ports {
+					out = append(out, fmt.Sprintf("-A OUTPUT -d %s -p tcp --dport %d -j ACCEPT # %s", ip, port, domain))
+				}
+			}
+		}
+	}
+	out = append(out, "")
+	if cfg.Logging.Enabled && cfg.DefaultAction == "deny" {
+		prefix := cfg.Logging.Prefix
+		if len(prefix) > 29 {
+			prefix = prefix[:29]
+		}
+		out = append(out, fmt.Sprintf(
+			"-A OUTPUT -m limit --limit %s -j LOG --log-prefix \"%s6 \" --log-level 4",
+			cfg.Logging.RateLimit, prefix,
+		))
+	}
+	if cfg.DefaultAction == "deny" {
+		out = append(out, "# Default: deny", "-A OUTPUT -j DROP")
+	}
+	out = append(out, "COMMIT")
+	return out, nil
 }
 
 func (c *Compiler) compileRule(rule firewall.Rule) (string, error) {

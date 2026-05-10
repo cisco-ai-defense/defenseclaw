@@ -477,13 +477,13 @@ func TestEvaluateClaudeCodeHook_SkillCraftedPathStillBlocksWhenUnregistered(t *t
 }
 
 // TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename
-// documents (and therefore pins as a known behavior) the fact that
-// an agent supplying "/tmp/x/<approved>/SKILL.md" allows when
-// "<approved>" is in the registry. This is by design — the registry
-// matches by name, not by path — but the test exists so the next
-// person changing skill name parsing has to opt in or out of this
-// behavior consciously, with full audit context (RawName/SourcePath)
-// reaching telemetry.
+// pins the F-1506 fix: when the agent supplies a path-shaped
+// skill_name like "/tmp/attacker/trusted-skill/SKILL.md", the
+// connector MUST treat the request as unregistered regardless of
+// whether the basename matches a registry entry. The legacy
+// behavior was allow/allow because the registry matched by name
+// only; that allowed any agent to bypass runtime skill admission
+// by crafting a path whose basename shadowed an approved skill.
 func TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename(t *testing.T) {
 	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
 	cfg.Guardrail.Mode = "action"
@@ -505,8 +505,8 @@ func TestEvaluateClaudeCodeHook_SkillCraftedPathMatchesApprovedBasename(t *testi
 	}
 	resp := api.evaluateClaudeCodeHook(context.Background(), req)
 
-	if resp.Action != "allow" || resp.RawAction != "allow" {
-		t.Fatalf("action=%q raw=%q, want allow/allow (registry matches by basename — see RawName/SourcePath in telemetry to detect bypass attempts)", resp.Action, resp.RawAction)
+	if resp.Action != "block" || resp.RawAction != "block" {
+		t.Fatalf("action=%q raw=%q, want block/block — path-shaped skill_name must force unregistered match (F-1506)", resp.Action, resp.RawAction)
 	}
 }
 

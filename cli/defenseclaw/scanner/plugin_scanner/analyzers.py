@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 
 from defenseclaw.scanner.plugin_scanner.helpers import (
     collect_files,
@@ -415,9 +416,13 @@ def scan_source_files(
     symlink_escapes: list[str] = []
     depth_truncations: list[str] = []
     oversized_files: list[str] = []
+    # Avarice F-2427: a CommonJS plugin can ship `index.cjs` (or
+    # JSX/TSX) and point package.json `main`/`bin` at it; the legacy
+    # extension list (.ts/.js/.mjs) skipped these executable entries
+    # entirely. Add .cjs/.cts/.jsx/.tsx so source rules see them.
     ts_files = collect_files(
         directory,
-        [".ts", ".js", ".mjs"],
+        [".ts", ".tsx", ".js", ".jsx", ".cjs", ".cts", ".mjs"],
         max_file_bytes=2 * 1024 * 1024,
         _symlink_escapes=symlink_escapes,
         _depth_truncations=depth_truncations,
@@ -1097,11 +1102,63 @@ def scan_claw_manifest(
     findings: list[Finding],
 ) -> None:
     manifest_path = os.path.join(directory, "openclaw.plugin.json")
+    # Avarice F-2429: a malicious plugin can replace
+    # openclaw.plugin.json with a symlink to any file readable by the
+    # scanner process. The previous code passed the path straight to
+    # open(), which followed the link and copied outside JSON content
+    # into Finding.evidence. We reject symlinks and any non-regular
+    # file outright, and after open() we re-stat the file descriptor
+    # to defend against TOCTOU swaps between lstat and open.
     try:
-        with open(manifest_path, encoding="utf-8") as fh:
-            raw = fh.read()
+        st = os.lstat(manifest_path)
     except OSError:
         return  # no openclaw manifest -- not an error
+    if stat.S_ISLNK(st.st_mode):
+        findings.append(
+            make_finding(
+                len(findings) + 1,
+                rule_id="CLAW-MANIFEST-SYMLINK",
+                severity="HIGH",
+                confidence=1.0,
+                title="openclaw.plugin.json is a symlink",
+                evidence=f"{manifest_path} is a symlink — refusing to follow (F-2429)",
+                description=(
+                    "The plugin's openclaw.plugin.json is a symlink. The scanner "
+                    "refuses to follow symlinks for the manifest because doing so "
+                    "could expose unrelated files via finding evidence."
+                ),
+                location=manifest_path,
+                remediation="Replace the symlink with a regular openclaw.plugin.json file.",
+                tags=["supply-chain", "symlink"],
+            )
+        )
+        return
+    if not stat.S_ISREG(st.st_mode):
+        return
+    try:
+        # O_NOFOLLOW forbids following a symlink that races between the
+        # lstat above and the open() below.
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(manifest_path, flags)
+    except OSError:
+        return
+    try:
+        # Re-stat the open fd to ensure we haven't been swapped to a
+        # symlink or non-regular file under us.
+        fst = os.fstat(fd)
+        if not stat.S_ISREG(fst.st_mode):
+            return
+        with os.fdopen(fd, encoding="utf-8") as fh:
+            fd = -1  # ownership transferred to fdopen
+            raw = fh.read()
+    except OSError:
+        return
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     try:
         manifest = json.loads(raw)

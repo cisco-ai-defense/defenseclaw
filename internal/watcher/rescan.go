@@ -194,8 +194,16 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 
 	var deltas []DriftDelta
 
-	// If a previous baseline exists but never recorded a scan result, keep
-	// retrying scan persistence so finding-based drift detection can recover.
+	// Avarice F-3188: keep the legacy "retry scan persistence" recovery
+	// path so a target that was first-baselined without a scan id can
+	// upgrade to a real baseline scan once the scanner recovers. The
+	// reason the legacy code was a vulnerability is that storeBaseline
+	// previously rewrote the baseline with scan_id="" on scanner
+	// failure even when a prior trusted scan existed. The hardened
+	// storeBaseline below now refuses that downgrade, so calling it
+	// here is safe: it ONLY rewrites when (a) the scanner succeeded
+	// and produced a real scan id, or (b) there was no prior trust
+	// state to overwrite (prior.ScanID == "").
 	if baseline.ScanID == "" {
 		w.storeBaseline(ctx, evt, currentSnap)
 	}
@@ -216,9 +224,19 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent) {
 }
 
 // storeBaseline runs a scan and persists the snapshot as the new baseline.
+//
+// Avarice F-3188: we now refuse to persist a baseline whose scan id
+// is empty unless the prior row already lacked a scan id. Without
+// this, scanner failures during a rescan would silently rewrite the
+// stored baseline to point at the mutated target with `scan_id=""`,
+// and the next rescan would treat the mutated content as the trusted
+// baseline. The recovery path (operator successfully scans the
+// target later) still works because storeBaseline is called again
+// with a real scan id.
 func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, snap *TargetSnapshot) {
 	s := w.scannerFor(evt)
 	scanID := ""
+	scannerOK := false
 	if s != nil {
 		scanCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 		defer cancel()
@@ -226,6 +244,23 @@ func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, sn
 		result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 		if err == nil && result != nil {
 			scanID = w.persistScanResult(result)
+			scannerOK = scanID != ""
+		}
+	}
+
+	if !scannerOK {
+		// Refuse to silently re-baseline a changed target without
+		// scanner evidence. If the existing row already has no scan
+		// id (first-time baseline before any scanner ran), fall
+		// through and persist the snapshot — that case is already
+		// safe because there is no prior trust state to overwrite.
+		// Otherwise, leave the existing baseline in place.
+		prior, err := w.store.GetTargetSnapshot(string(evt.Type), evt.Path)
+		if err == nil && prior != nil && prior.ScanID != "" {
+			fmt.Fprintf(os.Stderr,
+				"[rescan] refusing to overwrite baseline for %s without scanner evidence (F-3188)\n",
+				evt.Path)
+			return
 		}
 	}
 

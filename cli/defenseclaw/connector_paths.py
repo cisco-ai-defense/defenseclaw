@@ -51,7 +51,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -1225,7 +1227,36 @@ def restore_managed_mcp_backup(path: str) -> bool:
 
 
 def _capture_managed_mcp_backup(path: str) -> None:
-    if not os.path.isfile(path):
+    # Avarice F-2128: workspace-scoped MCP configs (Codex .mcp.json,
+    # Cursor .cursor/mcp.json, Copilot .github/mcp.json) live in a
+    # CWD chosen by the operator. A malicious repository can pre-place
+    # those config paths as symlinks to private files readable by the
+    # operator (e.g. ~/.ssh/id_rsa, ~/.netrc, ~/.aws/credentials).
+    # `os.path.isfile` and `shutil.copy2` BOTH follow symlinks, so the
+    # private link target was being copied into a workspace-visible
+    # `.defenseclaw-<name>.bak` sibling and registered for restore.
+    #
+    # We refuse to back up via a symlink: if the path is a symlink we
+    # skip backup entirely (callers tolerate "no backup" — restore
+    # only runs when a backup is present), and we use os.lstat /
+    # follow_symlinks=False to keep the fix robust on mixed Linux/macOS.
+    try:
+        st = os.lstat(path)
+    except (FileNotFoundError, OSError):
+        return
+    if stat.S_ISLNK(st.st_mode):
+        # Hard fail-closed: refuse to follow the symlink, and log so the
+        # operator sees why no .bak was written.
+        try:
+            target = os.readlink(path)
+        except OSError:
+            target = "<unreadable>"
+        sys.stderr.write(
+            f"[defenseclaw] refusing to back up MCP config: {path} is a symlink "
+            f"-> {target!r} (F-2128)\n"
+        )
+        return
+    if not stat.S_ISREG(st.st_mode):
         return
     backup = _managed_mcp_backup_path(path)
     if os.path.exists(backup):
@@ -1234,7 +1265,9 @@ def _capture_managed_mcp_backup(path: str) -> None:
         # right absolute path even when called from a different cwd.
         _registry_register(os.path.abspath(path), backup)
         return
-    shutil.copy2(path, backup)
+    # follow_symlinks=False is defense-in-depth: even if a symlink slips
+    # past the lstat above (e.g. TOCTOU), copy2 will not follow it.
+    shutil.copy2(path, backup, follow_symlinks=False)
     os.chmod(backup, 0o600)
     _registry_register(os.path.abspath(path), backup)
 

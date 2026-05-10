@@ -1855,9 +1855,23 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
 
     # Locate and scan
     skill_path = _resolve_path(app, skill_name)
+    # Avarice F-2327: when the post-install scan cannot run (skill
+    # unresolved, scanner crash) we must NOT leave the installed
+    # package on disk with no policy decision. Roll back the
+    # clawhub install before exiting.
     if not skill_path:
-        click.echo("[install] warning: could not locate installed skill for scan", err=True)
-        return
+        click.echo(
+            f"[install] could not locate installed skill {skill_name!r} for scan — "
+            "rolling back via clawhub uninstall (F-2327)",
+            err=True,
+        )
+        _run_clawhub_uninstall(skill_name)
+        if app.logger:
+            app.logger.log_action(
+                "install-rolled-back", skill_name,
+                "reason=skill-unresolved scan=skipped (F-2327)",
+            )
+        raise SystemExit(1)
 
     click.echo(f"[install] scanning {skill_path}...")
     scanner = SkillScannerWrapper(
@@ -1869,7 +1883,16 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
     try:
         result = scanner.scan(skill_path)
     except Exception as exc:
-        click.echo(f"error: scan failed: {exc}", err=True)
+        click.echo(
+            f"error: scan failed: {exc} — rolling back via clawhub uninstall (F-2327)",
+            err=True,
+        )
+        _run_clawhub_uninstall(skill_name)
+        if app.logger:
+            app.logger.log_action(
+                "install-rolled-back", skill_name,
+                f"reason=scan-failed exc={type(exc).__name__} (F-2327)",
+            )
         raise SystemExit(1)
 
     if app.logger:
@@ -1971,3 +1994,28 @@ def _run_clawhub_install(skill_name: str, force: bool) -> None:
     except (subprocess.CalledProcessError, FileNotFoundError) as exc:
         click.echo(f"error: clawhub install failed: {exc}", err=True)
         raise SystemExit(1)
+
+
+def _run_clawhub_uninstall(skill_name: str) -> None:
+    """Best-effort rollback for a partial install (F-2327).
+
+    Runs `npx clawhub uninstall <skill>` with a short timeout. We
+    intentionally do not raise on rollback failures — the caller is
+    already exiting non-zero — but we surface the error to the
+    operator so they can manually remediate.
+    """
+    args = ["npx", "clawhub", "uninstall", skill_name]
+    try:
+        subprocess.run(args, check=False, timeout=120)
+    except subprocess.TimeoutExpired:
+        click.echo(
+            f"[install] warning: clawhub uninstall of {skill_name!r} timed out — "
+            "manual cleanup may be required (F-2327)",
+            err=True,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        click.echo(
+            f"[install] warning: clawhub uninstall of {skill_name!r} failed: {exc} — "
+            "manual cleanup may be required (F-2327)",
+            err=True,
+        )

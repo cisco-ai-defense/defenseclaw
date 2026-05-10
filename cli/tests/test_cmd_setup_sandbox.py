@@ -87,11 +87,20 @@ class _MockGateway:
         self.port = 18789
 
 
+class _MockClaw:
+    """Avarice F-2227: launcher generation now reads
+    ``cfg.claw.openclaw_home_original`` to pin the privileged
+    pre-sandbox repair to the operator-confirmed home path."""
+    def __init__(self, openclaw_home_original: str = ""):
+        self.openclaw_home_original = openclaw_home_original
+
+
 class _MockCfg:
-    def __init__(self):
+    def __init__(self, openclaw_home_original: str = ""):
         self.gateway = _MockGateway()
         self.guardrail = _MockGuardrail()
         self.openshell = _MockOpenshell()
+        self.claw = _MockClaw(openclaw_home_original)
 
 
 class TestGenerateSystemdUnits(unittest.TestCase):
@@ -336,6 +345,18 @@ class TestPrePairDevice(unittest.TestCase):
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.sandbox_home, ignore_errors=True)
 
+    def _write_device_key(self, blob: bytes) -> str:
+        """Write a device.key with mode 0o600 + the gateway provenance
+        sentinel that avarice F-2551 now requires before the pre-pair
+        flow will touch paired.json."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(blob)
+        os.chmod(path, 0o600)
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
+        return path
+
     def test_no_device_key(self):
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertFalse(result)
@@ -346,10 +367,7 @@ class TestPrePairDevice(unittest.TestCase):
             return json.load(f)
 
     def test_with_ed25519_key(self):
-        key_data = os.urandom(64)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(64))
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)
@@ -362,10 +380,7 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(device["role"], "operator")
 
     def test_updates_existing_device(self):
-        key_data = os.urandom(64)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(64))
 
         _pre_pair_device(self.data_dir, self.sandbox_home)
         _pre_pair_device(self.data_dir, self.sandbox_home)
@@ -374,10 +389,7 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(len(paired), 1, "Should update, not duplicate")
 
     def test_32_byte_pubkey(self):
-        key_data = os.urandom(32)
-        key_path = os.path.join(self.data_dir, "device.key")
-        with open(key_path, "wb") as f:
-            f.write(key_data)
+        self._write_device_key(os.urandom(32))
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)
@@ -386,6 +398,52 @@ class TestPrePairDevice(unittest.TestCase):
         self.assertEqual(len(paired), 1)
         device = list(paired.values())[0]
         self.assertEqual(device["displayName"], "defenseclaw-sidecar")
+
+    def test_f2551_overpermissive_mode_refused(self):
+        """Avarice F-2551: device.key mode 0o644 (group/world read)
+        must be refused even with a provenance sentinel present."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o644)
+        with open(path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "F-2551 regression: 0o644 device.key was accepted")
+
+    def test_f2551_missing_provenance_refused(self):
+        """Avarice F-2551: a 0o600 device.key without the gateway
+        provenance sentinel must be refused (a local user could have
+        planted the file before sandbox setup ran)."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+        # No .provenance file alongside.
+
+        result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        self.assertFalse(result, "F-2551 regression: device.key without sentinel accepted")
+
+    def test_f2551_legacy_optin_bypasses_sentinel(self):
+        """The DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1 escape hatch
+        keeps the legacy behavior for operators who can't yet
+        regenerate device.key via the new gateway flow."""
+        path = os.path.join(self.data_dir, "device.key")
+        with open(path, "wb") as f:
+            f.write(os.urandom(32))
+        os.chmod(path, 0o600)
+
+        prev = os.environ.get("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY")
+        try:
+            os.environ["DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY"] = "1"
+            result = _pre_pair_device(self.data_dir, self.sandbox_home)
+        finally:
+            if prev is None:
+                os.environ.pop("DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", None)
+            else:
+                os.environ["DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY"] = prev
+        self.assertTrue(result, "legacy opt-in env var must keep working")
 
     def test_pem_encoded_key(self):
         import base64
@@ -404,6 +462,11 @@ class TestPrePairDevice(unittest.TestCase):
         key_path = os.path.join(self.data_dir, "device.key")
         with open(key_path, "w") as f:
             f.write(pem_data)
+        # Avarice F-2551: regenerate the on-disk perms + provenance
+        # sentinel that the hardened pre-pair flow now requires.
+        os.chmod(key_path, 0o600)
+        with open(key_path + ".provenance", "w", encoding="utf-8") as f:
+            f.write("source=test\n")
 
         result = _pre_pair_device(self.data_dir, self.sandbox_home)
         self.assertTrue(result)

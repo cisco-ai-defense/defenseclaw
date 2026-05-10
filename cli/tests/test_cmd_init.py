@@ -1209,7 +1209,14 @@ class TestInitStartsGateway(unittest.TestCase):
         with open(pid_file, "w") as f:
             f.write(str(os.getpid()))
 
-        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value="/usr/bin/defenseclaw-gateway"):
+        # Avarice F-2189: _is_sidecar_running now also checks
+        # /proc/<pid>/cmdline against known gateway binary names. Tests
+        # use os.getpid() (the python test runner) which won't match;
+        # stub the cmdline check to keep this test focused on the
+        # already-running short-circuit. The spoof guard has its own
+        # dedicated test in test_cmd_init_pid_spoof.
+        with patch("defenseclaw.commands.cmd_init.shutil.which", return_value="/usr/bin/defenseclaw-gateway"), \
+             patch("defenseclaw.commands.cmd_init._pid_looks_like_gateway", return_value=True):
             _start_gateway(cfg, logger)
             logger.log_action.assert_not_called()
 
@@ -1271,7 +1278,10 @@ class TestIsSidecarRunning(unittest.TestCase):
         pid_file = os.path.join(self.tmp_dir, "gateway.pid")
         with open(pid_file, "w") as f:
             f.write(str(os.getpid()))
-        self.assertTrue(_is_sidecar_running(pid_file))
+        # Avarice F-2189: stub the cmdline check — see test_cmd_init_pid_spoof
+        # for the dedicated regression coverage.
+        with patch("defenseclaw.commands.cmd_init._pid_looks_like_gateway", return_value=True):
+            self.assertTrue(_is_sidecar_running(pid_file))
 
     def test_stale_pid(self):
         from defenseclaw.commands.cmd_init import _is_sidecar_running

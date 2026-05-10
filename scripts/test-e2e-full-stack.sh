@@ -1020,23 +1020,53 @@ inspect_tool() {
     sidecar_post "/api/v1/inspect/tool" "$payload"
 }
 
+# Avarice F-1866: dump_artifacts is invoked from an EXIT trap when
+# any phase records FAIL>0. The legacy implementation cat'd
+# ~/.defenseclaw/config.yaml and ~/.openclaw/openclaw.json directly
+# and tail'd gateway.log / gateway.jsonl without redaction. The
+# DefenseClaw config schema permits inline llm.api_key,
+# splunk.hec_token, gateway.token, and OpenClaw gateway.auth.token
+# values, and the gateway logs include raw audit/prompt material.
+# A single failed assertion therefore leaked provider keys, gateway
+# tokens, and prompt content into CI logs.
+#
+# We redact secret-bearing keys (and well-known token formats) from
+# every dumped artifact via _redact_secrets, and we cap the dumped
+# files to a small tail. Operators that explicitly want full bytes
+# in CI can set DEFENSECLAW_DUMP_RAW_SECRETS=1 (NOT recommended).
+_redact_secrets() {
+    if [[ "${DEFENSECLAW_DUMP_RAW_SECRETS:-0}" == "1" ]]; then
+        cat
+        return
+    fi
+    # Redact:
+    #  * common token shapes (sk-*, ghp_*, AKIA*, eyJ* JWTs, hex-32+)
+    #  * any line whose key matches an obvious-secret name
+    sed -E \
+        -e 's/(api[-_]?key|secret|token|password|hec_token|auth_token|gateway_token|provider_key|client_secret|private_key|aws_secret_access_key)([[:space:]]*[:=][[:space:]]*)("?)[^"[:space:],}]+("?)/\1\2\3<redacted>\4/Ig' \
+        -e 's/sk-[A-Za-z0-9_-]{16,}/<redacted-sk>/g' \
+        -e 's/ghp_[A-Za-z0-9]{20,}/<redacted-gh>/g' \
+        -e 's/AKIA[0-9A-Z]{12,20}/<redacted-aws>/g' \
+        -e 's/eyJ[A-Za-z0-9_=-]{20,}\.[A-Za-z0-9_=-]+\.[A-Za-z0-9_.+/=-]+/<redacted-jwt>/g'
+}
+
 dump_artifacts() {
     echo ""
-    echo "=== Artifact Dump (on failure) ==="
+    echo "=== Artifact Dump (on failure, secrets redacted — F-1866) ==="
     echo "--- Run Context ---"
     echo "profile=$E2E_PROFILE"
     echo "run_id=$DEFENSECLAW_RUN_ID"
     echo "prefix=$E2E_PREFIX"
-    echo "--- ~/.defenseclaw/config.yaml ---"
-    cat ~/.defenseclaw/config.yaml 2>/dev/null || echo "  (not found)"
-    echo "--- .env key names ---"
+    echo "--- ~/.defenseclaw/config.yaml (redacted) ---"
+    cat ~/.defenseclaw/config.yaml 2>/dev/null | _redact_secrets || echo "  (not found)"
+    echo "--- .env key names (values redacted) ---"
     grep -oP '^\w+(?==)' ~/.defenseclaw/.env 2>/dev/null || echo "  (none)"
     echo "--- defenseclaw-gateway status ---"
-    defenseclaw-gateway status 2>/dev/null || echo "  (not running)"
-    echo "--- gateway.log (last 60 lines) ---"
-    tail -60 ~/.defenseclaw/gateway.log 2>/dev/null || echo "  (not found)"
-    echo "--- gateway.jsonl (last 60 lines) ---"
-    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null || echo "  (not found)"
+    defenseclaw-gateway status 2>/dev/null | _redact_secrets || echo "  (not running)"
+    echo "--- gateway.log (last 60 lines, redacted) ---"
+    tail -60 ~/.defenseclaw/gateway.log 2>/dev/null | _redact_secrets || echo "  (not found)"
+    echo "--- gateway.jsonl (last 60 lines, redacted) ---"
+    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- SQLite direct event count (via Python) ---"
     python3 -c "
 import sqlite3, os
@@ -1071,8 +1101,8 @@ conn.close()
     snapshot_skill_paths | grep "$E2E_PREFIX" || echo "  (none)"
     echo "--- current test plugin directories ---"
     snapshot_plugin_paths | grep "$E2E_PREFIX" || echo "  (none)"
-    echo "--- ~/.openclaw/openclaw.json ---"
-    cat ~/.openclaw/openclaw.json 2>/dev/null || echo "  (not found)"
+    echo "--- ~/.openclaw/openclaw.json (redacted) ---"
+    cat ~/.openclaw/openclaw.json 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- Splunk current-run actions ---"
     splunk_run_results_json 'action=* | head 20' | jq '.' 2>/dev/null || echo "[]"
     echo "--- splunk container logs (last 30) ---"
