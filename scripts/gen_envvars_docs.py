@@ -162,10 +162,10 @@ def _consumer_cell(entry: EnvVar) -> str:
     return "<br/>".join(parts)
 
 
-def _finding_cell(entry: EnvVar) -> str:
-    if not entry.finding_id:
+def _security_note_cell(entry: EnvVar) -> str:
+    if not entry.security_note:
         return "—"
-    return f"`{entry.finding_id}`"
+    return _escape_table_cell(entry.security_note)
 
 
 _SENTENCE_SPLIT = re.compile(r"\.\s+(?=[A-Z])")
@@ -197,7 +197,7 @@ def _render_table(category: str, *, mdx: bool) -> str:
 
     lines: list[str] = []
     lines.append(
-        "| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |"
+        "| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |"
     )
     lines.append(
         "| --- | --- | --- | --- | --- | --- | --- |"
@@ -219,7 +219,7 @@ def _render_table(category: str, *, mdx: bool) -> str:
             f"{_default_cell(e, mdx=mdx)} | "
             f"{_accepted_values_cell(e)} | "
             f"{purpose} | "
-            f"{_finding_cell(e)} | "
+            f"{_security_note_cell(e)} | "
             f"{consumer_cell} |"
         )
         lines.append(row)

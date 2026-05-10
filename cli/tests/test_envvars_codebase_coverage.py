@@ -1,16 +1,15 @@
 """CI gate: every ``DEFENSECLAW_*`` callsite in the codebase MUST be
 declared in ``internal/envvars/registry.json``.
 
-The audit that originally surfaced env-var sprawl scanned the repo
-manually. This test bakes that scan into CI so any new env-var
-reference added to the codebase fails the build unless the contributor
-also adds a registry entry.
+This test bakes a repo-wide audit into CI so any new env-var reference
+added to the codebase fails the build unless the contributor also
+adds a registry entry.
 
 How it works
 ------------
 1. Walk the repository starting at the repo root.
-2. Skip vendored dirs (``.git``, ``node_modules``, ``vendor``,
-   ``.venv``, the autogen docs, ``.avarice``, etc.).
+2. Skip vendored dirs (``node_modules``, ``vendor``, ``.venv``,
+   build outputs, dotfile dirs, etc.).
 3. For every source file (Go / Python / TypeScript / shell / YAML /
    Dockerfile / docs), regex-extract every token matching
    ``DEFENSECLAW_[A-Z0-9_]+``.
@@ -44,26 +43,19 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Directories to skip wholesale. Each entry is checked against any
 # path component, so "node_modules" anywhere in the tree is skipped.
+# Note: any directory whose name starts with "." is also skipped
+# unconditionally by the dotfile-prune in os.walk below; we don't need
+# to enumerate dotfile dirs here.
 _SKIP_DIRS = frozenset(
     {
-        ".git",
-        ".github",
-        ".avarice",
-        ".deepsec",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".venv",
         "venv",
         "node_modules",
         "vendor",
         "dist",
         "build",
+        "out",
         "target",
         "__pycache__",
-        ".terraform",
-        ".cursor",
-        ".cursor-data",
         "agent-transcripts",
     }
 )
@@ -122,9 +114,6 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # --auth-env / --token-env flags. The labels are example operator
     # configuration, not env vars DefenseClaw itself reads.
     "cli/tests/test_cmd_registry.py",
-    # Avarice analysis output (audit dumps that mention env vars).
-    "REMEDIATION_PLAN.md",
-    "HIGH_CRITICAL_REMEDIATION_PLAN.md",
 )
 
 # Match DEFENSECLAW_FOO and MIGRATION_DEFENSECLAW_HOME. The trailing

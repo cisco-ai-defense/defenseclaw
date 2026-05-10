@@ -16,16 +16,16 @@
     {
       "name": "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
       "category": "security_opt_out",
-      "purpose": "Bypass the F-2551 provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
+      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
       "default": "unset (fail-closed)",
       "accepted_values": ["1", "unset"],
       "security_impact": "high",
       "surface_in_doctor": true,
       "consumers": [
-        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1759", "description": "_pre_pair_device gates F-2551 fail-closed branch on this var"}
+        {"location": "cli/defenseclaw/commands/cmd_setup_sandbox.py:1759", "description": "_pre_pair_device gates the provenance fail-closed branch on this var"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-2551",
+      "security_note": "Provenance-sentinel verification — prevents acceptance of an unauthenticated device.key file (e.g. a copy left on disk by a prior install or attacker).",
       "replacement_hint": "Restart the gateway once after upgrading; LoadOrCreateIdentity auto-writes the .provenance sentinel and the env var is no longer needed."
     },
     {
@@ -40,7 +40,7 @@
         {"location": "internal/gateway/connector/codex.go:310", "description": "Authenticate() falls back to legacy behavior when set; emits a [SECURITY] log line"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-1365"
+      "security_note": "Per-bearer Codex authentication on loopback — prevents same-host user-to-user impersonation when multiple users share an OS account."
     },
     {
       "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
@@ -55,7 +55,7 @@
         {"location": "scripts/upgrade.sh:263", "description": "Shell upgrade path checks this before proceeding without verification"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-1827"
+      "security_note": "Upgrade-artifact integrity — prevents installing a tampered tarball/wheel pulled from a hijacked release CDN or MITM."
     },
     {
       "name": "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
@@ -69,7 +69,7 @@
         {"location": "scripts/install-openshell-sandbox.sh:159", "description": "Skips integrity verification when set"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-1829",
+      "security_note": "Pinned-digest sandbox install — prevents tag-mutation supply-chain attacks where an upstream tag is silently re-pointed at a malicious image.",
       "replacement_hint": "Pin via DEFENSECLAW_OPENSHELL_ARCH_DIGEST or DEFENSECLAW_OPENSHELL_BINARY_SHA256."
     },
     {
@@ -84,7 +84,7 @@
         {"location": "scripts/install-openshell-sandbox.sh:151", "description": "Verifies OCI manifest digest against this pin"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-1829"
+      "security_note": "Pinned-digest sandbox install — content-addressed verification of the OCI manifest before extraction."
     },
     {
       "name": "DEFENSECLAW_OPENSHELL_BINARY_SHA256",
@@ -99,7 +99,7 @@
         {"location": "scripts/install-openshell-sandbox.sh:250", "description": "Verifies extracted binary sha256 against this pin"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-1829"
+      "security_note": "Pinned-digest sandbox install — sha256 verification of the extracted binary."
     },
     {
       "name": "DEFENSECLAW_UPGRADE_TARBALL_SHA256",
@@ -114,7 +114,7 @@
         {"location": "scripts/upgrade.sh:225", "description": "Shell upgrade verifier"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-2267"
+      "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
     },
     {
       "name": "DEFENSECLAW_UPGRADE_WHL_SHA256",
@@ -129,7 +129,7 @@
         {"location": "scripts/upgrade.sh:226", "description": "Shell upgrade verifier"}
       ],
       "since": "0.5.0",
-      "finding_id": "F-2267"
+      "security_note": "Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file."
     },
     {
       "name": "DEFENSECLAW_DUMP_RAW_SECRETS",
@@ -982,7 +982,7 @@
     {
       "name": "DEFENSECLAW_LOCAL_PASSWORD",
       "category": "credential",
-      "purpose": "Password for the local Splunk daemon basic-auth surface. Previously leaked via /health (fixed in PR #21; regression tested by TestHealthEndpointNoSecrets).",
+      "purpose": "Password for the local Splunk daemon basic-auth surface. The /health endpoint scrubs this value; a regression test (TestHealthEndpointNoSecrets) guards against re-introduction.",
       "default": "unset",
       "accepted_values": ["any-string", "unset"],
       "security_impact": "high",
@@ -1071,14 +1071,14 @@
     {
       "name": "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
       "category": "discovery",
-      "purpose": "Colon-separated list of extra trusted binary prefixes for AI Discovery's binary probing. Tightened in F-2507 — operators with non-standard layouts (e.g. /opt/mycorp/bin) can re-enable specific paths.",
+      "purpose": "Colon-separated list of extra trusted binary prefixes for AI Discovery's binary probing. The default trust list is intentionally narrow (system bin dirs only); operators with non-standard layouts (e.g. /opt/mycorp/bin) can re-enable specific paths.",
       "default": "unset (only /usr/bin and /usr/local/bin trusted)",
       "accepted_values": ["colon-separated absolute paths", "unset"],
       "security_impact": "medium",
       "surface_in_doctor": true,
       "consumers": [{"location": "cli/defenseclaw/inventory/agent_discovery.py:241", "description": "Agent discovery binary probe"}],
       "since": "0.5.0",
-      "finding_id": "F-2507"
+      "security_note": "Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime."
     },
     {
       "name": "DEFENSECLAW_ANTHROPIC_PROBE_MODEL",
