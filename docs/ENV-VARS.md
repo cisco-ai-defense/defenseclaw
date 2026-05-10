@@ -20,9 +20,9 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 
 ## Security opt-outs
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
-| `DEFENSECLAW_CODEX_LOOPBACK_TRUST` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Restore legacy loopback-trusts-any-bearer behavior for the Codex connector. | `F-1365` | `internal/gateway/connector/codex.go:310` — Authenticate() falls back to legacy behavior when set; emits a [SECURITY] log line |
+| `DEFENSECLAW_CODEX_LOOPBACK_TRUST` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Restore legacy loopback-trusts-any-bearer behavior for the Codex connector. | Per-bearer Codex authentication on loopback — prevents same-host user-to-user impersonation when multiple users share an OS account. | `internal/gateway/connector/codex.go:310` — Authenticate() falls back to legacy behavior when set; emits a [SECURITY] log line |
 | `DEFENSECLAW_DEV` | low | `unset` | `1`, `true`, `unset` | Mark the process as a developer build. | — | `internal/redaction/credentials.go:173` — isCredentialScrubDevMode reads this var |
 | `DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM` | **medium** | `unset` (shim active for Bedrock) | `1`, `unset` | Disable the AWS Bedrock HTTP/1 monkey-patch the OpenClaw plugin installs to make Bedrock traffic visible to the guardrail proxy. | — | `extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts:265` — JS shim bails out when set |
 | `DEFENSECLAW_DISABLE_REDACTION` | **HIGH** | `unset` (redaction enabled) | `1`, `true`, `unset` | Disable all PII / credential redaction across every sink (audit DB, JSONL, OTel, Splunk, webhooks). | — | `internal/redaction/redaction.go:111` — DisableAll() reads this env var<br>`cli/defenseclaw/commands/redaction_status.py:42` — Python status reporter<br>`cli/defenseclaw/commands/cmd_setup.py:3158` — Setup flow surfaces this in onboarding |
@@ -30,25 +30,25 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 | `DEFENSECLAW_FAIL_MODE` | **medium** | (value from guardrail.hook_fail_mode in config.yaml) | `open`, `closed`, `unset` | Per-shell override of guardrail.hook_fail_mode. 'open' allows on transport errors; 'closed' blocks. | — | `internal/gateway/connector/hooks/inspect-tool.sh:43` — Read by every inspect-*.sh hook |
 | `DEFENSECLAW_FORCE_AWS_HTTP1_SHIM` | low | `unset` (shim only on Bedrock) | `1`, `unset` | Force the AWS HTTP/1 shim to install even on non-Bedrock setups. | — | `extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts:272` — JS shim forces install when set |
 | `DEFENSECLAW_JSONL_DISABLE` | low | `unset` (JSONL enabled) | `1`, `true`, `unset` | Disable the gateway.jsonl audit tier. | — | `internal/gateway/sidecar.go:226` — Gateway boot reads this kill switch<br>`internal/gateway/jsonl_kill_switch.go` — Definition site |
-| `DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED` | **medium** | `unset` (fail-closed) | `1`, `unset` | Accept a mutable OCI tag (e.g. 'latest') when installing openshell-sandbox instead of requiring a content-addressed digest or sha256 pin. <br>**Fix:** Pin via DEFENSECLAW_OPENSHELL_ARCH_DIGEST or DEFENSECLAW_OPENSHELL_BINARY_SHA256. | `F-1829` | `scripts/install-openshell-sandbox.sh:159` — Skips integrity verification when set |
-| `DEFENSECLAW_OPENSHELL_ARCH_DIGEST` | — | `unset` | `sha256:<hex>`, `unset` | Pin the openshell-sandbox install to a specific platform manifest digest (sha256:...). | `F-1829` | `scripts/install-openshell-sandbox.sh:151` — Verifies OCI manifest digest against this pin |
-| `DEFENSECLAW_OPENSHELL_BINARY_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Pin the final extracted openshell-sandbox binary to a specific sha256. | `F-1829` | `scripts/install-openshell-sandbox.sh:157` — Marker check (presence enables sha256 verification path)<br>`scripts/install-openshell-sandbox.sh:250` — Verifies extracted binary sha256 against this pin |
+| `DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED` | **medium** | `unset` (fail-closed) | `1`, `unset` | Accept a mutable OCI tag (e.g. 'latest') when installing openshell-sandbox instead of requiring a content-addressed digest or sha256 pin. <br>**Fix:** Pin via DEFENSECLAW_OPENSHELL_ARCH_DIGEST or DEFENSECLAW_OPENSHELL_BINARY_SHA256. | Pinned-digest sandbox install — prevents tag-mutation supply-chain attacks where an upstream tag is silently re-pointed at a malicious image. | `scripts/install-openshell-sandbox.sh:159` — Skips integrity verification when set |
+| `DEFENSECLAW_OPENSHELL_ARCH_DIGEST` | — | `unset` | `sha256:<hex>`, `unset` | Pin the openshell-sandbox install to a specific platform manifest digest (sha256:...). | Pinned-digest sandbox install — content-addressed verification of the OCI manifest before extraction. | `scripts/install-openshell-sandbox.sh:151` — Verifies OCI manifest digest against this pin |
+| `DEFENSECLAW_OPENSHELL_BINARY_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Pin the final extracted openshell-sandbox binary to a specific sha256. | Pinned-digest sandbox install — sha256 verification of the extracted binary. | `scripts/install-openshell-sandbox.sh:157` — Marker check (presence enables sha256 verification path)<br>`scripts/install-openshell-sandbox.sh:250` — Verifies extracted binary sha256 against this pin |
 | `DEFENSECLAW_OTEL_TLS_INSECURE` | **HIGH** | `unset` (TLS verified) | `true`, `1`, `unset` | Disable TLS certificate verification on the OTel exporter. | — | `internal/config/config.go:2300` — viper.BindEnv binds this to otel.tls.insecure |
 | `DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA` | **medium** | `unset` (validation requires OPA) | `1`, `unset` | Accept a policy file as 'validated' even when OPA / Rego is not installed. | — | `cli/defenseclaw/commands/cmd_policy.py:1135` — Policy validate command bypass |
-| `DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Bypass the F-2551 provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. <br>**Fix:** Restart the gateway once after upgrading; LoadOrCreateIdentity auto-writes the .provenance sentinel and the env var is no longer needed. | `F-2551` | `cli/defenseclaw/commands/cmd_setup_sandbox.py:1759` — _pre_pair_device gates F-2551 fail-closed branch on this var |
+| `DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Bypass the provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. <br>**Fix:** Restart the gateway once after upgrading; LoadOrCreateIdentity auto-writes the .provenance sentinel and the env var is no longer needed. | Provenance-sentinel verification — prevents acceptance of an unauthenticated device.key file (e.g. a copy left on disk by a prior install or attacker). | `cli/defenseclaw/commands/cmd_setup_sandbox.py:1759` — _pre_pair_device gates the provenance fail-closed branch on this var |
 | `DEFENSECLAW_REVEAL_PII` | **medium** | `unset` (PII redacted everywhere) | `1`, `true`, `unset` | Reveal PII in operator-facing logs only (CLI stdout, TUI). | — | `internal/redaction/redaction.go:90` — Reveal() reads this env var |
 | `DEFENSECLAW_SCHEMA_VALIDATION` | **medium** | on | `off`, `unset` | Disable the runtime JSON-schema gate that validates event payloads before they hit sinks. | — | `internal/gateway/sidecar.go:243` — Gateway boot reads and toggles the schema gate |
 | `DEFENSECLAW_STRICT_AVAILABILITY` | — | `unset` (transport failures fail-open) | `1`, `unset` | Opt-IN to fail-closed on transport errors during hook execution. | — | `internal/gateway/connector/hooks/_hardening.sh:250` — Hook hardening sourced by every *-hook.sh |
 | `DEFENSECLAW_TEST` | low | `unset` | `1`, `true`, `unset` | Mark the process as running under tests. | — | `internal/redaction/credentials.go:176` — isCredentialScrubDevMode reads this var |
 | `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN` | **HIGH** | `unset` (fail-closed) | `1`, `true`, `unset` | Make the plugin-side tool-inspect hook fail-open (allow tool) when the gateway is unreachable. | — | `extensions/defenseclaw/src/index.ts:98` — OpenClaw plugin tool-inspect handler |
-| `DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Skip checksum / signature verification during 'defenseclaw upgrade' or scripts/upgrade.sh. | `F-1827` | `cli/defenseclaw/commands/cmd_upgrade.py:318` — Python upgrade path checks this before downloading without a checksum<br>`scripts/upgrade.sh:263` — Shell upgrade path checks this before proceeding without verification |
-| `DEFENSECLAW_UPGRADE_TARBALL_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Operator-provided sha256 pin for the gateway tarball downloaded by `defenseclaw upgrade`. | `F-2267` | `cli/defenseclaw/commands/cmd_upgrade.py:341` — Python upgrade verifier<br>`scripts/upgrade.sh:225` — Shell upgrade verifier |
-| `DEFENSECLAW_UPGRADE_WHL_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Operator-provided sha256 pin for the Python CLI wheel downloaded by `defenseclaw upgrade`. | `F-2267` | `cli/defenseclaw/commands/cmd_upgrade.py:358` — Python upgrade verifier<br>`scripts/upgrade.sh:226` — Shell upgrade verifier |
+| `DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED` | **HIGH** | `unset` (fail-closed) | `1`, `unset` | Skip checksum / signature verification during 'defenseclaw upgrade' or scripts/upgrade.sh. | Upgrade-artifact integrity — prevents installing a tampered tarball/wheel pulled from a hijacked release CDN or MITM. | `cli/defenseclaw/commands/cmd_upgrade.py:318` — Python upgrade path checks this before downloading without a checksum<br>`scripts/upgrade.sh:263` — Shell upgrade path checks this before proceeding without verification |
+| `DEFENSECLAW_UPGRADE_TARBALL_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Operator-provided sha256 pin for the gateway tarball downloaded by `defenseclaw upgrade`. | Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file. | `cli/defenseclaw/commands/cmd_upgrade.py:341` — Python upgrade verifier<br>`scripts/upgrade.sh:225` — Shell upgrade verifier |
+| `DEFENSECLAW_UPGRADE_WHL_SHA256` | — | `unset` | `64-char hex sha256`, `unset` | Operator-provided sha256 pin for the Python CLI wheel downloaded by `defenseclaw upgrade`. | Operator-supplied checksum pin for upgrade artifacts — defense-in-depth alongside the sidecar .sha256 file. | `cli/defenseclaw/commands/cmd_upgrade.py:358` — Python upgrade verifier<br>`scripts/upgrade.sh:226` — Shell upgrade verifier |
 | `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST` | **medium** | `unset` (SSRF guard blocks private IPs) | `1`, `unset` | Relax the webhook SSRF guard to permit RFC1918 / loopback / link-local destinations. | — | `internal/gateway/webhook.go:139` — Webhook sender SSRF gate<br>`internal/gateway/webhook.go:563` — Webhook validate-on-add SSRF gate<br>`cli/defenseclaw/webhooks/writer.py:412` — Python writer validate-on-add |
 
 ## Credentials & secrets
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_GATEWAY_TOKEN` | **HIGH** | `unset` | `bearer-token`, `unset` | Bearer token hooks present to the gateway API. | — | `internal/gateway/connector/hooks/inspect-tool.sh:30` — Hooks present this header<br>`internal/cli/sidecar.go:43` — Sidecar references in setup messages |
 | `DEFENSECLAW_LLM_KEY` | **HIGH** | `unset` | `LLM API key string`, `unset` | Canonical env-var name for the unified LLM key. | — | `cli/defenseclaw/credentials.py` — Credentials registry default for llm.api_key_env |
@@ -71,7 +71,7 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 
 ## Paths & runtime layout
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_API_ADDR` | low | (templated value from gateway.api_port at hook install time) | `host:port`, `unset` | Sidecar API address that hooks dial. | — | `internal/gateway/connector/hooks/inspect-tool.sh:42` — Hooks dial this |
 | `DEFENSECLAW_BIN` | low | (discovered via PATH lookup) | `any-absolute-path` | Override path to the defenseclaw CLI binary. | — | `internal/scanner/plugin_test.go:177` — Plugin test harness<br>`scripts/setup-llm.sh:51` — LLM setup script |
@@ -87,7 +87,7 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 
 ## Telemetry (OTel)
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_OTEL_ENABLED` | — | (value from otel.enabled in config.yaml) | `true`, `false`, `1`, `0`, `unset` | Master toggle for the OTel exporter. | — | `internal/config/config.go:2297` — viper.BindEnv otel.enabled |
 | `DEFENSECLAW_OTEL_ENDPOINT` | — | (value from otel.endpoint) | `any-otlp-endpoint`, `unset` | Default OTLP endpoint (host:port[/path]). | — | `internal/config/config.go:2298` — viper.BindEnv otel.endpoint |
@@ -106,7 +106,7 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 
 ## Debug / verbose logging
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_DEBUG` | low | `unset` | `1`, `unset` | Gateway client logs every request/response frame to stderr. | — | `internal/gateway/client.go:80` — Client struct gates verbose logging on this var |
 | `DEFENSECLAW_JUDGE_TRACE` | **medium** | `unset` | `1`, `true`, `unset` | LLM judge logs every prompt + response. | — | `internal/gateway/llm_judge.go:62` — Judge debug toggle |
@@ -117,14 +117,14 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 
 ## Discovery & probes
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_ANTHROPIC_PROBE_MODEL` | — | claude-3-5-haiku-latest | `any-anthropic-model-id` | Override the model used by 'defenseclaw doctor' to probe Anthropic API key validity. | — | `cli/defenseclaw/commands/cmd_doctor.py:659` — Doctor's Anthropic probe |
-| `DEFENSECLAW_TRUSTED_BIN_PREFIXES` | **medium** | `unset` (only /usr/bin and /usr/local/bin trusted) | `colon-separated absolute paths`, `unset` | Colon-separated list of extra trusted binary prefixes for AI Discovery's binary probing. | `F-2507` | `cli/defenseclaw/inventory/agent_discovery.py:241` — Agent discovery binary probe |
+| `DEFENSECLAW_TRUSTED_BIN_PREFIXES` | **medium** | `unset` (only /usr/bin and /usr/local/bin trusted) | `colon-separated absolute paths`, `unset` | Colon-separated list of extra trusted binary prefixes for AI Discovery's binary probing. | Tight binary-discovery trust list — prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime. | `cli/defenseclaw/inventory/agent_discovery.py:241` — Agent discovery binary probe |
 
 ## Hook-internal (do not override)
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_AGENT_ID` | — | (set by plugin / hooks) | `any-string` | Agent identity propagated through correlation headers and OTel attributes. | — | `internal/cli/scan_v7.go:69` — Go reader<br>`extensions/defenseclaw/src/__tests__/agent_identity.test.ts:61` — JS plugin reader (tested) |
 | `DEFENSECLAW_AGENT_INSTANCE_ID` | — | (set by plugin / hooks) | `any-string` | Per-instance agent identifier; used to disambiguate concurrent runs of the same agent. | — | `internal/cli/scan_v7.go:70` — Go reader |
@@ -143,7 +143,7 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 
 ## Splunk-bridge bundle
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_HEC_TOKEN` | **HIGH** | (set in .env.example) | `hec-token` | Splunk-bridge HEC token. | — | `bundles/splunk_local_bridge/env/.env.example:12` — Bridge .env |
 | `DEFENSECLAW_HEC_URL` | — | (set in .env.example) | `any-hec-url` | Splunk-bridge bundle: HEC endpoint URL. | — | `bundles/splunk_local_bridge/env/.env.example:11` — Bridge .env |
@@ -155,7 +155,7 @@ Active overrides are also surfaced live by `defenseclaw doctor`
 
 ## Test fixtures (test-only)
 
-| Env var | Impact | Default | Accepted values | Purpose | Finding | Consumers |
+| Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
 | `DEFENSECLAW_FAKE_CLAUDE_LIST` | — | `unset` | `comma-separated mock responses`, `unset` | Test-only stub: comma-separated list of responses the fake claude CLI returns. | — | `internal/gateway/connector/codeguard_native_test.go:90` — Test stub |
 | `DEFENSECLAW_FAKE_CLAUDE_LOG` | — | `unset` | `absolute-path`, `unset` | Test-only stub: path the fake claude CLI logs invocations to. | — | `internal/gateway/connector/codeguard_native_test.go:116` — Test stub |
