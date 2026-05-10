@@ -877,16 +877,47 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     @patch("defenseclaw.registry.fetch_npm_package")
-    def test_install_no_action_warns_but_installs(self, mock_fetch, mock_scan):
+    def test_install_no_action_refuses_critical_findings(self, mock_fetch, mock_scan):
+        """Avarice F-0683: the legacy code printed "no action taken" and
+        STILL fell through to copytree() when a CRITICAL was found
+        without --action. We now refuse the install (fail closed) until
+        the operator either passes --action or explicitly allow-lists."""
         mock_scan.return_value = self._critical_scan_result()
         src = self._create_plugin_dir("warn-pkg")
         mock_fetch.return_value = src
 
         result = self._invoke_install(["install", "warn-pkg"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("refusing to install", result.output)
+        # The plugin must NOT have landed on disk.
+        self.assertFalse(
+            os.path.exists(os.path.join(self.app.cfg.plugin_dir, "warn-pkg")),
+            "F-0683 regression: critical plugin was installed without --action",
+        )
+
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    @patch("defenseclaw.registry.fetch_npm_package")
+    def test_install_no_action_allows_low_severity_findings(self, mock_fetch, mock_scan):
+        """F-0683 must not over-block: LOW/INFO scan findings without
+        --action still install with a warning so existing operator
+        workflows don't break."""
+        from datetime import datetime, timedelta, timezone
+        from defenseclaw.models import Finding, ScanResult
+        mock_scan.return_value = ScanResult(
+            scanner="plugin-scanner", target="x",
+            timestamp=datetime.now(timezone.utc),
+            findings=[Finding(
+                id="info-finding", severity="LOW", title="minor",
+                description="lint", scanner="plugin-scanner",
+            )],
+            duration=timedelta(seconds=0.1),
+        )
+        src = self._create_plugin_dir("low-warn-pkg")
+        mock_fetch.return_value = src
+
+        result = self._invoke_install(["install", "low-warn-pkg"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("findings", result.output)
-        self.assertIn("no action taken", result.output)
-        self.assertIn("Installed plugin: warn-pkg", result.output)
+        self.assertIn("Installed plugin: low-warn-pkg", result.output)
 
     @patch("defenseclaw.registry.fetch_npm_package")
     def test_install_network_error(self, mock_fetch):

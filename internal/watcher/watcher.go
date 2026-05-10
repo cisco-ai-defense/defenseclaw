@@ -472,8 +472,23 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if w.otel != nil {
 			w.otel.RecordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
 		}
+		// Avarice F-3187: a scanner error must NOT leave the
+		// freshly-detected install in place. The legacy code
+		// recorded `scan-error` and returned without quarantine,
+		// blocking, or disabling the artifact, so a malicious
+		// skill/plugin that crashed its scanner stayed installed.
+		// Treat scanner failures as fail-closed: enforce a block
+		// (which quarantines + disables per fallback policy) before
+		// surfacing the verdict to the sidecar.
+		w.enforceBlock(ctx, evt)
+		_ = w.logger.LogAction("install-blocked", evt.Path,
+			fmt.Sprintf("type=%s reason=scanner-error scanner=%s (F-3187)",
+				targetType, s.Name()))
 		w.recordAdmission(ctx, "scan-error", targetType)
-		res = AdmissionResult{Event: evt, Verdict: VerdictScanError, Reason: err.Error()}
+		res = AdmissionResult{Event: evt, Verdict: VerdictBlocked,
+			Reason: fmt.Sprintf("scanner failure (fail-closed): %v", err),
+			InstallAction: "block",
+		}
 		return res
 	}
 

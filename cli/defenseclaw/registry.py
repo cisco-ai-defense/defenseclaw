@@ -124,8 +124,54 @@ def _extract_archive(archive_path: str, dest_dir: str, *, prefix: str = "") -> N
                 try:
                     tf.extractall(dest_dir, filter="data")
                 except TypeError:
-                    # Python < 3.12 lacks the filter parameter
-                    tf.extractall(dest_dir)
+                    # Avarice F-2390: Python <3.12 lacks the `filter`
+                    # parameter. The legacy fallback called
+                    # tf.extractall(dest_dir) WITHOUT any path-
+                    # traversal validation, so a malicious tar with
+                    # `../escape`, absolute-path members, symlinks
+                    # pointing outside the dest, hardlinks, or
+                    # special device files could write outside
+                    # dest_dir before the plugin was scanned. We
+                    # reproduce the Python 3.12 "data" filter
+                    # contract by hand: regular files and dirs only,
+                    # all paths must resolve under dest_dir, and
+                    # anything that looks like traversal is fatal.
+                    safe_root = os.path.realpath(dest_dir)
+                    members: list[tarfile.TarInfo] = []
+                    for m in tf.getmembers():
+                        # Reject anything that isn't a plain file or
+                        # directory. The 3.12+ data filter does the
+                        # same — symlinks/hardlinks/devices/FIFOs
+                        # have no place inside a plugin tarball.
+                        if not (m.isfile() or m.isdir()):
+                            raise RegistryError(
+                                f"tar contains non-regular member: {m.name!r} "
+                                f"(type={m.type!r}, F-2390)"
+                            )
+                        # Tar members are POSIX paths regardless of
+                        # the host OS; split on `/` and `\\` so we
+                        # catch traversal attempts on Windows hosts
+                        # too.
+                        normalized = m.name.replace("\\", "/")
+                        if normalized.startswith("/") or normalized.startswith("\\"):
+                            raise RegistryError(
+                                f"tar contains absolute-path entry: {m.name!r} (F-2390)"
+                            )
+                        parts = os.path.normpath(normalized).split("/")
+                        if ".." in parts:
+                            raise RegistryError(
+                                f"tar contains path-traversal entry: {m.name!r} (F-2390)"
+                            )
+                        member_path = os.path.realpath(
+                            os.path.join(dest_dir, normalized)
+                        )
+                        if (member_path != safe_root
+                                and not member_path.startswith(safe_root + os.sep)):
+                            raise RegistryError(
+                                f"tar contains path-traversal entry: {m.name!r} (F-2390)"
+                            )
+                        members.append(m)
+                    tf.extractall(dest_dir, members=members)
     elif zipfile.is_zipfile(archive_path):
         safe_root = os.path.realpath(dest_dir)
         with zipfile.ZipFile(archive_path) as zf:

@@ -97,6 +97,21 @@ func (e *SkillEnforcer) IsQuarantined(skillName string) bool {
 }
 
 func copyFile(src, dst string) error {
+	// Avarice F-2869: os.ReadFile follows symlinks. The caller
+	// (copyDir) already filters out symlink entries with Lstat
+	// before reaching us, so this branch should only see regular
+	// files. We still defensively re-check to keep this helper
+	// safe for any future caller.
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("enforce: refusing to copy symlink %s", src)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("enforce: refusing to copy non-regular file %s", src)
+	}
 	data, err := os.ReadFile(src)
 	if err != nil {
 		return err
@@ -105,6 +120,15 @@ func copyFile(src, dst string) error {
 }
 
 func copyDir(src, dst string) error {
+	// Avarice F-2869: a malicious skill or plugin package can place
+	// a symlink in its installed tree (e.g.
+	// `malicious-skill/leaked-secret -> /etc/passwd`). The previous
+	// copyDir handled `d.IsDir()` and sent every other entry to
+	// copyFile, which used `os.ReadFile` (a symlink-following
+	// open). Quarantine therefore copied the link target into
+	// quarantine storage. We now Lstat each entry, skip symlinks
+	// and other non-regular files outright, and emit an explicit
+	// telemetry log so operators see the rejection.
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -120,8 +144,28 @@ func copyDir(src, dst string) error {
 
 		target := filepath.Join(dst, rel)
 
+		// Always Lstat — DirEntry.Type() may not surface the symlink
+		// bit on every filesystem.
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+
+		if mode&fs.ModeSymlink != 0 {
+			fmt.Fprintf(os.Stderr,
+				"[enforce] skipping symlink during quarantine: %s -> (target hidden, F-2869)\n",
+				path)
+			return nil
+		}
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o700)
+		}
+		if !mode.IsRegular() {
+			fmt.Fprintf(os.Stderr,
+				"[enforce] skipping non-regular file during quarantine: %s mode=%s (F-2869)\n",
+				path, mode)
+			return nil
 		}
 		return copyFile(path, target)
 	})

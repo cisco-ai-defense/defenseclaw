@@ -104,11 +104,27 @@ func (c *Compiler) Compile(cfg *firewall.FirewallConfig) ([]string, error) {
 	}
 
 	// Always allow: established connections, DNS, loopback.
+	//
+	// Avarice F-2908: the legacy ruleset emitted
+	//   pass out quick inet proto udp keep state
+	// before the DNS allow rules. UDP has no TCP-style established
+	// flag, so that rule unconditionally permitted any new outbound
+	// UDP/QUIC datagram and stopped further evaluation because of
+	// `quick`. A protected process could therefore bypass the
+	// default-deny by tunnelling over UDP or QUIC. We replace the
+	// blanket UDP pass with a stateful rule that only re-permits
+	// reply traffic for established UDP flows (i.e. PF state already
+	// created by an earlier `pass out` rule), and explicitly require
+	// the DNS allow rules below to admit new UDP datagrams.
 	rules = append(rules,
 		"",
-		"# Allow established connections",
-		"pass out quick inet proto tcp flags A/A",
-		"pass out quick inet proto udp keep state",
+		"# Allow established connections (F-2908: keep stateful TCP only)",
+		"pass out quick inet proto tcp flags A/A keep state",
+		"# Reply traffic for already-established UDP flows is admitted by",
+		"# PF's per-flow state created when a matching outbound rule first",
+		"# passed the datagram. We do NOT add a blanket `pass out quick udp`",
+		"# rule here because UDP has no established flag and `keep state`",
+		"# alone would create state for any new outbound UDP datagram.",
 		"",
 		"# Allow DNS",
 		"pass out quick inet proto udp to any port 53",

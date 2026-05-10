@@ -493,6 +493,70 @@ fetch_artifact "${WHL_URL}" "${STAGING_DIR}/${whl_name}"
 verify_checksum "${STAGING_DIR}/${whl_name}" "${whl_name}"
 ok "Python CLI wheel downloaded"
 
+# Avarice F-1827: a download alone is not proof of integrity. The
+# legacy upgrade flow extracted the tarball and pip-installed the
+# wheel without ever comparing the artifact bytes to a published
+# checksum or signature. We now require either:
+#
+#  1) a `<artifact>.sha256` sidecar published alongside each artifact
+#     in the same GitHub release, OR
+#  2) operator-provided pinned digests via the env vars
+#     DEFENSECLAW_UPGRADE_TARBALL_SHA256 and
+#     DEFENSECLAW_UPGRADE_WHL_SHA256.
+#
+# When neither is supplied, the upgrade aborts. Operators that
+# explicitly accept the unverified path can opt back into the legacy
+# behavior with DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.
+verify_artifact_sha256() {
+    local file="$1" name="$2" pinned_env="$3"
+    local pinned="${!pinned_env:-}"
+    local sidecar_url="${4}"
+    local actual
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "${file}" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "${file}" | awk '{print $1}')"
+    else
+        die "no sha256sum/shasum available — refusing to install unverified ${name} (F-1827)"
+    fi
+    if [[ -n "${pinned}" ]]; then
+        if [[ "${pinned,,}" != "${actual,,}" ]]; then
+            die "checksum mismatch for ${name}: expected ${pinned} got ${actual} (F-1827)"
+        fi
+        ok "${name}: pinned sha256 match"
+        return 0
+    fi
+    # Try sidecar.
+    if curl -sSfL --head "${sidecar_url}" -o /dev/null 2>/dev/null; then
+        local sidecar_dest="${STAGING_DIR}/$(basename "${file}").sha256"
+        if curl -sSfL "${sidecar_url}" -o "${sidecar_dest}"; then
+            local published
+            published="$(awk '{print $1; exit}' "${sidecar_dest}" | tr -d '[:space:]')"
+            if [[ -n "${published}" && "${published,,}" == "${actual,,}" ]]; then
+                ok "${name}: published .sha256 sidecar match"
+                return 0
+            fi
+            die "checksum mismatch for ${name}: published ${published} got ${actual} (F-1827)"
+        fi
+    fi
+    if [[ "${DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED:-0}" == "1" ]]; then
+        warn "${name}: no checksum available and DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 — proceeding without verification (F-1827)"
+        return 0
+    fi
+    die "no published .sha256 for ${name} and no pinned ${pinned_env}; refusing to install unverified artifact (F-1827)
+  Set DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 to proceed anyway (NOT recommended)."
+}
+
+verify_artifact_sha256 \
+    "${STAGING_DIR}/gateway.tar.gz" "gateway tarball" \
+    DEFENSECLAW_UPGRADE_TARBALL_SHA256 "${TARBALL_URL}.sha256"
+verify_artifact_sha256 \
+    "${STAGING_DIR}/${whl_name}" "python wheel" \
+    DEFENSECLAW_UPGRADE_WHL_SHA256 "${WHL_URL}.sha256"
+
+# Only extract after verification succeeds.
+tar -xzf "${STAGING_DIR}/gateway.tar.gz" -C "${STAGING_DIR}"
+
 # ── Confirm ───────────────────────────────────────────────────────────────────
 
 if [[ "${YES}" -eq 0 ]]; then

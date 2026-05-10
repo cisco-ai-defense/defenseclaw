@@ -1748,6 +1748,68 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Avarice F-3287: the legacy handler accepted any directory the
+	// gateway process could read and streamed every regular file
+	// inside it. A caller with the sidecar bearer token could ask
+	// for ~/.defenseclaw, ~/.ssh, /etc, /private/etc/ssh, etc., and
+	// receive a tarball of readable host files. Constrain req.Target
+	// to a directory under one of the configured skill or plugin
+	// roots, after fully resolving symlinks on both sides.
+	resolvedTarget, err := filepath.EvalSymlinks(req.Target)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("target directory not found: %s", req.Target),
+		})
+		return
+	}
+	resolvedAbs, err := filepath.Abs(resolvedTarget)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("target directory not resolvable: %s", req.Target),
+		})
+		return
+	}
+	a.cfgMu.RLock()
+	cfgSnap := a.scannerCfg
+	a.cfgMu.RUnlock()
+	var allowedRoots []string
+	if cfgSnap != nil {
+		allowedRoots = append(allowedRoots, cfgSnap.SkillDirs()...)
+		allowedRoots = append(allowedRoots, cfgSnap.PluginDirs()...)
+	}
+	rootOK := false
+	for _, root := range allowedRoots {
+		if root == "" {
+			continue
+		}
+		rr, rerr := filepath.EvalSymlinks(root)
+		if rerr != nil {
+			continue
+		}
+		rrAbs, aerr := filepath.Abs(rr)
+		if aerr != nil {
+			continue
+		}
+		if resolvedAbs == rrAbs {
+			rootOK = true
+			break
+		}
+		if strings.HasPrefix(resolvedAbs, rrAbs+string(os.PathSeparator)) {
+			rootOK = true
+			break
+		}
+	}
+	if !rootOK {
+		if a.logger != nil {
+			_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch-rejected", req.Target,
+				"reason=outside-skill-roots (F-3287)")
+		}
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "target is not under a configured skill or plugin root (F-3287)",
+		})
+		return
+	}
+
 	info, err := os.Stat(req.Target)
 	if err != nil || !info.IsDir() {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{
