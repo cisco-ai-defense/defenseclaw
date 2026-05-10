@@ -30,7 +30,7 @@ func TestWriteAndReadPIDInfo(t *testing.T) {
 	d := New(dir)
 
 	now := time.Now().Unix()
-	err := d.writePIDInfo(12345, "/usr/bin/defenseclaw-gateway")
+	err := d.writePIDInfo(12345, "/usr/bin/defenseclaw-gateway", "")
 	if err != nil {
 		t.Fatalf("writePIDInfo: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestWriteAndReadPIDInfo(t *testing.T) {
 func TestPIDFileIsJSON(t *testing.T) {
 	dir := t.TempDir()
 	d := New(dir)
-	_ = d.writePIDInfo(42, "/tmp/test-bin")
+	_ = d.writePIDInfo(42, "/tmp/test-bin", "")
 
 	data, err := os.ReadFile(d.pidFile)
 	if err != nil {
@@ -240,15 +240,20 @@ func TestVerifyProcessDarwinUsesPS(t *testing.T) {
 	if _, err := processExecutableDarwin(os.Getpid()); err != nil {
 		t.Skipf("darwin process inspection unavailable in this environment: %v", err)
 	}
+	// Capture the live start identity so verifyStartIdentity passes —
+	// otherwise the chain F-3399 hardening (PID-reuse detection) would
+	// reject the current process for not having a recorded identity.
+	ident, _ := processStartIdentity(os.Getpid())
 
 	info := pidInfo{
-		PID:        os.Getpid(),
-		Executable: exe,
-		StartTime:  time.Now().Unix(),
+		PID:           os.Getpid(),
+		Executable:    exe,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: ident,
 	}
 
-	if !d.verifyProcessDarwin(info) {
-		t.Error("verifyProcessDarwin should return true for current process")
+	if !d.verifyProcess(info) {
+		t.Error("verifyProcess should return true for current process")
 	}
 }
 
@@ -264,15 +269,42 @@ func TestVerifyProcessDarwinRejectsBadPID(t *testing.T) {
 		StartTime:  time.Now().Unix(),
 	}
 
-	if d.verifyProcessDarwin(info) {
-		t.Error("verifyProcessDarwin should return false for non-existent PID")
+	if d.verifyProcess(info) {
+		t.Error("verifyProcess should return false for non-existent PID")
+	}
+}
+
+// TestVerifyProcessRejectsMismatchedStartIdentity pins the second half of
+// avarice chain F-3399 (F-0942). A PID file written for a process that
+// later exited and had its PID reused must NOT verify as the original —
+// the start-identity tokens differ even when the executable name happens
+// to match. We simulate this by recording an identity that intentionally
+// disagrees with the current process's live identity.
+func TestVerifyProcessRejectsMismatchedStartIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("test not applicable on %s", runtime.GOOS)
+	}
+	d := New(t.TempDir())
+	exe, _ := os.Executable()
+	live, err := processStartIdentity(os.Getpid())
+	if err != nil || live == "" {
+		t.Skipf("processStartIdentity unavailable: %v", err)
+	}
+	info := pidInfo{
+		PID:           os.Getpid(),
+		Executable:    exe,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: live + "-stale", // simulate PID reuse
+	}
+	if d.verifyProcess(info) {
+		t.Error("verifyProcess must reject a mismatched start identity (PID-reuse case)")
 	}
 }
 
 func TestWritePIDInfoUsesRestrictedPerms(t *testing.T) {
 	dir := t.TempDir()
 	d := New(dir)
-	_ = d.writePIDInfo(99999, "/usr/bin/test")
+	_ = d.writePIDInfo(99999, "/usr/bin/test", "")
 
 	info, err := os.Stat(d.pidFile)
 	if err != nil {
