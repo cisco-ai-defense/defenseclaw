@@ -86,7 +86,7 @@
     },
     {
       "name": "bedrock",
-      "domains": ["bedrock-runtime."],
+      "domains": ["bedrock-runtime.*.amazonaws.com"],
       "profile_id": null,
       "env_keys": []
     }
