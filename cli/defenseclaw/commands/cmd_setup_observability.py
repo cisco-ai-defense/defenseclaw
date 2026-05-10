@@ -384,18 +384,33 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
             host = parsed.hostname
 
     name = f"splunk-hec-{_slug(host)}"
+    # F-0286: a legacy ``splunk:`` block whose ``verify_tls`` field is
+    # absent or false used to silently downgrade certificate validation
+    # under the new ``audit_sinks`` shape. Migrate to the explicit
+    # ``insecure_skip_verify`` opt-out so the migrated sink is now
+    # secure by default. We only carry the insecure mode forward when
+    # the operator EXPLICITLY set ``verify_tls=false``; absence implies
+    # the new secure default.
+    legacy_verify_present = "verify_tls" in legacy
+    legacy_verify_explicit_false = legacy_verify_present and not bool(legacy.get("verify_tls"))
+    new_block: dict[str, Any] = {
+        "endpoint": endpoint,
+        "token_env": str(legacy.get("hec_token_env", "") or "DEFENSECLAW_SPLUNK_HEC_TOKEN"),
+        "index": str(legacy.get("index", "") or "defenseclaw"),
+        "source": str(legacy.get("source", "") or "defenseclaw"),
+        "sourcetype": str(legacy.get("sourcetype", "") or "_json"),
+    }
+    if legacy_verify_explicit_false:
+        new_block["insecure_skip_verify"] = True
+        click.echo(
+            "  ⚠ migrated legacy verify_tls=false → insecure_skip_verify=true; "
+            "remove this opt-out for production",
+        )
     new_entry: dict[str, Any] = {
         "name": name,
         "kind": "splunk_hec",
         "enabled": bool(legacy.get("enabled", False)),
-        "splunk_hec": {
-            "endpoint": endpoint,
-            "token_env": str(legacy.get("hec_token_env", "") or "DEFENSECLAW_SPLUNK_HEC_TOKEN"),
-            "index": str(legacy.get("index", "") or "defenseclaw"),
-            "source": str(legacy.get("source", "") or "defenseclaw"),
-            "sourcetype": str(legacy.get("sourcetype", "") or "_json"),
-            "verify_tls": bool(legacy.get("verify_tls", False)),
-        },
+        "splunk_hec": new_block,
     }
 
     sinks = raw.get("audit_sinks")
@@ -561,7 +576,14 @@ def probe_splunk_hec(data_dir: str, name: str, *, timeout: float = 10.0) -> tupl
         token = _peek_dotenv(data_dir, token_env)
     if not token:
         return False, f"token not set (env={token_env})"
-    verify_tls = bool(hec.get("verify_tls", False))
+    # F-0286: TLS verification is ON by default. ``insecure_skip_verify``
+    # is the explicit opt-out for dev environments with self-signed
+    # HEC. The legacy ``verify_tls`` flag is honoured only when
+    # explicitly true (no-op against the new secure default); explicit
+    # false is silently IGNORED so probing this sink can never silently
+    # leak the HEC token to a MITM peer.
+    insecure_skip_verify = bool(hec.get("insecure_skip_verify", False))
+    verify_tls = not insecure_skip_verify
     body = _json.dumps({
         "event": "defenseclaw observability test",
         "sourcetype": hec.get("sourcetype", "_json"),
@@ -648,11 +670,15 @@ def _test_http_jsonl(data_dir: str, name: str, *, timeout: float) -> None:
             click.echo(f"  ⚠ bearer env {bearer_env!r} not set — sending unauthenticated probe")
     body = (_json.dumps({"probe": "defenseclaw.observability.test"}) + "\n").encode()
     req = urllib.request.Request(url, data=body, method=method, headers=headers)  # noqa: S310
-    verify_tls = bool(block.get("verify_tls", True))
+    # F-0286 parity: TLS verification is ON by default for the HTTP
+    # JSONL probe; only ``insecure_skip_verify=true`` disables it.
+    insecure_skip_verify = bool(block.get("insecure_skip_verify", False))
+    verify_tls = not insecure_skip_verify
     ctx = ssl.create_default_context()
     if not verify_tls:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
+        click.echo("  ⚠ TLS certificate verification DISABLED (insecure_skip_verify=true)")
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:  # noqa: S310
             click.echo(f"  ✓ webhook responded {resp.status} {resp.reason}")
