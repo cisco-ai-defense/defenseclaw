@@ -306,6 +306,35 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	_ = w.logger.LogAction(string(audit.ActionInstallDetected), evt.Path,
 		fmt.Sprintf("type=%s name=%s", targetType, evt.Name))
 
+	// Avarice F-2867: an explicit operator allow that recorded a
+	// source_path MUST NOT auto-allow a different on-disk asset
+	// just because it presents the same target name. We consult
+	// the stored entry first; if its source_path differs from
+	// evt.Path we drop the allow and force a fresh scan/decision.
+	if existing, _ := pe.GetAction(targetType, evt.Name); existing != nil {
+		if existing.Actions.Install == "allow" && existing.SourcePath != "" && existing.SourcePath != evt.Path {
+			_ = w.logger.LogAction("install-allow-path-mismatch", evt.Path,
+				fmt.Sprintf("type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
+					targetType, evt.Name, existing.SourcePath, evt.Path))
+			if w.otel != nil {
+				w.otel.EmitPolicyDecision("admission", "allow-path-mismatch", evt.Name, targetType,
+					"allow entry pinned to different source_path; failing closed (F-2867)",
+					map[string]string{
+						"allowed_path":   existing.SourcePath,
+						"presented_path": evt.Path,
+					})
+			}
+			w.enforceBlock(ctx, evt)
+			w.recordAdmission(ctx, "blocked", targetType)
+			res = AdmissionResult{
+				Event:   evt,
+				Verdict: VerdictBlocked,
+				Reason:  "allow entry pinned to different source_path; failing closed (F-2867)",
+			}
+			return res
+		}
+	}
+
 	// Build block/allow lists from the SQLite store for the OPA input.
 	blockList := w.buildListEntries(pe, "block")
 	allowList := w.buildListEntries(pe, "allow")
