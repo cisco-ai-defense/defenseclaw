@@ -144,10 +144,10 @@ func TestIsActive_SchemaValidationIsInverse(t *testing.T) {
 		value string
 		want  bool
 	}{
-		{"", false},      // unset → default (validation on) → NOT active bypass
-		{"on", false},    // explicit on → NOT active bypass
-		{"off", true},    // explicit off → bypass active
-		{"false", true},  // anything-but-on → bypass active
+		{"", false},     // unset → default (validation on) → NOT active bypass
+		{"on", false},   // explicit on → NOT active bypass
+		{"off", true},   // explicit off → bypass active
+		{"false", true}, // anything-but-on → bypass active
 	}
 	for _, tc := range cases {
 		t.Run(tc.value, func(t *testing.T) {

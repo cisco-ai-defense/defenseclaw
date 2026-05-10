@@ -96,18 +96,18 @@ type Consumer struct {
 
 // EnvVar is one registry entry. Fields mirror the JSON schema exactly.
 type EnvVar struct {
-	Name             string     `json:"name"`
-	Category         string     `json:"category"`
-	Purpose          string     `json:"purpose"`
-	Default          string     `json:"default"`
-	AcceptedValues   []string   `json:"accepted_values"`
-	SecurityImpact   string     `json:"security_impact"`
-	SurfaceInDoctor  bool       `json:"surface_in_doctor"`
-	Consumers        []Consumer `json:"consumers"`
-	Since            string     `json:"since"`
-	FindingID        string     `json:"finding_id,omitempty"`
-	ReplacementHint  string     `json:"replacement_hint,omitempty"`
-	Deprecated       bool       `json:"deprecated,omitempty"`
+	Name            string     `json:"name"`
+	Category        string     `json:"category"`
+	Purpose         string     `json:"purpose"`
+	Default         string     `json:"default"`
+	AcceptedValues  []string   `json:"accepted_values"`
+	SecurityImpact  string     `json:"security_impact"`
+	SurfaceInDoctor bool       `json:"surface_in_doctor"`
+	Consumers       []Consumer `json:"consumers"`
+	Since           string     `json:"since"`
+	FindingID       string     `json:"finding_id,omitempty"`
+	ReplacementHint string     `json:"replacement_hint,omitempty"`
+	Deprecated      bool       `json:"deprecated,omitempty"`
 }
 
 // IsActive returns true when the var is set to a value that activates
