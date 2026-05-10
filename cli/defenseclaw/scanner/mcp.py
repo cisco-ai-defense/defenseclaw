@@ -50,17 +50,6 @@ from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 if TYPE_CHECKING:
     pass
 
-# Hard-coded per-provider HTTPS defaults. Only used when the operator
-# hasn't set ``llm.base_url`` — the mcp-scanner SDK wants an explicit
-# URL and won't fall back to LiteLLM's default discovery. Keep in sync
-# with ``cli/defenseclaw/scanner/_llm_env.py``'s provider map: any
-# new provider entry that has a stable HTTPS endpoint SHOULD be added
-# here too so mcp-scanner can reach it without manual config.
-_PROVIDER_BASE_URLS: dict[str, str] = {
-    "openai": "https://api.openai.com",
-    "anthropic": "https://api.anthropic.com",
-}
-
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     """Translate a legacy ``InspectLLMConfig`` into the unified
@@ -109,13 +98,6 @@ class MCPScannerWrapper:
     def name(self) -> str:
         return "mcp-scanner"
 
-    def _resolve_llm_base_url(self) -> str:
-        """Resolve the LLM base URL from explicit config or provider name."""
-        llm = self._llm
-        if llm.base_url:
-            return llm.base_url
-        return _PROVIDER_BASE_URLS.get(llm.provider_prefix(), "")
-
     def _inject_env(self) -> None:
         """Inject LLM API key into provider-specific env var(s).
 
@@ -155,12 +137,22 @@ class MCPScannerWrapper:
         # the mcp-scanner SDK passes it straight through to LiteLLM.
         # ``litellm_model()`` stitches bare ``llm.model`` + ``llm.provider``
         # when needed, otherwise uses the already-prefixed string.
+        #
+        # ``llm_base_url`` is forwarded verbatim. The mcp-scanner SDK
+        # only adds ``api_base`` to the LiteLLM request when this value
+        # is truthy (mcpscanner/core/analyzers/llm_analyzer.py),
+        # otherwise LiteLLM's own provider-default discovery handles
+        # routing — which works for Bedrock, Gemini, Vertex, Azure,
+        # Groq, Mistral, DeepSeek, OpenRouter, etc. So an empty string
+        # is the correct default; operators who need a custom endpoint
+        # set ``llm.base_url`` (or ``scanners.mcp_scanner.llm.base_url``)
+        # explicitly.
         sdk_config = MCPConfig(
             api_key=aid.resolved_api_key(),
             endpoint_url=aid.endpoint,
             llm_provider_api_key=llm.resolved_api_key(),
             llm_model=litellm_model(llm),
-            llm_base_url=self._resolve_llm_base_url(),
+            llm_base_url=llm.base_url,
             llm_timeout=llm.effective_timeout(),
             llm_max_retries=llm.effective_max_retries(),
         )

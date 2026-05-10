@@ -39,8 +39,6 @@ from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 if TYPE_CHECKING:
     pass
 
-_SKILL_SCANNER_LLM_PROVIDERS = frozenset({"", "anthropic", "openai"})
-
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     """Back-compat shim — mirrors the one in ``mcp.py``. Kept local so
@@ -113,22 +111,32 @@ class SkillScannerWrapper:
         build_kwargs: dict = {"policy": policy}
         if cfg.use_behavioral:
             build_kwargs["use_behavioral"] = True
-        if cfg.use_llm and _skill_scanner_provider_supported(llm.provider_prefix()):
+        if cfg.use_llm:
+            # The upstream skill-scanner SDK auto-detects the provider
+            # from a LiteLLM-shaped ``provider/model`` string via its
+            # ``ProviderConfig`` (Bedrock, Gemini, Vertex, Azure,
+            # Ollama, OpenRouter, …). We deliberately do NOT pass
+            # ``llm_provider`` here because:
+            #   1. The factory ignores it whenever ``llm_model`` is
+            #      set (skill_scanner/core/analyzer_factory.py).
+            #   2. Our internal short names ("bedrock", "vertex_ai")
+            #      don't match the upstream ``LLMProvider`` enum
+            #      ("aws-bedrock", "gcp-vertex"), so passing them
+            #      would only matter on the model-less path and
+            #      would error out there.
+            # Letting the model string carry the provider keeps every
+            # LiteLLM-supported provider working end-to-end.
             build_kwargs["use_llm"] = True
-            # skill-scanner accepts the LiteLLM-style ``provider/model``
-            # string via llm_model; we still pass ``llm_provider``
-            # separately because skill-scanner uses it for routing
-            # decisions (e.g. local vs remote handling).
             model = litellm_model(llm)
             if model:
                 build_kwargs["llm_model"] = model
-            if llm.provider:
-                build_kwargs["llm_provider"] = llm.provider
             api_key = llm.resolved_api_key()
             if api_key:
                 build_kwargs["llm_api_key"] = api_key
             elif os.environ.get("SKILL_SCANNER_LLM_API_KEY"):
                 build_kwargs["llm_api_key"] = os.environ["SKILL_SCANNER_LLM_API_KEY"]
+            if llm.base_url:
+                build_kwargs["llm_base_url"] = llm.base_url
             if cfg.llm_consensus_runs > 0:
                 build_kwargs["llm_consensus_runs"] = cfg.llm_consensus_runs
         if cfg.use_trigger:
@@ -211,15 +219,3 @@ class SkillScannerWrapper:
             findings=findings,
             duration=timedelta(seconds=elapsed),
         )
-
-
-def _skill_scanner_provider_supported(provider: str) -> bool:
-    """Return whether cisco-ai-skill-scanner accepts ``llm_provider``.
-
-    The upstream scanner currently restricts providers to Anthropic and
-    OpenAI. When DefenseClaw's unified LLM is Bedrock (or another
-    provider), forcing ``--llm-provider bedrock`` makes every scan fail
-    before static/behavioral analyzers can run. In that case we keep the
-    scan alive by omitting the optional LLM analyzer.
-    """
-    return provider.strip().lower() in _SKILL_SCANNER_LLM_PROVIDERS

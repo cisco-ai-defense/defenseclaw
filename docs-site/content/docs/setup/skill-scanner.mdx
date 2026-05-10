@@ -32,7 +32,7 @@ The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-
 For each skill it runs:
 
 1. Static checks — manifest validation, allow-list of tool names, suspicious filesystem paths.
-2. Optional **LLM-assisted analysis** — only when the unified LLM key is configured and the model resolves to an `openai` or `anthropic` provider.
+2. Optional **LLM-assisted analysis** — runs whenever the unified LLM key is configured. The upstream scanner auto-detects the provider from the LiteLLM-shaped `provider/model` string, so OpenAI, Anthropic, Bedrock, Gemini, Vertex AI, Azure, Groq, Mistral, DeepSeek, OpenRouter, Ollama, vLLM, and other LiteLLM-supported providers all work without special-casing.
 3. A consolidated `ScanResult` with severity, findings, and (when applicable) a recommended action.
 
 ## One-shot scan
@@ -166,10 +166,10 @@ LLM-assisted analysis is what catches the *new* malicious skills you don't yet h
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-Under the hood DefenseClaw injects the unified key into the scanner subprocess as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL` via `inject_llm_env`. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
+Under the hood DefenseClaw injects the unified key into the scanner subprocess as `SKILL_SCANNER_LLM_API_KEY` and `SKILL_SCANNER_LLM_MODEL`, plus the matching provider-native variable (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_API_KEY`, `AZURE_OPENAI_API_KEY`, `GROQ_API_KEY`, etc.) via `inject_llm_env`. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
-<Callout type="warn">
-The Skill Scanner's LLM mode currently supports `anthropic` and `openai` providers. If your unified key resolves to something else (Gemini, Bedrock, Ollama), DefenseClaw will fall back to deterministic checks only and surface a one-line warning.
+<Callout type="info">
+LLM mode works with any LiteLLM-supported provider. The upstream Skill Scanner SDK auto-detects the provider from the LiteLLM-shaped `provider/model` string in your unified config (e.g. `bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0`, `gemini/gemini-2.5-pro`, `vertex_ai/gemini-1.5-pro`). For self-hosted endpoints (vLLM, LM Studio, LiteLLM proxy) set `llm.base_url` in `~/.defenseclaw/config.yaml`.
 </Callout>
 
 ## Install if missing
