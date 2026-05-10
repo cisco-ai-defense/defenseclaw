@@ -321,6 +321,11 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// directory.
 	if retainJudge && store != nil {
 		SetJudgePersistor(func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts) {
+			// Forward the SHA-256 digest of the judge INPUT (computed in
+			// emitJudge from JudgeEmitOpts.InputContent) so judge_responses
+			// rows carry input_hash for forensics/dedup. Historical bug:
+			// this row used to silently drop p.InputHash even when emitJudge
+			// populated it.
 			if err := store.InsertJudgeResponse(audit.JudgeResponse{
 				Kind:       p.Kind,
 				Direction:  string(dir),
@@ -330,6 +335,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 				LatencyMs:  p.LatencyMs,
 				ParseError: p.ParseError,
 				Raw:        p.RawResponse,
+				InputHash:  p.InputHash,
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "[sidecar] persist judge response: %v\n", err)
 			}

@@ -169,7 +169,9 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 
 // newWebhookHTTPClient builds an http.Client whose transport refuses
 // to dial private/loopback/link-local destinations and whose redirect
-// policy refuses any 30x.
+// policy follows at most 5 hops, http(s)-only, with the same
+// private-host check applied to each redirected destination
+// (ssrfSafeCheckRedirect, see internal/gateway/provider.go).
 //
 // When the operator has explicitly opted into local-development
 // testing via DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 (the same env

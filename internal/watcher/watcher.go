@@ -126,6 +126,12 @@ type InstallWatcher struct {
 	policyFileMu     sync.Mutex
 	policyFileHashes map[string]string   // path → sha256 hex of file contents (policy / list YAML watch)
 	policyListSnap   map[string][]string // path → sorted rule keys for list YAML diffs
+	// policyFileUnreadable tracks which paths returned a non-IsNotExist
+	// read error on the most recent poll. Used as a transition gate by
+	// recordPolicyFileReadFailure so a persistent EACCES/EPERM emits
+	// exactly one audit/telemetry activity (on entry) and one more
+	// (on recovery) instead of one per ~2s tick.
+	policyFileUnreadable map[string]struct{}
 }
 
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
@@ -137,20 +143,21 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		debounce = 500 * time.Millisecond
 	}
 	return &InstallWatcher{
-		cfg:              cfg,
-		skillDirs:        skillDirs,
-		pluginDirs:       pluginDirs,
-		store:            store,
-		logger:           logger,
-		shell:            shell,
-		opa:              opa,
-		otel:             otel,
-		debounce:         debounce,
-		onAdmit:          onAdmit,
-		pending:          make(map[string]time.Time),
-		watchedDirs:      make(map[string]bool),
-		policyFileHashes: make(map[string]string),
-		policyListSnap:   make(map[string][]string),
+		cfg:                  cfg,
+		skillDirs:            skillDirs,
+		pluginDirs:           pluginDirs,
+		store:                store,
+		logger:               logger,
+		shell:                shell,
+		opa:                  opa,
+		otel:                 otel,
+		debounce:             debounce,
+		onAdmit:              onAdmit,
+		pending:              make(map[string]time.Time),
+		watchedDirs:          make(map[string]bool),
+		policyFileHashes:     make(map[string]string),
+		policyListSnap:       make(map[string][]string),
+		policyFileUnreadable: make(map[string]struct{}),
 	}
 }
 
@@ -1009,6 +1016,19 @@ func (w *InstallWatcher) addSubtreeWatch(root string) {
 	if err != nil {
 		return
 	}
+	// Bound the per-subtree fsnotify watch count so an admitted
+	// directory containing a huge file tree (e.g. a vendored
+	// node_modules with 50k subdirectories) cannot exhaust the
+	// kernel's per-process inotify watch limit
+	// (fs.inotify.max_user_watches, typically 8k–64k on Linux). We
+	// cap at addSubtreeWatchMaxDirs and emit a single warning when
+	// hit so operators can either raise the kernel limit or scope the
+	// admitted root more tightly. Per-process watches across all
+	// admitted subtrees are still bounded by the kernel; this cap is
+	// per-call defense-in-depth.
+	const addSubtreeWatchMaxDirs = 4096
+	added := 0
+	capped := false
 	_ = filepath.WalkDir(rootAbs, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil || d == nil {
 			return nil
@@ -1022,6 +1042,10 @@ func (w *InstallWatcher) addSubtreeWatch(root string) {
 		if path != rootAbs && strings.HasPrefix(filepath.Base(path), ".") {
 			return filepath.SkipDir
 		}
+		if added >= addSubtreeWatchMaxDirs {
+			capped = true
+			return filepath.SkipDir
+		}
 		w.watchMu.Lock()
 		if w.watchedDirs == nil {
 			w.watchedDirs = make(map[string]bool)
@@ -1032,10 +1056,18 @@ func (w *InstallWatcher) addSubtreeWatch(root string) {
 		}
 		if addErr := w.fsw.Add(path); addErr == nil {
 			w.watchedDirs[path] = true
+			added++
 		}
 		w.watchMu.Unlock()
 		return nil
 	})
+	if capped {
+		fmt.Fprintf(os.Stderr,
+			"[watcher] addSubtreeWatch: capped at %d directories under %s; "+
+				"deeper subdirectories will not receive fsnotify events. "+
+				"Reduce admitted root scope or raise fs.inotify.max_user_watches.\n",
+			addSubtreeWatchMaxDirs, rootAbs)
+	}
 }
 
 // resolveTopLevelChild returns the absolute path of a watched

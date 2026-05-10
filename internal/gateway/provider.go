@@ -377,15 +377,52 @@ func ssrfSafeDialContext(ctx context.Context, network, addr string) (net.Conn, e
 	return dialer.DialContext(ctx, network, pinned)
 }
 
+// extraReservedCIDRs covers ranges Go's net.IP.IsPrivate() does NOT
+// recognise but that we still must refuse to dial:
+//   - 100.64.0.0/10  RFC 6598 carrier-grade NAT (cloud private overlay)
+//   - 169.254.169.254/32  EC2/Azure/GCP instance metadata (IMDS)
+//   - 169.254.170.2/32    ECS task metadata endpoint
+//   - fd00::/8       IPv6 unique local addresses (broader than fc00::/7
+//     subset Go reports as private)
+//
+// Kept in sync with internal/netguard/netguard.go's extraReservedCIDRs;
+// the two predicates must classify the same set of IPs as "unsafe" so
+// the gateway's own dial guard cannot be weaker than the shared
+// netguard helper used by other subsystems.
+var extraReservedNets = func() []*net.IPNet {
+	cidrs := []string{
+		"100.64.0.0/10",
+		"169.254.169.254/32",
+		"169.254.170.2/32",
+		"fd00::/8",
+	}
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, s := range cidrs {
+		if _, n, err := net.ParseCIDR(s); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}()
+
 // isUnsafeIP returns true for any address class we never want the
 // proxy to dial: loopback, RFC1918 private, link-local (incl. cloud
-// IMDS 169.254.0.0/16), unspecified (0.0.0.0/::).
+// IMDS 169.254.0.0/16), unspecified (0.0.0.0/::), CGNAT, ULA, and the
+// ECS task metadata endpoint.
 func isUnsafeIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	for _, n := range extraReservedNets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // ssrfSafeCheckRedirect rejects redirects to non-http/https schemes or

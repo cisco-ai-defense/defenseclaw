@@ -226,13 +226,26 @@ func (r *AgentRegistry) AgentInstanceForSession(sessionID string) string {
 // for a new one. Caller must hold r.mu (write lock). O(N) on registry
 // size, which is bounded by agentRegistryMaxSessions, so the worst-case
 // eviction cost stays small.
+//
+// Tie-break: when multiple entries share the same LastSeen (common
+// under bursty traffic and unit-test wallclocks with low resolution),
+// fall back to lexicographic key order. Without this tie-break the
+// victim depends on Go's randomized map iteration, which makes both
+// behavior and tests flaky.
 func (r *AgentRegistry) evictOldestLocked() {
 	var oldestKey string
 	var oldestSeen time.Time
 	for key, entry := range r.sessions {
-		if oldestKey == "" || entry.LastSeen.Before(oldestSeen) {
+		if oldestKey == "" {
 			oldestKey = key
 			oldestSeen = entry.LastSeen
+			continue
+		}
+		if entry.LastSeen.Before(oldestSeen) {
+			oldestKey = key
+			oldestSeen = entry.LastSeen
+		} else if entry.LastSeen.Equal(oldestSeen) && key < oldestKey {
+			oldestKey = key
 		}
 	}
 	if oldestKey != "" {

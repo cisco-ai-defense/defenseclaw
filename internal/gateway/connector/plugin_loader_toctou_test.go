@@ -67,6 +67,88 @@ func TestValidatePluginRootChain_WorldWritable(t *testing.T) {
 	}
 }
 
+// TestValidatePluginRootChain_NonStickyWorldWritableAncestor pins the
+// negative case for the sticky-bit relaxation: a world-writable
+// ancestor that does NOT have the sticky bit set must STILL be
+// refused. The relaxation in validatePluginRootChain is intentionally
+// narrow (only sticky-bit dirs like /tmp are allowed); without this
+// negative test, a future "loosen the check" change could quietly
+// accept arbitrary world-writable ancestors and reintroduce the
+// shared-host TOCTOU foothold the original DeepSec finding called out.
+func TestValidatePluginRootChain_NonStickyWorldWritableAncestor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ancestry walk is unix-only")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root cannot meaningfully test owner-uid mismatch")
+	}
+	root := t.TempDir()
+	// Build  root/parent (0o777, NO sticky)/leaf (0o700)
+	parent := filepath.Join(root, "parent")
+	if err := os.MkdirAll(parent, 0o777); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	if err := os.Chmod(parent, 0o777); err != nil { // explicit, no sticky
+		t.Fatalf("chmod parent: %v", err)
+	}
+	leaf := filepath.Join(parent, "leaf")
+	if err := os.MkdirAll(leaf, 0o700); err != nil {
+		t.Fatalf("mkdir leaf: %v", err)
+	}
+
+	err := validatePluginRootChain(leaf)
+	if err == nil {
+		t.Fatal("expected refusal of non-sticky world-writable ancestor, got nil")
+	}
+	if !strings.Contains(err.Error(), "writable") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+// TestValidatePluginRootChain_StickyWorldWritableAncestorAccepted is
+// the positive partner: with the sticky bit set, a world-writable
+// ancestor (the /tmp pattern) MUST be accepted. This test would
+// regress to "no" if anyone removed the os.ModeSticky exception.
+func TestValidatePluginRootChain_StickyWorldWritableAncestorAccepted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ancestry walk is unix-only")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root cannot meaningfully test owner-uid mismatch")
+	}
+	root := t.TempDir()
+	parent := filepath.Join(root, "sticky-parent")
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		t.Fatalf("mkdir parent: %v", err)
+	}
+	// On macOS, os.Chmod with the literal 0o1777 silently strips the
+	// sticky bit; we must pass os.ModeSticky explicitly through the
+	// FileMode constructor (or use the syscall directly). Using
+	// os.ModeSticky | 0o777 is the portable form that survives the
+	// FileMode → syscall translation on darwin and linux.
+	if err := os.Chmod(parent, os.ModeSticky|0o777); err != nil {
+		t.Fatalf("chmod sticky parent: %v", err)
+	}
+	// Verify the sticky bit actually stuck before asserting on the
+	// validator's behavior — this isolates a kernel/FS limitation
+	// from a regression in the validator.
+	info, err := os.Stat(parent)
+	if err != nil {
+		t.Fatalf("stat parent: %v", err)
+	}
+	if info.Mode()&os.ModeSticky == 0 {
+		t.Skipf("filesystem does not support sticky bit on this directory (mode=%v); cannot exercise sticky-relaxation branch", info.Mode())
+	}
+	leaf := filepath.Join(parent, "leaf")
+	if err := os.MkdirAll(leaf, 0o700); err != nil {
+		t.Fatalf("mkdir leaf: %v", err)
+	}
+
+	if err := validatePluginRootChain(leaf); err != nil {
+		t.Fatalf("expected sticky-bit ancestor to be accepted, got: %v", err)
+	}
+}
+
 // TestSafeOpenPluginSO_HappyPath: regular file, owned by us, opens.
 func TestSafeOpenPluginSO_HappyPath(t *testing.T) {
 	dir := t.TempDir()

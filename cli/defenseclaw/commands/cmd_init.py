@@ -466,13 +466,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     store.close()
 
 
-def _stdin_is_tty() -> bool:
-    try:
-        return click.get_text_stream("stdin").isatty()
-    except Exception:
-        return False
-
-
 def _resolve_secret_arg(
     flag: str,
     *,

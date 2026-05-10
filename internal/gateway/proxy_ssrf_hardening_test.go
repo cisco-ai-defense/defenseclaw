@@ -136,18 +136,120 @@ func TestHandlePassthrough_RejectsUserinfo(t *testing.T) {
 	}
 }
 
+// TestHandleChatCompletion_RejectsUserinfo confirms the chat
+// completion route applies the same userinfo-rejection guard as
+// handlePassthrough. Pre-fix this route silently forwarded the
+// userinfo segment to Bifrost (which uses its own HTTP stack and
+// would have leaked the credential into the upstream Authorization
+// header).
+func TestHandleChatCompletion_RejectsUserinfo(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "openai/gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "https://attacker:password@api.openai.com")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handleChatCompletion(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for userinfo URL on chat completion, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "userinfo") {
+		t.Errorf("response should mention userinfo: %s", rec.Body.String())
+	}
+}
+
+// TestHandleChatCompletion_RejectsNonHTTPScheme pins the scheme
+// guard parity with passthrough.
+func TestHandleChatCompletion_RejectsNonHTTPScheme(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "openai/gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", "file:///etc/passwd")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handleChatCompletion(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for non-http(s) scheme on chat completion, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleChatCompletion_RejectsPrivateHost pins the
+// private-host guard parity with passthrough. Since
+// `newTestProxy` sets `passthroughAllowPrivateForTest = true` for
+// legacy fixtures, we must explicitly turn it back off so the
+// real production guard runs.
+func TestHandleChatCompletion_RejectsPrivateHost(t *testing.T) {
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	// Override the test-bypass enabled by newTestProxy so we exercise
+	// the production guard. Restore after the test.
+	passthroughAllowPrivateForTest = false
+	t.Cleanup(func() { passthroughAllowPrivateForTest = true })
+
+	body := mustJSON(t, map[string]interface{}{
+		"model":    "openai/gpt-4",
+		"messages": []map[string]interface{}{{"role": "user", "content": "hi"}},
+	})
+	cases := []struct {
+		name   string
+		target string
+	}{
+		{"loopback", "http://127.0.0.1:8080/v1/chat/completions"},
+		{"imdsv2", "http://169.254.169.254/latest/meta-data/iam/security-credentials/"},
+		{"ecs_metadata", "http://169.254.170.2/v2/credentials/abc"},
+		{"private_rfc1918", "http://10.0.0.1:8080/v1/chat/completions"},
+		{"cgnat", "http://100.64.0.1:8080/v1/chat/completions"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DC-Target-URL", tc.target)
+			req.RemoteAddr = "127.0.0.1:12345"
+			rec := httptest.NewRecorder()
+			proxy.handleChatCompletion(rec, req)
+			if rec.Code != http.StatusForbidden {
+				t.Errorf("expected 403 for %s (%s), got %d: %s",
+					tc.name, tc.target, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestSSRFSafeDialContext_RefusesPrivateIP exercises the
 // providerHTTPClient transport guard directly. Even if a known
 // provider's hostname were CNAME'd or DNS-rebound between the
 // application-level isPrivateHost check and the actual TCP dial, the
-// transport must refuse to connect to a private IP.
+// transport must refuse to connect to a private IP, link-local IMDS,
+// CGNAT, or IPv6 ULA address.
 func TestSSRFSafeDialContext_RefusesPrivateIP(t *testing.T) {
 	cases := []string{
 		"127.0.0.1:443",
 		"10.0.0.1:443",
 		"172.16.0.1:443",
 		"192.168.1.1:443",
-		"169.254.169.254:80",
+		"169.254.169.254:80", // EC2 IMDSv2
+		"169.254.170.2:80",   // ECS task metadata
+		"100.64.0.1:443",     // RFC 6598 CGNAT
 		"[::1]:443",
 		"[fd00::1]:443",
 	}
@@ -214,14 +316,21 @@ func TestIsUnsafeIP(t *testing.T) {
 		{"172.16.0.1", true},
 		{"172.31.255.255", true},
 		{"192.168.1.1", true},
-		{"169.254.169.254", true},
+		{"169.254.169.254", true}, // EC2/Azure/GCP IMDS
+		{"169.254.170.2", true},   // ECS task metadata
+		{"100.64.0.1", true},      // RFC 6598 CGNAT (newly added in extraReservedNets)
+		{"100.127.255.255", true}, // CGNAT upper bound
 		{"0.0.0.0", true},
 		{"::1", true},
-		{"fd00::1", true},
+		{"fd00::1", true}, // IPv6 ULA
+		{"fdff::1", true}, // IPv6 ULA upper subset
 		{"::", true},
 		{"1.1.1.1", false},
 		{"8.8.8.8", false},
-		{"172.32.0.1", false}, // outside the 172.16/12 private range
+		{"100.63.255.255", false},       // just below CGNAT range
+		{"100.128.0.0", false},          // just above CGNAT range
+		{"172.32.0.1", false},           // outside the 172.16/12 private range
+		{"2001:4860:4860::8888", false}, // public IPv6 (Google DNS)
 	}
 	for _, tt := range tests {
 		t.Run(tt.ip, func(t *testing.T) {

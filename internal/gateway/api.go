@@ -2126,12 +2126,19 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				// it cannot be replayed against /api/v1/* routes
 				// and is bound to a single connector's OTLP
 				// namespace. See connector/otlp_token.go.
+				//
+				// DeepSec follow-up: parity with the bearer branch
+				// below — promote the peeked agent identity once
+				// auth has succeeded so audit rows on path-token
+				// authed traffic still carry agent_instance_id.
 				if subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
+					r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 					next.ServeHTTP(w, r)
 					return
 				}
 				if scoped := a.lookupOTLPPathToken(source); scoped != "" &&
 					subtle.ConstantTimeCompare([]byte(pathToken), []byte(scoped)) == 1 {
+					r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 					next.ServeHTTP(w, r)
 					return
 				}
