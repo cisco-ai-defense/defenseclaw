@@ -1,6 +1,36 @@
 #!/usr/bin/env python3
 """
 PoC: Credential leakage via unauthenticated /health endpoint
+============================================================
+
+STATUS (2026-05): RESOLVED. Kept as a regression check.
+-------------------------------------------------------
+
+The original vulnerability — ``reportSplunkHealth()`` in
+``internal/gateway/sidecar.go`` reading ``SPLUNK_PASSWORD`` and
+``DEFENSECLAW_LOCAL_PASSWORD`` from the splunk-bridge .env file and
+serializing them via the unauthenticated ``/health`` and ``/status``
+endpoints — was fixed in PR #21 (commit ``5a0fe7f3``).
+
+* The leaking ``reportSplunkHealth`` function no longer exists; its
+  replacement ``reportSinksHealth`` emits boolean ``_set`` indicators
+  (``web_password_set: true``) instead of raw values.
+* The regression test ``TestHealthEndpointNoSecrets`` in
+  ``internal/gateway/gateway_test.go`` asserts that the strings
+  ``"web_password"`` and ``"password"`` never appear in the serialized
+  ``/health`` response.
+
+The two env vars themselves (``DEFENSECLAW_LOCAL_USERNAME`` /
+``DEFENSECLAW_LOCAL_PASSWORD``) remain legitimate basic-auth credentials
+for the local Splunk daemon. They are read at
+``internal/cli/daemon.go:211-212`` and never echoed back through the
+gateway's REST surface.
+
+If this PoC ever reports a leak again, the regression test has been
+bypassed and a new fix is required.
+
+Original report (preserved for historical context)
+--------------------------------------------------
 
 Vulnerability:  reportSplunkHealth() in internal/gateway/sidecar.go (lines 495-505)
                 reads SPLUNK_PASSWORD and DEFENSECLAW_LOCAL_PASSWORD from the
@@ -26,8 +56,8 @@ Reproduce:
        then queries /health and /status to extract leaked credentials.
     4. On exit the script cleans up the synthetic .env file.
 
-Fix: Remove password fields from reportSplunkHealth() details map, or gate
-     /health behind authentication.
+Original fix (now landed): Remove password fields from
+reportSplunkHealth() details map, or gate /health behind authentication.
 """
 
 import json
