@@ -128,8 +128,12 @@ setup.add_command(provider)
 
 
 # Local LLM providers that run on-box and don't require an API key.
-# Kept in lockstep with _LOCAL_LLM_PROVIDERS in defenseclaw/config.py and
-# IsLocalProvider() in internal/config/config.go.
+# This is intentionally a *subset* of ``_LOCAL_LLM_PROVIDERS`` in
+# ``defenseclaw/config.py`` and ``IsLocalProvider()`` in
+# ``internal/config/config.go`` — the wizard only offers entries that
+# have a sensible default base URL. The generic ``local`` alias is
+# excluded because it has no canonical endpoint; operators choosing
+# that route configure ``llm.base_url`` directly in ``config.yaml``.
 _LOCAL_LLM_WIZARD_PROVIDERS = {"ollama", "vllm", "lm_studio", "lmstudio"}
 
 # Default base URLs for local providers so the wizard can offer a sane

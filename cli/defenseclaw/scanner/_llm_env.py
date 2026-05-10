@@ -69,6 +69,17 @@ _PROVIDER_ENV_VARS: dict[str, tuple[str, ...]] = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"),
     "azure": ("AZURE_OPENAI_API_KEY", "AZURE_API_KEY"),
     "gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    # ``gemini-openai`` is a Bifrost routing key for Google's
+    # OpenAI-compatible Gemini endpoint. Same Google API key, but the
+    # Python LiteLLM bridge needs a separate entry so the env-var
+    # injector recognizes the prefix without warning spam. Note that
+    # LiteLLM itself doesn't natively understand the
+    # ``gemini-openai/`` model prefix — operators using this provider
+    # for the Python scanners must pin ``llm.base_url`` to the
+    # OpenAI-compatible endpoint and set ``llm.model`` to a bare
+    # ``openai/...`` shape; or stick with ``provider: gemini`` for
+    # the scanners and use ``gemini-openai`` only at the gateway.
+    "gemini-openai": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "vertex_ai": ("GOOGLE_APPLICATION_CREDENTIALS",),
     # Bedrock has two auth modes. LiteLLM prefers the short-term API
     # bearer token (prefix ``ABSK...``, env var ``AWS_BEARER_TOKEN_BEDROCK``,

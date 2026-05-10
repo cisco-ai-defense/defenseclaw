@@ -260,8 +260,8 @@ _DEFAULT_LLM_MAX_RETRIES = 2
 # this set triggers a one-shot warning so typos surface early. Keep in
 # lockstep with recognizedLLMProviders in internal/config/config.go.
 _RECOGNIZED_LLM_PROVIDERS = frozenset({
-    "openai", "anthropic", "azure", "gemini", "vertex_ai", "bedrock",
-    "groq", "mistral", "cohere", "ollama", "vllm", "deepseek", "xai",
+    "openai", "anthropic", "azure", "gemini", "gemini-openai", "vertex_ai",
+    "bedrock", "groq", "mistral", "cohere", "ollama", "vllm", "deepseek", "xai",
     "fireworks_ai", "perplexity", "huggingface", "replicate",
     "openrouter", "together_ai", "cerebras", "lm_studio", "lmstudio",
     "local",
@@ -281,11 +281,11 @@ def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
     _warned_llm_prefixes.add(key)
     _log.warning(
         "config: unknown LLM provider prefix %r for %s — expected one of "
-        "openai/anthropic/azure/gemini/vertex_ai/bedrock/groq/mistral/"
-        "cohere/ollama/vllm/deepseek/xai/fireworks_ai/perplexity/"
-        "huggingface/replicate/openrouter/together_ai/cerebras/lm_studio/"
-        "local. Gateway (Bifrost) and scanners (LiteLLM) may disagree "
-        "on how to route this model",
+        "openai/anthropic/azure/gemini/gemini-openai/vertex_ai/bedrock/"
+        "groq/mistral/cohere/ollama/vllm/deepseek/xai/fireworks_ai/"
+        "perplexity/huggingface/replicate/openrouter/together_ai/cerebras/"
+        "lm_studio/local. Gateway (Bifrost) and scanners (LiteLLM) may "
+        "disagree on how to route this model",
         prefix, component_path,
     )
 

@@ -602,6 +602,59 @@ class TestSkillScannerWrapper(unittest.TestCase):
         kwargs = build_analyzers.call_args.kwargs
         self.assertEqual(kwargs["llm_base_url"], "http://10.0.0.5:8000/v1")
 
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
+    def test_scan_skips_llm_when_model_unresolved(self, mock_convert):
+        """When ``cfg.use_llm=True`` but no model is resolvable from
+        ``llm.model`` *or* ``SKILL_SCANNER_LLM_MODEL`` env, the wrapper
+        must NOT pass ``use_llm`` to upstream. Otherwise the upstream
+        factory falls back to a hard-coded Anthropic default
+        (``claude-3-5-sonnet-20241022``) which crashes operators whose
+        unified key isn't an Anthropic key. Skipping the LLM analyzer
+        with a log line is strictly better.
+        """
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.scanner.skill import SkillScannerWrapper
+        from defenseclaw.models import ScanResult
+        from datetime import datetime, timezone
+
+        mock_sdk_module = MagicMock()
+        mock_scanner_instance = MagicMock()
+        mock_sdk_module.SkillScanner.return_value = mock_scanner_instance
+        mock_scanner_instance.scan_skill.return_value = MagicMock(findings=[])
+
+        build_analyzers = MagicMock(return_value=[])
+        mock_convert.return_value = ScanResult(
+            scanner="skill-scanner",
+            target="/tmp/skill",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        cfg = SkillScannerConfig(use_llm=True, use_behavioral=True)
+        llm = LLMConfig(provider="bedrock", api_key="bedrock-key")  # no model
+
+        # Ensure no leftover env from another test sneaks in.
+        prev_env = os.environ.pop("SKILL_SCANNER_LLM_MODEL", None)
+        try:
+            with patch.dict("sys.modules", {
+                "skill_scanner": mock_sdk_module,
+                "skill_scanner.core": MagicMock(),
+                "skill_scanner.core.analyzer_factory": MagicMock(build_analyzers=build_analyzers),
+                "skill_scanner.core.scan_policy": MagicMock(),
+            }):
+                scanner = SkillScannerWrapper(cfg, llm=llm)
+                scanner.scan("/tmp/skill")
+        finally:
+            if prev_env is not None:
+                os.environ["SKILL_SCANNER_LLM_MODEL"] = prev_env
+
+        kwargs = build_analyzers.call_args.kwargs
+        # Behavioral analyzer must still run — only the LLM analyzer is gated.
+        self.assertTrue(kwargs.get("use_behavioral"))
+        self.assertNotIn("use_llm", kwargs)
+        self.assertNotIn("llm_model", kwargs)
+        self.assertNotIn("llm_provider", kwargs)
+
 
 class TestMCPScannerCommonConfigs(unittest.TestCase):
     """Tests for MCPScannerWrapper using shared InspectLLM and CiscoAIDefense configs."""

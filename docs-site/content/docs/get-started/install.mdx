@@ -100,10 +100,13 @@ defenseclaw doctor
 ## Uninstall
 
 ```bash
-defenseclaw uninstall
+defenseclaw uninstall              # reversible — keeps ~/.defenseclaw/ and binaries
+defenseclaw uninstall --all        # also delete ~/.defenseclaw/ (audit log, config, secrets)
+defenseclaw uninstall --binaries   # also remove ~/.local/bin/defenseclaw{,-gateway}
+defenseclaw uninstall --all --binaries --yes   # full nuke, no confirm prompt
 ```
 
-Tears down connector integrations (restores `~/.codex/config.toml`, `~/.claude/settings.json`, etc. from byte-for-byte backups), then removes `~/.defenseclaw/` and the binaries.
+The default tears down connector integrations (restores `~/.codex/config.toml`, `~/.claude/settings.json`, etc. from byte-for-byte backups) but **leaves `~/.defenseclaw/` and the installed binaries on disk** so a subsequent `defenseclaw setup guardrail` can pick up where you left off. Use `--all` and/or `--binaries` to make the removal total. `--dry-run` previews the plan.
 
 ## Next
 

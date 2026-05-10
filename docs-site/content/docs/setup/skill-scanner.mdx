@@ -22,7 +22,7 @@ DefenseClaw integrates Cisco's open-source [`cisco-ai-skill-scanner`](https://gi
 
 ## What it scans
 
-The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/skill.py) accepts four target shapes (all positional — there is no `--remote` flag for URL fetches; the URL itself is the target):
+The wrapper at [`cli/defenseclaw/scanner/skill.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/skill.py) accepts four target shapes — all **positional**. URL fetches in particular take the URL itself as the positional target (no `--remote` involved). The `--remote` flag does exist, but for a different scenario: it forwards the scan request to a sidecar API for a skill installed on a remote host (see the "Remote sidecar" tab below).
 
 - **Local skill name** (`my-skill`) — resolves through every connector's skill directory: `~/.claude/skills`, `~/.openclaw/skills`, `~/.cursor/skills`, `~/.codex/skills`, `~/.zeptoclaw/skills`.
 - **`--path <dir>`** — scan a directory you specify, useful inside a skill repo's pre-commit hook.

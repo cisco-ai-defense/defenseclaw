@@ -22,6 +22,7 @@ to the skill-scanner CLI.  Maps SDK ScanResult/Finding → DefenseClaw models.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
@@ -38,6 +39,8 @@ from defenseclaw.scanner._llm_env import inject_llm_env, litellm_model
 
 if TYPE_CHECKING:
     pass
+
+_log = logging.getLogger(__name__)
 
 
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
@@ -126,19 +129,37 @@ class SkillScannerWrapper:
             #      would error out there.
             # Letting the model string carry the provider keeps every
             # LiteLLM-supported provider working end-to-end.
-            build_kwargs["use_llm"] = True
+            #
+            # Guard ``use_llm`` on a resolved model: without it, the
+            # upstream factory falls back to a hard-coded Anthropic
+            # default (``claude-3-5-sonnet-20241022``) and then crashes
+            # on operators whose unified key isn't an Anthropic key.
+            # Skipping the LLM analyzer with a clear log line is
+            # strictly better than emitting an upstream warning that
+            # operators can't action.
             model = litellm_model(llm)
-            if model:
-                build_kwargs["llm_model"] = model
-            api_key = llm.resolved_api_key()
-            if api_key:
-                build_kwargs["llm_api_key"] = api_key
-            elif os.environ.get("SKILL_SCANNER_LLM_API_KEY"):
-                build_kwargs["llm_api_key"] = os.environ["SKILL_SCANNER_LLM_API_KEY"]
-            if llm.base_url:
-                build_kwargs["llm_base_url"] = llm.base_url
-            if cfg.llm_consensus_runs > 0:
-                build_kwargs["llm_consensus_runs"] = cfg.llm_consensus_runs
+            env_model = os.environ.get("SKILL_SCANNER_LLM_MODEL", "")
+            if model or env_model:
+                build_kwargs["use_llm"] = True
+                if model:
+                    build_kwargs["llm_model"] = model
+                api_key = llm.resolved_api_key()
+                if api_key:
+                    build_kwargs["llm_api_key"] = api_key
+                elif os.environ.get("SKILL_SCANNER_LLM_API_KEY"):
+                    build_kwargs["llm_api_key"] = os.environ["SKILL_SCANNER_LLM_API_KEY"]
+                if llm.base_url:
+                    build_kwargs["llm_base_url"] = llm.base_url
+                if cfg.llm_consensus_runs > 0:
+                    build_kwargs["llm_consensus_runs"] = cfg.llm_consensus_runs
+            else:
+                _log.info(
+                    "skill-scanner: use_llm requested but no model resolved "
+                    "from llm.model / SKILL_SCANNER_LLM_MODEL — skipping LLM "
+                    "analyzer to avoid upstream's Anthropic fallback default. "
+                    "Set llm.model (e.g. 'bedrock/anthropic.claude-3-5-haiku') "
+                    "or SKILL_SCANNER_LLM_MODEL to enable.",
+                )
         if cfg.use_trigger:
             build_kwargs["use_trigger"] = True
         if cfg.use_virustotal:
