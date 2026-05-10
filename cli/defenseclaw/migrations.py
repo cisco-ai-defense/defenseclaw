@@ -212,9 +212,18 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
     except OSError as exc:
         click.echo(f"    WARNING: could not back up openclaw.json ({exc})")
 
-    with open(oc_json, "w") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    # DeepSec follow-up: the previous implementation used a non-atomic
+    # ``open(..., "w") + json.dump`` pair which could leave the user's
+    # Codex MCP config truncated mid-write if the process was killed.
+    # Route through the atomic temp-file + os.replace helper used for
+    # every other migration write so a crash here is harmless: either
+    # the new content is fully present or the old file is intact. We
+    # use mode=0o644 (not 0o600) because openclaw.json is a regular
+    # config file, not a secret store.
+    payload = json.dumps(cfg, indent=2, ensure_ascii=False) + "\n"
+    if not _atomic_write_text(oc_json, payload, mode=0o644):
+        click.echo("    WARNING: failed to write openclaw.json atomically")
+        return
 
     for c in changes:
         click.echo(f"    {c}")

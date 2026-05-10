@@ -126,17 +126,45 @@ var (
 	bifrostTenants   = make(map[tenantKey]*bifrostTenantEntry)
 )
 
+// tenantKeyString gives evictOldestBifrostTenantLocked a deterministic
+// tie-break order. We do NOT include the raw apiKey here — keyID is
+// already a sha256 of apiKey (see bifrostKeyID). Provider name +
+// baseURL + keyID is plenty for stable lexicographic ordering and
+// contains no secrets.
+func tenantKeyString(k tenantKey) string {
+	return string(k.provider) + "|" + k.baseURL + "|" + k.keyID
+}
+
 // evictOldestBifrostTenantLocked drops the LRU tenant client. Caller
 // must hold bifrostTenantsMu (write lock).
+//
+// Tie-break: when two entries share the same lastUsed (unlikely on a
+// busy gateway but observable under low-resolution wallclocks and in
+// unit tests), order by stringified tenantKey so eviction is
+// deterministic. Without this tie-break the victim depends on Go's
+// randomized map iteration order, which makes bursty-traffic
+// behavior — and the eviction test below — flaky.
 func evictOldestBifrostTenantLocked() {
 	var oldestKey tenantKey
+	var oldestKeyStr string
 	var oldestSeen time.Time
 	first := true
 	for k, e := range bifrostTenants {
-		if first || e.lastUsed.Before(oldestSeen) {
+		ks := tenantKeyString(k)
+		if first {
 			oldestKey = k
+			oldestKeyStr = ks
 			oldestSeen = e.lastUsed
 			first = false
+			continue
+		}
+		if e.lastUsed.Before(oldestSeen) {
+			oldestKey = k
+			oldestKeyStr = ks
+			oldestSeen = e.lastUsed
+		} else if e.lastUsed.Equal(oldestSeen) && ks < oldestKeyStr {
+			oldestKey = k
+			oldestKeyStr = ks
 		}
 	}
 	if first {
@@ -400,18 +428,18 @@ func getBifrostClient(
 	}
 
 	now := time.Now()
-	bifrostTenantsMu.RLock()
-	if e, ok := bifrostTenants[tk]; ok {
-		bifrostTenantsMu.RUnlock()
-		bifrostTenantsMu.Lock()
-		if cur, stillThere := bifrostTenants[tk]; stillThere {
-			cur.lastUsed = now
-		}
-		bifrostTenantsMu.Unlock()
-		return e.client, nil
-	}
-	bifrostTenantsMu.RUnlock()
-
+	// Single Lock path. The previous double-checked-locking variant
+	// had an RLock-probe + Lock-recheck, which sounded like a fast
+	// path but was actually a TOCTOU footgun: between dropping RLock
+	// and acquiring Lock, a concurrent eviction could call
+	// client.Shutdown() on the snapshot client we were about to
+	// return. With the cache capped at bifrostTenantsMaxSize entries
+	// and lookups being a single map read, the lock contention from a
+	// pure write-lock path is negligible compared to the work we're
+	// otherwise doing (Bifrost's per-request payload assembly and
+	// upstream HTTP). The simpler model also lets us hold the lock
+	// across the cap-eviction and slow-path re-init below without any
+	// further race.
 	bifrostTenantsMu.Lock()
 	defer bifrostTenantsMu.Unlock()
 	if e, ok := bifrostTenants[tk]; ok {
