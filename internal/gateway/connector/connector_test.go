@@ -4890,6 +4890,12 @@ func TestIsLoopback_IPv6Variants(t *testing.T) {
 // FAIL_MODE. A DefenseClaw outage must not brick the user's agent.
 // Operators who want strict availability must opt in explicitly via
 // DEFENSECLAW_STRICT_AVAILABILITY=1 (see the next test).
+//
+// NOTE on fail_mode in the failure log: this is metadata recording
+// the configured response-layer fail mode at write time, not the
+// transport-layer behavior under test. Post-F-0681, the safer default
+// for response-layer failures is "closed", so the metadata reflects
+// that. The transport-layer fail-open behavior remains unchanged.
 func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -4931,7 +4937,12 @@ func TestHookScript_FailOpenOnUnreachable_Default(t *testing.T) {
 		`"connector":"claudecode"`,
 		`"hook":"claude-code-hook"`,
 		`"category":"transport"`,
-		`"fail_mode":"open"`,
+		// Closes avarice F-0681. The response-layer default is now
+		// "closed" so the failure log metadata reflects that.
+		// Functional invariant under test (hook exits 0 / allows
+		// agent on transport failure) is unchanged — that is the
+		// `category=transport` dimension above.
+		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Errorf("hook failure log missing %q:\n%s", want, logText)
@@ -5169,18 +5180,49 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "open",
 		},
 		{
-			name:         "codex_empty_opts_falls_back_to_open_default",
+			name:         "operator_closed_with_codex_enforcement_stays_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed", CodexEnforcement: true},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			// Closes avarice F-0681. After v4 the safer default is
+			// "closed" — empty SetupOpts.HookFailMode renders the
+			// hook with FAIL_MODE=closed so response-layer failures
+			// (4xx, malformed JSON, missing action) BLOCK rather than
+			// silently allowing. Existing v3 installs are pinned to
+			// "open" by _migrate_0_4_0_seed_hook_fail_mode (Python).
+			name:         "codex_empty_opts_falls_back_to_closed_default",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 		{
-			name:         "codex_garbage_opts_value_normalizes_to_open",
+			name:         "empty_opts_with_codex_enforcement_upgrades_to_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", CodexEnforcement: true},
+			connector:    &CodexConnector{},
+			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "empty_opts_with_claudecode_enforcement_upgrades_to_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", ClaudeCodeEnforcement: true},
+			connector:    &ClaudeCodeConnector{},
+			hookFile:     "claude-code-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			// Closes avarice F-0681. Garbage / typo values
+			// normalize to the safer "closed" sentinel so a
+			// misconfigured operator value never silently puts the
+			// agent into fail-OPEN mode.
+			name:         "codex_garbage_opts_value_normalizes_to_closed",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "this-is-not-a-real-mode"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
+			wantFailMode: "closed",
 		},
 	}
 
@@ -5249,7 +5291,11 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		// down / network error) rather than a response failure
 		// (4xx / parse error). Operators triage these differently.
 		`"category":"transport"`,
-		`"fail_mode":"open"`,
+		// Closes avarice F-0681. Response-layer default flipped to
+		// "closed" — transport-layer fail-open behavior under test
+		// here is unchanged (the hook still exits 0 and the agent
+		// still proceeds when the gateway is unreachable).
+		`"fail_mode":"closed"`,
 	} {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("hook failure log missing %s:\n%s", want, logText)

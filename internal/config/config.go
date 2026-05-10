@@ -1244,17 +1244,28 @@ type GuardrailConfig struct {
 }
 
 // EffectiveHookFailMode returns the operator-chosen hook fail mode,
-// defaulting to "open" when unset or set to anything other than the
-// canonical "closed" sentinel. Centralized here so the sidecar and
-// any future config-edit surfaces never disagree on the default.
+// defaulting to "closed" when unset (CodeGuard rule
+// codeguard-0-authorization-access-control: deny by default). The
+// canonical "open" sentinel is the only way to get the legacy
+// fail-open behavior; any other value (typo, blank, malformed
+// migration row) collapses to "closed" so the agent never silently
+// fails open at the response-layer boundary. Centralized here so the
+// sidecar and any future config-edit surfaces never disagree on the
+// default.
+//
+// Backwards compatibility: existing operators on v3 are protected by
+// the _migrate_0_4_0_seed_hook_fail_mode migration in
+// cli/defenseclaw/migrations.py, which writes ``hook_fail_mode: open``
+// into config.yaml on first upgrade. New installs and explicit-empty
+// values get the safer default. Closes avarice F-0681.
 func (g *GuardrailConfig) EffectiveHookFailMode() string {
 	if g == nil {
-		return "open"
-	}
-	if g.HookFailMode == "closed" {
 		return "closed"
 	}
-	return "open"
+	if g.HookFailMode == "open" {
+		return "open"
+	}
+	return "closed"
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
@@ -2326,12 +2337,16 @@ func setDefaults(dataDir string) {
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")
-	// "open" is the user-friendly default — see
-	// GuardrailConfig.HookFailMode for the rationale. Operators who
-	// want strict response-layer enforcement run `defenseclaw setup
-	// guardrail` (which prompts) or `defenseclaw guardrail fail-mode
-	// closed`.
-	viper.SetDefault("guardrail.hook_fail_mode", "open")
+	// "closed" is the safer default — response-layer failures (4xx,
+	// malformed JSON, missing action) BLOCK the tool/prompt rather
+	// than silently allowing it. Closes avarice F-0681. Existing
+	// operators on v3 are protected by
+	// _migrate_0_4_0_seed_hook_fail_mode (migrations.py) which writes
+	// ``hook_fail_mode: open`` to existing config.yaml so prior
+	// behavior is preserved on upgrade. Operators who explicitly want
+	// fail-open run `defenseclaw guardrail fail-mode open` (or set
+	// guardrail.hook_fail_mode: open in YAML).
+	viper.SetDefault("guardrail.hook_fail_mode", "closed")
 	viper.SetDefault("guardrail.scanner_mode", "both")
 	viper.SetDefault("guardrail.connector", "")
 	viper.SetDefault("guardrail.host", "")

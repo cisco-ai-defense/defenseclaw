@@ -34,12 +34,14 @@ from defenseclaw.context import AppContext
 
 def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
              model: str = "openai/gpt-4o", llm_model: str = "",
-             hook_fail_mode: str = "open"):
+             hook_fail_mode: str = "closed"):
     """Build a minimal AppContext that the guardrail commands can drive.
 
-    ``hook_fail_mode`` mirrors the v3 ``guardrail.hook_fail_mode`` field
-    (defaults to "open" so fixtures without explicit fail-mode wiring
-    behave like a fresh, user-friendly install).
+    ``hook_fail_mode`` mirrors the v4 ``guardrail.hook_fail_mode`` field
+    (defaults to "closed" so fixtures without explicit fail-mode wiring
+    behave like a fresh, secure-by-default install — closes avarice
+    F-0681). Tests that need to exercise the legacy fail-open path
+    pass ``hook_fail_mode="open"`` explicitly.
     """
     guardrail_cfg = SimpleNamespace(
         enabled=enabled,
