@@ -40,6 +40,15 @@ type benchFile struct {
 	Cases []benchCase `json:"cases"`
 }
 
+// benchmarkSyntheticRSAPrivateKeyPEM returns a minimal PEM-shaped string that
+// triggers SEC-PRIVKEY without storing a contiguous "BEGIN … PRIVATE KEY"
+// marker in labels.json (avoids GitHub secret scanning alerts on fixtures).
+func benchmarkSyntheticRSAPrivateKeyPEM() string {
+	return "-----BEGIN " + "RSA " + "PRIVATE KEY-----\n" +
+		"MIIEpAIBAAKCAQEA\n" +
+		"-----END " + "RSA " + "PRIVATE KEY-----"
+}
+
 // TestSeverityBenchmark runs labeled fixtures through scanLocalPatterns
 // and asserts the severity/action contracts. Cases flagged with
 // note_llm_required are skipped unless GUARDRAIL_BENCHMARK_LLM=1 —
@@ -60,6 +69,12 @@ func TestSeverityBenchmark(t *testing.T) {
 	}
 	if len(file.Cases) == 0 {
 		t.Fatal("benchmark labels empty")
+	}
+
+	for i := range file.Cases {
+		if file.Cases[i].ID == "critical/private-key-in-completion" {
+			file.Cases[i].Content = benchmarkSyntheticRSAPrivateKeyPEM()
+		}
 	}
 
 	runLLMCases := os.Getenv("GUARDRAIL_BENCHMARK_LLM") == "1"
