@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -516,3 +517,46 @@ func ResolveAPIKey(envVar string, dotenvPath string) string {
 	}
 	return ""
 }
+
+// isUnsafeIP returns true when an IP address points at a destination
+// the gateway must refuse to dial: loopback, link-local, multicast,
+// the private RFC1918 ranges, IPv6 ULA, ECS metadata, and the CGNAT
+// space. Mirrors the dial-side guard so isPrivateHost (shape.go) and
+// the dial guard share one predicate, closing the application-check
+// vs dial-resolution split documented inline at the call site.
+func isUnsafeIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		ip.IsPrivate() ||
+		ip.IsInterfaceLocalMulticast() {
+		return true
+	}
+	// CGNAT: 100.64.0.0/10
+	if v4 := ip.To4(); v4 != nil {
+		if v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127 {
+			return true
+		}
+		// AWS / link-local metadata: 169.254.169.254 + 169.254.170.2 (ECS)
+		if v4[0] == 169 && v4[1] == 254 {
+			return true
+		}
+	}
+	// IPv6 ULA: fc00::/7
+	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+		return true
+	}
+	return false
+}
+
+// passthroughAllowPrivateForTest is a test-only seam letting the
+// passthrough integration tests simulate a "known provider" pointed
+// at httptest.NewServer (which binds 127.0.0.1). Production code MUST
+// leave this at false; the dedicated SSRF tests still route private
+// targets through the shape-branch which is not subject to this gate.
+var passthroughAllowPrivateForTest bool

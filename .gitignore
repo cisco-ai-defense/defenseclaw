@@ -117,3 +117,9 @@ agent-out/
 .avarice/
 .deepsec/
 security_report/
+
+# Local smoke-test scratch directory used by manual REPL/curl runs
+# against an isolated DEFENSECLAW_HOME. Holds bin/, home/, logs/, and
+# operator-authored sweep-*.sh helpers — none of these are project
+# source.
+.smoke/
