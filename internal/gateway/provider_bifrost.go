@@ -104,10 +104,58 @@ func (t tlsOverrides) id() string {
 	return "tls:sha256:" + hex.EncodeToString(sum[:8])
 }
 
+// bifrostTenantsMaxSize bounds the in-memory tenant client cache.
+// DeepSec S3.BUG ("Bifrost tenant client cache grows without
+// eviction"): the previous package-level map grew on every cache
+// miss with no LRU/TTL/Shutdown, and authenticated callers can vary
+// `X-AI-Auth` (and Azure/Bedrock can also vary baseURL) per request.
+// On a long-running gateway with credential rotation or a hostile
+// authenticated caller, that drove permanent memory + connection
+// growth. We now keep at most bifrostTenantsMaxSize live clients,
+// evict the least-recently-used entry when we hit the cap, and call
+// the SDK's Shutdown on every eviction so each client's HTTP / queue
+// resources are released alongside the map slot.
+const bifrostTenantsMaxSize = 256
+
+type bifrostTenantEntry struct {
+	client   *bifrost.Bifrost
+	lastUsed time.Time
+}
+
 var (
 	bifrostTenantsMu sync.RWMutex
-	bifrostTenants   = make(map[tenantKey]*bifrost.Bifrost)
+	bifrostTenants   = make(map[tenantKey]*bifrostTenantEntry)
 )
+
+// evictOldestBifrostTenantLocked drops the LRU tenant client. Caller
+// must hold bifrostTenantsMu (write lock).
+func evictOldestBifrostTenantLocked() {
+	var oldestKey tenantKey
+	var oldestSeen time.Time
+	first := true
+	for k, e := range bifrostTenants {
+		if first || e.lastUsed.Before(oldestSeen) {
+			oldestKey = k
+			oldestSeen = e.lastUsed
+			first = false
+		}
+	}
+	if first {
+		return
+	}
+	if entry, ok := bifrostTenants[oldestKey]; ok {
+		delete(bifrostTenants, oldestKey)
+		// Shutdown asynchronously so we don't hold the write
+		// lock across an SDK teardown that may block on
+		// in-flight streams. The SDK's Shutdown is documented
+		// as safe to call once and is a no-op on subsequent
+		// invocations.
+		go func(c *bifrost.Bifrost) {
+			defer func() { _ = recover() }()
+			c.Shutdown()
+		}(entry.client)
+	}
+}
 
 // tenantAccount implements schemas.Account and is frozen at construction
 // time: it returns the same single key + config for its pinned provider and
@@ -357,17 +405,27 @@ func getBifrostClient(
 		subID:    subBlockID(bedrock, vertex, azure),
 	}
 
+	now := time.Now()
 	bifrostTenantsMu.RLock()
-	if c, ok := bifrostTenants[tk]; ok {
+	if e, ok := bifrostTenants[tk]; ok {
 		bifrostTenantsMu.RUnlock()
-		return c, nil
+		bifrostTenantsMu.Lock()
+		if cur, stillThere := bifrostTenants[tk]; stillThere {
+			cur.lastUsed = now
+		}
+		bifrostTenantsMu.Unlock()
+		return e.client, nil
 	}
 	bifrostTenantsMu.RUnlock()
 
 	bifrostTenantsMu.Lock()
 	defer bifrostTenantsMu.Unlock()
-	if c, ok := bifrostTenants[tk]; ok {
-		return c, nil
+	if e, ok := bifrostTenants[tk]; ok {
+		e.lastUsed = now
+		return e.client, nil
+	}
+	if len(bifrostTenants) >= bifrostTenantsMaxSize {
+		evictOldestBifrostTenantLocked()
 	}
 
 	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, tls, bedrock, vertex, azure, extraHeaders)
@@ -377,7 +435,7 @@ func getBifrostClient(
 	if err != nil {
 		return nil, fmt.Errorf("gateway: bifrost init: %w", err)
 	}
-	bifrostTenants[tk] = client
+	bifrostTenants[tk] = &bifrostTenantEntry{client: client, lastUsed: now}
 	return client, nil
 }
 

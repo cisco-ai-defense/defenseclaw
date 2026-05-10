@@ -64,6 +64,79 @@ exit 0
 	}
 }
 
+// TestRunGitList_HostileRepoIgnoresLocalConfig (CRITICAL regression)
+// constructs a worktree whose .git/config sets core.fsmonitor and
+// core.hooksPath to commands that, if executed by git, would
+// side-channel a marker into a tempfile. The gitsafe wrapper MUST
+// suppress those settings via -c overrides so git runs cleanly and
+// no marker file is ever created.
+//
+// The test uses the real `git` binary (skipping when absent) because
+// the threat model is specifically: git itself is the attacker's
+// jumping-off point. Running through the wrapper proves the
+// mitigations apply end-to-end.
+func TestRunGitList_HostileRepoIgnoresLocalConfig(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("real git not on PATH")
+	}
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh available")
+	}
+	repo := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "pwned.txt")
+	gitDir := filepath.Join(repo, ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "objects"), 0o700); err != nil {
+		t.Fatalf("mkdir .git: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(gitDir, "refs", "heads"), 0o700); err != nil {
+		t.Fatalf("mkdir refs: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatalf("write HEAD: %v", err)
+	}
+	// A hostile config: every executable git config knob that has
+	// historically been used for RCE in malicious worktree CVEs.
+	hostileConfig := fmt.Sprintf(`[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+	fsmonitor = "sh -c 'echo fsmonitor > %s'"
+	hooksPath = "%s"
+	useReplaceRefs = true
+	editor = "sh -c 'echo editor > %s'"
+[diff]
+	external = "sh -c 'echo diff > %s'"
+[uploadpack]
+	packObjectsHook = "sh -c 'echo packhook > %s'"
+`, marker, gitDir, marker, marker, marker)
+	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte(hostileConfig), 0o600); err != nil {
+		t.Fatalf("write hostile config: %v", err)
+	}
+	// Plant a hooks/pre-commit just in case core.hooksPath escaped
+	// the override; runGitList only reads, but layered defense.
+	if err := os.WriteFile(filepath.Join(gitDir, "pre-commit"),
+		[]byte(fmt.Sprintf("#!/bin/sh\necho hooks > %s\n", marker)), 0o700); err != nil {
+		t.Fatalf("write pre-commit: %v", err)
+	}
+
+	// runGitList swallows the diff-against-HEAD error in
+	// gitChangedFiles by combining with ls-files; here we invoke
+	// directly so we exercise both the env scrub and the -c flags.
+	if _, err := runGitList(context.Background(), repo, "ls-files", "--others", "--exclude-standard"); err != nil {
+		// Errors are acceptable as long as no helper fired.
+		t.Logf("runGitList (acceptable) error: %v", err)
+	}
+	if _, err := runGitList(context.Background(), repo, "diff", "--name-only", "HEAD", "--"); err != nil {
+		t.Logf("runGitList diff (acceptable) error: %v", err)
+	}
+
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		data, _ := os.ReadFile(marker)
+		t.Fatalf("hostile config triggered: marker=%q content=%q (CRITICAL regression — gitsafe wrapper failed)", marker, data)
+	}
+}
+
 func TestRunGitList_AcceptsSmallOutput(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no sh available")

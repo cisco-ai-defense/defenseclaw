@@ -18,11 +18,33 @@
 
 package connector
 
+import "os"
+
 // pluginGetUID is a no-op stub on Windows (UID is a Unix concept).
 var pluginGetUID = func() int { return 0 }
+
+// pluginOwnerUID has no meaning on Windows (ownership is ACL-based, not
+// UID-based). Returning ok=false signals callers to skip the UID check;
+// all neutral callers gate this behind runtime.GOOS != "windows" anyway.
+func pluginOwnerUID(_ os.FileInfo) (uint32, bool) {
+	return 0, false
+}
+
+// pluginInodeIdentity is a no-op on Windows (no stable inode/dev via
+// syscall.Stat_t). Neutral callers gate the inode race check behind
+// runtime.GOOS != "windows".
+func pluginInodeIdentity(_ os.FileInfo) (dev, ino uint64, ok bool) {
+	return 0, 0, false
+}
 
 // validatePluginOwner is a no-op on Windows. File ownership semantics
 // differ (ACLs vs. UID/GID) and the Unix syscall.Stat_t is unavailable.
 func validatePluginOwner(_ string) error {
+	return nil
+}
+
+// validatePluginOwnerFromInfo is a no-op on Windows, mirroring
+// validatePluginOwner.
+func validatePluginOwnerFromInfo(_ string, _ os.FileInfo) error {
 	return nil
 }

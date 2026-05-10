@@ -628,6 +628,77 @@ Claude Code now talk directly to their native upstreams in both
     mode contract end-to-end.
 
 ## [Pre-PR-265] — PR #194 single-rollup (security floor + connector polymorphism + test parity)
+## [Unreleased] — DeepSec audit closure (75 findings → 0)
+
+This rollup closes every actionable finding from the DeepSec security
+audit (`.deepsec/data/defenseclaw/reports/report.md`): 1 CRITICAL,
+26 HIGH, 24 MEDIUM, 9 HIGH_BUG, and 15 BUG. The two findings tagged
+"FP" by reviewers are also remediated because their underlying code
+paths required changes anyway. No protections were removed; the audit
+strictly tightens existing guards.
+
+### Security — DeepSec hardening (selected highlights)
+
+- **CRITICAL S0** Codex git-scan hardening: hostile repository config,
+  external diff, and `core.fsmonitor` injection paths are sanitized
+  through `internal/gitsafe`; safe-flag set audited against
+  `git --help`.
+- **HIGH S2** Workflow integrity: `.github/workflows/{ci,docs-site,e2e,release}.yml`
+  pin every third-party action by SHA, drop unused `permissions`
+  scopes, and quote / sanitize all input expansions.
+- **HIGH S2** Gateway HTTP egress: `internal/gateway/proxy.go` enforces
+  SSRF refusal across known/unknown branches with `ResolveAndPin`,
+  exact provider matching, IP/CIDR pinned dialer, userinfo / control-
+  byte rejection, and structured URL scrubbing on every log/metric
+  surface.
+- **HIGH S2** Connector subprocess + plugin loader: token-aware hook
+  templates, plugin loader TOCTOU closed (open-then-stat pinned to the
+  same fd), embedded plugin canonical token derivation.
+- **HIGH S2** Gateway scanners (mcp / plugin / skill) now fail-closed
+  on non-zero subprocess exit; `policy.ScanResultInput` extended so the
+  policy engine sees the full scanner verdict shape.
+- **HIGH S2** Watcher routes rescan + baseline through admission and
+  installs recursive watches on every admitted directory; skipping a
+  policy file no longer suppresses unrelated change activity.
+- **HIGH S3 BUG** Sandbox cleanup is scoped to per-request directories;
+  the surgical 0.3 migration replaced the destructive prior path; the
+  `http_jsonl` sink retries synchronously on transient failures;
+  watchdog uses flock + binary fingerprint to recognise stale
+  processes; `RepairPairing` is fail-closed and atomic.
+- **MEDIUM S4** Webhook URLs are hashed (`scrubURLSecrets`,
+  `hashWebhookTargetURL`) on every log path; AI-discovery path
+  fingerprints are HMAC-keyed; MCP scan target URLs are validated as
+  loopback / private / metadata; endpoint ignore-list switched from
+  prefix matching to exact hostname / loopback IP literal matching.
+- **MEDIUM S4** `CorrelationMiddleware` no longer mints unauthenticated
+  agent sessions: it calls `AgentRegistry.ResolvePeek`, then handlers
+  call `PromoteSessionIfAuthenticated` after `tokenAuth` succeeds.
+  Combined with the LRU cap on `AgentRegistry`, unauthenticated
+  callers can no longer amplify in-memory state by flooding distinct
+  `X-DefenseClaw-Session-Id` headers.
+- **BUG S5** `cli/defenseclaw/commands/cmd_init.py` no longer runs
+  notifications onboarding twice; `cli/defenseclaw/provenance.py` now
+  hashes nested policy bundle files; `internal/cli/connector_cmd.go`
+  discovers plugin connectors before lifecycle commands run;
+  `internal/cli/{policy,status}.go` attach the gateway bearer / token
+  header on outbound API calls; `internal/cli/policy_diff.go` +
+  `internal/sandbox/network_policy.go` make endpoint coverage
+  port-aware; `internal/cli/tui_cmd.go` treats EOF + empty input as
+  decline; `internal/gateway/api_ratelimit.go` resolves a `time.Time`
+  data race with `atomic.Int64`; `internal/gateway/connector/otlp_token.go`
+  is now `flock`-synchronized for cross-process token minting;
+  `internal/gateway/judge_store.go` + `internal/gatewaylog/events.go`
+  fix `JudgeResponse.input_hash` to hash the *input* (not the response
+  body), with `JudgeEmitOpts.InputContent` automatically populating
+  the digest; `internal/gateway/llm_event_emit.go` + `api.go` add a
+  bounded LRU cache for hook prompt correlation maps;
+  `internal/gateway/provider_bifrost.go` adds a bounded LRU cache for
+  per-tenant Bifrost clients with proper `Shutdown()` on eviction;
+  `internal/guardrail/rulepack.go` uses slash-separated paths for
+  `embed.FS` lookups; `internal/watcher/policy_files_watch.go` records
+  per-file unreadable errors instead of suppressing the whole poll.
+
+## [Unreleased] — PR #194 single-rollup (security floor + connector polymorphism + test parity)
 
 This rollup closes the audit gaps identified in the v3 connector
 review and lands PR #141's matrix in a single coherent set of

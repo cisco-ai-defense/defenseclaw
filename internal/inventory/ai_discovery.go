@@ -19,6 +19,7 @@ package inventory
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -3215,6 +3216,42 @@ func shouldSkipDiscoveryDir(name string) bool {
 	}
 }
 
+// pathHashKey is the per-installation HMAC key that turns the
+// otherwise-reversible path SHA-256 fingerprint into an
+// installation-scoped opaque digest. DeepSec S2.MEDIUM ("Redacted AI
+// discovery events expose reversible path fingerprints"): without a
+// key, a recipient of a redacted gateway event can dictionary-attack
+// well-known paths (~/.aws/credentials, repo roots, package manifest
+// paths) to recover the local layout. The key is set by
+// SetPathHashKey at sidecar boot, drawn from the gateway secret so it
+// is stable for the install but opaque to outside recipients. When
+// the key is unset (legacy callers, tests) we fall back to the plain
+// SHA-256 form so existing tooling keeps parsing the digest.
+var pathHashKey []byte
+var pathHashKeyMu sync.RWMutex
+
+// SetPathHashKey installs the per-installation HMAC key used for
+// hashPath / hashValue digests. Pass nil to revert to the legacy
+// unsalted SHA-256 form (tests).
+func SetPathHashKey(key []byte) {
+	pathHashKeyMu.Lock()
+	defer pathHashKeyMu.Unlock()
+	if len(key) == 0 {
+		pathHashKey = nil
+		return
+	}
+	pathHashKey = append([]byte(nil), key...)
+}
+
+func currentPathHashKey() []byte {
+	pathHashKeyMu.RLock()
+	defer pathHashKeyMu.RUnlock()
+	if len(pathHashKey) == 0 {
+		return nil
+	}
+	return append([]byte(nil), pathHashKey...)
+}
+
 func hashPath(path string) string {
 	if path == "" {
 		return ""
@@ -3223,7 +3260,16 @@ func hashPath(path string) string {
 	if err == nil {
 		path = abs
 	}
+	if key := currentPathHashKey(); len(key) > 0 {
+		return "hmac-sha256:" + keyedHashHex(key, path)
+	}
 	return "sha256:" + hashHex(path)
+}
+
+func keyedHashHex(key []byte, value string) string {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(value))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func hashValue(value string) string {
