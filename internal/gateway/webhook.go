@@ -136,16 +136,62 @@ func NewWebhookDispatcher(cfgs []config.WebhookConfig) *WebhookDispatcher {
 	if len(endpoints) == 0 {
 		return nil
 	}
+	allowLoopback := os.Getenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 	return &WebhookDispatcher{
-		endpoints: endpoints,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		endpoints:    endpoints,
+		client:       newWebhookHTTPClient(allowLoopback, logger),
 		retryBackoff: webhookRetryBackoff,
 		sem:          make(chan struct{}, webhookMaxConcurrency),
 		logger:       logger,
 		debug:        os.Getenv("DEFENSECLAW_WEBHOOK_DEBUG") == "1",
 		done:         make(chan struct{}),
+	}
+}
+
+// newWebhookHTTPClient builds the http.Client used to deliver webhooks. It
+// installs:
+//
+//   - secureDialContext: every TCP dial re-resolves the destination and
+//     rejects private/loopback/link-local/cloud-metadata addresses. This
+//     defeats the F-1306 DNS-rebinding window where validateWebhookURL
+//     saw a public IP at config time but Go's default dialer later
+//     resolved a private IP.
+//
+//   - CheckRedirect: every redirect target is re-validated through
+//     validateWebhookURL. Pre-fix, an attacker-controlled webhook
+//     endpoint could 302 the dispatcher to http://127.0.0.1:6379/
+//     (Redis) or http://169.254.169.254/ (cloud IMDS) and have Go's
+//     default redirect policy follow it.
+//
+// allowLoopback is wired from DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST=1 so dev
+// workflows that intentionally point at 127.0.0.1 still work.
+func newWebhookHTTPClient(allowLoopback bool, logger *log.Logger) *http.Client {
+	transport := &http.Transport{
+		DialContext:           secureDialContext(allowLoopback, 10*time.Second),
+		MaxIdleConns:          10,
+		MaxIdleConnsPerHost:   5,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,
+	}
+	return &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Conservative cap (Go's default is 10) and cheap.
+			if len(via) >= 5 {
+				return fmt.Errorf("webhook: redirect chain length %d exceeded", len(via))
+			}
+			if err := validateWebhookURL(req.URL.String()); err != nil {
+				if logger != nil {
+					logger.Printf("rejected redirect to %s: %v",
+						req.URL.Redacted(), err)
+				}
+				return fmt.Errorf("webhook redirect rejected: %w", err)
+			}
+			return nil
+		},
 	}
 }
 
@@ -549,6 +595,26 @@ func validateWebhookURL(rawURL string) error {
 }
 
 func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	// F-1225 (parity): collapse IPv4-mapped IPv6 ("::ffff:127.0.0.1") to
+	// its canonical IPv4 form so the IPv4 private-range checks below
+	// catch it. Without this, an attacker can use the v6-mapped form to
+	// route around the IPv4 ranges via dial syntax like
+	// http://[::ffff:127.0.0.1]/.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	// Use the standard library's classification helpers first — they
+	// reflect the kernel's view of "address class" and are kept current
+	// with new RFCs. The explicit CIDR list below is belt-and-suspenders
+	// in case future Go versions lag.
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() || ip.IsPrivate() {
+		return true
+	}
 	privateRanges := []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",

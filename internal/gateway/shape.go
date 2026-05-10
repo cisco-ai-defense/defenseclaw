@@ -226,6 +226,13 @@ func isPrivateHost(host string) bool {
 	} else if h2, _, err := net.SplitHostPort(h); err == nil {
 		h = h2
 	}
+	// F-1225: strip IPv6 zone identifier ("%lo0", "%eth0") before
+	// net.ParseIP. Scoped IPv6 literals like "::1%lo0" and "fe80::1%lo0"
+	// are valid dial targets but ParseIP returns nil on the zone-qualified
+	// form, so the pre-fix path fell through to DNS resolution (which
+	// fails for an IP literal), returned false, and let the caller dial
+	// loopback / link-local destinations.
+	h = stripIPv6Zone(h)
 	if ip := net.ParseIP(h); ip != nil {
 		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
 			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
