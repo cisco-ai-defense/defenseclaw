@@ -30,6 +30,14 @@ import { RulesSection } from './sections/rules';
 import { SuppressionsSection } from './sections/suppressions';
 import { SensitiveToolsSection } from './sections/sensitive-tools';
 import { JudgesSection } from './sections/judges';
+import { FirewallSection } from './sections/firewall';
+import {
+  AuditSection,
+  EnforcementSection,
+  ScannersSection,
+  WatchSection,
+  WebhooksSection,
+} from './sections/ops';
 import { ReviewSection } from './sections/review';
 import { LiveTestPane } from './sections/live-test';
 import { summarize, validatePolicy } from './lib/validators';
@@ -139,6 +147,65 @@ const SECTION_DEFS: SectionDef[] = [
         : p.judges.map((j) => j.name).join(', '),
     status: (p) => customizedIfNonEmpty([p.judges]),
     render: (p, set) => <JudgesSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'firewall',
+    title: 'Firewall',
+    subtitle: (p) =>
+      `${p.firewall.default_action} · ${p.firewall.allowed_domains.length} allow · ${p.firewall.blocked_destinations.length} block`,
+    status: (p) =>
+      p.firewall.allowed_domains.length > 0 ||
+      p.firewall.blocked_destinations.length > 2 // base ships 2 default IMDS entries
+        ? 'customized'
+        : 'untouched',
+    render: (p, set) => <FirewallSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'webhooks',
+    title: 'Webhooks',
+    subtitle: (p) =>
+      p.webhooks.length === 0
+        ? 'no destinations configured'
+        : `${p.webhooks.length} destination${p.webhooks.length === 1 ? '' : 's'}`,
+    status: (p) => customizedIfNonEmpty([p.webhooks]),
+    render: (p, set) => <WebhooksSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'watch',
+    title: 'Watch (rescan)',
+    subtitle: (p) =>
+      p.watch.rescan_enabled
+        ? `enabled · every ${p.watch.rescan_interval_min} min`
+        : 'disabled',
+    status: () => 'untouched',
+    render: (p, set) => <WatchSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'enforcement',
+    title: 'Enforcement',
+    subtitle: (p) => `max delay ${p.enforcement.max_enforcement_delay_seconds}s`,
+    status: () => 'untouched',
+    render: (p, set) => <EnforcementSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'audit',
+    title: 'Audit',
+    subtitle: (p) => `${p.audit.retention_days} day retention`,
+    status: () => 'untouched',
+    render: (p, set) => <AuditSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'scanners',
+    title: 'Scanner profiles',
+    subtitle: (p) => {
+      const overrides = Object.values(p.scanners).filter(Boolean).length;
+      return overrides > 0
+        ? `${overrides} scanner profile${overrides === 1 ? '' : 's'} overridden`
+        : 'inherit base';
+    },
+    status: (p) =>
+      Object.values(p.scanners).some(Boolean) ? 'customized' : 'untouched',
+    render: (p, set) => <ScannersSection policy={p} onPolicyChange={set} />,
   },
   {
     id: 'review',
