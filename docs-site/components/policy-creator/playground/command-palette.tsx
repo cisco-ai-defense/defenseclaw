@@ -19,19 +19,11 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { filterIndex, type IndexEntry } from './cmdk-filter';
 
-interface IndexEntry {
-  /** Section id (matches sections/<file>.tsx + accordion id). */
-  sectionId: string;
-  /** Display label inside the search results. */
-  label: string;
-  /** Section group, shown as a tag. */
-  group: string;
-  /** Optional aliases the operator might type ("hec", "url", etc). */
-  keywords?: string[];
-}
+export type { IndexEntry } from './cmdk-filter';
 
-const INDEX: IndexEntry[] = [
+export const INDEX: IndexEntry[] = [
   // basics
   { sectionId: 'basics', group: 'Basics', label: 'Policy name', keywords: ['name', 'id'] },
   { sectionId: 'basics', group: 'Basics', label: 'Description', keywords: ['desc'] },
@@ -122,6 +114,12 @@ export function CommandPalette({ onJump }: CommandPaletteProps) {
   // stopImmediatePropagation so Fumadocs never sees the event.
   // Outside the playground (where this component isn't mounted) the
   // Fumadocs handler is untouched.
+  //
+  // Bind exactly once for the lifetime of the component. Reading
+  // `open` via the functional setter avoids a stale-closure trap
+  // *and* keeps us from re-installing the global capture-phase
+  // listener on every toggle (which used to also briefly leave the
+  // listener un-installed during effect re-binds).
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       const isToggle =
@@ -130,16 +128,24 @@ export function CommandPalette({ onJump }: CommandPaletteProps) {
         e.preventDefault();
         e.stopImmediatePropagation();
         setOpen((prev) => !prev);
-      } else if (e.key === 'Escape' && open) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        setOpen(false);
+        return;
+      }
+      if (e.key === 'Escape') {
+        // Only consume the Escape if we were open; let other
+        // listeners (modals, dialogs) handle it otherwise.
+        setOpen((prev) => {
+          if (prev) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+          }
+          return false;
+        });
       }
     }
     // capture: true so we run before Fumadocs' (default-phase) handler.
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [open]);
+  }, []);
 
   // Focus the input when the palette opens; reset query on close.
   useEffect(() => {
@@ -283,36 +289,7 @@ export function CommandPaletteHint() {
   );
 }
 
-// ── filtering ───────────────────────────────────────────────────────
-
-function filterIndex(idx: IndexEntry[], q: string): IndexEntry[] {
-  const trimmed = q.trim().toLowerCase();
-  if (!trimmed) return idx;
-  // Token AND-match: every whitespace-separated token must appear in
-  // (label + group + keywords) somewhere. This handles natural typing
-  // like "splunk token" → matches "Splunk HEC sink" via its keywords.
-  const tokens = trimmed.split(/\s+/);
-  const scored: Array<{ entry: IndexEntry; score: number }> = [];
-  for (const entry of idx) {
-    const hay = [
-      entry.label.toLowerCase(),
-      entry.group.toLowerCase(),
-      ...(entry.keywords ?? []).map((k) => k.toLowerCase()),
-    ].join(' | ');
-    let ok = true;
-    let score = 0;
-    for (const t of tokens) {
-      const at = hay.indexOf(t);
-      if (at < 0) {
-        ok = false;
-        break;
-      }
-      // Earlier matches score higher; label hits score higher than
-      // keyword hits.
-      score += entry.label.toLowerCase().includes(t) ? 100 - at : 50 - at;
-    }
-    if (ok) scored.push({ entry, score });
-  }
-  scored.sort((a, b) => b.score - a.score);
-  return scored.map((s) => s.entry);
-}
+// `filterIndex` was extracted to ./cmdk-filter.ts so node:test can
+// exercise it without React. Re-export to keep existing call sites
+// stable.
+export { filterIndex } from './cmdk-filter';
