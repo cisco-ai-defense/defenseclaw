@@ -594,7 +594,14 @@ def _dashboard_group_id(item: dict) -> str:
     return ""
 
 
-def _terraform_import(terraform_bin: str, *, prepared: _PreparedRun, address: str, remote_id: str, timeout: int) -> None:
+def _terraform_import(
+    terraform_bin: str,
+    *,
+    prepared: _PreparedRun,
+    address: str,
+    remote_id: str,
+    timeout: int,
+) -> None:
     _run_terraform(
         terraform_bin,
         ["import", "-input=false", f"-state={prepared.state_path}", address, remote_id],
@@ -651,7 +658,9 @@ def _adopt_existing_resources(
     dashboard_layouts = console_data.get("layouts") or {}
     detector_defs = console_data.get("detectors") or {}
 
-    if not isinstance(chart_maps["single"], dict) or not isinstance(chart_maps["time"], dict) or not isinstance(chart_maps["table"], dict):
+    if not isinstance(chart_maps["single"], dict) or not isinstance(chart_maps["time"], dict) or not isinstance(
+        chart_maps["table"], dict
+    ):
         raise click.ClickException("Unexpected Terraform console output for chart metadata.")
     if not isinstance(dashboard_layouts, dict) or not isinstance(detector_defs, dict):
         raise click.ClickException("Unexpected Terraform console output for dashboard or detector metadata.")
@@ -686,7 +695,9 @@ def _adopt_existing_resources(
         },
     }
     if prepared.with_detectors:
-        bundle_addresses.update({f'signalfx_detector.detector["{detector_key}"]' for detector_key in detector_defs.keys()})
+        bundle_addresses.update(
+            {f'signalfx_detector.detector["{detector_key}"]' for detector_key in detector_defs.keys()}
+        )
 
     group_name = _expected_group_name(prepared.name_prefix)
     dashboard_groups_payload = _extract_list_payload(
@@ -750,7 +761,8 @@ def _adopt_existing_resources(
             for address in bundle_state_addresses:
                 state_addresses.discard(address)
         click.echo(
-            f"  Found {len(candidate_groups)} dashboard groups named {group_name!r}, but none contained matching dashboards."
+            f"  Found {len(candidate_groups)} dashboard groups named {group_name!r}, "
+            "but none contained matching dashboards."
         )
     else:
         bundle_state_addresses = sorted(address for address in bundle_addresses if address in state_addresses)
@@ -782,7 +794,13 @@ def _adopt_existing_resources(
     for resource in resources:
         if resource.address in state_addresses:
             continue
-        _terraform_import(terraform_bin, prepared=prepared, address=resource.address, remote_id=resource.remote_id, timeout=timeout)
+        _terraform_import(
+            terraform_bin,
+            prepared=prepared,
+            address=resource.address,
+            remote_id=resource.remote_id,
+            timeout=timeout,
+        )
         state_addresses.add(resource.address)
         imported += 1
 
