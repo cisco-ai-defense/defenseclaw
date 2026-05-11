@@ -11,6 +11,7 @@
 import { useState } from 'react';
 import type { Policy, Recipe, RuleDef, RulesFile, SeverityUpper } from '../types';
 import { SEVERITIES_UPPER } from '../types';
+import { ChipsField } from '../ui/chips-field';
 import { RecipePicker } from '../ui/recipe-picker';
 import { RegexInput } from '../ui/regex-input';
 import { SegmentedControl } from '../ui/segmented-control';
@@ -263,17 +264,11 @@ export function RulesSection({
                               }
                             }}
                           />
-                          <TextField
-                            label="tags (comma-separated)"
-                            value={rule.tags.join(', ')}
-                            onChange={(v) =>
-                              updateRule(fileIdx, ruleIdx, {
-                                tags: v
-                                  .split(',')
-                                  .map((s) => s.trim())
-                                  .filter(Boolean),
-                              })
-                            }
+                          <ChipsField
+                            label="tags"
+                            values={rule.tags}
+                            onChange={(next) => updateRule(fileIdx, ruleIdx, { tags: next })}
+                            placeholder="exfiltration"
                           />
                         </div>
                         <RegexInput

@@ -5,6 +5,7 @@
 
 import type { FirstPartyEntry, Policy } from '../types';
 import { SCANNER_TYPES } from '../types';
+import { ChipsField } from '../ui/chips-field';
 import { SegmentedControl } from '../ui/segmented-control';
 import { TextField } from '../ui/text-field';
 import { Toggle } from '../ui/toggle';
@@ -113,18 +114,12 @@ export function AdmissionSection({
                   />
                 </div>
                 <div className="sm:col-span-3">
-                  <TextField
-                    label="path contains (comma-separated)"
-                    value={entry.source_path_contains.join(', ')}
-                    onChange={(v) =>
-                      updateAllow(idx, {
-                        source_path_contains: v
-                          .split(',')
-                          .map((s) => s.trim())
-                          .filter(Boolean),
-                      })
-                    }
-                    placeholder=".defenseclaw, .openclaw/extensions"
+                  <ChipsField
+                    label="path contains"
+                    values={entry.source_path_contains}
+                    onChange={(next) => updateAllow(idx, { source_path_contains: next })}
+                    placeholder=".defenseclaw"
+                    hint="Press Enter or , to add. Backspace on empty input removes the last."
                   />
                 </div>
                 <div className="flex items-end justify-end sm:col-span-1">

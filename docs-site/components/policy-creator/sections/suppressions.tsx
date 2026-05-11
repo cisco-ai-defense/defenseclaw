@@ -20,6 +20,7 @@
 
 import { useState } from 'react';
 import type { Policy, Recipe } from '../types';
+import { ChipsField } from '../ui/chips-field';
 import { RecipePicker } from '../ui/recipe-picker';
 import { RegexInput } from '../ui/regex-input';
 import { SegmentedControl } from '../ui/segmented-control';
@@ -410,18 +411,12 @@ function ToolEditor({
                   onCounterexamplesChange={(next) => setExFor(idx, { no: next })}
                   hint="Scope tightly. ^.*$ would silence every finding on every tool."
                 />
-                <TextField
-                  label="suppress_findings (comma-separated finding ids)"
-                  value={item.suppress_findings.join(', ')}
-                  onChange={(v) =>
-                    update(idx, {
-                      suppress_findings: v
-                        .split(',')
-                        .map((s) => s.trim())
-                        .filter(Boolean),
-                    })
-                  }
-                  placeholder="JUDGE-INJ-DESTRUCTIVE, SEC-SHELL-WRITE"
+                <ChipsField
+                  label="suppress_findings"
+                  values={item.suppress_findings}
+                  onChange={(next) => update(idx, { suppress_findings: next })}
+                  placeholder="JUDGE-INJ-DESTRUCTIVE"
+                  hint="One finding ID per chip. Press Enter or , to add."
                 />
                 <TextField
                   label="reason"
