@@ -70,7 +70,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                 [
                     "apply",
                     "--api-url",
-                    "https://api.us1.signalfx.com",
+                    "https://api.realm.signalfx.com",
                     "--auth-token",
                     "secret-token",
                     "--name-prefix",
@@ -91,7 +91,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
         self.assertEqual([call["cmd"][1] for call in calls], ["plan", "apply", "output"])
         self.assertTrue(all("secret-token" not in " ".join(call["cmd"]) for call in calls))
         self.assertEqual(calls[0]["env"]["TF_VAR_signalfx_auth_token"], "secret-token")
-        self.assertEqual(calls[0]["env"]["TF_VAR_signalfx_api_url"], "https://api.us1.signalfx.com")
+        self.assertEqual(calls[0]["env"]["TF_VAR_signalfx_api_url"], "https://api.realm.signalfx.com")
         self.assertEqual(calls[0]["env"]["TF_VAR_name_prefix"], "Smoke")
         self.assertEqual(calls[0]["env"]["TF_VAR_create_detectors"], "false")
         self.assertEqual(calls[0]["env"]["TF_VAR_detectors_disabled"], "true")
@@ -119,7 +119,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                 [
                     "plan",
                     "--api-url",
-                    "https://api.us1.signalfx.com",
+                    "https://api.realm.signalfx.com",
                     "--auth-token",
                     "secret-token",
                     "--work-dir",
@@ -143,7 +143,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                 [
                     "plan",
                     "--api-url",
-                    "https://api.us1.signalfx.com",
+                    "https://api.realm.signalfx.com",
                     "--work-dir",
                     str(Path(td) / "tf-work"),
                 ],
@@ -154,16 +154,16 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
 
     def test_api_url_derives_from_ingest_realm(self) -> None:
         self.assertEqual(
-            _api_url_from_ingest_endpoint("https://ingest.us1.observability.splunkcloud.com/v1/metrics"),
-            "https://api.us1.signalfx.com",
+            _api_url_from_ingest_endpoint("https://ingest.realm.observability.splunkcloud.com/v1/metrics"),
+            "https://api.realm.signalfx.com",
         )
         self.assertEqual(
-            _api_url_from_ingest_endpoint("ingest.eu0.signalfx.com:443"),
-            "https://api.eu0.signalfx.com",
+            _api_url_from_ingest_endpoint("ingest.realm2.signalfx.com:443"),
+            "https://api.realm2.signalfx.com",
         )
         self.assertEqual(
-            _api_url_from_ingest_endpoint("https://api.us1.signalfx.com"),
-            "https://api.us1.signalfx.com",
+            _api_url_from_ingest_endpoint("https://api.realm.signalfx.com"),
+            "https://api.realm.signalfx.com",
         )
 
 
