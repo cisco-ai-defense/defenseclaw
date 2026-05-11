@@ -132,6 +132,11 @@ var genericHookScripts = []string{
 var connectorHookScripts = map[string][]string{
 	"claudecode": {"claude-code-hook.sh"},
 	"codex":      {"codex-hook.sh"},
+	"copilot":    {"copilot-hook.sh"},
+	"cursor":     {"cursor-hook.sh"},
+	"geminicli":  {"geminicli-hook.sh"},
+	"hermes":     {"hermes-hook.sh"},
+	"windsurf":   {"windsurf-hook.sh"},
 }
 
 // hookScripts returns the full list of hook scripts (generic + all
@@ -290,8 +295,7 @@ func writeHookHelpers(hookDir string) error {
 //   - inspect-request.sh       (pre-request)
 //   - inspect-response.sh      (post-response)
 //   - inspect-tool-response.sh (post-tool)
-//   - claude-code-hook.sh      (Claude Code lifecycle events)
-//   - codex-hook.sh            (Codex lifecycle events)
+//   - connector-specific lifecycle hooks listed in connectorHookScripts
 //
 // Plan B4: the shared _hardening.sh helper is also written so each
 // hook can `source` it at runtime to pick up the rlimit + env
@@ -450,6 +454,10 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     "closed" too. This only fires when the operator never made
 //     an explicit choice.
 //  3. Otherwise: defaultHookFailMode ("open").
+//  4. Hook-only connectors may use explicit "closed" only when their
+//     documented hook surface supports fail-closed behavior. Unsupported
+//     connectors stay fail-open and rely on their config writer to omit
+//     vendor fail-closed fields.
 //
 // Transport-layer failures (gateway unreachable / 5xx) are NOT
 // governed by FailMode — they always allow unless the operator opts
@@ -479,6 +487,12 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 			if opts.ClaudeCodeEnforcement {
 				failMode = "closed"
 			}
+		}
+	}
+	if hp, ok := c.(HookCapabilityProvider); ok {
+		caps := hp.HookCapabilities(opts)
+		if failMode == "closed" && !caps.SupportsFailClosed {
+			failMode = "open"
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)

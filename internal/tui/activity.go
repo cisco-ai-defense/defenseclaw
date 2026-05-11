@@ -34,6 +34,8 @@ type activityEntry struct {
 	Duration  time.Duration
 	Done      bool
 	Expanded  bool
+	Meta      CommandResultMeta
+	Cancelled bool
 }
 
 const (
@@ -92,10 +94,19 @@ func (p *ActivityPanel) SetTab(tab int) {
 
 // AddEntry adds a new running command entry and enters terminal mode.
 func (p *ActivityPanel) AddEntry(command string) {
+	p.AddEntryWithMeta(command, CommandResultMeta{})
+}
+
+func (p *ActivityPanel) AddEntryWithMeta(command string, meta CommandResultMeta) {
+	start := time.Now()
+	if !meta.StartedAt.IsZero() {
+		start = meta.StartedAt
+	}
 	p.entries = append(p.entries, activityEntry{
 		Command:   command,
-		StartTime: time.Now(),
+		StartTime: start,
 		Expanded:  true,
+		Meta:      meta,
 	})
 	p.cursor = len(p.entries) - 1
 	p.termMode = true
@@ -113,6 +124,10 @@ func (p *ActivityPanel) AppendOutput(line string) {
 
 // FinishEntry marks the current command as done.
 func (p *ActivityPanel) FinishEntry(exitCode int, duration time.Duration) {
+	p.FinishEntryWithMeta(exitCode, duration, CommandResultMeta{})
+}
+
+func (p *ActivityPanel) FinishEntryWithMeta(exitCode int, duration time.Duration, meta CommandResultMeta) {
 	if len(p.entries) == 0 {
 		return
 	}
@@ -120,6 +135,23 @@ func (p *ActivityPanel) FinishEntry(exitCode int, duration time.Duration) {
 	p.entries[idx].Done = true
 	p.entries[idx].ExitCode = exitCode
 	p.entries[idx].Duration = duration
+	p.entries[idx].Cancelled = meta.Cancelled
+	if meta.Origin != "" || len(meta.MaskedArgv) > 0 {
+		meta.ExitCode = exitCode
+		meta.Duration = duration
+		if meta.FinishedAt.IsZero() {
+			meta.FinishedAt = time.Now()
+		}
+		p.entries[idx].Meta = meta
+	}
+}
+
+func (p *ActivityPanel) UpdateLatestMeta(update func(*CommandResultMeta)) {
+	if len(p.entries) == 0 || update == nil {
+		return
+	}
+	idx := len(p.entries) - 1
+	update(&p.entries[idx].Meta)
 }
 
 // SetSize sets the panel dimensions.
@@ -258,7 +290,7 @@ func (p *ActivityPanel) View() string {
 	}
 
 	if len(p.entries) == 0 {
-		return tabBar + p.theme.Dimmed.Render("  No commands run yet. Press : or Ctrl+K to open the command palette.\n  Try: \"doctor\", \"status\", or \"scan skill --all\".")
+		return tabBar + p.theme.Dimmed.Render("  No commands run yet.\n  Next: press : and run doctor, readiness, or keys check.")
 	}
 
 	if p.termMode {
@@ -334,7 +366,9 @@ func (p *ActivityPanel) viewTerminal() string {
 	// Minimal header: command name + status
 	header := p.theme.CmdName.Render("$ " + entry.Command)
 	if entry.Done {
-		if entry.ExitCode == 0 {
+		if entry.Cancelled {
+			header += "  " + p.theme.ExitFail.Render(fmt.Sprintf("cancelled (%s)", entry.Duration.Round(time.Millisecond)))
+		} else if entry.ExitCode == 0 {
 			header += "  " + p.theme.ExitOK.Render(fmt.Sprintf("exit 0 (%s)", entry.Duration.Round(time.Millisecond)))
 		} else {
 			header += "  " + p.theme.ExitFail.Render(fmt.Sprintf("exit %d (%s)", entry.ExitCode, entry.Duration.Round(time.Millisecond)))
@@ -346,8 +380,12 @@ func (p *ActivityPanel) viewTerminal() string {
 	b.WriteString("\n")
 	b.WriteString(strings.Repeat("─", p.width))
 	b.WriteString("\n")
+	if card := p.resultCard(entry); card != "" {
+		b.WriteString(card)
+		b.WriteString("\n")
+	}
 
-	maxVisible := p.height - 4 // header + separator + hint + padding
+	maxVisible := p.height - 5 // header + separator + result/hint + padding
 	if maxVisible < 5 {
 		maxVisible = 5
 	}
@@ -461,7 +499,9 @@ func (p *ActivityPanel) formatEntryHeader(idx int, entry activityEntry) string {
 
 	status := ""
 	if entry.Done {
-		if entry.ExitCode == 0 {
+		if entry.Cancelled {
+			status = p.theme.ExitFail.Render(fmt.Sprintf("cancelled (%s)", entry.Duration.Round(time.Millisecond)))
+		} else if entry.ExitCode == 0 {
 			status = p.theme.ExitOK.Render(fmt.Sprintf("✓ exit 0 (%s)", entry.Duration.Round(time.Millisecond)))
 		} else {
 			status = p.theme.ExitFail.Render(fmt.Sprintf("✗ exit %d (%s)", entry.ExitCode, entry.Duration.Round(time.Millisecond)))
@@ -487,4 +527,44 @@ func (p *ActivityPanel) formatEntryHeader(idx int, entry activityEntry) string {
 	}
 
 	return fmt.Sprintf("%s%s %s %s  %s %s%s", sel, expandIcon, ts, cmd, status, "", outputCount)
+}
+
+func (p *ActivityPanel) resultCard(entry activityEntry) string {
+	meta := entry.Meta
+	if meta.Origin == "" && len(meta.MaskedArgv) == 0 && !entry.Done {
+		return ""
+	}
+	var parts []string
+	if meta.Origin != "" {
+		parts = append(parts, "origin="+meta.Origin)
+	}
+	if meta.Category != "" {
+		parts = append(parts, "category="+meta.Category)
+	}
+	if meta.Risk != "" {
+		parts = append(parts, "risk="+string(meta.Risk))
+	}
+	if entry.Done {
+		if meta.ConfigReloaded {
+			parts = append(parts, "config reloaded=yes")
+		}
+		if meta.RestartCompleted {
+			parts = append(parts, "restart completed=yes")
+		}
+		if meta.DoctorCacheRefreshed {
+			parts = append(parts, "doctor cache refreshed=yes")
+		}
+		if meta.SuggestedNextAction != "" {
+			parts = append(parts, "next="+meta.SuggestedNextAction)
+		}
+	} else {
+		parts = append(parts, "elapsed="+time.Since(entry.StartTime).Round(time.Second).String())
+	}
+	if len(meta.MaskedArgv) > 0 {
+		parts = append(parts, "argv="+strings.Join(meta.MaskedArgv, " "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return p.theme.Dimmed.Render("  Result: " + strings.Join(parts, "  "))
 }

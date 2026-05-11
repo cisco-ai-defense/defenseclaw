@@ -30,13 +30,37 @@ Use `<binary> --help` for any command.
 | `setup mcp-scanner` | Configure MCP scanner analyzers |
 | `setup gateway` | Configure gateway connection settings |
 | `setup guardrail` | Configure LLM guardrail (mode, model, port, API key) |
+| `setup codex` / `setup claude-code` | Configure observability-only connector aliases |
+| `setup hermes` / `setup cursor` / `setup windsurf` | Configure hook-first observability aliases |
+| `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
+
+### agent
+
+| Command | Description |
+|---------|-------------|
+| `agent discover [--refresh] [--json]` | Run local agent discovery and best-effort emit sanitized discovery telemetry |
+| `agent usage [--refresh] [--json] [--detail] [--state STATE] [--category CAT] [--product NAME] [--show-gone] [--limit N]` | Show continuous AI visibility inventory from the sidecar. The default view groups signals by `(state, category, product, vendor, detector)` so wide-net detectors (e.g. `package_dependency` rolling up every `package.json`/`pyproject.toml`/`requirements.txt`) collapse into a single row with a count and sample basenames. `--detail` falls back to the per-signal view (with two-axis confidence and rich evidence columns when the gateway has them); `--state`/`--category`/`--product` filter the table; `gone` signals are hidden by default unless `--show-gone` (or `--state gone`) is passed; `--json` is the unfiltered raw payload for tooling. |
+| `agent processes [--refresh] [--json] [--limit N]` | List AI processes the sidecar currently observes (PID, PPID, user, uptime, comm, vendor/product). Sourced from the `runtime` block on each process-detector signal. |
+| `agent components [--refresh] [--json] [--ecosystem ECO] [--name NEEDLE] [--min-identity 0..1] [--min-presence 0..1] [--limit N]` | Show the deduped AI components/SDK rollup (one row per `(ecosystem, name)`) with versions, install counts, two-axis confidence (identity + presence) and the detector set. `--min-identity`/`--min-presence` filter on the Bayesian engine output for fast triage. |
+| `agent components show NAME [--ecosystem ECO] [--json]` | Print every per-install location for one component: detector, state, workspace hash, basename, evidence quality, match kind, last-seen. Raw paths only surface when both `privacy.disable_redaction=true` and `ai_discovery.store_raw_local_paths=true`. |
+| `agent components history NAME [--ecosystem ECO] [--limit N] [--json]` | Print the confidence trend (most-recent-first) for one component, sourced from the SQLite `ai_confidence_snapshots` history. |
+| `agent confidence explain NAME [--ecosystem ECO] [--json]` | Print the per-evidence factor breakdown the engine used to compute identity + presence: detector, evidence id, match kind, quality, specificity/recency, likelihood ratio, log-odds delta, and the percentage-point shift each factor contributed. |
+| `agent confidence policy show [--source merged\|default] [--json]` | Print the active confidence policy YAML. `merged` (default) is what the engine actually loaded; `default` is the embedded baseline so you can diff against your override. |
+| `agent confidence policy default [--json]` | Print the embedded default policy — typically piped to `~/.defenseclaw/confidence_policy.yaml` as a starting point for an override. |
+| `agent confidence policy validate PATH [--json]` | Dry-run a candidate policy file against the sidecar's loader + validator. Exits non-zero on failure with the same diagnostic the loader would print at boot. |
+| `agent discovery enable [--mode] [--scan-roots] [--scan-interval-min N] [--process-interval-s N] [--max-files-per-scan N] [--max-file-bytes N] [--include-shell-history/--no-include-shell-history] [--include-package-manifests/--no-...] [--include-env-var-names/--no-...] [--include-network-domains/--no-...] [--emit-otel/--no-emit-otel] [--allow-workspace-signatures/--no-...] [--store-raw-local-paths/--no-...] [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Flip `ai_discovery.enabled=true`, save config, bounce the gateway, and trigger a first scan in one step. Re-running on an already-enabled install with new tuning flags applies the diff and bounces the sidecar (audit logs as `ai_discovery-update`). |
+| `agent discovery disable [--restart/--no-restart] [--yes]` | Flip `ai_discovery.enabled=false`, save config, and bounce the gateway so the service stops |
+| `agent discovery setup [--restart/--no-restart] [--scan/--no-scan] [--yes]` | Walk an interactive wizard for every `ai_discovery.*` knob (mode, scan/process intervals, scan roots, file caps, detection sources, OTel, signature/path privacy). Each prompt defaults to the current config value so pressing Enter on every step is a no-op. |
+| `agent discovery status [--json]` | Show on-disk + live AI discovery state and warn on drift between the two |
+| `agent discovery scan [--json]` | Trigger one immediate AI discovery scan via the sidecar (`POST /api/v1/ai-usage/scan`) and render a one-line summary. Returns an actionable error when the sidecar is disabled (HTTP 503) pointing at `agent discovery enable`. |
+| `agent signatures list \| validate \| install \| disable \| enable` | Manage AI discovery signature packs |
 
 ### skill
 
 | Command | Description |
 |---------|-------------|
-| `skill list` | List all OpenClaw skills with scan severity and enforcement status |
+| `skill list` | List active agent skills with scan severity and enforcement status |
 | `skill scan <target>` | Scan a skill by name, path, or `all` for all configured skills |
 | `skill install <name>` | Install via clawhub, scan, enforce block/allow list |
 | `skill info <name>` | Show detailed skill metadata, scan results, and enforcement actions |
@@ -64,6 +88,31 @@ Use `<binary> --help` for any command.
 | `plugin scan <name-or-path>` | Scan a plugin for security issues |
 | `plugin install <name-or-path>` | Install a plugin from a local path |
 | `plugin remove <name>` | Remove an installed plugin |
+
+### registry
+
+External skill / MCP catalog ingestion. See
+[`docs/REGISTRIES.md`](./REGISTRIES.md) for the full pipeline.
+
+| Command | Description |
+|---------|-------------|
+| `registry add <id>` | Register a new external catalog source (clawhub, smithery, skills_sh, http_yaml, http_json, git, file) |
+| `registry edit <id>` | Update an existing source (only the flags you pass are changed) |
+| `registry list` | List configured registry sources with cached `total (clean/warning/blocked)` entry counts |
+| `registry show <id>` | Pretty-print one source plus its verdict summary |
+| `registry remove <id>` | Delete a source and its on-disk cache |
+| `registry test <id>` | Dry-run fetch + parse — no cache or asset_policy writes |
+| `registry sync [<id>...] [--all]` | Fetch + scan + auto-promote clean entries into `asset_policy.{skill,mcp}.registry` |
+| `registry entries <id> [--approved\|--rejected]` | Show cached entries (after sync); operator-override filters |
+| `registry approve <id> <name> --type {skill\|mcp}` | Manually approve an entry |
+| `registry reject <id> <name> --type {skill\|mcp}` | Manually reject an entry (sets status to `blocked`) |
+| `registry require --type <t> --enabled/--disabled` | Toggle `asset_policy.<t>.registry_required` |
+| `registry wizard` | Interactive add+sync convenience flow |
+| `setup registry` | Wrapper for `registry wizard` so it shows up in `setup --help` |
+
+All `registry` subcommands accept `--non-interactive` (skip prompts;
+required flags must be present) and `--json` (stable machine-readable
+output) so they're safe to call from the TUI and CI/CD pipelines.
 
 ### tool
 
@@ -107,7 +156,9 @@ at the matching profile. See
 
 | Command | Description |
 |---------|-------------|
-| `codeguard install-skill` | Install the CodeGuard skill into the OpenClaw workspace |
+| `codeguard status --connector <name> --target skill\|rule` | Inspect optional native CodeGuard assets |
+| `codeguard install --connector <name> --target skill\|rule [--replace]` | Explicitly install a CodeGuard skill/rule asset |
+| `codeguard install-skill` | Backward-compatible alias for `codeguard install --target skill` |
 
 ### upgrade
 

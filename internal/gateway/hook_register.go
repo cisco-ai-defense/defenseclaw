@@ -38,4 +38,10 @@ func init() {
 	registerHookHandler("codex", func(a *APIServer) http.HandlerFunc {
 		return a.handleCodexHook
 	})
+	for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot"} {
+		connectorName := name
+		registerHookHandler(connectorName, func(a *APIServer) http.HandlerFunc {
+			return a.handleAgentHook(connectorName)
+		})
+	}
 }

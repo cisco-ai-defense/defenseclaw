@@ -48,6 +48,52 @@ processors:
       - key: audit.details
         action: delete
 
+  # Loki-only payload cap. Applied AFTER attributes/strip-bodies in the
+  # logs pipeline, BEFORE the otlphttp/loki exporter. Tempo/Prometheus
+  # and any per-sink OTLP audit exporter (configured in
+  # internal/audit/sinks/otlp_logs.go on the sidecar side) deliberately
+  # do NOT include this processor — they receive the full payload so
+  # forensic tooling and a downstream SIEM keep full fidelity.
+  #
+  # Why this exists:
+  #   When `privacy.disable_redaction=true` is set on the sidecar, the
+  #   gateway/audit log records carry raw prompts, raw model responses,
+  #   judge bodies, and full request/response HTTP payloads. A single
+  #   long file pasted into a chat completion can produce a >500 KiB
+  #   body and >64 KiB of OTel attributes, which trips Loki's
+  #   `max_line_size` (default 256 KiB) and
+  #   `max_structured_metadata_size` (default 64 KiB) limits and the
+  #   entry is silently dropped — breaking audit fidelity.
+  #
+  # What it does:
+  #   1. Drops the largest free-form attributes wholesale. They live in
+  #      the SQLite audit DB and (optionally) a SIEM via the audit
+  #      OTLP-logs sink, which is the right destination for
+  #      forensic-scale payloads.
+  #   2. Truncates every remaining string-valued attribute to 8 KiB so
+  #      no single attribute alone can blow the 256 KiB structured
+  #      metadata ceiling, even with hundreds of attributes.
+  #   3. Caps the log body at 200 KiB so it stays well under Loki's
+  #      raised 1 MiB max_line_size limit.
+  #
+  # Loki's `max_line_size_truncate: true` is the safety net for any
+  # value that escapes these caps; the alert
+  # `DefenseClawLokiIngestOverflow` (prometheus/rules/alerts.yml) makes
+  # those escapes observable.
+  transform/loki-payload-cap:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - delete_key(attributes, "audit.details")
+          - delete_key(attributes, "defenseclaw.judge.raw_response")
+          - delete_key(attributes, "defenseclaw.llm.raw_request_body")
+          - delete_key(attributes, "defenseclaw.llm.raw_response_body")
+          - delete_key(attributes, "gen_ai.prompt")
+          - delete_key(attributes, "gen_ai.completion")
+          - truncate_all(attributes, 8192)
+          - set(body, Substring(body, 0, 200000)) where IsString(body) and Len(body) > 200000
+
 exporters:
   # Traces -> Tempo.
   otlp/tempo:
@@ -110,5 +156,5 @@ service:
       exporters: [prometheusremotewrite/prometheus, prometheus, debug]
     logs:
       receivers: [otlp]
-      processors: [resource, attributes/strip-bodies, batch]
+      processors: [resource, attributes/strip-bodies, transform/loki-payload-cap, batch]
       exporters: [otlphttp/loki, debug]

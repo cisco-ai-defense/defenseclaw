@@ -1,0 +1,185 @@
+{
+  "_source": "Hand-curated from internal/gateway/connector/{hook_only,claudecode,codex,openclaw,zeptoclaw}.go and cli/defenseclaw/commands/cmd_setup.py (_CONNECTOR_META, _hilt_support_note). Re-extract on every connector change.",
+  "_lastVerified": "2026-05-08",
+  "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
+  "connectors": [
+    {
+      "id": "claudecode",
+      "label": "Claude Code",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["PreToolUse"],
+        "blockEvents": ["PreToolUse", "PostToolUse", "UserPromptSubmit", "Stop", "PermissionRequest"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Claude Code supports native PreToolUse ask prompts. CRITICAL findings still block; HIGH findings can pause for approval.",
+      "notes": "Enforcement gated behind guardrail.claudecode_enforcement_enabled. Observability runs end-to-end without enforcement."
+    },
+    {
+      "id": "codex",
+      "label": "Codex",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop", "SessionStart"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Codex has no native ask surface here; confirm verdicts are downgraded with raw_action preserved. HITL routes through TUI / OpenClaw plugin.",
+      "notes": "Three telemetry channels at boot: hooks, native OTel, and the notify bridge for agent-turn-complete events. Enforcement gated behind guardrail.codex_enforcement_enabled."
+    },
+    {
+      "id": "openclaw",
+      "label": "OpenClaw",
+      "family": "proxy",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["before_tool_call"],
+        "blockEvents": ["before_tool_call", "fetch_request", "fetch_response"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "OpenClaw supports DefenseClaw approval prompts for tool actions. Approvals reach chat-origin sessions via the bundled plugin.",
+      "notes": "Reference proxy connector — full data-path interception, sandbox enforcement, plugin-mediated HITL."
+    },
+    {
+      "id": "cursor",
+      "label": "Cursor",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["beforeShellExecution", "beforeMCPExecution"],
+        "blockEvents": [
+          "preToolUse",
+          "beforeShellExecution",
+          "beforeMCPExecution",
+          "beforeReadFile",
+          "beforeTabFileRead",
+          "beforeSubmitPrompt",
+          "stop"
+        ],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Cursor supports native ask only on documented ask-capable hook events (beforeShellExecution, beforeMCPExecution).",
+      "notes": "hooks.json under ~/.cursor; MCP / skills / rules surfaces are workspace-scoped."
+    },
+    {
+      "id": "hermes",
+      "label": "Hermes",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["pre_tool_call"],
+        "supportsFailClosed": false,
+        "scope": "user"
+      },
+      "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
+      "notes": "Hooks live in ~/.hermes/config.yaml. Discovery surfaces for MCP, skills, plugins."
+    },
+    {
+      "id": "geminicli",
+      "label": "Gemini CLI",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["BeforeAgent", "BeforeModel", "BeforeTool", "AfterTool", "AfterAgent"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
+      "notes": "settings.json hooks; native OTLP exporter wires directly to the gateway."
+    },
+    {
+      "id": "copilot",
+      "label": "GitHub Copilot CLI",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["preToolUse", "PreToolUse"],
+        "blockEvents": [
+          "preToolUse",
+          "PreToolUse",
+          "permissionRequest",
+          "PermissionRequest",
+          "agentStop",
+          "Stop",
+          "subagentStop",
+          "SubagentStop",
+          "postToolUseFailure",
+          "PostToolUseFailure"
+        ],
+        "supportsFailClosed": false,
+        "scope": "workspace"
+      },
+      "hilt": "Copilot CLI supports native ask on documented preToolUse hooks.",
+      "notes": "Workspace-scoped hooks under <workspace>/.github/hooks/."
+    },
+    {
+      "id": "windsurf",
+      "label": "Windsurf",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": [
+          "pre_user_prompt",
+          "pre_read_code",
+          "pre_write_code",
+          "pre_run_command",
+          "pre_mcp_tool_use"
+        ],
+        "supportsFailClosed": false,
+        "scope": "user"
+      },
+      "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
+      "notes": "Cascade hooks under ~/.codeium/windsurf/hooks.json. Existing MCP/rules discovered, never auto-created."
+    },
+    {
+      "id": "zeptoclaw",
+      "label": "ZeptoClaw",
+      "family": "proxy",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "sandbox",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["fetch_request", "fetch_response", "tool_call"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "ZeptoClaw has no native ask surface; confirm verdicts are downgraded with raw_action preserved so operators can review in TUI/audit.",
+      "notes": "api_base redirect into the DefenseClaw proxy plus response-scan."
+    }
+  ]
+}

@@ -1,0 +1,124 @@
+---
+title: Environment variables
+description: Every environment variable DefenseClaw reads, grouped by category, with defaults and the file:line that consumes each one.
+keywords:
+  - DefenseClaw env vars
+  - DEFENSECLAW_LLM_KEY
+  - DEFENSECLAW_HOME
+  - DEFENSECLAW_STRICT_AVAILABILITY
+  - DEFENSECLAW_FAIL_MODE
+  - DEFENSECLAW_DISABLE_REDACTION
+  - DEFENSECLAW_REVEAL_PII
+  - OTEL_EXPORTER_OTLP_ENDPOINT
+  - DefenseClaw configuration
+---
+
+This is the canonical list of environment variables DefenseClaw reads. The CLI and gateway never silently consume an env var that is not on this page — when you find one in the source, file a doc bug.
+
+<Callout title="Two ways to set env vars">
+Most operators want the persistent path: `defenseclaw keys set <ENV>` writes to `~/.defenseclaw/.env`, which the CLI loads on every invocation. For one-shot debugging, plain `export` in the shell wins (see [Reference → Keys](/docs/reference/keys) for the resolution order).
+</Callout>
+
+## Authentication & secrets
+
+| Env var | Default | What it controls | Where read |
+| --- | --- | --- | --- |
+| `DEFENSECLAW_LLM_KEY` | unset | The single canonical LLM key. Used by the gateway upstream, judge, and scanners. | `cli/defenseclaw/credentials.py` |
+| `OPENCLAW_GATEWAY_TOKEN` | auto-detected | Auth token the gateway uses to talk to OpenClaw. Auto-detected from `~/.openclaw/openclaw.json` when present. | `cli/defenseclaw/credentials.py` |
+| `CISCO_AI_DEFENSE_API_KEY` | unset | API key for the Cisco AI Defense remote scanner (`scanner_mode=remote\|both`). | `cli/defenseclaw/credentials.py` |
+| `JUDGE_API_KEY` | unset | Custom LLM judge key — only consulted when `guardrail.judge.llm.api_key_env` overrides the default. | `cli/defenseclaw/credentials.py` |
+| `VIRUSTOTAL_API_KEY` | unset | VirusTotal API key for the skill scanner (`use_virustotal=true`). | `cli/defenseclaw/credentials.py` |
+| `SPLUNK_ACCESS_TOKEN` | unset | Splunk HEC token for audit forwarding. | `cli/defenseclaw/credentials.py` |
+| `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | unset | Custom skill-scanner LLM key (overrides `DEFENSECLAW_LLM_KEY` for that scanner). | `cli/defenseclaw/credentials.py` |
+| `DEFENSECLAW_GATEWAY_TOKEN` | unset | Bearer token the agent hooks send to the gateway. Read by every hook script. | `internal/gateway/connector/hooks/*-hook.sh` |
+| `DEFENSECLAW_SPLUNK_HEC_TOKEN` | unset | Alternative Splunk HEC env var consulted by the Python sink wiring. | `cli/defenseclaw/commands/cmd_setup.py` |
+| `<TokenEnv>` (per-webhook) | per-webhook config | Each webhook's `secret_env` field names an env var holding its bot token / routing key / HMAC secret. | `internal/gateway/webhook.go` |
+| `<AuthEnv>` (per-registry) | per-source config | Each registry source's `auth_env` field names an env var holding a bearer token. | `cli/defenseclaw/commands/cmd_registry.py` |
+
+See [Reference → Keys](/docs/reference/keys) for the full credential registry, requirement classification, and resolution order.
+
+## Behaviour switches
+
+| Env var | Default | What it controls | Where read |
+| --- | --- | --- | --- |
+| `DEFENSECLAW_STRICT_AVAILABILITY` | `0` | When `1`, transport-layer hook failures (gateway unreachable / 5xx) **block** the tool. Default behaviour is fail-open on transport. | `internal/gateway/connector/hooks/_hardening.sh::defenseclaw_should_fail_closed_on_unreachable` |
+| `DEFENSECLAW_FAIL_MODE` | (use `guardrail.hook_fail_mode`) | Per-shell override for response-layer fail mode. `open` or `closed`. | `internal/gateway/connector/hooks/claude-code-hook.sh:29`, mirrored in every `*-hook.sh`. |
+| `DEFENSECLAW_DISABLE_REDACTION` | `0` | When `1`, **all sinks** (audit DB, OTel logs, webhooks, Splunk HEC, gateway log) emit raw values. The strongest opt-out. | `internal/redaction/redaction.go::DisableAll` |
+| `DEFENSECLAW_REVEAL_PII` | `0` | When `1`, operator-facing logs only (stderr / TUI Logs panel) emit raw values. Persistent sinks STILL redact. | `internal/redaction/redaction.go::Reveal` |
+| `DEFENSECLAW_DEBUG` | `0` | When `1`, the gateway client logs every request/response. Verbose; useful in dev. | `internal/gateway/client.go` |
+| `DEFENSECLAW_WEBHOOK_DEBUG` | `0` | When `1`, the webhook dispatcher logs URL, headers, payload size, response. | `internal/gateway/webhook.go` |
+| `DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST` | `0` | When `1`, the SSRF guard permits RFC1918 / localhost destinations. Disable in prod. | `internal/gateway/webhook.go`, `cli/defenseclaw/webhooks/writer.py` |
+| `DEFENSECLAW_PERSIST_JUDGE` | `0` | When `1`, the gateway persists every LLM judge body to disk (large; debug only). | `internal/gateway/sidecar.go:134` |
+| `DEFENSECLAW_JSONL_DISABLE` | `0` | When `1`, the gateway stops writing `~/.defenseclaw/gateway.jsonl`. The audit DB and other sinks continue. | `internal/gateway/sidecar.go::jsonlKillSwitchEnabled` |
+| `DEFENSECLAW_SCHEMA_VALIDATION` | `1` | When `0`, the gateway skips JSON-schema validation on inbound hook payloads. Almost never the right answer. | `internal/gateway/sidecar.go:243` |
+| `DEFENSECLAW_JUDGE_TRACE` | `0` | When `1`, the LLM judge logs every prompt + response pair. Verbose. | `internal/gateway/llm_judge.go:62` |
+| `DEFENSECLAW_LLM_DEBUG` | `0` | When non-empty, the Python LLM client logs every request/response. | `cli/defenseclaw/llm.py:110` |
+| `DEFENSECLAW_SIDECAR_DIAG` | `0` | When `1`, the sidecar emits extra diagnostic logging during boot. | `internal/cli/sidecar.go:212` |
+| `DEFENSECLAW_DEV` / `DEFENSECLAW_TEST` | `0` | Disable redaction of credential placeholders in the dev/test code paths. Internal only. | `internal/redaction/credentials.go:173` |
+
+The first two rows are the most-asked: see [Reference → Fail modes](/docs/reference/fail-modes) for the full disambiguation. The next two are documented end-to-end on [Reference → Redaction](/docs/reference/redaction).
+
+## Paths
+
+| Env var | Default | What it controls | Where read |
+| --- | --- | --- | --- |
+| `DEFENSECLAW_HOME` | `~/.defenseclaw` | Override the data directory. Affects `config.yaml`, `.env`, `audit.db`, `gateway.jsonl`, hook scripts, registries cache. | `internal/config/defaults.go:62`, `cli/defenseclaw/config.py:98` |
+| `DEFENSECLAW_GATEWAY_BIN` | `defenseclaw-gateway` (PATH lookup) | Path to the Go gateway binary. Useful when running a development build. | `cli/defenseclaw/gateway.py:315` |
+| `DEFENSECLAW_BIN` | (PATH lookup) | Path to the `defenseclaw` CLI binary, consulted by tests and shell-out helpers. | `internal/scanner/plugin_test.go:177` |
+| `DEFENSECLAW_OVERLAY_ROOT` | unset | Extra directory the provider catalog overlay reads at setup time. | `cli/defenseclaw/commands/cmd_setup_provider.py:115` |
+| `DEFENSECLAW_API_ADDR` | per-config (`gateway.host:api_port`) | Hook scripts dial this for the REST sidecar. Templated into every `*-hook.sh`. | `internal/gateway/connector/hooks/*-hook.sh` |
+| `DEFENSECLAW_CUSTOM_PROVIDERS_PATH` | unset | Path to a custom providers YAML the embedded loader reads. | `internal/configs/embed.go:71` |
+
+## Telemetry
+
+| Env var | Default | What it controls | Where read |
+| --- | --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | (per-config / unset) | OTLP collector endpoint. The gateway, scanner, and CLI all honor the standard OTel env. | OTel SDK (across the codebase) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | `grpc` or `http/protobuf`. | OTel SDK |
+| `OTEL_EXPORTER_OTLP_HEADERS` | unset | Extra headers (e.g., a vendor auth token) attached to every export. | OTel SDK |
+| `OTEL_SERVICE_NAME` | `defenseclaw-gateway` (sidecar) / `defenseclaw` (CLI) | Service name resource attribute on every span. | OTel SDK |
+| `DEFENSECLAW_RUN_ID` | (auto-generated) | Stable run-id stamped onto every event so you can correlate a single TUI session, scan, or guardrail run across sinks. | `internal/gateway/sidecar.go:114`, `internal/audit/store.go:2390`, `internal/gatewaylog/runid.go:58`, `cli/defenseclaw/logger.py:172`, `cli/defenseclaw/db.py:739` |
+
+## Discovery & upgrade
+
+| Env var | Default | What it controls | Where read |
+| --- | --- | --- | --- |
+| `DEFENSECLAW_TRUSTED_BIN_PREFIXES` | (built-in safe list) | Colon-separated extra prefixes the AI Discovery agent treats as trusted binaries. | `cli/defenseclaw/inventory/agent_discovery.py:233` |
+| `DEFENSECLAW_ANTHROPIC_PROBE_MODEL` | (built-in default) | Override the model the doctor uses to probe Anthropic credentials. Internal / triage. | `cli/defenseclaw/commands/cmd_doctor.py:659` |
+| `GITHUB_TOKEN` / `GH_TOKEN` | unset | Used by the upgrade flow for higher GitHub API rate limits. Optional. | (gh-style fallbacks across the upgrade helpers) |
+
+## Connector-specific
+
+| Env var | Default | What it controls | Where read |
+| --- | --- | --- | --- |
+| `DEFENSECLAW_HOOK_CONNECTOR` | (set by the hook itself) | Connector name the hook script identifies as. Internal — read by `_hardening.sh` for log lines. | `internal/gateway/connector/hooks/*-hook.sh` |
+| `DEFENSECLAW_HOOK_NAME` | (set by the hook itself) | Hook-name pair (e.g. `claude-code-hook`). Internal. | `internal/gateway/connector/hooks/*-hook.sh` |
+| `DEFENSECLAW_PROXY_TOKEN` / `LITELLM_MASTER_KEY` | unset | Test harness token for the proxy sandbox in `scripts/test-proxy-sandbox.py`. Not for production. | `scripts/test-proxy-sandbox.py:940` |
+| `DEFENSECLAW_SIDECAR_URL` | `http://127.0.0.1:18790` | URL the bundled CodeGuard skill dials. | `skills/codeguard/main.py:35` |
+
+## Standard env vars DefenseClaw respects (not consumed directly)
+
+| Env var | What DefenseClaw does with it |
+| --- | --- |
+| `HOME` | Default `DEFENSECLAW_HOME` derives from `$HOME/.defenseclaw`. |
+| `PATH` | Used to resolve `defenseclaw-gateway` and the agent connector binaries. Hardened in hook scripts (see `_hardening.sh::defenseclaw_harden_env`). |
+| `NO_COLOR` | The CLI drops ANSI when set, except for the high-severity redaction-off warning (which honours TTY only — see `cli/defenseclaw/config.py::_warn_disable_redaction_config`). |
+| `OPENCLAW_*` | Read by OpenClaw itself; DefenseClaw inspects only the gateway token. |
+
+## When in doubt
+
+Run `defenseclaw doctor`. The doctor walks the same env-var resolution code paths as the running gateway and surfaces the effective values. Pair with `defenseclaw keys list` for the credential view.
+
+```bash
+defenseclaw doctor
+defenseclaw keys list
+```
+
+## Reference
+
+- [`cli/defenseclaw/credentials.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/credentials.py) — credential registry.
+- [`internal/redaction/redaction.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/redaction/redaction.go) — `Reveal` / `DisableAll`.
+- [`internal/gateway/connector/hooks/_hardening.sh`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/hooks/_hardening.sh) — strict-availability behaviour.
+- [Reference → Keys](/docs/reference/keys)
+- [Reference → Redaction](/docs/reference/redaction)
+- [Reference → Fail modes](/docs/reference/fail-modes)

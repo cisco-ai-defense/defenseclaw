@@ -1,0 +1,42 @@
+---
+title: Disabling guardrail
+description: defenseclaw setup guardrail --disable rolls everything back. Connector hooks are removed (or restored from the byte-for-byte backup), the proxy stops, and the agent talks directly to its native upstream again.
+keywords:
+  - disable DefenseClaw guardrail
+  - DefenseClaw uninstall connector
+  - DefenseClaw teardown
+---
+
+```bash
+defenseclaw setup guardrail --disable
+```
+
+This is the safe rollback. It runs the active connector's `Teardown()`, removes DefenseClaw-owned hook entries (or restores agent files from the hash-checked backup), stops the guardrail proxy, and clears the `guardrail.enabled` flag in `~/.defenseclaw/config.yaml`.
+
+<Callout>
+`--disable` always restarts the gateway. Leaving the proxy running defeats the purpose of disabling.
+</Callout>
+
+## What it touches
+
+| Connector | Restored from backup | Surgically removed if file drifted |
+| --- | --- | --- |
+| Claude Code | `~/.claude/settings.json` (hooks + `OTEL_*` env) | DefenseClaw hook entries only |
+| Codex | `~/.codex/config.toml` (hooks, otel, notify) | DefenseClaw blocks only |
+| Cursor | `~/.cursor/hooks.json` | DefenseClaw hook entries only |
+| Windsurf | `~/.codeium/windsurf/hooks.json` | DefenseClaw hook entries only |
+| Gemini CLI | `~/.gemini/settings.json` | DefenseClaw hook entries + native OTLP block |
+| GitHub Copilot CLI | `<workspace>/.github/hooks/defenseclaw.json` | DefenseClaw hook entries |
+| Hermes | `~/.hermes/config.yaml` | DefenseClaw hook entries |
+| OpenClaw | `~/.openclaw/openclaw.json` | Plugin allow/load entries |
+| ZeptoClaw | `~/.zeptoclaw/config.json` (api_base, safety) | DefenseClaw rewrites |
+
+The audit DB and `~/.defenseclaw/` config are **not** removed. Use `defenseclaw uninstall` for the full reset.
+
+## Verify the rollback
+
+```bash
+defenseclaw doctor
+```
+
+`doctor` will confirm that no DefenseClaw hook scripts remain in the agent's config and that the gateway is offline (or running without the proxy listener bound).

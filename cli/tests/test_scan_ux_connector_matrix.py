@@ -62,9 +62,12 @@ from defenseclaw.models import Finding, ScanResult
 from tests.helpers import cleanup_app, make_app_context
 
 
-# Supported connector names — keep in lockstep with
-# ``Config.active_connector`` and ``cmd_doctor._CONNECTOR_LABELS``.
-SUPPORTED_CONNECTORS = ("openclaw", "codex", "claudecode", "zeptoclaw")
+# Supported connector names — keep in lockstep with connector_paths.KNOWN_CONNECTORS
+# and cmd_doctor._CONNECTOR_LABELS.
+SUPPORTED_CONNECTORS = (
+    "openclaw", "codex", "claudecode", "zeptoclaw",
+    "hermes", "cursor", "windsurf", "geminicli", "copilot",
+)
 
 
 class _MatrixBase(unittest.TestCase):

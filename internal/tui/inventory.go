@@ -61,17 +61,28 @@ type aibomInventory struct {
 	// claw_inventory.py (line ~103). Older CLIs may not populate
 	// it — the renderer falls back to ClawMode and to the panel's
 	// SetConnector value.
-	Connector string            `json:"connector,omitempty"`
-	Live      bool              `json:"live"`
-	Skills    []aibomSkill      `json:"skills"`
-	Plugins   []aibomPlugin     `json:"plugins"`
-	MCPs      []aibomMCP        `json:"mcp"`
-	Agents    []aibomAgent      `json:"agents"`
-	Tools     []aibomTool       `json:"tools"`
-	Models    []aibomModel      `json:"model_providers"`
-	Memory    []aibomMemory     `json:"memory"`
-	Errors    []json.RawMessage `json:"errors"`
-	Summary   aibomSummary      `json:"summary"`
+	Connector string `json:"connector,omitempty"`
+	// Polymorphic connector-specific paths (G3). Populated by
+	// claw_inventory._attach_connector_paths so the renderer can
+	// surface the right home / config / skill / plugin / mcp file
+	// locations for non-OpenClaw connectors instead of the legacy
+	// "~/.openclaw" fallback. Older CLIs ship empty values; the
+	// renderer falls back to OpenclawCfg / ClawHome in that case.
+	ConnectorHome        string            `json:"connector_home,omitempty"`
+	ConnectorConfigFiles []string          `json:"connector_config_files,omitempty"`
+	ConnectorSkillDirs   []string          `json:"connector_skill_dirs,omitempty"`
+	ConnectorPluginDirs  []string          `json:"connector_plugin_dirs,omitempty"`
+	ConnectorMCPFiles    []string          `json:"connector_mcp_files,omitempty"`
+	Live                 bool              `json:"live"`
+	Skills               []aibomSkill      `json:"skills"`
+	Plugins              []aibomPlugin     `json:"plugins"`
+	MCPs                 []aibomMCP        `json:"mcp"`
+	Agents               []aibomAgent      `json:"agents"`
+	Tools                []aibomTool       `json:"tools"`
+	Models               []aibomModel      `json:"model_providers"`
+	Memory               []aibomMemory     `json:"memory"`
+	Errors               []json.RawMessage `json:"errors"`
+	Summary              aibomSummary      `json:"summary"`
 }
 
 type aibomSkill struct {
@@ -921,7 +932,11 @@ func (p *InventoryPanel) renderSummary(width int) string {
 		sourceVal = fmt.Sprintf("%s (%s)", sourceVal, connectorName)
 	}
 	fmt.Fprintf(&b, "  %s  %s\n", dimLabel.Render("Source:"), sourceVal)
-	fmt.Fprintf(&b, "  %s  %s\n\n", dimLabel.Render("Home:"), inv.ClawHome)
+	homePath := inv.ConnectorHome
+	if homePath == "" {
+		homePath = inv.ClawHome
+	}
+	fmt.Fprintf(&b, "  %s  %s\n\n", dimLabel.Render("Home:"), homePath)
 
 	halfW := width/2 - 2
 	if halfW < 35 {
@@ -985,8 +1000,12 @@ func (p *InventoryPanel) renderSummary(width int) string {
 	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftBox, "  ", rightBox))
 
 	b.WriteString("\n\n")
+	configPath := inv.OpenclawCfg
+	if len(inv.ConnectorConfigFiles) > 0 && inv.ConnectorConfigFiles[0] != "" {
+		configPath = inv.ConnectorConfigFiles[0]
+	}
 	b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Render(
-		fmt.Sprintf("  Config: %s  │  Use Tab/← → to switch sub-tabs  │  Press \"r\" to reload", inv.OpenclawCfg)))
+		fmt.Sprintf("  Config: %s  │  Use Tab/← → to switch sub-tabs  │  Press \"r\" to reload", configPath)))
 
 	return b.String()
 }

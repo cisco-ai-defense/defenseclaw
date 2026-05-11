@@ -19,7 +19,7 @@
    - ``gateway-event-envelope.json`` declares the full provenance
      quartet and the v7 event_type enum (verdict / judge / lifecycle
      / error / diagnostic / scan / scan_finding / activity / egress
-     / LLM/tool telemetry events).
+     / LLM/tool telemetry events / AI discovery events).
 
 Run via ``make check-schemas``.
 """
@@ -38,20 +38,31 @@ EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",
     "llm_prompt", "llm_response", "tool_invocation",
+    "ai_discovery",
 }
 
 EXPECTED_PROVENANCE_FIELDS = {
     "schema_version", "content_hash", "generation", "binary_version",
 }
 
-# Connector names emitted by Connector.Name() in
-# internal/gateway/connector/{openclaw,zeptoclaw,claudecode,codex}.go.
+# Connector names emitted by Connector.Name() in internal/gateway/connector.
 # The empty string is a legal "no connector picked yet" placeholder
 # emitted by the gateway before `defenseclaw setup connector` has run.
-# These four names are the contract every downstream consumer
+# These names are the contract every downstream consumer
 # (Splunk APM dashboards, OTLP collector validation, audit drill-down)
 # pivots on; drift here is a multi-week diagnostic rabbit-hole.
-EXPECTED_CLAW_MODE_ENUM = {"openclaw", "zeptoclaw", "claudecode", "codex", ""}
+EXPECTED_CLAW_MODE_ENUM = {
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "",
+}
 
 
 def load_json(path: Path) -> dict:
@@ -147,6 +158,52 @@ def check_resource(doc: dict) -> bool:
     return True
 
 
+GATEWAYLOG_SCHEMA_DIR = ROOT / "internal" / "gatewaylog" / "schemas"
+
+
+def check_schema_mirrors() -> bool:
+    """Verify every schema present in both schemas/ and the
+    internal/gatewaylog/schemas/ mirror is byte-for-byte identical.
+
+    The Go code at gateway boot time ALWAYS reads the mirror under
+    internal/gatewaylog/schemas/ (via go:embed). The top-level
+    schemas/ directory is the source of truth for downstream
+    consumers (assert scripts, docs site, examples). Drift between
+    the two means the gateway is enforcing one contract while the
+    public-facing tooling believes another — which has caused real
+    incidents in the past. CI must catch the drift, not production.
+    """
+    if not GATEWAYLOG_SCHEMA_DIR.is_dir():
+        # Mirror not present yet (rare in CI, common in fresh checkouts
+        # after a clean clone). Treat as a soft warning rather than a
+        # hard failure so this script keeps working in those flows.
+        print(
+            "check_schemas: warning — internal/gatewaylog/schemas not present; skipping mirror check",
+            file=sys.stderr,
+        )
+        return True
+
+    ok = True
+    for mirror_path in sorted(GATEWAYLOG_SCHEMA_DIR.rglob("*.json")):
+        rel = mirror_path.relative_to(GATEWAYLOG_SCHEMA_DIR)
+        canonical_path = SCHEMA_DIR / rel
+        if not canonical_path.exists():
+            # Mirror has files the canonical dir doesn't — fine, it's
+            # allowed to ship internal-only schemas.
+            continue
+        canonical_bytes = canonical_path.read_bytes()
+        mirror_bytes = mirror_path.read_bytes()
+        if canonical_bytes != mirror_bytes:
+            print(
+                f"check_schemas: mirror drift between schemas/{rel} and internal/gatewaylog/schemas/{rel}",
+                file=sys.stderr,
+            )
+            ok = False
+        else:
+            print(f"check_schemas: mirror {rel} OK")
+    return ok
+
+
 def main() -> int:
     if not SCHEMA_DIR.is_dir():
         print(f"check_schemas: schema dir not found: {SCHEMA_DIR}", file=sys.stderr)
@@ -184,6 +241,9 @@ def main() -> int:
             ok = False
     else:
         print("check_schemas: schemas/otel/resource.schema.json missing", file=sys.stderr)
+        ok = False
+
+    if not check_schema_mirrors():
         ok = False
 
     return 0 if ok else 1

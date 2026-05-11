@@ -306,7 +306,12 @@ var providerHTTPClient = &http.Client{
 // ResolveAPIKey reads the API key from the named environment variable,
 // optionally loading a .env file first (for daemon contexts where the
 // user's shell env is not inherited).
+// Returns "" immediately when local key resolution has been disabled via
+// DisableLocalKeyResolution (enterprise credential-management mode).
 func ResolveAPIKey(envVar string, dotenvPath string) string {
+	if localKeyResolutionDisabled {
+		return ""
+	}
 	if v := os.Getenv(envVar); v != "" {
 		return v
 	}

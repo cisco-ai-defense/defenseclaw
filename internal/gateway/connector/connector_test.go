@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
@@ -263,7 +264,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -1785,7 +1786,7 @@ env_key = "OPENAI_API_KEY"
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all five Codex events and pointing at the generated
+// covering all six Codex events and pointing at the generated
 // codex-hook.sh. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
@@ -1813,9 +1814,9 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	raw, _ := os.ReadFile(configPath)
 	content := string(raw)
 
-	// The [hooks] table must be present with each of the five events
+	// The [hooks] table must be present with each of the six events
 	// listed as sub-tables.
-	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
+	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"} {
 		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
 			// Accept either dotted or nested rendering.
 			if !strings.Contains(content, evt) {
@@ -1839,12 +1840,45 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	if _, isTable := parsed["hooks"].(map[string]interface{}); !isTable {
 		t.Errorf("hooks key is not a table, got %T", parsed["hooks"])
 	}
+	hooks := parsed["hooks"].(map[string]interface{})
+	state, ok := hooks["state"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
+	}
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	for _, tc := range []struct {
+		eventType string
+		eventKey  string
+		matcher   string
+		timeout   int
+	}{
+		{"SessionStart", "session_start", "startup|resume|clear", 30},
+		{"UserPromptSubmit", "user_prompt_submit", "", 30},
+		{"PreToolUse", "pre_tool_use", "*", 30},
+		{"PermissionRequest", "permission_request", "*", 30},
+		{"PostToolUse", "post_tool_use", "*", 30},
+		{"Stop", "stop", "", 90},
+	} {
+		key := fmt.Sprintf("%s:%s:0:0", configPath, tc.eventKey)
+		entry, ok := state[key].(map[string]interface{})
+		if !ok {
+			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
+		}
+		gotHash, _ := entry["trusted_hash"].(string)
+		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookPath, tc.timeout)
+		if gotHash != wantHash {
+			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
+		}
+		if _, ok := entry["enabled"]; ok {
+			t.Errorf("trusted state for %s should not force enabled; got %v", tc.eventType, entry)
+		}
+	}
 }
 
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
 // regression test for the codex/claude-code observability-only
 // architecture. With CodexEnforcement=false (the default), Setup must
-// install the [hooks] table and features.codex_hooks=true (so the
+// install the [hooks] table and features.hooks=true (so the
 // codex-hook.sh script fires for tool-call telemetry) but must NOT:
 //   - rewrite cfg["openai_base_url"] to the proxy URL (codex talks
 //     directly to its native upstream — api.openai.com or
@@ -1948,8 +1982,11 @@ env_key = "OPENROUTER_API_KEY"
 		t.Error("hooks.PostToolUse missing — tool-result telemetry lost")
 	}
 	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["codex_hooks"].(bool); !v {
-		t.Errorf("features.codex_hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("features.hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("deprecated features.codex_hooks should be removed to avoid Codex startup warnings, got=%v", features)
 	}
 
 	// Subprocess sandbox JSON must NOT be created — that's
@@ -2032,11 +2069,12 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	// `otel.exporter`" at codex startup — a regression that would block
 	// the entire CLI from launching, not just OTel export. The value
 	// must match the kebab-case serde tag for OtelHttpProtocol::Json,
-	// and "json" specifically is required because the gateway's OTLP-HTTP
-	// receiver only accepts application/json bodies (415s protobuf).
+	// and "json" specifically keeps Codex telemetry on the gateway's
+	// stable receive path. The receiver can normalize protobuf too, but
+	// Codex requires this explicit field either way.
 	protocol, _ := otlphttp["protocol"].(string)
 	if protocol != "json" {
-		t.Errorf("otlp-http protocol = %q, want %q (codex requires this field; gateway only accepts application/json)",
+		t.Errorf("otlp-http protocol = %q, want %q (codex requires this explicit field)",
 			protocol, "json")
 	}
 	headers, _ := otlphttp["headers"].(map[string]interface{})
@@ -2221,7 +2259,7 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 }
 
 // TestCodex_Setup_EnablesHooksFeature confirms the connector writes
-// features.codex_hooks = true into config.toml. Without this, Codex
+// features.hooks = true into config.toml. Without this, Codex
 // ignores any registered hooks because the feature gate defaults to
 // off.
 func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
@@ -2239,9 +2277,167 @@ func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(configPath)
-	content := string(data)
-	if !strings.Contains(content, "codex_hooks") {
-		t.Errorf("config.toml missing codex_hooks feature flag\nfile:\n%s", content)
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+	features, _ := parsed["features"].(map[string]interface{})
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("config.toml missing hooks feature flag; features=%v\nfile:\n%s", features, data)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("config.toml still contains deprecated codex_hooks feature flag\nfile:\n%s", data)
+	}
+}
+
+func TestCodexCommandHookHashMatchesCodexCanonicalIdentity(t *testing.T) {
+	got := codexCommandHookHash("pre_tool_use", "*", "/tmp/hook.sh", 30)
+	want := "sha256:73ec4bb1ffa348f02fcca6c5c0725cc825ba47aa298a7e72eab4e47856cbadbc"
+	if got != want {
+		t.Fatalf("codexCommandHookHash = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	key := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	otherKey := codexHookStateKey(codexHookStateKeySource(configPath), "post_tool_use", 2, 0)
+
+	state := map[string]interface{}{
+		key: map[string]interface{}{
+			"trusted_hash": "sha256:user-replacement",
+		},
+		otherKey: map[string]interface{}{
+			"trusted_hash": "sha256:unrelated",
+		},
+	}
+	hooks := map[string]interface{}{"state": state}
+	if removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatalf("user replacement trust state was removed: %v", hooks)
+	}
+	if _, ok := state[key]; !ok {
+		t.Fatalf("user replacement trust entry missing: %v", state)
+	}
+
+	state[key] = map[string]interface{}{
+		"trusted_hash": codexCommandHookHash("pre_tool_use", "*", hookPath, 30),
+	}
+	if !removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatal("DefenseClaw-owned trust state was not removed")
+	}
+	if _, ok := state[key]; ok {
+		t.Fatalf("DefenseClaw-owned trust entry still present: %v", state)
+	}
+	if _, ok := state[otherKey]; !ok {
+		t.Fatalf("unrelated trust entry removed: %v", state)
+	}
+}
+
+// TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust is
+// the end-to-end pin for the "user replaced our hook script with their
+// own" workflow: after Setup, the operator may swap the hook command
+// out (or change the timeout/matcher) for any of the events. On
+// Teardown, DefenseClaw must NOT delete those entries because the
+// trusted_hash no longer matches what we wrote. Removing them would
+// silently re-prompt the user to trust their own hooks on next Codex
+// launch — a confusing security UX failure.
+func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "tok-test",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Operator simulates editing config.toml to register their own
+	// PreToolUse hook in place of (or alongside) ours. We model this
+	// by overwriting only the trust-state entry for that event. The
+	// real hook command stays whatever Setup wrote; what matters is
+	// that the trusted_hash diverges from codexCommandHookHash().
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after setup: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	hooks, _ := parsed["hooks"].(map[string]interface{})
+	if hooks == nil {
+		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
+	}
+	state, _ := hooks["state"].(map[string]interface{})
+	if state == nil {
+		t.Fatalf("hooks.state missing after Setup; cannot exercise user-modified branch")
+	}
+	preToolUseKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	if _, ok := state[preToolUseKey]; !ok {
+		t.Fatalf("expected DefenseClaw to install pre_tool_use trust entry at %q; state=%v", preToolUseKey, state)
+	}
+	state[preToolUseKey] = map[string]interface{}{
+		"trusted_hash": "sha256:user-replacement-do-not-touch",
+	}
+	rewritten, err := toml.Marshal(parsed)
+	if err != nil {
+		t.Fatalf("re-marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, rewritten, 0o600); err != nil {
+		t.Fatalf("write user-modified config: %v", err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+
+	postRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after teardown: %v", err)
+	}
+	var post map[string]interface{}
+	if err := toml.Unmarshal(postRaw, &post); err != nil {
+		t.Fatalf("unmarshal post-teardown config: %v", err)
+	}
+
+	postHooks, _ := post["hooks"].(map[string]interface{})
+	if postHooks == nil {
+		t.Fatalf("teardown deleted entire hooks block even though user edits remain:\n%s", postRaw)
+	}
+	postState, _ := postHooks["state"].(map[string]interface{})
+	if postState == nil {
+		t.Fatalf("teardown deleted hooks.state even though user edit at %q must be preserved", preToolUseKey)
+	}
+	entry, ok := postState[preToolUseKey].(map[string]interface{})
+	if !ok {
+		t.Fatalf("teardown removed user trust entry at %q; state=%v", preToolUseKey, postState)
+	}
+	if got, _ := entry["trusted_hash"].(string); got != "sha256:user-replacement-do-not-touch" {
+		t.Fatalf("teardown clobbered user trusted_hash: got=%q want=sha256:user-replacement-do-not-touch", got)
+	}
+
+	// Untouched DefenseClaw entries (other events) must be removed,
+	// since their trusted_hash still matches what we wrote — that's
+	// the recognition signal teardown relies on.
+	for _, eventKey := range []string{"session_start", "user_prompt_submit", "permission_request", "post_tool_use", "stop"} {
+		key := codexHookStateKey(codexHookStateKeySource(configPath), eventKey, 0, 0)
+		if _, present := postState[key]; present {
+			t.Errorf("teardown failed to remove DefenseClaw-owned trust entry for %s at %q", eventKey, key)
+		}
 	}
 }
 
@@ -2433,6 +2629,7 @@ func TestCodex_TeardownWithoutBackup_RemovesManagedConfig(t *testing.T) {
 		"codex-hook.sh",
 		"notify-bridge.sh",
 		"codex_hooks",
+		"trusted_hash",
 		"x-defenseclaw-token",
 		"x-defenseclaw-client",
 		"[otel]",
@@ -2457,7 +2654,7 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 		t.Fatalf("write hook: %v", err)
 	}
 	cfg := map[string]interface{}{
-		"hooks": buildCodexHooksTable(hookPath),
+		"hooks": buildCodexHooksTable(configPath, hookPath),
 		"otel":  buildCodexOtelBlock(SetupOpts{APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}),
 		"notify": []interface{}{
 			"bash",
@@ -3579,8 +3776,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 6 {
-		t.Errorf("HookScripts() returned %d scripts, want 6", len(scripts))
+	if len(scripts) != 11 {
+		t.Errorf("HookScripts() returned %d scripts, want 11", len(scripts))
 	}
 }
 
@@ -3935,8 +4132,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 4 {
-		t.Errorf("expected 4 built-in connectors, got %d", r.Len())
+	if r.Len() != 9 {
+		t.Errorf("expected 9 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -5501,6 +5698,11 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 		{"openclaw", func() Connector { return NewOpenClawConnector() }},
 		{"codex", func() Connector { return NewCodexConnector() }},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }},
+		{"hermes", func() Connector { return NewHermesConnector() }},
+		{"cursor", func() Connector { return NewCursorConnector() }},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }},
+		{"copilot", func() Connector { return NewCopilotConnector() }},
 	}
 
 	for _, c := range cases {
@@ -5551,6 +5753,11 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		ap, ok := conn.(AgentPathProvider)
@@ -5581,6 +5788,11 @@ func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		hsp, ok := conn.(HookScriptProvider)
@@ -5621,6 +5833,11 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		// settings.json hooks are sufficient for guardrail
 		// enforcement, so the var is recommended-not-required.
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []EnvScope{EnvScopeProcess}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []EnvScope{EnvScopeNone}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []EnvScope{EnvScopeNone}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []EnvScope{EnvScopeNone}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []EnvScope{EnvScopeNone}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
 	for _, c := range cases {
@@ -5675,6 +5892,11 @@ func TestConnector_ProviderProbe_AllBuiltinsImplement(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		if _, ok := conn.(ProviderProbe); !ok {
@@ -5813,6 +6035,11 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 	}{
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
 		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
 		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
 	}
@@ -5926,6 +6153,96 @@ func TestWriteHookScriptsForConnectorObject_HonoursInterface(t *testing.T) {
 		mustExist(t, filepath.Join(dir, "claude-code-hook.sh"))
 		mustNotExist(t, filepath.Join(dir, "codex-hook.sh"))
 	})
+}
+
+// TestHardening_SweepStaleHookDirs pins the L-3 fix: the v4
+// _hardening.sh helper sweeps orphaned hook-tmp.* directories under
+// DEFENSECLAW_HOME that the EXIT-trap cleanup couldn't remove (SIGKILL,
+// OOM, system reboot mid-hook, etc.). Without this sweep, every
+// fallback-path hook invocation (mktemp absent → uses
+// ${DEFENSECLAW_HOME}/hook-tmp.<PID>) on a long-running host
+// accumulates orphans forever.
+func TestHardening_SweepStaleHookDirs(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find not available")
+	}
+
+	// Materialize the embedded helper to disk so we can source it.
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	dcHome := filepath.Join(tmp, "dchome")
+	if err := os.MkdirAll(dcHome, 0o700); err != nil {
+		t.Fatalf("mkdir dchome: %v", err)
+	}
+
+	// Stale orphans (older than 60 minutes) — must be swept.
+	stale1 := filepath.Join(dcHome, "hook-tmp.11111")
+	stale2 := filepath.Join(dcHome, "hook-tmp.22222")
+	for _, p := range []string{stale1, stale2} {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		// Drop a tracer file so we can verify the directory is
+		// recursively removed, not just emptied.
+		if err := os.WriteFile(filepath.Join(p, "tracer.txt"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write tracer in %s: %v", p, err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	// Fresh hook-tmp dir (younger than 60 minutes) — must be preserved
+	// because the active hook could still be using it.
+	fresh := filepath.Join(dcHome, "hook-tmp.33333")
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatalf("mkdir fresh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fresh, "tracer.txt"), []byte("y"), 0o600); err != nil {
+		t.Fatalf("write fresh tracer: %v", err)
+	}
+
+	// Unrelated sibling (not matching hook-tmp.*) — must be preserved
+	// regardless of mtime, so that the sweep is conservative about
+	// clobbering operator state.
+	unrelated := filepath.Join(dcHome, "audit-snapshot")
+	if err := os.MkdirAll(unrelated, 0o700); err != nil {
+		t.Fatalf("mkdir unrelated: %v", err)
+	}
+	old := time.Now().Add(-7 * 24 * time.Hour)
+	if err := os.Chtimes(unrelated, old, old); err != nil {
+		t.Fatalf("chtimes unrelated: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", "set -e; source \"$0\"; _defenseclaw_sweep_stale_hook_dirs", helperPath)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+dcHome)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sweep failed: %v\n%s", err, out)
+	}
+
+	for _, p := range []string{stale1, stale2} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale dir %s still exists after sweep (err=%v) — orphans accumulate forever in the fallback path", p, err)
+		}
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh dir %s was swept but should have been preserved: %v", fresh, err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Errorf("unrelated dir %s was swept; the sweep must only touch hook-tmp.*: %v", unrelated, err)
+	}
 }
 
 // TestParseHookSchemaVersion pins the digit-extraction contract used
@@ -6088,27 +6405,4 @@ func mustNotExist(t *testing.T, path string) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected %s to NOT exist, got err=%v", path, err)
 	}
-}
-
-// stringSlicesEqual is the order-sensitive equivalent of
-// reflect.DeepEqual for two []string. We use it (rather than
-// reflect.DeepEqual) when the test's *intent* is to communicate
-// "compare two ordered string slices"; reflect.DeepEqual would
-// work but obscures the contract for readers. Equality requires
-// identical lengths and pairwise element equality at every index.
-//
-// Defined here as a local helper rather than imported from a util
-// package because the connector test suite is the only consumer
-// today, and adding a public helper would invite the test-only
-// helper to leak into production code.
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

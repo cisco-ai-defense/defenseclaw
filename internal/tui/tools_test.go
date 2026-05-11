@@ -198,8 +198,8 @@ func TestExecuteActionMenuItem_ToolDispatch(t *testing.T) {
 	for key := range seen {
 		key := key
 		t.Run("key_"+key, func(t *testing.T) {
-			cmd := m.executeActionMenuItem(key)
-			if cmd == nil {
+			next, cmd := m.executeActionMenuItem(key)
+			if cmd == nil && !next.commandPreview.Active {
 				t.Fatalf("executeActionMenuItem(%q) returned nil — every ToolActions key must map to a CLI verb", key)
 			}
 		})
@@ -226,7 +226,8 @@ func TestExecuteActionMenuItem_ToolDispatch_ScopePreserved(t *testing.T) {
 	// reshaping the executor; this suffices to prove the dispatch
 	// resolved a selection).
 	for _, k := range []string{"b", "a", "u", "i"} {
-		if cmd := m.executeActionMenuItem(k); cmd == nil {
+		next, cmd := m.executeActionMenuItem(k)
+		if cmd == nil && !next.commandPreview.Active {
 			t.Errorf("key %q failed to dispatch on scoped tool row", k)
 		}
 	}
@@ -235,7 +236,8 @@ func TestExecuteActionMenuItem_ToolDispatch_ScopePreserved(t *testing.T) {
 func TestExecuteActionMenuItem_ToolDispatch_NilSelectionSafe(t *testing.T) {
 	m := New(Deps{Config: &config.Config{}})
 	m.activePanel = PanelTools
-	if cmd := m.executeActionMenuItem("b"); cmd != nil {
+	next, cmd := m.executeActionMenuItem("b")
+	if cmd != nil || next.commandPreview.Active {
 		t.Errorf("executeActionMenuItem on empty tool list must be a safe no-op, got %v", cmd)
 	}
 }

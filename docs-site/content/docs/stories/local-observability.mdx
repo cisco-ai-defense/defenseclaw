@@ -1,0 +1,119 @@
+---
+title: Pin local observability in 60 seconds
+description: defenseclaw setup local-observability up brings the bundled Prom/Loki/Tempo/Grafana stack online and points the gateway's OTLP exporter at it. One command, four containers, three signals.
+keywords:
+  - DefenseClaw local observability
+  - DefenseClaw OTLP local stack
+  - prometheus loki tempo grafana
+  - DefenseClaw OTel exporter
+---
+
+DefenseClaw's runtime is designed to land in your existing telemetry stack — Splunk, OTLP, webhooks. But for the first 60 seconds of operating it, you want to see what it's doing without wiring up production. That's the local stack.
+
+<Video
+  src="local-observability"
+  caption="The 60-second tour: defenseclaw setup local-observability up → containers warm up → Grafana populates with live gateway events."
+/>
+
+For the full deep-dive on flags, dashboards, and tear-down, see [Observability → Local stack](/docs/observability/local-observability).
+
+## What you get
+
+<Cards>
+  <Card title="Prometheus" description="Metrics: requests, blocks, judge latency, sandbox events." />
+  <Card title="Loki" description="Logs: every audit row, with structured labels for connector + severity." />
+  <Card title="Tempo" description="Traces: hook → gateway → policy → sink, end-to-end." />
+  <Card title="Grafana" description="Pre-built dashboard with the four signals operators actually look at." />
+</Cards>
+
+## Run it
+
+<Steps>
+
+<Step>
+
+### Bring up the stack
+
+```bash
+defenseclaw setup local-observability up
+```
+
+Brings up four containers via Docker Compose:
+
+- `prometheus:latest` on `:9090`
+- `loki:latest` on `:3100`
+- `tempo:latest` on `:3200`
+- `grafana:latest` on `:3000`
+
+</Step>
+
+<Step>
+
+### Point the gateway at the OTLP collector
+
+```bash
+defenseclaw setup guardrail \
+  --connector $(cat ~/.defenseclaw/picked_connector) \
+  --restart
+```
+
+Setup detects the local stack on `127.0.0.1:4317` and wires the top-level `otel.endpoint` (in `~/.defenseclaw/config.yaml`) to point at it.
+
+</Step>
+
+<Step>
+
+### Open Grafana
+
+Visit http://localhost:3000 (default credentials are surfaced by the up command). The pre-installed `defenseclaw-overview` dashboard shows:
+
+- Requests per second by connector
+- Block rate by severity
+- p50 / p95 / p99 judge latency
+- Recent CRITICAL findings, with click-through to the Loki log line
+
+</Step>
+
+<Step>
+
+### Tear it down
+
+```bash
+defenseclaw setup local-observability down
+```
+
+Stops the containers and unwires the OTLP endpoint. Your audit DB is untouched.
+
+</Step>
+
+</Steps>
+
+## Architecture
+
+<Flow
+  direction="LR"
+  caption="The gateway exports three signals. The local stack receives all three and Grafana joins them."
+>
+  <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
+  <Node id="prom" kind="datastore">{`Prometheus\n:9090`}</Node>
+  <Node id="loki" kind="datastore">{`Loki\n:3100`}</Node>
+  <Node id="tempo" kind="datastore">{`Tempo\n:3200`}</Node>
+  <Node id="graf" kind="datastore">{`Grafana\n:3000`}</Node>
+  <Edge from="gateway" to="prom" label="metrics" />
+  <Edge from="gateway" to="loki" label="logs" />
+  <Edge from="gateway" to="tempo" label="traces" />
+  <Edge from="prom" to="graf" />
+  <Edge from="loki" to="graf" />
+  <Edge from="tempo" to="graf" />
+</Flow>
+
+## When to graduate to your own stack
+
+The local stack is for building intuition. For production, replace each component with the equivalent in your existing telemetry estate:
+
+- Prometheus → your metrics platform (Datadog, New Relic, Honeycomb, ...).
+- Loki → your log aggregator (Splunk, Datadog Logs, ...).
+- Tempo → your tracing backend (Honeycomb, Tempo, Jaeger, ...).
+- Grafana → whatever your team already uses for dashboards.
+
+Point the gateway's OTLP exporter at your collector and DefenseClaw's signals land alongside the rest of your telemetry. See the [Reference / Configuration](/docs/reference/configuration) page for the full env-var list.

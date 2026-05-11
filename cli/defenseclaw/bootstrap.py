@@ -794,6 +794,32 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup mode zeptoclaw")
+    if connector == "hermes":
+        path = os.path.expanduser("~/.hermes/config.yaml")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Hermes config found")
+        return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup mode hermes")
+    if connector == "cursor":
+        path = os.path.expanduser("~/.cursor/hooks.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Cursor hooks found")
+        return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup mode cursor")
+    if connector == "windsurf":
+        path = os.path.expanduser("~/.codeium/windsurf/hooks.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Windsurf hooks found")
+        return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup mode windsurf")
+    if connector == "geminicli":
+        path = os.path.expanduser("~/.gemini/settings.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Gemini CLI settings found")
+        return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup mode geminicli")
+    if connector == "copilot":
+        cwd = getattr(cfg, "cwd", "") or os.getcwd()
+        path = os.path.join(cwd, ".github", "hooks", "defenseclaw.json")
+        if os.path.isfile(path):
+            return StepResult("Connector", "pass", "Copilot hooks found")
+        return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup mode copilot")
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 

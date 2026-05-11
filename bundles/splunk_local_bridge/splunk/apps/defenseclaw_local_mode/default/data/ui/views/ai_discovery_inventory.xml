@@ -1,0 +1,141 @@
+<form version="1.1">
+  <label>AI Discovery Inventory</label>
+  <description>Splunk-local view of the AI discovery and shadow-agent signals mirrored from the demo Grafana dashboards.</description>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time">
+      <label>Time range</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="vendor" searchWhenChanged="true">
+      <label>Vendor</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="text" token="category" searchWhenChanged="true">
+      <label>Category</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="text" token="state" searchWhenChanged="true">
+      <label>State</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+  </fieldset>
+  <row>
+    <panel>
+      <title>Observed Signals</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | where ("$vendor$"="*" OR vendor="$vendor$") AND ("$category$"="*" OR category="$category$") AND ("$state$"="*" OR state="$state$") | stats dc(signal_id) as observed_signals</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>New Signals</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | where ("$vendor$"="*" OR vendor="$vendor$") AND ("$category$"="*" OR category="$category$") AND (state="new" OR state="changed") | stats count as new_signals</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Gone Signals</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | where ("$vendor$"="*" OR vendor="$vendor$") AND ("$category$"="*" OR category="$category$") AND state="gone" | stats count as gone_signals</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Detector Errors</title>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | where severity="ERROR" OR severity="CRITICAL" OR like(metric_name, "%errors%") | stats count as detector_errors</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Signals By State</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | where ("$vendor$"="*" OR vendor="$vendor$") AND ("$category$"="*" OR category="$category$") | timechart span=15m count by state limit=8 useother=t</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Signals By Category</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | where ("$vendor$"="*" OR vendor="$vendor$") AND ("$state$"="*" OR state="$state$") | timechart span=15m count by category limit=8 useother=t</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">line</option>
+        <option name="drilldown">none</option>
+      </chart>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Top Vendors And Products</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | where ("$vendor$"="*" OR vendor="$vendor$") AND ("$category$"="*" OR category="$category$") AND ("$state$"="*" OR state="$state$") | stats count as events dc(signal_id) as signals values(category) as categories values(state) as states values(detector) as detectors by vendor product | sort - signals - events | head 20</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Detector Activity</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | stats count as events dc(signal_id) as signals values(vendor) as vendors values(product) as products by detector state | sort - events | head 20</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+  <row>
+    <panel>
+      <title>Recent AI Discovery Events</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_ai_discovery_events` | table timestamp scan_id signal_id state category vendor product detector severity message | sort - timestamp | head 50</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">20</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+</form>

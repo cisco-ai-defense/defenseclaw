@@ -1,0 +1,197 @@
+---
+title: Setup MCP scanner
+description: Behavioural scan of every Model Context Protocol server an agent might call. DefenseClaw wraps cisco-ai-mcp-scanner to surface hidden tool intents and shadow capabilities, and writes verdicts into the same mcp_actions admission policy as the watcher.
+keywords:
+  - DefenseClaw MCP scanner
+  - cisco-ai-mcp-scanner
+  - Model Context Protocol security
+  - MCP server scan
+  - tool poisoning
+  - mcp_actions
+  - mcpServers
+---
+
+The Model Context Protocol (MCP) is becoming the default way for agents to acquire new tools. Each MCP server exposes a set of tools; the agent picks them up at startup and calls them as needed.
+
+That tool list is also a perfect place to hide a "shadow capability" — a tool whose description claims to read calendar events but whose implementation actually exfiltrates files, or a `safe_lookup` tool that quietly modifies a database. Static metadata isn't enough; you need to *look at what the server will say it can do, and what its implementations imply*.
+
+DefenseClaw integrates Cisco's open-source [`cisco-ai-mcp-scanner`](https://github.com/cisco-ai-defense/mcp-scanner) for exactly that. Verdicts feed the `mcp_actions` admission policy by severity bucket — same shape as `skill_actions`.
+
+## What it scans
+
+The wrapper at [`cli/defenseclaw/scanner/mcp.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/mcp.py) accepts two target shapes — both as a positional `TARGET` argument (there is no `--server` or `--remote` flag — the scanner figures out which from the target's shape):
+
+- **Local stdio server name** — described by a JSON file with a top-level `mcpServers` block (the format used by Claude Desktop, Cursor, OpenClaw, Gemini, Codex, and Copilot). DefenseClaw spins each server up in a sandbox, lists its tools, and records every advertised description, parameter schema, and example.
+- **Remote HTTP server URL** — passed as the positional target. The scanner calls `scan_remote_server_tools` directly without spawning a subprocess.
+
+For every tool the scanner produces:
+
+1. A static signature (name, schema, description hash).
+2. An optional **LLM-assisted intent analysis** — the description vs. the implied side effects.
+3. A consolidated finding with severity and reasoning.
+
+## Where DefenseClaw finds your servers
+
+The CLI auto-discovers MCP server lists from the connectors you've set up, so you usually don't pass paths:
+
+```bash
+defenseclaw mcp scan --all
+```
+
+The default sources include:
+
+- `~/.openclaw/openclaw.json` → `mcp.servers`
+- `~/Library/Application Support/Claude/claude_desktop_config.json` → `mcpServers`
+- `~/.cursor/mcp.json` → `mcpServers`
+- `~/.codeium/windsurf/mcp_config.json` → `mcpServers`
+- Connector-specific paths registered by `defenseclaw setup guardrail`.
+
+Each server is scanned independently and findings are tagged with the connector that discovered them.
+
+## One-shot scans
+
+<Tabs items={['All connectors', 'Specific server', 'Remote URL', 'With prompts/resources']}>
+  <Tab value="All connectors">
+```bash
+defenseclaw mcp scan --all --json | jq -s '[.[].findings[]]'
+```
+
+CI-friendly. Walks every server discovered in `openclaw.json` and emits **one JSON object per server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
+  </Tab>
+  <Tab value="Specific server">
+```bash
+defenseclaw mcp scan filesystem
+```
+
+Scans just the named server entry from the discovered configs. The name is the **positional target**, not a `--server` flag.
+  </Tab>
+  <Tab value="Remote URL">
+```bash
+defenseclaw mcp scan https://mcp.example.com/sse
+```
+
+Pass the URL as the positional target — the scanner detects it's an HTTP target and uses `scan_remote_server_tools`. No subprocess spawn. The remote server is *not* added to any connector — this is purely a pre-flight check.
+  </Tab>
+  <Tab value="With prompts/resources">
+```bash
+defenseclaw mcp scan filesystem --scan-prompts --scan-resources --scan-instructions
+```
+
+Extends the scan beyond the tool list to also evaluate the server's prompts, resources, and instructions surfaces. Use when you suspect a server is hiding intent in its prompt templates.
+  </Tab>
+</Tabs>
+
+Other real flags: `--analyzers <list>` to constrain which analyzer plugins run, `--json` for machine output.
+
+## Continuous protection
+
+Just like skills, MCP scanning is most valuable as part of an admission pipeline. `defenseclaw setup guardrail` configures the watcher to:
+
+<Steps>
+  <Step>
+    **Block** — when a new entry appears in any tracked
+    `mcpServers` file, hold the agent off until the scan resolves.
+  </Step>
+  <Step>
+    **Allow** — release the server back to the agent if the result
+    severity maps to `runtime: enable` for the active rule pack.
+  </Step>
+  <Step>
+    **Scan** — run the wrapper against the new entry and emit the
+    findings to the audit pipeline.
+  </Step>
+</Steps>
+
+If you only want one-shot scans (no watcher), keep `setup guardrail`'s admission off and run `defenseclaw mcp scan --all` from CI or a daily cron. The findings still flow to the same audit sinks.
+
+## Configure the action mapping
+
+The scanner produces a *severity*. What that severity *does* lives in the active OPA policy file under `mcp_actions` — the schema is per-severity buckets, identical in shape to `skill_actions`:
+
+```yaml title="policies/default.yaml (excerpt)"
+admission:
+  scan_on_install: true
+  allow_list_bypass_scan: true
+
+mcp_actions:
+  critical:
+    file:    quarantine
+    runtime: disable
+    install: block
+  high:
+    file:    quarantine
+    runtime: disable
+    install: block
+  medium:
+    file:    none
+    runtime: enable
+    install: none
+  low:
+    file:    none
+    runtime: enable
+    install: none
+  info:
+    file:    none
+    runtime: enable
+    install: none
+
+# Optional per-asset overrides (in scanner_overrides), e.g. tighten medium for the mcp class:
+scanner_overrides:
+  mcp:
+    medium:
+      file: quarantine
+      runtime: disable
+      install: block
+```
+
+To switch profiles for the entire `mcp_actions` table:
+
+```bash
+defenseclaw policy activate strict       # see Defaults page for the diff vs default
+defenseclaw policy activate default
+defenseclaw policy activate permissive
+```
+
+## Block / allow individual servers
+
+The watcher's verdict is the default. Operators always have manual override (block / allow act on the **whole server**, not on individual tools — the CLI doesn't take a `--tool` flag):
+
+```bash
+defenseclaw mcp list                                         # what is configured + state
+defenseclaw mcp block untrusted-fs --reason "exfil tool found"
+defenseclaw mcp allow cisco-internal --reason "first-party"
+```
+
+Every action is audited (`block-mcp`, etc.) so the trail is intact even when the manual override contradicts the watcher.
+
+## Using the unified LLM key
+
+Behavioural intent analysis depends on the LLM judge being able to reason about each tool's description vs. its parameter schema. Set the unified key once:
+
+```bash
+defenseclaw keys set DEFENSECLAW_LLM_KEY
+```
+
+DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any Cisco AI Defense API key for content classification. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
+
+<Callout type="info">
+The MCP scanner runs each stdio server inside a subprocess sandbox with a wall-clock timeout. Servers that hang are killed; servers that try to spawn networked side processes are flagged as findings, not just terminated silently.
+</Callout>
+
+## Install if missing
+
+`cisco-ai-mcp-scanner` is a hard dependency of `defenseclaw` (Python ≥3.11) and is pulled in automatically by `pip install defenseclaw`. If your environment somehow lost it, reinstall it directly:
+
+```bash
+pip install --upgrade cisco-ai-mcp-scanner
+```
+
+`defenseclaw mcp` exits cleanly with a one-line install hint if the SDK isn't present — it never crashes the gateway.
+
+## See also
+
+- [Setup → Skill scanner](/docs/setup/skill-scanner) — sibling scanner for skill bundles, same admission pattern via `skill_actions`
+- [Setup → Unified LLM key](/docs/setup/unified-llm-key) — the env var the LLM-assisted analysis reads
+- [Defaults](/docs/defaults) — the `mcp_actions` table for each shipped rule pack
+- [Policies](/docs/policies) — the layered architecture
+- [Reference → CLI](/docs/reference/cli) — full `defenseclaw mcp` subcommand reference

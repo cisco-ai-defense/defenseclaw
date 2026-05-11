@@ -1,0 +1,95 @@
+name: Docs site (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs-site/**'
+      - '.github/workflows/docs-site.yml'
+  pull_request:
+    paths:
+      - 'docs-site/**'
+      - '.github/workflows/docs-site.yml'
+  workflow_dispatch:
+
+# Required for actions/deploy-pages — least-privilege scoping per
+# https://github.com/actions/deploy-pages#usage. The Pages OIDC token
+# is the only credential used; we never persist any other secret.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Single-flight: never let two Pages deploys race; cancel pending runs
+# but never cancel an in-progress deploy half-way through.
+concurrency:
+  group: docs-site-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build static export
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs-site
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # Shallow clone is enough; we don't compute git history in the
+          # build path. Keeps CI minutes low.
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: docs-site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build static export
+        env:
+          # Project-pages subpath. Override in repo Settings → Pages
+          # if you map a custom apex domain (e.g., docs.defenseclaw.dev).
+          BASE_PATH: /defenseclaw
+          SITE_URL: https://cisco-ai-defense.github.io/defenseclaw
+          # Avoid leaking spurious telemetry from the build host into
+          # someone else's dashboards.
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: npm run build
+
+      - name: Verify basePath in output
+        run: |
+          if ! grep -q "/defenseclaw/_next/" out/index.html; then
+            echo "::error::Built index.html does not reference /defenseclaw/_next/ — basePath may be misapplied."
+            exit 1
+          fi
+
+      - name: Add .nojekyll
+        # GitHub Pages defaults to running Jekyll, which strips files
+        # whose names begin with `_` (Next.js emits `_next/`). The
+        # marker file disables Jekyll for this site.
+        run: touch out/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs-site/out
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

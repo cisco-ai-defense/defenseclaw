@@ -22,10 +22,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// applyHermeticConnectorHomes redirects the four built-in connector
+// applyHermeticConnectorHomes redirects built-in connector
 // home/path overrides at a tmpdir so a parallel parity test does not
 // race against the developer's real ~/.openclaw, ~/.claude,
-// ~/.codex, ~/.zeptoclaw on disk.
+// ~/.codex, ~/.zeptoclaw, or hook-first connector configs on disk.
 //
 // The package-level *PathOverride globals are not mutex-protected, so
 // every parallel subtest in this file MUST snapshot and restore
@@ -188,7 +188,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
@@ -236,9 +236,11 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 				gatewayToken: "tok",
 				masterKey:    "mk",
 				setupOpts: connector.SetupOpts{
-					DataDir:   dir,
-					ProxyAddr: "127.0.0.1:4000",
-					APIAddr:   "127.0.0.1:18970",
+					DataDir:      dir,
+					ProxyAddr:    "127.0.0.1:4000",
+					APIAddr:      "127.0.0.1:18970",
+					APIToken:     "tok",
+					WorkspaceDir: filepath.Join(dir, "workspace"),
 				},
 				health: NewSidecarHealth(),
 			}
@@ -276,7 +278,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
@@ -312,9 +314,11 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 				gatewayToken: "tok",
 				masterKey:    "mk",
 				setupOpts: connector.SetupOpts{
-					DataDir:   dir,
-					ProxyAddr: "127.0.0.1:4000",
-					APIAddr:   "127.0.0.1:18970",
+					DataDir:      dir,
+					ProxyAddr:    "127.0.0.1:4000",
+					APIAddr:      "127.0.0.1:18970",
+					APIToken:     "tok",
+					WorkspaceDir: filepath.Join(dir, "workspace"),
 				},
 				health:    NewSidecarHealth(),
 				inspector: NewGuardrailInspector("local", nil, nil, ""),

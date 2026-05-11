@@ -990,7 +990,7 @@ func TestBuildResource_AgentWatchContextAttributes(t *testing.T) {
 	cfg := disabledCfg()
 	cfg.TenantID = "tenant-a"
 	cfg.WorkspaceID = "workspace-1"
-	cfg.DeploymentMode = "standalone"
+	cfg.DeploymentMode = "unmanaged_byod"
 	cfg.DiscoverySource = "registry"
 
 	res := buildResource(cfg, "1.0.0")
@@ -1005,7 +1005,7 @@ func TestBuildResource_AgentWatchContextAttributes(t *testing.T) {
 		"tenant.id":              "tenant-a",
 		"workspace.id":           "workspace-1",
 		"deployment.environment": "test",
-		"deployment.mode":        "standalone",
+		"deployment.mode":        "unmanaged_byod",
 		"discovery.source":       "registry",
 	} {
 		if got[key] != want {

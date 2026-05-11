@@ -106,7 +106,10 @@ import click
     "--agent",
     "agent_name",
     type=click.Choice(
-        ["openclaw", "zeptoclaw", "claudecode", "codex"],
+        [
+            "openclaw", "zeptoclaw", "claudecode", "codex",
+            "hermes", "cursor", "windsurf", "geminicli", "copilot",
+        ],
         case_sensitive=False,
     ),
     default=None,

@@ -607,13 +607,11 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 		// keep the format strict to match third-party OTel consumers.
 		headers = append(headers, "x-defenseclaw-token="+opts.APIToken)
 	}
-	// Switch to OTLP-JSON over HTTP so the gateway's permissive
-	// JSON receiver (internal/gateway/otel_ingest.go) can decode
-	// the payload without a protobuf dependency. Claude Code
-	// supports both protocols; "http/json" is documented at
-	// https://code.claude.com/docs/en/monitoring-usage and is
-	// the safe default for a forwarder that doesn't have an OTel
-	// SDK on the receive path.
+	// Switch to OTLP-JSON over HTTP so Claude Code telemetry stays on
+	// the same stable receive path as Codex. The gateway can normalize
+	// OTLP protobuf too, but "http/json" is documented at
+	// https://code.claude.com/docs/en/monitoring-usage and keeps setup
+	// deterministic across upgrades.
 	failMode := "open"
 	if opts.ClaudeCodeEnforcement {
 		failMode = "closed"
@@ -708,18 +706,6 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 		}
 		return updateManagedFileBackupPostHash(opts.DataDir, c.Name(), "settings.json", settingsPath)
 	})
-}
-
-// isClaudeCodeOtelKey reports whether an env-var name belongs to the
-// OTel-related set this connector manages. Used both for backup-time
-// filtering and for Teardown stripping.
-func isClaudeCodeOtelKey(name string) bool {
-	for _, k := range claudeCodeOtelEnvKeys {
-		if name == k {
-			return true
-		}
-	}
-	return false
 }
 
 func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed string) bool {

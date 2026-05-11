@@ -17,7 +17,9 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -563,10 +565,10 @@ func (c *CodexConnector) cleanupLegacyEnvFiles(opts SetupOpts) {
 // lmstudio, etc.). To guarantee every model provider flows through
 // DefenseClaw, rewrite each [model_providers.*].base_url to the proxy.
 //
-// Hooks are loaded from a sibling hooks.json referenced by
-// config.toml's top-level `hooks` key. The feature flag
-// features.codex_hooks must be true for hooks to actually run — that
-// flag defaults to off.
+// Hooks are loaded from config.toml's inline [hooks] table. The
+// feature flag [features].hooks enables the hook engine; older
+// [features].codex_hooks entries are deprecated by Codex and should be
+// removed so the TUI does not warn on startup.
 
 // CodexConfigPathOverride allows tests to redirect the config path.
 var CodexConfigPathOverride string
@@ -660,9 +662,18 @@ type codexConfigBackup struct {
 	// holds the inline HookEventsToml struct when present.
 	HadHooksKey   bool            `json:"had_hooks_key"`
 	OriginalHooks json.RawMessage `json:"original_hooks,omitempty"`
-	// AddedCodexHooksFlag is true if we flipped features.codex_hooks on
-	// during Setup. Teardown only clears the flag if we were the ones
-	// who set it.
+	// AddedCodexHooksFlag is a legacy backup field name. It now tracks
+	// whether Setup flipped [features].hooks on; Teardown only clears
+	// the flag if we were the ones who set it.
+	//
+	// IMPORTANT: the JSON tag must remain "added_codex_hooks_flag"
+	// for on-disk backwards compatibility with previously written
+	// codex.json backups. Renaming the Go field is fine; renaming
+	// the tag would silently lose the flag for every existing
+	// install at upgrade time, and Teardown would then refuse to
+	// strip the [features].hooks/codex_hooks block we added — leaving
+	// hook fan-out enabled even after the operator removed
+	// DefenseClaw.
 	AddedCodexHooksFlag bool `json:"added_codex_hooks_flag"`
 
 	// HadOtelBlock / OriginalOtel back up the operator's pristine
@@ -712,6 +723,7 @@ var codexHookGroups = []struct {
 	{"SessionStart", "startup|resume|clear", 30},
 	{"UserPromptSubmit", "", 30},
 	{"PreToolUse", "*", 30},
+	{"PermissionRequest", "*", 30},
 	{"PostToolUse", "*", 30},
 	{"Stop", "", 90},
 }
@@ -965,22 +977,24 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	// passing a string triggers a TOML parse error at codex startup.
 	// Always installed, regardless of enforcement mode: hooks are the
 	// entry point for tool-call telemetry into /api/v1/codex/hook
-	// (UserPromptSubmit, PreToolUse, PostToolUse, PermissionRequest,
-	// Stop). In observability mode the hook handler logs but never
+	// (SessionStart, UserPromptSubmit, PreToolUse, PermissionRequest,
+	// PostToolUse, Stop).
+	// In observability mode the hook handler logs but never
 	// blocks; in enforcement mode it can also block based on the
 	// subprocess sandbox policy.
-	cfg["hooks"] = buildCodexHooksTable(hookScript)
+	cfg["hooks"] = buildCodexHooksTable(configPath, hookScript)
 
 	features, _ := cfg["features"].(map[string]interface{})
 	if features == nil {
 		features = map[string]interface{}{}
 	}
-	if v, ok := features["codex_hooks"].(bool); !ok || !v {
+	if v, ok := features["hooks"].(bool); !ok || !v {
 		if !backupExists {
 			backup.AddedCodexHooksFlag = true
 		}
 	}
-	features["codex_hooks"] = true
+	features["hooks"] = true
+	delete(features, "codex_hooks")
 	cfg["features"] = features
 
 	// Native OTel exporter — runs on every install regardless of
@@ -1080,8 +1094,10 @@ func codexActiveProviderFromConfig(cfg map[string]interface{}) string {
 // The generated hook script decides fail-open vs fail-closed from
 // SetupOpts: observability-only installs allow the tool when the
 // gateway is unavailable, while enforcement installs can block.
-func buildCodexHooksTable(hookScript string) map[string]interface{} {
+func buildCodexHooksTable(configPath, hookScript string) map[string]interface{} {
 	out := map[string]interface{}{}
+	state := map[string]interface{}{}
+	keySource := codexHookStateKeySource(configPath)
 	for _, group := range codexHookGroups {
 		matcherGroup := map[string]interface{}{
 			"hooks": []interface{}{
@@ -1096,8 +1112,109 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 			matcherGroup["matcher"] = group.matcher
 		}
 		out[group.eventType] = []interface{}{matcherGroup}
+		eventKey := codexHookEventKeyLabel(group.eventType)
+		state[codexHookStateKey(keySource, eventKey, 0, 0)] = map[string]interface{}{
+			"trusted_hash": codexCommandHookHash(eventKey, group.matcher, hookScript, group.timeout),
+		}
 	}
+	out["state"] = state
 	return out
+}
+
+func codexHookEventKeyLabel(eventType string) string {
+	switch eventType {
+	case "PreToolUse":
+		return "pre_tool_use"
+	case "PermissionRequest":
+		return "permission_request"
+	case "PostToolUse":
+		return "post_tool_use"
+	case "PreCompact":
+		return "pre_compact"
+	case "PostCompact":
+		return "post_compact"
+	case "SessionStart":
+		return "session_start"
+	case "UserPromptSubmit":
+		return "user_prompt_submit"
+	case "Stop":
+		return "stop"
+	default:
+		return eventType
+	}
+}
+
+func codexHookStateKeySource(configPath string) string {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return configPath
+	}
+	return abs
+}
+
+func codexHookStateKey(keySource, eventKey string, groupIndex, handlerIndex int) string {
+	return fmt.Sprintf("%s:%s:%d:%d", keySource, eventKey, groupIndex, handlerIndex)
+}
+
+// codexCommandHookHash produces the value Codex stores under
+// hooks.state[<key>].trusted_hash to suppress the "DefenseClaw inserted
+// a hook, do you trust it?" prompt on Codex startup.
+//
+// SECURITY MODEL — this is NOT tamper detection.
+//
+// Anyone with write access to ~/.codex/config.toml can recompute a
+// matching hash for arbitrary hook content using the same algorithm,
+// because the inputs are written next to the output. The "sha256:"
+// prefix is a Codex format requirement, not an integrity claim. The
+// hash exists solely so DefenseClaw's teardown logic
+// (removeOwnedCodexHookState) can recognize the entries it inserted
+// and leave operator-edited entries alone — that is, it is a
+// self-fingerprint for ownership, not a security boundary.
+//
+// Determinism note: codexCanonicalJSON relies on encoding/json's
+// alphabetical key ordering for map[string]interface{} (stable since
+// Go 1.12). Tests pin a known hash to catch any future drift in the
+// canonical form, which would otherwise re-prompt every existing
+// installation on the next Codex launch.
+func codexCommandHookHash(eventKey, matcher, command string, timeout int) string {
+	hook := map[string]interface{}{
+		"async":   false,
+		"command": command,
+		"timeout": timeout,
+		"type":    "command",
+	}
+	identity := map[string]interface{}{
+		"event_name": eventKey,
+		"hooks":      []interface{}{hook},
+	}
+	if matcher != "" {
+		identity["matcher"] = matcher
+	}
+	return codexVersionForTOML(identity)
+}
+
+// codexVersionForTOML returns the "sha256:<hex>" fingerprint Codex
+// expects in hooks.state.<key>.trusted_hash. See codexCommandHookHash
+// for why this is a self-recognition fingerprint and not an integrity
+// check.
+func codexVersionForTOML(v interface{}) string {
+	serialized := codexCanonicalJSON(v)
+	hash := sha256.Sum256(serialized)
+	return fmt.Sprintf("sha256:%x", hash[:])
+}
+
+// codexCanonicalJSON serializes v with stable map-key ordering. This
+// determinism is required so that codexCommandHookHash produces the
+// same value across runs and across goroutines for the same logical
+// hook identity.
+func codexCanonicalJSON(v interface{}) []byte {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return []byte("null")
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 }
 
 // buildCodexOtelBlock returns the [otel] table that points codex's
@@ -1126,10 +1243,10 @@ func buildCodexHooksTable(hookScript string) map[string]interface{} {
 // schema - omitting it produces `invalid configuration: missing
 // field `protocol` in `otel.exporter``` at codex startup, which
 // blocks the entire CLI from launching (not just OTel export). We
-// hard-code `"json"` because the gateway's OTLP-HTTP receiver
-// (internal/gateway/otel_ingest.go) accepts `application/json` only
-// and 415s any `application/x-protobuf` body - a mismatched
-// protocol would silently drop every batch instead of erroring out.
+// hard-code `"json"` because it is the stable protocol DefenseClaw has
+// used for Codex native telemetry since the first OTLP integration. The
+// gateway also accepts OTLP protobuf, but pinning JSON avoids changing
+// Codex's wire format during setup/teardown upgrades.
 //
 // log_user_prompt = false is the privacy-preserving default: codex's
 // native OTel emits prompt text only when this is true. When redaction
@@ -1341,10 +1458,13 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 	}
 
 	removedOwnedHooks := false
-	hooksRemain := false
+	hookEventsRemain := false
 	if hooks, ok := cfg["hooks"].(map[string]interface{}); ok {
 		hooksDir := filepath.Join(opts.DataDir, "hooks")
 		for eventType, val := range hooks {
+			if eventType == "state" {
+				continue
+			}
 			before := codexHookEntryCount(val)
 			remaining := removeOwnedHooks(val, hooksDir)
 			if before != len(remaining) {
@@ -1354,20 +1474,25 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 				delete(hooks, eventType)
 			} else {
 				hooks[eventType] = remaining
+				hookEventsRemain = true
 			}
+		}
+		hookScript := filepath.Join(opts.DataDir, "hooks", "codex-hook.sh")
+		if removeOwnedCodexHookState(hooks, configPath, hookScript) {
+			removedOwnedHooks = true
 		}
 		if len(hooks) == 0 {
 			delete(cfg, "hooks")
 		} else {
-			hooksRemain = true
 			cfg["hooks"] = hooks
 		}
 	} else if !backup.HadHooksKey {
 		delete(cfg, "hooks")
 	}
 
-	if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hooksRemain) {
+	if backup.AddedCodexHooksFlag || (removedOwnedHooks && !hookEventsRemain) {
 		if features, ok := cfg["features"].(map[string]interface{}); ok {
+			delete(features, "hooks")
 			delete(features, "codex_hooks")
 			if len(features) == 0 {
 				delete(cfg, "features")
@@ -1438,6 +1563,34 @@ func codexHookEntryCount(v interface{}) int {
 		return 0
 	}
 	return len(list)
+}
+
+func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hookScript string) bool {
+	state, ok := hooks["state"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	removed := false
+	keySource := codexHookStateKeySource(configPath)
+	for _, group := range codexHookGroups {
+		eventKey := codexHookEventKeyLabel(group.eventType)
+		key := codexHookStateKey(keySource, eventKey, 0, 0)
+		entry, ok := state[key].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		expectedHash := codexCommandHookHash(eventKey, group.matcher, hookScript, group.timeout)
+		if trustedHash, _ := entry["trusted_hash"].(string); trustedHash == expectedHash {
+			delete(state, key)
+			removed = true
+		}
+	}
+	if len(state) == 0 {
+		delete(hooks, "state")
+	} else {
+		hooks["state"] = state
+	}
+	return removed
 }
 
 func codexValueMatches(a, b interface{}) bool {

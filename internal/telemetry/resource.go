@@ -45,6 +45,7 @@ func resolveServiceName(attrs map[string]string) string {
 func buildResource(cfg *config.Config, version string) *resource.Resource {
 	hostname, _ := os.Hostname()
 	serviceName := resolveServiceName(cfg.OTel.Resource.Attributes)
+	activeConnector := cfg.ActiveConnector()
 
 	attrs := []attribute.KeyValue{
 		attribute.String("service.name", serviceName),
@@ -54,8 +55,8 @@ func buildResource(cfg *config.Config, version string) *resource.Resource {
 		attribute.String("host.name", hostname),
 		attribute.String("host.arch", runtime.GOARCH),
 		attribute.String("os.type", runtime.GOOS),
-		attribute.String("defenseclaw.claw.mode", string(cfg.Claw.Mode)),
-		attribute.String("defenseclaw.claw.home_dir", cfg.Claw.HomeDir),
+		attribute.String("defenseclaw.claw.mode", activeConnector),
+		attribute.String("defenseclaw.claw.home_dir", cfg.ConnectorHomeDir(activeConnector)),
 		attribute.String("defenseclaw.gateway.host", cfg.Gateway.Host),
 		attribute.Int("defenseclaw.gateway.port", cfg.Gateway.Port),
 		attribute.String("defenseclaw.instance.id", uuid.New().String()),

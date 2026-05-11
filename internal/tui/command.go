@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -151,14 +152,17 @@ type CommandOutputMsg struct {
 
 // CommandDoneMsg signals that a command has finished.
 type CommandDoneMsg struct {
-	Command  string
-	ExitCode int
-	Duration time.Duration
+	Command   string
+	ExitCode  int
+	Duration  time.Duration
+	Cancelled bool
+	Meta      CommandResultMeta
 }
 
 // CommandStartMsg signals that a command has started.
 type CommandStartMsg struct {
 	Command string
+	Meta    CommandResultMeta
 }
 
 func buildCLIArgs(entry *CmdEntry, extra string) ([]string, error) {
@@ -309,6 +313,13 @@ func (e *CommandExecutor) IsInteractive() bool {
 // real terminal. This ensures Python and other runtimes use unbuffered/line-
 // buffered output, making interactive prompts appear immediately.
 func (e *CommandExecutor) ExecuteInteractive(binary string, args []string, displayName string) tea.Cmd {
+	intent := NewCommandIntent(binary, args, displayName, inferCommandCategory(args), "legacy")
+	intent.Interactive = true
+	return e.ExecuteIntent(intent)
+}
+
+// ExecuteIntent runs an intent asynchronously and streams output to the TUI.
+func (e *CommandExecutor) ExecuteIntent(intent CommandIntent) tea.Cmd {
 	return func() tea.Msg {
 		e.mu.Lock()
 		if e.running {
@@ -320,62 +331,82 @@ func (e *CommandExecutor) ExecuteInteractive(binary string, args []string, displ
 		prog := e.program
 		e.mu.Unlock()
 
+		start := time.Now()
+		intent = intent.Normalized()
+		meta := intent.Meta(start)
+		displayName := intent.MaskedDisplayName()
 		if prog != nil {
-			prog.Send(CommandStartMsg{Command: displayName})
+			prog.Send(CommandStartMsg{Command: displayName, Meta: meta})
 		}
 
-		start := time.Now()
-		cmd := exec.Command(resolveRegistryBinary(binary), args...)
+		cmd := exec.Command(resolveRegistryBinary(intent.Binary), intent.Args...)
 		cmd.Env = os.Environ()
 
-		ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 120})
-		if err != nil {
-			e.mu.Lock()
-			e.running = false
-			close(e.cancel)
-			e.cancel = nil
-			e.mu.Unlock()
-			if prog != nil {
-				prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to start PTY: %v", err), Timestamp: time.Now()})
-			}
-			return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: time.Since(start)}
+		var cancelled atomic.Bool
+		if intent.Interactive {
+			return e.executePTY(cmd, prog, displayName, start, meta, &cancelled)
 		}
-
-		e.mu.Lock()
-		e.stdin = ptmx
-		e.mu.Unlock()
-
-		cancelCh := e.cancel
-		go func() {
-			<-cancelCh
-			if cmd.Process != nil {
-				cmd.Process.Signal(os.Interrupt)
-			}
-		}()
-
-		readInteractiveOutput(ptmx, prog)
-
-		exitCode := 0
-		if err := cmd.Wait(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = 1
-			}
-		}
-		ptmx.Close()
-
-		e.mu.Lock()
-		e.stdin = nil
-		e.running = false
-		if e.cancel != nil {
-			close(e.cancel)
-			e.cancel = nil
-		}
-		e.mu.Unlock()
-
-		return CommandDoneMsg{Command: displayName, ExitCode: exitCode, Duration: time.Since(start)}
+		return e.executePiped(cmd, prog, displayName, start, meta, &cancelled)
 	}
+}
+
+func (e *CommandExecutor) executePTY(cmd *exec.Cmd, prog *tea.Program, displayName string, start time.Time, meta CommandResultMeta, cancelled *atomic.Bool) tea.Msg {
+	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 120})
+	if err != nil {
+		e.finishExecution()
+		if prog != nil {
+			prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to start PTY: %v", err), Timestamp: time.Now()})
+		}
+		meta.ExitCode = 1
+		meta.Duration = time.Since(start)
+		meta.FinishedAt = time.Now()
+		return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: meta.Duration, Meta: meta}
+	}
+
+	e.mu.Lock()
+	e.stdin = ptmx
+	e.mu.Unlock()
+
+	cancelCh := e.cancel
+	doneCh := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-cancelCh:
+			cancelled.Store(true)
+			if cmd.Process != nil {
+				_ = cmd.Process.Signal(os.Interrupt)
+			}
+		case <-doneCh:
+		}
+	}()
+
+	readInteractiveOutput(ptmx, prog)
+
+	exitCode := 0
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+	_ = ptmx.Close()
+	close(doneCh)
+	<-watcherDone
+
+	e.mu.Lock()
+	e.stdin = nil
+	e.mu.Unlock()
+	e.finishExecution()
+
+	meta.ExitCode = exitCode
+	meta.Duration = time.Since(start)
+	meta.FinishedAt = time.Now()
+	meta.Cancelled = cancelled.Load()
+	meta.SuggestedNextAction = suggestedNextAction(displayName, exitCode)
+	return CommandDoneMsg{Command: displayName, ExitCode: exitCode, Duration: meta.Duration, Cancelled: meta.Cancelled, Meta: meta}
 }
 
 // readLineOutput reads from r line-by-line. Used for non-interactive commands
@@ -439,80 +470,79 @@ func readInteractiveOutput(r io.Reader, program *tea.Program) {
 
 // Execute runs a command asynchronously and streams output to the TUI.
 func (e *CommandExecutor) Execute(binary string, args []string, displayName string) tea.Cmd {
-	return func() tea.Msg {
-		e.mu.Lock()
-		if e.running {
-			e.mu.Unlock()
-			return CommandOutputMsg{Line: "A command is already running. Wait for it to finish or press Ctrl+C.", Timestamp: time.Now()}
-		}
-		e.running = true
-		e.cancel = make(chan struct{})
-		prog := e.program
-		e.mu.Unlock()
+	intent := NewCommandIntent(binary, args, displayName, inferCommandCategory(args), "legacy")
+	return e.ExecuteIntent(intent)
+}
 
+func (e *CommandExecutor) executePiped(cmd *exec.Cmd, prog *tea.Program, displayName string, start time.Time, meta CommandResultMeta, cancelled *atomic.Bool) tea.Msg {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		e.finishExecution()
 		if prog != nil {
-			prog.Send(CommandStartMsg{Command: displayName})
+			prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to create pipe: %v", err), Timestamp: time.Now()})
 		}
+		meta.ExitCode = 1
+		meta.Duration = time.Since(start)
+		meta.FinishedAt = time.Now()
+		return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: meta.Duration, Meta: meta}
+	}
+	cmd.Stderr = cmd.Stdout
 
-		start := time.Now()
-		cmd := exec.Command(resolveRegistryBinary(binary), args...)
-		cmd.Env = os.Environ()
-
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			e.mu.Lock()
-			e.running = false
-			close(e.cancel)
-			e.cancel = nil
-			e.mu.Unlock()
-			if prog != nil {
-				prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to create pipe: %v", err), Timestamp: time.Now()})
-			}
-			return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: time.Since(start)}
+	if err := cmd.Start(); err != nil {
+		e.finishExecution()
+		if prog != nil {
+			prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to start: %v", err), Timestamp: time.Now()})
 		}
-		cmd.Stderr = cmd.Stdout
+		meta.ExitCode = 1
+		meta.Duration = time.Since(start)
+		meta.FinishedAt = time.Now()
+		return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: meta.Duration, Meta: meta}
+	}
 
-		if err := cmd.Start(); err != nil {
-			e.mu.Lock()
-			e.running = false
-			close(e.cancel)
-			e.cancel = nil
-			e.mu.Unlock()
-			if prog != nil {
-				prog.Send(CommandOutputMsg{Line: fmt.Sprintf("Failed to start: %v", err), Timestamp: time.Now()})
-			}
-			return CommandDoneMsg{Command: displayName, ExitCode: 1, Duration: time.Since(start)}
-		}
-
-		cancelCh := e.cancel
-
-		go func() {
-			<-cancelCh
+	cancelCh := e.cancel
+	doneCh := make(chan struct{})
+	watcherDone := make(chan struct{})
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-cancelCh:
+			cancelled.Store(true)
 			if cmd.Process != nil {
-				cmd.Process.Signal(os.Interrupt)
+				_ = cmd.Process.Signal(os.Interrupt)
 			}
-		}()
-
-		readLineOutput(stdout, prog)
-
-		exitCode := 0
-		if err := cmd.Wait(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			} else {
-				exitCode = 1
-			}
+		case <-doneCh:
 		}
+	}()
 
-		e.mu.Lock()
-		e.running = false
-		if e.cancel != nil {
-			close(e.cancel)
-			e.cancel = nil
+	readLineOutput(stdout, prog)
+
+	exitCode := 0
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
 		}
-		e.mu.Unlock()
+	}
+	close(doneCh)
+	<-watcherDone
+	e.finishExecution()
 
-		return CommandDoneMsg{Command: displayName, ExitCode: exitCode, Duration: time.Since(start)}
+	meta.ExitCode = exitCode
+	meta.Duration = time.Since(start)
+	meta.FinishedAt = time.Now()
+	meta.Cancelled = cancelled.Load()
+	meta.SuggestedNextAction = suggestedNextAction(displayName, exitCode)
+	return CommandDoneMsg{Command: displayName, ExitCode: exitCode, Duration: meta.Duration, Cancelled: meta.Cancelled, Meta: meta}
+}
+
+func (e *CommandExecutor) finishExecution() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.running = false
+	if e.cancel != nil {
+		close(e.cancel)
+		e.cancel = nil
 	}
 }
 
@@ -531,13 +561,21 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup migrate-llm", CLIBinary: dc, CLIArgs: []string{"setup", "migrate-llm"}, Description: "Migrate legacy LLM config into unified llm: block", Category: "setup"},
 		{TUIName: "setup skill-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "skill-scanner"}, Description: "Configure skill scanner (interactive)", Category: "setup"},
 		{TUIName: "setup mcp-scanner", CLIBinary: dc, CLIArgs: []string{"setup", "mcp-scanner"}, Description: "Configure MCP scanner (interactive)", Category: "setup"},
+		{TUIName: "setup openclaw", CLIBinary: dc, CLIArgs: []string{"setup", "openclaw", "--yes"}, Description: "Configure OpenClaw guardrail setup", Category: "setup"},
+		{TUIName: "setup zeptoclaw", CLIBinary: dc, CLIArgs: []string{"setup", "zeptoclaw", "--yes"}, Description: "Configure ZeptoClaw guardrail setup", Category: "setup"},
 		{TUIName: "setup codex", CLIBinary: dc, CLIArgs: []string{"setup", "codex", "--yes"}, Description: "Configure Codex observability hooks", Category: "setup"},
 		{TUIName: "setup claude-code", CLIBinary: dc, CLIArgs: []string{"setup", "claude-code", "--yes"}, Description: "Configure Claude Code observability hooks", Category: "setup"},
-		{TUIName: "setup mode", CLIBinary: dc, CLIArgs: []string{"setup", "mode"}, Description: "Switch active connector", Category: "setup", NeedsArg: true, ArgHint: "<openclaw|codex|claudecode|zeptoclaw>"},
+		{TUIName: "setup hermes", CLIBinary: dc, CLIArgs: []string{"setup", "hermes", "--yes"}, Description: "Configure Hermes observability hooks", Category: "setup"},
+		{TUIName: "setup cursor", CLIBinary: dc, CLIArgs: []string{"setup", "cursor", "--yes"}, Description: "Configure Cursor observability hooks", Category: "setup"},
+		{TUIName: "setup windsurf", CLIBinary: dc, CLIArgs: []string{"setup", "windsurf", "--yes"}, Description: "Configure Windsurf observability hooks", Category: "setup"},
+		{TUIName: "setup geminicli", CLIBinary: dc, CLIArgs: []string{"setup", "geminicli", "--yes"}, Description: "Configure Gemini CLI observability hooks", Category: "setup"},
+		{TUIName: "setup copilot", CLIBinary: dc, CLIArgs: []string{"setup", "copilot", "--yes"}, Description: "Configure Copilot observability hooks", Category: "setup"},
+		{TUIName: "setup mode", CLIBinary: dc, CLIArgs: []string{"setup", "mode"}, Description: "Fast/scripted connector switch", Category: "setup", NeedsArg: true, ArgHint: "<openclaw|codex|claudecode|zeptoclaw|hermes|cursor|windsurf|geminicli|copilot>"},
 		{TUIName: "setup rotate-token", CLIBinary: dc, CLIArgs: []string{"setup", "rotate-token", "--yes"}, Description: "Rotate the gateway token", Category: "setup"},
 		{TUIName: "setup gateway", CLIBinary: dc, CLIArgs: []string{"setup", "gateway"}, Description: "Configure gateway connection (interactive)", Category: "setup"},
 		{TUIName: "setup guardrail", CLIBinary: dc, CLIArgs: []string{"setup", "guardrail"}, Description: "Configure LLM guardrail", Category: "setup"},
 		{TUIName: "setup redaction", CLIBinary: dc, CLIArgs: []string{"setup", "redaction"}, Description: "Show/toggle redaction state", Category: "setup", NeedsArg: true, ArgHint: "<status|on|off> [--yes]"},
+		{TUIName: "setup notifications", CLIBinary: dc, CLIArgs: []string{"setup", "notifications"}, Description: "Show/toggle desktop notifications", Category: "setup", NeedsArg: true, ArgHint: "<status|on|off> [--yes]"},
 		{TUIName: "setup splunk", CLIBinary: dc, CLIArgs: []string{"setup", "splunk"}, Description: "Configure Splunk / O11y", Category: "setup"},
 		{TUIName: "setup local-observability up", CLIBinary: dc, CLIArgs: []string{"setup", "local-observability", "up"}, Description: "Start local Prom/Loki/Tempo/Grafana stack", Category: "setup"},
 		{TUIName: "setup local-observability down", CLIBinary: dc, CLIArgs: []string{"setup", "local-observability", "down"}, Description: "Stop local observability stack", Category: "setup"},
@@ -563,6 +601,23 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "setup provider remove", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "remove"}, Description: "Remove a custom LLM provider from the overlay", Category: "setup"},
 		{TUIName: "setup provider list", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "list"}, Description: "List overlay provider entries", Category: "setup"},
 		{TUIName: "setup provider show", CLIBinary: dc, CLIArgs: []string{"setup", "provider", "show"}, Description: "Show merged provider registry", Category: "setup"},
+
+		// Agent / AI discovery
+		// One-shot toggles for the sidecar's continuous AI-discovery
+		// service. The CLI commands save config + restart the gateway
+		// + (optionally) trigger an immediate scan, so palette users
+		// don't have to remember the three-step "edit YAML, bounce
+		// gateway, --refresh" dance that the previous workflow
+		// required.
+		{TUIName: "agent discover", CLIBinary: dc, CLIArgs: []string{"agent", "discover"}, Description: "Discover installed agents and emit sanitized telemetry", Category: "info"},
+		{TUIName: "agent usage", CLIBinary: dc, CLIArgs: []string{"agent", "usage"}, Description: "Show continuous AI visibility from the sidecar", Category: "info"},
+		{TUIName: "agent usage --refresh", CLIBinary: dc, CLIArgs: []string{"agent", "usage", "--refresh"}, Description: "Trigger an AI-usage scan and render results", Category: "scan"},
+		{TUIName: "agent discovery setup", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "setup"}, Description: "Interactive AI discovery wizard (mode, intervals, sources)", Category: "setup"},
+		{TUIName: "agent discovery enable", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "enable", "--yes"}, Description: "Enable AI discovery, save config, restart, and scan", Category: "setup"},
+		{TUIName: "agent discovery disable", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "disable", "--yes"}, Description: "Disable AI discovery and restart the gateway", Category: "setup"},
+		{TUIName: "agent discovery status", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "status"}, Description: "Show on-disk vs live AI discovery state", Category: "info"},
+		{TUIName: "agent discovery scan", CLIBinary: dc, CLIArgs: []string{"agent", "discovery", "scan"}, Description: "Trigger one immediate AI discovery scan", Category: "scan"},
+		{TUIName: "agent signatures list", CLIBinary: dc, CLIArgs: []string{"agent", "signatures", "list"}, Description: "List the merged AI discovery signature catalog", Category: "info"},
 
 		// Scan
 		{TUIName: "scan skill", CLIBinary: dc, CLIArgs: []string{"skill", "scan"}, Description: "Scan a skill", Category: "scan", NeedsArg: true, ArgHint: "<skill-name>"},
@@ -641,6 +696,7 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "config show", CLIBinary: dc, CLIArgs: []string{"config", "show"}, Description: "Show resolved config with secrets masked", Category: "info"},
 		{TUIName: "config path", CLIBinary: dc, CLIArgs: []string{"config", "path"}, Description: "Show DefenseClaw filesystem paths", Category: "info"},
 		{TUIName: "keys list", CLIBinary: dc, CLIArgs: []string{"keys", "list"}, Description: "List configured and missing credentials", Category: "info"},
+		{TUIName: "keys list --json", CLIBinary: dc, CLIArgs: []string{"keys", "list", "--json"}, Description: "List credentials as JSON for setup parity", Category: "info"},
 		{TUIName: "keys check", CLIBinary: dc, CLIArgs: []string{"keys", "check"}, Description: "Fail if required credentials are missing", Category: "info"},
 		{TUIName: "keys set", CLIBinary: dc, CLIArgs: []string{"keys", "set"}, Description: "Persist a credential to the DefenseClaw .env", Category: "setup", NeedsArg: true, ArgHint: "<ENV_NAME> --value <secret>"},
 		{TUIName: "keys fill-missing", CLIBinary: dc, CLIArgs: []string{"keys", "fill-missing"}, Description: "Prompt for missing required credentials", Category: "setup"},
@@ -747,6 +803,11 @@ func BuildRegistry() []CmdEntry {
 		{TUIName: "alerts acknowledge", CLIBinary: dc, CLIArgs: []string{"alerts", "acknowledge"}, Description: "Acknowledge alerts by severity", Category: "enforce", NeedsArg: true, ArgHint: "--severity HIGH"},
 		{TUIName: "alerts dismiss", CLIBinary: dc, CLIArgs: []string{"alerts", "dismiss"}, Description: "Dismiss alerts by severity", Category: "enforce", NeedsArg: true, ArgHint: "--severity HIGH"},
 		{TUIName: "audit log-activity", CLIBinary: dc, CLIArgs: []string{"audit", "log-activity"}, Description: "Log operator activity (payload via --payload-file)", Category: "other", NeedsArg: true, ArgHint: "--payload-file <path>"},
+		{TUIName: "fix credentials", CLIBinary: dc, CLIArgs: []string{"keys", "fill-missing"}, Description: "Prompt for missing required credentials", Category: "setup"},
+		{TUIName: "setup connector", CLIBinary: dc, CLIArgs: []string{"setup"}, Description: "Open connector setup choices in the CLI", Category: "setup"},
+		{TUIName: "restart gateway", CLIBinary: gw, CLIArgs: []string{"restart"}, Description: "Restart the gateway sidecar", Category: "daemon"},
+		{TUIName: "open setup", CLIBinary: dc, CLIArgs: []string{"setup"}, Description: "Jump to the TUI Setup panel", Category: "info"},
+		{TUIName: "readiness", CLIBinary: dc, CLIArgs: []string{"doctor"}, Description: "Run health checks that feed Setup Readiness", Category: "info"},
 		{TUIName: "help", CLIBinary: dc, CLIArgs: []string{"--help"}, Description: "Show CLI help", Category: "info"},
 	}
 }

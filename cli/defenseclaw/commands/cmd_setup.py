@@ -127,6 +127,40 @@ from defenseclaw.commands.cmd_setup_provider import provider  # noqa: E402
 setup.add_command(provider)
 
 
+# Local LLM providers that run on-box and don't require an API key.
+# This is intentionally a *subset* of ``_LOCAL_LLM_PROVIDERS`` in
+# ``defenseclaw/config.py`` and ``IsLocalProvider()`` in
+# ``internal/config/config.go`` — the wizard only offers entries that
+# have a sensible default base URL. The generic ``local`` alias is
+# excluded because it has no canonical endpoint; operators choosing
+# that route configure ``llm.base_url`` directly in ``config.yaml``.
+_LOCAL_LLM_WIZARD_PROVIDERS = {"ollama", "vllm", "lm_studio", "lmstudio"}
+
+# Default base URLs for local providers so the wizard can offer a sane
+# prefill. Operators can still override to point at a shared LAN host.
+_LOCAL_LLM_DEFAULT_BASE_URL = {
+    "ollama":    "http://127.0.0.1:11434",
+    "vllm":      "http://127.0.0.1:8000/v1",
+    "lm_studio": "http://127.0.0.1:1234/v1",
+    "lmstudio":  "http://127.0.0.1:1234/v1",
+}
+
+# Provider choices offered in the wizard. Cloud providers first (most
+# operators), then local runtimes. Kept in lockstep with
+# ``_RECOGNIZED_LLM_PROVIDERS`` in ``defenseclaw/config.py`` so any
+# provider the resolver accepts is also pickable in the wizard. The
+# scanner wrappers and the LiteLLM bridge are provider-agnostic — any
+# entry here works end-to-end with a unified ``DEFENSECLAW_LLM_KEY`` +
+# ``DEFENSECLAW_LLM_MODEL``.
+_WIZARD_LLM_PROVIDERS = [
+    "anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai",
+    "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai",
+    "fireworks_ai", "perplexity", "huggingface", "replicate", "together_ai",
+    "cerebras",
+    "ollama", "vllm", "lm_studio",
+]
+
+
 # --------------------------------------------------------------------------
 # `defenseclaw setup migrate-llm`
 # --------------------------------------------------------------------------
@@ -274,8 +308,45 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     default=False,
     help="Print the current unified LLM config and exit (no prompts).",
 )
+@click.option(
+    "--provider",
+    type=click.Choice(_WIZARD_LLM_PROVIDERS, case_sensitive=False),
+    default=None,
+    help="LLM provider to write non-interactively.",
+)
+@click.option("--model", default=None, help="LLM model id to write non-interactively.")
+@click.option(
+    "--api-key-env",
+    default=None,
+    help="Environment variable name holding the LLM API key.",
+)
+@click.option(
+    "--api-key",
+    default=None,
+    help="Secret value to persist into ~/.defenseclaw/.env under --api-key-env.",
+)
+@click.option("--base-url", default=None, help="Provider base URL override.")
+@click.option("--timeout", type=int, default=None, help="LLM timeout in seconds.")
+@click.option("--max-retries", type=int, default=None, help="LLM retry count.")
+@click.option(
+    "--non-interactive",
+    "--accept-defaults",
+    is_flag=True,
+    help="Use flags/current defaults instead of prompting.",
+)
 @pass_ctx
-def setup_llm(app: AppContext, show: bool) -> None:
+def setup_llm(
+    app: AppContext,
+    show: bool,
+    provider: str | None,
+    model: str | None,
+    api_key_env: str | None,
+    api_key: str | None,
+    base_url: str | None,
+    timeout: int | None,
+    max_retries: int | None,
+    non_interactive: bool,
+) -> None:
     """Configure the unified top-level ``llm:`` block.
 
     Prompts for provider, model, API key env var, and base URL, writing
@@ -309,6 +380,32 @@ def setup_llm(app: AppContext, show: bool) -> None:
         ux.subhead(
             "To change: run 'defenseclaw setup llm' without --show.",
         )
+        return
+
+    if non_interactive:
+        _configure_llm_non_interactive(
+            cfg,
+            cfg.data_dir,
+            provider=provider,
+            model=model,
+            api_key_env=api_key_env,
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
+        cfg.save()
+
+        click.echo()
+        ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
+        resolved = cfg.resolve_llm("")
+        key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
+        key_state = _mask(os.environ.get(key_env, "")) if os.environ.get(key_env, "") else "(not set)"
+        ux.kv("llm.provider", resolved.provider or "(unset)")
+        ux.kv("llm.model", resolved.model or "(unset)")
+        ux.kv("llm.api_key_env", f"{key_env} = {key_state}")
+        if resolved.base_url:
+            ux.kv("llm.base_url", resolved.base_url)
         return
 
     click.echo()
@@ -350,7 +447,12 @@ def setup_llm(app: AppContext, show: bool) -> None:
               help="LLM provider (anthropic or openai)")
 @click.option("--llm-model", default=None, help="LLM model name")
 @click.option("--llm-consensus-runs", type=int, default=None, help="LLM consensus runs (0=disabled)")
-@click.option("--policy", default=None, help="Scan policy preset (strict, balanced, permissive)")
+@click.option(
+    "--policy",
+    default=None,
+    type=click.Choice(["strict", "balanced", "permissive", "none"], case_sensitive=False),
+    help="Scan policy preset (strict, balanced, permissive, none)",
+)
 @click.option("--lenient", is_flag=True, default=None, help="Tolerate malformed skills")
 @click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
@@ -398,7 +500,7 @@ def setup_skill_scanner(
         if llm_consensus_runs is not None:
             sc.llm_consensus_runs = llm_consensus_runs
         if policy is not None:
-            sc.policy = policy
+            sc.policy = "" if policy.lower() == "none" else policy.lower()
         if lenient is not None:
             sc.lenient = lenient
     else:
@@ -491,31 +593,6 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     sc.lenient = click.confirm("  Lenient mode (tolerate malformed skills)?", default=sc.lenient)
 
 
-# Local LLM providers that run on-box and don't require an API key.
-# Kept in lockstep with _LOCAL_LLM_PROVIDERS in defenseclaw/config.py and
-# IsLocalProvider() in internal/config/config.go.
-_LOCAL_LLM_WIZARD_PROVIDERS = {"ollama", "vllm", "lm_studio", "lmstudio"}
-
-# Default base URLs for local providers so the wizard can offer a sane
-# prefill. Operators can still override to point at a shared LAN host.
-_LOCAL_LLM_DEFAULT_BASE_URL = {
-    "ollama":    "http://127.0.0.1:11434",
-    "vllm":      "http://127.0.0.1:8000/v1",
-    "lm_studio": "http://127.0.0.1:1234/v1",
-    "lmstudio":  "http://127.0.0.1:1234/v1",
-}
-
-# Provider choices offered in the wizard. Cloud providers first (most
-# operators), then local runtimes. The list is a superset of guardrail's
-# KNOWN_PROVIDERS so the wizard can configure Ollama/vLLM without edits
-# to that module.
-_WIZARD_LLM_PROVIDERS = [
-    "anthropic", "openai", "openrouter", "azure", "gemini", "gemini-openai",
-    "groq", "mistral", "cohere", "deepseek", "xai", "bedrock", "vertex_ai",
-    "ollama", "vllm", "lm_studio",
-]
-
-
 def _configure_llm(cfg, data_dir: str) -> None:
     """Prompt for unified ``llm:`` settings (provider, model, API key).
 
@@ -604,6 +681,63 @@ def _configure_llm(cfg, data_dir: str) -> None:
     # inspect_llm → llm one-way when llm is empty, so leaving the old
     # block populated after a successful wizard run would round-trip a
     # redundant copy of the same values into YAML.
+    _clear_legacy_llm_fields(cfg)
+
+
+def _configure_llm_non_interactive(
+    cfg,
+    data_dir: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    api_key_env: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    timeout: int | None = None,
+    max_retries: int | None = None,
+) -> None:
+    """Apply unified ``llm:`` settings without prompting.
+
+    Secret values supplied through ``--api-key`` are written to the
+    env-backed ``.env`` store and never persisted into ``config.yaml``.
+    """
+    llm = cfg.llm
+    if provider is not None:
+        llm.provider = provider.strip().lower()
+    elif not llm.provider:
+        llm.provider = "anthropic"
+
+    if model is not None:
+        llm.model = model.strip()
+
+    is_local = llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS
+    if is_local:
+        llm.api_key = ""
+        llm.api_key_env = ""
+        if base_url is not None:
+            llm.base_url = base_url.strip()
+        elif not llm.base_url:
+            llm.base_url = _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
+    else:
+        env_name = (api_key_env or llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV).strip()
+        if not env_name:
+            env_name = DEFENSECLAW_LLM_KEY_ENV
+        if api_key:
+            _save_secret_to_dotenv(env_name, api_key, data_dir)
+        llm.api_key = ""
+        llm.api_key_env = env_name
+        if base_url is not None:
+            llm.base_url = base_url.strip()
+
+    if timeout is not None:
+        llm.timeout = timeout
+    elif not llm.timeout:
+        llm.timeout = 30
+    if max_retries is not None:
+        llm.max_retries = max_retries
+    elif not llm.max_retries:
+        llm.max_retries = 2
+
     _clear_legacy_llm_fields(cfg)
 
 
@@ -985,20 +1119,58 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     os.replace(tmp, dotenv_path)
 
 
+_ROTATE_TOKEN_TIMEOUT_S = 60.0
+_ROTATE_TOKEN_MAX_OUTPUT_BYTES = 256 * 1024
+
+
 def _rotate_token_run_gateway(args: list[str]) -> tuple[int, str, str]:
-    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr)."""
+    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr).
+
+    Bounded by ``_ROTATE_TOKEN_TIMEOUT_S`` (a hung gateway during a
+    teardown/setup cycle must not wedge the rotate-token CLI forever)
+    and by ``_ROTATE_TOKEN_MAX_OUTPUT_BYTES`` (a runaway subprocess
+    must not balloon the CLI's resident memory). Hitting either limit
+    raises ``ClickException`` so the operator sees the failure rather
+    than a silent kill.
+    """
     binary = shutil.which("defenseclaw-gateway")
     if not binary:
         raise click.ClickException(
             "defenseclaw-gateway binary not found on PATH. Install it before running rotate-token "
             "(the connector teardown/setup hooks need it to refresh hook scripts)."
         )
-    proc = subprocess.run(
-        [binary, *args],
-        capture_output=True,
-        check=False,
+    try:
+        proc = subprocess.run(
+            [binary, *args],
+            capture_output=True,
+            check=False,
+            timeout=_ROTATE_TOKEN_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Surface partial output so the operator can see how far the
+        # subprocess got before the timeout fired.
+        head = (exc.stdout or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
+        tail = (exc.stderr or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
+        raise click.ClickException(
+            f"defenseclaw-gateway {' '.join(args)!r} timed out after "
+            f"{_ROTATE_TOKEN_TIMEOUT_S:.0f}s. Partial stderr: "
+            f"{tail.decode('utf-8', errors='replace')[:512]} "
+            f"(stdout: {head.decode('utf-8', errors='replace')[:256]})"
+        ) from exc
+
+    stdout = proc.stdout or b""
+    stderr = proc.stderr or b""
+    if len(stdout) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES or len(stderr) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES:
+        raise click.ClickException(
+            f"defenseclaw-gateway {' '.join(args)!r} produced "
+            f"{len(stdout)+len(stderr)} bytes of output (cap "
+            f"{_ROTATE_TOKEN_MAX_OUTPUT_BYTES} per stream); refusing to buffer."
+        )
+    return (
+        proc.returncode,
+        stdout.decode("utf-8", errors="replace"),
+        stderr.decode("utf-8", errors="replace"),
     )
-    return proc.returncode, proc.stdout.decode("utf-8", errors="replace"), proc.stderr.decode("utf-8", errors="replace")
 
 
 @setup.command("rotate-token")
@@ -1024,8 +1196,8 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     Generates a new 32-byte CSPRNG hex token, rewrites
     ~/.defenseclaw/.env atomically (mode 0o600), and refreshes the
     per-connector hook scripts so they pick up the new token. The
-    operator must restart their agent (claude / codex / openclaw /
-    zeptoclaw) for the new credential to take effect.
+    operator must restart their active agent connector for the new
+    credential to take effect.
 
     Plan B5 / S0.5.
     """
@@ -1070,7 +1242,7 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     ux.ok("Hook scripts refreshed.")
     click.echo()
-    ux.subhead("Next step: restart the agent (claude / codex / openclaw / zeptoclaw) so")
+    ux.subhead("Next step: restart the active agent connector so")
     ux.subhead("the new token is picked up by its inspect / hook subprocess invocations.")
 
 
@@ -1267,7 +1439,17 @@ def _fetch_ssm_token(param: str, region: str, profile: str | None) -> str | None
 # Connector metadata (mirrors internal/gateway/connector/*.go)
 # ---------------------------------------------------------------------------
 
-_CONNECTOR_NAMES_FALLBACK = ["openclaw", "zeptoclaw", "claudecode", "codex"]
+_CONNECTOR_NAMES_FALLBACK = [
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+]
 
 
 def _fetch_connector_names(cfg=None) -> list[str]:
@@ -1323,6 +1505,36 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "sandbox",
     },
+    "hermes": {
+        "label": "Hermes",
+        "description": "config.yaml hooks + MCP/skills/plugins surfaces",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "cursor": {
+        "label": "Cursor",
+        "description": "hooks.json command hooks + MCP/skills/rules surfaces",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "windsurf": {
+        "label": "Windsurf",
+        "description": "Cascade hooks + documented local config discovery",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "geminicli": {
+        "label": "Gemini CLI",
+        "description": "settings.json hooks + native OTLP + extensions",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
+    "copilot": {
+        "label": "GitHub Copilot CLI",
+        "description": ".github/hooks command hooks (workspace-scoped)",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -1339,14 +1551,44 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     "claudecode": (
         "~/.claude/settings.json hooks",
         "~/.claude/settings.json env OTEL_* / CLAUDE_CODE_ENABLE_TELEMETRY",
-        "Claude Code Project CodeGuard plugin (installed once and left enabled)",
+        "Optional CodeGuard native plugin only when explicitly installed",
         "~/.defenseclaw/hooks/ and subprocess policy files",
     ),
     "codex": (
-        "~/.codex/config.toml hooks / features.codex_hooks",
+        "~/.codex/config.toml hooks / features.hooks / hook trust state",
         "~/.codex/config.toml otel / notify",
-        "~/.codex/skills/software-security Project CodeGuard skill (installed once and left enabled)",
+        "Optional CodeGuard native skill only when explicitly installed",
         "~/.defenseclaw/hooks/ and notify bridge files",
+    ),
+    "hermes": (
+        "~/.hermes/config.yaml hooks",
+        "~/.hermes/config.yaml MCP entries when configured explicitly",
+        "~/.hermes/skills and ~/.hermes/plugins discovery/install surfaces",
+        "~/.defenseclaw/hooks/hermes-hook.sh",
+    ),
+    "cursor": (
+        "~/.cursor/hooks.json hooks",
+        "<workspace>/.cursor/mcp.json MCP entries when configured explicitly",
+        "<workspace>/.cursor/skills and <workspace>/.cursor/rules install surfaces",
+        "~/.defenseclaw/hooks/cursor-hook.sh",
+    ),
+    "windsurf": (
+        "~/.codeium/windsurf/hooks.json hooks",
+        "Existing Windsurf MCP/rules paths are discovered but not guessed/created",
+        "~/.defenseclaw/hooks/windsurf-hook.sh",
+    ),
+    "geminicli": (
+        "~/.gemini/settings.json hooks",
+        "~/.gemini/settings.json native OTLP telemetry and MCP entries",
+        "<workspace>/.gemini/skills, extensions, and agents install surfaces",
+        "~/.defenseclaw/hooks/geminicli-hook.sh",
+    ),
+    "copilot": (
+        "<workspace>/.github/hooks/defenseclaw.json hooks",
+        "<workspace>/.github/mcp.json MCP entries when configured explicitly",
+        "<workspace>/.github/skills, agents, and instructions install surfaces",
+        "Native OTLP env vars are documented for the process env; shell rc files are not mutated",
+        "~/.defenseclaw/hooks/copilot-hook.sh",
     ),
 }
 
@@ -1428,6 +1670,14 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
         return "codex"
     if os.path.isfile(os.path.join(home, ".zeptoclaw", "config.json")):
         return "zeptoclaw"
+    if os.path.isfile(os.path.join(home, ".hermes", "config.yaml")):
+        return "hermes"
+    if os.path.isfile(os.path.join(home, ".cursor", "hooks.json")):
+        return "cursor"
+    if os.path.isfile(os.path.join(home, ".codeium", "windsurf", "hooks.json")):
+        return "windsurf"
+    if os.path.isfile(os.path.join(home, ".gemini", "settings.json")):
+        return "geminicli"
     return None
 
 
@@ -1501,9 +1751,18 @@ def _hilt_support_note(connector: str) -> str:
     if connector == "claudecode":
         return "Claude Code supports native PreToolUse ask prompts."
     if connector == "codex":
-        return "Codex is partial: PermissionRequest prompts are native; PreToolUse ask is unsupported."
+        return "Codex has no native ask surface here; confirm verdicts are downgraded with raw_action preserved."
     if connector == "zeptoclaw":
-        return "ZeptoClaw is partial: proxy-gated confirmations only; unsupported surfaces alert."
+        return "ZeptoClaw has no native ask surface; confirm verdicts are downgraded with raw_action preserved."
+    if connector == "copilot":
+        return "Copilot CLI supports native ask on documented preToolUse hooks."
+    if connector == "cursor":
+        return "Cursor supports native ask only on documented ask-capable hook events."
+    if connector in {"hermes", "windsurf", "geminicli"}:
+        return (
+            "This connector can block supported hook events but has no native human approval surface; "
+            "confirm falls back explicitly."
+        )
     return "Support depends on the connector surface."
 
 
@@ -1615,7 +1874,11 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 # ---------------------------------------------------------------------------
 
 @setup.command("guardrail")
-@click.option("--disable", is_flag=True, help="Disable guardrail and revert OpenClaw config")
+@click.option(
+    "--disable",
+    is_flag=True,
+    help="Disable guardrail and restore connector config where applicable.",
+)
 # ``--connector`` is the canonical name (matches scripts/install.sh and
 # /v1/connectors). ``--agent`` is kept as an alias for backward
 # compatibility with existing scripts and docs. Both bind to the same
@@ -1624,9 +1887,9 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 # behavior for aliased options.
 @click.option("--connector", "--agent", "agent_name",
               type=click.Choice(_CONNECTOR_NAMES, case_sensitive=False), default=None,
-              help="Agent framework connector (openclaw, claudecode, codex, zeptoclaw). "
-                   "Alias: --agent. Defaults to <data_dir>/picked_connector when set "
-                   "by the installer, else filesystem auto-detection, else openclaw.")
+              help=("Agent framework connector. Alias: --agent. Defaults to "
+                    "<data_dir>/picked_connector when set by the installer, "
+                    "else filesystem auto-detection, else openclaw."))
 @click.option("--mode", "guard_mode", type=click.Choice(["observe", "action"]), default=None,
               help="Guardrail mode")
 @click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None,
@@ -1653,7 +1916,7 @@ def _connector_enforcement_enabled(gc, connector: str) -> bool:
 @click.option("--disable-redaction/--enable-redaction", default=None,
               help="Disable or enable prompt/log redaction")
 @click.option("--restart/--no-restart", default=True,
-              help="Restart gateway and openclaw after setup (default: on)")
+              help="Restart gateway and the active connector after setup (default: on)")
 @click.option("--verify/--no-verify", default=True,
               help="Run connectivity checks after setup (default: on)")
 @click.option("--non-interactive", "--accept-defaults", is_flag=True,
@@ -1679,7 +1942,7 @@ def setup_guardrail(
     PII, and data exfiltration patterns.
 
     Use --connector (alias: --agent) to select the agent framework
-    connector (openclaw, claudecode, codex, zeptoclaw). The connector
+    connector. The connector
     determines how LLM traffic is intercepted, how tool calls are
     inspected, and what subprocess enforcement policy is applied. When
     omitted, the value defaults to the install-time hint at
@@ -1894,7 +2157,7 @@ def setup_guardrail(
 
 
 # ---------------------------------------------------------------------------
-# setup codex / setup claude-code  —  observability-only aliases
+# setup <observability connector>  —  observability-only aliases
 # ---------------------------------------------------------------------------
 #
 # These are thin wrappers around the existing observability-only branch
@@ -1906,6 +2169,11 @@ def setup_guardrail(
 #
 #   defenseclaw setup codex          → observability-only for Codex
 #   defenseclaw setup claude-code    → observability-only for Claude Code
+#   defenseclaw setup hermes         → observability-only for Hermes
+#   defenseclaw setup cursor         → observability-only for Cursor
+#   defenseclaw setup windsurf       → observability-only for Windsurf
+#   defenseclaw setup geminicli      → observability-only for Gemini CLI
+#   defenseclaw setup copilot        → observability-only for GitHub Copilot CLI
 #
 # Both commands also flip ``claw.mode`` so the rest of the CLI/TUI
 # (skill scanner, MCP scanner, plugin scanner, overview panels) reads
@@ -1938,9 +2206,9 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
     selected by future ``defenseclaw setup guardrail`` invocations.
 
     The bound on contents is intentional: the file is one short word
-    (``codex`` / ``claudecode`` / ``openclaw`` / ``zeptoclaw``) and
-    ``_read_picked_connector`` rejects anything outside ``_CONNECTOR_NAMES``,
-    so even a corrupted write can never escalate to remote code paths.
+    (one of ``_CONNECTOR_NAMES``) and ``_read_picked_connector``
+    rejects anything outside ``_CONNECTOR_NAMES``, so even a corrupted
+    write can never escalate to remote code paths.
     """
     if not data_dir:
         return
@@ -1994,10 +2262,10 @@ def _apply_connector_observability_only(
 
     Returns True on success, False on any persistence error.
     """
-    if connector not in ("codex", "claudecode"):
+    if connector not in _OBSERVABILITY_ONLY_CONNECTORS:
         click.echo(
             f"  ✗ observability-only mode is only supported for "
-            f"codex/claudecode (got {connector!r})",
+            f"{sorted(_OBSERVABILITY_ONLY_CONNECTORS)} (got {connector!r})",
             err=True,
         )
         return False
@@ -2014,11 +2282,14 @@ def _apply_connector_observability_only(
     gc.detection_strategy = "regex_only"
     gc.detection_strategy_completion = "regex_only"
     gc.judge.enabled = False
+    cfg.ai_discovery.enabled = True
+    cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
+    cfg.ai_discovery.include_shell_history = True
+    cfg.ai_discovery.include_package_manifests = True
+    cfg.ai_discovery.include_env_var_names = True
+    cfg.ai_discovery.include_network_domains = True
 
-    if connector == "codex":
-        gc.codex_enforcement_enabled = False
-    else:
-        gc.claudecode_enforcement_enabled = False
+    _set_connector_enforcement(gc, connector, False)
 
     try:
         cfg.save()
@@ -2055,11 +2326,7 @@ def _apply_connector_observability_only(
 
 def _print_connector_observability_banner(connector: str) -> None:
     label = _CONNECTOR_META[connector]["label"]
-    enforcement_flag = (
-        "codex_enforcement_enabled"
-        if connector == "codex"
-        else "claudecode_enforcement_enabled"
-    )
+    enforcement_flag = _connector_enforcement_flag(connector)
     click.echo()
     click.echo(f"  DefenseClaw — {label} observability setup")
     click.echo("  ─────────────────────────────────────────────────────────")
@@ -2073,18 +2340,24 @@ def _print_connector_observability_banner(connector: str) -> None:
         "    • Hooks      — tool calls, prompt-submit, agent stop "
         f"→ /api/v1/{connector}/hook"
     )
-    click.echo(
-        "    • Native OTel — model + token counts, raw API bodies "
-        "→ /v1/logs and /v1/metrics"
-    )
+    native_otel_connectors = {"codex", "claudecode", "geminicli", "copilot"}
+    if connector in native_otel_connectors:
+        click.echo(
+            "    • Native OTel — documented agent telemetry "
+            "→ /v1/logs, /v1/metrics, and/or /v1/traces"
+        )
     if connector == "codex":
         click.echo(
             "    • Notify     — agent-turn-complete events "
             "→ /api/v1/codex/notify"
         )
     click.echo()
-    click.echo(f"  To later turn enforcement on, set guardrail.{enforcement_flag}=true")
-    click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+    if enforcement_flag:
+        click.echo(f"  To later turn proxy interception on, set guardrail.{enforcement_flag}=true")
+        click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
+    else:
+        click.echo("  To later enforce supported hook events, set connector_hooks.<name>.mode=action")
+        click.echo("  (or guardrail.mode=action) and restart the gateway.")
     click.echo()
     _print_connector_mutation_notice(connector)
     click.echo()
@@ -2102,6 +2375,7 @@ def _print_observability_summary(connector: str, cfg=None) -> None:
         ("guardrail.enabled", "true (observability-only)"),
         ("guardrail.mode", "observe"),
         ("enforcement", "disabled"),
+        ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
     for k, v in rows:
         click.echo(f"    {k + ':':<22s} {v}")
@@ -2118,8 +2392,12 @@ def _print_observability_summary(connector: str, cfg=None) -> None:
         "defenseclaw setup local-observability up"
     )
     click.echo(
-        f"    • Tail audit events for the new connector: "
-        f"defenseclaw audit tail --connector {connector}"
+        "    • Watch decisions live: defenseclaw tui  "
+        "(or: tail -f ~/.defenseclaw/gateway.jsonl | jq)"
+    )
+    click.echo(
+        f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
+        f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
     )
     click.echo()
     click.echo("  To revert and restore direct LLM access:")
@@ -2209,13 +2487,13 @@ def _setup_observability_alias(
     restart: bool,
     with_local_stack: bool,
 ) -> None:
-    """Shared body for ``setup codex`` and ``setup claude-code``.
+    """Shared body for observability-only connector setup aliases.
 
     Splitting this out (rather than calling each Click command from
     the other) keeps the wiring linear: each Click command parses its
     own flags, then defers to this helper for the actual work.
     """
-    if connector not in ("codex", "claudecode"):
+    if connector not in _OBSERVABILITY_ONLY_CONNECTORS:
         raise click.ClickException(
             f"unsupported connector for observability alias: {connector!r}"
         )
@@ -2347,14 +2625,269 @@ def setup_claude_code(
     )
 
 
+def _make_observability_setup_command(connector: str) -> click.Command:
+    """Create a ``defenseclaw setup <connector>`` observability alias."""
+    label = _CONNECTOR_META[connector]["label"]
+
+    @click.command(
+        connector,
+        help=(
+            f"Configure DefenseClaw for {label} observability (no enforcement).\n\n"
+            "Pins the active connector so CLI/TUI scanners read that agent's "
+            "documented local surfaces. Enforcement remains opt-in through "
+            "`defenseclaw setup guardrail` or connector hook action mode."
+        ),
+        short_help=f"Configure DefenseClaw for {label} observability.",
+    )
+    @click.option(
+        "--yes", "-y", "yes",
+        is_flag=True,
+        help="Skip the confirmation prompt (non-interactive).",
+    )
+    @click.option(
+        "--restart/--no-restart",
+        default=True,
+        show_default=True,
+        help=(
+            "Restart defenseclaw-gateway after applying changes "
+            "(needed so the connector's hook scripts and telemetry are wired)."
+        ),
+    )
+    @click.option(
+        "--with-local-stack/--no-local-stack",
+        default=False,
+        show_default=True,
+        help=(
+            "Also bring up the bundled Prom/Loki/Tempo/Grafana stack via "
+            "`defenseclaw setup local-observability up` once config is saved."
+        ),
+    )
+    @pass_ctx
+    def _cmd(app: AppContext, yes: bool, restart: bool, with_local_stack: bool) -> None:
+        _setup_observability_alias(
+            app,
+            connector=connector,
+            yes=yes,
+            restart=restart,
+            with_local_stack=with_local_stack,
+        )
+
+    _cmd.__name__ = f"setup_{connector}"
+    _cmd.__doc__ = (
+        f"Configure DefenseClaw for {label} observability (no enforcement).\n\n"
+        "Pins the active connector so CLI/TUI scanners read that agent's "
+        "documented local surfaces. Enforcement remains opt-in through "
+        "`defenseclaw setup guardrail` or connector hook action mode."
+    )
+    return _cmd
+
+
+for _observability_connector in ("hermes", "cursor", "windsurf", "geminicli", "copilot"):
+    setup.add_command(_make_observability_setup_command(_observability_connector))
+
+
 # Connectors that go through the DefenseClaw proxy (port 4000) and
 # therefore support the full guardrail enforcement surface (block,
 # observe, scanner_mode, judge, etc.). The complement set
-# {codex, claudecode} is observability-only — they talk directly to
-# their native upstream and DefenseClaw collects telemetry via
-# hook scripts and OTel without sitting in the data path.
+# _OBSERVABILITY_ONLY_CONNECTORS talks directly to its native upstream
+# and DefenseClaw collects telemetry via hook scripts and, where the
+# vendor documents it, native OTLP without sitting in the LLM data path.
 _GUARDRAIL_SUPPORTING_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
-_OBSERVABILITY_ONLY_CONNECTORS = frozenset({"codex", "claudecode"})
+_OBSERVABILITY_ONLY_CONNECTORS = frozenset({
+    "codex",
+    "claudecode",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+})
+
+
+def _setup_guardrail_connector_alias(
+    app: AppContext,
+    *,
+    connector: str,
+    yes: bool,
+    non_interactive: bool,
+    guard_mode: str | None,
+    scanner_mode: str | None,
+    cisco_endpoint: str | None,
+    cisco_api_key_env: str | None,
+    cisco_timeout_ms: int | None,
+    guard_port: int | None,
+    block_message: str | None,
+    detection_strategy: str | None,
+    rule_pack: str | None,
+    judge_model: str | None,
+    judge_api_base: str | None,
+    judge_api_key_env: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
+    disable_redaction: bool | None,
+    restart: bool,
+    verify: bool,
+) -> None:
+    """Run the full guardrail setup backend for a specific connector."""
+    if connector not in _GUARDRAIL_SUPPORTING_CONNECTORS:
+        raise click.ClickException(
+            f"{connector!r} is not a guardrail-capable connector"
+        )
+
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector)
+    click.echo()
+    click.echo(f"  DefenseClaw — {label} guardrail setup")
+    click.echo("  ─────────────────────────────────────────────────────────")
+    click.echo()
+    click.echo(f"  This pins claw.mode={connector} and guardrail.connector={connector},")
+    click.echo("  then runs the same non-interactive backend as `setup guardrail`.")
+    click.echo()
+
+    if not (yes or non_interactive):
+        if not click.confirm(f"  Configure {label} guardrail now?", default=True):
+            click.echo("  Aborted — no changes made.")
+            return
+
+    app.cfg.claw.mode = connector
+    app.cfg.guardrail.connector = connector
+    _write_picked_connector_hint(getattr(app.cfg, "data_dir", None), connector)
+
+    ctx = click.get_current_context()
+    ctx.invoke(
+        setup_guardrail,
+        disable=False,
+        agent_name=connector,
+        guard_mode=guard_mode,
+        guard_port=guard_port,
+        scanner_mode=scanner_mode,
+        cisco_endpoint=cisco_endpoint,
+        cisco_api_key_env=cisco_api_key_env,
+        cisco_timeout_ms=cisco_timeout_ms,
+        block_message=block_message,
+        detection_strategy=detection_strategy,
+        rule_pack=rule_pack,
+        judge_model=judge_model,
+        judge_api_base=judge_api_base,
+        judge_api_key_env=judge_api_key_env,
+        human_approval=human_approval,
+        hilt_min_severity=hilt_min_severity,
+        disable_redaction=disable_redaction,
+        restart=restart,
+        verify=verify,
+        non_interactive=True,
+    )
+
+
+def _make_guardrail_connector_setup_command(connector: str) -> click.Command:
+    """Create ``defenseclaw setup openclaw|zeptoclaw`` aliases."""
+    label = _CONNECTOR_META[connector]["label"]
+
+    @click.command(
+        connector,
+        help=(
+            f"Configure DefenseClaw guardrail for {label}.\n\n"
+            "Pins claw.mode and guardrail.connector, then runs the "
+            "same backend as `defenseclaw setup guardrail --connector ...`."
+        ),
+        short_help=f"Configure {label} guardrail setup.",
+    )
+    @click.option("--yes", "-y", "yes", is_flag=True, help="Skip confirmation prompt.")
+    @click.option("--non-interactive", "--accept-defaults", is_flag=True, help="Alias for --yes.")
+    @click.option(
+        "--mode",
+        "guard_mode",
+        type=click.Choice(["observe", "action"]),
+        default=None,
+        help="Guardrail mode.",
+    )
+    @click.option("--scanner-mode", type=click.Choice(["local", "remote", "both"]), default=None, help="Scanner mode.")
+    @click.option("--cisco-endpoint", default=None, help="Cisco AI Defense API endpoint.")
+    @click.option("--cisco-api-key-env", default=None, help="Env var name holding Cisco AI Defense API key.")
+    @click.option("--cisco-timeout-ms", type=int, default=None, help="Cisco AI Defense timeout (ms).")
+    @click.option("--port", "guard_port", type=int, default=None, help="Guardrail proxy port.")
+    @click.option("--block-message", default=None, help="Custom block message.")
+    @click.option(
+        "--detection-strategy",
+        type=click.Choice(["regex_only", "regex_judge", "judge_first"]),
+        default=None,
+        help="Detection strategy.",
+    )
+    @click.option(
+        "--rule-pack",
+        type=click.Choice(["default", "strict", "permissive"]),
+        default=None,
+        help="Guardrail rule-pack profile.",
+    )
+    @click.option("--judge-model", default=None, help="LLM judge model.")
+    @click.option("--judge-api-base", default=None, help="LLM judge API base URL.")
+    @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key.")
+    @click.option("--human-approval/--no-human-approval", default=None, help="Enable or disable human approval.")
+    @click.option(
+        "--hilt-min-severity",
+        type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False),
+        default=None,
+        help="Minimum severity that asks for human approval.",
+    )
+    @click.option(
+        "--disable-redaction/--enable-redaction",
+        default=None,
+        help="Disable or enable prompt/log redaction.",
+    )
+    @click.option("--restart/--no-restart", default=True, show_default=True, help="Restart gateway after setup.")
+    @click.option("--verify/--no-verify", default=True, show_default=True, help="Run connectivity checks after setup.")
+    @pass_ctx
+    def _cmd(
+        app: AppContext,
+        yes: bool,
+        non_interactive: bool,
+        guard_mode: str | None,
+        scanner_mode: str | None,
+        cisco_endpoint: str | None,
+        cisco_api_key_env: str | None,
+        cisco_timeout_ms: int | None,
+        guard_port: int | None,
+        block_message: str | None,
+        detection_strategy: str | None,
+        rule_pack: str | None,
+        judge_model: str | None,
+        judge_api_base: str | None,
+        judge_api_key_env: str | None,
+        human_approval: bool | None,
+        hilt_min_severity: str | None,
+        disable_redaction: bool | None,
+        restart: bool,
+        verify: bool,
+    ) -> None:
+        _setup_guardrail_connector_alias(
+            app,
+            connector=connector,
+            yes=yes,
+            non_interactive=non_interactive,
+            guard_mode=guard_mode,
+            scanner_mode=scanner_mode,
+            cisco_endpoint=cisco_endpoint,
+            cisco_api_key_env=cisco_api_key_env,
+            cisco_timeout_ms=cisco_timeout_ms,
+            guard_port=guard_port,
+            block_message=block_message,
+            detection_strategy=detection_strategy,
+            rule_pack=rule_pack,
+            judge_model=judge_model,
+            judge_api_base=judge_api_base,
+            judge_api_key_env=judge_api_key_env,
+            human_approval=human_approval,
+            hilt_min_severity=hilt_min_severity,
+            disable_redaction=disable_redaction,
+            restart=restart,
+            verify=verify,
+        )
+
+    _cmd.__name__ = f"setup_{connector}"
+    return _cmd
+
+
+for _guardrail_connector in ("openclaw", "zeptoclaw"):
+    setup.add_command(_make_guardrail_connector_setup_command(_guardrail_connector))
 
 
 def _apply_connector_mode_switch(
@@ -2525,7 +3058,7 @@ def _apply_connector_mode_switch(
 @click.argument(
     "connector",
     type=click.Choice(
-        sorted(("openclaw", "zeptoclaw", "codex", "claudecode")),
+        sorted(_CONNECTOR_NAMES),
         case_sensitive=False,
     ),
 )
@@ -2545,15 +3078,16 @@ def _apply_connector_mode_switch(
 )
 @pass_ctx
 def setup_mode(app: AppContext, connector: str, restart: bool, yes: bool) -> None:
-    """Switch the active claw connector with smart guardrail inheritance.
+    """Switch the active agent connector with smart guardrail inheritance.
 
     \b
     Inheritance rules:
       openclaw ↔ zeptoclaw         inherit current guardrail config
-      → codex / claudecode         observability-only (proxy off)
-      from codex / claudecode      observe-only (proxy on, no enforce)
+      → hook/observability agents  observability-only (proxy off)
+      from hook/observability      observe-only (proxy on, no enforce)
 
-    The TUI Overview's [m] action calls this command directly.
+    The TUI Overview's [m] action now runs full connector setup
+    aliases instead. This command remains the fast/scripted switch.
 
     Examples:
 
@@ -2703,6 +3237,335 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
             "config",
             f"disable_redaction={desired!s}",
         )
+
+
+@setup.command("notifications")
+@click.argument(
+    "action",
+    type=click.Choice(("on", "off", "status"), case_sensitive=False),
+    required=False,
+)
+@click.option(
+    "--yes", "-y", "yes", is_flag=True,
+    help=(
+        "Skip the interactive confirmation prompt and accept the "
+        "default answer. Required for non-TTY callers (CI, scripts, "
+        "TUI shell-outs); without it the command may hang waiting "
+        "on stdin when invoked without an explicit on/off/status "
+        "argument."
+    ),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after toggling. The notification "
+        "dispatcher is built once at sidecar boot from "
+        "``notifications.*`` so a flip without restart leaves the "
+        "previous state in effect for the running process. Use "
+        "``--no-restart`` only when the sidecar is offline; the "
+        "``setup`` group's auto-restart hook will not double-bounce "
+        "the gateway because this command marks the restart as "
+        "handled."
+    ),
+)
+@pass_ctx
+def setup_notifications(
+    app: AppContext,
+    action: str | None,
+    yes: bool,
+    restart: bool,
+) -> None:
+    """Toggle user-session desktop notifications for blocks and HITL approvals.
+
+    \b
+    DefenseClaw can surface a desktop notification whenever a hook,
+    guardrail verdict, or asset policy blocks a tool call, or when a
+    Human-in-the-Loop approval is pending in the chat / TUI. The
+    notification is informational only — clicking it does not approve
+    or deny anything; the operator still replies in the existing
+    chat/CLI surface.
+    \b
+    With no argument this command is a one-shot Y/n onboarding
+    prompt:
+    \b
+      Show desktop notifications for blocks and approval requests? [Y/n]
+    \b
+    Use ``on`` / ``off`` to flip ``notifications.enabled`` directly,
+    and ``status`` to print the resolved configuration without
+    mutating it.
+    \b
+    Examples:
+      defenseclaw setup notifications
+      defenseclaw setup notifications on
+      defenseclaw setup notifications off --yes
+      defenseclaw setup notifications status
+    """
+    cfg = app.cfg
+    nc = cfg.notifications
+    current = bool(nc.enabled)
+
+    normalized = action.strip().lower() if action else None
+
+    if normalized == "status":
+        ux.section("Notifications state")
+        click.echo(
+            f"    {ux.dim('config (notifications.enabled):')} "
+            f"{'ON' if current else 'OFF'}"
+        )
+        click.echo(
+            f"    {ux.dim('block_enforced:')} {'on' if nc.block_enforced else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('block_would_block:')} {'on' if nc.block_would_block else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('hitl_approval:')} {'on' if nc.hitl_approval else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.hook:')} {'on' if nc.sources.hook else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.guardrail:')} "
+            f"{'on' if nc.sources.guardrail else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('sources.asset_policy:')} "
+            f"{'on' if nc.sources.asset_policy else 'off'}"
+        )
+        click.echo(
+            f"    {ux.dim('dedup_window:')} {nc.dedup_window or '30s'}"
+        )
+        click.echo(
+            f"    {ux.dim('max_per_minute:')} {nc.max_per_minute}"
+        )
+        return
+
+    if normalized in ("on", "off"):
+        desired = normalized == "on"
+    else:
+        # No explicit action -> interactive Y/n onboarding prompt.
+        # ``--yes`` short-circuits to the prompt's default (True).
+        if yes:
+            desired = True
+        else:
+            desired = click.confirm(
+                "  Show desktop notifications for blocks and approval requests?",
+                default=True,
+            )
+
+    if desired == current:
+        state = "ON" if current else "OFF"
+        click.echo(f"  • Notifications are already {state}; nothing to change.")
+        return
+
+    nc.enabled = desired
+
+    try:
+        cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise click.ClickException("config save failed") from exc
+
+    ux.ok(
+        f"notifications.enabled set to {desired!s} "
+        f"({'ON' if desired else 'OFF'})"
+    )
+
+    if restart:
+        ux.subhead(
+            "Restarting gateway so the notification dispatcher picks up the new state..."
+        )
+        # _restart_defense_gateway sets the per-context "restart
+        # already handled" flag, so the setup group's
+        # _auto_restart_sidecar_after_setup result callback won't
+        # bounce the gateway a second time after this one returns.
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        # Operator opted out of the restart explicitly; suppress the
+        # group-level auto-restart hook too so the operator sees one
+        # consistent "do it yourself" message instead of the hook
+        # contradicting us by bouncing the gateway anyway.
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        ux.warn(
+            "Skipped restart (--no-restart). The running sidecar still "
+            "uses the previous notification state. Restart manually:"
+        )
+        ux.subhead("   defenseclaw-gateway restart")
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-notifications-toggle",
+            "config",
+            f"enabled={desired!s}",
+        )
+
+
+# ``setup notifications`` is already a one-shot command (action is a
+# positional argument, not a subgroup) so we can't attach
+# ``set <key> <value>`` to it without breaking the existing
+# ``defenseclaw setup notifications on`` form. A flat sibling command
+# keeps the new surface discoverable (``setup --help`` lists it next
+# to ``notifications``) and avoids click's argument-vs-subcommand
+# parsing ambiguity.
+_NOTIFICATION_SLOTS: dict[str, tuple[str, str]] = {
+    # slot name (operator-typed)  ->  (object_path, attr)
+    # Categories (event types) live on the NotificationsConfig itself.
+    "block_enforced":     ("",        "block_enforced"),
+    "block_would_block":  ("",        "block_would_block"),
+    "hitl_approval":      ("",        "hitl_approval"),
+    # Sources live on the nested NotificationSourceFilter struct.
+    "sources.hook":       ("sources", "hook"),
+    "sources.guardrail":  ("sources", "guardrail"),
+    "sources.asset_policy": ("sources", "asset_policy"),
+    # Friendlier short forms for the source toggles. Keep both so
+    # ``--help`` callers and operators copying from ``status`` output
+    # land on a working invocation either way.
+    "hook":               ("sources", "hook"),
+    "guardrail":          ("sources", "guardrail"),
+    "asset_policy":       ("sources", "asset_policy"),
+}
+
+
+@setup.command("notifications-set")
+@click.argument(
+    "slot",
+    type=click.Choice(sorted(set(_NOTIFICATION_SLOTS.keys())), case_sensitive=False),
+)
+@click.argument(
+    "value",
+    type=click.Choice(("on", "off"), case_sensitive=False),
+)
+@click.option(
+    "--restart/--no-restart", default=True, show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after the toggle. The notifier "
+        "dispatcher reads its filters at sidecar boot, so a flip "
+        "without restart leaves the running process on the previous "
+        "filter set."
+    ),
+)
+@pass_ctx
+def setup_notifications_set(
+    app: AppContext,
+    slot: str,
+    value: str,
+    restart: bool,
+) -> None:
+    """Toggle a single notifications category or source.
+
+    ``slot`` is one of the dotted paths below; ``value`` is ``on`` or
+    ``off``. The master switch (``notifications.enabled``) is left
+    alone — use ``defenseclaw setup notifications on/off`` for that.
+
+    \b
+    Categories (event types):
+      block_enforced       Real blocks (default: on).
+      block_would_block    Observe-mode would-block / would-ask toasts (default: off).
+      hitl_approval        Human-in-the-loop prompts (default: on).
+
+    \b
+    Sources (subsystem of origin):
+      sources.hook         Per-tool hooks (claude_code / codex / ...).
+      sources.guardrail    Guardrail verdicts.
+      sources.asset_policy Skill / MCP allow-list blocks.
+
+    \b
+    Examples:
+      defenseclaw setup notifications-set sources.hook off
+      defenseclaw setup notifications-set hitl_approval on --no-restart
+      defenseclaw setup notifications-set guardrail off  # short form
+    """
+    cfg = app.cfg
+    nc = cfg.notifications
+
+    obj_path, attr = _NOTIFICATION_SLOTS[slot.lower()]
+    target = nc if not obj_path else getattr(nc, obj_path)
+    current = bool(getattr(target, attr))
+    desired = value.lower() == "on"
+
+    if current == desired:
+        ux.subhead(
+            f"notifications.{slot} already {value.lower()}; nothing to change.",
+        )
+        return
+
+    setattr(target, attr, desired)
+    try:
+        cfg.save()
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}")
+        raise click.ClickException("config save failed") from exc
+
+    ux.ok(f"notifications.{slot} = {value.lower()}")
+    if not nc.enabled:
+        # The dispatcher checks the master switch first, so flipping a
+        # sub-toggle with the master OFF is harmless but invisible —
+        # surface that so operators don't think their change had no
+        # effect.
+        ux.warn(
+            "notifications.enabled is OFF — this toggle won't have any "
+            "user-visible effect until you run "
+            "`defenseclaw setup notifications on`.",
+        )
+
+    if restart:
+        ux.subhead("Restarting gateway so the dispatcher picks up the new filter…")
+        _restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=cfg.active_connector(),
+        )
+    else:
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        ux.subhead(
+            "Skipped restart (--no-restart). Run `defenseclaw-gateway "
+            "restart` when ready.",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "setup-notifications-set",
+            "config",
+            f"slot={slot} value={value.lower()}",
+        )
+
+
+# ``setup registry`` — discoverable shortcut that drops the operator
+# straight into the registry wizard. The full ``defenseclaw registry``
+# group remains the canonical surface for non-onboarding flows
+# (``add`` / ``edit`` / ``sync`` / ...); this wrapper exists so a
+# first-time operator working through ``defenseclaw setup --help``
+# doesn't have to know that registries live in their own top-level
+# group.
+@setup.command("registry")
+@click.pass_context
+def setup_registry(ctx: click.Context) -> None:
+    """Register an external skill / MCP catalog (interactive wizard).
+
+    Wraps ``defenseclaw registry wizard`` so first-run operators
+    discover the registry feature inside ``defenseclaw setup --help``.
+    For non-interactive usage and the full subcommand surface
+    (``add`` / ``edit`` / ``sync`` / ``approve`` / ``reject`` /
+    ``test`` / ``list`` / ``show`` / ``remove`` / ``require``), use
+    the top-level ``defenseclaw registry`` group directly.
+    """
+    # Lazy import to avoid pulling the registry HTTP / YAML deps into
+    # setup commands that don't need them, and to dodge a potential
+    # circular import (cmd_registry imports config -> ... -> setup
+    # in some lint configurations).
+    from defenseclaw.commands.cmd_registry import wizard_cmd
+
+    return ctx.invoke(wizard_cmd)
 
 
 def execute_guardrail_setup(
@@ -2875,7 +3738,7 @@ def _interactive_guardrail_setup(
             click.echo()
             click.echo("  Observability-only mode")
             click.echo("  ───────────────────────")
-            click.echo("  Codex / Claude Code talk DIRECTLY to their native upstream;")
+            click.echo(f"  {label} talks DIRECTLY to its native upstream;")
             click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
             click.echo()
             click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")
@@ -2927,6 +3790,9 @@ def _interactive_guardrail_setup(
     proxy_port = gc.port or 4000
     if gc.connector in ("codex", "claudecode"):
         click.echo(f"  Proxy port:    {proxy_port} (enabled for this connector setup)")
+    elif gc.connector in _OBSERVABILITY_ONLY_CONNECTORS:
+        api_port = getattr(app.cfg.gateway, "api_port", 18970)
+        click.echo(f"  API port:      {api_port} (hook endpoint only; no LLM proxy binding)")
     else:
         click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
     click.echo()

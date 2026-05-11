@@ -11,8 +11,13 @@
 package gateway
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -37,6 +42,74 @@ func TestResolveActiveConnector_EmptyDefaultsToOpenClaw(t *testing.T) {
 	}
 	if got := conn.Name(); got != "openclaw" {
 		t.Errorf("connector name = %q, want %q", got, "openclaw")
+	}
+}
+
+func TestTeardownPreviousConnector_CleansCodexTrustedHookState(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("mkdir codex config dir: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+
+	connector.CodexConfigPathOverride = configPath
+	t.Cleanup(func() { connector.CodexConfigPathOverride = "" })
+
+	opts := connector.SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "tok-test",
+	}
+	codex := connector.NewCodexConnector()
+	if err := codex.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("codex setup: %v", err)
+	}
+	if err := connector.SaveActiveConnector(dir, "codex"); err != nil {
+		t.Fatalf("save active connector: %v", err)
+	}
+
+	registry := connector.NewDefaultRegistry()
+	if err := teardownPreviousConnector(registry, "claudecode", opts, context.Background()); err != nil {
+		t.Fatalf("teardown previous connector: %v", err)
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read restored codex config: %v", err)
+	}
+
+	// Parse TOML and check for residue at the key level rather than via
+	// substring matching. Substring matching is brittle: future Codex
+	// config formats might legitimately contain "hooks" inside an
+	// unrelated key (e.g. "webhook_url") or in a comment, and the test
+	// would start failing on cosmetic changes. Key-level checks pin the
+	// invariant that actually matters — DefenseClaw's hook plumbing
+	// must not survive a connector switch.
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid TOML after teardown: %v\nfile:\n%s", err, data)
+	}
+	for _, forbidden := range []string{"hooks", "features"} {
+		if _, present := parsed[forbidden]; present {
+			t.Fatalf("connector switch left top-level %q key in restored config:\n%s", forbidden, data)
+		}
+	}
+	if got, _ := parsed["model_provider"].(string); got != "openai" {
+		t.Errorf("teardown clobbered original model_provider: got=%q want=openai\nfile:\n%s", got, data)
+	}
+	// Also assert no DefenseClaw-installed hook script path leaked into
+	// any string value (covers the "fragment lurking inside a TOML
+	// inline string" case that key-level checks alone would miss).
+	if strings.Contains(string(data), "codex-hook.sh") {
+		t.Fatalf("teardown left codex-hook.sh path in config:\n%s", data)
+	}
+	if strings.Contains(string(data), "trusted_hash") {
+		t.Fatalf("teardown left trusted_hash entry in config:\n%s", data)
 	}
 }
 
@@ -69,15 +142,15 @@ func TestConfiguredConnectorNameFallsBackToClawMode(t *testing.T) {
 }
 
 // TestResolveActiveConnector_KnownNameReturnsConnector covers the
-// happy path for each of the four built-in connectors. We don't
-// just spot-check one — the registry contract for S1.4 is "every
-// name DefaultRegistry advertises must resolve cleanly", so we
-// drive the assertion off the same list the registry exposes.
+// happy path for every built-in connector. We don't just spot-check
+// one — the registry contract for S1.4 is "every name DefaultRegistry
+// advertises must resolve cleanly", so we drive the assertion off the
+// same list the registry exposes.
 func TestResolveActiveConnector_KnownNameReturnsConnector(t *testing.T) {
 	t.Parallel()
 	reg := connector.NewDefaultRegistry()
 
-	for _, name := range []string{"openclaw", "codex", "claudecode", "zeptoclaw"} {
+	for _, name := range reg.Names() {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -130,6 +203,23 @@ func TestResolveActiveConnector_UnknownNameReturnsError(t *testing.T) {
 				t.Errorf("error message should mention the openclaw default, got: %v", err)
 			}
 		})
+	}
+}
+
+func TestHILTApprovalManagerSharedSidecarBroker(t *testing.T) {
+	t.Parallel()
+	hilt := NewHILTApprovalManager(nil, nil, nil)
+
+	router := NewEventRouter(nil, nil, nil, false, nil)
+	router.SetHILTApprovalManager(hilt)
+	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, &config.Config{})
+	api.SetHILTApprovalManager(hilt)
+
+	if router.hilt != hilt {
+		t.Fatal("router should receive the shared sidecar-level HILT approval manager")
+	}
+	if api.hilt != hilt {
+		t.Fatal("API should receive the same shared sidecar-level HILT approval manager")
 	}
 }
 

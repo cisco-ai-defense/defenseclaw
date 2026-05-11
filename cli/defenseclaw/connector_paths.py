@@ -34,7 +34,7 @@ Public surface
 --------------
 
 * :data:`KNOWN_CONNECTORS` — tuple of every name the dispatchers
-  recognize. Adding a fifth connector is a one-line change here plus
+  recognize. Adding a connector is a one-line change here plus
   a matching dispatch arm in each ``*_for_connector`` function below
   and a Go-side ``connector.NewDefaultRegistry`` registration.
 * :func:`normalize` — canonicalize an operator-supplied connector name
@@ -50,10 +50,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -64,6 +67,11 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "codex",
     "claudecode",
     "zeptoclaw",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -72,6 +80,20 @@ OpenClaw". Keeping the list explicit (rather than discovering at
 import time) means a typo in ``guardrail.connector`` surfaces in
 :func:`is_known` and in setup-time validation, instead of silently
 producing wrong paths.
+"""
+
+HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset({
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+})
+"""Connectors added through lifecycle hook surfaces.
+
+Kept as a compatibility constant for older tests/importers. These connectors
+now expose connector-specific MCP/skill/rule/plugin path discovery instead of
+falling back to OpenClaw or returning hook-only empty paths.
 """
 
 
@@ -145,6 +167,109 @@ def _dedup(paths: list[str]) -> list[str]:
 # Public dispatchers
 # ---------------------------------------------------------------------------
 
+def connector_home(
+    connector: str | None,
+    *,
+    openclaw_home: str | None = None,
+) -> str:
+    """Return the on-disk home directory for *connector*.
+
+    Returned values are absolute, ``~/`` expanded paths so callers can
+    show them in inventory views without further normalization. The
+    OpenClaw branch defaults to ``~/.openclaw`` when *openclaw_home* is
+    None / empty, matching :func:`_openclaw_skill_dirs`. For unknown
+    connectors we return the empty string so the renderer falls back
+    to whatever per-component path it already has — the worst-case is
+    a missing label, never a wrong one.
+    """
+    name = normalize(connector)
+    home = str(Path.home())
+    if name == "claudecode":
+        return os.path.join(home, ".claude")
+    if name == "codex":
+        return os.path.join(home, ".codex")
+    if name == "zeptoclaw":
+        return os.path.join(home, ".zeptoclaw")
+    if name == "geminicli":
+        return os.path.join(home, ".gemini")
+    if name == "copilot":
+        return os.path.join(home, ".copilot")
+    if name == "cursor":
+        return os.path.join(home, ".cursor")
+    if name == "windsurf":
+        return os.path.join(home, ".codeium", "windsurf")
+    if name == "hermes":
+        return os.path.join(home, ".hermes")
+    if name == "openclaw":
+        if openclaw_home:
+            return _expand(openclaw_home)
+        return os.path.join(home, ".openclaw")
+    return ""
+
+
+def connector_config_files(
+    connector: str | None,
+    *,
+    openclaw_config: str | None = None,
+    openclaw_home: str | None = None,
+) -> list[str]:
+    """Return the documented config file paths for *connector*.
+
+    Lists the *expected* primary config files even when they don't
+    exist on disk yet — callers (inventory, doctor) want to show the
+    operator "this is where I'd look", not just "this exists right
+    now". Order is most-canonical first; deduplicated. Returns an
+    empty list for unknown connectors.
+    """
+    name = normalize(connector)
+    home = str(Path.home())
+    paths: list[str] = []
+    cwd = os.getcwd()
+    if name == "claudecode":
+        paths = [
+            os.path.join(home, ".claude", "settings.json"),
+            os.path.join(cwd, ".claude", "settings.json"),
+        ]
+    elif name == "codex":
+        paths = [
+            os.path.join(home, ".codex", "config.toml"),
+            os.path.join(cwd, ".mcp.json"),
+        ]
+    elif name == "zeptoclaw":
+        paths = [
+            os.path.join(home, ".zeptoclaw", "config.json"),
+            os.path.join(cwd, ".mcp.json"),
+        ]
+    elif name == "geminicli":
+        paths = [
+            os.path.join(home, ".gemini", "settings.json"),
+            os.path.join(cwd, ".gemini", "settings.json"),
+        ]
+    elif name == "copilot":
+        paths = [
+            os.path.join(home, ".copilot", "config.json"),
+            os.path.join(cwd, ".github", "copilot.json"),
+        ]
+    elif name == "cursor":
+        paths = [
+            os.path.join(home, ".cursor", "mcp.json"),
+            os.path.join(cwd, ".cursor", "mcp.json"),
+        ]
+    elif name == "windsurf":
+        paths = list(_windsurf_mcp_paths(home))
+    elif name == "hermes":
+        paths = [
+            os.path.join(home, ".hermes", "config.json"),
+            os.path.join(cwd, ".hermes", "config.json"),
+        ]
+    elif name == "openclaw":
+        if openclaw_config:
+            paths = [_expand(openclaw_config)]
+        else:
+            paths = [os.path.join(home, ".openclaw", "openclaw.json")]
+    return _dedup(paths)
+
+
 def skill_dirs(
     connector: str | None,
     *,
@@ -171,6 +296,16 @@ def skill_dirs(
         return _codex_skill_dirs()
     if name == "zeptoclaw":
         return _zeptoclaw_skill_dirs()
+    if name == "hermes":
+        return _hermes_skill_dirs()
+    if name == "cursor":
+        return _cursor_skill_dirs()
+    if name == "windsurf":
+        return _windsurf_skill_dirs()
+    if name == "geminicli":
+        return _gemini_skill_dirs()
+    if name == "copilot":
+        return _copilot_skill_dirs()
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -195,6 +330,16 @@ def plugin_dirs(
         return _codex_plugin_dirs()
     if name == "zeptoclaw":
         return _zeptoclaw_plugin_dirs()
+    if name == "hermes":
+        return _hermes_plugin_dirs()
+    if name == "cursor":
+        return []
+    if name == "windsurf":
+        return []
+    if name == "geminicli":
+        return _gemini_plugin_dirs()
+    if name == "copilot":
+        return []
     return _openclaw_plugin_dirs(openclaw_home)
 
 
@@ -227,6 +372,16 @@ def mcp_servers(
         return _codex_mcp_servers()
     if name == "zeptoclaw":
         return _zeptoclaw_mcp_servers()
+    if name == "hermes":
+        return _hermes_mcp_servers()
+    if name == "cursor":
+        return _cursor_mcp_servers()
+    if name == "windsurf":
+        return _windsurf_mcp_servers()
+    if name == "geminicli":
+        return _gemini_mcp_servers()
+    if name == "copilot":
+        return _copilot_mcp_servers()
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -262,6 +417,43 @@ def _zeptoclaw_skill_dirs() -> list[str]:
     return _dedup([
         os.path.join(home, ".zeptoclaw", "skills"),
         os.path.join(cwd, ".zeptoclaw", "skills"),
+    ])
+
+
+def _hermes_skill_dirs() -> list[str]:
+    return [os.path.join(str(Path.home()), ".hermes", "skills")]
+
+
+def _cursor_skill_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".cursor", "skills"),
+        os.path.join(cwd, ".agents", "skills"),
+        os.path.join(home, ".cursor", "skills"),
+        os.path.join(home, ".agents", "skills"),
+    ])
+
+
+def _windsurf_skill_dirs() -> list[str]:
+    return []
+
+
+def _gemini_skill_dirs() -> list[str]:
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".gemini", "skills"),
+        os.path.join(cwd, ".agents", "skills"),
+    ])
+
+
+def _copilot_skill_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".github", "skills"),
+        os.path.join(cwd, ".agents", "skills"),
+        os.path.join(home, ".copilot", "skills"),
     ])
 
 
@@ -311,6 +503,24 @@ def _zeptoclaw_plugin_dirs() -> list[str]:
     return _dedup([
         base,
         os.path.join(base, "cache"),
+    ])
+
+
+def _hermes_plugin_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(home, ".hermes", "plugins"),
+        os.path.join(cwd, ".hermes", "plugins"),
+    ])
+
+
+def _gemini_plugin_dirs() -> list[str]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    return _dedup([
+        os.path.join(cwd, ".gemini", "extensions"),
+        os.path.join(home, ".gemini", "extensions"),
     ])
 
 
@@ -433,6 +643,47 @@ def _openclaw_mcp_servers(
     )
 
 
+def _hermes_mcp_servers() -> list[MCPServerEntry]:
+    return _read_yaml_mcp_servers(
+        os.path.join(str(Path.home()), ".hermes", "config.yaml"),
+        key_paths=(("mcp", "servers"), ("mcpServers",)),
+    )
+
+
+def _cursor_mcp_servers() -> list[MCPServerEntry]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    entries: list[MCPServerEntry] = []
+    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".cursor", "mcp.json")))
+    entries.extend(_read_dotmcp_json(os.path.join(home, ".cursor", "mcp.json")))
+    return _dedup_mcp_entries(entries)
+
+
+def _windsurf_mcp_servers() -> list[MCPServerEntry]:
+    home = str(Path.home())
+    entries: list[MCPServerEntry] = []
+    for path in _windsurf_mcp_paths(home):
+        entries.extend(_read_dotmcp_json(path))
+    return _dedup_mcp_entries(entries)
+
+
+def _gemini_mcp_servers() -> list[MCPServerEntry]:
+    return _read_mcp_settings_block(
+        os.path.join(str(Path.home()), ".gemini", "settings.json"),
+        keys=("mcpServers",),
+    )
+
+
+def _copilot_mcp_servers() -> list[MCPServerEntry]:
+    home = str(Path.home())
+    cwd = os.getcwd()
+    entries: list[MCPServerEntry] = []
+    entries.extend(_read_dotmcp_json(os.path.join(home, ".copilot", "mcp-config.json")))
+    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".github", "mcp.json")))
+    entries.extend(_read_dotmcp_json(os.path.join(cwd, ".mcp.json")))
+    return _dedup_mcp_entries(entries)
+
+
 # --- Low-level file/CLI helpers --------------------------------------------
 
 def _read_openclaw_json(config_file: str) -> dict[str, Any] | None:
@@ -473,6 +724,31 @@ def _read_mcp_settings_block(
     return _parse_mcp_servers_value(cursor)
 
 
+def _read_yaml_mcp_servers(
+    path: str,
+    *,
+    key_paths: tuple[tuple[str, ...], ...],
+) -> list[MCPServerEntry]:
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    entries: list[MCPServerEntry] = []
+    for keys in key_paths:
+        cursor: Any = data
+        for k in keys:
+            if not isinstance(cursor, dict):
+                cursor = None
+                break
+            cursor = cursor.get(k)
+        if cursor is not None:
+            entries.extend(_parse_mcp_servers_value(cursor))
+    return _dedup_mcp_entries(entries)
+
+
 def _read_dotmcp_json(path: str) -> list[MCPServerEntry]:
     """Parse a project-local ``.mcp.json``.
 
@@ -495,6 +771,14 @@ def _read_dotmcp_json(path: str) -> list[MCPServerEntry]:
 
 def _read_zepto_config(path: str) -> list[MCPServerEntry]:
     return _read_mcp_settings_block(path, keys=("mcp", "servers"))
+
+
+def _windsurf_mcp_paths(home: str | None = None) -> list[str]:
+    home = home or str(Path.home())
+    return [
+        os.path.join(home, ".codeium", "windsurf", "mcp_config.json"),
+        os.path.join(home, ".codeium", "windsurf", "mcp.json"),
+    ]
 
 
 def _read_mcp_servers_via_openclaw_cli(
@@ -659,6 +943,7 @@ def set_mcp_server(
     * Codex        — ``./.mcp.json[mcpServers][name]``
                      via :func:`_atomic_json_merge`.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
+    * Hook-only    — :class:`MCPWriteUnsupportedError`.
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -685,6 +970,32 @@ def set_mcp_server(
         # server should edit ``~/.codex/config.toml`` directly — the
         # read path now picks it up automatically.
         path = os.path.join(os.getcwd(), ".mcp.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "hermes":
+        path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
+        _atomic_yaml_merge(path, ("mcp", "servers", name), entry)
+        return
+    if name_n == "cursor":
+        path = os.path.join(os.getcwd(), ".cursor", "mcp.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "windsurf":
+        path = _windsurf_existing_mcp_write_path()
+        if not path:
+            raise MCPWriteUnsupportedError(
+                "windsurf MCP writes are disabled until an existing documented "
+                "Windsurf MCP config file is present; DefenseClaw will not "
+                "create guessed Windsurf config paths.",
+            )
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "geminicli":
+        path = os.path.join(str(Path.home()), ".gemini", "settings.json")
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if name_n == "copilot":
+        path = os.path.join(os.getcwd(), ".github", "mcp.json")
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "zeptoclaw":
@@ -732,6 +1043,31 @@ def unset_mcp_server(
         path = os.path.join(os.getcwd(), ".mcp.json")
         _atomic_json_delete(path, ("mcpServers", name))
         return
+    if name_n == "hermes":
+        path = os.path.join(str(Path.home()), ".hermes", "config.yaml")
+        _atomic_yaml_delete(path, ("mcp", "servers", name))
+        return
+    if name_n == "cursor":
+        path = os.path.join(os.getcwd(), ".cursor", "mcp.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "windsurf":
+        path = _windsurf_existing_mcp_write_path()
+        if not path:
+            raise MCPWriteUnsupportedError(
+                "windsurf MCP writes are disabled until an existing documented "
+                "Windsurf MCP config file is present.",
+            )
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "geminicli":
+        path = os.path.join(str(Path.home()), ".gemini", "settings.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if name_n == "copilot":
+        path = os.path.join(os.getcwd(), ".github", "mcp.json")
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -768,6 +1104,7 @@ def _atomic_json_merge(
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
+    _capture_managed_mcp_backup(path)
     data: dict[str, Any]
     try:
         with open(path) as f:
@@ -810,8 +1147,259 @@ def _atomic_json_delete(
     if not isinstance(cursor, dict) or keys[-1] not in cursor:
         return False
     del cursor[keys[-1]]
+    _capture_managed_mcp_backup(path)
     _atomic_write_json(path, loaded)
     return True
+
+
+def _atomic_yaml_merge(
+    path: str,
+    keys: tuple[str, ...],
+    value: dict[str, Any],
+) -> None:
+    parent = os.path.dirname(path)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    _capture_managed_mcp_backup(path)
+    try:
+        with open(path) as f:
+            loaded = yaml.safe_load(f) or {}
+        data = loaded if isinstance(loaded, dict) else {}
+    except (FileNotFoundError, yaml.YAMLError):
+        data = {}
+    cursor = data
+    for k in keys[:-1]:
+        node = cursor.get(k)
+        if not isinstance(node, dict):
+            node = {}
+            cursor[k] = node
+        cursor = node
+    cursor[keys[-1]] = value
+    _atomic_write_yaml(path, data)
+
+
+def _atomic_yaml_delete(
+    path: str,
+    keys: tuple[str, ...],
+) -> bool:
+    try:
+        with open(path) as f:
+            loaded = yaml.safe_load(f) or {}
+    except (FileNotFoundError, yaml.YAMLError):
+        return False
+    if not isinstance(loaded, dict):
+        return False
+    cursor: Any = loaded
+    for k in keys[:-1]:
+        if not isinstance(cursor, dict) or k not in cursor:
+            return False
+        cursor = cursor[k]
+    if not isinstance(cursor, dict) or keys[-1] not in cursor:
+        return False
+    del cursor[keys[-1]]
+    _capture_managed_mcp_backup(path)
+    _atomic_write_yaml(path, loaded)
+    return True
+
+
+def restore_managed_mcp_backup(path: str) -> bool:
+    """Restore the one-shot DefenseClaw backup for *path* if present.
+
+    Looks first for the registry-recorded backup under
+    ``$DEFENSECLAW_HOME/connector_backups/mcp/`` (which records the
+    absolute target path so workspace-scoped restores survive a
+    ``cd``); falls back to the legacy sibling ``.bak`` file for
+    backwards compatibility with existing installs.
+    """
+    abs_path = os.path.abspath(path)
+    registry_backup = _registry_backup_for(abs_path)
+    if registry_backup is not None and os.path.isfile(registry_backup):
+        os.replace(registry_backup, abs_path)
+        _registry_clear(abs_path)
+        return True
+    backup = _managed_mcp_backup_path(path)
+    if not os.path.isfile(backup):
+        return False
+    os.replace(backup, path)
+    return True
+
+
+def _capture_managed_mcp_backup(path: str) -> None:
+    if not os.path.isfile(path):
+        return
+    backup = _managed_mcp_backup_path(path)
+    if os.path.exists(backup):
+        # Sibling backup already present — the registry entry may be
+        # stale; refresh it so a later restore_by_id() resolves to the
+        # right absolute path even when called from a different cwd.
+        _registry_register(os.path.abspath(path), backup)
+        return
+    shutil.copy2(path, backup)
+    os.chmod(backup, 0o600)
+    _registry_register(os.path.abspath(path), backup)
+
+
+def _managed_mcp_backup_path(path: str) -> str:
+    parent = os.path.dirname(path) or "."
+    basename = os.path.basename(path).lstrip(".") or "config"
+    return os.path.join(parent, f".defenseclaw-{basename}.bak")
+
+
+# ---------------------------------------------------------------------------
+# MCP backup registry — workspace-cwd-independent restore (S5.2 / C-2)
+# ---------------------------------------------------------------------------
+#
+# The historical ``.defenseclaw-<name>.bak`` sibling-file scheme works
+# fine for user-scope configs (``~/.claude/settings.json``) because the
+# absolute path is stable. It breaks for workspace-scope configs (e.g.
+# Copilot's ``<cwd>/.github/mcp.json``) because the .bak is anchored to
+# the cwd at backup time; restoring after a ``cd`` either touches the
+# wrong workspace or no-ops silently.
+#
+# The registry below is a single JSON file under
+# ``$DEFENSECLAW_HOME/connector_backups/mcp/registry.json`` that maps
+# the SHA-256 of the absolute target path -> {"path": <abs target>,
+# "backup": <abs sibling .bak>, "ts": <utc>}. ``restore_by_id`` and
+# ``restore_managed_mcp_backup`` look here first, ensuring restore is
+# anchored to the original target regardless of cwd.
+
+def _registry_dir() -> str:
+    """Return the absolute MCP backup registry directory.
+
+    Created lazily with mode 0o700 because the registry leaks the
+    file paths of every config DefenseClaw has touched.
+    """
+    home = os.environ.get("DEFENSECLAW_HOME", "").strip()
+    if not home:
+        home = str(Path.home() / ".defenseclaw")
+    return os.path.join(home, "connector_backups", "mcp")
+
+
+def _registry_path() -> str:
+    return os.path.join(_registry_dir(), "registry.json")
+
+
+def _registry_load() -> dict[str, dict[str, str]]:
+    path = _registry_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    for k, v in data.items():
+        if isinstance(k, str) and isinstance(v, dict):
+            out[k] = {kk: str(vv) for kk, vv in v.items() if isinstance(kk, str)}
+    return out
+
+
+def _registry_save(state: dict[str, dict[str, str]]) -> None:
+    path = _registry_path()
+    parent = os.path.dirname(path)
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=".dc-mcp-registry-", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+            f.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _registry_key(abs_target: str) -> str:
+    """Stable identifier for *abs_target* used as the registry key.
+
+    SHA-256 of the absolute path. We use a hash (not the path itself)
+    because some operators consider the on-disk filename of a workspace
+    as sensitive; the original is still recorded in the value as
+    ``path`` so legitimate restore flows can echo it back to the user.
+    """
+    import hashlib
+    return hashlib.sha256(abs_target.encode("utf-8")).hexdigest()
+
+
+def _registry_register(abs_target: str, backup: str) -> None:
+    import datetime as _dt
+    state = _registry_load()
+    state[_registry_key(abs_target)] = {
+        "path": abs_target,
+        "backup": os.path.abspath(backup),
+        "ts": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    try:
+        _registry_save(state)
+    except OSError:
+        # Best-effort: registry write failure must not block setup.
+        # The legacy sibling backup is still in place for restore.
+        pass
+
+
+def _registry_clear(abs_target: str) -> None:
+    state = _registry_load()
+    if state.pop(_registry_key(abs_target), None) is None:
+        return
+    try:
+        _registry_save(state)
+    except OSError:
+        pass
+
+
+def _registry_backup_for(abs_target: str) -> str | None:
+    entry = _registry_load().get(_registry_key(abs_target))
+    if not entry:
+        return None
+    backup = entry.get("backup", "")
+    return backup or None
+
+
+def lookup_managed_mcp_backup(path: str) -> str | None:
+    """Return the absolute backup path for *path* if recorded.
+
+    Public lookup helper for tests and for tooling that needs to surface
+    the recorded backup location without performing a restore.
+    """
+    return _registry_backup_for(os.path.abspath(path))
+
+
+def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:
+    import tempfile
+
+    parent = os.path.dirname(path) or "."
+    os.makedirs(parent, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".defenseclaw-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    finally:
+        try:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _windsurf_existing_mcp_write_path() -> str | None:
+    for path in _windsurf_mcp_paths():
+        if os.path.isfile(path):
+            return path
+    return None
 
 
 def _atomic_write_json(path: str, data: dict[str, Any]) -> None:

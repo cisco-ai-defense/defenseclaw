@@ -96,6 +96,17 @@ class TestSkillDirs:
         home = str(Path.home())
         assert os.path.join(home, ".zeptoclaw", "skills") in dirs
 
+    def test_new_connector_skill_dirs_are_connector_specific(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        assert connector_paths.skill_dirs("hermes") == [
+            os.path.join(str(tmp_path / "home"), ".hermes", "skills"),
+        ]
+        assert os.path.join(str(tmp_path), ".cursor", "skills") in connector_paths.skill_dirs("cursor")
+        assert connector_paths.skill_dirs("windsurf") == []
+        assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
+        assert os.path.join(str(tmp_path), ".github", "skills") in connector_paths.skill_dirs("copilot")
+
     def test_openclaw_default_paths(self, tmp_path):
         dirs = connector_paths.skill_dirs(
             "openclaw",
@@ -162,6 +173,15 @@ class TestPluginDirs:
         )
         assert dirs == [os.path.join(str(tmp_path), "extensions")]
 
+    def test_new_connector_plugin_dirs(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        assert os.path.join(str(tmp_path / "home"), ".hermes", "plugins") in connector_paths.plugin_dirs("hermes")
+        assert connector_paths.plugin_dirs("cursor") == []
+        assert connector_paths.plugin_dirs("windsurf") == []
+        assert os.path.join(str(tmp_path), ".gemini", "extensions") in connector_paths.plugin_dirs("geminicli")
+        assert connector_paths.plugin_dirs("copilot") == []
+
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
         contract that each framework owns its own filesystem footprint."""
@@ -205,6 +225,32 @@ class TestMCPServers:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         assert connector_paths.mcp_servers("codex") == []
+
+    def test_new_connector_mcp_readers(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        hermes = fake_home / ".hermes" / "config.yaml"
+        hermes.parent.mkdir(parents=True)
+        hermes.write_text("mcp:\n  servers:\n    h:\n      command: hermes-mcp\n")
+        assert connector_paths.mcp_servers("hermes")[0].command == "hermes-mcp"
+
+        cursor = tmp_path / ".cursor" / "mcp.json"
+        cursor.parent.mkdir(parents=True)
+        cursor.write_text(json.dumps({"mcpServers": {"c": {"command": "cursor-mcp"}}}))
+        assert connector_paths.mcp_servers("cursor")[0].command == "cursor-mcp"
+
+        gemini = fake_home / ".gemini" / "settings.json"
+        gemini.parent.mkdir(parents=True)
+        gemini.write_text(json.dumps({"mcpServers": {"g": {"command": "gemini-mcp"}}}))
+        assert connector_paths.mcp_servers("geminicli")[0].command == "gemini-mcp"
+
+        copilot = tmp_path / ".github" / "mcp.json"
+        copilot.parent.mkdir(parents=True)
+        copilot.write_text(json.dumps({"mcpServers": {"p": {"command": "copilot-mcp"}}}))
+        assert connector_paths.mcp_servers("copilot")[0].command == "copilot-mcp"
 
     def test_codex_reads_global_config_toml(self, tmp_path, monkeypatch):
         """Bug fix regression: pre-S5.x ``defenseclaw mcp list`` only

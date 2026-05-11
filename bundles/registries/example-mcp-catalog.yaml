@@ -1,0 +1,39 @@
+# Example DefenseClaw registry manifest — MCP servers only.
+#
+# Publish this file at a stable HTTPS URL and register it with:
+#
+#   defenseclaw registry add corp-mcp \
+#     --kind http_yaml \
+#     --url https://catalog.example.com/mcp.yaml \
+#     --content mcp --non-interactive
+#   defenseclaw registry sync corp-mcp
+#
+# Schema: schemas/registry-manifest.schema.json (validated at sync time).
+schema_version: 1
+generated_at: "2026-05-07T00:00:00Z"
+publisher: example-corp
+entries:
+  - name: filesystem
+    type: mcp
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/srv/shared"]
+    publisher: anthropic
+    license: MIT
+    description: Bounded filesystem read access scoped to a single root.
+    tags: [reference]
+  - name: postgres-readonly
+    type: mcp
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-postgres"]
+    env_required: [PGHOST, PGUSER, PGDATABASE]
+    publisher: anthropic
+    description: Read-only Postgres queries; restrict via PG-side roles.
+  - name: corp-knowledge
+    type: mcp
+    transport: streamable-http
+    url: https://mcp.example.com/v1/knowledge
+    publisher: example-corp
+    description: Internal knowledge base via streamable-HTTP MCP.
+    tags: [internal]

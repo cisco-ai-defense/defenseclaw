@@ -3,6 +3,7 @@
   "content_hash": "\u003cstripped\u003e",
   "event_type": "verdict",
   "generation": 1,
+  "run_id": "\u003cstripped\u003e",
   "schema_version": 7,
   "severity": "HIGH",
   "sidecar_instance_id": "\u003cstripped\u003e",

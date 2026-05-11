@@ -48,8 +48,8 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_setup import setup as setup_group
+
 from tests.helpers import cleanup_app, make_app_context
 
 
@@ -255,6 +255,72 @@ class TestSetupClaudeCodeAlias(unittest.TestCase):
         self.assertEqual(gc.mode, "observe")
         self.assertEqual(gc.scanner_mode, "local")
         self.assertFalse(gc.judge.enabled)
+
+
+class TestSetupNewConnectorAliases(unittest.TestCase):
+    """The hook-first connectors expose the same observability alias contract."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
+
+        def _save():
+            with open(self.cfg_path, "w") as fh:
+                fh.write(
+                    f"claw_mode: {self.app.cfg.claw.mode}\n"
+                    f"guardrail_connector: {self.app.cfg.guardrail.connector}\n"
+                )
+
+        self.app.cfg.save = _save  # type: ignore[assignment]
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def test_new_aliases_pin_observability_connector(self):
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot"]:
+            with self.subTest(connector=connector), patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ) as restart_mock, patch(
+                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                return_value=None,
+            ):
+                self.app.cfg.claw.mode = "openclaw"
+                self.app.cfg.guardrail.connector = "openclaw"
+                result = _invoke([connector, "--yes", "--no-restart"], self.app)
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(self.app.cfg.guardrail.connector, connector)
+                self.assertEqual(self.app.cfg.claw.mode, connector)
+                self.assertTrue(self.app.cfg.guardrail.enabled)
+                self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+                self.assertEqual(self.app.cfg.guardrail.scanner_mode, "local")
+                self.assertFalse(self.app.cfg.guardrail.judge.enabled)
+                restart_mock.assert_not_called()
+
+                hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
+                with open(hint_path) as fh:
+                    self.assertEqual(fh.read().strip(), connector)
+
+    def test_setup_help_lists_new_alias_commands(self):
+        result = _invoke(["--help"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot"]:
+            self.assertIn(connector, result.output)
+
+    def test_guardrail_help_mentions_new_connector_choices(self):
+        result = _invoke(["guardrail", "--help"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot"]:
+            self.assertIn(connector, result.output)
+        self.assertNotIn("openclaw, claudecode, codex, zeptoclaw", result.output)
+
+    def test_rotate_token_help_is_connector_agnostic(self):
+        result = _invoke(["rotate-token", "--help"], self.app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("active agent connector", result.output)
+        self.assertNotIn("Claude", result.output)
+        self.assertNotIn("Codex", result.output)
 
 
 class TestSetupCodexAliasInteractiveDecline(unittest.TestCase):
