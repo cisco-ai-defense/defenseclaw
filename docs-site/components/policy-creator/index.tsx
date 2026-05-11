@@ -25,8 +25,11 @@ import type { SectionStatus } from './ui/section';
 import { BasicsSection } from './sections/basics';
 import { SeverityMatrixSection } from './sections/severity-matrix';
 import { AdmissionSection } from './sections/admission';
+import { GuardrailSection } from './sections/guardrail';
+import { RulesSection } from './sections/rules';
 import { ReviewSection } from './sections/review';
 import { LiveTestPane } from './sections/live-test';
+import { summarize, validatePolicy } from './lib/validators';
 
 interface SectionDef {
   id: string;
@@ -80,6 +83,30 @@ const SECTION_DEFS: SectionDef[] = [
     render: (p, set) => <AdmissionSection policy={p} onPolicyChange={set} />,
   },
   {
+    id: 'guardrail',
+    title: 'Guardrail',
+    subtitle: (p) =>
+      `block≥${p.guardrail.block_threshold} · alert≥${p.guardrail.alert_threshold} · ${
+        Object.keys(p.guardrail.patterns).length
+      } pattern categor${Object.keys(p.guardrail.patterns).length === 1 ? 'y' : 'ies'}`,
+    status: (p) =>
+      Object.keys(p.guardrail.patterns).length > 0 || p.guardrail.hilt.enabled
+        ? 'customized'
+        : 'untouched',
+    render: (p, set) => <GuardrailSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'rules',
+    title: 'Rule pack',
+    subtitle: (p) => {
+      const total = p.rule_pack.files.reduce((acc, f) => acc + f.rules.length, 0);
+      return `${p.rule_pack.files.length} file${p.rule_pack.files.length === 1 ? '' : 's'} · ${total} rule${total === 1 ? '' : 's'}`;
+    },
+    status: (p) =>
+      p.rule_pack.files.some((f) => f.rules.length > 0) ? 'customized' : 'untouched',
+    render: (p, set) => <RulesSection policy={p} onPolicyChange={set} />,
+  },
+  {
     id: 'review',
     title: 'Review & export',
     subtitle: () => 'Generated YAML + data.json',
@@ -92,6 +119,9 @@ export default function PolicyCreator() {
   const initial = useMemo(() => policyFromPreset('default'), []);
   const [policy, setPolicy] = useState<Policy>(initial);
   const [openId, setOpenId] = useState<string>('basics');
+
+  const findings = useMemo(() => validatePolicy(policy), [policy]);
+  const counts = useMemo(() => summarize(findings), [findings]);
 
   return (
     <div className="my-6 grid grid-cols-1 gap-4 rounded-2xl border border-fd-border bg-fd-card/30 p-3 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
@@ -118,10 +148,76 @@ export default function PolicyCreator() {
             </Section>
           ))}
         </div>
+        <FindingsBar
+          counts={counts}
+          findings={findings.slice(0, 6)}
+          totalFindings={findings.length}
+        />
       </div>
       <aside className="lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]">
         <LiveTestPane policy={policy} />
       </aside>
     </div>
+  );
+}
+
+function FindingsBar({
+  counts,
+  findings,
+  totalFindings,
+}: {
+  counts: { errors: number; warnings: number; info: number };
+  findings: ReturnType<typeof validatePolicy>;
+  totalFindings: number;
+}) {
+  if (totalFindings === 0) {
+    return (
+      <div className="flex items-center gap-2 border-t border-fd-border bg-emerald-500/10 px-4 py-2 text-[11px] text-emerald-700 dark:text-emerald-300">
+        <span aria-hidden="true">✓</span>
+        <span>No issues. Ready to export.</span>
+      </div>
+    );
+  }
+  return (
+    <details className="border-t border-fd-border bg-fd-card">
+      <summary className="flex cursor-pointer items-center gap-3 px-4 py-2 text-[11px] text-fd-foreground">
+        <span aria-hidden="true">⚠</span>
+        <span>
+          {counts.errors > 0 && <span className="text-red-500">{counts.errors} error{counts.errors === 1 ? '' : 's'}</span>}
+          {counts.errors > 0 && (counts.warnings > 0 || counts.info > 0) && ' · '}
+          {counts.warnings > 0 && <span className="text-amber-600">{counts.warnings} warning{counts.warnings === 1 ? '' : 's'}</span>}
+          {counts.warnings > 0 && counts.info > 0 && ' · '}
+          {counts.info > 0 && <span className="text-fd-muted-foreground">{counts.info} info</span>}
+        </span>
+        <span className="ml-auto text-fd-muted-foreground">click to expand</span>
+      </summary>
+      <ul className="divide-y divide-fd-border">
+        {findings.map((f, i) => (
+          <li key={i} className="px-4 py-2 text-[11px]">
+            <div className="flex items-baseline gap-2">
+              <span
+                className={
+                  f.level === 'error'
+                    ? 'text-red-500'
+                    : f.level === 'warning'
+                      ? 'text-amber-600 dark:text-amber-400'
+                      : 'text-fd-muted-foreground'
+                }
+              >
+                {f.level.toUpperCase()}
+              </span>
+              <code className="font-mono text-[10px] text-fd-muted-foreground">{f.location}</code>
+            </div>
+            <div className="text-fd-foreground">{f.message}</div>
+            {f.fix && <div className="text-[10px] text-fd-muted-foreground">Fix: {f.fix}</div>}
+          </li>
+        ))}
+        {totalFindings > findings.length && (
+          <li className="px-4 py-2 text-[11px] text-fd-muted-foreground">
+            …and {totalFindings - findings.length} more.
+          </li>
+        )}
+      </ul>
+    </details>
   );
 }
