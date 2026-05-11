@@ -48,7 +48,7 @@ The detector set covers:
 
 Preferred DefenseClaw CLI flow:
 
-The CLI automatically imports matching existing dashboards, charts, and detectors when they are already present in O11y, and creates fresh resources when they are not.
+The CLI automatically imports matching existing dashboards and detectors when they are already present in O11y, and creates fresh resources when they are not.
 
 ```bash
 defenseclaw setup splunk-o11y-dashboards apply \

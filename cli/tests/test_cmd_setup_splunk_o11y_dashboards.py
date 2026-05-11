@@ -234,7 +234,6 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
             [
                 ["terraform", "import", "-input=false", f"-state={tmp_path / 'state' / 'terraform.tfstate'}", "signalfx_dashboard_group.defenseclaw_o11y", "dg-1"],
                 ["terraform", "import", "-input=false", f"-state={tmp_path / 'state' / 'terraform.tfstate'}", "signalfx_dashboard.executive", "db-1"],
-                ["terraform", "import", "-input=false", f"-state={tmp_path / 'state' / 'terraform.tfstate'}", 'signalfx_single_value_chart.single["executive_verdicts_31d"]', "chart-1"],
             ],
         )
 

@@ -385,7 +385,7 @@ def _prepare_run(
     click.echo(f"    API URL:       {resolved_api_url}")
     click.echo(f"    Test label:    {name_prefix or '(none)'}")
     click.echo(f"    Detectors:     {_detector_summary(with_detectors, enable_detectors)}")
-    click.echo("    Adoption:      automatic import of matching existing resources before apply")
+    click.echo("    Adoption:      automatic import of matching existing dashboards before apply")
     if not with_detectors:
         click.echo(f"    {ux.dim('Use --with-detectors to create Splunk detectors from bundled rules.')}")
     click.echo()
@@ -436,6 +436,18 @@ def _terraform_state_list(terraform_bin: str, *, prepared: _PreparedRun, timeout
     if result.returncode != 0:
         return set()
     return {line.strip() for line in (result.stdout or "").splitlines() if line.strip()}
+
+
+def _terraform_state_rm(terraform_bin: str, *, prepared: _PreparedRun, addresses: list[str], timeout: int) -> None:
+    if not addresses:
+        return
+    _run_terraform(
+        terraform_bin,
+        ["state", "rm", f"-state={prepared.state_path}", *addresses],
+        cwd=prepared.work_dir,
+        env=prepared.env,
+        timeout=timeout,
+    )
 
 
 def _terraform_console_json(terraform_bin: str, *, prepared: _PreparedRun, expr: str, timeout: int):
@@ -650,6 +662,31 @@ def _adopt_existing_resources(
 
     imported = 0
     resources: list[_ImportTarget] = []
+    chart_addresses = [
+        f'{resource_prefix}["{chart_key}"]'
+        for chart_type, resource_prefix in (
+            ("single", "signalfx_single_value_chart.single"),
+            ("time", "signalfx_time_chart.time"),
+            ("table", "signalfx_table_chart.table"),
+        )
+        for chart_key in (chart_maps.get(chart_type) or {}).keys()
+        if f'{resource_prefix}["{chart_key}"]' in state_addresses
+    ]
+    bundle_addresses = {
+        "signalfx_dashboard_group.defenseclaw_o11y",
+        *{f"signalfx_dashboard.{dashboard_key}" for dashboard_key in dashboard_layouts.keys()},
+        *{
+            f'{resource_prefix}["{chart_key}"]'
+            for chart_type, resource_prefix in (
+                ("single", "signalfx_single_value_chart.single"),
+                ("time", "signalfx_time_chart.time"),
+                ("table", "signalfx_table_chart.table"),
+            )
+            for chart_key in (chart_maps.get(chart_type) or {}).keys()
+        },
+    }
+    if prepared.with_detectors:
+        bundle_addresses.update({f'signalfx_detector.detector["{detector_key}"]' for detector_key in detector_defs.keys()})
 
     group_name = _expected_group_name(prepared.name_prefix)
     dashboard_groups_payload = _extract_list_payload(
@@ -700,71 +737,28 @@ def _adopt_existing_resources(
         resources.append(_ImportTarget("signalfx_dashboard_group.defenseclaw_o11y", group_id))
         for dashboard_key, dashboard_item in chosen_group_dashboards.items():
             resources.append(_ImportTarget(f"signalfx_dashboard.{dashboard_key}", _resource_id(dashboard_item)))
-
-        for dashboard_key, dashboard_item in chosen_group_dashboards.items():
-            expected_layout = dashboard_layouts.get(dashboard_key) or []
-            if not isinstance(expected_layout, list):
-                continue
-            dashboard_id = _resource_id(dashboard_item)
-            chart_items = _dashboard_charts(_o11y_api_get_json(api_url, api_token, f"/v2/dashboard/{dashboard_id}"))
-            if len(chart_items) < len(expected_layout):
-                raise click.ClickException(
-                    f"Dashboard {dashboard_item.get('name')!r} has fewer remote charts than the Terraform bundle expects."
-                )
-            for position, chart_layout in enumerate(expected_layout):
-                if not isinstance(chart_layout, dict):
-                    continue
-                chart_key = str(chart_layout.get("key") or "").strip()
-                chart_type = str(chart_layout.get("type") or "").strip()
-                chart_defs = chart_maps.get(chart_type)
-                expected_chart = chart_defs.get(chart_key) if isinstance(chart_defs, dict) else None
-                resource_prefix = {
-                    "single": "signalfx_single_value_chart.single",
-                    "time": "signalfx_time_chart.time",
-                    "table": "signalfx_table_chart.table",
-                }.get(chart_type)
-                if resource_prefix is None:
-                    continue
-                chart_address = f'{resource_prefix}["{chart_key}"]'
-                if chart_address in state_addresses:
-                    continue
-                chart_item = chart_items[position]
-                if isinstance(expected_chart, dict) and isinstance(chart_item, dict):
-                    expected_name = str(expected_chart.get("name") or "").strip()
-                    expected_desc = str(expected_chart.get("description") or "").strip()
-                    remote_name = str(chart_item.get("name") or chart_item.get("title") or "").strip()
-                    remote_desc = str(chart_item.get("description") or "").strip()
-                    if expected_name and remote_name and expected_name != remote_name:
-                        match = None
-                        for candidate in chart_items:
-                            if not isinstance(candidate, dict):
-                                continue
-                            candidate_name = str(candidate.get("name") or candidate.get("title") or "").strip()
-                            candidate_desc = str(candidate.get("description") or "").strip()
-                            if candidate_name == expected_name and (not expected_desc or candidate_desc == expected_desc):
-                                match = candidate
-                                break
-                        if match is not None:
-                            chart_item = match
-                    elif expected_desc and remote_desc and expected_desc != remote_desc:
-                        match = None
-                        for candidate in chart_items:
-                            if not isinstance(candidate, dict):
-                                continue
-                            candidate_name = str(candidate.get("name") or candidate.get("title") or "").strip()
-                            candidate_desc = str(candidate.get("description") or "").strip()
-                            if candidate_name == expected_name and candidate_desc == expected_desc:
-                                match = candidate
-                                break
-                        if match is not None:
-                            chart_item = match
-                resources.append(_ImportTarget(chart_address, _resource_id(chart_item)))
+        if chart_addresses:
+            _terraform_state_rm(terraform_bin, prepared=prepared, addresses=chart_addresses, timeout=timeout)
+            for address in chart_addresses:
+                state_addresses.discard(address)
 
     elif candidate_groups:
+        bundle_state_addresses = sorted(address for address in bundle_addresses if address in state_addresses)
+        if bundle_state_addresses:
+            click.echo("  No matching dashboards were found in O11y; clearing stale bundle state before apply.")
+            _terraform_state_rm(terraform_bin, prepared=prepared, addresses=bundle_state_addresses, timeout=timeout)
+            for address in bundle_state_addresses:
+                state_addresses.discard(address)
         click.echo(
             f"  Found {len(candidate_groups)} dashboard groups named {group_name!r}, but none contained matching dashboards."
         )
     else:
+        bundle_state_addresses = sorted(address for address in bundle_addresses if address in state_addresses)
+        if bundle_state_addresses:
+            click.echo("  No existing dashboard group was found; clearing stale bundle state before apply.")
+            _terraform_state_rm(terraform_bin, prepared=prepared, addresses=bundle_state_addresses, timeout=timeout)
+            for address in bundle_state_addresses:
+                state_addresses.discard(address)
         click.echo(f"  No existing dashboard group named {group_name!r} was found; nothing to adopt.")
 
     if prepared.with_detectors:
