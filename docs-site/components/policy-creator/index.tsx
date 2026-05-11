@@ -27,6 +27,9 @@ import { SeverityMatrixSection } from './sections/severity-matrix';
 import { AdmissionSection } from './sections/admission';
 import { GuardrailSection } from './sections/guardrail';
 import { RulesSection } from './sections/rules';
+import { SuppressionsSection } from './sections/suppressions';
+import { SensitiveToolsSection } from './sections/sensitive-tools';
+import { JudgesSection } from './sections/judges';
 import { ReviewSection } from './sections/review';
 import { LiveTestPane } from './sections/live-test';
 import { summarize, validatePolicy } from './lib/validators';
@@ -105,6 +108,37 @@ const SECTION_DEFS: SectionDef[] = [
     status: (p) =>
       p.rule_pack.files.some((f) => f.rules.length > 0) ? 'customized' : 'untouched',
     render: (p, set) => <RulesSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'suppressions',
+    title: 'Suppressions',
+    subtitle: (p) =>
+      `${p.suppressions.pre_judge_strips.length} pre-judge · ${p.suppressions.finding_suppressions.length} finding · ${p.suppressions.tool_suppressions.length} tool`,
+    status: (p) =>
+      customizedIfNonEmpty([
+        p.suppressions.pre_judge_strips,
+        p.suppressions.finding_suppressions,
+        p.suppressions.tool_suppressions,
+      ]),
+    render: (p, set) => <SuppressionsSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'sensitive-tools',
+    title: 'Sensitive tools',
+    subtitle: (p) =>
+      `${p.sensitive_tools.length} tool${p.sensitive_tools.length === 1 ? '' : 's'}`,
+    status: (p) => customizedIfNonEmpty([p.sensitive_tools]),
+    render: (p, set) => <SensitiveToolsSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'judges',
+    title: 'LLM judges',
+    subtitle: (p) =>
+      p.judges.length === 0
+        ? 'no judges configured'
+        : p.judges.map((j) => j.name).join(', '),
+    status: (p) => customizedIfNonEmpty([p.judges]),
+    render: (p, set) => <JudgesSection policy={p} onPolicyChange={set} />,
   },
   {
     id: 'review',
