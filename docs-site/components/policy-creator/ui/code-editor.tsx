@@ -25,9 +25,9 @@
 //   - Line numbers re-render on every keystroke; for snippets up to
 //     a few hundred lines this is fine.
 //
-// The export name stays `RegoEditor` for backwards compat with
-// existing call sites; new callers should use the language-agnostic
-// `CodeEditor` alias and pass `language` + `highlight` explicitly.
+// The primary export is `CodeEditor`; pass `language` + `highlight`
+// to specialize it. `RegoEditor` is a thin backwards-compat alias so
+// existing Rego-only call sites don't have to thread defaults.
 
 'use client';
 

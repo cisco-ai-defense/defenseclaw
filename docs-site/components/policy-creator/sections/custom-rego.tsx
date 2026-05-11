@@ -7,7 +7,7 @@
 // script, OPA on the host validates the snippet via `opa check`.
 //
 // The source field uses our zero-dep RegoEditor (textarea + transparent
-// highlighted overlay). See ui/rego-editor.tsx for why we don't pull in
+// highlighted overlay). See ui/code-editor.tsx for why we don't pull in
 // CodeMirror or Monaco for this niche surface.
 
 'use client';
@@ -16,7 +16,7 @@ import { useMemo } from 'react';
 import type { CustomRegoSnippet, Policy } from '../types';
 import { lintRego } from '../lib/rego-lint';
 import { TextField } from '../ui/text-field';
-import { RegoEditor } from '../ui/rego-editor';
+import { RegoEditor } from '../ui/code-editor';
 
 const STARTER_SNIPPET = (name: string) => `package defenseclaw.custom.${name}
 

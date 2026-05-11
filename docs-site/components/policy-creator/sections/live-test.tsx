@@ -30,7 +30,7 @@ import { highlightJsonToHtml } from '../lib/json-highlight';
 import { listScenariosForDomain, ScenarioJsonPreview, ScenarioPicker } from '../ui/scenario-picker';
 import { SegmentedControl } from '../ui/segmented-control';
 import { VerdictBadge } from '../ui/verdict-badge';
-import { CodeEditor } from '../ui/rego-editor';
+import { CodeEditor } from '../ui/code-editor';
 
 type Domain = Scenario['domain'];
 type Source = 'scenario' | 'custom';
