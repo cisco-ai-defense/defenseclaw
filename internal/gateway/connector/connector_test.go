@@ -1246,14 +1246,225 @@ func TestClaudeCode_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) 
 		t.Fatalf("read disabled hook: %v", err)
 	}
 	disabled := string(disabledHook)
-	if !strings.Contains(disabled, "defenseclaw-managed-hook disabled") {
-		t.Errorf("disabled hook missing tombstone marker\nfile:\n%s", disabled)
+	// Tombstone MUST carry the v<digit> schema marker so isOwnedHook /
+	// scriptHasMarker recognise it as DefenseClaw-owned. v0 is the
+	// "older than any tagged version" sentinel.
+	if !strings.Contains(disabled, "defenseclaw-managed-hook v") {
+		t.Errorf("disabled hook missing v<digit> tombstone marker\nfile:\n%s", disabled)
+	}
+	if !strings.Contains(disabled, "disabled tombstone") {
+		t.Errorf("disabled hook missing operator-visible 'disabled tombstone' tag\nfile:\n%s", disabled)
+	}
+	// Portability: POSIX shebang so the tombstone runs even on hosts
+	// without /bin/bash (Alpine, distroless, BSDs).
+	if !strings.HasPrefix(disabled, "#!/bin/sh\n") {
+		t.Errorf("disabled hook should start with POSIX shebang, got:\n%s", disabled)
 	}
 	if !strings.Contains(disabled, "exit 0") {
 		t.Errorf("disabled hook must exit successfully\nfile:\n%s", disabled)
 	}
 	if strings.Contains(disabled, "/api/v1/claude-code/hook") {
 		t.Errorf("disabled hook still forwards stale payloads\nfile:\n%s", disabled)
+	}
+}
+
+// TestEveryHookOwner_TeardownLeavesTombstone is the cross-connector
+// contract test for the tombstone behaviour individually exercised by
+// TestCodex_Teardown_WritesDisabledHookForCachedProcesses and
+// TestClaudeCode_Teardown_WritesDisabledHookForCachedProcesses.
+//
+// The goal is structural, not behavioural duplication: a single table
+// iterates every builtin Connector that implements HookScriptOwner and
+// asserts the shared tombstone contract enforced by
+// writeDisabledHookTombstone:
+//
+//  1. After Teardown the on-disk hook script still exists at the path
+//     a long-lived host agent process may have cached at startup.
+//  2. The file is owner-executable (0o700 ∧ 0o111 != 0).
+//  3. Body starts with `#!/bin/sh\n` (portable to Alpine / distroless
+//     hosts; no /bin/bash dependency).
+//  4. Body contains the `defenseclaw-managed-hook v<digit>` marker so
+//     scriptHasMarker / isOwnedHook recognise the tombstone as ours
+//     across future hook-script reinstalls.
+//  5. Body contains the literal `disabled tombstone` operator tag.
+//  6. Body contains `exit 0` (the whole point — cached PIDs exit
+//     successfully without forwarding stale payloads).
+//  7. Body does NOT reference the connector's hook API path —
+//     forwarding stale payloads to a torn-down endpoint is the exact
+//     failure mode the tombstone exists to prevent.
+//
+// Adding a new HookScriptOwner connector? Add a row here AND verify
+// HookScriptOwner is declared on the type. If you forget either side
+// the rest of the gateway will still install the hook but teardown
+// will leak it, and long-lived host agents that cached the path will
+// hit exit-127 on the next connector switch.
+func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
+	type tc struct {
+		name       string
+		hookScript string
+		hookAPI    string
+		// setup prepares any host-side config and path overrides the
+		// connector's Setup needs; the returned cleanup is run via
+		// t.Cleanup so per-row state never leaks across subtests.
+		setup func(t *testing.T) (Connector, SetupOpts)
+	}
+
+	hookOnlySetup := func(ext string, ctor func() *hookOnlyConnector, override *string) func(*testing.T) (Connector, SetupOpts) {
+		return func(t *testing.T) (Connector, SetupOpts) {
+			t.Helper()
+			dir := t.TempDir()
+			cfgDir := t.TempDir()
+			cfgPath := filepath.Join(cfgDir, "config"+ext)
+			prev := *override
+			*override = cfgPath
+			t.Cleanup(func() { *override = prev })
+			return ctor(), SetupOpts{
+				DataDir:      dir,
+				APIAddr:      "127.0.0.1:18970",
+				APIToken:     "tok-test",
+				WorkspaceDir: t.TempDir(),
+			}
+		}
+	}
+
+	cases := []tc{
+		{
+			name:       "codex",
+			hookScript: "codex-hook.sh",
+			hookAPI:    "/api/v1/codex/hook",
+			setup: func(t *testing.T) (Connector, SetupOpts) {
+				t.Helper()
+				dir := t.TempDir()
+				cfgPath := filepath.Join(dir, "config.toml")
+				if err := os.WriteFile(cfgPath, []byte("model_provider = \"openai\"\n"), 0o644); err != nil {
+					t.Fatalf("write codex config: %v", err)
+				}
+				prev := CodexConfigPathOverride
+				CodexConfigPathOverride = cfgPath
+				t.Cleanup(func() { CodexConfigPathOverride = prev })
+				return NewCodexConnector(), SetupOpts{
+					DataDir:   dir,
+					ProxyAddr: "127.0.0.1:4000",
+					APIAddr:   "127.0.0.1:18970",
+				}
+			},
+		},
+		{
+			name:       "claudecode",
+			hookScript: "claude-code-hook.sh",
+			hookAPI:    "/api/v1/claude-code/hook",
+			setup: func(t *testing.T) (Connector, SetupOpts) {
+				t.Helper()
+				dir := t.TempDir()
+				settingsDir := filepath.Join(dir, "claude-settings")
+				if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+					t.Fatalf("mkdir settings: %v", err)
+				}
+				cfgPath := filepath.Join(settingsDir, "settings.json")
+				if err := os.WriteFile(cfgPath, []byte(`{}`), 0o644); err != nil {
+					t.Fatalf("write claude settings: %v", err)
+				}
+				prev := ClaudeCodeSettingsPathOverride
+				ClaudeCodeSettingsPathOverride = cfgPath
+				t.Cleanup(func() { ClaudeCodeSettingsPathOverride = prev })
+				return NewClaudeCodeConnector(), SetupOpts{
+					DataDir:   dir,
+					ProxyAddr: "127.0.0.1:4000",
+					APIAddr:   "127.0.0.1:18970",
+				}
+			},
+		},
+		{
+			name:       "hermes",
+			hookScript: "hermes-hook.sh",
+			hookAPI:    "/api/v1/hermes/hook",
+			setup:      hookOnlySetup(".yaml", NewHermesConnector, &HermesConfigPathOverride),
+		},
+		{
+			name:       "cursor",
+			hookScript: "cursor-hook.sh",
+			hookAPI:    "/api/v1/cursor/hook",
+			setup:      hookOnlySetup(".json", NewCursorConnector, &CursorHooksPathOverride),
+		},
+		{
+			name:       "windsurf",
+			hookScript: "windsurf-hook.sh",
+			hookAPI:    "/api/v1/windsurf/hook",
+			setup:      hookOnlySetup(".json", NewWindsurfConnector, &WindsurfHooksPathOverride),
+		},
+		{
+			name:       "geminicli",
+			hookScript: "geminicli-hook.sh",
+			hookAPI:    "/api/v1/geminicli/hook",
+			setup:      hookOnlySetup(".json", NewGeminiCLIConnector, &GeminiSettingsPathOverride),
+		},
+		{
+			name:       "copilot",
+			hookScript: "copilot-hook.sh",
+			hookAPI:    "/api/v1/copilot/hook",
+			setup:      hookOnlySetup(".json", NewCopilotConnector, &CopilotHooksPathOverride),
+		},
+	}
+
+	// Defence-in-depth: every Connector returned by setup must actually
+	// implement HookScriptOwner. If a future refactor drops the
+	// interface from one of these connectors the tombstone helper
+	// becomes silently inert for that connector, so we'd rather fail
+	// the table at the seam than ship a regression.
+	for _, c := range cases {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			conn, opts := c.setup(t)
+			if _, ok := conn.(HookScriptOwner); !ok {
+				t.Fatalf("%s connector no longer implements HookScriptOwner — tombstone contract cannot apply", c.name)
+			}
+
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			hookPath := filepath.Join(opts.DataDir, "hooks", c.hookScript)
+			live, err := os.ReadFile(hookPath)
+			if err != nil {
+				t.Fatalf("read live hook after Setup: %v", err)
+			}
+			if !strings.Contains(string(live), c.hookAPI) {
+				t.Fatalf("live hook does not forward to %s (Setup precondition violated)\nfile:\n%s", c.hookAPI, live)
+			}
+
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+
+			info, err := os.Stat(hookPath)
+			if err != nil {
+				t.Fatalf("tombstone missing after Teardown — cached host PIDs would hit exit-127: %v", err)
+			}
+			if info.Mode()&0o111 == 0 {
+				t.Errorf("tombstone is not executable: mode %v — cached PIDs would still hit a fork/exec failure", info.Mode())
+			}
+
+			body, err := os.ReadFile(hookPath)
+			if err != nil {
+				t.Fatalf("read tombstone: %v", err)
+			}
+			content := string(body)
+
+			if !strings.HasPrefix(content, "#!/bin/sh\n") {
+				t.Errorf("tombstone shebang is not POSIX /bin/sh (Alpine/distroless hosts will break):\n%s", content)
+			}
+			if !strings.Contains(content, "defenseclaw-managed-hook v") {
+				t.Errorf("tombstone missing v<digit> schema marker — isOwnedHook will mis-classify it:\n%s", content)
+			}
+			if !strings.Contains(content, "disabled tombstone") {
+				t.Errorf("tombstone missing operator-visible 'disabled tombstone' tag:\n%s", content)
+			}
+			if !strings.Contains(content, "exit 0") {
+				t.Errorf("tombstone does not exit 0 — cached PIDs will not fail-safe:\n%s", content)
+			}
+			if strings.Contains(content, c.hookAPI) {
+				t.Errorf("tombstone still forwards stale payloads to %s:\n%s", c.hookAPI, content)
+			}
+		})
 	}
 }
 
@@ -2585,8 +2796,19 @@ func TestCodex_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
 		t.Fatalf("read disabled hook: %v", err)
 	}
 	disabled := string(disabledHook)
-	if !strings.Contains(disabled, "defenseclaw-managed-hook disabled") {
-		t.Errorf("disabled hook missing tombstone marker\nfile:\n%s", disabled)
+	// Tombstone MUST carry the v<digit> schema marker so isOwnedHook /
+	// scriptHasMarker recognise it as DefenseClaw-owned. v0 is the
+	// "older than any tagged version" sentinel.
+	if !strings.Contains(disabled, "defenseclaw-managed-hook v") {
+		t.Errorf("disabled hook missing v<digit> tombstone marker\nfile:\n%s", disabled)
+	}
+	if !strings.Contains(disabled, "disabled tombstone") {
+		t.Errorf("disabled hook missing operator-visible 'disabled tombstone' tag\nfile:\n%s", disabled)
+	}
+	// Portability: POSIX shebang so the tombstone runs even on hosts
+	// without /bin/bash (Alpine, distroless, BSDs).
+	if !strings.HasPrefix(disabled, "#!/bin/sh\n") {
+		t.Errorf("disabled hook should start with POSIX shebang, got:\n%s", disabled)
 	}
 	if !strings.Contains(disabled, "exit 0") {
 		t.Errorf("disabled hook must exit successfully\nfile:\n%s", disabled)
@@ -3718,21 +3940,28 @@ func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 	}
 }
 
+// Mirrors the production layout used by OpenClawConnector.Setup, which
+// passes filepath.Join(opts.DataDir, "hooks") as the hookDir argument.
+// Verifies the new connector-scoped hook writer only lays down the
+// generic inspect-*.sh baseline for OpenClaw (no vendor *-hook.sh)
+// because OpenClawConnector deliberately does NOT implement
+// HookScriptOwner — see plan C2 / S2.5.
 func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
-	dir := t.TempDir()
-	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	dataDir := t.TempDir()
+	hookDir := filepath.Join(dataDir, "hooks")
+	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
 
-	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, NewOpenClawConnector()); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewOpenClawConnector()); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
 
 	for _, name := range genericHookScripts {
-		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-			t.Errorf("generic hook %s not created: %v", name, err)
+		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+			t.Errorf("generic hook %s not created under hookDir: %v", name, err)
 		}
 	}
-	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "hermes-hook.sh"} {
+		if _, err := os.Stat(filepath.Join(hookDir, name)); !os.IsNotExist(err) {
 			t.Errorf("OpenClaw hook writer should not create vendor hook %s, stat err=%v", name, err)
 		}
 	}
@@ -4087,11 +4316,16 @@ func TestTeardown_DoesNotDeleteOtherConnectorsHookScripts(t *testing.T) {
 	// Invariant 1: claude-code-hook.sh — the script claudecode owns —
 	// should be replaced with a disabled tombstone so already-running
 	// Claude Code processes that cached the path do not fail with exit 127.
+	// The tombstone must carry the v<digit> schema marker so
+	// isOwnedHook/scriptHasMarker still recognise it as DefenseClaw-owned.
 	disabledHook, err := os.ReadFile(filepath.Join(hookDir, "claude-code-hook.sh"))
 	if err != nil {
 		t.Fatalf("claude-code-hook.sh disabled tombstone missing after teardown: %v", err)
 	}
-	if !strings.Contains(string(disabledHook), "defenseclaw-managed-hook disabled") {
+	if !strings.Contains(string(disabledHook), "defenseclaw-managed-hook v") {
+		t.Errorf("claude-code-hook.sh tombstone missing v<digit> marker, got:\n%s", string(disabledHook))
+	}
+	if !strings.Contains(string(disabledHook), "disabled tombstone") {
 		t.Errorf("claude-code-hook.sh should be a disabled tombstone, got:\n%s", string(disabledHook))
 	}
 
@@ -6180,40 +6414,81 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 	}
 }
 
+// TestConnector_AgentPaths_HookScriptsCoverAll pins the per-connector
+// hook script contract. The expected lists are intentionally hardcoded
+// rather than computed via hookScriptNamesForConnector so that a
+// regression in the helper itself (e.g., dropping the generic
+// inspect-*.sh baseline, or attributing the wrong *-hook.sh to a
+// connector) fails this test loudly. The previous implementation used
+// the same helper for both sides of the comparison and would have
+// passed even if hookScriptNamesForConnector returned the wrong set.
+//
+// Update this table when adding/removing a builtin connector or
+// changing the genericHookScripts baseline.
 func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 	dataDir := t.TempDir()
 	opts := SetupOpts{DataDir: dataDir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 
-	connectors := []Connector{
-		NewZeptoClawConnector(),
-		NewOpenClawConnector(),
-		NewCodexConnector(),
-		NewClaudeCodeConnector(),
-		NewHermesConnector(),
-		NewCursorConnector(),
-		NewWindsurfConnector(),
-		NewGeminiCLIConnector(),
-		NewCopilotConnector(),
+	// Canonical baseline every connector contributes.
+	generic := []string{
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
 	}
-	for _, conn := range connectors {
-		ap, ok := conn.(AgentPathProvider)
-		if !ok {
-			t.Fatalf("%s missing AgentPathProvider", conn.Name())
-		}
-		paths := ap.AgentPaths(opts)
-		got := map[string]bool{}
-		for _, p := range paths.HookScripts {
-			got[filepath.Base(p)] = true
-		}
-		expected := hookScriptNamesForConnector(opts, conn)
-		if len(got) != len(expected) {
-			t.Errorf("%s: AgentPaths.HookScripts has %d unique entries, want %d (got %v)", conn.Name(), len(got), len(expected), paths.HookScripts)
-		}
-		for _, want := range expected {
-			if !got[want] {
-				t.Errorf("%s: AgentPaths.HookScripts missing %q (got %v)", conn.Name(), want, paths.HookScripts)
+	withVendor := func(vendor string) []string {
+		out := make([]string, 0, len(generic)+1)
+		out = append(out, generic...)
+		out = append(out, vendor)
+		return out
+	}
+
+	cases := []struct {
+		ctor func() Connector
+		name string
+		want []string
+	}{
+		{func() Connector { return NewZeptoClawConnector() }, "zeptoclaw", generic},
+		{func() Connector { return NewOpenClawConnector() }, "openclaw", generic},
+		{func() Connector { return NewCodexConnector() }, "codex", withVendor("codex-hook.sh")},
+		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
+		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
+		{func() Connector { return NewCursorConnector() }, "cursor", withVendor("cursor-hook.sh")},
+		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
+		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
+		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := tc.ctor()
+			ap, ok := conn.(AgentPathProvider)
+			if !ok {
+				t.Fatalf("%s missing AgentPathProvider", tc.name)
 			}
-		}
+			paths := ap.AgentPaths(opts)
+
+			// Order-independent membership check.
+			got := map[string]bool{}
+			for _, p := range paths.HookScripts {
+				got[filepath.Base(p)] = true
+			}
+			if len(got) != len(tc.want) {
+				t.Errorf("%s: AgentPaths.HookScripts has %d unique entries, want %d (got %v)", tc.name, len(got), len(tc.want), paths.HookScripts)
+			}
+			for _, want := range tc.want {
+				if !got[want] {
+					t.Errorf("%s: AgentPaths.HookScripts missing %q (got %v)", tc.name, want, paths.HookScripts)
+				}
+			}
+			// And every reported entry must be under <DataDir>/hooks/.
+			hookDir := filepath.Join(dataDir, "hooks")
+			for _, p := range paths.HookScripts {
+				if filepath.Dir(p) != hookDir {
+					t.Errorf("%s: hook script %q not under %q", tc.name, p, hookDir)
+				}
+			}
+		})
 	}
 }
 

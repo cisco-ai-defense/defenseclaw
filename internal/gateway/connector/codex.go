@@ -192,14 +192,12 @@ func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		return fmt.Errorf("codex teardown: subprocess enforcement: %w", err)
 	}
-	// Note: writeDisabledCodexHook below intentionally writes the
-	// codex-hook.sh stub AFTER the scoped removeOwnedHookScripts so
-	// any stale codex-hook.sh from a previous install is replaced
-	// rather than left in place. The disabled stub exits 0 so
-	// long-lived Codex sessions that cached the absolute hook path
-	// don't 127 after Teardown.
-	removeOwnedHookScripts(opts, c)
-	if err := writeDisabledCodexHook(opts); err != nil {
+	// Cached-PID safety: long-lived Codex sessions cache the absolute
+	// hook path at startup. We replace codex-hook.sh in place with the
+	// shared v0 tombstone (atomic rename, no ENOENT window) instead of
+	// deleting it — see writeDisabledHookTombstone for the full
+	// contract.
+	if err := writeDisabledHookTombstone(opts, "codex-hook.sh", "Codex"); err != nil {
 		return fmt.Errorf("codex teardown: disabled hook: %w", err)
 	}
 	return nil
@@ -1345,24 +1343,6 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		return fmt.Errorf("write notify bridge: %w", err)
 	}
 	return nil
-}
-
-// writeDisabledCodexHook leaves a no-op tombstone at the path older
-// Codex processes may have cached before teardown. The config restore
-// removes the hook registration for new Codex sessions; this keeps
-// already-running sessions from surfacing repeated "hook failed" noise.
-func writeDisabledCodexHook(opts SetupOpts) error {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := os.MkdirAll(hookDir, 0o700); err != nil {
-		return fmt.Errorf("ensure hook dir: %w", err)
-	}
-	body := "#!/bin/bash\n" +
-		"# defenseclaw-managed-hook disabled\n" +
-		"# Codex connector was torn down. Existing Codex processes may\n" +
-		"# keep this hook path cached until restart, so exit successfully\n" +
-		"# without forwarding stale payloads.\n" +
-		"exit 0\n"
-	return atomicWriteFile(filepath.Join(hookDir, "codex-hook.sh"), []byte(body), 0o700)
 }
 
 // isCodexReservedProviderID reports whether name is one of the

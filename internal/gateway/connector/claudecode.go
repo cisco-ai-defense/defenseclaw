@@ -161,11 +161,12 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
 
-	// Replace our vendor hook with a disabled tombstone so any
-	// already-running Claude Code process that cached the hook path exits
-	// cleanly instead of surfacing repeated exit-127 failures.
-	removeOwnedHookScripts(opts, c)
-	if err := writeDisabledClaudeCodeHook(opts); err != nil {
+	// Cached-PID safety: long-lived Claude Code processes cache the
+	// absolute hook path at startup. We replace claude-code-hook.sh in
+	// place with the shared v0 tombstone (atomic rename, no ENOENT
+	// window) instead of deleting it — see writeDisabledHookTombstone
+	// for the full contract.
+	if err := writeDisabledHookTombstone(opts, "claude-code-hook.sh", "Claude Code"); err != nil {
 		errs = append(errs, fmt.Sprintf("disabled hook: %v", err))
 	}
 
@@ -173,20 +174,6 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		return fmt.Errorf("claudecode teardown errors: %s", strings.Join(errs, "; "))
 	}
 	return nil
-}
-
-func writeDisabledClaudeCodeHook(opts SetupOpts) error {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := os.MkdirAll(hookDir, 0o700); err != nil {
-		return fmt.Errorf("ensure hook dir: %w", err)
-	}
-	body := "#!/bin/bash\n" +
-		"# defenseclaw-managed-hook disabled\n" +
-		"# Claude Code connector was torn down. Existing Claude Code processes may\n" +
-		"# keep this hook path cached until restart, so exit successfully\n" +
-		"# without forwarding stale payloads.\n" +
-		"exit 0\n"
-	return atomicWriteFile(filepath.Join(hookDir, "claude-code-hook.sh"), []byte(body), 0o700)
 }
 
 func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
@@ -302,10 +289,15 @@ func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSig
 // AgentPaths reports the on-disk footprint Claude Code's connector
 // touches. The connector patches ~/.claude/settings.json (hooks
 // table), backs it up via managed + legacy backup files, and writes the
-// inspect-* + claude-code-hook.sh scripts under <DataDir>/hooks/.
-// Legacy env files (claudecode_env.sh / claudecode.env) are
-// surfaced for audit completeness even though they are scoped to
-// <DataDir> and never sourced into the user's shell.
+// inspect-* + claude-code-hook.sh scripts under <DataDir>/hooks/. The
+// shims directory under <DataDir>/shims/ is created by
+// SetupSubprocessEnforcement when enforcement is enabled and is listed
+// in CreatedDirs so VerifyClean and the audit surface treat it as
+// connector-owned. Legacy env files (claudecode_env.sh / claudecode.env)
+// are NOT reported here — they are scoped to <DataDir>, are never
+// sourced into the user's shell, and VerifyClean handles them
+// separately. Adding them to AgentPaths would mis-attribute them to
+// the patched/backup surfaces the operator audit relies on.
 func (c *ClaudeCodeConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	return AgentPaths{
 		PatchedFiles: []string{claudeCodeSettingsPath()},

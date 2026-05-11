@@ -184,7 +184,13 @@ func (c *OpenClawConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
-	removeOwnedHookScripts(opts, c)
+	// OpenClaw does not implement HookScriptOwner: it owns only the
+	// shared inspect-*.sh family written by every connector's
+	// hookwriter, and those are intentionally left in place across
+	// connector switches (they're shared infrastructure). Tombstoning
+	// is unnecessary because OpenClaw drives tool inspection via the
+	// embedded extension, not via a long-lived cached *-hook.sh path
+	// in a host agent process.
 
 	if len(errs) > 0 {
 		return fmt.Errorf("openclaw teardown errors: %s", strings.Join(errs, "; "))

@@ -649,11 +649,14 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 // agent ended up with an empty hooks/ dir and every hook invocation
 // failed with exit 127 ("command not found").
 //
-// Per-connector hook removal is now the responsibility of each
-// Connector.Teardown via removeOwnedHookScripts, which scopes
-// deletion to the calling connector's own *-hook.sh basenames
-// (HookScriptOwner.HookScriptNames) and leaves the shared
-// inspect-*.sh helpers in place.
+// Per-connector hook lifecycle is now the responsibility of each
+// Connector.Teardown via writeDisabledHookTombstone, which replaces
+// the connector's own *-hook.sh in place with a v0 tombstone so
+// long-lived host processes that cached the absolute hook path exit
+// cleanly. The shared inspect-*.sh helpers are intentionally left
+// untouched across connector switches — they're written by every
+// connector's hookwriter and removing them here is what produced the
+// original exit-127 bug during a claudecode → codex switch.
 func TeardownSubprocessEnforcement(opts SetupOpts) error {
 	shimDir := filepath.Join(opts.DataDir, "shims")
 	_ = os.RemoveAll(shimDir)
@@ -664,27 +667,57 @@ func TeardownSubprocessEnforcement(opts SetupOpts) error {
 	return nil
 }
 
-// removeOwnedHookScripts removes ONLY the hook scripts the calling
-// connector owns. Generic inspect-*.sh scripts and other connectors'
-// *-hook.sh files are intentionally left in place — they're either
-// shared infrastructure or owned by a different connector that may
-// still be active or about to become active. Removing them here is
-// what produced the exit-127 "command not found" bug during
-// connector switches.
+// writeDisabledHookTombstone replaces <DataDir>/hooks/<scriptName>
+// with a no-op POSIX shell stub so a long-lived host agent process
+// that cached the absolute hook path exits cleanly (exit 0) instead
+// of either:
 //
-// If c is nil or does not implement HookScriptOwner this is a no-op.
-func removeOwnedHookScripts(opts SetupOpts, c Connector) {
-	if c == nil {
-		return
-	}
-	owner, ok := c.(HookScriptOwner)
-	if !ok {
-		return
+//   - ENOENT → exit 127 if the file had been removed during a connector
+//     switch, or
+//   - hitting a transport-failure fail-closed path when the operator
+//     has set DEFENSECLAW_STRICT_AVAILABILITY=1 and the gateway is
+//     gone or no longer serves the connector's hook endpoint.
+//
+// vendorLabel is interpolated into the tombstone body so an operator
+// reading the file later sees which connector tore down. Pass the
+// connector's lowercase name (e.g. "codex", "hermes") or a
+// human-friendly equivalent ("Claude Code") — both are fine.
+//
+// Format invariants — assert them in TestHookOwners_TeardownLeavesTombstone:
+//
+//   - Shebang is /bin/sh (not /bin/bash) so the tombstone runs on
+//     minimal hosts where /bin/bash is absent (Alpine, distroless,
+//     some BSDs). The body is literal `exit 0`; POSIX sh is enough.
+//   - Line 2 carries the v0 schema marker so scriptHasMarker /
+//     isOwnedHook recognise the tombstone as DefenseClaw-owned.
+//     v0 is the "older than any tagged version" sentinel; any
+//     actively-installed *-hook.sh (currently v3+) beats it in
+//     downgrade-safety comparisons.
+//   - The write is atomic (CreateTemp + rename) so a concurrent
+//     hook invocation either sees the prior content or the
+//     tombstone, never an empty/partial file.
+//   - The body never contains a /api/v1/.../hook URL — the
+//     tombstone MUST NOT forward stale payloads.
+//
+// File mode is 0o700 (owner-only rwx) to match the live hook scripts.
+func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) error {
+	if strings.TrimSpace(scriptName) == "" {
+		return fmt.Errorf("tombstone: empty scriptName")
 	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	for _, name := range owner.HookScriptNames(opts) {
-		_ = os.Remove(filepath.Join(hookDir, name))
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("ensure hook dir: %w", err)
 	}
+	if vendorLabel == "" {
+		vendorLabel = "DefenseClaw connector"
+	}
+	body := "#!/bin/sh\n" +
+		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
+		"# keep this hook path cached until restart, so exit successfully\n" +
+		"# without forwarding stale payloads.\n" +
+		"exit 0\n"
+	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }
 
 // ShimBinaries returns the list of binary names that are shimmed.

@@ -155,7 +155,11 @@ func (c *ZeptoClawConnector) Teardown(ctx context.Context, opts SetupOpts) error
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
-	removeOwnedHookScripts(opts, c)
+	// ZeptoClaw does not implement HookScriptOwner and operates through
+	// a proxy api_base in config.json, not a *-hook.sh script that
+	// a host agent process keeps cached. The shared inspect-*.sh
+	// scripts are intentionally left in place — they're owned by the
+	// hookwriter, not by any single connector.
 
 	if len(errs) > 0 {
 		return fmt.Errorf("zeptoclaw teardown errors: %s", strings.Join(errs, "; "))

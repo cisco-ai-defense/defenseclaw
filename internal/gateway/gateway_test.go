@@ -761,35 +761,23 @@ func (r *rollbackConnector) VerifyClean(connector.SetupOpts) error {
 	return nil
 }
 
-type hookRetryConnector struct {
+// fakeHookOwner is a minimal stubConnector that satisfies the
+// HookScriptOwner contract so the narrow verifyHookScriptsOrRetry path
+// can be exercised without a full builtin connector. setupCalls
+// counts Setup invocations so tests can assert the narrow retry path
+// never re-runs full Setup.
+type fakeHookOwner struct {
 	stubConnector
-	hooks        []string
-	setupCalls   int
-	writeOnRetry bool
-	setupErr     error
+	hooks      []string
+	setupCalls int
 }
 
-func (h *hookRetryConnector) HookScriptNames(connector.SetupOpts) []string {
+func (h *fakeHookOwner) HookScriptNames(connector.SetupOpts) []string {
 	return h.hooks
 }
 
-func (h *hookRetryConnector) Setup(_ context.Context, opts connector.SetupOpts) error {
+func (h *fakeHookOwner) Setup(_ context.Context, _ connector.SetupOpts) error {
 	h.setupCalls++
-	if h.setupErr != nil {
-		return h.setupErr
-	}
-	if !h.writeOnRetry {
-		return nil
-	}
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := os.MkdirAll(hookDir, 0o700); err != nil {
-		return err
-	}
-	for _, name := range h.hooks {
-		if err := os.WriteFile(filepath.Join(hookDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -810,94 +798,130 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 	}
 }
 
-func TestVerifyHookScriptsOrRetry_ErrorsWhenRetryStillMissing(t *testing.T) {
+// TestFailGuardrailWithRollback_ChainsHealthAndTeardown locks the
+// sidecar fail-loud contract: both the conn.Setup() error branch and
+// the verifyHookScriptsOrRetry error branch in runGuardrail funnel
+// through failGuardrailWithRollback, which MUST (a) run Teardown +
+// VerifyClean via recordAndRollbackFailedConnectorSetup, (b) persist
+// the partially-installed connector name so the next boot can finish
+// cleaning up, (c) flip Guardrail health to StateError with the
+// wrapped error message visible to operators, and (d) return the
+// wrapped error so the sidecar errCh propagates it. A future refactor
+// that drops any of these steps fails this test loudly.
+func TestFailGuardrailWithRollback_ChainsHealthAndTeardown(t *testing.T) {
 	dir := t.TempDir()
-	conn := &hookRetryConnector{
-		stubConnector: stubConnector{name: "codex"},
-		hooks:         []string{"codex-hook.sh"},
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+	s := &Sidecar{health: NewSidecarHealth()}
+
+	bootErr := fmt.Errorf("connector codex hook verification failed: missing [codex-hook.sh]")
+	got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{DataDir: dir}, conn, "hook verification", bootErr)
+	if got != bootErr {
+		t.Fatalf("failGuardrailWithRollback should return the input error verbatim, got: %v", got)
+	}
+	if !conn.teardownCalled {
+		t.Fatal("failGuardrailWithRollback did not chain into connector Teardown")
+	}
+	if !conn.verifyCalled {
+		t.Fatal("failGuardrailWithRollback did not chain into connector VerifyClean")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "codex" {
+		t.Fatalf("active connector state = %q, want codex (operator must see what failed on next boot)", got)
+	}
+	snap := s.health.Snapshot()
+	if snap.Guardrail.State != StateError {
+		t.Fatalf("Guardrail health state = %q, want %q", snap.Guardrail.State, StateError)
+	}
+	if !strings.Contains(snap.Guardrail.LastError, "missing [codex-hook.sh]") {
+		t.Errorf("Guardrail health LastError should surface the operator-visible cause, got: %q", snap.Guardrail.LastError)
+	}
+}
+
+// failGuardrailWithRollback must be a no-op when given nil inputs so
+// the caller never has to guard the call site itself.
+func TestFailGuardrailWithRollback_NilInputs(t *testing.T) {
+	s := &Sidecar{health: NewSidecarHealth()}
+	if got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{}, nil, "setup", fmt.Errorf("ignored")); got == nil {
+		t.Errorf("nil connector should still return the input error, got nil")
+	}
+	if got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{}, &rollbackConnector{stubConnector: stubConnector{name: "x"}}, "setup", nil); got != nil {
+		t.Errorf("nil err should short-circuit and return nil, got: %v", got)
+	}
+}
+
+// When the retry hook writer cannot find the template (script name not
+// in the embedded FS), verifyHookScriptsOrRetry must wrap and surface
+// the error rather than silently swallowing it. The wrapped error must
+// mention the connector name so operator logs are diagnosable.
+func TestVerifyHookScriptsOrRetry_WrapsWriterError(t *testing.T) {
+	dir := t.TempDir()
+	conn := &fakeHookOwner{
+		stubConnector: stubConnector{name: "fakeconnector"},
+		hooks:         []string{"does-not-exist-in-embed.sh"},
 	}
 
-	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn)
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn)
 	if err == nil {
-		t.Fatal("verifyHookScriptsOrRetry should fail when hooks are still missing after retry")
+		t.Fatal("expected error when hook writer cannot find embedded template")
 	}
-	if conn.setupCalls != 1 {
-		t.Fatalf("retry setup calls = %d, want 1", conn.setupCalls)
+	if conn.setupCalls != 0 {
+		t.Fatalf("narrow retry must NOT re-run Setup; got %d Setup calls", conn.setupCalls)
+	}
+	if !strings.Contains(err.Error(), "fakeconnector") {
+		t.Errorf("error should name the failing connector, got: %v", err)
 	}
 	if got := connector.LoadActiveConnector(dir); got != "" {
 		t.Fatalf("verifyHookScriptsOrRetry should not save active connector state, got %q", got)
 	}
 }
 
+// Happy-path retry: an owner whose hook script IS in the embedded FS
+// triggers a successful narrow hook-writer run, producing the missing
+// hook script on disk WITHOUT re-running Setup.
 func TestVerifyHookScriptsOrRetry_RestoresMissingHook(t *testing.T) {
 	dir := t.TempDir()
-	conn := &hookRetryConnector{
-		stubConnector: stubConnector{name: "codex"},
-		hooks:         []string{"codex-hook.sh"},
-		writeOnRetry:  true,
-	}
+	conn := connector.NewCodexConnector()
 
-	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn)
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn)
 	if err != nil {
 		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
-	}
-	if conn.setupCalls != 1 {
-		t.Fatalf("retry setup calls = %d, want 1", conn.setupCalls)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
 		t.Fatalf("restored hook missing: %v", err)
 	}
+	// Narrow retry must also lay down the generic inspect-*.sh helpers
+	// because the writer treats them as the shared baseline.
+	if _, err := os.Stat(filepath.Join(dir, "hooks", "inspect-tool.sh")); err != nil {
+		t.Fatalf("generic inspect-tool.sh missing after narrow retry: %v", err)
+	}
 }
 
-// When every hook is already on disk, verifyHookScriptsOrRetry must not
-// trigger a redundant Setup. This is the common steady-state path on
-// gateway boot when nothing is wrong.
+// When every owned hook is already on disk, verifyHookScriptsOrRetry
+// must skip the retry entirely. This is the common steady-state path
+// on gateway boot when nothing is wrong, and the test guards against a
+// regression where the writer is invoked unconditionally and either
+// thrashes disk or clobbers operator-edited content.
 func TestVerifyHookScriptsOrRetry_NoRetryWhenHooksPresent(t *testing.T) {
 	dir := t.TempDir()
-	conn := &hookRetryConnector{
-		stubConnector: stubConnector{name: "codex"},
-		hooks:         []string{"codex-hook.sh"},
-	}
+	conn := connector.NewCodexConnector()
 
 	hookDir := filepath.Join(dir, "hooks")
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		t.Fatalf("mkdir hooks: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(hookDir, "codex-hook.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	const seedSentinel = "# operator-seeded sentinel — not the embedded template\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hookDir, "codex-hook.sh"), []byte(seedSentinel), 0o700); err != nil {
 		t.Fatalf("seed hook: %v", err)
 	}
 
-	if err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn); err != nil {
+	if err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn); err != nil {
 		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
 	}
-	if conn.setupCalls != 0 {
-		t.Fatalf("retry setup calls = %d, want 0 (no retry expected when hooks present)", conn.setupCalls)
+	body, err := os.ReadFile(filepath.Join(hookDir, "codex-hook.sh"))
+	if err != nil {
+		t.Fatalf("re-read seeded hook: %v", err)
 	}
-}
-
-// When the retry Setup itself errors, verifyHookScriptsOrRetry must wrap and
-// surface the error (not silently swallow it). The wrapped error must mention
-// the connector name so operator logs are diagnosable.
-func TestVerifyHookScriptsOrRetry_WrapsSetupError(t *testing.T) {
-	dir := t.TempDir()
-	conn := &hookRetryConnector{
-		stubConnector: stubConnector{name: "codex"},
-		hooks:         []string{"codex-hook.sh"},
-		setupErr:      fmt.Errorf("simulated setup failure"),
-	}
-
-	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn)
-	if err == nil {
-		t.Fatal("expected error when retry Setup fails")
-	}
-	if conn.setupCalls != 1 {
-		t.Fatalf("retry setup calls = %d, want 1", conn.setupCalls)
-	}
-	if !strings.Contains(err.Error(), "codex") {
-		t.Errorf("error should name the failing connector, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "simulated setup failure") {
-		t.Errorf("error should wrap the underlying Setup error, got: %v", err)
+	if string(body) != seedSentinel {
+		t.Errorf("seeded codex-hook.sh body was overwritten — retry path ran unexpectedly\ngot:\n%s", body)
 	}
 }
 

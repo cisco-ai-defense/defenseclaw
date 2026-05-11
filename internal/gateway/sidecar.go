@@ -1279,31 +1279,36 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
 		}
+		// Both branches below treat any failure to reach a verified
+		// post-Setup state as fail-loud: rollback, surface
+		// Guardrail=Error, and return so the operator sees the failure
+		// rather than booting into a connector that will exit-127 on
+		// every hook invocation. A Setup() error is strictly more
+		// severe than "Setup succeeded but a hook script went missing"
+		// — handling them asymmetrically (one fatal, one warning)
+		// inverted operator expectations, so both paths now exit the
+		// guardrail goroutine with the wrapped error via the shared
+		// failGuardrailWithRollback helper.
 		if err := conn.Setup(ctx, setupOpts); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
-			recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
-		} else {
-			// Post-Setup verification: every owned hook script the
-			// connector said it would write MUST exist on disk before
-			// we mark the connector active. Without this check, a
-			// silent partial install (Setup returns nil but
-			// writeHookScriptsCommonWithFailMode never reached its
-			// for-loop, or another goroutine deleted the freshly
-			// written script) ships a connector whose every hook
-			// invocation will exit 127 ("command not found") — the
-			// exact symptom we hit during the claudecode → codex
-			// switch. Fail loud here and try one re-Setup so the
-			// operator either sees the error or gets a self-healing
-			// install.
-			if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook verification failed: %v\n", conn.Name(), err)
-				recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
-				s.health.SetGuardrail(StateError, err.Error(), nil)
-				return err
-			}
-			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
-			}
+			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "setup", fmt.Errorf("connector %s setup failed: %w", conn.Name(), err))
+		}
+		// Post-Setup verification: every owned hook script the
+		// connector said it would write MUST exist on disk before
+		// we mark the connector active. Without this check, a
+		// silent partial install (Setup returns nil but
+		// writeHookScriptsCommonWithFailMode never reached its
+		// for-loop, or another goroutine deleted the freshly
+		// written script) ships a connector whose every hook
+		// invocation will exit 127 ("command not found") — the
+		// exact symptom we hit during the claudecode → codex
+		// switch. Fail loud here and try one targeted hook-writer
+		// retry so the operator either sees the error or gets a
+		// self-healing install.
+		if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
+			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "hook verification", err)
+		}
+		if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 		}
 
 		// Plan A4 / S0.12: refuse to start when the connector advertises
@@ -1605,19 +1610,34 @@ func verifyHookScriptsOnDisk(dataDir string, conn connector.Connector) []string 
 	return missing
 }
 
+// verifyHookScriptsOrRetry checks that every connector-owned hook
+// script is on disk and, if any are missing, runs a targeted retry of
+// JUST the hook writer (not the full Setup). The documented failure
+// mode is "hook writer raced / silently missed a write"; re-running
+// Setup in full would needlessly re-patch the agent config, re-capture
+// managed backups, re-install subprocess enforcement, etc. The narrow
+// retry is also safe to invoke unconditionally on a freshly-completed
+// install because writeHookScriptsCommonWithFailMode is idempotent
+// (MkdirAll + WriteFile, no destructive side-effects).
+//
+// The ctx argument is reserved for connectors whose hook writer ever
+// gains a cancellable code path; the current implementation does not
+// require it.
 func verifyHookScriptsOrRetry(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
+	_ = ctx
 	missing := verifyHookScriptsOnDisk(opts.DataDir, conn)
 	if len(missing) == 0 {
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying Setup\n", conn.Name(), missing)
-	if err := conn.Setup(ctx, opts); err != nil {
-		return fmt.Errorf("connector %s re-Setup after missing-hook detection failed: %w", conn.Name(), err)
+	fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying hook writer\n", conn.Name(), missing)
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := connector.WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		return fmt.Errorf("connector %s hook-writer retry after missing-hook detection failed: %w", conn.Name(), err)
 	}
 	if missing = verifyHookScriptsOnDisk(opts.DataDir, conn); len(missing) > 0 {
-		return fmt.Errorf("connector %s still missing hook scripts after re-Setup: %v", conn.Name(), missing)
+		return fmt.Errorf("connector %s still missing hook scripts after hook-writer retry: %v", conn.Name(), missing)
 	}
-	fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup restored missing hook scripts\n", conn.Name())
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook-writer retry restored missing hook scripts\n", conn.Name())
 	return nil
 }
 
@@ -1648,6 +1668,29 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
 	return nil
+}
+
+// failGuardrailWithRollback is the shared fail-loud path for connector
+// boot errors. It logs the failure with a stable surface label so
+// operators can grep for the originating phase, rolls the partial
+// setup back via recordAndRollbackFailedConnectorSetup, surfaces
+// Guardrail=Error in the health snapshot, and returns the wrapped
+// error so the caller can propagate it to the sidecar errCh.
+//
+// Centralising the sequence here keeps the two failure paths in
+// runGuardrail (Setup error / hook verification error) in lockstep —
+// any change to logging, rollback ordering, or health-state shape
+// happens once and is covered by a single integration test.
+func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, surface string, err error) error {
+	if conn == nil || err == nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
+	recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+	if s != nil && s.health != nil {
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+	}
+	return err
 }
 
 func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {
