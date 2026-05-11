@@ -109,28 +109,46 @@ func TestExtractPassthroughResponseContent_OpenAIResponsesFallback(t *testing.T)
 
 // --- tool-call extractors --------------------------------------------------
 
+// nestedToolCall mirrors the OpenAI Chat Completions tool_calls shape that
+// extractPassthroughToolCalls now emits and that inspectToolCalls consumes.
+// Keeping it in the test file (rather than importing the unexported one from
+// proxy.go) intentionally pins the wire contract — anything that drifts the
+// emit shape will fail to decode here and fail the test.
+type nestedToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
 // assertSingleCall extracts the (name, arguments) pair from
 // extractPassthroughToolCalls's normalised payload and fails the test if the
-// shape isn't a single-element array with matching values.
+// shape isn't a single-element OpenAI Chat Completions tool_calls entry with
+// matching values.
 func assertSingleCall(t *testing.T, raw json.RawMessage, wantName, wantArgs string) {
 	t.Helper()
 	if raw == nil {
 		t.Fatalf("extractPassthroughToolCalls returned nil; want one call")
 	}
-	var calls []map[string]string
+	var calls []nestedToolCall
 	if err := json.Unmarshal(raw, &calls); err != nil {
 		t.Fatalf("could not decode normalised tool-call payload %q: %v", string(raw), err)
 	}
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 tool call, got %d: %v", len(calls), calls)
 	}
-	if calls[0]["name"] != wantName {
-		t.Fatalf("tool name: got %q, want %q", calls[0]["name"], wantName)
+	if calls[0].Type != "function" {
+		t.Fatalf("tool type: got %q, want %q", calls[0].Type, "function")
+	}
+	if calls[0].Function.Name != wantName {
+		t.Fatalf("tool name: got %q, want %q", calls[0].Function.Name, wantName)
 	}
 	// Compare arguments structurally so whitespace / key order doesn't matter.
 	var gotArgs, wantArgsParsed interface{}
-	if err := json.Unmarshal([]byte(calls[0]["arguments"]), &gotArgs); err != nil {
-		t.Fatalf("could not parse extracted arguments %q: %v", calls[0]["arguments"], err)
+	if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &gotArgs); err != nil {
+		t.Fatalf("could not parse extracted arguments %q: %v", calls[0].Function.Arguments, err)
 	}
 	if err := json.Unmarshal([]byte(wantArgs), &wantArgsParsed); err != nil {
 		t.Fatalf("could not parse expected arguments %q: %v", wantArgs, err)
@@ -180,34 +198,18 @@ func TestExtractPassthroughToolCalls_BedrockConverse(t *testing.T) {
 }
 
 func TestExtractPassthroughToolCalls_OpenAIResponses(t *testing.T) {
+	// OpenAI Responses emits `arguments` on the wire as a JSON-encoded
+	// string (a quoted string containing JSON). The normaliser unwraps
+	// that outer encoding so the inspector sees the same Go-string
+	// shape that OpenAI Chat Completions produces natively — i.e.
+	// `{"cmd":"bash -i"}` rather than `"{\"cmd\":\"bash -i\"}"`.
 	body := []byte(`{
       "output": [
         {"type": "function_call", "name": "exec", "arguments": "{\"cmd\":\"bash -i\"}"}
       ]
     }`)
 	got := extractPassthroughToolCalls(body, "openai")
-	if got == nil {
-		t.Fatalf("expected one tool call; got nil")
-	}
-	// OpenAI Responses emits `arguments` on the wire as a JSON-encoded
-	// string (already double-encoded). json.RawMessage preserves that
-	// wrapping in the normalised payload, unlike the Chat Completions
-	// path where `arguments` parses as a Go string and unwraps.
-	// Both forms still carry the inspectable command for downstream
-	// scanning; this test just pins the as-implemented contract.
-	var calls []map[string]string
-	if err := json.Unmarshal(got, &calls); err != nil {
-		t.Fatalf("could not decode normalised tool-call payload %q: %v", string(got), err)
-	}
-	if len(calls) != 1 {
-		t.Fatalf("expected 1 tool call, got %d: %v", len(calls), calls)
-	}
-	if calls[0]["name"] != "exec" {
-		t.Fatalf("tool name: got %q, want %q", calls[0]["name"], "exec")
-	}
-	if !strings.Contains(calls[0]["arguments"], `bash -i`) {
-		t.Fatalf("expected inspectable command to survive normalisation; got arguments=%q", calls[0]["arguments"])
-	}
+	assertSingleCall(t, got, "exec", `{"cmd":"bash -i"}`)
 }
 
 func TestExtractPassthroughToolCalls_OpenAIChatFallback(t *testing.T) {
@@ -295,28 +297,20 @@ func TestExtractSSEChunkText_UnknownChunkReturnsEmpty(t *testing.T) {
 	}
 }
 
-// --- integration: extractPassthroughToolCalls → inspectToolCalls --------
+// --- regression guard: extractPassthroughToolCalls → inspectToolCalls --
 //
-// KNOWN BUG (currently t.Skip): the passthrough extractor emits a FLAT
-// array of {name, arguments}, but the downstream inspectToolCalls parses
-// the OpenAI Chat Completions NESTED shape {id, type, function:{name,
-// arguments}}. When the flat output is decoded into the nested struct,
-// every Function.Name and Function.Arguments comes back empty. The
-// scanner then sees no inspectable text and returns no findings, so
-// tool-call inspection for Anthropic `tool_use`, Gemini `functionCall`,
-// and Bedrock `toolUse` is wired but inoperative — exactly the gap PR
-// #258 claims to close.
-//
-// When the fix lands (either normalise extractor output to the nested
-// OpenAI shape, or teach the inspector to accept the flat shape), drop
-// the t.Skip and this test becomes a tripwire against future drift.
+// inspectToolCalls (proxy.go) parses the OpenAI Chat Completions tool_calls
+// nested shape — `[{id, type, function:{name, arguments}}]`. If
+// extractPassthroughToolCalls ever drifts back to the flat `[{name,
+// arguments}]` shape it briefly emitted during initial PR review, the
+// inspector would silently decode every Function.Name and
+// Function.Arguments as the empty string and tool-call inspection for
+// Anthropic / Gemini / Bedrock / OpenAI Responses would return no
+// findings without any visible error. This test fails loudly on that
+// drift by running the extractor output through the inspector's
+// verbatim parse schema.
 
 func TestExtractPassthroughToolCalls_ShapeMatchesInspector(t *testing.T) {
-	t.Skip("KNOWN BUG: extractPassthroughToolCalls emits flat shape, " +
-		"inspectToolCalls expects nested OpenAI shape — passthrough " +
-		"tool-call inspection for Anthropic/Gemini/Bedrock returns " +
-		"no findings until the shapes are aligned.")
-
 	body := []byte(`{
       "content": [
         {"type": "tool_use", "name": "bash", "input": {"command": "rm -rf /"}}
@@ -342,8 +336,13 @@ func TestExtractPassthroughToolCalls_ShapeMatchesInspector(t *testing.T) {
 	if len(inspectorView) != 1 {
 		t.Fatalf("inspector shape: expected 1 tool call, got %d\nraw=%s", len(inspectorView), string(raw))
 	}
-	if inspectorView[0].Function.Name != "bash" || inspectorView[0].Function.Arguments == "" {
-		t.Fatalf("SHAPE-DRIFT: extractor output decodes to empty Function.{Name,Arguments} under the inspector's schema. raw=%s", string(raw))
+	if inspectorView[0].Function.Name != "bash" {
+		t.Fatalf("SHAPE-DRIFT: inspector saw Function.Name=%q (expected %q) — extractor likely regressed to flat shape. raw=%s",
+			inspectorView[0].Function.Name, "bash", string(raw))
+	}
+	if !strings.Contains(inspectorView[0].Function.Arguments, "rm -rf /") {
+		t.Fatalf("SHAPE-DRIFT: inspector saw Function.Arguments=%q — inspectable command lost during normalisation. raw=%s",
+			inspectorView[0].Function.Arguments, string(raw))
 	}
 }
 

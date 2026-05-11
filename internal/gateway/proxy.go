@@ -1504,40 +1504,82 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 }
 
 // extractPassthroughToolCalls returns provider-native tool-call payloads
-// found in a non-streaming response body, normalised into a JSON array of
-// {name, arguments(json string)} objects. Returns nil when the body
+// found in a non-streaming response body, normalised into the OpenAI Chat
+// Completions tool_calls JSON shape — `[{id, type:"function",
+// function:{name, arguments}}]` — so it can be fed directly to
+// inspectToolCalls without a separate parser. Returns nil when the body
 // contains no recognised tool-call shape, so the caller can short-circuit
-// inspection. pre-fix tool-call inspection only ran on the
-// OpenAI chat-completion path; Anthropic `tool_use`, Gemini `functionCall`,
-// Bedrock tool use, and OpenAI Responses `function_call` output sailed
-// through unchecked.
+// inspection.
+//
+// Pre-fix tool-call inspection only ran on the OpenAI chat-completion
+// path; Anthropic `tool_use`, Gemini `functionCall`, Bedrock `toolUse`,
+// and OpenAI Responses `function_call` output sailed through unchecked.
+// The first pass at this function emitted a flat `[{name, arguments}]`
+// shape that did not match the inspector's nested schema, so even when
+// the extractor found a tool call the inspector saw empty name and
+// arguments and returned no findings. The function now emits the
+// nested shape verbatim so the inspector reads the inspectable text
+// rather than empty strings.
 func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
-	type out struct {
+	type fn struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	}
-	var calls []out
+	type call struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function fn     `json:"function"`
+	}
+	var calls []call
+	// argString normalises the various provider representations of the
+	// "arguments" payload into a single Go string that, when fed to
+	// ScanAllRules, exposes the same inspectable substrings as the
+	// native OpenAI Chat Completions wire shape (where `arguments` is
+	// already a JSON string in Go after json.Unmarshal).
+	//
+	//   - Go string: pass through (already unwrapped).
+	//   - json.RawMessage starting with `"`: a JSON-encoded string
+	//     (OpenAI Responses pattern). Unmarshal once to strip the
+	//     wrapping quotes and decode escape sequences.
+	//   - json.RawMessage otherwise: a JSON object/array literal
+	//     (Anthropic input, Gemini args, Bedrock input). Pass the
+	//     raw bytes through so the scanner sees the literal arg keys
+	//     and values.
+	//   - nil/zero-length: empty string.
+	//   - anything else: best-effort json.Marshal.
+	argString := func(args interface{}) string {
+		switch a := args.(type) {
+		case string:
+			return a
+		case json.RawMessage:
+			if len(a) == 0 {
+				return ""
+			}
+			if a[0] == '"' {
+				var unwrapped string
+				if err := json.Unmarshal(a, &unwrapped); err == nil {
+					return unwrapped
+				}
+			}
+			return string(a)
+		case nil:
+			return ""
+		default:
+			b, err := json.Marshal(a)
+			if err != nil {
+				return ""
+			}
+			return string(b)
+		}
+	}
 	addCall := func(name string, args interface{}) {
 		if name == "" {
 			return
 		}
-		argStr := ""
-		switch a := args.(type) {
-		case string:
-			argStr = a
-		case json.RawMessage:
-			if len(a) > 0 {
-				argStr = string(a)
-			}
-		case nil:
-			argStr = ""
-		default:
-			b, err := json.Marshal(a)
-			if err == nil {
-				argStr = string(b)
-			}
-		}
-		calls = append(calls, out{Name: name, Arguments: argStr})
+		calls = append(calls, call{
+			Type:     "function",
+			Function: fn{Name: name, Arguments: argString(args)},
+		})
 	}
 
 	switch provider {
@@ -1634,11 +1676,7 @@ func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
 	if len(calls) == 0 {
 		return nil
 	}
-	out2 := make([]map[string]string, len(calls))
-	for i, c := range calls {
-		out2[i] = map[string]string{"name": c.Name, "arguments": c.Arguments}
-	}
-	encoded, err := json.Marshal(out2)
+	encoded, err := json.Marshal(calls)
 	if err != nil {
 		return nil
 	}
