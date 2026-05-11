@@ -28,9 +28,28 @@ mocked in tests by passing a custom ``resolver`` callback.
 from __future__ import annotations
 
 import ipaddress
+import os
 import socket
 from collections.abc import Callable
 from urllib.parse import urlparse
+
+# RFC 6598 carrier-grade NAT range. Python's ``ipaddress.is_private``
+# does NOT include this block — it predates RFC 6598 — so we have to
+# match it explicitly to stay in lockstep with the Go-side gateway
+# guard (``internal/gateway/provider.go`` ``isUnsafeIP``). Operators
+# running over Tailscale or other CGNAT-routed overlays opt in via
+# ``DEFENSECLAW_ALLOW_CGNAT=1``, the same env var the Go side honours.
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _cgnat_allowed() -> bool:
+    """Return True when the operator has opted into dialing CGNAT.
+
+    Read at call time (not at import) so tests can toggle the env var
+    with :func:`unittest.mock.patch.dict` and so a long-running process
+    picks up a config change without restart.
+    """
+    return os.environ.get("DEFENSECLAW_ALLOW_CGNAT") == "1"
 
 ALLOWED_SCHEMES = frozenset({"http", "https"})
 """Schemes accepted for HTTP-style fetches.
@@ -157,6 +176,23 @@ def resolve_and_pin(
             raise SSRFError(
                 f"host {host!r} resolves to private address {addr} "
                 "(use --allow-private to opt in)"
+            )
+        # CGNAT (RFC 6598, 100.64.0.0/10) is not covered by
+        # ipaddress.is_private but the Go-side dial guard refuses it,
+        # so a CGNAT URL accepted here would still fail at dispatch
+        # time. Refuse here too to keep config-time validation in
+        # lockstep with runtime, unless the operator has explicitly
+        # opted into a CGNAT overlay with DEFENSECLAW_ALLOW_CGNAT=1.
+        if (
+            not allow_private
+            and not _cgnat_allowed()
+            and ip.version == 4
+            and ip in _CGNAT_NETWORK
+        ):
+            raise SSRFError(
+                f"host {host!r} resolves to RFC 6598 CGNAT address {addr} "
+                "(set DEFENSECLAW_ALLOW_CGNAT=1 to opt in, "
+                "or use --allow-private)"
             )
         if safe_ip is None:
             safe_ip = addr
