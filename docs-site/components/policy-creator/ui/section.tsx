@@ -43,7 +43,11 @@ export function Section({
     }
   })();
   return (
-    <div className="border-b border-fd-border last:border-b-0">
+    // The id={section-…} anchor is consumed by the cmd-K command
+    // palette to scrollIntoView() and flash the matching section.
+    // scroll-mt offsets the smooth-scroll for the sticky doc header
+    // so the section title lands fully visible, not under the nav.
+    <div id={`section-${id}`} className="scroll-mt-24 border-b border-fd-border last:border-b-0 transition-shadow">
       <button
         type="button"
         onClick={onToggle}

@@ -43,6 +43,7 @@ import {
 import { ReviewSection } from './sections/review';
 import { LiveTestPane } from './sections/live-test';
 import { summarize, validatePolicy } from './lib/validators';
+import { CommandPalette, CommandPaletteHint } from './playground/command-palette';
 
 interface SectionDef {
   id: string;
@@ -253,13 +254,20 @@ export function Playground({
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
+      {/* Cmd-K palette is portal-style (fixed full-screen overlay)
+       *  but mounted here so it shares the Playground's section
+       *  state via setOpenId. */}
+      <CommandPalette onJump={setOpenId} />
       <div className="flex flex-col overflow-hidden rounded-xl border border-fd-border bg-fd-background">
-        <div className="border-b border-fd-border bg-fd-card px-4 py-3">
-          <h2 className="text-base font-semibold text-fd-foreground">Playground</h2>
-          <p className="mt-0.5 text-[11px] text-fd-muted-foreground">
-            Every knob the engine reads, surfaced section-by-section. Edits run through the
-            live OPA-WASM engine on the right.
-          </p>
+        <div className="flex items-center justify-between border-b border-fd-border bg-fd-card px-4 py-3">
+          <div>
+            <h2 className="text-base font-semibold text-fd-foreground">Playground</h2>
+            <p className="mt-0.5 text-[11px] text-fd-muted-foreground">
+              Every knob the engine reads, surfaced section-by-section. Edits run through the
+              live OPA-WASM engine on the right.
+            </p>
+          </div>
+          <CommandPaletteHint />
         </div>
         {banner}
         <div className="divide-y divide-fd-border">
