@@ -30,6 +30,7 @@ import { RulesSection } from './sections/rules';
 import { SuppressionsSection } from './sections/suppressions';
 import { SensitiveToolsSection } from './sections/sensitive-tools';
 import { JudgesSection } from './sections/judges';
+import { CustomRegoSection } from './sections/custom-rego';
 import { FirewallSection } from './sections/firewall';
 import {
   AuditSection,
@@ -206,6 +207,16 @@ const SECTION_DEFS: SectionDef[] = [
     status: (p) =>
       Object.values(p.scanners).some(Boolean) ? 'customized' : 'untouched',
     render: (p, set) => <ScannersSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'custom-rego',
+    title: 'Custom Rego (advanced)',
+    subtitle: (p) =>
+      p.custom_rego.length === 0
+        ? 'no snippets'
+        : `${p.custom_rego.length} snippet${p.custom_rego.length === 1 ? '' : 's'}`,
+    status: (p) => customizedIfNonEmpty([p.custom_rego]),
+    render: (p, set) => <CustomRegoSection policy={p} onPolicyChange={set} />,
   },
   {
     id: 'review',
