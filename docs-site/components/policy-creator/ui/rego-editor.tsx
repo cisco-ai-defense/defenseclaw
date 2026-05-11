@@ -1,7 +1,7 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 //
-// Lightweight syntax-highlighted Rego editor. No CodeMirror, no
+// Lightweight syntax-highlighted code editor. No CodeMirror, no
 // Monaco — just a transparent <textarea> stacked over a <pre> that
 // renders the highlighted source. Both share identical typography
 // and padding so the cursor lines up perfectly with the highlighted
@@ -9,52 +9,70 @@
 //
 // Why this approach?
 //   - Bundle: zero new deps. CodeMirror 6 is ~150KB, Monaco is
-//     ~500KB + a worker. For a niche "advanced" section, that's
-//     prohibitive.
+//     ~500KB + a worker. For the niche surfaces that need a real
+//     editor (custom-rego, BYO test input), that's prohibitive.
 //   - Behavior: all native textarea affordances (selection, IME,
 //     undo/redo, accessibility) work for free; we only intercept Tab
 //     to insert two spaces.
-//   - Maintenance: the tokenizer is ~100 LOC and the overlay is a
+//   - Maintenance: each tokenizer is ~100 LOC and the overlay is a
 //     single <pre>, so future-me can debug it in 5 minutes.
 //
 // Tradeoffs we accept:
 //   - No real autocomplete or hover docs.
 //   - Highlighting is presentation-only; the authoritative parse
-//     happens via `opa check` on the host when the install script
-//     runs.
+//     happens elsewhere (`opa check` for Rego, `JSON.parse` for the
+//     live-test input).
 //   - Line numbers re-render on every keystroke; for snippets up to
 //     a few hundred lines this is fine.
+//
+// The export name stays `RegoEditor` for backwards compat with
+// existing call sites; new callers should use the language-agnostic
+// `CodeEditor` alias and pass `language` + `highlight` explicitly.
 
 'use client';
 
 import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { highlightRegoToHtml } from '../lib/rego-highlight';
 
-export interface RegoEditorProps {
+export interface CodeEditorProps {
   label: string;
   hint?: ReactNode;
   value: string;
   onChange: (next: string) => void;
   /** Visible rows when empty. Editor will not shrink below this. */
   minRows?: number;
+  /** Short language label rendered in the top-right of the editor
+   *  (e.g. "rego", "json"). Defaults to "rego" for backwards compat. */
+  language?: string;
+  /** Tokenize-and-render function. Receives the raw source string,
+   *  returns syntax-highlighted HTML. Defaults to the Rego highlighter. */
+  highlight?: (source: string) => string;
+  /** Placeholder shown when value is empty. */
+  placeholder?: string;
 }
 
-const TAB_REPLACEMENT = '  '; // 2-space indents are conventional in OPA examples.
+const TAB_REPLACEMENT = '  '; // 2-space indents are conventional in both Rego + JSON.
 
-export function RegoEditor({
+const DEFAULT_PLACEHOLDER =
+  "Write Rego here. The bundled modules cover most use cases — only override when you need a verdict the defaults can't express.";
+
+export function CodeEditor({
   label,
   hint,
   value,
   onChange,
   minRows = 14,
-}: RegoEditorProps) {
+  language = 'rego',
+  highlight = highlightRegoToHtml,
+  placeholder = DEFAULT_PLACEHOLDER,
+}: CodeEditorProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const overlayRef = useRef<HTMLPreElement>(null);
   const gutterRef = useRef<HTMLPreElement>(null);
 
   // Pre-rendered highlighted HTML; recompute only when the source
   // changes.
-  const highlighted = useMemo(() => highlightRegoToHtml(value), [value]);
+  const highlighted = useMemo(() => highlight(value), [highlight, value]);
 
   // Line-number gutter content. Always at least minRows so an empty
   // editor still shows the rule of available rows.
@@ -118,7 +136,7 @@ export function RegoEditor({
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-fd-muted-foreground">{label}</span>
         <span className="text-[10px] uppercase tracking-wide text-fd-muted-foreground">
-          rego
+          {language}
         </span>
       </div>
       <div className="relative overflow-hidden rounded-md border border-fd-border bg-fd-background focus-within:border-[var(--brand-cisco)] focus-within:ring-1 focus-within:ring-[var(--brand-cisco)]">
@@ -162,7 +180,7 @@ export function RegoEditor({
                 tabSize: 2,
                 WebkitTextFillColor: 'transparent',
               }}
-              placeholder="Write Rego here. The bundled modules cover most use cases — only override when you need a verdict the defaults can't express."
+              placeholder={placeholder}
             />
           </div>
         </div>
@@ -170,4 +188,12 @@ export function RegoEditor({
       {hint && <span className="text-[11px] text-fd-muted-foreground">{hint}</span>}
     </div>
   );
+}
+
+/** Backwards-compat alias. Existing call sites import { RegoEditor };
+ *  they get a CodeEditor with the Rego defaults baked in. New callers
+ *  should import { CodeEditor } and pass language + highlight. */
+export type RegoEditorProps = Omit<CodeEditorProps, 'language' | 'highlight'>;
+export function RegoEditor(props: RegoEditorProps) {
+  return <CodeEditor {...props} />;
 }
