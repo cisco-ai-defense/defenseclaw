@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -145,6 +146,78 @@ class TestPrivateRanges(unittest.TestCase):
             guard_url(
                 "https://zero.example/m",
                 resolver=stub({"zero.example": ["0.0.0.0"]}),
+            )
+
+    # --- CGNAT / RFC 6598 ----------------------------------------------
+    # Python's ``ipaddress.is_private`` predates RFC 6598 and does NOT
+    # cover 100.64.0.0/10, so the previous implementation accepted CGNAT
+    # webhook URLs at config-time even though the Go-side dial guard
+    # blocks them at runtime. These tests pin the validator-parity fix:
+    # CGNAT is rejected by default, the existing ``--allow-private``
+    # opt-in still wins, and a CGNAT-aware operator can flip the
+    # dedicated ``DEFENSECLAW_ALLOW_CGNAT=1`` env switch the Go side
+    # honours.
+
+    def test_cgnat_blocked_by_default(self):
+        for ip in ("100.64.0.5", "100.99.42.7", "100.127.255.254"):
+            with self.subTest(ip=ip):
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+                    with self.assertRaises(SSRFError) as cm:
+                        guard_url(
+                            "https://tail.example/m",
+                            resolver=stub({"tail.example": [ip]}),
+                        )
+                    self.assertIn("CGNAT", str(cm.exception))
+
+    def test_cgnat_allowed_with_env_optin(self):
+        with patch.dict(os.environ, {"DEFENSECLAW_ALLOW_CGNAT": "1"}):
+            guard_url(
+                "https://tail.example/m",
+                resolver=stub({"tail.example": ["100.64.0.5"]}),
+            )
+
+    def test_cgnat_allowed_with_allow_private(self):
+        # --allow-private already meant "yes I know this looks
+        # internal" — CGNAT should ride along with it so operators
+        # don't have to set two flags to authorise one decision.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+            guard_url(
+                "https://corp.example/m",
+                allow_private=True,
+                resolver=stub({"corp.example": ["100.64.0.5"]}),
+            )
+
+    def test_cgnat_boundary_addresses(self):
+        # First and last address of 100.64.0.0/10 (100.64.0.0 .. 100.127.255.255).
+        # 100.63.255.255 sits one octet below the block and must NOT be
+        # treated as CGNAT.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+            for ip in ("100.64.0.0", "100.127.255.255"):
+                with self.subTest(ip=ip, expected="blocked"):
+                    with self.assertRaises(SSRFError):
+                        guard_url(
+                            "https://b.example/m",
+                            resolver=stub({"b.example": [ip]}),
+                        )
+            # 100.63.255.255 is just outside CGNAT and is globally
+            # routable; the guard must let it through.
+            guard_url(
+                "https://just-below.example/m",
+                resolver=stub({"just-below.example": ["100.63.255.255"]}),
+            )
+
+    def test_cgnat_check_v4_only(self):
+        # 64:ff9b::/96 is NAT64; it isn't CGNAT and must not get caught
+        # by the v4 CGNAT regex masquerading as a v6 address.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+            # Pure public IPv6 must still pass.
+            guard_url(
+                "https://v6.example/m",
+                resolver=stub({"v6.example": ["2606:4700::1"]}),
             )
 
 
