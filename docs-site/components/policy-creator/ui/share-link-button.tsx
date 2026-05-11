@@ -64,7 +64,16 @@ export function ShareLinkButton({
       type="button"
       onClick={onClick}
       disabled={state === 'busy'}
-      title="Encodes the current policy into the URL fragment. The link never hits a server — your draft is in the URL itself."
+      title={
+        // Honest about leak surfaces: fragments are not sent in the
+        // initial HTTP request, but they DO get persisted in browser
+        // history, written to clipboard managers, and forwarded
+        // verbatim if the recipient pastes the link into a chat
+        // service that previews URLs. Treat the link like any other
+        // copy of the policy YAML — share via the same channels you
+        // already trust for that.
+        'Encodes the policy into the URL fragment. We never upload it, but the link itself contains the draft — it will live in your clipboard, browser history, and any chat tool you paste it into. Share it with the same care you would the YAML.'
+      }
       className={[
         'inline-flex items-center gap-1.5 rounded-md border border-fd-border bg-fd-background font-medium text-fd-foreground transition',
         sizeCls,

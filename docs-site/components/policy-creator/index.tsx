@@ -28,7 +28,14 @@ import { Playground } from './playground';
 import { QuickStart } from './quick-start';
 import type { Answers } from './quick-start/questions';
 import { defaultAnswers, deserializeAnswers, serializeAnswers } from './quick-start/questions';
-import { clearHashPayload, decodePolicyFromHash, readHashPayload } from './lib/share';
+import {
+  clearHashPayload,
+  decodePolicyFromHash,
+  readHashPayload,
+  type DecodeFailure,
+} from './lib/share';
+
+type ShareErrorReason = DecodeFailure;
 
 type TabId = 'quick-start' | 'playground';
 
@@ -48,6 +55,9 @@ export default function PolicyCreator() {
   // Quick Start interview. Used by the Playground to render the
   // handoff banner and the "restart Quick Start" affordance.
   const [arrivedFromQuickStart, setArrivedFromQuickStart] = useState(false);
+  // Surfaced when a share link decoded into something we couldn't trust.
+  // Cleared by the user dismissing the banner.
+  const [shareError, setShareError] = useState<ShareErrorReason | null>(null);
 
   // Hydrate persisted state on mount. We delay setting `hydrated` until
   // after the first paint so SSR and CSR trees agree.
@@ -74,10 +84,13 @@ export default function PolicyCreator() {
     const payload = readHashPayload();
     if (payload) {
       void (async () => {
-        const shared = await decodePolicyFromHash(payload);
-        if (!shared) {
-          // Bad payload — strip it so the URL bar isn't lying about
-          // having a draft, but don't show a noisy error.
+        const result = await decodePolicyFromHash(payload);
+        if (!result.ok) {
+          // Bad payload — surface an actionable error and strip the
+          // hash so the URL bar isn't lying about having a draft.
+          // Distinguishing the failure mode helps the operator decide
+          // whether to ask the sender for a fresh link vs report a bug.
+          setShareError(result.reason);
           clearHashPayload();
           return;
         }
@@ -87,7 +100,7 @@ export default function PolicyCreator() {
             'Load policy from share link? Your in-progress draft in this browser will be replaced.',
           );
         if (proceed) {
-          setPolicy(shared);
+          setPolicy(result.policy);
           // Reset answers — share link only carries the Policy, not
           // the Quick Start answer state. Operator can re-derive by
           // walking through the wizard if they want to.
@@ -161,6 +174,9 @@ export default function PolicyCreator() {
   return (
     <div className="my-6 rounded-2xl border border-fd-border bg-fd-card/30 p-3">
       <Tabs active={tab} onSwitch={setTab} />
+      {shareError && (
+        <ShareErrorBanner reason={shareError} onDismiss={() => setShareError(null)} />
+      )}
       <div className="mt-3">
         {tab === 'quick-start' ? (
           <QuickStart
@@ -237,6 +253,58 @@ function Tabs({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+const SHARE_ERROR_COPY: Record<ShareErrorReason, { title: string; detail: string }> = {
+  version: {
+    title: 'Share link uses an unsupported format version.',
+    detail:
+      'The link was produced by a newer (or much older) version of this page. Ask the sender to re-share from a current build.',
+  },
+  'too-large': {
+    title: 'Share link payload is suspiciously large.',
+    detail:
+      'We refused to decode it as a guard against gzip bombs. If this was a legitimate policy, the sender can re-export it as a YAML bundle instead.',
+  },
+  malformed: {
+    title: "Share link is malformed and couldn't be decoded.",
+    detail:
+      'The base64 / gzip / JSON layers all failed. The link is likely truncated or corrupted in transit — ask the sender to copy it again.',
+  },
+  'invalid-shape': {
+    title: 'Share link decoded, but the contents are not a DefenseClaw policy.',
+    detail:
+      'We dropped it instead of overwriting your draft. If you trust the sender, they can paste their YAML directly into the Playground.',
+  },
+};
+
+function ShareErrorBanner({
+  reason,
+  onDismiss,
+}: {
+  reason: ShareErrorReason;
+  onDismiss: () => void;
+}) {
+  const { title, detail } = SHARE_ERROR_COPY[reason];
+  return (
+    <div
+      role="alert"
+      className="mt-3 flex flex-wrap items-start justify-between gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[12px] text-amber-700 dark:text-amber-300"
+    >
+      <div className="min-w-0 flex-1">
+        <strong className="block">{title}</strong>
+        <span className="opacity-90">{detail}</span>
+      </div>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] hover:bg-amber-500/20"
+        aria-label="Dismiss share-link error"
+      >
+        Dismiss
+      </button>
     </div>
   );
 }
