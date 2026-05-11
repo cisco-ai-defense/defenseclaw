@@ -116,13 +116,12 @@ from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
 
 setup.add_command(local_observability)
 
-# Register `defenseclaw setup splunk-o11y-dashboards` (Terraform-backed
-# dashboard and detector provisioning for Splunk Observability Cloud).
+# Import the Splunk O11y dashboard bundle command so it can be registered
+# under `defenseclaw setup splunk dashboards` after the Splunk group is
+# defined below.
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E402
     splunk_o11y_dashboards,
 )
-
-setup.add_command(splunk_o11y_dashboards)
 
 # Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
 # notifiers). Distinct from `setup observability add webhook` (generic
@@ -4704,7 +4703,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 }
 
 
-@setup.command("splunk")
+@click.group("splunk", invoke_without_command=True)
+@click.pass_context
 @click.option("--o11y", "enable_o11y", is_flag=True, default=False,
               help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
 @click.option("--logs", "enable_logs", is_flag=True, default=False,
@@ -4761,9 +4761,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
     ),
 )
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
-@pass_ctx
 def setup_splunk(
-    app: AppContext,
+    ctx: click.Context,
     enable_o11y: bool,
     enable_logs: bool,
     s3_export: bool,
@@ -4808,6 +4807,13 @@ def setup_splunk(
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    app = ctx.find_object(AppContext)
+    if app is None:
+        raise click.ClickException("App context unavailable")
+
     if show_credentials:
         _show_splunk_credentials(app.cfg.data_dir)
         return
@@ -4895,6 +4901,12 @@ def setup_splunk(
         if did_enterprise:
             parts.append("enterprise=enabled")
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
+
+
+# Register `defenseclaw setup splunk dashboards` (Terraform-backed dashboard
+# and detector provisioning for Splunk Observability Cloud).
+setup.add_command(setup_splunk)
+setup_splunk.add_command(splunk_o11y_dashboards)
 
 
 # ---------------------------------------------------------------------------

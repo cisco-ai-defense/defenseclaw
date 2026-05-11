@@ -220,7 +220,7 @@ For Splunk Observability Cloud, use the dashboard bundle at
 [bundles/splunk_o11y_dashboards/README.md](bundles/splunk_o11y_dashboards/README.md):
 
 ```bash
-defenseclaw setup splunk-o11y-dashboards apply \
+defenseclaw setup splunk dashboards apply \
   --api-url <api-endpoint> \
   --auth-token <api-access-token> \
   --with-detectors \

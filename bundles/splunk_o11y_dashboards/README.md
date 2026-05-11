@@ -51,7 +51,7 @@ Preferred DefenseClaw CLI flow:
 The CLI automatically imports matching existing dashboards and detectors when they are already present in O11y, and creates fresh resources when they are not.
 
 ```bash
-defenseclaw setup splunk-o11y-dashboards apply \
+defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
   --auth-token <api-access-token> \
   --yes
@@ -71,7 +71,7 @@ defenseclaw setup splunk-o11y-dashboards apply \
 | `--detector-notification <target>` | Repeatable detector notification target such as `Email,secops@example.com`. |
 
 ```bash
-defenseclaw setup splunk-o11y-dashboards apply \
+defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
   --auth-token <api-access-token> \
   --dashboards-only \
@@ -81,7 +81,7 @@ defenseclaw setup splunk-o11y-dashboards apply \
 Create detectors, left disabled:
 
 ```bash
-defenseclaw setup splunk-o11y-dashboards apply \
+defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
   --auth-token <api-access-token> \
   --with-detectors \
@@ -91,7 +91,7 @@ defenseclaw setup splunk-o11y-dashboards apply \
 Create detectors enabled:
 
 ```bash
-defenseclaw setup splunk-o11y-dashboards apply \
+defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
   --auth-token <api-access-token> \
   --with-detectors \

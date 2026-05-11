@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""defenseclaw setup splunk-o11y-dashboards — manage O11y dashboards.
+"""defenseclaw setup splunk dashboards — manage O11y dashboards.
 
 This command is intentionally a thin Terraform driver. It copies the bundled
 Terraform module into the user's DefenseClaw data directory, resolves the
@@ -55,7 +55,7 @@ _DASHBOARD_SPECS = (
 
 
 @click.group(
-    "splunk-o11y-dashboards",
+    "dashboards",
     short_help="Create/update Splunk Observability Cloud dashboards.",
 )
 def splunk_o11y_dashboards() -> None:

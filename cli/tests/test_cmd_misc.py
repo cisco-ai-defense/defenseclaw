@@ -18,19 +18,17 @@
 
 import json
 import os
-import tempfile
+import sys
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.models import Event
-from tests.helpers import make_app_context, cleanup_app
 
+from tests.helpers import cleanup_app, make_app_context
 
 # ---------------------------------------------------------------------------
 # Status command
@@ -263,7 +261,6 @@ class TestAlertsCommand(unittest.TestCase):
     def _insert_scan_with_findings(self, target, scanner, findings):
         """Helper: insert a scan_result and its findings into the store."""
         import uuid
-        from datetime import timedelta
         scan_id = str(uuid.uuid4())
         max_sev = findings[0]["severity"] if findings else "INFO"
         self.app.store.insert_scan_result(
@@ -716,12 +713,22 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         result = self.runner.invoke(setup, ["splunk", "--help"], obj=self.app)
         self.assertEqual(result.exit_code, 0)
+        self.assertIn("dashboards", result.output)
         self.assertIn("--o11y", result.output)
         self.assertIn("--logs", result.output)
         self.assertIn("--enterprise", result.output)
         self.assertIn("--hec-endpoint", result.output)
         self.assertIn("--skip-test", result.output)
         self.assertIn("--accept-splunk-license", result.output)
+
+    def test_setup_splunk_dashboards_help(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(setup, ["splunk", "dashboards", "apply", "--help"], obj=self.app)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--api-url", result.output)
+        self.assertIn("--auth-token", result.output)
+        self.assertIn("--with-detectors", result.output)
 
     def test_setup_splunk_o11y_non_interactive(self):
         from defenseclaw.commands.cmd_setup import setup
