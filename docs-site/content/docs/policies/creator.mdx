@@ -1,0 +1,87 @@
+---
+title: Policy creator
+description: Build a DefenseClaw policy section by section. Live OPA-WASM evaluation in the browser, copy-pasteable YAML on the way out.
+keywords:
+  - DefenseClaw policy
+  - policy generator
+  - OPA WASM
+  - regex tester
+  - guardrail rule pack
+  - suppressions
+---
+
+import PolicyCreator from "@/components/policy-creator";
+
+The policy creator turns the dozen YAML files DefenseClaw reads at install time into a single,
+opinionated wizard. Pick a starting preset, tune the knobs you care about, and watch the verdicts
+update in real time as the bundled Rego runs against canned inputs in your browser.
+
+<Callout type="info" title="No data leaves the page">
+The wizard ships compiled WebAssembly copies of the bundled Rego (admission, guardrail, firewall,
+audit, skill_actions). Evaluation happens entirely in your browser — your draft policy and the
+inputs you test against are never uploaded.
+</Callout>
+
+<PolicyCreator />
+
+## How to use it
+
+<Steps>
+
+<Step>
+
+**Pick a starting preset.** The wizard ships with the same three presets the CLI bundles:
+`default`, `strict`, and `permissive`. Picking one fills every section; you can override anything
+afterwards.
+
+</Step>
+
+<Step>
+
+**Open one section at a time.** Each section starts collapsed. The dot to the left of the title
+shows whether it's untouched (gray), customized (Cisco blue), warning (amber), or invalid (red).
+
+</Step>
+
+<Step>
+
+**Watch the live test.** Pick a domain (admission / guardrail / firewall / audit / skill_actions)
+and a canned scenario. The verdict re-evaluates whenever you mutate the policy. When the badge
+turns red and the line below says "Differs from expected verdict", you've changed something the
+scenario expects to pass.
+
+</Step>
+
+<Step>
+
+**Export.** The Review section renders every YAML file the engine needs, plus the `data.json` that
+OPA reads at evaluation time. Copy each file into `~/.defenseclaw/policies/` (or run the install
+script from the bottom bar — see the next section) and activate with:
+
+```bash
+defenseclaw policy activate <name>
+```
+
+</Step>
+
+</Steps>
+
+## What lives behind each section
+
+| Section            | Backed by                                                                                                                                              |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Basics             | `name`, `description`, `basedOn` keys in the top-level policy YAML. The base preset only seeds defaults — it doesn't lock you in.                       |
+| Severity matrix    | `skill_actions.<sev>` (runtime/file/install) plus per-scanner `scanner_overrides.<scanner>.<sev>` for skill, MCP, and plugin scanners.                  |
+| Admission          | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries (target_type / target_name / reason / paths).     |
+| Review & export    | `policies/<name>.yaml`, `policies/rego/data.json`, plus the per-pack guardrail YAMLs once Phase 2-3 lands (rules, suppressions, judges, sensitive tools).|
+
+## Limits to know about
+
+- **Rego patches happen offline.** The wizard exports `data.json` (which the bundled Rego reads at
+  runtime) and any custom Rego snippets you author in the playground. It does *not* recompile the
+  shipped Rego — for that you still need `opa build` on the host.
+- **Regex parity matters.** The Live Test pane uses your browser's V8 regex engine, but the engine
+  uses Go's `regexp` (RE2). The validators in Phase 2 flag patterns RE2 won't accept (lookaround,
+  backrefs); the spike will run them in `re2-wasm` to make the diagnosis precise.
+- **Pre-existing rule packs.** When you start from `strict`, the wizard pre-loads the bundled
+  rule pack so you can see exactly what's there before adding your own.

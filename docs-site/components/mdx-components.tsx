@@ -11,6 +11,7 @@ import type { MDXComponents } from 'mdx/types';
 import { Flow, Node, Edge, Sequence, Message } from '@/components/diagram';
 import { CapabilityMatrix, HookEventsList } from '@/components/capability-matrix';
 import { CommandGenerator } from '@/components/command-generator';
+import PolicyCreator from '@/components/policy-creator';
 import { Video } from '@/components/video';
 import { TerminalAnimation } from '@/components/terminal-animation';
 
@@ -43,6 +44,7 @@ export const mdxComponents: MDXComponents = {
   CapabilityMatrix,
   HookEventsList,
   CommandGenerator,
+  PolicyCreator,
   Video,
   TerminalAnimation,
 };
