@@ -106,6 +106,10 @@ defenseclaw setup guardrail \
 
 Pass `--non-interactive` (or `--accept-defaults`) to skip every prompt; missing flags fall back to the same defaults the wizard would have offered. The judge stays off until you pass `--judge-model` (or pick a strategy that uses it); `--detection-strategy regex_only` here just makes that explicit.
 
+<Callout title="Don't hand-roll the flags">
+The [Command generator](/docs/command-generator) builds a non-interactive `defenseclaw setup guardrail` invocation for any connector with all the knobs below — mode, scanner, judge, HITL, advanced — and surfaces validation warnings inline.
+</Callout>
+
 ## Prompt → flag mapping
 
 Each row corresponds to one prompt in the animation. **Default** shows what pressing Enter selects; **Flag** is the CI-shaped equivalent. Rows tagged **interactive-only** have no direct flag — the Note explains the workaround.
