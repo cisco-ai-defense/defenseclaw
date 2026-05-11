@@ -12,51 +12,89 @@ keywords:
 
 import PolicyCreator from "@/components/policy-creator";
 
-The policy creator turns the dozen YAML files DefenseClaw reads at install time into a single,
-opinionated wizard. Pick a starting preset, tune the knobs you care about, and watch the verdicts
-update in real time as the bundled Rego runs against canned inputs in your browser.
+Two ways in: answer five questions and we'll assemble a complete policy (**Quick Start**), or open
+every knob the engine reads, section by section (**Playground**). Both tabs share the same draft
+policy, so you can interview-then-tweak, and either side surfaces a live OPA verdict in your
+browser as you go.
 
 <Callout type="info" title="No data leaves the page">
 The wizard ships compiled WebAssembly copies of the bundled Rego (admission, guardrail, firewall,
 audit, skill_actions). Evaluation happens entirely in your browser — your draft policy and the
-inputs you test against are never uploaded.
+inputs you test against are never uploaded. Saved progress lives in `localStorage`.
 </Callout>
 
 <PolicyCreator />
 
-## How to use it
+## Quick Start vs. Playground
+
+<Cards>
+  <Card
+    title="Quick Start (default)"
+    href="#"
+    description="Pick a posture, choose what to block / allow, choose how loud the alerts are, choose where they go. Five questions, ~60 seconds, complete policy. The right rail's policy summary updates as you tick boxes."
+  />
+  <Card
+    title="Playground"
+    href="#"
+    description="14 collapsible sections covering every knob the engine reads. Use this for fine-tuning the Quick Start output, hand-authoring rule packs, or writing custom Rego snippets."
+  />
+</Cards>
+
+When you click **Open in Playground →** at the bottom of the Quick Start, your answers carry over
+and every Playground section is pre-filled. A blue banner at the top of the Playground reminds you
+where the state came from, and a Restart Quick Start button lets you start the interview again
+without losing your in-flight Playground edits.
+
+## How the Quick Start works
 
 <Steps>
 
 <Step>
 
-**Pick a starting preset.** The wizard ships with the same three presets the CLI bundles:
-`default`, `strict`, and `permissive`. Picking one fills every section; you can override anything
-afterwards.
+**Q1 — Posture.** Picks the base preset (Observe / Balanced / Strict). The Balanced default is the
+sensible production starting point; Observe is for shadow-mode evaluation; Strict is for regulated
+workloads where false-positive cost is acceptable.
 
 </Step>
 
 <Step>
 
-**Open one section at a time.** Each section starts collapsed. The dot to the left of the title
-shows whether it's untouched (gray), customized (Cisco blue), warning (amber), or invalid (red).
+**Q2 — What to block.** Multi-select cards covering hardcoded secrets, prompt injection, exfil
+sinks, cloud metadata (IMDS), destructive shell, sensitive paths, PII, trust exploits, cognitive
+attacks. Each card lists exactly which rules it enables and which firewall destinations it adds —
+deep-link to the [regex cookbook](/docs/policies/regex-cookbook) to see the patterns it ships.
 
 </Step>
 
 <Step>
 
-**Watch the live test.** Pick a domain (admission / guardrail / firewall / audit / skill_actions)
-and a canned scenario. The verdict re-evaluates whenever you mutate the policy. When the badge
-turns red and the line below says "Differs from expected verdict", you've changed something the
-scenario expects to pass.
+**Q3 — What to allow.** Multi-select cards for the most common alert-volume reducers: cosmetic
+shell commands (git status, ls, pwd), first-party plugins, internal domains, known dev tools.
+Free-form text inputs let you add your own globs and domains. Deep-links to the
+[suppression cookbook](/docs/policies/suppression-cookbook) explain when each layer is right.
 
 </Step>
 
 <Step>
 
-**Export.** The Review section renders every YAML file the engine needs, plus the `data.json` that
-OPA reads at evaluation time. Copy each file into `~/.defenseclaw/policies/` (or run the install
-script from the bottom bar — see the next section) and activate with:
+**Q4 — Response.** Pick how aggressive enforcement should be: log silently, alert on HIGH+, ask
+first (HILT) on MEDIUM+, or hard block on MEDIUM+. Drives the guardrail thresholds, the HILT
+configuration, and the skill\_actions matrix.
+
+</Step>
+
+<Step>
+
+**Q5 — Sinks.** Toggle local audit log, stdout, Splunk HEC, Slack webhook, or a generic webhook.
+Secrets are referenced by env var name only — never typed inline.
+
+</Step>
+
+<Step>
+
+**Open in Playground.** The CTA at the bottom hands you off to the full editor with everything
+pre-filled. The Review section renders every YAML file plus `data.json`; copy them into
+`~/.defenseclaw/policies/` (or run the bundled install script) and activate with:
 
 ```bash
 defenseclaw policy activate <name>
@@ -66,22 +104,33 @@ defenseclaw policy activate <name>
 
 </Steps>
 
-## What lives behind each section
+## What lives behind each Playground section
 
-| Section            | Backed by                                                                                                                                              |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Basics             | `name`, `description`, `basedOn` keys in the top-level policy YAML. The base preset only seeds defaults — it doesn't lock you in.                       |
-| Severity matrix    | `skill_actions.<sev>` (runtime/file/install) plus per-scanner `scanner_overrides.<scanner>.<sev>` for skill, MCP, and plugin scanners.                  |
-| Admission          | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries (target_type / target_name / reason / paths).     |
-| Review & export    | `policies/<name>.yaml`, `policies/rego/data.json`, plus the per-pack guardrail YAMLs once Phase 2-3 lands (rules, suppressions, judges, sensitive tools).|
+| Section          | Backed by                                                                                                                              |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Basics           | `name`, `description`, `basedOn` keys in the top-level policy YAML.                                                                    |
+| Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-scanner `scanner_overrides.<scanner>.<sev>`.                                     |
+| Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
+| Guardrail        | `guardrail.block_threshold` / `alert_threshold`, `guardrail.hilt`, `guardrail.patterns`, `severity_mappings`, Cisco trust level.       |
+| Rule pack        | Per-file regex rules (`policies/guardrail/<pack>/rules/<filename>.yaml`).                                                              |
+| Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
+| Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
+| LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |
+| Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
+| Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
+| Watch / Audit    | `watch.rescan_*`, `audit.log_*`, `audit.retention_days`.                                                                               |
+| Custom Rego      | Per-snippet `package defenseclaw.custom.<name>` modules emitted into `policies/rego/custom-<name>.rego`.                               |
+| Review & export  | Renders every YAML file the engine needs + `policies/rego/data.json` + a copy-pasteable bash install script.                           |
 
 ## Limits to know about
 
-- **Rego patches happen offline.** The wizard exports `data.json` (which the bundled Rego reads at
-  runtime) and any custom Rego snippets you author in the playground. It does *not* recompile the
-  shipped Rego — for that you still need `opa build` on the host.
-- **Regex parity matters.** The Live Test pane uses your browser's V8 regex engine, but the engine
-  uses Go's `regexp` (RE2). The validators in Phase 2 flag patterns RE2 won't accept (lookaround,
-  backrefs); the spike will run them in `re2-wasm` to make the diagnosis precise.
-- **Pre-existing rule packs.** When you start from `strict`, the wizard pre-loads the bundled
-  rule pack so you can see exactly what's there before adding your own.
+- **Rego compilation is offline.** The wizard exports `data.json` (read by the bundled Rego at runtime)
+  and any custom snippets you author. It does *not* recompile the shipped Rego — for that you still
+  need `opa build` on the host. The lint in the Custom Rego section catches the obvious shape
+  mistakes (`package` header, balanced braces, `:=` vs `=`).
+- **Regex parity.** The browser uses V8 regex; the engine uses Go's `regexp` (RE2). The validator
+  flags RE2 incompatibilities (lookaround, backrefs) inline so you catch them before exporting.
+  Inline flag groups (`(?i)`, `(?ims)`) are translated to JS flags transparently so bundled rules
+  don't false-error.
+- **Pre-existing rule packs.** When you switch the base preset, the wizard reloads the bundled
+  rule pack so you can see (and edit) the patterns that ship with that pack.
