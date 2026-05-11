@@ -11,7 +11,33 @@ keywords:
   - first-party allow list
 ---
 
-DefenseClaw makes one decision per event: **allow, ask, or deny**. The plumbing that turns a prompt or a tool call into that decision lives in five layers:
+DefenseClaw makes one decision per event: **allow, ask, or deny**. The plumbing that turns a prompt or a tool call into that decision lives in five layers.
+
+<Cards>
+  <Card
+    title="Policy creator"
+    href="/docs/policies/creator"
+    description="Build a complete policy from a preset, see live OPA-WASM verdicts in your browser, and export every YAML / data.json / Rego file ready to paste into ~/.defenseclaw/policies/."
+  />
+  <Card
+    title="Recipes"
+    href="/docs/policies/recipes"
+    description="133 pre-cooked rules, suppressions, and judge categories. Search, filter, and copy the YAML directly."
+  />
+  <Card
+    title="Suppression cookbook"
+    href="/docs/policies/suppression-cookbook"
+    description="Tune the four suppression layers (pre-judge / finding / tool / correlator) without losing real signals."
+  />
+  <Card
+    title="Regex cookbook"
+    href="/docs/policies/regex-cookbook"
+    description="RE2-compatible patterns for secrets, prompt injection, and exfiltration markers, with counterexamples and traps to avoid."
+  />
+</Cards>
+
+## How the layers fit together
+
 
 <Flow
   direction="TB"
