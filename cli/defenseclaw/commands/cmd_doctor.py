@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import urllib.error
 import urllib.request
@@ -1321,7 +1322,15 @@ def _check_security_overrides(cfg, r: _DoctorResult) -> None:
     for entry in active:
         tag = _OVERRIDE_TAG_BY_IMPACT.get(entry.security_impact, "warn")
         # Detail format: "<name>: <purpose-headline> | impact=<level> | <security-note> | fix: <hint>"
-        purpose_one_liner = entry.purpose.split(".")[0].strip()
+        # Split on a true sentence boundary (period + whitespace + capital
+        # letter) so that internal periods inside IP literals
+        # ("100.64.0.0/10"), filenames (".aws/credentials"), and common
+        # abbreviations ("e.g.", "i.e.", "etc.") don't truncate the headline
+        # mid-thought.
+        sentence_break = re.search(r"\.\s+(?=[A-Z])", entry.purpose)
+        purpose_one_liner = (
+            entry.purpose[: sentence_break.start()] if sentence_break else entry.purpose
+        ).strip()
         if len(purpose_one_liner) > 100:
             purpose_one_liner = purpose_one_liner[:97] + "..."
         bits = [purpose_one_liner, f"impact={entry.security_impact}"]
