@@ -21,6 +21,7 @@ import { emitInstallScript } from '../lib/emit-script';
 import { LiveTestPane } from '../sections/live-test';
 import { CopyButton } from '../ui/copy-button';
 import { DownloadButton } from '../ui/download-button';
+import { ShareLinkButton } from '../ui/share-link-button';
 import { applyAnswers } from './apply';
 import { PreviewDrawer } from './preview-drawer';
 import { PolicySummaryCard } from './summary';
@@ -513,6 +514,7 @@ function StepReview({
               variant="primary"
             />
             <CopyButton value={installScript} label="Copy script" />
+            <ShareLinkButton policy={policy} />
           </div>
         </div>
       </div>

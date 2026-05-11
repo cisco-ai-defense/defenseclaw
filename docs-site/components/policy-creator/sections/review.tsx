@@ -20,6 +20,7 @@ import { emitInstallScript } from '../lib/emit-script';
 import { CopyButton } from '../ui/copy-button';
 import { DownloadButton } from '../ui/download-button';
 import { SegmentedControl } from '../ui/segmented-control';
+import { ShareLinkButton } from '../ui/share-link-button';
 
 type Tab = 'files' | 'install' | 'diff';
 
@@ -43,8 +44,11 @@ export function ReviewSection({ policy }: { policy: Policy }) {
           ]}
           onChange={setTab}
         />
+        <div className="ml-auto flex gap-1">
+          <ShareLinkButton policy={policy} />
+        </div>
         {tab === 'install' && (
-          <div className="ml-auto flex gap-1">
+          <div className="flex gap-1">
             <DownloadButton
               filename={`install-${policy.name}.sh`}
               contents={script}

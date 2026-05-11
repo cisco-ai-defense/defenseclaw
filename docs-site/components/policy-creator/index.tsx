@@ -28,6 +28,7 @@ import { Playground } from './playground';
 import { QuickStart } from './quick-start';
 import type { Answers } from './quick-start/questions';
 import { defaultAnswers, deserializeAnswers, serializeAnswers } from './quick-start/questions';
+import { clearHashPayload, decodePolicyFromHash, readHashPayload } from './lib/share';
 
 type TabId = 'quick-start' | 'playground';
 
@@ -51,16 +52,55 @@ export default function PolicyCreator() {
   // Hydrate persisted state on mount. We delay setting `hydrated` until
   // after the first paint so SSR and CSR trees agree.
   useEffect(() => {
+    let restoredFromLs = false;
     try {
       const rawTab = window.localStorage.getItem(LS_TAB);
       if (rawTab === 'playground' || rawTab === 'quick-start') setTab(rawTab);
       const rawPolicy = window.localStorage.getItem(LS_POLICY);
-      if (rawPolicy) setPolicy(JSON.parse(rawPolicy) as Policy);
+      if (rawPolicy) {
+        setPolicy(JSON.parse(rawPolicy) as Policy);
+        restoredFromLs = true;
+      }
       const rawAnswers = window.localStorage.getItem(LS_ANSWERS);
       if (rawAnswers) setAnswers(deserializeAnswers(JSON.parse(rawAnswers)));
     } catch {
       /* malformed — keep initial */
     }
+
+    // After localStorage, check whether the URL has #policy=… from a
+    // share link and offer to load it. We do this asynchronously
+    // because decompression is async; the page is already interactive
+    // by then (with the localStorage-restored draft visible).
+    const payload = readHashPayload();
+    if (payload) {
+      void (async () => {
+        const shared = await decodePolicyFromHash(payload);
+        if (!shared) {
+          // Bad payload — strip it so the URL bar isn't lying about
+          // having a draft, but don't show a noisy error.
+          clearHashPayload();
+          return;
+        }
+        const proceed =
+          !restoredFromLs ||
+          window.confirm(
+            'Load policy from share link? Your in-progress draft in this browser will be replaced.',
+          );
+        if (proceed) {
+          setPolicy(shared);
+          // Reset answers — share link only carries the Policy, not
+          // the Quick Start answer state. Operator can re-derive by
+          // walking through the wizard if they want to.
+          setAnswers(defaultAnswers());
+          // Switch to Playground; share links almost always intend
+          // "review the policy I just sent you" rather than "redo
+          // the interview".
+          setTab('playground');
+        }
+        clearHashPayload();
+      })();
+    }
+
     setHydrated(true);
   }, []);
 
