@@ -16,7 +16,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Policy } from '../types';
+import { emit } from '../lib/emit';
+import { emitInstallScript } from '../lib/emit-script';
 import { LiveTestPane } from '../sections/live-test';
+import { CopyButton } from '../ui/copy-button';
+import { DownloadButton } from '../ui/download-button';
 import { applyAnswers } from './apply';
 import { PolicySummaryCard } from './summary';
 import {
@@ -125,6 +129,12 @@ export function QuickStart({
   const current = STEPS[stepIdx];
   const isFirst = stepIdx === 0;
   const isLast = stepIdx === STEPS.length - 1;
+  // Install script + per-file emit are pure functions of `policy`. We
+  // compute once here so the Review step and the sticky footer share
+  // the same string (and the same useMemo cache key) — emit() walks
+  // the whole policy graph so it isn't free.
+  const installScript = useMemo(() => emitInstallScript(policy), [policy]);
+  const installFilename = `install-${policy.name}.sh`;
 
   return (
     <div className="space-y-4">
@@ -147,7 +157,13 @@ export function QuickStart({
           <StepSinks answers={answers} update={update} />
         )}
         {current.id === 'review' && (
-          <StepReview policy={policy} answers={answers} onOpenInPlayground={onOpenInPlayground} />
+          <StepReview
+            policy={policy}
+            answers={answers}
+            installScript={installScript}
+            installFilename={installFilename}
+            onOpenInPlayground={onOpenInPlayground}
+          />
         )}
       </section>
 
@@ -174,13 +190,23 @@ export function QuickStart({
             </button>
           )}
           {isLast && (
-            <button
-              type="button"
-              onClick={onOpenInPlayground}
-              className="rounded-lg bg-[var(--brand-cisco)] px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:opacity-95"
-            >
-              Open in Playground →
-            </button>
+            <>
+              <DownloadButton
+                filename={installFilename}
+                contents={installScript}
+                mime="text/x-shellscript"
+                label={`Download ${installFilename}`}
+                size="md"
+                variant="primary"
+              />
+              <button
+                type="button"
+                onClick={onOpenInPlayground}
+                className="rounded-lg border border-fd-border bg-fd-background px-3 py-1.5 text-sm font-medium text-fd-foreground hover:border-[var(--brand-cisco)] hover:bg-[var(--brand-cisco)]/10"
+              >
+                Open in Playground →
+              </button>
+            </>
           )}
         </div>
       </footer>
@@ -433,37 +459,107 @@ function StepSinks({ answers, update }: StepProps) {
 function StepReview({
   policy,
   answers,
+  installScript,
+  installFilename,
   onOpenInPlayground,
 }: {
   policy: Policy;
   answers: Answers;
+  installScript: string;
+  installFilename: string;
   onOpenInPlayground: () => void;
 }) {
+  // emit() walks the full Policy graph so this useMemo matters; the
+  // install-script string is computed once in the parent and lifted
+  // down so the footer shares the cache.
+  const files = useMemo(() => emit(policy), [policy]);
+
   return (
     <>
       <StepHeader
         title="Review your policy"
-        subtitle="Test it against canned scenarios on the right, then jump into the Playground if you want to fine-tune anything."
+        subtitle="Test it against canned scenarios on the right, then download the install script — or jump into the Playground if you want to fine-tune anything."
       />
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,1fr)]">
         <PolicySummaryCard policy={policy} answers={answers} />
         <LiveTestPane policy={policy} />
       </div>
-      <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3 text-[12px] text-fd-foreground">
+
+      {/* Primary CTA: download the self-contained install script. */}
+      <div className="mt-4 rounded-lg border border-[var(--brand-cisco)]/50 bg-[var(--brand-cisco)]/5 p-4">
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="min-w-[200px] flex-1">
+            <div className="text-sm font-semibold text-fd-foreground">Download &amp; run</div>
+            <p className="mt-0.5 text-[12px] leading-snug text-fd-muted-foreground">
+              One self-contained bash script. Drops every YAML / <code>data.json</code> / Rego file
+              under <code>~/.defenseclaw/policies/</code> via heredocs (no curl, no scp), then
+              runs <code>defenseclaw policy activate {policy.name}</code>. Re-runs are idempotent.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <DownloadButton
+              filename={installFilename}
+              contents={installScript}
+              mime="text/x-shellscript"
+              label={installFilename}
+              size="md"
+              variant="primary"
+            />
+            <CopyButton value={installScript} label="Copy script" />
+          </div>
+        </div>
+      </div>
+
+      {/* Secondary: per-file downloads for operators who want to drop a
+       *  single YAML into a config repo without running the script. */}
+      <details className="mt-3 rounded-lg border border-fd-border bg-fd-background p-3">
+        <summary className="cursor-pointer text-[12px] font-medium text-fd-foreground">
+          Or download individual files ({files.length})
+        </summary>
+        <ul className="mt-2 space-y-1.5">
+          {files.map((f) => (
+            <li
+              key={f.path}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-fd-border bg-fd-card p-2"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-mono text-[11px] text-fd-foreground">{f.path}</div>
+                <div className="text-[10px] text-fd-muted-foreground">{f.description}</div>
+              </div>
+              <div className="flex gap-1">
+                <DownloadButton
+                  filename={pathBase(f.path)}
+                  contents={f.contents}
+                  mime="text/plain"
+                  label={pathBase(f.path)}
+                />
+                <CopyButton value={f.contents} label="Copy" />
+              </div>
+            </li>
+          ))}
+        </ul>
+      </details>
+
+      {/* Tertiary: hand off to Playground for fine-tuning. */}
+      <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg border border-fd-border bg-fd-background p-3 text-[12px] text-fd-muted-foreground">
         <span>
-          Looks right? <strong>Open in Playground</strong> to see the generated YAML, copy the
-          install script, or tweak any of the 14 advanced sections.
+          Want to see the generated YAML side-by-side, edit a rule, or write custom Rego?
         </span>
         <button
           type="button"
           onClick={onOpenInPlayground}
-          className="ml-auto rounded-lg bg-[var(--brand-cisco)] px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:opacity-95"
+          className="ml-auto rounded-md border border-fd-border bg-fd-background px-3 py-1.5 text-sm font-medium text-fd-foreground hover:border-[var(--brand-cisco)] hover:bg-[var(--brand-cisco)]/10"
         >
           Open in Playground →
         </button>
       </div>
     </>
   );
+}
+
+function pathBase(path: string): string {
+  const parts = path.split('/');
+  return parts[parts.length - 1] ?? path;
 }
 
 // ── Building blocks ─────────────────────────────────────────────────

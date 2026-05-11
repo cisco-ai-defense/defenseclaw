@@ -18,6 +18,7 @@ import { diffAgainstBase } from '../lib/diff';
 import { emit, type EmittedFile } from '../lib/emit';
 import { emitInstallScript } from '../lib/emit-script';
 import { CopyButton } from '../ui/copy-button';
+import { DownloadButton } from '../ui/download-button';
 import { SegmentedControl } from '../ui/segmented-control';
 
 type Tab = 'files' | 'install' | 'diff';
@@ -161,37 +162,6 @@ function DiffView({
         </li>
       ))}
     </ul>
-  );
-}
-
-function DownloadButton({
-  filename,
-  contents,
-  mime,
-}: {
-  filename: string;
-  contents: string;
-  mime: string;
-}) {
-  const onClick = () => {
-    const blob = new Blob([contents], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  };
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex items-center gap-1.5 rounded-md border border-fd-border bg-fd-background px-2 py-1 text-xs font-medium text-fd-foreground hover:border-[var(--brand-cisco)] hover:bg-[var(--brand-cisco)]/10"
-    >
-      ↓ {filename}
-    </button>
   );
 }
 
