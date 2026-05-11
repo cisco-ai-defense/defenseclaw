@@ -1283,6 +1283,29 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
 			recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
 		} else {
+			// Post-Setup verification: every owned hook script the
+			// connector said it would write MUST exist on disk before
+			// we mark the connector active. Without this check, a
+			// silent partial install (Setup returns nil but
+			// writeHookScriptsCommonWithFailMode never reached its
+			// for-loop, or another goroutine deleted the freshly
+			// written script) ships a connector whose every hook
+			// invocation will exit 127 ("command not found") — the
+			// exact symptom we hit during the claudecode → codex
+			// switch. Fail loud here and try one re-Setup so the
+			// operator either sees the error or gets a self-healing
+			// install.
+			if missing := verifyHookScriptsOnDisk(setupOpts.DataDir, conn); len(missing) > 0 {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying Setup\n", conn.Name(), missing)
+				if err := conn.Setup(ctx, setupOpts); err != nil {
+					fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup after missing-hook detection failed: %v\n", conn.Name(), err)
+					recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
+				} else if missing := verifyHookScriptsOnDisk(setupOpts.DataDir, conn); len(missing) > 0 {
+					fmt.Fprintf(os.Stderr, "[guardrail] connector %s STILL missing hook scripts after re-Setup: %v — connector marked active but hooks WILL fail with exit 127\n", conn.Name(), missing)
+				} else {
+					fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup restored missing hook scripts\n", conn.Name())
+				}
+			}
 			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 			}
@@ -1560,6 +1583,31 @@ func isLoopbackGatewayHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return false
+}
+
+// verifyHookScriptsOnDisk checks that every hook script the connector
+// claims to own (HookScriptOwner.HookScriptNames) is present in
+// <dataDir>/hooks. Returns the list of missing basenames so callers
+// can decide whether to retry Setup, fall back, or fail loud. Connectors
+// that do not implement HookScriptOwner contribute no entries — there
+// is nothing connector-specific to verify and the generic inspect-*.sh
+// scripts are checked separately by the connector's own Setup path.
+func verifyHookScriptsOnDisk(dataDir string, conn connector.Connector) []string {
+	if conn == nil {
+		return nil
+	}
+	owner, ok := conn.(connector.HookScriptOwner)
+	if !ok {
+		return nil
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	var missing []string
+	for _, name := range owner.HookScriptNames(connector.SetupOpts{DataDir: dataDir}) {
+		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }
 
 // teardownPreviousConnector checks if a different connector was previously

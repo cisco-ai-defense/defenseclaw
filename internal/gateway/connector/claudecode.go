@@ -161,6 +161,13 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
 
+	// Scoped per-connector hook removal: only delete claude-code-hook.sh
+	// (the script we own). The previous behavior — deleting every
+	// connector's hook script via the global hookScripts list — caused
+	// the exit-127 bug during connector switches. See
+	// TeardownSubprocessEnforcement for the full rationale.
+	removeOwnedHookScripts(opts, c)
+
 	if len(errs) > 0 {
 		return fmt.Errorf("claudecode teardown errors: %s", strings.Join(errs, "; "))
 	}

@@ -111,7 +111,36 @@ fi
 ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+
+# Anthropic's Claude Code hook protocol — like Codex's — is strictly
+# EITHER structured JSON on stdout with exit 0 (Claude parses the
+# permissionDecision/decision from the JSON) OR exit 2 with the reason
+# on stderr. Doing BOTH is a protocol violation: depending on Claude
+# version, either the exit code wins (and the rich JSON reason is
+# silently replaced with a generic "Hook exited with code 2" surface),
+# or stdout wins inconsistently. This is the same shape bug we hit on
+# codex-hook.sh where Codex explicitly logged
+# "exited with code 2 but did not write a blocking reason to stderr"
+# and then FAILED OPEN. Even where Claude Code currently still blocks
+# on the exit code, mixing the protocols means the operator-facing
+# reason ("matched: SEC-PRIVKEY:Private key") is at risk of being
+# dropped between Claude versions.
+#
+# Resolution: when the gateway gave us structured claude_code_output
+# (every block path in claude_code_hook.go does), trust it and exit 0.
+# Fall back to exit-2-plus-stderr only when no structured output is
+# present.
 if [ "$ACTION" = "block" ]; then
+  if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+    # JSON on stdout already carries permissionDecision=deny /
+    # decision=block. Exit 0 so Claude Code honors it.
+    exit 0
+  fi
+  REASON=$(echo "$RESULT" | jq -r '.reason // empty' 2>/dev/null)
+  if [ -z "$REASON" ]; then
+    REASON="Blocked by DefenseClaw Claude Code policy."
+  fi
+  printf '%s\n' "$REASON" >&2
   exit 2
 fi
 exit 0

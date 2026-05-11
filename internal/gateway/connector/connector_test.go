@@ -3949,6 +3949,81 @@ func TestTeardownSubprocessEnforcement(t *testing.T) {
 	}
 }
 
+// TestTeardown_DoesNotDeleteOtherConnectorsHookScripts is a regression
+// test for the exit-127 "command not found" bug observed during a
+// claudecode → codex switch. The old TeardownSubprocessEnforcement
+// iterated the GLOBAL hookScripts slice (every connector's *-hook.sh
+// + every generic inspect-*.sh) and removed them all from the shared
+// hooks dir. When called from one connector's Teardown that wiped
+// scripts owned by the incoming connector AND the shared inspect-*.sh
+// helpers, leaving the agent with an empty hooks/ dir if the
+// follow-up Setup hit any silent partial-install path.
+//
+// The fix scopes per-Teardown deletion to the calling connector's own
+// HookScriptOwner.HookScriptNames basenames. This test simulates the
+// failure: pre-populates hooks/ with codex-hook.sh + inspect-*.sh,
+// runs claudecode.Teardown, and asserts that codex-hook.sh and the
+// generic inspect-*.sh files SURVIVE (only claude-code-hook.sh is
+// removed).
+func TestTeardown_DoesNotDeleteOtherConnectorsHookScripts(t *testing.T) {
+	dir := t.TempDir()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
+
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+
+	preExisting := []string{
+		"codex-hook.sh",
+		"claude-code-hook.sh",
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
+	}
+	for _, name := range preExisting {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	reg := NewDefaultRegistry()
+	cc, ok := reg.Get("claudecode")
+	if !ok {
+		t.Fatal("claudecode connector missing from registry")
+	}
+
+	if err := cc.Teardown(context.Background(), opts); err != nil {
+		// Some teardown sub-steps (settings.json restore, etc.) may
+		// surface non-fatal errors in a tmp dir without a real
+		// ~/.claude/settings.json. We only care about the hook-dir
+		// invariant here.
+		t.Logf("claudecode.Teardown returned (non-fatal in tmp env): %v", err)
+	}
+
+	// Invariant 1: claude-code-hook.sh — the script claudecode owns —
+	// should be removed.
+	if _, err := os.Stat(filepath.Join(hookDir, "claude-code-hook.sh")); !os.IsNotExist(err) {
+		t.Errorf("claude-code-hook.sh should be removed by claudecode.Teardown, got stat err=%v", err)
+	}
+
+	// Invariant 2: every other connector's hook script and every
+	// generic inspect-*.sh script must survive — they're owned by
+	// other connectors or shared infrastructure.
+	for _, name := range []string{
+		"codex-hook.sh",
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
+	} {
+		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+			t.Errorf("expected %s to survive claudecode.Teardown, got stat err=%v", name, err)
+		}
+	}
+}
+
 // --- Security Surface Coverage tests ---
 
 func TestSecuritySurfaceCoverage(t *testing.T) {
@@ -5472,6 +5547,281 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("hook failure log missing %s:\n%s", want, logText)
 		}
+	}
+}
+
+// TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo pins the
+// Codex hook protocol contract: when the gateway returns a block
+// verdict with a structured `codex_output` JSON body (which every
+// block path in codex_hook.go does), the hook MUST print that JSON
+// to stdout and exit 0. It MUST NOT exit 2.
+//
+// Codex's hook protocol is strictly either-or:
+//   - exit 0 + JSON on stdout  → Codex parses the JSON decision
+//   - exit 2 + reason on stderr → Codex blocks with stderr text
+//
+// Doing BOTH (exit 2 with stdout JSON and empty stderr) makes Codex
+// pick the exit code, ignore stdout, find an empty stderr, then log
+// "exited with code 2 but did not write a blocking reason to stderr"
+// and FAIL OPEN. We hit that bug live with a CRITICAL prompt-injection
+// pattern (RSA private key paste): the gateway correctly returned
+// permissionDecision=deny on stdout, the hook also exited 2, and the
+// model still got the prompt because Codex treated the hook as
+// malformed.
+func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	// Stand up a tiny gateway stub that returns a verdict shaped
+	// exactly like codex_hook.go:codexResponseFor for action=block on
+	// PreToolUse. The codex_output mirror is the critical bit — it's
+	// the JSON the hook script must echo to stdout.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"matched: PATH-ETC-SHADOW:/etc/shadow access",
+			"findings":["PATH-ETC-SHADOW:/etc/shadow access"],
+			"mode":"action",
+			"would_block":false,
+			"codex_output":{
+				"hookSpecificOutput":{
+					"hookEventName":"PreToolUse",
+					"permissionDecision":"deny",
+					"permissionDecisionReason":"matched: PATH-ETC-SHADOW:/etc/shadow access"
+				}
+			}
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", CodexEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":["bash","-lc","cat /etc/shadow"]}}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should exit 0 when gateway returned structured codex_output (Codex protocol: JSON-on-stdout xor exit-2-on-stderr); got err=%v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
+	}
+
+	// stdout must carry the codex_output JSON Codex will parse.
+	stdoutText := stdout.String()
+	for _, want := range []string{
+		`"hookEventName":"PreToolUse"`,
+		`"permissionDecision":"deny"`,
+		`"permissionDecisionReason":"matched: PATH-ETC-SHADOW:/etc/shadow access"`,
+	} {
+		if !strings.Contains(stdoutText, want) {
+			t.Errorf("stdout missing %q\nfull stdout: %q", want, stdoutText)
+		}
+	}
+	// stderr must be empty (no "blocking" hint, no "fail" log) —
+	// otherwise Codex still logs "did not write a blocking reason to
+	// stderr" because we used the wrong protocol path.
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Errorf("stderr should be empty when block goes via structured stdout JSON, got: %q", stderr.String())
+	}
+}
+
+// TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo pins the
+// same Anthropic-side hook protocol contract that
+// TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo pins for Codex:
+// when the gateway returns a block verdict with a structured
+// claude_code_output JSON body, the hook MUST print that JSON to
+// stdout and exit 0 — NOT exit 2.
+//
+// The bug here was structurally identical to the codex one: the
+// pre-fix script wrote claude_code_output to stdout AND exited 2 on
+// action=block, which is a Claude Code hook protocol violation.
+// Depending on Claude Code version that either silently swaps our
+// rich "matched: SEC-FOO" reason for a generic "Hook exited with code
+// 2" surface, or ignores stdout entirely. Either way the operator
+// loses the actual policy reason, and on some versions the agent
+// fails open the same way Codex did.
+func TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"matched: SEC-PRIVKEY:Private key",
+			"findings":["SEC-PRIVKEY:Private key"],
+			"mode":"action",
+			"would_block":false,
+			"claude_code_output":{
+				"hookSpecificOutput":{
+					"hookEventName":"PreToolUse",
+					"permissionDecision":"deny",
+					"permissionDecisionReason":"matched: SEC-PRIVKEY:Private key"
+				}
+			}
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", ClaudeCodeEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat /etc/shadow"}}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should exit 0 when gateway returned structured claude_code_output (Claude Code protocol: JSON-on-stdout xor exit-2-on-stderr); got err=%v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
+	}
+
+	stdoutText := stdout.String()
+	for _, want := range []string{
+		`"hookEventName":"PreToolUse"`,
+		`"permissionDecision":"deny"`,
+		`"permissionDecisionReason":"matched: SEC-PRIVKEY:Private key"`,
+	} {
+		if !strings.Contains(stdoutText, want) {
+			t.Errorf("stdout missing %q\nfull stdout: %q", want, stdoutText)
+		}
+	}
+	// stderr must be empty so Claude Code uses the rich JSON reason
+	// instead of the stderr fallback.
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Errorf("stderr should be empty when block goes via structured stdout JSON, got: %q", stderr.String())
+	}
+}
+
+// TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo
+// mirrors the codex fallback test for symmetry: legacy/edge code
+// paths that don't include a claude_code_output mirror still block
+// via exit 2 with the reason on stderr.
+func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"hypothetical legacy claude verdict",
+			"mode":"action",
+			"would_block":false
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", ClaudeCodeEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("hook should exit 2 when gateway block has no structured claude_code_output, got exit 0\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("exit code = %d, want 2 (legacy block fallback)", exitErr.ExitCode())
+		}
+	}
+	if !strings.Contains(stderr.String(), "hypothetical legacy claude verdict") {
+		t.Errorf("stderr must carry the block reason on the legacy path, got: %q", stderr.String())
+	}
+}
+
+// TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo pins the
+// fallback path: if the gateway ever returns action=block but does
+// NOT include a codex_output mirror (legacy callers, future codex
+// events not yet wired up), the hook must use the exit-2-with-stderr
+// path so Codex still blocks. The reason MUST land on stderr —
+// emitting an empty stderr was the original bug.
+func TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"hypothetical legacy verdict",
+			"mode":"action",
+			"would_block":false
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", CodexEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("hook should exit 2 when gateway block has no structured codex_output, got exit 0\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("exit code = %d, want 2 (legacy block fallback)", exitErr.ExitCode())
+		}
+	}
+	if !strings.Contains(stderr.String(), "hypothetical legacy verdict") {
+		t.Errorf("stderr must carry the block reason on the legacy path, got: %q", stderr.String())
 	}
 }
 

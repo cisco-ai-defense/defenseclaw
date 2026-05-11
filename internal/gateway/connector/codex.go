@@ -192,6 +192,13 @@ func (c *CodexConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		return fmt.Errorf("codex teardown: subprocess enforcement: %w", err)
 	}
+	// Note: writeDisabledCodexHook below intentionally writes the
+	// codex-hook.sh stub AFTER the scoped removeOwnedHookScripts so
+	// any stale codex-hook.sh from a previous install is replaced
+	// rather than left in place. The disabled stub exits 0 so
+	// long-lived Codex sessions that cached the absolute hook path
+	// don't 127 after Teardown.
+	removeOwnedHookScripts(opts, c)
 	if err := writeDisabledCodexHook(opts); err != nil {
 		return fmt.Errorf("codex teardown: disabled hook: %w", err)
 	}

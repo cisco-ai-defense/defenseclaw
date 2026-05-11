@@ -124,7 +124,30 @@ fi
 ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+
+# Codex's hook protocol is strictly EITHER structured JSON on stdout
+# with exit 0 (Codex parses the decision from the JSON) OR exit 2
+# with the reason on stderr (Codex blocks with stderr as the
+# message). Doing BOTH is a protocol violation: Codex sees exit 2,
+# ignores stdout, finds an empty stderr, then logs
+# "exited with code 2 but did not write a blocking reason to stderr"
+# and FAILS OPEN — which is exactly the bug we hit when our gateway
+# returned permissionDecision=deny on stdout AND we exited 2.
+#
+# Resolution: trust the structured JSON when the gateway gave us one
+# (every block path in codex_hook.go does), and only fall back to
+# the exit-2-plus-stderr path when no structured output exists.
 if [ "$ACTION" = "block" ]; then
+  if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+    # JSON on stdout already carries permissionDecision=deny /
+    # decision=block. Exit 0 so Codex honors it.
+    exit 0
+  fi
+  REASON=$(echo "$RESULT" | jq -r '.reason // empty' 2>/dev/null)
+  if [ -z "$REASON" ]; then
+    REASON="Blocked by DefenseClaw Codex policy."
+  fi
+  printf '%s\n' "$REASON" >&2
   exit 2
 fi
 exit 0
