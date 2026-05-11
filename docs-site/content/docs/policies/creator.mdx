@@ -12,10 +12,10 @@ keywords:
 
 import PolicyCreator from "@/components/policy-creator";
 
-Two ways in: answer five questions and we'll assemble a complete policy (**Quick Start**), or open
-every knob the engine reads, section by section (**Playground**). Both tabs share the same draft
-policy, so you can interview-then-tweak, and either side surfaces a live OPA verdict in your
-browser as you go.
+Two ways in: step through a six-screen wizard and we'll assemble a complete policy (**Quick
+Start**), or open every knob the engine reads, section by section (**Playground**). Both tabs share
+the same draft policy, so you can interview-then-tweak, and either side surfaces a live OPA verdict
+in your browser as you go.
 
 <Callout type="info" title="No data leaves the page">
 The wizard ships compiled WebAssembly copies of the bundled Rego (admission, guardrail, firewall,
@@ -31,7 +31,7 @@ inputs you test against are never uploaded. Saved progress lives in `localStorag
   <Card
     title="Quick Start (default)"
     href="#"
-    description="Pick a posture, choose what to block / allow, choose how loud the alerts are, choose where they go. Five questions, ~60 seconds, complete policy. The right rail's policy summary updates as you tick boxes."
+    description="Six-step wizard: Posture → Block → Allow → Response → Sinks → Review. One question per screen, Back/Next at the bottom, breadcrumb at the top. Final Review step renders the live policy summary and runs canned scenarios through OPA in your browser."
   />
   <Card
     title="Playground"
@@ -51,24 +51,24 @@ without losing your in-flight Playground edits.
 
 <Step>
 
-**Q1 — Posture.** Picks the base preset (Observe / Balanced / Strict). The Balanced default is the
-sensible production starting point; Observe is for shadow-mode evaluation; Strict is for regulated
-workloads where false-positive cost is acceptable.
+**Step 1 — Posture.** Picks the base preset (Observe / Balanced / Strict). The Balanced default is
+the sensible production starting point; Observe is for shadow-mode evaluation; Strict is for
+regulated workloads where false-positive cost is acceptable.
 
 </Step>
 
 <Step>
 
-**Q2 — What to block.** Multi-select cards covering hardcoded secrets, prompt injection, exfil
-sinks, cloud metadata (IMDS), destructive shell, sensitive paths, PII, trust exploits, cognitive
-attacks. Each card lists exactly which rules it enables and which firewall destinations it adds —
-deep-link to the [regex cookbook](/docs/policies/regex-cookbook) to see the patterns it ships.
+**Step 2 — What to block.** Nine cards grouped under four headers (Data leaks, Network exfiltration,
+Code execution, LLM-layer attacks). Multi-select. Each card lists exactly which rules it enables
+and which firewall destinations it adds — deep-link to the
+[regex cookbook](/docs/policies/regex-cookbook) to see the patterns it ships.
 
 </Step>
 
 <Step>
 
-**Q3 — What to allow.** Multi-select cards for the most common alert-volume reducers: cosmetic
+**Step 3 — What to allow.** Multi-select cards for the most common alert-volume reducers: cosmetic
 shell commands (git status, ls, pwd), first-party plugins, internal domains, known dev tools.
 Free-form text inputs let you add your own globs and domains. Deep-links to the
 [suppression cookbook](/docs/policies/suppression-cookbook) explain when each layer is right.
@@ -77,7 +77,7 @@ Free-form text inputs let you add your own globs and domains. Deep-links to the
 
 <Step>
 
-**Q4 — Response.** Pick how aggressive enforcement should be: log silently, alert on HIGH+, ask
+**Step 4 — Response.** Pick how aggressive enforcement should be: log silently, alert on HIGH+, ask
 first (HILT) on MEDIUM+, or hard block on MEDIUM+. Drives the guardrail thresholds, the HILT
 configuration, and the skill\_actions matrix.
 
@@ -85,15 +85,18 @@ configuration, and the skill\_actions matrix.
 
 <Step>
 
-**Q5 — Sinks.** Toggle local audit log, stdout, Splunk HEC, Slack webhook, or a generic webhook.
+**Step 5 — Sinks.** Toggle local audit log, stdout, Splunk HEC, Slack webhook, or a generic webhook.
 Secrets are referenced by env var name only — never typed inline.
 
 </Step>
 
 <Step>
 
-**Open in Playground.** The CTA at the bottom hands you off to the full editor with everything
-pre-filled. The Review section renders every YAML file plus `data.json`; copy them into
+**Step 6 — Review.** Inline policy summary plus the live OPA test pane: pick a canned scenario (a
+CRITICAL secret in a skill, an MCP install with a sketchy domain, a quarantined plugin), see the
+verdict (`blocked` / `allowed` / `quarantined`), and tweak earlier steps until it matches intent.
+Then **Open in Playground →** hands you off to the full editor with everything pre-filled. The
+Review section there renders every YAML file plus `data.json`; copy them into
 `~/.defenseclaw/policies/` (or run the bundled install script) and activate with:
 
 ```bash

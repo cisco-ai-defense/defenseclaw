@@ -1,14 +1,16 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 //
-// Quick Start interview — five card-based question groups laid out as a
-// single scrollable page. Right rail shows the "Policy summary" card +
-// the existing Live Test pane (re-evaluated on every answer change).
+// Quick Start interview — six-step wizard. One question per screen, a
+// breadcrumb stepper at the top, and Back/Next at the bottom. The
+// final "Review" step is the only one that surfaces the live policy
+// summary + scenario evaluator, so the question screens stay calm.
 //
-// State model: the parent owns both `policy` and `answers`. We rebuild
-// `policy` from `answers` on every change via applyAnswers(); the
-// parent's setPolicy lifts the result so the Playground tab and
-// localStorage stay in sync.
+// State model: parent owns `policy` + `answers`. We rebuild `policy`
+// from `answers` on every change via applyAnswers(); the parent's
+// setPolicy lifts the result so the Playground tab + localStorage
+// stay in sync. Step index is owned here and persisted to its own
+// localStorage key so a refresh keeps you where you were.
 
 'use client';
 
@@ -20,6 +22,7 @@ import { PolicySummaryCard } from './summary';
 import {
   ALLOW_CARDS,
   BLOCK_CARDS,
+  BLOCK_CATEGORIES,
   POSTURES,
   RESPONSES,
   SINK_CARDS,
@@ -38,6 +41,19 @@ const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
 function docsHref(path: string): string {
   return `${BASE_PATH}${path}`;
 }
+
+const STEP_KEY = 'dc-policy-creator/quickstart/step/v1';
+
+const STEPS = [
+  { id: 'posture', label: 'Posture' },
+  { id: 'block', label: 'Block' },
+  { id: 'allow', label: 'Allow' },
+  { id: 'response', label: 'Response' },
+  { id: 'sinks', label: 'Sinks' },
+  { id: 'review', label: 'Review' },
+] as const;
+
+type StepId = (typeof STEPS)[number]['id'];
 
 export interface QuickStartProps {
   policy: Policy;
@@ -66,6 +82,31 @@ export function QuickStart({
     onPolicyChange(next);
   }, [answers, onPolicyChange]);
 
+  // Step index. Hydrate from localStorage on mount only — SSR returns
+  // 0 to keep first paint stable.
+  const [stepIdx, setStepIdx] = useState(0);
+  const [hydrated, setHydrated] = useState(false);
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(STEP_KEY);
+      if (raw !== null) {
+        const n = Number.parseInt(raw, 10);
+        if (Number.isFinite(n) && n >= 0 && n < STEPS.length) setStepIdx(n);
+      }
+    } catch {
+      // Storage may be denied (private mode, sandbox); harmless to skip.
+    }
+    setHydrated(true);
+  }, []);
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      window.localStorage.setItem(STEP_KEY, String(stepIdx));
+    } catch {
+      // Same harmless path as above.
+    }
+  }, [stepIdx, hydrated]);
+
   // Helpers that return a NEW Answers without mutating the caller's
   // copy (Sets are reference types).
   function update(mut: (draft: Answers) => void) {
@@ -81,193 +122,351 @@ export function QuickStart({
     onAnswersChange(draft);
   }
 
+  const current = STEPS[stepIdx];
+  const isFirst = stepIdx === 0;
+  const isLast = stepIdx === STEPS.length - 1;
+
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
-      {/* ── Left column: questions ───────────────────────────────── */}
-      <div className="space-y-5">
-        <header className="rounded-xl border border-fd-border bg-fd-background p-4">
-          <h2 className="text-base font-semibold text-fd-foreground">Quick start</h2>
-          <p className="mt-0.5 text-[12px] leading-snug text-fd-muted-foreground">
-            Answer five questions and we&apos;ll assemble a complete policy. Watch the right
-            rail update as you go. When you&apos;re done, hop into the Playground for
-            fine-tuning or copy the install script straight from there.
-          </p>
-        </header>
+    <div className="space-y-4">
+      <Stepper steps={STEPS} current={stepIdx} onJump={setStepIdx} />
 
-        {/* Q1 — posture */}
-        <QuestionGroup
-          number={1}
-          title="What posture should we start from?"
-          subtitle="Picks a base preset. You&rsquo;ll layer your block / allow choices on top."
+      <section className="rounded-xl border border-fd-border bg-fd-background p-4 md:p-5">
+        {current.id === 'posture' && (
+          <StepPosture answers={answers} update={update} />
+        )}
+        {current.id === 'block' && (
+          <StepBlock answers={answers} update={update} />
+        )}
+        {current.id === 'allow' && (
+          <StepAllow answers={answers} update={update} />
+        )}
+        {current.id === 'response' && (
+          <StepResponse answers={answers} update={update} />
+        )}
+        {current.id === 'sinks' && (
+          <StepSinks answers={answers} update={update} />
+        )}
+        {current.id === 'review' && (
+          <StepReview policy={policy} answers={answers} onOpenInPlayground={onOpenInPlayground} />
+        )}
+      </section>
+
+      <footer className="sticky bottom-2 flex items-center gap-2 rounded-xl border border-fd-border bg-fd-card p-3 shadow-lg">
+        <button
+          type="button"
+          onClick={() => setStepIdx((n) => Math.max(0, n - 1))}
+          disabled={isFirst}
+          className="rounded-lg border border-fd-border bg-fd-background px-3 py-1.5 text-sm font-medium hover:border-fd-foreground/30 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          <div className="grid gap-2 md:grid-cols-3">
-            {POSTURES.map((p) => (
-              <RadioCard
-                key={p.id}
-                checked={answers.posture === p.id}
-                title={p.title}
-                description={p.description}
-                onSelect={() => update((d) => void (d.posture = p.id))}
-              />
-            ))}
-          </div>
-        </QuestionGroup>
-
-        {/* Q2 — block */}
-        <QuestionGroup
-          number={2}
-          title="What should we block?"
-          subtitle="Pick everything you want flagged. We&rsquo;ll enable the matching rules and add destinations to the firewall."
-        >
-          <div className="grid gap-2 md:grid-cols-2">
-            {BLOCK_CARDS.map((card) => (
-              <CheckCard
-                key={card.id}
-                card={card}
-                checked={answers.block.has(card.id)}
-                onToggle={() =>
-                  update((d) => {
-                    if (d.block.has(card.id)) d.block.delete(card.id);
-                    else d.block.add(card.id);
-                  })
-                }
-              />
-            ))}
-          </div>
-        </QuestionGroup>
-
-        {/* Q3 — allow */}
-        <QuestionGroup
-          number={3}
-          title="What should we allow even when flagged?"
-          subtitle="Reduce alert noise by letting known-safe tools / domains / first-party plugins through."
-        >
-          <div className="grid gap-2 md:grid-cols-2">
-            {ALLOW_CARDS.map((card) => (
-              <AllowCheckCard
-                key={card.id}
-                card={card}
-                checked={answers.allow.has(card.id)}
-                onToggle={() =>
-                  update((d) => {
-                    if (d.allow.has(card.id)) d.allow.delete(card.id);
-                    else d.allow.add(card.id);
-                  })
-                }
-              />
-            ))}
-          </div>
-          <FreeFormList
-            label="Additional first-party globs"
-            placeholder="my-org/*"
-            items={answers.firstPartyExtra}
-            onChange={(next) => update((d) => void (d.firstPartyExtra = next))}
-            hint="One per line. Matches a target_name on the first-party allow list."
-          />
-          <FreeFormList
-            label="Additional internal domains"
-            placeholder="*.corp.internal"
-            items={answers.domainsExtra}
-            onChange={(next) => update((d) => void (d.domainsExtra = next))}
-            hint="One per line. Added to firewall.allowed_domains."
-          />
-        </QuestionGroup>
-
-        {/* Q4 — response */}
-        <QuestionGroup
-          number={4}
-          title="When something risky happens, what should we do?"
-          subtitle="Sets the block / alert thresholds and HILT (human-in-the-loop) configuration."
-        >
-          <div className="grid gap-2 md:grid-cols-2">
-            {RESPONSES.map((r) => (
-              <RadioCard
-                key={r.id}
-                checked={answers.response === r.id}
-                title={r.title}
-                description={r.description}
-                onSelect={() => update((d) => void (d.response = r.id))}
-              />
-            ))}
-          </div>
-        </QuestionGroup>
-
-        {/* Q5 — sinks */}
-        <QuestionGroup
-          number={5}
-          title="Where should events go?"
-          subtitle="Wire one or more destinations. Local audit log is on by default \u2014 turn it off only if you really mean to."
-        >
-          <div className="space-y-2">
-            {SINK_CARDS.map((card) => (
-              <SinkRow
-                key={card.id}
-                card={card}
-                value={answers.sinks[card.id]}
-                onToggle={(enabled) =>
-                  update((d) => {
-                    d.sinks = { ...d.sinks, [card.id]: { ...d.sinks[card.id], enabled } };
-                  })
-                }
-                onChangeField={(key, val) =>
-                  update((d) => {
-                    d.sinks = { ...d.sinks, [card.id]: { ...d.sinks[card.id], [key]: val } };
-                  })
-                }
-              />
-            ))}
-          </div>
-        </QuestionGroup>
-
-        <div className="sticky bottom-2 flex flex-wrap items-center gap-2 rounded-xl border border-fd-border bg-fd-card p-3 shadow-lg">
-          <span className="text-[12px] text-fd-muted-foreground">
-            Done? Pre-fill the Playground with these choices and fine-tune anything you like.
-          </span>
-          <button
-            type="button"
-            onClick={onOpenInPlayground}
-            className="ml-auto rounded-lg bg-[var(--brand-cisco)] px-4 py-2 text-sm font-semibold text-white shadow-sm hover:opacity-95"
-          >
-            Open in Playground →
-          </button>
+          ← Back
+        </button>
+        <span className="text-[12px] text-fd-muted-foreground">
+          Step {stepIdx + 1} of {STEPS.length}
+        </span>
+        <div className="ml-auto flex items-center gap-2">
+          {!isLast && (
+            <button
+              type="button"
+              onClick={() => setStepIdx((n) => Math.min(STEPS.length - 1, n + 1))}
+              className="rounded-lg bg-[var(--brand-cisco)] px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:opacity-95"
+            >
+              Next →
+            </button>
+          )}
+          {isLast && (
+            <button
+              type="button"
+              onClick={onOpenInPlayground}
+              className="rounded-lg bg-[var(--brand-cisco)] px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:opacity-95"
+            >
+              Open in Playground →
+            </button>
+          )}
         </div>
-      </div>
-
-      {/* ── Right column: live policy + scenario test ───────────── */}
-      <aside className="space-y-3 lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-auto">
-        <PolicySummaryCard policy={policy} answers={answers} />
-        <LiveTestPane policy={policy} />
-      </aside>
+      </footer>
     </div>
   );
 }
 
-// ── Building blocks ─────────────────────────────────────────────────
+// ── Stepper ─────────────────────────────────────────────────────────
 
-function QuestionGroup({
-  number,
-  title,
-  subtitle,
-  children,
+function Stepper({
+  steps,
+  current,
+  onJump,
 }: {
-  number: number;
-  title: string;
-  subtitle?: string;
-  children: React.ReactNode;
+  steps: ReadonlyArray<{ id: StepId; label: string }>;
+  current: number;
+  onJump: (idx: number) => void;
 }) {
   return (
-    <section className="space-y-2 rounded-xl border border-fd-border bg-fd-background p-4">
-      <header className="flex items-baseline gap-2">
-        <span className="rounded-md bg-fd-card px-1.5 py-0.5 text-[11px] font-mono text-fd-muted-foreground">
-          Q{number}
-        </span>
-        <h3 className="text-sm font-semibold text-fd-foreground">{title}</h3>
-      </header>
-      {subtitle && <p className="text-[11px] text-fd-muted-foreground">{subtitle}</p>}
-      <div className="pt-2">{children}</div>
-    </section>
+    <ol className="flex flex-wrap items-center gap-1.5 rounded-xl border border-fd-border bg-fd-background p-2">
+      {steps.map((s, i) => {
+        const state = i < current ? 'done' : i === current ? 'active' : 'pending';
+        return (
+          <li key={s.id} className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => onJump(i)}
+              className={[
+                'flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[12px] font-medium transition',
+                state === 'active'
+                  ? 'bg-[var(--brand-cisco)] text-white'
+                  : state === 'done'
+                    ? 'bg-fd-card text-fd-foreground hover:border-fd-foreground/30'
+                    : 'text-fd-muted-foreground hover:text-fd-foreground',
+              ].join(' ')}
+            >
+              <span
+                className={[
+                  'inline-flex size-5 items-center justify-center rounded-full text-[10px] font-mono',
+                  state === 'active'
+                    ? 'bg-white/20'
+                    : state === 'done'
+                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                      : 'bg-fd-card',
+                ].join(' ')}
+                aria-hidden
+              >
+                {state === 'done' ? '✓' : i + 1}
+              </span>
+              {s.label}
+            </button>
+            {i < steps.length - 1 && (
+              <span aria-hidden className="text-[10px] text-fd-muted-foreground">
+                ›
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
+
+// ── Step renderers ──────────────────────────────────────────────────
+
+interface StepProps {
+  answers: Answers;
+  update: (mut: (draft: Answers) => void) => void;
+}
+
+function StepHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <header className="mb-4">
+      <h3 className="text-base font-semibold text-fd-foreground">{title}</h3>
+      {subtitle && <p className="mt-0.5 text-[12px] text-fd-muted-foreground">{subtitle}</p>}
+    </header>
+  );
+}
+
+function StepPosture({ answers, update }: StepProps) {
+  return (
+    <>
+      <StepHeader
+        title="What posture should we start from?"
+        subtitle="Picks a base preset. You'll layer your block / allow choices on top."
+      />
+      <div className="grid gap-2 md:grid-cols-3">
+        {POSTURES.map((p) => (
+          <RadioCard
+            key={p.id}
+            checked={answers.posture === p.id}
+            title={p.title}
+            description={p.description}
+            onSelect={() => update((d) => void (d.posture = p.id))}
+          />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function StepBlock({ answers, update }: StepProps) {
+  // Group the cards by category so the grid never feels like one long
+  // wall of checkboxes. The category ordering is taken from
+  // BLOCK_CATEGORIES so questions.ts stays the source of truth.
+  const grouped = useMemo(() => {
+    const map = new Map<string, BlockCard[]>();
+    for (const c of BLOCK_CATEGORIES) map.set(c.id, []);
+    for (const card of BLOCK_CARDS) {
+      const bucket = map.get(card.category);
+      if (bucket) bucket.push(card);
+    }
+    return map;
+  }, []);
+  return (
+    <>
+      <StepHeader
+        title="What should we block?"
+        subtitle="Pick everything you want flagged. We'll enable the matching rules and add destinations to the firewall."
+      />
+      <div className="space-y-5">
+        {BLOCK_CATEGORIES.map((cat) => {
+          const cards = grouped.get(cat.id) ?? [];
+          if (cards.length === 0) return null;
+          return (
+            <div key={cat.id} className="space-y-2">
+              <div className="flex items-baseline gap-2">
+                <h4 className="text-[12px] font-semibold uppercase tracking-wide text-fd-muted-foreground">
+                  {cat.title}
+                </h4>
+                <span className="text-[11px] text-fd-muted-foreground/80">{cat.blurb}</span>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                {cards.map((card) => (
+                  <CheckCard
+                    key={card.id}
+                    card={card}
+                    checked={answers.block.has(card.id)}
+                    onToggle={() =>
+                      update((d) => {
+                        if (d.block.has(card.id)) d.block.delete(card.id);
+                        else d.block.add(card.id);
+                      })
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function StepAllow({ answers, update }: StepProps) {
+  return (
+    <>
+      <StepHeader
+        title="What should we allow even when flagged?"
+        subtitle="Reduce alert noise by letting known-safe tools / domains / first-party plugins through."
+      />
+      <div className="grid gap-2 md:grid-cols-2">
+        {ALLOW_CARDS.map((card) => (
+          <AllowCheckCard
+            key={card.id}
+            card={card}
+            checked={answers.allow.has(card.id)}
+            onToggle={() =>
+              update((d) => {
+                if (d.allow.has(card.id)) d.allow.delete(card.id);
+                else d.allow.add(card.id);
+              })
+            }
+          />
+        ))}
+      </div>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <FreeFormList
+          label="Additional first-party globs"
+          placeholder="my-org/*"
+          items={answers.firstPartyExtra}
+          onChange={(next) => update((d) => void (d.firstPartyExtra = next))}
+          hint="One per line. Matches a target_name on the first-party allow list."
+        />
+        <FreeFormList
+          label="Additional internal domains"
+          placeholder="*.corp.internal"
+          items={answers.domainsExtra}
+          onChange={(next) => update((d) => void (d.domainsExtra = next))}
+          hint="One per line. Added to firewall.allowed_domains."
+        />
+      </div>
+    </>
+  );
+}
+
+function StepResponse({ answers, update }: StepProps) {
+  return (
+    <>
+      <StepHeader
+        title="When something risky happens, what should we do?"
+        subtitle="Sets the block / alert thresholds and HILT (human-in-the-loop) configuration."
+      />
+      <div className="grid gap-2 md:grid-cols-2">
+        {RESPONSES.map((r) => (
+          <RadioCard
+            key={r.id}
+            checked={answers.response === r.id}
+            title={r.title}
+            description={r.description}
+            onSelect={() => update((d) => void (d.response = r.id))}
+          />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function StepSinks({ answers, update }: StepProps) {
+  return (
+    <>
+      <StepHeader
+        title="Where should events go?"
+        subtitle="Wire one or more destinations. Local audit log is on by default — turn it off only if you really mean to."
+      />
+      <div className="space-y-2">
+        {SINK_CARDS.map((card) => (
+          <SinkRow
+            key={card.id}
+            card={card}
+            value={answers.sinks[card.id]}
+            onToggle={(enabled) =>
+              update((d) => {
+                d.sinks = { ...d.sinks, [card.id]: { ...d.sinks[card.id], enabled } };
+              })
+            }
+            onChangeField={(key, val) =>
+              update((d) => {
+                d.sinks = { ...d.sinks, [card.id]: { ...d.sinks[card.id], [key]: val } };
+              })
+            }
+          />
+        ))}
+      </div>
+    </>
+  );
+}
+
+function StepReview({
+  policy,
+  answers,
+  onOpenInPlayground,
+}: {
+  policy: Policy;
+  answers: Answers;
+  onOpenInPlayground: () => void;
+}) {
+  return (
+    <>
+      <StepHeader
+        title="Review your policy"
+        subtitle="Test it against canned scenarios on the right, then jump into the Playground if you want to fine-tune anything."
+      />
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,1fr)]">
+        <PolicySummaryCard policy={policy} answers={answers} />
+        <LiveTestPane policy={policy} />
+      </div>
+      <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-3 text-[12px] text-fd-foreground">
+        <span>
+          Looks right? <strong>Open in Playground</strong> to see the generated YAML, copy the
+          install script, or tweak any of the 14 advanced sections.
+        </span>
+        <button
+          type="button"
+          onClick={onOpenInPlayground}
+          className="ml-auto rounded-lg bg-[var(--brand-cisco)] px-3 py-1.5 text-sm font-semibold text-white shadow-sm hover:opacity-95"
+        >
+          Open in Playground →
+        </button>
+      </div>
+    </>
+  );
+}
+
+// ── Building blocks ─────────────────────────────────────────────────
 
 function RadioCard({
   checked,
@@ -339,7 +538,8 @@ function CheckCard({
         )}
         {(card.destinations?.length ?? 0) > 0 && (
           <span className="rounded bg-fd-muted px-1.5 py-0.5 font-mono">
-            {card.destinations!.length} firewall destination{card.destinations!.length === 1 ? '' : 's'}
+            {card.destinations!.length} firewall destination
+            {card.destinations!.length === 1 ? '' : 's'}
           </span>
         )}
         {card.cookbookHref && (
@@ -433,7 +633,7 @@ function FreeFormList({
     setPending('');
   };
   return (
-    <div className="space-y-1.5 pt-3">
+    <div className="space-y-1.5">
       <label className="block text-[11px] font-medium uppercase tracking-wide text-fd-muted-foreground">
         {label}
       </label>

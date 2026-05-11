@@ -38,10 +38,43 @@ export type PostureId = (typeof POSTURES)[number]['id'];
 
 // --- Q2: what to block (multi select) --------------------------------------
 
+/** Logical bucket for the block-card grid in the wizard's "Block" step.
+ *  Purely a UX grouping — the apply.ts mapper doesn't read it. */
+export type BlockCategory = 'data' | 'network' | 'code' | 'llm';
+
+export const BLOCK_CATEGORIES: ReadonlyArray<{
+  id: BlockCategory;
+  title: string;
+  blurb: string;
+}> = [
+  {
+    id: 'data',
+    title: 'Data leaks',
+    blurb: 'Credentials, PII, and sensitive paths the agent should never read or send.',
+  },
+  {
+    id: 'network',
+    title: 'Network exfiltration',
+    blurb: 'Outbound destinations commonly used to siphon data out of a sandbox.',
+  },
+  {
+    id: 'code',
+    title: 'Code execution',
+    blurb: 'Shell commands and tool calls that can hose the box.',
+  },
+  {
+    id: 'llm',
+    title: 'LLM-layer attacks',
+    blurb: 'Prompt-shape patterns aimed at the model itself.',
+  },
+];
+
 export interface BlockCard {
   id: string;
   title: string;
   description: string;
+  /** Which group this card renders under in the wizard. */
+  category: BlockCategory;
   /** Rule IDs (cross-file) toggled to enabled when this card is checked. */
   ruleIds: string[];
   /** Hostnames added to the firewall block list. */
@@ -57,6 +90,7 @@ export interface BlockCard {
 export const BLOCK_CARDS: BlockCard[] = [
   {
     id: 'secrets',
+    category: 'data',
     title: 'Hardcoded secrets in prompts',
     description:
       'AWS access keys, OpenAI keys, GitHub tokens, JWTs, private keys, Slack webhooks. Catches credentials accidentally pasted into prompts before they reach an LLM provider.',
@@ -74,6 +108,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'prompt_injection',
+    category: 'llm',
     title: 'Prompt injection',
     description:
       'System-prompt overrides, role overrides, jailbreak chains. Detects user input attempting to bypass guardrails or escalate the agent\u2019s capabilities.',
@@ -98,6 +133,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'exfiltration',
+    category: 'network',
     title: 'Exfiltration to known leak sinks',
     description:
       'RequestBin, HookBin, Burp Collaborator, ngrok, webhook.site. The most common destinations for exfiltrated data when an attacker doesn\u2019t bother hiding.',
@@ -113,6 +149,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'cloud_metadata',
+    category: 'network',
     title: 'Cloud metadata access (IMDS)',
     description:
       'AWS IMDS at 169.254.169.254, GCP metadata at metadata.google.internal, Azure IMDS. Exposing these from a sandboxed agent leaks credentials with one curl.',
@@ -126,6 +163,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'destructive_shell',
+    category: 'code',
     title: 'Destructive shell commands',
     description:
       'rm -rf /, dd if=, mkfs, fdisk, shred, :(){:|:&};:. Catches the canonical "make the disk dance" patterns before they hit a sandbox.',
@@ -134,6 +172,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'sensitive_paths',
+    category: 'data',
     title: 'Sensitive file paths',
     description:
       '~/.ssh, ~/.aws, ~/.kube, /etc/shadow, .env files, gh-cli config. Prevents the agent from reading or writing config that leaks long-lived credentials.',
@@ -142,6 +181,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'pii_enterprise',
+    category: 'data',
     title: 'PII / enterprise data leakage',
     description:
       'SSN, internal hostnames, employee IDs, financial routing numbers. Most useful when the agent talks to public LLM providers.',
@@ -150,6 +190,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'trust_exploit',
+    category: 'llm',
     title: 'Trust / impersonation exploits',
     description:
       'Role overrides, fake function-call results, "you are an admin" prompts. Catches the social-engineering vector against agents.',
@@ -158,6 +199,7 @@ export const BLOCK_CARDS: BlockCard[] = [
   },
   {
     id: 'cognitive',
+    category: 'llm',
     title: 'Cognitive / manipulation patterns',
     description:
       'Authority-claim, urgency, fake citations, false consensus. Lower-confidence patterns that flag suspicious narrative shape rather than concrete payloads.',

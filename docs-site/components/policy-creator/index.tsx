@@ -162,7 +162,7 @@ function Tabs({
     {
       id: 'quick-start',
       label: 'Quick start',
-      hint: 'Answer 5 questions, get a complete policy',
+      hint: 'Step through 6 questions, get a complete policy',
     },
     {
       id: 'playground',
