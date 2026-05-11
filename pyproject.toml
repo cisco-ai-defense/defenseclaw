@@ -92,13 +92,13 @@ default-groups = ["dev"]
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
     "cryptography>=46.0.7",   # CVE-2026-39892 fixed in 46.0.7
-    "litellm==1.83.7",        # CVE-2026-35029, CVE-2026-35030, GHSA-xqmj-j6mv-4862
-    # litellm 1.83.7 ships exact pins for several transitive deps that
-    # conflict with what cisco-ai-skill-scanner 2.0.8 (and our own pins)
-    # expect. We override to a single compatible version per package —
-    # the newer of the two — and rely on litellm's runtime API surface
-    # being compatible with the bumped versions (verified via Python
-    # tests in CI). CVE-2026-28684 (python-dotenv 1.2.1) is tracked via
+    "litellm==1.83.10",       # CVE-2026-40217 fixed in 1.83.10 (also covers CVE-2026-35029, CVE-2026-35030, GHSA-xqmj-j6mv-4862 fixed in earlier 1.83.x)
+    # litellm pins exact transitive versions that conflict with what
+    # cisco-ai-skill-scanner 2.0.8 (and our own pins) expect. We
+    # override to a single compatible version per package — the newer
+    # of the two — and rely on litellm's runtime API surface being
+    # compatible with the bumped versions (verified via Python tests
+    # in CI). CVE-2026-28684 (python-dotenv 1.2.1) is tracked via
     # pip-audit's ignore list in ci.yml.
     "python-dotenv==1.2.1",
     "openai==2.30.0",
@@ -106,6 +106,11 @@ override-dependencies = [
     "importlib-metadata>=8.7.1",
     "jsonschema>=4.26.0",
     "python-multipart>=0.0.27", # CVE-2026-42561 fixed in 0.0.27
+    "urllib3>=2.7.0",           # CVE-2026-44431, CVE-2026-44432 fixed in 2.7.0
+    # aiohttp 3.13.4 fixes a batch of HTTP-parser CVEs (CVE-2026-22815,
+    # CVE-2026-34513..34520, CVE-2026-34525). litellm 1.83.10's
+    # transitive pin floats aiohttp downward without this override.
+    "aiohttp>=3.13.4",
 ]
 
 [tool.ruff]
