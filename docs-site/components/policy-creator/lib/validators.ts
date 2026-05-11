@@ -24,6 +24,31 @@ export interface RegexLintResult {
   findings: ValidationFinding[];
 }
 
+// Translate a Go RE2 pattern to something V8's RegExp can compile.
+//
+// RE2 supports inline flag groups at the start of a pattern — `(?i)foo`,
+// `(?ims)foo` — that V8 rejects with "Invalid group". JS expresses the
+// same thing as a separate flags arg to `new RegExp(pattern, flags)`.
+//
+// We also collapse any *consecutive* leading flag groups (`(?i)(?m)foo`)
+// because RE2 treats them as additive. We do NOT touch mid-pattern flag
+// scopes like `(?i:foo)` — those are RE2-only and we let the V8 compile
+// fail naturally so the operator still sees the lint error.
+//
+// Returns the translated pattern + the JS flag set so the caller can
+// pass both to `new RegExp(...)`.
+function toV8(pattern: string, extraFlags: string): { pattern: string; flags: string } {
+  let p = pattern;
+  const flagSet = new Set(extraFlags.split(''));
+  for (;;) {
+    const m = p.match(/^\(\?([ims]+)\)/);
+    if (!m) break;
+    for (const ch of m[1]) flagSet.add(ch);
+    p = p.slice(m[0].length);
+  }
+  return { pattern: p, flags: Array.from(flagSet).join('') };
+}
+
 // Patterns Go's regexp/syntax explicitly does not support. Listed by
 // order of likelihood so we can give a useful diagnostic on the first
 // match. See https://github.com/google/re2/wiki/Syntax for the RE2
@@ -64,9 +89,11 @@ export function lintRegex(pattern: string): RegexLintResult {
     };
   }
 
-  // 1) Compile in V8.
+  // 1) Compile in V8 — translate RE2 inline flag groups (`(?i)`, `(?ims)`)
+  //    to JS flags first so we don't false-flag valid Go patterns.
   try {
-    new RegExp(pattern);
+    const v8 = toV8(pattern, '');
+    new RegExp(v8.pattern, v8.flags);
     compiled = true;
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
@@ -137,7 +164,8 @@ export function testRegex(
   const out: RegexTestResult[] = [];
   let re: RegExp | null = null;
   try {
-    re = new RegExp(pattern, flags);
+    const v8 = toV8(pattern, flags);
+    re = new RegExp(v8.pattern, v8.flags);
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     for (const text of [...examples, ...counterexamples]) {
