@@ -2,14 +2,14 @@
   "title": "Connectors",
   "pages": [
     "index",
-    "openclaw",
-    "zeptoclaw",
     "claudecode",
     "codex",
+    "openclaw",
     "cursor",
-    "windsurf",
+    "hermes",
     "geminicli",
     "copilot",
-    "hermes"
+    "windsurf",
+    "zeptoclaw"
   ]
 }

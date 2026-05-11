@@ -1,8 +1,11 @@
 // Hero terminal-demo connector list. Lives outside the React tree so
 // both <HeroLockup> (which drives the rotation) and <TerminalDemo>
 // (which renders the per-connector block) can import it without
-// creating a circular dependency. Order matches /docs/connectors so
-// the rotation reads the same as the docs nav.
+// creating a circular dependency. Order is by adoption / popularity so
+// the rotation leads with the connectors most visitors recognize
+// first; the docs nav (content/docs/connectors/meta.json) and the
+// capability matrix (data/capability-matrix.json) follow the same
+// ordering.
 //
 // Setup aliases verified against docs/setup/guardrail/aliases/:
 //   - proxies (OpenClaw, ZeptoClaw) → defenseclaw setup guardrail
@@ -21,13 +24,13 @@ export interface ConnectorBlock {
 }
 
 export const TERMINAL_CONNECTORS: ConnectorBlock[] = [
-  { id: 'openclaw',   label: 'OpenClaw',           command: 'defenseclaw setup guardrail',   modeId: 'openclaw' },
-  { id: 'zeptoclaw',  label: 'ZeptoClaw',          command: 'defenseclaw setup guardrail',   modeId: 'zeptoclaw' },
   { id: 'claudecode', label: 'Claude Code',        command: 'defenseclaw setup claude-code', modeId: 'claudecode' },
   { id: 'codex',      label: 'Codex',              command: 'defenseclaw setup codex',       modeId: 'codex' },
-  { id: 'hermes',     label: 'Hermes',             command: 'defenseclaw setup hermes',      modeId: 'hermes' },
+  { id: 'openclaw',   label: 'OpenClaw',           command: 'defenseclaw setup guardrail',   modeId: 'openclaw' },
   { id: 'cursor',     label: 'Cursor',             command: 'defenseclaw setup cursor',      modeId: 'cursor' },
-  { id: 'windsurf',   label: 'Windsurf',           command: 'defenseclaw setup windsurf',    modeId: 'windsurf' },
+  { id: 'hermes',     label: 'Hermes',             command: 'defenseclaw setup hermes',      modeId: 'hermes' },
   { id: 'geminicli',  label: 'Gemini CLI',         command: 'defenseclaw setup geminicli',   modeId: 'geminicli' },
   { id: 'copilot',    label: 'GitHub Copilot CLI', command: 'defenseclaw setup copilot',     modeId: 'copilot' },
+  { id: 'windsurf',   label: 'Windsurf',           command: 'defenseclaw setup windsurf',    modeId: 'windsurf' },
+  { id: 'zeptoclaw',  label: 'ZeptoClaw',          command: 'defenseclaw setup guardrail',   modeId: 'zeptoclaw' },
 ];
