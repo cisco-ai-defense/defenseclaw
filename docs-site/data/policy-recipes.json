@@ -1,0 +1,3078 @@
+{
+  "generated_at": "2026-05-11T18:28:58.506Z",
+  "recipes": [
+    {
+      "id": "RECIPE-C2-WEBHOOK-SITE",
+      "title": "webhook.site (known exfil)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-WEBHOOK-SITE",
+        "pattern": "(?i)webhook\\.site",
+        "title": "webhook.site (known exfil)",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-NGROK",
+      "title": "ngrok tunnel (exfil risk)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-NGROK",
+        "pattern": "(?i)(?:ngrok\\.io|ngrok-free\\.app)",
+        "title": "ngrok tunnel (exfil risk)",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-PIPEDREAM",
+      "title": "Pipedream (known exfil)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-PIPEDREAM",
+        "pattern": "(?i)pipedream\\.net",
+        "title": "Pipedream (known exfil)",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-REQUESTBIN",
+      "title": "RequestBin (known exfil)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-REQUESTBIN",
+        "pattern": "(?i)requestbin\\.com",
+        "title": "RequestBin (known exfil)",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-HOOKBIN",
+      "title": "HookBin (known exfil)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-HOOKBIN",
+        "pattern": "(?i)hookbin\\.com",
+        "title": "HookBin (known exfil)",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-BURP",
+      "title": "Burp Collaborator (pentest C2)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-BURP",
+        "pattern": "(?i)burpcollaborator\\.net",
+        "title": "Burp Collaborator (pentest C2)",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-INTERACTSH",
+      "title": "interact.sh (OOB exfil)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-INTERACTSH",
+        "pattern": "(?i)interact\\.sh",
+        "title": "interact.sh (OOB exfil)",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-OAST",
+      "title": "oast.fun (OOB testing)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-OAST",
+        "pattern": "(?i)oast\\.fun",
+        "title": "oast.fun (OOB testing)",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-CANARY",
+      "title": "Canary Tokens",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-CANARY",
+        "pattern": "(?i)canarytokens\\.com",
+        "title": "Canary Tokens",
+        "severity": "MEDIUM",
+        "confidence": 0.75,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-PASTEBIN",
+      "title": "Pastebin raw fetch",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-PASTEBIN",
+        "pattern": "(?i)pastebin\\.com/raw/",
+        "title": "Pastebin raw fetch",
+        "severity": "MEDIUM",
+        "confidence": 0.7,
+        "tags": [
+          "exfiltration",
+          "c2"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "c2"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-METADATA-AWS",
+      "title": "AWS metadata endpoint (SSRF)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-METADATA-AWS",
+        "pattern": "169\\.254\\.169\\.254",
+        "title": "AWS metadata endpoint (SSRF)",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "ssrf",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "ssrf",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-METADATA-GCP",
+      "title": "GCP metadata endpoint (SSRF)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-METADATA-GCP",
+        "pattern": "metadata\\.google\\.internal",
+        "title": "GCP metadata endpoint (SSRF)",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "ssrf",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "ssrf",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-METADATA-AZURE",
+      "title": "Azure metadata endpoint (SSRF)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-METADATA-AZURE",
+        "pattern": "169\\.254\\.169\\.254/metadata",
+        "title": "Azure metadata endpoint (SSRF)",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "ssrf",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "ssrf",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-METADATA-HEX",
+      "title": "AWS metadata endpoint (hex-encoded SSRF)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-METADATA-HEX",
+        "pattern": "(?i)0xa9fea9fe",
+        "title": "AWS metadata endpoint (hex-encoded SSRF)",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "ssrf",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "ssrf",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-METADATA-DECIMAL",
+      "title": "AWS metadata endpoint (decimal-encoded SSRF)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-METADATA-DECIMAL",
+        "pattern": "(?:^|[/])2852039166(?:$|[/])",
+        "title": "AWS metadata endpoint (decimal-encoded SSRF)",
+        "severity": "CRITICAL",
+        "confidence": 0.93,
+        "tags": [
+          "ssrf",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "ssrf",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-METADATA-OCTAL",
+      "title": "AWS metadata endpoint (octal-encoded SSRF)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-METADATA-OCTAL",
+        "pattern": "0251\\.0376\\.0251\\.0376",
+        "title": "AWS metadata endpoint (octal-encoded SSRF)",
+        "severity": "CRITICAL",
+        "confidence": 0.93,
+        "tags": [
+          "ssrf",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "ssrf",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-DNS-TUNNEL",
+      "title": "DNS TXT query with high-entropy label (tunneling indicator)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-DNS-TUNNEL",
+        "pattern": "(?i)\\bdig\\b\\s+[^;\\n]*\\bTXT\\b\\s+(?:[a-f0-9]{16,}|[A-Za-z2-7]{24,})\\.[A-Za-z0-9-]{2,}\\.",
+        "title": "DNS TXT query with high-entropy label (tunneling indicator)",
+        "severity": "HIGH",
+        "confidence": 0.78,
+        "tags": [
+          "exfiltration",
+          "dns-tunnel"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "dns-tunnel"
+      ]
+    },
+    {
+      "id": "RECIPE-C2-DNS-EXFIL",
+      "title": "nslookup with hex subdomain (DNS exfil)",
+      "kind": "rule:c2",
+      "body": {
+        "id": "C2-DNS-EXFIL",
+        "pattern": "(?i)\\bnslookup\\b\\s+[a-f0-9]{8,}\\.\\w+\\.",
+        "title": "nslookup with hex subdomain (DNS exfil)",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "exfiltration",
+          "dns-tunnel"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (c2.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/c2.yaml",
+      "tags": [
+        "exfiltration",
+        "dns-tunnel"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-SOUL",
+      "title": "SOUL.md access (agent identity)",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-SOUL",
+        "pattern": "(?i)SOUL\\.md",
+        "title": "SOUL.md access (agent identity)",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-IDENTITY",
+      "title": "IDENTITY.md access",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-IDENTITY",
+        "pattern": "(?i)IDENTITY\\.md",
+        "title": "IDENTITY.md access",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-MEMORY",
+      "title": "MEMORY.md access",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-MEMORY",
+        "pattern": "(?i)MEMORY\\.md",
+        "title": "MEMORY.md access",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-CLAUDE-MD",
+      "title": "CLAUDE.md access",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-CLAUDE-MD",
+        "pattern": "(?i)CLAUDE\\.md",
+        "title": "CLAUDE.md access",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-TOOLS-MD",
+      "title": "TOOLS.md access",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-TOOLS-MD",
+        "pattern": "(?i)TOOLS\\.md",
+        "title": "TOOLS.md access",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-AGENTS-MD",
+      "title": "AGENTS.md access",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-AGENTS-MD",
+        "pattern": "(?i)AGENTS\\.md",
+        "title": "AGENTS.md access",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-OPENCLAW-JSON",
+      "title": "openclaw.json config access",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-OPENCLAW-JSON",
+        "pattern": "(?i)openclaw\\.json",
+        "title": "openclaw.json config access",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-COG-GATEWAY-JSON",
+      "title": "gateway.json config access",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "COG-GATEWAY-JSON",
+        "pattern": "(?i)gateway\\.json",
+        "title": "gateway.json config access",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "cognitive-tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-REVSHELL-BASH",
+      "title": "Bash reverse shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-REVSHELL-BASH",
+        "pattern": "(?i)bash\\s+-i\\s+>&\\s*/dev/tcp/",
+        "title": "Bash reverse shell",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "execution",
+          "reverse-shell"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "reverse-shell"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-REVSHELL-DEVTCP",
+      "title": "Reverse shell via /dev/tcp",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-REVSHELL-DEVTCP",
+        "pattern": "/dev/tcp/\\d{1,3}\\.\\d{1,3}",
+        "title": "Reverse shell via /dev/tcp",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "execution",
+          "reverse-shell"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "reverse-shell"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-REVSHELL-NC",
+      "title": "Netcat reverse shell with -e",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-REVSHELL-NC",
+        "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)",
+        "title": "Netcat reverse shell with -e",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "execution",
+          "reverse-shell"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "reverse-shell"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-REVSHELL-PYTHON",
+      "title": "Python reverse shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-REVSHELL-PYTHON",
+        "pattern": "(?i)python[23]?\\s+-c\\s+.*socket.*connect",
+        "title": "Python reverse shell",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "execution",
+          "reverse-shell"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "reverse-shell"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PIPE-CURL",
+      "title": "curl piped to shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PIPE-CURL",
+        "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:ba)?sh\\b",
+        "title": "curl piped to shell",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PIPE-WGET",
+      "title": "wget piped to shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PIPE-WGET",
+        "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:ba)?sh\\b",
+        "title": "wget piped to shell",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "execution",
+          "download-exec"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "download-exec"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PIPE-BASE64",
+      "title": "base64 decode piped to shell",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PIPE-BASE64",
+        "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:ba)?sh\\b",
+        "title": "base64 decode piped to shell",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "execution",
+          "obfuscation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "obfuscation"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-EVAL",
+      "title": "Shell eval with dynamic input",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-EVAL",
+        "pattern": "(?i)\\beval\\s+[\"'\\$\\(]",
+        "title": "Shell eval with dynamic input",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "execution"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-BASH-C",
+      "title": "Shell -c execution",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-BASH-C",
+        "pattern": "(?i)\\b(?:ba)?sh\\s+-c\\s+",
+        "title": "Shell -c execution",
+        "severity": "LOW",
+        "confidence": 0.55,
+        "tags": [
+          "execution"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity LOW.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PYTHON-C",
+      "title": "Python inline execution",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PYTHON-C",
+        "pattern": "(?i)\\bpython[23]?\\s+-c\\s+",
+        "title": "Python inline execution",
+        "severity": "LOW",
+        "confidence": 0.55,
+        "tags": [
+          "execution"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity LOW.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-PERL-E",
+      "title": "Perl inline execution",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-PERL-E",
+        "pattern": "(?i)\\bperl\\s+-e\\s+",
+        "title": "Perl inline execution",
+        "severity": "LOW",
+        "confidence": 0.55,
+        "tags": [
+          "execution"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity LOW.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-RUBY-E",
+      "title": "Ruby inline execution",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-RUBY-E",
+        "pattern": "(?i)\\bruby\\s+-e\\s+",
+        "title": "Ruby inline execution",
+        "severity": "LOW",
+        "confidence": 0.55,
+        "tags": [
+          "execution"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity LOW.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-RM-RF",
+      "title": "Recursive force delete from critical root path",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-RM-RF",
+        "pattern": "(?i)\\brm\\s+(?:-[a-zA-Z]*\\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\\b(?:\\s+\\S+)*\\s+/(?:$|[\"'\\s,}\\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|[\"'\\s,}\\]]))",
+        "title": "Recursive force delete from critical root path",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "destructive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "destructive"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-MKFS",
+      "title": "Filesystem format command",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-MKFS",
+        "pattern": "(?i)\\bmkfs\\b",
+        "title": "Filesystem format command",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "destructive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "destructive"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-DD-IF",
+      "title": "dd disk write",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-DD-IF",
+        "pattern": "(?i)\\bdd\\s+if=",
+        "title": "dd disk write",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "destructive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "destructive"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-CHMOD-WORLD",
+      "title": "chmod world-writable",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-CHMOD-WORLD",
+        "pattern": "(?i)\\bchmod\\s+[0-7]*[0-7][0-7][2367]\\s",
+        "title": "chmod world-writable",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "privilege"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-CHOWN-ROOT",
+      "title": "chown to root",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-CHOWN-ROOT",
+        "pattern": "(?i)\\bchown\\s+root\\b",
+        "title": "chown to root",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "privilege"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-SUDO",
+      "title": "sudo invocation",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-SUDO",
+        "pattern": "(?i)\\bsudo\\s+",
+        "title": "sudo invocation",
+        "severity": "LOW",
+        "confidence": 0.5,
+        "tags": [
+          "privilege"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity LOW.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-ETC-WRITE",
+      "title": "Write redirect to /etc/",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-ETC-WRITE",
+        "pattern": "(?i)>\\s*/etc/",
+        "title": "Write redirect to /etc/",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "system-file"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "system-file"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-CRONTAB",
+      "title": "Crontab modification",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-CRONTAB",
+        "pattern": "(?i)\\bcrontab\\s+(?:-[a-zA-Z]\\s+)*(?:-e|-r|-l|/|['\"<>|])",
+        "title": "Crontab modification",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "persistence"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "persistence"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-SYSTEMCTL",
+      "title": "Suspicious systemd persistence enablement",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-SYSTEMCTL",
+        "pattern": "(?i)\\bsystemctl\\s+enable\\b(?:\\s+--now\\b)?\\s+\\S*(?:backdoor|payload|persist|reverse|shell|evil)\\S*(?:\\.service)?\\b",
+        "title": "Suspicious systemd persistence enablement",
+        "severity": "CRITICAL",
+        "confidence": 0.82,
+        "tags": [
+          "persistence"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "persistence"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-NETCAT-LISTEN",
+      "title": "Netcat listener",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-NETCAT-LISTEN",
+        "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:-[a-zA-Z]*)*-?l",
+        "title": "Netcat listener",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "network",
+          "reverse-shell"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "network",
+        "reverse-shell"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-CURL-UPLOAD",
+      "title": "curl file upload",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-CURL-UPLOAD",
+        "pattern": "(?i)\\bcurl\\b\\s+.*(?:--upload-file|-T\\s|--data\\s+@|-F\\s+.*=@)",
+        "title": "curl file upload",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "network",
+          "exfiltration"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "network",
+        "exfiltration"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-WGET-POST",
+      "title": "wget POST data exfil",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-WGET-POST",
+        "pattern": "(?i)\\bwget\\b\\s+.*--post-(?:data|file)",
+        "title": "wget POST data exfil",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "network",
+          "exfiltration"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "network",
+        "exfiltration"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-SOCAT-EXEC",
+      "title": "socat with EXEC (reverse shell)",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-SOCAT-EXEC",
+        "pattern": "(?i)\\bsocat\\b\\s+.*\\bEXEC\\b",
+        "title": "socat with EXEC (reverse shell)",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "execution",
+          "reverse-shell"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "reverse-shell"
+      ]
+    },
+    {
+      "id": "RECIPE-CMD-ENV-DUMP",
+      "title": "Environment variable dump",
+      "kind": "rule:command",
+      "body": {
+        "id": "CMD-ENV-DUMP",
+        "pattern": "(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\\s+-p)\\b",
+        "title": "Environment variable dump",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-BULK-SSN",
+      "title": "US Social Security Number",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-BULK-SSN",
+        "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+        "title": "US Social Security Number",
+        "severity": "CRITICAL",
+        "confidence": 0.85,
+        "tags": [
+          "pii",
+          "regulated"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "regulated"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-BULK-SSN-NOHYPHEN",
+      "title": "US SSN (no hyphens)",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-BULK-SSN-NOHYPHEN",
+        "pattern": "\\b(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6[0-5][0-9]|66[0-5]|66[7-9]|6[7-9][0-9]|[78][0-9]{2})(?:0[1-9]|[1-9][0-9])(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\\b",
+        "title": "US SSN (no hyphens)",
+        "severity": "HIGH",
+        "confidence": 0.55,
+        "tags": [
+          "pii",
+          "regulated"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "regulated"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-CC-VISA",
+      "title": "Visa credit card number",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-CC-VISA",
+        "pattern": "\\b4\\d{3}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b",
+        "title": "Visa credit card number",
+        "severity": "CRITICAL",
+        "confidence": 0.8,
+        "tags": [
+          "pii",
+          "pci"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "pci"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-CC-MC",
+      "title": "Mastercard credit card number",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-CC-MC",
+        "pattern": "\\b5[1-5]\\d{2}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b",
+        "title": "Mastercard credit card number",
+        "severity": "CRITICAL",
+        "confidence": 0.8,
+        "tags": [
+          "pii",
+          "pci"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "pci"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-CC-AMEX",
+      "title": "American Express card number",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-CC-AMEX",
+        "pattern": "\\b3[47]\\d{2}[\\s-]?\\d{6}[\\s-]?\\d{5}\\b",
+        "title": "American Express card number",
+        "severity": "CRITICAL",
+        "confidence": 0.8,
+        "tags": [
+          "pii",
+          "pci"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "pci"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-CC-DISCOVER",
+      "title": "Discover card number",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-CC-DISCOVER",
+        "pattern": "\\b6(?:011|5\\d{2})[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b",
+        "title": "Discover card number",
+        "severity": "CRITICAL",
+        "confidence": 0.8,
+        "tags": [
+          "pii",
+          "pci"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "pci"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-IBAN",
+      "title": "International Bank Account Number (IBAN)",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-IBAN",
+        "pattern": "\\b[A-Z]{2}\\d{2}[\\s]?[\\dA-Z]{4}[\\s]?(?:[\\dA-Z]{4}[\\s]?){1,7}[\\dA-Z]{1,4}\\b",
+        "title": "International Bank Account Number (IBAN)",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "pii",
+          "financial"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "financial"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-US-PHONE",
+      "title": "US phone number",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-US-PHONE",
+        "pattern": "\\b(?:\\+1[\\s.-]?)?(?:\\(?\\d{3}\\)?[\\s.-]?)\\d{3}[\\s.-]?\\d{4}\\b",
+        "title": "US phone number",
+        "severity": "MEDIUM",
+        "confidence": 0.5,
+        "tags": [
+          "pii"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-EMAIL-BULK",
+      "title": "Email address",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-EMAIL-BULK",
+        "pattern": "(?i)\\b[a-z0-9._%+\\-]+@[a-z0-9.\\-]+\\.[a-z]{2,}\\b",
+        "title": "Email address",
+        "severity": "MEDIUM",
+        "confidence": 0.4,
+        "tags": [
+          "pii"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-PASSPORT-US",
+      "title": "US passport number pattern",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-PASSPORT-US",
+        "pattern": "\\b[A-Z]\\d{8}\\b",
+        "title": "US passport number pattern",
+        "severity": "HIGH",
+        "confidence": 0.5,
+        "tags": [
+          "pii",
+          "regulated"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "regulated"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-DL-CA",
+      "title": "California drivers license pattern",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-DL-CA",
+        "pattern": "\\b[A-Z]\\d{7}\\b",
+        "title": "California drivers license pattern",
+        "severity": "HIGH",
+        "confidence": 0.4,
+        "tags": [
+          "pii",
+          "regulated"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "regulated"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-MEDICAL-RECORD",
+      "title": "Medical record number",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-MEDICAL-RECORD",
+        "pattern": "(?i)\\b(?:mrn|medical record|patient id)\\s*[:#]?\\s*\\d{6,12}\\b",
+        "title": "Medical record number",
+        "severity": "CRITICAL",
+        "confidence": 0.7,
+        "tags": [
+          "pii",
+          "hipaa"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "hipaa"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-DOB-PATTERN",
+      "title": "Date of birth with label",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-DOB-PATTERN",
+        "pattern": "(?i)\\b(?:dob|date of birth|birth[\\s-]?date)\\s*[:#]?\\s*\\d{1,2}[/\\-]\\d{1,2}[/\\-]\\d{2,4}\\b",
+        "title": "Date of birth with label",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "pii",
+          "hipaa"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "hipaa"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-NHS-NUMBER",
+      "title": "UK NHS number pattern",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-NHS-NUMBER",
+        "pattern": "\\b\\d{3}[\\s]?\\d{3}[\\s]?\\d{4}\\b",
+        "title": "UK NHS number pattern",
+        "severity": "HIGH",
+        "confidence": 0.4,
+        "tags": [
+          "pii",
+          "regulated"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "regulated"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-BULK-CSV-PII",
+      "title": "CSV/TSV header with multiple PII columns",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-BULK-CSV-PII",
+        "pattern": "(?i)(?:first[\\s_]?name|last[\\s_]?name|ssn|social[\\s_]?security|credit[\\s_]?card|card[\\s_]?number|account[\\s_]?number),.*(?:first[\\s_]?name|last[\\s_]?name|ssn|social[\\s_]?security|credit[\\s_]?card|card[\\s_]?number|account[\\s_]?number)",
+        "title": "CSV/TSV header with multiple PII columns",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "pii",
+          "bulk-data"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "bulk-data"
+      ]
+    },
+    {
+      "id": "RECIPE-ENT-BULK-JSON-PII",
+      "title": "JSON field with PII key",
+      "kind": "rule:enterprise-data",
+      "body": {
+        "id": "ENT-BULK-JSON-PII",
+        "pattern": "(?i)\"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)\"\\s*:\\s*\"",
+        "title": "JSON field with PII key",
+        "severity": "HIGH",
+        "confidence": 0.75,
+        "tags": [
+          "pii",
+          "bulk-data"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (enterprise-data.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
+      "tags": [
+        "pii",
+        "bulk-data"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-AWS-KEY",
+      "title": "AWS access key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-AWS-KEY",
+        "pattern": "(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
+        "title": "AWS access key",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [
+        "AKIAIOSFODNN7EXAMPLE",
+        "ASIA1234567890ABCDEFGHIJ"
+      ],
+      "counterexamples": [
+        "BANANAFRUITNOTAKEY",
+        "AKI",
+        "AKIAtoolow"
+      ],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-AWS-SECRET",
+      "title": "AWS secret access key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-AWS-SECRET",
+        "pattern": "(?i)aws_secret_access_key\\s*[=:]\\s*[A-Za-z0-9/+=]{30,}",
+        "title": "AWS secret access key",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-ANTHROPIC",
+      "title": "Anthropic API key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-ANTHROPIC",
+        "pattern": "sk-ant-[a-zA-Z0-9\\-_]{20,}",
+        "title": "Anthropic API key",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-OPENAI",
+      "title": "OpenAI project key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-OPENAI",
+        "pattern": "sk-proj-[a-zA-Z0-9]{20,}",
+        "title": "OpenAI project key",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-OPENAI-V2",
+      "title": "OpenAI API key (long form)",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-OPENAI-V2",
+        "pattern": "sk-[a-zA-Z0-9]{40,}",
+        "title": "OpenAI API key (long form)",
+        "severity": "CRITICAL",
+        "confidence": 0.85,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [
+        "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "counterexamples": [
+        "sk-tooshort",
+        "pk-livenotopenai"
+      ],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-STRIPE",
+      "title": "Stripe key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-STRIPE",
+        "pattern": "(?:sk_live_|pk_live_|sk_test_|pk_test_|rk_live_|rk_test_)[a-zA-Z0-9]{20,}",
+        "title": "Stripe key",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-GITHUB-TOKEN",
+      "title": "GitHub token",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-GITHUB-TOKEN",
+        "pattern": "(?:ghp_|gho_|ghu_|ghs_|ghr_)[a-zA-Z0-9]{36,}",
+        "title": "GitHub token",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [
+        "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "ghs_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      ],
+      "counterexamples": [
+        "ghp_short",
+        "gh_notatoken"
+      ],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-GITHUB-PAT",
+      "title": "GitHub fine-grained PAT",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-GITHUB-PAT",
+        "pattern": "github_pat_[a-zA-Z0-9_]{22,}",
+        "title": "GitHub fine-grained PAT",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-GITLAB",
+      "title": "GitLab personal access token",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-GITLAB",
+        "pattern": "glpat-[a-zA-Z0-9\\-_]{20,}",
+        "title": "GitLab personal access token",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-GOOGLE",
+      "title": "Google API key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-GOOGLE",
+        "pattern": "AIza[0-9A-Za-z\\-_]{35}",
+        "title": "Google API key",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-SLACK-TOKEN",
+      "title": "Slack token",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-SLACK-TOKEN",
+        "pattern": "xox[bpors]-[0-9a-zA-Z\\-]{10,}",
+        "title": "Slack token",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-SLACK-WEBHOOK",
+      "title": "Slack webhook URL",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-SLACK-WEBHOOK",
+        "pattern": "https://hooks\\.slack\\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+",
+        "title": "Slack webhook URL",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [
+        "https://hooks.slack.com/services/T0000/B0000/abcdefg12345"
+      ],
+      "counterexamples": [
+        "https://hooks.slack.com/wrongpath",
+        "https://example.com"
+      ],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-DISCORD-WEBHOOK",
+      "title": "Discord webhook URL",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-DISCORD-WEBHOOK",
+        "pattern": "https://discord(?:app)?\\.com/api/webhooks/\\d+/[a-zA-Z0-9_\\-]+",
+        "title": "Discord webhook URL",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-PRIVKEY",
+      "title": "Private key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-PRIVKEY",
+        "pattern": "-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----",
+        "title": "Private key",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN OPENSSH PRIVATE KEY-----"
+      ],
+      "counterexamples": [
+        "-----BEGIN CERTIFICATE-----",
+        "BEGIN PRIVATE KEY without dashes"
+      ],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-JWT",
+      "title": "JWT token",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-JWT",
+        "pattern": "eyJ[A-Za-z0-9\\-_]{10,}\\.eyJ[A-Za-z0-9\\-_]{10,}\\.[A-Za-z0-9\\-_.+/=]+",
+        "title": "JWT token",
+        "severity": "MEDIUM",
+        "confidence": 0.7,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity MEDIUM.",
+      "examples": [
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature_here_xyz"
+      ],
+      "counterexamples": [
+        "eyJonly",
+        "not.a.jwt"
+      ],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-CONNSTR",
+      "title": "Connection string with credentials",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-CONNSTR",
+        "pattern": "(?:mongodb|postgres|mysql|redis|amqp)://[^:\\s]+:[^@\\s]+@",
+        "title": "Connection string with credentials",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-BEARER",
+      "title": "Bearer token in header",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-BEARER",
+        "pattern": "(?i)(?:authorization|bearer)\\s*[:=]\\s*Bearer\\s+[A-Za-z0-9\\-_.~+/]+=*",
+        "title": "Bearer token in header",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-SENDGRID",
+      "title": "SendGrid API key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-SENDGRID",
+        "pattern": "SG\\.[a-zA-Z0-9\\-_]{10,}\\.[a-zA-Z0-9\\-_]{10,}",
+        "title": "SendGrid API key",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-TWILIO",
+      "title": "Twilio API key",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-TWILIO",
+        "pattern": "SK[0-9a-fA-F]{32}",
+        "title": "Twilio API key",
+        "severity": "HIGH",
+        "confidence": 0.8,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-NPM-TOKEN",
+      "title": "npm access token",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-NPM-TOKEN",
+        "pattern": "npm_[a-zA-Z0-9]{36,}",
+        "title": "npm access token",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-PYPI-TOKEN",
+      "title": "PyPI API token",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-PYPI-TOKEN",
+        "pattern": "pypi-[A-Za-z0-9\\-_]{50,}",
+        "title": "PyPI API token",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-SEC-HEX-SECRET",
+      "title": "Hex-encoded secret in assignment",
+      "kind": "rule:secret",
+      "body": {
+        "id": "SEC-HEX-SECRET",
+        "pattern": "(?i)(?:secret(?:_key)?|api[_-]?key|access[_-]?token|auth[_-]?token)\\s*[=:]\\s*[\"'][a-f0-9]{32,}[\"']",
+        "title": "Hex-encoded secret in assignment",
+        "severity": "HIGH",
+        "confidence": 0.72,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (secrets.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/secrets.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-SSH-DIR",
+      "title": "SSH directory access",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-SSH-DIR",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.ssh/",
+        "title": "SSH directory access",
+        "severity": "HIGH",
+        "confidence": 0.95,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-SSH-KEY",
+      "title": "SSH private key file path",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-SSH-KEY",
+        "pattern": "(?i)(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])",
+        "title": "SSH private key file path",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-AWS-CREDS",
+      "title": "AWS credentials file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-AWS-CREDS",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/credentials",
+        "title": "AWS credentials file",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-AWS-CONFIG",
+      "title": "AWS config file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-AWS-CONFIG",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.aws/config",
+        "title": "AWS config file",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-KUBE",
+      "title": "Kubernetes config",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-KUBE",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.kube/config",
+        "title": "Kubernetes config",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-DOCKER",
+      "title": "Docker config",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-DOCKER",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.docker/config\\.json",
+        "title": "Docker config",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-GNUPG",
+      "title": "GPG keyring access",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-GNUPG",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.gnupg/",
+        "title": "GPG keyring access",
+        "severity": "HIGH",
+        "confidence": 0.95,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-NPMRC",
+      "title": "npm config (may contain tokens)",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-NPMRC",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.npmrc",
+        "title": "npm config (may contain tokens)",
+        "severity": "MEDIUM",
+        "confidence": 0.8,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-PYPIRC",
+      "title": "PyPI config (may contain tokens)",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-PYPIRC",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.pypirc",
+        "title": "PyPI config (may contain tokens)",
+        "severity": "MEDIUM",
+        "confidence": 0.8,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-GIT-CREDS",
+      "title": "Git credentials file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-GIT-CREDS",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.git-credentials",
+        "title": "Git credentials file",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-NETRC",
+      "title": "netrc credentials file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-NETRC",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.netrc",
+        "title": "netrc credentials file",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-ENV-FILE",
+      "title": "Environment file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-ENV-FILE",
+        "pattern": "(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?\\s*[\"'\\s,\\]})]*$|(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?[\"'\\s,\\]})]",
+        "title": "Environment file",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-ETC-PASSWD",
+      "title": "/etc/passwd access",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-ETC-PASSWD",
+        "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?pas{1,4}wd\\b|\\betc%2Fpas{1,4}wd\\b)",
+        "title": "/etc/passwd access",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "system-file"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "system-file"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-ETC-SHADOW",
+      "title": "/etc/shadow access",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-ETC-SHADOW",
+        "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?shadow\\b|\\betc%2Fshadow\\b)",
+        "title": "/etc/shadow access",
+        "severity": "CRITICAL",
+        "confidence": 0.95,
+        "tags": [
+          "system-file",
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "system-file",
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-ETC-SUDOERS",
+      "title": "/etc/sudoers access",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-ETC-SUDOERS",
+        "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?sudoers\\b|\\betc%2Fsudoers\\b)",
+        "title": "/etc/sudoers access",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "system-file",
+          "privilege"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "system-file",
+        "privilege"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-PROC-ENVIRON",
+      "title": "/proc environ access",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-PROC-ENVIRON",
+        "pattern": "/proc/(?:\\d+|self)/environ",
+        "title": "/proc environ access",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential"
+      ]
+    },
+    {
+      "id": "RECIPE-PATH-HISTORY",
+      "title": "Shell history file",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "PATH-HISTORY",
+        "pattern": "(?:~|\\$HOME|/home/\\w+|/root)/\\.(?:bash_history|zsh_history|python_history)",
+        "title": "Shell history file",
+        "severity": "MEDIUM",
+        "confidence": 0.8,
+        "tags": [
+          "credential",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "file-sensitive"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-AUTHORITY",
+      "title": "Authority claim in tool args",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-AUTHORITY",
+        "pattern": "(?i)(?:i am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)",
+        "title": "Authority claim in tool args",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-MAINTENANCE",
+      "title": "Fake mode activation",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-MAINTENANCE",
+        "pattern": "(?i)(?:maintenance|debug|admin|developer)\\s+mode\\s+(?:enabled|activated|on)",
+        "title": "Fake mode activation",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-SAFETY-OVERRIDE",
+      "title": "Safety override attempt",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-SAFETY-OVERRIDE",
+        "pattern": "(?i)(?:safety|guardrail|filter|restriction)\\s+(?:override|bypass|disable|turn\\s+off|remove)",
+        "title": "Safety override attempt",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-NEW-INSTRUCTIONS",
+      "title": "Fake instruction update",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-NEW-INSTRUCTIONS",
+        "pattern": "(?i)(?:your|new|updated)\\s+(?:instructions|system\\s+prompt|rules)\\s+(?:have\\s+changed|are|say)",
+        "title": "Fake instruction update",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-IGNORE-PREVIOUS",
+      "title": "Ignore previous instructions",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-IGNORE-PREVIOUS",
+        "pattern": "(?i)ignore\\s+(?:all\\s+)?(?:previous|prior|above|earlier)\\s+(?:instructions|rules|guidelines|context)",
+        "title": "Ignore previous instructions",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-DISREGARD",
+      "title": "Disregard instructions",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-DISREGARD",
+        "pattern": "(?i)disregard\\s+(?:all\\s+)?(?:previous|prior|above|your|earlier)\\s+(?:instructions|rules|guidelines|programming|context)",
+        "title": "Disregard instructions",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-JAILBREAK",
+      "title": "Jailbreak attempt",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-JAILBREAK",
+        "pattern": "(?i)(?:jailbreak|dan\\s+mode|do\\s+anything\\s+now|you\\s+are\\s+now\\s+(?:free|unfiltered))",
+        "title": "Jailbreak attempt",
+        "severity": "CRITICAL",
+        "confidence": 0.92,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-PRETEND",
+      "title": "Identity override attempt",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-PRETEND",
+        "pattern": "(?i)(?:pretend|act\\s+as(?:\\s+if)?)\\s+(?:you\\s+are|you're)\\s+(?:a\\s+|an\\s+)?(?:different|evil|unrestricted|unfiltered|uncensored)",
+        "title": "Identity override attempt",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-FORGET",
+      "title": "Forget instructions attack",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-FORGET",
+        "pattern": "(?i)forget\\s+(?:everything|all)\\s+(?:you\\s+)?(?:know|learned|were\\s+told)",
+        "title": "Forget instructions attack",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-NEW-INSTRUCT-PREFIX",
+      "title": "Direct instruction injection prefix",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-NEW-INSTRUCT-PREFIX",
+        "pattern": "(?i)new\\s+instructions?\\s*:\\s*",
+        "title": "Direct instruction injection prefix",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-OVERRIDE-INSTRUCT",
+      "title": "Override instructions",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-OVERRIDE-INSTRUCT",
+        "pattern": "(?i)override\\s+(?:previous\\s+)?(?:instructions?|rules?|guidelines?)",
+        "title": "Override instructions",
+        "severity": "CRITICAL",
+        "confidence": 0.88,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-FROM-NOW-ON",
+      "title": "Persistent behavior change",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-FROM-NOW-ON",
+        "pattern": "(?i)from\\s+now\\s+on[,\\s]+you\\s+(?:are|will|must|should)",
+        "title": "Persistent behavior change",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-SWITCH-MODE",
+      "title": "Mode/personality switch",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-SWITCH-MODE",
+        "pattern": "(?i)switch\\s+(?:to\\s+)?(?:a\\s+)?(?:different|new|unrestricted)\\s+(?:mode|personality|character|persona)",
+        "title": "Mode/personality switch",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-PROMPT-EXTRACT",
+      "title": "System prompt extraction attempt",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-PROMPT-EXTRACT",
+        "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:system\\s+|initial\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
+        "title": "System prompt extraction attempt",
+        "severity": "MEDIUM",
+        "confidence": 0.75,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-FICTIONAL",
+      "title": "Fictional framing / purpose laundering",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-FICTIONAL",
+        "pattern": "(?i)(?:hypothetically|in\\s+a\\s+fictional\\s+(?:scenario|world|story)|for\\s+(?:educational|research|academic)\\s+purposes?\\s+only|this\\s+is\\s+just\\s+a\\s+(?:test|experiment|hypothetical))",
+        "title": "Fictional framing / purpose laundering",
+        "severity": "MEDIUM",
+        "confidence": 0.7,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-NO-ETHICS",
+      "title": "Ethics removal attempt",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-NO-ETHICS",
+        "pattern": "(?i)no\\s+(?:ethical|moral)\\s+(?:guidelines?|restrictions?|limits?|constraints?)",
+        "title": "Ethics removal attempt",
+        "severity": "HIGH",
+        "confidence": 0.88,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-TOOL-MANIP",
+      "title": "Tool manipulation directive",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-TOOL-MANIP",
+        "pattern": "(?i)(?:use\\s+the\\s+\\w+\\s+tool\\s+to\\s+(?:delete|remove|destroy|wipe)|invoke\\s+(?:the\\s+)?\\w+\\s+(?:tool|function)\\s+without\\s+(?:asking|confirmation|approval)|automatically\\s+(?:execute|run|call)\\s+(?:all\\s+)?(?:tools?|functions?))",
+        "title": "Tool manipulation directive",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-PERSONA",
+      "title": "Malicious persona adoption",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-PERSONA",
+        "pattern": "(?i)(?:act\\s+as|you\\s+are\\s+now|roleplay\\s+as|simulate\\s+being|play\\s+the\\s+role\\s+of)\\s+(?:a\\s+|an\\s+)?(?:hacker|pentester|attacker|malware\\s+author|evil|unethical|criminal)",
+        "title": "Malicious persona adoption",
+        "severity": "HIGH",
+        "confidence": 0.88,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-DELIMITER",
+      "title": "Delimiter hijacking / prompt framing escape",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-DELIMITER",
+        "pattern": "(?i)(?:system\\s+override|end\\s+system\\s+prompt|<\\/system>|<\\|im_end\\|>|\\[INST\\]|\\[\\/INST\\]|<\\|endoftext\\|>|<<\\s*SYS\\s*>>)",
+        "title": "Delimiter hijacking / prompt framing escape",
+        "severity": "CRITICAL",
+        "confidence": 0.93,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-OUTPUT-CONSTRAINT",
+      "title": "Forced encoding to bypass filters",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-OUTPUT-CONSTRAINT",
+        "pattern": "(?i)(?:respond\\s+only\\s+in\\s+(?:hex|base64|rot13|binary|morse|unicode)|encode\\s+your\\s+(?:response|answer|output)\\s+in\\s+(?:base64|hex|rot13|url)|output\\s+as\\s+(?:hex|base64|rot13|url)\\s+encoded|(?:rot13|unicode\\s+escape|url\\s+(?:decode|encode))\\s+(?:the|your|this))",
+        "title": "Forced encoding to bypass filters",
+        "severity": "HIGH",
+        "confidence": 0.85,
+        "tags": [
+          "prompt-injection",
+          "obfuscation"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection",
+        "obfuscation"
+      ]
+    },
+    {
+      "id": "RECIPE-TRUST-PAYLOAD-SPLIT",
+      "title": "Payload splitting / forced compliance prefix",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "TRUST-PAYLOAD-SPLIT",
+        "pattern": "(?i)(?:start\\s+your\\s+(?:response|answer|output)\\s+with\\s+[\"'](?:Sure|Absolutely|Of\\s+course|Here\\s+is|I\\s+can\\s+help))|(?:begin\\s+by\\s+saying\\s+[\"'](?:Sure|Yes|Absolutely))",
+        "title": "Payload splitting / forced compliance prefix",
+        "severity": "HIGH",
+        "confidence": 0.87,
+        "tags": [
+          "prompt-injection"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection"
+      ]
+    },
+    {
+      "id": "RECIPE-STRIP-SYSTEM-SENDER",
+      "title": "System sender metadata injected by agent framework",
+      "kind": "pre_judge_strip",
+      "body": {
+        "id": "STRIP-SYSTEM-SENDER",
+        "pattern": "\\b(cli|system|bot|admin)\\b",
+        "context": "System sender metadata injected by agent framework",
+        "applies_to": [
+          "pii"
+        ]
+      },
+      "why": "Pre-judge strip shipped in the bundled strict pack. Applies to pii.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/suppressions.yaml",
+      "tags": [
+        "pre-judge",
+        "pii"
+      ]
+    },
+    {
+      "id": "RECIPE-STRIP-MESSAGING-BRIDGE-STATUS",
+      "title": "Messaging bridge status banners (WhatsApp/Telegram/Slack/Discord gateway connect/disconnect lines) embed channel IDs or phone numbers that are transport metadata, not user-provided PII",
+      "kind": "pre_judge_strip",
+      "body": {
+        "id": "STRIP-MESSAGING-BRIDGE-STATUS",
+        "pattern": "(?im)^[ \\t]*System:[ \\t]*\\[[^\\]\\n]+\\][ \\t]+[^\\n]*?\\b(?:connected|disconnected|reconnected|linked|unlinked|online|offline)\\b[^\\n]*$",
+        "context": "Messaging bridge status banners (WhatsApp/Telegram/Slack/Discord gateway connect/disconnect lines) embed channel IDs or phone numbers that are transport metadata, not user-provided PII",
+        "applies_to": [
+          "pii"
+        ]
+      },
+      "why": "Pre-judge strip shipped in the bundled strict pack. Applies to pii.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/suppressions.yaml",
+      "tags": [
+        "pre-judge",
+        "pii"
+      ]
+    },
+    {
+      "id": "RECIPE-SUPP-USERNAME-METADATA",
+      "title": "System metadata, not real username",
+      "kind": "finding_suppression",
+      "body": {
+        "id": "SUPP-USERNAME-METADATA",
+        "finding_pattern": "JUDGE-PII-USER",
+        "entity_pattern": "^(cli|system|bot|admin|root)$",
+        "reason": "System metadata, not real username"
+      },
+      "why": "Finding suppression shipped in the bundled strict pack.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/suppressions.yaml",
+      "tags": [
+        "finding"
+      ]
+    },
+    {
+      "id": "RECIPE-SUPP-EMAIL-CHATID",
+      "title": "Teams chatId format, not email address",
+      "kind": "finding_suppression",
+      "body": {
+        "id": "SUPP-EMAIL-CHATID",
+        "finding_pattern": "JUDGE-PII-EMAIL",
+        "entity_pattern": "^19:[a-f0-9\\-]+@unq\\.gbl\\.spaces$",
+        "reason": "Teams chatId format, not email address"
+      },
+      "why": "Finding suppression shipped in the bundled strict pack.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/suppressions.yaml",
+      "tags": [
+        "finding"
+      ]
+    },
+    {
+      "id": "RECIPE-SUPP-TOOL-COSMETIC-SHELL",
+      "title": "Suppress cosmetic shell commands (git status / log / diff)",
+      "kind": "tool_suppression",
+      "body": {
+        "tool_pattern": "^(shell|bash|sh)\\.execute$",
+        "suppress_findings": [
+          "JUDGE-INJ-DESTRUCTIVE"
+        ],
+        "reason": "Cosmetic shell commands (git status, ls, pwd) generate noise without security risk"
+      },
+      "why": "Tool suppressions let you silence findings on tools whose name matches a regex. Use this to drop noisy verdicts on read-only commands while keeping write/destructive commands surfaced.",
+      "examples": [
+        "shell.execute",
+        "bash.execute"
+      ],
+      "counterexamples": [
+        "shell.write",
+        "fs.unlink"
+      ],
+      "source": "docs-site/scripts/build-policy-assets.ts (illustrative)",
+      "tags": [
+        "tool",
+        "shell",
+        "noise-reduction"
+      ]
+    }
+  ]
+}

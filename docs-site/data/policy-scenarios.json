@@ -1,0 +1,208 @@
+{
+  "generated_at": "2026-05-11T18:28:58.506Z",
+  "scenarios": [
+    {
+      "id": "admission-critical-skill",
+      "title": "CRITICAL skill scan",
+      "domain": "admission",
+      "description": "A skill scanner found a CRITICAL finding. Default policy: reject install.",
+      "expectedVerdict": "rejected",
+      "input": {
+        "target_type": "skill",
+        "target_name": "malicious-helper",
+        "path": "/Users/op/.openclaw/skills/malicious-helper",
+        "block_list": [],
+        "allow_list": [],
+        "scan_result": {
+          "max_severity": "CRITICAL",
+          "total_findings": 3,
+          "scanner_name": "skill-scanner",
+          "findings": [
+            {
+              "severity": "CRITICAL",
+              "scanner": "skill-scanner",
+              "title": "Hardcoded credentials"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "admission-medium-mcp",
+      "title": "MEDIUM MCP scan",
+      "domain": "admission",
+      "description": "An MCP server scan found a MEDIUM finding. Default policy clears it; strict rejects.",
+      "expectedVerdict": "rejected",
+      "input": {
+        "target_type": "mcp",
+        "target_name": "context-server",
+        "path": "/Users/op/.config/mcp/context-server",
+        "block_list": [],
+        "allow_list": [],
+        "scan_result": {
+          "max_severity": "MEDIUM",
+          "total_findings": 1,
+          "scanner_name": "mcp-scanner",
+          "findings": [
+            {
+              "severity": "MEDIUM",
+              "scanner": "mcp-scanner",
+              "title": "Untrusted upstream"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "admission-allow-listed",
+      "title": "Allow-listed plugin",
+      "domain": "admission",
+      "description": "Plugin appears on the explicit allow list. Verdict: allowed regardless of scan.",
+      "expectedVerdict": "allowed",
+      "input": {
+        "target_type": "plugin",
+        "target_name": "defenseclaw",
+        "path": "/Users/op/.defenseclaw/plugins/defenseclaw",
+        "block_list": [],
+        "allow_list": [
+          {
+            "target_type": "plugin",
+            "target_name": "defenseclaw",
+            "reason": "first-party DefenseClaw plugin"
+          }
+        ]
+      }
+    },
+    {
+      "id": "admission-blocked",
+      "title": "Block-listed skill",
+      "domain": "admission",
+      "description": "Skill appears on the block list. Verdict: blocked regardless of allow list.",
+      "expectedVerdict": "blocked",
+      "input": {
+        "target_type": "skill",
+        "target_name": "banned-skill",
+        "path": "/Users/op/.openclaw/skills/banned-skill",
+        "block_list": [
+          {
+            "target_type": "skill",
+            "target_name": "banned-skill",
+            "reason": "previously compromised"
+          }
+        ],
+        "allow_list": []
+      }
+    },
+    {
+      "id": "guardrail-critical-prompt",
+      "title": "CRITICAL local guardrail finding (prompt)",
+      "domain": "guardrail",
+      "description": "Local scanner flagged the prompt with CRITICAL severity. Default action: block.",
+      "expectedVerdict": "block",
+      "input": {
+        "direction": "prompt",
+        "model": "gpt-4o-mini",
+        "mode": "action",
+        "scanner_mode": "local",
+        "local_result": {
+          "action": "block",
+          "severity": "CRITICAL",
+          "findings": [
+            "Hardcoded AWS key in prompt"
+          ],
+          "reason": "SEC-AWS-KEY pattern match"
+        },
+        "cisco_result": null,
+        "content_length": 1024
+      }
+    },
+    {
+      "id": "guardrail-medium-completion",
+      "title": "MEDIUM guardrail finding (completion)",
+      "domain": "guardrail",
+      "description": "MEDIUM finding on completion. Default policy: alert. Strict: block.",
+      "expectedVerdict": "alert",
+      "input": {
+        "direction": "completion",
+        "model": "gpt-4o-mini",
+        "mode": "action",
+        "scanner_mode": "local",
+        "local_result": {
+          "action": "alert",
+          "severity": "MEDIUM",
+          "findings": [
+            "Possible IP address leakage"
+          ],
+          "reason": "JUDGE-PII-IP match"
+        },
+        "cisco_result": null,
+        "content_length": 256
+      }
+    },
+    {
+      "id": "firewall-allowed-domain",
+      "title": "Allowed-domain HTTPS fetch",
+      "domain": "firewall",
+      "description": "Outbound to api.github.com:443. Allowed by default policy.",
+      "expectedVerdict": "allow",
+      "input": {
+        "target_type": "plugin",
+        "destination": "api.github.com",
+        "port": 443,
+        "protocol": "tcp"
+      }
+    },
+    {
+      "id": "firewall-imds",
+      "title": "AWS IMDS fetch attempt",
+      "domain": "firewall",
+      "description": "Outbound to 169.254.169.254. Blocked by default and strict policies.",
+      "expectedVerdict": "deny",
+      "input": {
+        "target_type": "plugin",
+        "destination": "169.254.169.254",
+        "port": 80,
+        "protocol": "tcp"
+      }
+    },
+    {
+      "id": "audit-recent-info",
+      "title": "Recent INFO event",
+      "domain": "audit",
+      "description": "5-day-old INFO event. Retained by default (within retention).",
+      "expectedVerdict": "true",
+      "input": {
+        "event_type": "scan",
+        "severity": "INFO",
+        "age_days": 5,
+        "export_targets": []
+      }
+    },
+    {
+      "id": "audit-old-critical",
+      "title": "Old CRITICAL event",
+      "domain": "audit",
+      "description": "500-day-old CRITICAL. Retained indefinitely under default policy.",
+      "expectedVerdict": "true",
+      "input": {
+        "event_type": "block",
+        "severity": "CRITICAL",
+        "age_days": 500,
+        "export_targets": [
+          "splunk"
+        ]
+      }
+    },
+    {
+      "id": "skill-actions-high",
+      "title": "HIGH severity skill verdict",
+      "domain": "skill_actions",
+      "description": "Skill flagged HIGH. Default policy: runtime=disable, file=quarantine, install=block.",
+      "expectedVerdict": "block",
+      "input": {
+        "severity": "HIGH",
+        "target_type": "skill"
+      }
+    }
+  ]
+}
