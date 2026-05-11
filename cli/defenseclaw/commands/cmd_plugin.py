@@ -417,6 +417,30 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
                     if app.logger:
                         app.logger.log_action("install-allowed", plugin_name, "reason=allow-listed-post-scan")
                 elif not take_action:
+                    # the legacy code printed
+                    # "no action taken" and STILL fell through to
+                    # `shutil.copytree(source_path, dest)`, so a
+                    # registry plugin with a CRITICAL scan finding was
+                    # installed verbatim because the operator didn't
+                    # pass --action. Without --action we now refuse to
+                    # install when the scanner reported HIGH/CRITICAL
+                    # findings, regardless of fallback action knobs.
+                    sev_norm = (sev or "").strip().upper()
+                    if sev_norm in {"HIGH", "CRITICAL"}:
+                        click.echo(
+                            f"error: refusing to install {plugin_name!r} — "
+                            f"{len(result.findings)} {sev_norm} findings detected and "
+                            f"--action was not passed. Run with --action to "
+                            f"enforce, or `defenseclaw plugin allow {plugin_name}` to "
+                            f"explicitly accept the risk.",
+                            err=True,
+                        )
+                        if app.logger:
+                            app.logger.log_action(
+                                "install-refused", plugin_name,
+                                f"{detail} reason=critical-without-action",
+                            )
+                        raise SystemExit(1)
                     click.echo(
                         f"[install] {len(result.findings)} {sev} findings in {plugin_name!r} "
                         f"(no action taken — pass --action to enforce)"

@@ -24,7 +24,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -33,6 +32,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/gitsafe"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -660,19 +660,84 @@ func validateGitCwd(cwd string) (string, error) {
 
 // safeGitEnv returns environment variables that prevent git from executing
 // attacker-controlled config hooks (core.fsmonitor, core.hooksPath, etc.)
-// by disabling system/global config and pointing HOME to a safe empty dir.
+// by disabling system/global config and overriding the most dangerous
+// repo-local config knobs via GIT_CONFIG_COUNT/KEY/VALUE.
+//
+// Repository-local `.git/config` cannot be fully suppressed by git, but
+// GIT_CONFIG_KEY_<n>/VALUE_<n> entries override repo-local values, so a
+// hostile workspace setting core.fsmonitor / core.hooksPath /
+// protocol.<x>.allow=user becomes a no-op for the hooks/diff helpers we
+// run. GIT_CONFIG_PARAMETERS is unset so a poisoned parent env cannot
+// smuggle additional config in.
+//
+// This helper is retained for defense-in-depth and unit test coverage;
+// the actual git subprocesses now go through internal/gitsafe.Command
+// (see runGitList below) which provides a stricter, centralised wrapper
+// that also clears HOME / XDG_CONFIG_HOME and injects -c flags directly.
 func safeGitEnv() []string {
-	return append(os.Environ(),
+	// (key, value) pairs that neutralise the most dangerous repo-
+	// local config knobs. Note: we cannot fully prevent git from
+	// reading `.git/config`, but per `gitconfig(5)`,
+	// GIT_CONFIG_KEY_<n>/VALUE_<n> entries override repo-local
+	// values so any malicious setting becomes a no-op for the
+	// hooks/diff helpers we run.
+	overrides := []string{
+		"core.fsmonitor", "false",
+		"core.fsmonitorhookversion", "1",
+		"core.hooksPath", "/dev/null",
+		"core.sshCommand", "false",
+		"core.gitProxy", "false",
+		"core.editor", "/bin/false",
+		"core.pager", "cat",
+		"diff.external", "false",
+		"diff.tool", "false",
+		"protocol.allow", "never",
+		"protocol.file.allow", "never",
+		"protocol.ext.allow", "never",
+		"uploadpack.allowFilter", "false",
+		"uploadpack.allowAnySHA1InWant", "false",
+		"safe.directory", "*",
+	}
+	env := append(os.Environ(),
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"HOME="+os.TempDir(),
+		// Disable any pre-existing GIT_CONFIG_PARAMETERS override
+		// inherited from a parent process.
+		"GIT_CONFIG_PARAMETERS=",
 	)
+	pairs := 0
+	for i := 0; i+1 < len(overrides); i += 2 {
+		env = append(env,
+			fmt.Sprintf("GIT_CONFIG_KEY_%d=%s", pairs, overrides[i]),
+			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", pairs, overrides[i+1]),
+		)
+		pairs++
+	}
+	env = append(env, fmt.Sprintf("GIT_CONFIG_COUNT=%d", pairs))
+	return env
 }
 
+// runGitList executes a closed-set git read command in cwd via the
+// gitsafe wrapper, which:
+//
+//   - clears system AND global git config (GIT_CONFIG_NOSYSTEM=1,
+//     GIT_CONFIG_GLOBAL=/dev/null, GIT_CONFIG_COUNT=0);
+//   - points HOME and XDG_CONFIG_HOME at an empty per-process tempdir
+//     so $HOME/.gitconfig and $XDG_CONFIG_HOME/git/config cannot apply;
+//   - drops every inherited GIT_* / XDG_* env var;
+//   - injects -c core.fsmonitor=false, -c core.hooksPath=/dev/null,
+//     -c core.useReplaceRefs=false, --no-optional-locks, --no-ext-diff
+//     so a malicious .git/config inside the worktree cannot trigger
+//     external helper execution during diff / ls-files / rev-parse.
+//
+// The ctx-bounded subprocess output is still capped via runGitListMaxBytes
+// to keep a hostile monorepo from OOMing the sidecar.
 func runGitList(ctx context.Context, cwd string, args ...string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = cwd
-	cmd.Env = safeGitEnv()
+	cmd, err := gitsafe.Command(ctx, cwd, args...)
+	if err != nil {
+		return nil, fmt.Errorf("git %v in %s: %w", args, cwd, err)
+	}
 
 	// Bound stdout via io.LimitReader so a monorepo with many
 	// millions of tracked files (or a hostile worktree manufactured
@@ -814,9 +879,10 @@ func gitRootForCWD(cwd string) string {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "rev-parse", "--show-toplevel")
-	cmd.Dir = safeCwd
-	cmd.Env = safeGitEnv()
+	cmd, err := gitsafe.Command(ctx, safeCwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return ""
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

@@ -152,9 +152,18 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("openclaw subprocess enforcement: %w", err)
 	}
 
-	// Surface 3: Hook script for tool inspection
+	// Surface 3: Hook script for tool inspection.
+	//
+	// hardening (S2.5): use the token-aware hook writer so
+	// the companion .token file (sourced by the generic inspect
+	// templates) contains the gateway bearer token. Previously this
+	// path called the back-compat WriteHookScript shim with an
+	// implicit empty token; the API server's tokenAuth middleware
+	// then 401'd every inspect request, the templates' fail-open
+	// kicked in, and OpenClaw tool calls slipped past inspection.
+	// See finding "OpenClaw installs tokenless inspection hooks".
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScript(hookDir, opts.APIAddr); err != nil {
+	if err := WriteHookScriptsWithToken(hookDir, opts.APIAddr, opts.APIToken); err != nil {
 		return fmt.Errorf("openclaw hook script: %w", err)
 	}
 

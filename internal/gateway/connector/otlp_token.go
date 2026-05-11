@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // OTLPPathTokenScope identifies a connector-bound OTLP token used in
@@ -129,14 +130,43 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 		return "", err
 	}
 
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		return "", fmt.Errorf("create OTLP path-token dir: %w", err)
+	}
+
+	// ("Cross-process OTLP token minting can
+	// desynchronize the returned token from the persisted token"):
+	// the previous implementation serialized only goroutines in the
+	// current process via otlpTokenMu and then wrote through a
+	// fixed shared temp path of the form `<tokenPath>.tmp`. Two
+	// setup or sidecar processes minting the same scoped token
+	// concurrently could clobber each other's `.tmp` file, race
+	// the rename, and return token A while the file ended up
+	// containing token B (rejecting later loopback OTLP requests).
+	//
+	// We now (1) take a cross-process file lock against
+	// `<tokenPath>.lock`, (2) re-check the existing token under
+	// the lock, (3) use os.CreateTemp inside the token directory
+	// so each minting process owns its own unique temp file,
+	// (4) fsync before rename for durability, and (5) re-read the
+	// final file after rename so the returned value matches the
+	// post-rename on-disk contents even if a racing process had
+	// already minted a different token.
+	lockPath := tokenPath + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("open OTLP path-token lock: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return "", fmt.Errorf("acquire OTLP path-token lock: %w", err)
+	}
+	defer func() { _ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) }()
+
 	if existing, err := readTrimmedFile(tokenPath); err == nil && existing != "" {
 		return existing, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("read OTLP path-token %s: %w", tokenPath, err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
-		return "", fmt.Errorf("create OTLP path-token dir: %w", err)
 	}
 
 	buf := make([]byte, otlpTokenLen)
@@ -145,19 +175,40 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	}
 	tok := hex.EncodeToString(buf)
 
-	tmp := tokenPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
-		return "", fmt.Errorf("write OTLP path-token: %w", err)
+	tmpFile, err := os.CreateTemp(filepath.Dir(tokenPath), filepath.Base(tokenPath)+".*.tmp")
+	if err != nil {
+		return "", fmt.Errorf("create OTLP path-token temp: %w", err)
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
+	tmpName := tmpFile.Name()
+	cleanupTmp := func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpName)
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		cleanupTmp()
 		return "", fmt.Errorf("chmod OTLP path-token: %w", err)
 	}
-	if err := os.Rename(tmp, tokenPath); err != nil {
-		_ = os.Remove(tmp)
+	if _, err := tmpFile.Write([]byte(tok + "\n")); err != nil {
+		cleanupTmp()
+		return "", fmt.Errorf("write OTLP path-token: %w", err)
+	}
+	if err := tmpFile.Sync(); err != nil {
+		cleanupTmp()
+		return "", fmt.Errorf("fsync OTLP path-token: %w", err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return "", fmt.Errorf("close OTLP path-token temp: %w", err)
+	}
+	if err := os.Rename(tmpName, tokenPath); err != nil {
+		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("rename OTLP path-token: %w", err)
 	}
-	return tok, nil
+	final, err := readTrimmedFile(tokenPath)
+	if err != nil || final == "" {
+		return "", fmt.Errorf("verify OTLP path-token post-rename: %w", err)
+	}
+	return final, nil
 }
 
 // LoadOTLPPathToken reads the token for *scope* from disk if present.

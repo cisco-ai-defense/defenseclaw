@@ -529,28 +529,45 @@ func readMCPServersClaudeCode() ([]MCPServerEntry, error) {
 }
 
 func readMCPServersCodex() ([]MCPServerEntry, error) {
-	// Codex registers MCP servers in two places — the global
+	// Codex registers MCP servers in two places -- the global
 	// `~/.codex/config.toml` `[mcp_servers]` table and the
 	// project-local `./.mcp.json` (a Codex SDK / Claude Code
 	// convention). Pre-S5.x we only read `./.mcp.json`, which
 	// silently dropped every globally-registered server. We now
 	// read both, with the project-local file taking precedence so
-	// per-project overrides win — matching how Codex itself layers
+	// per-project overrides win -- matching how Codex itself layers
 	// them at runtime.
+	//
+	// Precedence is enforced via APPEND ORDER + first-wins
+	// `dedupMCPEntries`: project-local entries are appended FIRST
+	// so that, when a project and global config both declare the
+	// same server name, the project-local command/URL is the one
+	// retained for inventory, watcher, snapshot, and admission.
+	// Reversing this order regresses finding "Codex
+	// project-local MCP overrides are shadowed by global entries":
+	// a malicious user-global config that re-uses a benign
+	// project-local server name would otherwise hide the active
+	// command from DefenseClaw scans even though Codex itself
+	// invokes the project-local override at runtime.
 	home, _ := os.UserHomeDir()
 	cwd, _ := os.Getwd()
 
 	var entries []MCPServerEntry
+
+	// 1. Project-local first (highest precedence).
+	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
+	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
+		entries = append(entries, e...)
+	}
+
+	// 2. Global second (filled in only for names not already taken).
 	if home != "" {
 		tomlPath := filepath.Join(home, ".codex", "config.toml")
 		if e, err := readMCPFromCodexConfigTOML(tomlPath); err == nil {
 			entries = append(entries, e...)
 		}
 	}
-	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
-	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
-		entries = append(entries, e...)
-	}
+
 	return dedupMCPEntries(entries), nil
 }
 

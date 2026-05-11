@@ -169,4 +169,108 @@ describe("loadSidecarConfig", () => {
     expect(cfg.host).toBe("127.0.0.1");
     expect(cfg.apiPort).toBe(18970);
   });
+
+  // -------------------------------------------------------------------
+  // S3.HIGH_BUG ("Embedded OpenClaw plugin misses the canonical
+  // first-boot token"): the embedded extension's token resolver MUST
+  // accept the canonical DEFENSECLAW_GATEWAY_TOKEN written by the Go
+  // sidecar's first-boot bootstrap into ~/.defenseclaw/.env, even when
+  // the operator never exported the value into the Node process. Before
+  // the fix the dotenv fallback only looked for OPENCLAW_GATEWAY_TOKEN
+  // and the OpenClaw process had no token, which silently 401'd every
+  // /api/v1/inspect/* request and let tool calls bypass inspection.
+  // -------------------------------------------------------------------
+  describe("token resolution (first-boot regression)", () => {
+    const ENV_KEYS = [
+      "DEFENSECLAW_GATEWAY_TOKEN",
+      "OPENCLAW_GATEWAY_TOKEN",
+    ] as const;
+    const savedEnv: Record<string, string | undefined> = {};
+
+    beforeEach(() => {
+      for (const k of ENV_KEYS) {
+        savedEnv[k] = process.env[k];
+        delete process.env[k];
+      }
+    });
+
+    afterEach(() => {
+      for (const k of ENV_KEYS) {
+        if (savedEnv[k] === undefined) {
+          delete process.env[k];
+        } else {
+          process.env[k] = savedEnv[k];
+        }
+      }
+    });
+
+    function mockEnvOnlyDotenv(dotenv: string) {
+      // Two readFileSync sites need to be served deterministically:
+      //   1. config.yaml -> return empty so all token resolution falls
+      //      back to env / dotenv lookups (the canonical-first-boot
+      //      scenario from the report).
+      //   2. ~/.defenseclaw/.env -> return the supplied dotenv blob.
+      mockReadFileSync.mockImplementation((path) => {
+        const p = String(path);
+        if (p.endsWith("config.yaml")) {
+          return "";
+        }
+        if (p.endsWith(".env")) {
+          return dotenv;
+        }
+        throw new Error("ENOENT: " + p);
+      });
+    }
+
+    it("reads DEFENSECLAW_GATEWAY_TOKEN from ~/.defenseclaw/.env when env is empty", () => {
+      mockEnvOnlyDotenv(
+        "DEFENSECLAW_GATEWAY_TOKEN=canonical-from-firstboot\n"
+      );
+      const cfg = loadSidecarConfig();
+      expect(cfg.token).toBe("canonical-from-firstboot");
+    });
+
+    it("falls back to legacy OPENCLAW_GATEWAY_TOKEN in dotenv for old installs", () => {
+      mockEnvOnlyDotenv("OPENCLAW_GATEWAY_TOKEN=legacy-only-token\n");
+      const cfg = loadSidecarConfig();
+      expect(cfg.token).toBe("legacy-only-token");
+    });
+
+    it("prefers DEFENSECLAW_GATEWAY_TOKEN over the legacy name when both are present", () => {
+      mockEnvOnlyDotenv(
+        [
+          "DEFENSECLAW_GATEWAY_TOKEN=new-canonical",
+          "OPENCLAW_GATEWAY_TOKEN=legacy-shadow",
+          "",
+        ].join("\n")
+      );
+      const cfg = loadSidecarConfig();
+      expect(cfg.token).toBe("new-canonical");
+    });
+
+    it("returns empty token when neither env nor dotenv has the value", () => {
+      mockReadFileSync.mockImplementation((path) => {
+        const p = String(path);
+        if (p.endsWith("config.yaml")) return "";
+        throw new Error("ENOENT: " + p);
+      });
+      const cfg = loadSidecarConfig();
+      expect(cfg.token).toBe("");
+    });
+
+    it("respects gateway.token_env override and reads that name from dotenv", () => {
+      mockReadFileSync.mockImplementation((path) => {
+        const p = String(path);
+        if (p.endsWith("config.yaml")) {
+          return "gateway:\n  token_env: CUSTOM_TOKEN_ENV\n";
+        }
+        if (p.endsWith(".env")) {
+          return "CUSTOM_TOKEN_ENV=via-token-env-override\n";
+        }
+        throw new Error("ENOENT: " + p);
+      });
+      const cfg = loadSidecarConfig();
+      expect(cfg.token).toBe("via-token-env-override");
+    });
+  });
 });

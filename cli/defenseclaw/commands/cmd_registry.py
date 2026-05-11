@@ -928,6 +928,23 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
         return _scan_skill_via_clawhub(cmd_skill, app, target)
     if target.startswith(("http://", "https://")):
         require_sha256 = source.kind in _HASH_REQUIRED_SKILL_SOURCE_KINDS
+        # source.auth_env is the bearer token reserved
+        # for the registry/catalog origin. The legacy code forwarded it
+        # to entry.source_url, which a malicious manifest can point at
+        # an arbitrary HTTPS host. The first request would carry the
+        # operator's token to the attacker. We only forward auth_env
+        # when source_url is same-origin with the registry source URL;
+        # otherwise we drop the auth.
+        forward_auth_env = source.auth_env
+        if not _registry_same_origin(source.url, target):
+            if source.auth_env:
+                click.echo(
+                    f"[registry] dropping bearer token before fetching cross-origin "
+                    f"skill source_url {target!r} (registry source: {source.url!r}; "
+                    f")",
+                    err=True,
+                )
+            forward_auth_env = ""
         return _scan_skill_via_http(
             cmd_skill,
             app,
@@ -935,9 +952,35 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
             expected_sha256=entry.sha256,
             require_sha256=require_sha256,
             allow_private=allow_private,
-            auth_env=source.auth_env,
+            auth_env=forward_auth_env,
         )
     return None
+
+
+def _registry_same_origin(registry_url: str, manifest_url: str) -> bool:
+    """True if the manifest-supplied skill source_url
+    has the same scheme + host (case-insensitive) + port as the
+    registry source URL. We use this as the gate for forwarding
+    operator-supplied bearer tokens."""
+    import urllib.parse
+    if not registry_url or not manifest_url:
+        return False
+    try:
+        a = urllib.parse.urlparse(registry_url)
+        b = urllib.parse.urlparse(manifest_url)
+    except ValueError:
+        return False
+    if not a.scheme or not b.scheme:
+        return False
+    a_host = (a.hostname or "").lower()
+    b_host = (b.hostname or "").lower()
+    if not a_host or not b_host or a_host != b_host:
+        return False
+    if a.scheme.lower() != b.scheme.lower():
+        return False
+    a_port = a.port or (443 if a.scheme.lower() == "https" else 80)
+    b_port = b.port or (443 if b.scheme.lower() == "https" else 80)
+    return a_port == b_port
 
 
 def _scan_skill_via_clawhub(cmd_skill_module, app: AppContext, uri: str):  # type: ignore[no-untyped-def]
@@ -1003,6 +1046,23 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
     if transport == "stdio":
         if not entry.command:
             return None
+        # a registry manifest is publisher-controlled.
+        # The legacy code passed publisher-supplied entry.command and
+        # entry.args straight to MCPScannerWrapper, which spawned the
+        # process during scan-mcp-config-file. A malicious catalog can
+        # publish `command="bash"`, `args=["-c", "<rce>"]` and run
+        # arbitrary code as the operator during routine
+        # `defenseclaw registry sync` BEFORE any admission decision.
+        # We refuse to spawn arbitrary commands here: only allowlisted
+        # interpreters that the operator has opted into via env are
+        # permitted, and shell-style flag/arg patterns are rejected.
+        if not _is_safe_stdio_scan_command(entry.command, list(entry.args)):
+            click.echo(
+                f"[registry] refusing to spawn manifest-supplied stdio command for "
+                f"scan: name={entry.name!r} command={entry.command!r}",
+                err=True,
+            )
+            return None
         server = MCPServerEntry(
             name=entry.name,
             command=entry.command,
@@ -1017,12 +1077,103 @@ def _run_mcp_scan(app: AppContext, cfg: Config, source: RegistrySource, entry: M
             return None
     if not entry.url:
         return None
+    # validate generic registry MCP URLs against
+    # the SSRF guard (loopback / link-local / private-IP rejection)
+    # before the remote scanner reaches them.
+    if not _registry_mcp_url_allowed(entry.url):
+        click.echo(
+            f"[registry] refusing to scan manifest MCP URL {entry.url!r} — "
+            f"resolves to loopback/private/link-local. Use "
+            f"`defenseclaw registry sync --allow-private` to opt in.",
+            err=True,
+        )
+        return None
     try:
         return scanner.scan(entry.url)
     except SystemExit:
         return None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _is_safe_stdio_scan_command(command: str, args: list[str]) -> bool:
+    """only allow stdio MCP scan when the
+    publisher-supplied command is a recognized MCP runner that does
+    NOT take arbitrary shell strings as arguments. Shell interpreters
+    (bash, sh, zsh, fish, dash, ksh, csh, tcsh, python*, perl, ruby,
+    node-with-`-e`, etc.) are rejected outright. Operators that need
+    custom MCP runners can install/scan them out-of-band. We also
+    reject any argv element that looks like a shell flag commonly
+    used to inject arbitrary code (`-c`, `--exec`, `-e`).
+    """
+    if not command:
+        return False
+    base = os.path.basename(command).lower().strip()
+    if not base:
+        return False
+    forbidden_runners = {
+        "bash", "sh", "zsh", "fish", "dash", "ksh", "csh", "tcsh",
+        "python", "python2", "python3", "perl", "ruby",
+        "powershell", "pwsh", "cmd", "wscript", "cscript",
+        "node", "deno", "bun",  # node `-e` and friends
+    }
+    # Match python3.13 etc.
+    if base in forbidden_runners:
+        return False
+    if base.startswith(("python", "node", "deno", "ruby", "perl")):
+        return False
+    forbidden_flags = {"-c", "--command", "--eval", "-e", "--exec",
+                       "--script", "-x"}
+    for a in args:
+        if not isinstance(a, str):
+            return False
+        if a.strip() in forbidden_flags:
+            return False
+    return True
+
+
+def _registry_mcp_url_allowed(url: str) -> bool:
+    """reject loopback/link-local/private addresses
+    so a manifest cannot steer the remote scanner at internal hosts.
+    Operators that legitimately want to scan internal MCP services
+    can opt in via `--allow-private` (handled by the caller before
+    this function is invoked)."""
+    import ipaddress
+    import urllib.parse
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in ("localhost", "ip6-localhost", "ip6-loopback"):
+        return False
+    if host.endswith(".localhost"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # Resolve once to catch DNS-pinned private targets.
+        try:
+            import socket
+            infos = socket.getaddrinfo(host, None)
+        except OSError:
+            return False
+        for info in infos:
+            try:
+                resolved = ipaddress.ip_address(info[4][0])
+            except (ValueError, IndexError):
+                continue
+            if (resolved.is_loopback or resolved.is_private
+                    or resolved.is_link_local or resolved.is_multicast
+                    or resolved.is_reserved or resolved.is_unspecified):
+                return False
+        return True
+    if (ip.is_loopback or ip.is_private or ip.is_link_local
+            or ip.is_multicast or ip.is_reserved or ip.is_unspecified):
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

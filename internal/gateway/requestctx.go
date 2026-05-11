@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -302,21 +303,42 @@ func TruncateUserAgent256(ua string) string {
 	return ua[:maxUserAgentLogLength]
 }
 
+// trustedProxyEnvVar names the env var holding a comma-separated list
+// of CIDRs whose immediate-peer X-Forwarded-For headers we trust. When
+// unset (the default), forwarded headers are ignored entirely and the
+// socket peer address is the only authoritative client IP.
+const trustedProxyEnvVar = "DEFENSECLAW_TRUSTED_PROXY_CIDRS"
+
 // ClientIPRedacted returns a privacy-preserving client address for logs
 // (IPv4 /24, IPv6 prefix simplified to first 4 hextets + "::/48" style stub).
+//
+// ("Authentication failure logs trust spoofable
+// X-Forwarded-For"): the legacy implementation always preferred the
+// first “X-Forwarded-For“ value over the socket “RemoteAddr“, and
+// returned the raw header bytes when they failed to parse as an IP.
+// Any unauthenticated caller could therefore choose the
+// “client_ip“ recorded for failed-auth alerting and forensics.
+//
+// We now only honour “X-Forwarded-For“ when the immediate peer
+// (“r.RemoteAddr“) is inside an explicitly configured trusted-proxy
+// CIDR list. The default is empty (no trusted proxies), which is the
+// safest behaviour for sidecars that run on loopback only. Operators
+// fronting the sidecar with a reverse proxy can opt in via the
+// “DEFENSECLAW_TRUSTED_PROXY_CIDRS“ env var.
 func ClientIPRedacted(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
-	ipStr := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if ipStr != "" {
-		ipStr = strings.TrimSpace(strings.Split(ipStr, ",")[0])
-	} else {
-		host, _, err := net.SplitHostPort(r.RemoteAddr)
-		if err != nil {
-			ipStr = r.RemoteAddr
-		} else {
-			ipStr = host
+	ipStr := socketClientIP(r)
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if isTrustedProxyPeer(ipStr) {
+			candidate := strings.TrimSpace(strings.Split(forwarded, ",")[0])
+			if parsed := net.ParseIP(candidate); parsed != nil {
+				ipStr = candidate
+			}
+			// Unparseable forwarded values are dropped on purpose:
+			// the legacy code returned them verbatim, which let an
+			// attacker choose log strings.
 		}
 	}
 	ip := net.ParseIP(ipStr)
@@ -333,6 +355,43 @@ func ClientIPRedacted(r *http.Request) string {
 		return strings.Join(parts[:4], ":") + ":…/48"
 	}
 	return s
+}
+
+func socketClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+func isTrustedProxyPeer(ipStr string) bool {
+	cfg := strings.TrimSpace(os.Getenv(trustedProxyEnvVar))
+	if cfg == "" {
+		return false
+	}
+	peer := net.ParseIP(ipStr)
+	if peer == nil {
+		return false
+	}
+	for _, cidr := range strings.Split(cfg, ",") {
+		c := strings.TrimSpace(cidr)
+		if c == "" {
+			continue
+		}
+		_, network, err := net.ParseCIDR(c)
+		if err != nil {
+			// A bare IP is also acceptable shorthand for /32 or /128.
+			if direct := net.ParseIP(c); direct != nil && direct.Equal(peer) {
+				return true
+			}
+			continue
+		}
+		if network.Contains(peer) {
+			return true
+		}
+	}
+	return false
 }
 
 // otelHTTPServerMiddleware creates a server span for each request and

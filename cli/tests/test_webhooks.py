@@ -390,6 +390,77 @@ class SSRFValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_webhook_url("http://[::1]/hook")
 
+    # --- RFC 6598 CGNAT parity with the Go-side dial guard --------------
+    # Python's ipaddress.is_private predates RFC 6598 and does not cover
+    # 100.64.0.0/10. The Go-side webhook dispatcher
+    # (internal/gateway/webhook.go::isPrivateIP -> isUnsafeIP) refuses
+    # CGNAT unless DEFENSECLAW_ALLOW_CGNAT=1 is set. These tests pin the
+    # Python validator to the same contract so an "I'll just set up my
+    # webhook on a Tailscale endpoint" mistake fails fast at write-time
+    # instead of surfacing as an opaque ssrf-dial error at delivery time.
+
+    def test_rejects_cgnat_ipv4_by_default(self):
+        env = os.environ.copy()
+        env.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+        with patch.dict(os.environ, env, clear=True):
+            for bad in (
+                "http://100.64.0.0/hook",        # range lower bound
+                "http://100.64.0.5:8080/hook",   # typical Tailscale endpoint
+                "http://100.127.255.255/hook",   # range upper bound
+            ):
+                with self.subTest(url=bad):
+                    with self.assertRaises(ValueError) as cm:
+                        validate_webhook_url(bad)
+                    self.assertIn("CGNAT", str(cm.exception))
+
+    def test_allows_cgnat_with_env_optin(self):
+        with patch.dict(
+            os.environ, {"DEFENSECLAW_ALLOW_CGNAT": "1"}, clear=False,
+        ):
+            os.environ.pop("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", None)
+            validate_webhook_url("http://100.64.0.5:8080/hook")
+            validate_webhook_url("http://100.127.255.255/hook")
+
+    def test_cgnat_optin_does_not_widen_private_ranges(self):
+        # Opting into CGNAT must not silently allow RFC 1918 or the
+        # ECS metadata endpoint.
+        with patch.dict(
+            os.environ, {"DEFENSECLAW_ALLOW_CGNAT": "1"}, clear=False,
+        ):
+            os.environ.pop("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", None)
+            for still_bad in (
+                "http://10.0.0.1/hook",
+                "http://192.168.1.1/hook",
+                "http://169.254.169.254/latest",
+                "http://169.254.170.2/v2/credentials",
+                "http://[fd00::1]/hook",
+            ):
+                with self.subTest(url=still_bad):
+                    with self.assertRaises(ValueError):
+                        validate_webhook_url(still_bad)
+
+    def test_cgnat_just_outside_range_is_public(self):
+        # 100.63.255.255 and 100.128.0.0 bracket the 100.64.0.0/10 block
+        # on either side; both must be accepted as public.
+        env = os.environ.copy()
+        env.pop("DEFENSECLAW_ALLOW_CGNAT", None)
+        env.pop("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", None)
+        with patch.dict(os.environ, env, clear=True):
+            validate_webhook_url("http://100.63.255.255/hook")
+            validate_webhook_url("http://100.128.0.0/hook")
+
+    def test_cgnat_optin_only_for_literal_one(self):
+        # Mirror cgnatAllowed() in netguard.go: only "1" opts in. A
+        # typo'd "true" / "yes" / "0" / " 1 " must still block CGNAT.
+        for bad_optin in ("true", "yes", "0", "false", " 1 ", "True"):
+            with patch.dict(
+                os.environ, {"DEFENSECLAW_ALLOW_CGNAT": bad_optin}, clear=False,
+            ):
+                os.environ.pop("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", None)
+                with self.subTest(env_value=bad_optin):
+                    with self.assertRaises(ValueError):
+                        validate_webhook_url("http://100.64.0.5/hook")
+
 
 # ---------------------------------------------------------------------------
 # Formatter parity (structural + compactness + HMAC)

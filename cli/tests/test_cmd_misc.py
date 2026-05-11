@@ -827,7 +827,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
         self.assertIn("kind: splunk_hec", cfg)
         self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
-        self.assertIn("verify_tls: true", cfg)
+        # production preset relies on the Go sink's secure
+        # default (TLS verification ON) and must not emit any
+        # insecure_skip_verify opt-out. The legacy verify_tls flag is
+        # likewise silent — operators with a real cert do not need
+        # any per-sink override.
+        self.assertNotIn("insecure_skip_verify", cfg)
+        self.assertNotIn("verify_tls", cfg)
 
     def test_setup_splunk_enterprise_skip_test(self):
         from defenseclaw.commands.cmd_setup import setup

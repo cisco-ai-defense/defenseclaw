@@ -95,3 +95,13 @@ output/playwright/
 # between personal workflow notes and the project's canonical docs.
 AGENTS.md
 CLAUDE.md
+
+# Local security-audit tool output directories. These are
+# regenerated per run and never checked in.
+.deepsec/
+
+# Local smoke-test scratch directory used by manual REPL/curl runs
+# against an isolated DEFENSECLAW_HOME. Holds bin/, home/, logs/, and
+# operator-authored sweep-*.sh helpers — none of these are project
+# source.
+.smoke/

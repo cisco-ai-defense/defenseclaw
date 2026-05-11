@@ -15,7 +15,24 @@ concurrency:
 jobs:
   core:
     name: Core E2E
-    if: ${{ github.event_name != 'schedule' }}
+    # Self-hosted runner safety: this job has access to
+    # OPENCLAW_GATEWAY_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY,
+    # BIFROST_API_KEY, and SPLUNK_ACCESS_TOKEN via the env block
+    # below, plus persistent shell access on a long-lived ARM64
+    # runner. Fork PRs are NOT allowed to dispatch this job —
+    # attacker-controlled workflow code in a fork PR would otherwise
+    # exfiltrate every secret and pivot through the runner.
+    #
+    # Only run on push, schedule, workflow_dispatch, or PRs whose
+    # head ref lives on this repo (i.e. internal PRs). The
+    # e2e-required gate below treats a skipped core run on a fork PR
+    # as a hard failure unless an authorized maintainer re-runs the
+    # workflow from the merge commit. External contributors instead
+    # rely on the GitHub-hosted shadow job further down the file.
+    if: >-
+      ${{ github.event_name != 'schedule'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, ARM64, e2e]
     timeout-minutes: 30
     env:
@@ -49,7 +66,12 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      # Action refs are SHA-pinned (with the human tag in a trailing
+      # comment) so an attacker cannot retroactively rewrite a
+      # mutable major-version tag to inject code into a self-hosted
+      # runner that holds production secrets. Update by replacing
+      # the SHA after auditing the new tag.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Clean DefenseClaw
         run: |
@@ -456,7 +478,7 @@ jobs:
 
       - name: Upload DefenseClaw logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: defenseclaw-logs-core
           path: /tmp/defenseclaw-logs-core/**
@@ -548,7 +570,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Clean DefenseClaw
         run: |
@@ -1229,7 +1251,7 @@ jobs:
 
       - name: Upload DefenseClaw logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
           name: defenseclaw-logs-full-live
           path: /tmp/defenseclaw-logs-full-live/**
@@ -1296,8 +1318,8 @@ jobs:
     env:
       DEFENSECLAW_E2E_CONNECTOR: ${{ matrix.connector }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: 'go.mod'
           cache: true

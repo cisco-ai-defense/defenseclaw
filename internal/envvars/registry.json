@@ -1,0 +1,2134 @@
+{
+  "$schema_version": "1",
+  "$description": "DefenseClaw environment-variable registry. Single source of truth for every DEFENSECLAW_* env var consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. Auto-generated docs (docs/ENV-VARS.md, docs-site/content/docs/reference/env-vars.mdx) are rendered from this file.",
+  "$categories": {
+    "security_opt_out": "Toggles that weaken security defaults. Surfaced by 'defenseclaw doctor' whenever active.",
+    "debug": "Verbose-logging toggles. Safe but noisy.",
+    "telemetry": "OTel / observability config. Override values normally set in config.yaml.",
+    "runtime_path": "Path / binary overrides for installation and runtime layout.",
+    "hook_internal": "Set by hook scripts and the daemon launcher. Do not override manually.",
+    "credential": "Auth materials (API keys, tokens, passwords). Should reference env vars, not contain raw values in code.",
+    "discovery": "Probe / discovery tuning.",
+    "splunk_bridge": "Splunk-bridge bundle (bundles/splunk_local_bridge). Not consumed by the Go gateway.",
+    "test_fixture": "Test-only fixtures. Should never be set in production."
+  },
+  "entries": [
+    {
+      "name": "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
+      "category": "security_opt_out",
+      "purpose": "Bypass the provenance-sentinel check during 'defenseclaw setup sandbox' pre-pairing. When the gateway has not yet created the .provenance sibling next to device.key, set this to 1 to fall back to the legacy loose acceptance of any 32-byte blob found at data_dir/device.key.",
+      "default": "unset (fail-closed)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
+          "description": "_pre_pair_device gates the provenance fail-closed branch on this var"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Provenance-sentinel verification \u2014 prevents acceptance of an unauthenticated device.key file (e.g. a copy left on disk by a prior install or attacker).",
+      "replacement_hint": "Restart the gateway once after upgrading; LoadOrCreateIdentity auto-writes the .provenance sentinel and the env var is no longer needed."
+    },
+    {
+      "name": "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
+      "category": "security_opt_out",
+      "purpose": "Restore legacy loopback-trusts-any-bearer behavior for the Codex connector. With this unset, codex requests on 127.0.0.1 must present an Authorization that matches a recorded provider key. Set to 1 on shared hosts where multiple users share the same OS account.",
+      "default": "unset (fail-closed)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/codex.go",
+          "description": "Authenticate() falls back to legacy behavior when set; emits a [SECURITY] log line"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Per-bearer Codex authentication on loopback \u2014 prevents same-host user-to-user impersonation when multiple users share an OS account."
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
+      "category": "security_opt_out",
+      "purpose": "Skip checksum / signature verification during 'defenseclaw upgrade' or scripts/upgrade.sh. Intended for emergency-fix scenarios where the signing CA chain is briefly unavailable.",
+      "default": "unset (fail-closed)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
+          "description": "Python upgrade path checks this before downloading without a checksum"
+        },
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Shell upgrade path checks this before proceeding without verification"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Upgrade-artifact integrity \u2014 prevents installing a tampered tarball/wheel pulled from a hijacked release CDN or MITM."
+    },
+    {
+      "name": "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+      "category": "security_opt_out",
+      "purpose": "Accept a mutable OCI tag (e.g. 'latest') when installing openshell-sandbox instead of requiring a content-addressed digest or sha256 pin. Recommended only for local development.",
+      "default": "unset (fail-closed)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "scripts/install-openshell-sandbox.sh",
+          "description": "Skips integrity verification when set"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Pinned-digest sandbox install \u2014 prevents tag-mutation supply-chain attacks where an upstream tag is silently re-pointed at a malicious image.",
+      "replacement_hint": "Pin via DEFENSECLAW_OPENSHELL_ARCH_DIGEST or DEFENSECLAW_OPENSHELL_BINARY_SHA256."
+    },
+    {
+      "name": "DEFENSECLAW_OPENSHELL_ARCH_DIGEST",
+      "category": "security_opt_out",
+      "purpose": "Pin the openshell-sandbox install to a specific platform manifest digest (sha256:...). Recommended pinning method for production. Read in conjunction with DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED.",
+      "default": "unset",
+      "accepted_values": [
+        "sha256:<hex>",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/install-openshell-sandbox.sh",
+          "description": "Verifies OCI manifest digest against this pin"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Pinned-digest sandbox install \u2014 content-addressed verification of the OCI manifest before extraction."
+    },
+    {
+      "name": "DEFENSECLAW_OPENSHELL_BINARY_SHA256",
+      "category": "security_opt_out",
+      "purpose": "Pin the final extracted openshell-sandbox binary to a specific sha256. Alternative to DEFENSECLAW_OPENSHELL_ARCH_DIGEST for cases where only the binary checksum is published.",
+      "default": "unset",
+      "accepted_values": [
+        "64-char hex sha256",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/install-openshell-sandbox.sh",
+          "description": "Marker check (presence enables sha256 verification path)"
+        },
+        {
+          "location": "scripts/install-openshell-sandbox.sh",
+          "description": "Verifies extracted binary sha256 against this pin"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Pinned-digest sandbox install \u2014 sha256 verification of the extracted binary."
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_TARBALL_SHA256",
+      "category": "security_opt_out",
+      "purpose": "Operator-provided sha256 pin for the gateway tarball downloaded by `defenseclaw upgrade`. Verified before extraction. When neither a sidecar .sha256 file nor this pin is supplied, the upgrade aborts unless DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.",
+      "default": "unset",
+      "accepted_values": [
+        "64-char hex sha256",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
+          "description": "Python upgrade verifier"
+        },
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Shell upgrade verifier"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Operator-supplied checksum pin for upgrade artifacts \u2014 defense-in-depth alongside the sidecar .sha256 file."
+    },
+    {
+      "name": "DEFENSECLAW_UPGRADE_WHL_SHA256",
+      "category": "security_opt_out",
+      "purpose": "Operator-provided sha256 pin for the Python CLI wheel downloaded by `defenseclaw upgrade`. Verified before installation. When neither a sidecar .sha256 file nor this pin is supplied, the upgrade aborts unless DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.",
+      "default": "unset",
+      "accepted_values": [
+        "64-char hex sha256",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_upgrade.py",
+          "description": "Python upgrade verifier"
+        },
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Shell upgrade verifier"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Operator-supplied checksum pin for upgrade artifacts \u2014 defense-in-depth alongside the sidecar .sha256 file."
+    },
+    {
+      "name": "DEFENSECLAW_DUMP_RAW_SECRETS",
+      "category": "security_opt_out",
+      "purpose": "E2E test toggle ONLY. When set, scripts/test-e2e-full-stack.sh prints raw secrets to its diagnostic logs. Never set in production.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "scripts/test-e2e-full-stack.sh",
+          "description": "Dumps raw secrets in diagnostic output for test debugging"
+        }
+      ],
+      "since": "0.5.0"
+    },
+    {
+      "name": "DEFENSECLAW_DISABLE_REDACTION",
+      "category": "security_opt_out",
+      "purpose": "Disable all PII / credential redaction across every sink (audit DB, JSONL, OTel, Splunk, webhooks). Strongest opt-out \u2014 raw values appear everywhere.",
+      "default": "unset (redaction enabled)",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/redaction/redaction.go",
+          "description": "DisableAll() reads this env var"
+        },
+        {
+          "location": "cli/defenseclaw/commands/redaction_status.py",
+          "description": "Python status reporter"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Setup flow surfaces this in onboarding"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_REVEAL_PII",
+      "category": "security_opt_out",
+      "purpose": "Reveal PII in operator-facing logs only (CLI stdout, TUI). Persistent sinks (audit DB, JSONL, OTel) still redact. Weaker than DISABLE_REDACTION.",
+      "default": "unset (PII redacted everywhere)",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/redaction/redaction.go",
+          "description": "Reveal() reads this env var"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
+      "category": "security_opt_out",
+      "purpose": "Relax the webhook SSRF guard to permit RFC1918 / loopback / link-local destinations. Required for local-development setups (e.g. webhook against http://127.0.0.1:5000); a production setup should not use this.",
+      "default": "unset (SSRF guard blocks private IPs)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/webhook.go",
+          "description": "Webhook sender SSRF gate"
+        },
+        {
+          "location": "internal/gateway/webhook.go",
+          "description": "Webhook validate-on-add SSRF gate"
+        },
+        {
+          "location": "cli/defenseclaw/webhooks/writer.py",
+          "description": "Python writer validate-on-add"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_SCHEMA_VALIDATION",
+      "category": "security_opt_out",
+      "purpose": "Disable the runtime JSON-schema gate that validates event payloads before they hit sinks. Set to 'off' to disable. Intended only for triaging schema-drift incidents.",
+      "default": "on",
+      "accepted_values": [
+        "off",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Gateway boot reads and toggles the schema gate"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_JSONL_DISABLE",
+      "category": "security_opt_out",
+      "purpose": "Disable the gateway.jsonl audit tier. Other sinks (audit DB, OTel, Splunk) continue. Useful when local disk is constrained; downgrades forensic coverage.",
+      "default": "unset (JSONL enabled)",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Gateway boot reads this kill switch"
+        },
+        {
+          "location": "internal/gateway/jsonl_kill_switch.go",
+          "description": "Definition site"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_TLS_INSECURE",
+      "category": "security_opt_out",
+      "purpose": "Disable TLS certificate verification on the OTel exporter. Use only with privately-signed collectors during initial bring-up; never in production.",
+      "default": "unset (TLS verified)",
+      "accepted_values": [
+        "true",
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv binds this to otel.tls.insecure"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
+      "category": "security_opt_out",
+      "purpose": "Disable the AWS Bedrock HTTP/1 monkey-patch the OpenClaw plugin installs to make Bedrock traffic visible to the guardrail proxy. Disabling means Bedrock traffic bypasses the proxy.",
+      "default": "unset (shim active for Bedrock)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts",
+          "description": "JS shim bails out when set"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
+      "category": "security_opt_out",
+      "purpose": "Force the AWS HTTP/1 shim to install even on non-Bedrock setups. Counterpart to DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM; only one should be set at a time.",
+      "default": "unset (shim only on Bedrock)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts",
+          "description": "JS shim forces install when set"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
+      "category": "security_opt_out",
+      "purpose": "Make the plugin-side tool-inspect hook fail-open (allow tool) when the gateway is unreachable. Default is fail-closed (block).",
+      "default": "unset (fail-closed)",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "extensions/defenseclaw/src/index.ts",
+          "description": "OpenClaw plugin tool-inspect handler"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
+      "category": "security_opt_out",
+      "purpose": "Accept a policy file as 'validated' even when OPA / Rego is not installed. Default rejects; this turns validation into a no-op when OPA is absent.",
+      "default": "unset (validation requires OPA)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_policy.py",
+          "description": "Policy validate command bypass"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_DEV",
+      "category": "security_opt_out",
+      "purpose": "Mark the process as a developer build. Disables credential-placeholder redaction so test fixtures can use literal example keys.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/redaction/credentials.go",
+          "description": "isCredentialScrubDevMode reads this var"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST",
+      "category": "security_opt_out",
+      "purpose": "Mark the process as running under tests. Same effect as DEFENSECLAW_DEV on credential-placeholder redaction.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/redaction/credentials.go",
+          "description": "isCredentialScrubDevMode reads this var"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_FAIL_MODE",
+      "category": "security_opt_out",
+      "purpose": "Per-shell override of guardrail.hook_fail_mode. 'open' allows on transport errors; 'closed' blocks. Templated into every *-hook.sh.",
+      "default": "(value from guardrail.hook_fail_mode in config.yaml)",
+      "accepted_values": [
+        "open",
+        "closed",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
+          "description": "Read by every inspect-*.sh hook"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_STRICT_AVAILABILITY",
+      "category": "security_opt_out",
+      "purpose": "Opt-IN to fail-closed on transport errors during hook execution. Inverse of the bypass pattern. Not a bypass; stricter than default.",
+      "default": "unset (transport failures fail-open)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening sourced by every *-hook.sh"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_ALLOW_CGNAT",
+      "category": "security_opt_out",
+      "purpose": "Permit dialing into the RFC 6598 carrier-grade NAT range (100.64.0.0/10) from gateway- and netguard-side SSRF/dial-time guards. Required only on Tailscale meshes (which use 100.64/10 for endpoints) or other private overlays addressed in CGNAT space.",
+      "default": "unset (CGNAT range is treated as unsafe)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/netguard/netguard.go",
+          "description": "cgnatAllowed() gates the 100.64.0.0/10 deny-list entry at init"
+        },
+        {
+          "location": "internal/gateway/provider.go",
+          "description": "extraReservedNets mirrors the same opt-out so dial-time and config-time predicates classify identically"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "RFC 6598 CGNAT space is the canonical 'private overlay' address pool used by AWS Cloud WAN, GCP private overlays, and most carrier NAT deployments \u2014 leaving it on the allow-list opens an SSRF/exfil channel to those overlays.",
+      "replacement_hint": "Allow-list only the specific Tailscale / overlay subnets your deployment needs in custom-providers.json instead of opting out of the entire /10."
+    },
+    {
+      "name": "DEFENSECLAW_ALLOW_LOCAL_MCP_TARGETS",
+      "category": "security_opt_out",
+      "purpose": "Disable URL safety validation for `defenseclaw scan mcp` targets. Allows scanning loopback, RFC1918, link-local, and cloud-metadata destinations.",
+      "default": "unset (loopback / private / metadata targets rejected)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/scanner/mcp.go",
+          "description": "validateMCPScanTargetURL short-circuits when set"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Without this guard the scanner can be redirected against internal RFC1918 services or cloud IMDS (169.254.169.254) and exfiltrate metadata or pivot inside the network.",
+      "replacement_hint": "Run the local MCP server on a public-by-design loopback bridge (e.g. expose via an ngrok-style tunnel) instead of scanning loopback directly."
+    },
+    {
+      "name": "DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP",
+      "category": "security_opt_out",
+      "purpose": "Re-enable the legacy regex-based namespace cleanup in pre-sandbox shell scripts. Default cleanup uses a recorded namespace name file (sandbox.netns.txt) which scopes cleanup to namespaces this install actually created.",
+      "default": "unset (namespace-file scoped cleanup)",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
+          "description": "pre-sandbox cleanup script honours the opt-in"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
+          "description": "post-sandbox cleanup script (templated)"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
+          "description": "post-sandbox cleanup script (templated)"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Regex-matched cleanup (`grep -E 'sandbox|openshell'`) tears down ANY namespace whose name happens to contain those substrings \u2014 including unrelated containers run by other operators on the same host."
+    },
+    {
+      "name": "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
+      "category": "security_opt_out",
+      "purpose": "Comma-separated CIDR list whose immediate-peer X-Forwarded-For headers are trusted by the gateway. Default is empty: forwarded headers are ignored entirely and the socket peer address is the only authoritative client IP.",
+      "default": "unset (XFF ignored, RemoteAddr only)",
+      "accepted_values": [
+        "comma-separated CIDR list, e.g. 10.0.0.0/8,172.16.0.0/12",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/requestctx.go",
+          "description": "trustedProxyEnvVar constant"
+        },
+        {
+          "location": "internal/gateway/requestctx.go",
+          "description": "ClientIPRedacted honours XFF only when peer is in this list"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Trusting forwarded headers from arbitrary peers lets unauthenticated callers spoof the client_ip recorded for auth-failure alerting and forensics."
+    },
+    {
+      "name": "DEFENSECLAW_DEBUG",
+      "category": "debug",
+      "purpose": "Gateway client logs every request/response frame to stderr. Verbose; do not enable in production.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/client.go",
+          "description": "Client struct gates verbose logging on this var"
+        }
+      ],
+      "since": "0.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_WEBHOOK_DEBUG",
+      "category": "debug",
+      "purpose": "Webhook dispatcher dumps full request bodies (including secrets) to stderr.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/webhook.go",
+          "description": "Webhook sender debug field"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_LLM_DEBUG",
+      "category": "debug",
+      "purpose": "Python LLM bridge logs per-request prompt + response bodies. May contain secrets.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/llm.py",
+          "description": "LLM bridge _DEBUG flag"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_JUDGE_TRACE",
+      "category": "debug",
+      "purpose": "LLM judge logs every prompt + response. May contain agent traffic and secrets.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/llm_judge.go",
+          "description": "Judge debug toggle"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_PERSIST_JUDGE",
+      "category": "debug",
+      "purpose": "Persist every judge prompt + response to disk under data_dir. Disk grows fast; use only during analysis.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Gateway boot enables judge persistence"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SIDECAR_DIAG",
+      "category": "debug",
+      "purpose": "Extra sidecar boot-time diagnostics (config dump, env presence). Off by default to keep operator logs tight.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "true",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/sidecar.go",
+          "description": "sidecarDiagEnabled helper"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_ENABLED",
+      "category": "telemetry",
+      "purpose": "Master toggle for the OTel exporter. Overrides otel.enabled in config.yaml.",
+      "default": "(value from otel.enabled in config.yaml)",
+      "accepted_values": [
+        "true",
+        "false",
+        "1",
+        "0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.enabled"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_ENDPOINT",
+      "category": "telemetry",
+      "purpose": "Default OTLP endpoint (host:port[/path]). Per-signal vars below take precedence.",
+      "default": "(value from otel.endpoint)",
+      "accepted_values": [
+        "any-otlp-endpoint",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.endpoint"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_PROTOCOL",
+      "category": "telemetry",
+      "purpose": "Default OTLP protocol (http/protobuf or grpc).",
+      "default": "(value from otel.protocol)",
+      "accepted_values": [
+        "http/protobuf",
+        "grpc",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.protocol"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_TRACES_ENDPOINT",
+      "category": "telemetry",
+      "purpose": "Per-signal override for traces endpoint.",
+      "default": "(value from otel.traces.endpoint)",
+      "accepted_values": [
+        "any-otlp-endpoint",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.traces.endpoint"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_TRACES_PROTOCOL",
+      "category": "telemetry",
+      "purpose": "Per-signal override for traces protocol.",
+      "default": "(value from otel.traces.protocol)",
+      "accepted_values": [
+        "http/protobuf",
+        "grpc",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.traces.protocol"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_TRACES_URL_PATH",
+      "category": "telemetry",
+      "purpose": "Per-signal override for traces URL path (when using HTTP).",
+      "default": "(value from otel.traces.url_path)",
+      "accepted_values": [
+        "any-url-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.traces.url_path"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_METRICS_ENDPOINT",
+      "category": "telemetry",
+      "purpose": "Per-signal override for metrics endpoint.",
+      "default": "(value from otel.metrics.endpoint)",
+      "accepted_values": [
+        "any-otlp-endpoint",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.metrics.endpoint"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_METRICS_PROTOCOL",
+      "category": "telemetry",
+      "purpose": "Per-signal override for metrics protocol.",
+      "default": "(value from otel.metrics.protocol)",
+      "accepted_values": [
+        "http/protobuf",
+        "grpc",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.metrics.protocol"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_METRICS_URL_PATH",
+      "category": "telemetry",
+      "purpose": "Per-signal override for metrics URL path.",
+      "default": "(value from otel.metrics.url_path)",
+      "accepted_values": [
+        "any-url-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.metrics.url_path"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_LOGS_ENDPOINT",
+      "category": "telemetry",
+      "purpose": "Per-signal override for logs endpoint.",
+      "default": "(value from otel.logs.endpoint)",
+      "accepted_values": [
+        "any-otlp-endpoint",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.logs.endpoint"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_LOGS_PROTOCOL",
+      "category": "telemetry",
+      "purpose": "Per-signal override for logs protocol.",
+      "default": "(value from otel.logs.protocol)",
+      "accepted_values": [
+        "http/protobuf",
+        "grpc",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.logs.protocol"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OTEL_LOGS_URL_PATH",
+      "category": "telemetry",
+      "purpose": "Per-signal override for logs URL path.",
+      "default": "(value from otel.logs.url_path)",
+      "accepted_values": [
+        "any-url-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/config.go",
+          "description": "viper.BindEnv otel.logs.url_path"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_TELEMETRY_ENABLED",
+      "category": "telemetry",
+      "purpose": "Local-observability-stack-only toggle. Used by bundles/local_observability_stack/docker-compose.yml to gate telemetry collection. Distinct from DEFENSECLAW_OTEL_ENABLED.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "0",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/local_observability_stack/docker-compose.yml",
+          "description": "Compose-file env reference"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_RUN_ID",
+      "category": "telemetry",
+      "purpose": "Correlation ID stamped on every event for cross-sink joins. Auto-generated per gateway boot if unset; explicit value is useful for E2E test runs.",
+      "default": "auto-generated UUID at gateway boot",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gatewaylog/runid.go",
+          "description": "Go reader"
+        },
+        {
+          "location": "internal/audit/store.go",
+          "description": "Audit store reader"
+        },
+        {
+          "location": "internal/gateway/sidecar.go",
+          "description": "Sidecar boot"
+        },
+        {
+          "location": "cli/defenseclaw/logger.py",
+          "description": "Python logger reader"
+        },
+        {
+          "location": "cli/defenseclaw/db.py",
+          "description": "Python DB reader"
+        },
+        {
+          "location": "scripts/test-e2e-full-stack.sh",
+          "description": "E2E test runner default"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOME",
+      "category": "runtime_path",
+      "purpose": "Override the canonical data dir (default ~/.defenseclaw). Honored by every Python and Go entry point.",
+      "default": "~/.defenseclaw",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/config/defaults.go",
+          "description": "Go default-resolver"
+        },
+        {
+          "location": "cli/defenseclaw/config.py",
+          "description": "Python config loader"
+        },
+        {
+          "location": "cli/defenseclaw/connector_paths.py",
+          "description": "Connector path resolver"
+        },
+        {
+          "location": "scripts/install.sh",
+          "description": "Installer reads this"
+        },
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Upgrader reads this"
+        },
+        {
+          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
+          "description": "Hooks read this"
+        }
+      ],
+      "since": "0.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_BIN",
+      "category": "runtime_path",
+      "purpose": "Override path to the defenseclaw-gateway binary. Used by CI / packagers when the binary isn't on PATH.",
+      "default": "(discovered via PATH lookup)",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/gateway.py",
+          "description": "Python gateway-process spawner"
+        }
+      ],
+      "since": "0.2.0"
+    },
+    {
+      "name": "DEFENSECLAW_BIN",
+      "category": "runtime_path",
+      "purpose": "Override path to the defenseclaw CLI binary. Used by tests and setup-llm.sh.",
+      "default": "(discovered via PATH lookup)",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/scanner/plugin_test.go",
+          "description": "Plugin test harness"
+        },
+        {
+          "location": "scripts/setup-llm.sh",
+          "description": "LLM setup script"
+        }
+      ],
+      "since": "0.2.0"
+    },
+    {
+      "name": "DEFENSECLAW_OVERLAY_ROOT",
+      "category": "runtime_path",
+      "purpose": "Extra provider-catalog overlay dir merged on top of the built-in catalog.",
+      "default": "unset",
+      "accepted_values": [
+        "any-absolute-path",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_provider.py",
+          "description": "Provider setup overlay loader"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_CUSTOM_PROVIDERS_PATH",
+      "category": "runtime_path",
+      "purpose": "Path to a custom providers YAML file consulted before the embedded catalog.",
+      "default": "unset",
+      "accepted_values": [
+        "any-absolute-path",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/configs/embed.go",
+          "description": "Go embedded-providers loader"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_API_ADDR",
+      "category": "runtime_path",
+      "purpose": "Sidecar API address that hooks dial. Templated into every *-hook.sh and shim. Typically set by the gateway setup; operator overrides only for unusual layouts.",
+      "default": "(templated value from gateway.api_port at hook install time)",
+      "accepted_values": [
+        "host:port",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
+          "description": "Hooks dial this"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_SIDECAR_URL",
+      "category": "runtime_path",
+      "purpose": "Target URL for the bundled CodeGuard skill (skills/codeguard/main.py) to call into the sidecar.",
+      "default": "http://127.0.0.1:18790",
+      "accepted_values": [
+        "any-http-url"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "skills/codeguard/main.py",
+          "description": "Skill sidecar URL"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_DIR",
+      "category": "runtime_path",
+      "purpose": "Used in generated openshell-sandbox shell wrappers to locate the DefenseClaw install dir from inside the sandbox.",
+      "default": "(templated at install time)",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_sandbox.py",
+          "description": "Sandbox shell wrappers reference this"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_VENV",
+      "category": "runtime_path",
+      "purpose": "Path to the DefenseClaw uv venv. Set by install.sh / upgrade.sh; operators normally don't override.",
+      "default": "${DEFENSECLAW_HOME}/.venv",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/install.sh",
+          "description": "Installer venv path"
+        },
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Upgrader venv path"
+        }
+      ],
+      "since": "0.2.0"
+    },
+    {
+      "name": "DEFENSECLAW_INSTALL_DIR",
+      "category": "runtime_path",
+      "purpose": "Directory where CLI symlinks are placed by install.sh / setup-llm.sh.",
+      "default": "$HOME/.local/bin",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/setup-llm.sh",
+          "description": "Install location for setup-llm"
+        }
+      ],
+      "since": "0.2.0"
+    },
+    {
+      "name": "MIGRATION_DEFENSECLAW_HOME",
+      "category": "runtime_path",
+      "purpose": "Passed by scripts/upgrade.sh to the migration step. Identifies the data dir the migration should operate on.",
+      "default": "(set by upgrade.sh)",
+      "accepted_values": [
+        "any-absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/upgrade.sh",
+          "description": "Upgrade-time migration runner"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_CONNECTOR",
+      "category": "hook_internal",
+      "purpose": "Internal label identifying which connector's hook is executing. Set by every *-hook.sh; do not override manually.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "claudecode",
+        "codex",
+        "openclaw",
+        "zeptoclaw",
+        "inspect",
+        "..."
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
+          "description": "Each hook exports this"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_NAME",
+      "category": "hook_internal",
+      "purpose": "Internal label identifying which hook is executing. Set by every *-hook.sh.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "inspect-tool",
+        "inspect-request",
+        "..."
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
+          "description": "Each hook exports this"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_HOME",
+      "category": "hook_internal",
+      "purpose": "Hardened HOME exported by hooks to insulate them from operator HOME.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_CWD",
+      "category": "hook_internal",
+      "purpose": "Resolved CWD exported by hooks; used by sanitizeHookCWD to bound git operations.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_PATH",
+      "category": "hook_internal",
+      "purpose": "Hardened PATH exported by hooks (system-only) so a hostile workspace can't shadow git/curl/etc.",
+      "default": "(set by hooks)",
+      "accepted_values": [
+        "colon-separated paths"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Hook hardening"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_MAX_BODY",
+      "category": "hook_internal",
+      "purpose": "Request-body cap (in bytes) for hooks. Default 1048576 (1 MiB).",
+      "default": "1048576",
+      "accepted_values": [
+        "positive integer"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/_hardening.sh",
+          "description": "Body-cap enforcement"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_DAEMON",
+      "category": "hook_internal",
+      "purpose": "Sentinel set by the daemon launcher in the child process so it knows it's the daemon.",
+      "default": "(set by daemon launcher; child only)",
+      "accepted_values": [
+        "1"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon.go",
+          "description": "EnvDaemon constant"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_DATA_DIR",
+      "category": "hook_internal",
+      "purpose": "Set by Daemon.Start in the spawned child's environment so killStaleProcesses can verify a candidate process belongs to THIS data directory before signalling it. Required so two legitimate DefenseClaw daemons running from different profiles can be told apart by /proc/<pid>/environ inspection.",
+      "default": "(set by daemon launcher; child only)",
+      "accepted_values": [
+        "absolute path"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/daemon/daemon.go",
+          "description": "EnvDataDir constant"
+        },
+        {
+          "location": "internal/daemon/proc_unix.go",
+          "description": "killStaleProcesses verifies match before SIGTERM"
+        }
+      ],
+      "since": "0.5.0"
+    },
+    {
+      "name": "DEFENSECLAW_AGENT_ID",
+      "category": "hook_internal",
+      "purpose": "Agent identity propagated through correlation headers and OTel attributes.",
+      "default": "(set by plugin / hooks)",
+      "accepted_values": [
+        "any-string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/scan_v7.go",
+          "description": "Go reader"
+        },
+        {
+          "location": "extensions/defenseclaw/src/__tests__/agent_identity.test.ts",
+          "description": "JS plugin reader (tested)"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_AGENT_INSTANCE_ID",
+      "category": "hook_internal",
+      "purpose": "Per-instance agent identifier; used to disambiguate concurrent runs of the same agent.",
+      "default": "(set by plugin / hooks)",
+      "accepted_values": [
+        "any-string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/scan_v7.go",
+          "description": "Go reader"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_AGENT_NAME",
+      "category": "hook_internal",
+      "purpose": "Human-readable agent name propagated via correlation headers.",
+      "default": "(set by plugin / hooks)",
+      "accepted_values": [
+        "any-string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "extensions/defenseclaw/src/index.ts",
+          "description": "JS plugin header emit"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_PLUGIN_AGENT_ID",
+      "category": "hook_internal",
+      "purpose": "Plugin-side agent ID. Falls back to DEFENSECLAW_AGENT_ID when unset.",
+      "default": "(set by plugin)",
+      "accepted_values": [
+        "any-string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "extensions/defenseclaw/src/__tests__/agent_identity.test.ts",
+          "description": "JS plugin reader (tested)"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SIDECAR_INSTANCE_ID",
+      "category": "hook_internal",
+      "purpose": "Sidecar instance ID; auto-generated by the gateway at boot, propagated via headers.",
+      "default": "(auto-generated by gateway)",
+      "accepted_values": [
+        "uuid-or-similar"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/scan_v7.go",
+          "description": "Go reader"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_CLIENT",
+      "category": "hook_internal",
+      "purpose": "Client name (e.g. openclaw-plugin) stamped on the X-DefenseClaw-Client correlation header.",
+      "default": "(set by plugin)",
+      "accepted_values": [
+        "any-string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "extensions/defenseclaw/src/policy/enforcer.ts",
+          "description": "Enforcer header"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_OPENCLAW_MAIN",
+      "category": "hook_internal",
+      "purpose": "Sentinel read by the OpenClaw plugin bootstrapper to locate its main module.",
+      "default": "(set by plugin bootstrap)",
+      "accepted_values": [
+        "absolute-path"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "extensions/defenseclaw/src/aws-sdk-http1-for-guardrail.ts",
+          "description": "Plugin bootstrap sentinel"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_LLM_KEY",
+      "category": "credential",
+      "purpose": "Canonical env-var name for the unified LLM key. Value MUST live in env / .env, not in code or config.yaml.",
+      "default": "unset",
+      "accepted_values": [
+        "LLM API key string",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/credentials.py",
+          "description": "Credentials registry default for llm.api_key_env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_LLM_KEY_ENV",
+      "category": "credential",
+      "purpose": "Indirection: name of the env var to read the LLM key from. Set by config when the operator points llm.api_key_env at a non-default var.",
+      "default": "DEFENSECLAW_LLM_KEY",
+      "accepted_values": [
+        "any env-var name"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/config.py",
+          "description": "Credentials registry indirection (path corrected)"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_LLM_MODEL",
+      "category": "credential",
+      "purpose": "Override the configured LLM model id at runtime.",
+      "default": "(value from llm.model in config.yaml)",
+      "accepted_values": [
+        "provider/model-id",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_config.py",
+          "description": "Tested override path"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_LLM_MODEL_ENV",
+      "category": "credential",
+      "purpose": "Indirection: name of the env var to read the LLM model from.",
+      "default": "DEFENSECLAW_LLM_MODEL",
+      "accepted_values": [
+        "any env-var name"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/config.py",
+          "description": "Credentials registry indirection (path corrected)"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_GATEWAY_TOKEN",
+      "category": "credential",
+      "purpose": "Bearer token hooks present to the gateway API. Required when the gateway is configured with a non-empty token; absent installs trust loopback by default.",
+      "default": "unset",
+      "accepted_values": [
+        "bearer-token",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
+          "description": "Hooks present this header"
+        },
+        {
+          "location": "internal/cli/sidecar.go",
+          "description": "Sidecar references in setup messages"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SKILL_SCANNER_LLM_KEY",
+      "category": "credential",
+      "purpose": "Override the LLM key used by the skill scanner only. Falls back to DEFENSECLAW_LLM_KEY when unset.",
+      "default": "unset",
+      "accepted_values": [
+        "LLM API key string",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/credentials.py",
+          "description": "Credentials registry"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
+      "category": "credential",
+      "purpose": "Alternative HEC token consulted by the Python sink wiring when the canonical splunk_hec.token_env points to a different var.",
+      "default": "unset",
+      "accepted_values": [
+        "HEC token",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup.py",
+          "description": "Python Splunk wiring fallback"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_PROXY_TOKEN",
+      "category": "credential",
+      "purpose": "Test-harness proxy bearer. Used by scripts/test-proxy-sandbox.py only; aliases LITELLM_MASTER_KEY.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "scripts/test-proxy-sandbox.py",
+          "description": "Test proxy bearer"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_MASTER_KEY",
+      "category": "credential",
+      "purpose": "Bearer derived from device.key (PBKDF2). Internal fallback; documented in GUARDRAIL_QUICKSTART for curl examples only. Operators should not rely on this credential.",
+      "default": "(derived at boot from device.key)",
+      "accepted_values": [
+        "sk-dc-<hex>"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "docs/GUARDRAIL_QUICKSTART.md",
+          "description": "deriveMasterKey (path corrected)"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_LOCAL_USERNAME",
+      "category": "credential",
+      "purpose": "Username for the local Splunk daemon basic-auth surface.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/daemon.go",
+          "description": "Daemon reads from .env"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_LOCAL_PASSWORD",
+      "category": "credential",
+      "purpose": "Password for the local Splunk daemon basic-auth surface. The /health endpoint scrubs this value; a regression test (TestHealthEndpointNoSecrets) guards against re-introduction.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/cli/daemon.go",
+          "description": "Daemon reads from .env"
+        }
+      ],
+      "since": "0.3.0"
+    },
+    {
+      "name": "DEFENSECLAW_PD_ROUTING_KEY",
+      "category": "credential",
+      "purpose": "PagerDuty routing key default for webhook entries.",
+      "default": "unset",
+      "accepted_values": [
+        "pagerduty-routing-key",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
+          "description": "Webhook setup default"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_PD_KEY",
+      "category": "credential",
+      "purpose": "Alias for DEFENSECLAW_PD_ROUTING_KEY.",
+      "default": "unset",
+      "accepted_values": [
+        "pagerduty-key",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
+          "description": "Alternative PD key var"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_WEBEX_TOKEN",
+      "category": "credential",
+      "purpose": "Webex bot token default for webhook entries.",
+      "default": "unset",
+      "accepted_values": [
+        "webex-bot-token",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
+          "description": "Webhook setup default"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_WEBHOOK_SECRET",
+      "category": "credential",
+      "purpose": "Generic webhook HMAC secret default.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
+          "description": "Webhook setup default"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SIEM_SECRET",
+      "category": "credential",
+      "purpose": "SIEM webhook secret default.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_setup_webhook.py",
+          "description": "Webhook setup default"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_REGISTRY_TOKEN",
+      "category": "credential",
+      "purpose": "Default registry auth env var (e.g. SkillsHub). Operators override per registry via cmd_registry.",
+      "default": "unset",
+      "accepted_values": [
+        "registry-token",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_registry.py",
+          "description": "Registry default auth_env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SKILLSSH_TOKEN",
+      "category": "credential",
+      "purpose": "Example registry-specific token env var. Documented in cmd_registry.",
+      "default": "unset",
+      "accepted_values": [
+        "registry-token",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "docs/REGISTRIES.md",
+          "description": "Registry example token (path corrected)"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+      "category": "discovery",
+      "purpose": "Colon-separated list of extra trusted binary prefixes for AI Discovery's binary probing. The default trust list is intentionally narrow (system bin dirs only); operators with non-standard layouts (e.g. /opt/mycorp/bin) can re-enable specific paths.",
+      "default": "unset (only /usr/bin and /usr/local/bin trusted)",
+      "accepted_values": [
+        "colon-separated absolute paths",
+        "unset"
+      ],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/inventory/agent_discovery.py",
+          "description": "Agent discovery binary probe"
+        }
+      ],
+      "since": "0.5.0",
+      "security_note": "Tight binary-discovery trust list \u2014 prevents PATH-shadow elevation where a malicious binary in a user-writable dir gets probed and treated as a real agent runtime."
+    },
+    {
+      "name": "DEFENSECLAW_ANTHROPIC_PROBE_MODEL",
+      "category": "discovery",
+      "purpose": "Override the model used by 'defenseclaw doctor' to probe Anthropic API key validity. Default is claude-3-5-haiku-latest; override for accounts with restricted model lists.",
+      "default": "claude-3-5-haiku-latest",
+      "accepted_values": [
+        "any-anthropic-model-id"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/defenseclaw/commands/cmd_doctor.py",
+          "description": "Doctor's Anthropic probe"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HEC_URL",
+      "category": "splunk_bridge",
+      "purpose": "Splunk-bridge bundle: HEC endpoint URL. Read by the bridge container only.",
+      "default": "(set in .env.example)",
+      "accepted_values": [
+        "any-hec-url"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/splunk_local_bridge/env/.env.example",
+          "description": "Bridge .env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_HEC_TOKEN",
+      "category": "splunk_bridge",
+      "purpose": "Splunk-bridge HEC token.",
+      "default": "(set in .env.example)",
+      "accepted_values": [
+        "hec-token"
+      ],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/splunk_local_bridge/env/.env.example",
+          "description": "Bridge .env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_INDEX",
+      "category": "splunk_bridge",
+      "purpose": "Splunk-bridge target index.",
+      "default": "defenseclaw_local",
+      "accepted_values": [
+        "splunk-index-name"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/splunk_local_bridge/env/.env.example",
+          "description": "Bridge .env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SOURCETYPE",
+      "category": "splunk_bridge",
+      "purpose": "Splunk-bridge sourcetype.",
+      "default": "defenseclaw:json",
+      "accepted_values": [
+        "splunk-sourcetype"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/splunk_local_bridge/env/.env.example",
+          "description": "Bridge .env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_SOURCE",
+      "category": "splunk_bridge",
+      "purpose": "Splunk-bridge source label.",
+      "default": "defenseclaw",
+      "accepted_values": [
+        "any-source-string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/splunk_local_bridge/env/.env.example",
+          "description": "Bridge .env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_INTEGRATION_ENABLED",
+      "category": "splunk_bridge",
+      "purpose": "Splunk-bridge integration toggle.",
+      "default": "false",
+      "accepted_values": [
+        "true",
+        "false"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/splunk_local_bridge/env/.env.example",
+          "description": "Bridge .env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_REF",
+      "category": "splunk_bridge",
+      "purpose": "Splunk-bridge bundle git ref label.",
+      "default": "unknown",
+      "accepted_values": [
+        "any-string"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "bundles/splunk_local_bridge/env/.env.example",
+          "description": "Bridge .env"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_FAKE_CLAUDE_LIST",
+      "category": "test_fixture",
+      "purpose": "Test-only stub: comma-separated list of responses the fake claude CLI returns. Used by codeguard_native_test.go.",
+      "default": "unset",
+      "accepted_values": [
+        "comma-separated mock responses",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/codeguard_native_test.go",
+          "description": "Test stub"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_FAKE_CLAUDE_LOG",
+      "category": "test_fixture",
+      "purpose": "Test-only stub: path the fake claude CLI logs invocations to.",
+      "default": "unset",
+      "accepted_values": [
+        "absolute-path",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/codeguard_native_test.go",
+          "description": "Test stub"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_KEY",
+      "category": "test_fixture",
+      "purpose": "Placeholder LLM key used in test fixtures only.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_cmd_keys.py",
+          "description": "Test fixture (path corrected)"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_KEY_NOTSET_12345",
+      "category": "test_fixture",
+      "purpose": "Placeholder env var name used to assert 'unset' behavior in tests.",
+      "default": "unset",
+      "accepted_values": [
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_guardrail.py",
+          "description": "Test fixture for unset assertions (path corrected)"
+        }
+      ],
+      "since": "0.4.0"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_LLM_KEY",
+      "category": "test_fixture",
+      "purpose": "Placeholder LLM key used in some test setups when DEFENSECLAW_LLM_KEY needs an alternate target.",
+      "default": "unset",
+      "accepted_values": [
+        "any-string",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "cli/tests/test_cmd_setup_connector_llm.py",
+          "description": "Test fixture (path corrected)"
+        }
+      ],
+      "since": "0.4.0"
+    }
+  ]
+}

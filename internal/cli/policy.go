@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -266,6 +267,24 @@ var policyReloadCmd = &cobra.Command{
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-DefenseClaw-Client", "cli")
+		// ("policy reload client omits the
+		// required gateway token"): /policy/reload is wrapped
+		// in tokenAuth, which exempts only GET /health. Without
+		// these headers the sidecar returns 401 and the CLI
+		// cannot hot-reload policies on a normally-configured
+		// install. Resolve the gateway token from
+		// cfg.Gateway.ResolvedToken() (which honours config +
+		// env precedence) and attach it under both the bearer
+		// and the explicit X-DefenseClaw-Token header so we
+		// stay compatible with both intake paths.
+		if cfg != nil {
+			if token := strings.TrimSpace(cfg.Gateway.ResolvedToken()); token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+				req.Header.Set("X-DefenseClaw-Token", token)
+			} else {
+				return fmt.Errorf("policy reload: no gateway token configured (set DEFENSECLAW_GATEWAY_TOKEN or run 'defenseclaw setup gateway')")
+			}
+		}
 
 		client := &http.Client{Timeout: 10 * time.Second}
 		resp, err := client.Do(req)

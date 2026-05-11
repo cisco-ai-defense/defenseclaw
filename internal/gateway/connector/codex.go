@@ -272,32 +272,17 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 // on X-DC-Auth or the master key. The gateway token exists to protect
 // those paths, not to break the local-only native binary path.
 func (c *CodexConnector) Authenticate(r *http.Request) bool {
-	if IsLoopback(r) {
-		// PR #141 audit H1: ZeptoClaw closed its loopback-trust gap in
-		// plan B1 because its inspect-*.sh hooks can inject X-DC-Auth.
-		// codex-cli is a native Rust binary that opens connections to
-		// /c/codex/responses directly with `Authorization: Bearer
-		// <provider-key>` and has no shell-script seam to inject the
-		// gateway token. Strict-rejecting loopback when a gateway
-		// token is configured would 401 every codex request and no
-		// guardrail would ever execute — see
-		// TestCodex_Authenticate_NativeBinaryLoopback for the
-		// production rationale. Until codex grows a token-injection
-		// path, the most we can do is surface the architectural gap
-		// once at boot so operators in shared-host deployments are
-		// aware that other local processes can impersonate codex.
-		if c.gatewayToken != "" {
-			c.loopbackWarn.Do(func() {
-				fmt.Fprintf(os.Stderr,
-					"[SECURITY] codex: loopback request accepted without X-DC-Auth — "+
-						"DEFENSECLAW_GATEWAY_TOKEN is set but the codex native binary "+
-						"has no seam to inject it. Any process on this host can route "+
-						"through /c/codex/* with no further authentication.\n")
-			})
-		}
-		return true
-	}
-
+	// the legacy code unconditionally trusted any
+	// loopback caller. On a shared-user host, that allowed any
+	// local process to use /c/codex/* as an unauthenticated
+	// provider relay (the connector copies the operator's
+	// provider snapshot upstream and API key onto the request).
+	// We now require additional evidence even on loopback when a
+	// gateway token is configured: either X-DC-Auth, the master
+	// key, or an Authorization Bearer that matches a recorded
+	// codex provider key. Operators that want the legacy loose
+	// behavior (single-user dev box) can opt back in with
+	// DEFENSECLAW_CODEX_LOOPBACK_TRUST=1.
 	if dcAuth := r.Header.Get("X-DC-Auth"); dcAuth != "" {
 		token := strings.TrimPrefix(dcAuth, "Bearer ")
 		if c.gatewayToken != "" && SecureTokenMatch(token, c.gatewayToken) {
@@ -312,6 +297,73 @@ func (c *CodexConnector) Authenticate(r *http.Request) bool {
 		}
 	}
 
+	if IsLoopback(r) {
+		// If no gateway token is configured at all, there is no
+		// auth surface to enforce; preserve legacy local-only
+		// behavior.
+		if c.gatewayToken == "" {
+			return true
+		}
+		// Operator-explicit opt-in: trust loopback regardless of
+		// header presence. We still emit a one-time security
+		// warning so operators on shared hosts see the risk.
+		legacy := strings.TrimSpace(os.Getenv("DEFENSECLAW_CODEX_LOOPBACK_TRUST")) == "1"
+		if legacy {
+			c.loopbackWarn.Do(func() {
+				fmt.Fprintf(os.Stderr,
+					"[SECURITY] codex: DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 — accepting "+
+						"loopback /c/codex/* requests without X-DC-Auth. Any process on "+
+						"this host can route through the codex relay.\n")
+			})
+			return true
+		}
+		// Fail-closed default: require proof the caller knows
+		// either the gateway token, the master key, or the
+		// operator-configured codex provider key. The latter
+		// keeps the native codex CLI working because it already
+		// sends Authorization: Bearer <provider-key>.
+		if c.matchesKnownProviderKey(r) {
+			return true
+		}
+		c.loopbackWarn.Do(func() {
+			fmt.Fprintf(os.Stderr,
+				"[SECURITY] codex: rejecting loopback /c/codex/* request — "+
+					"no X-DC-Auth, no matching master key, and no recognized "+
+					"provider Authorization header. Set "+
+					"DEFENSECLAW_CODEX_LOOPBACK_TRUST=1 to opt back into "+
+					"the legacy loose behavior on a single-user host.\n")
+		})
+		return false
+	}
+
+	return false
+}
+
+// matchesKnownProviderKey returns true if the request carries an
+// Authorization Bearer token that matches any operator-recorded
+// codex provider api_key. This is how the native codex Rust binary
+// authenticates loopback calls when DEFENSECLAW_CODEX_LOOPBACK_TRUST is
+// not set: it already sends the provider key, so we accept proof of
+// possession of that key as authentication.
+func (c *CodexConnector) matchesKnownProviderKey(r *http.Request) bool {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return false
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	if token == "" {
+		return false
+	}
+	c.snapshotMu.RLock()
+	defer c.snapshotMu.RUnlock()
+	for _, p := range c.providers {
+		if p.APIKey == "" {
+			continue
+		}
+		if SecureTokenMatch(token, p.APIKey) {
+			return true
+		}
+	}
 	return false
 }
 

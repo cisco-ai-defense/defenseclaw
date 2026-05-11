@@ -314,15 +314,22 @@ func promptFirstRunBeforeTUI(
 
 	reader := bufio.NewReader(in)
 	line, rerr := reader.ReadString('\n')
-	// EOF on an empty input is fine: it means the operator pressed
-	// Ctrl+D at the prompt, which we treat as "no" to be safe — a
-	// hard EOF probably means stdin already closed and we'd loop on
-	// any spawned interactive subprocess that tried to read it.
-	// Other read errors mean we genuinely couldn't talk to stdin,
-	// so we degrade to "unavailable" instead of pretending we got
-	// an answer.
+	// ("Ctrl-D/empty EOF is treated as yes despite
+	// the safety comment"): the comment below correctly states
+	// that an empty EOF should be treated as "no" to avoid
+	// spawning an interactive `defenseclaw init` against a closed
+	// stdin, but the previous switch happily mapped "" -> yes
+	// (Enter and EOF were indistinguishable). Catch the empty-EOF
+	// case here so it routes to firstRunDeclined; non-EOF read
+	// errors still degrade to "unavailable" (we genuinely couldn't
+	// talk to stdin and shouldn't pretend we got an answer).
 	if rerr != nil && rerr != io.EOF {
 		return firstRunUnavailable, nil
+	}
+	if rerr == io.EOF && strings.TrimSpace(line) == "" {
+		fmt.Fprintln(out, "  No input received — opening the TUI without running the wizard.")
+		fmt.Fprintln(out, "  Run it later anytime with: defenseclaw init")
+		return firstRunDeclined, nil
 	}
 
 	answer := strings.TrimSpace(strings.ToLower(line))

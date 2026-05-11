@@ -30,6 +30,14 @@ from io import StringIO
 from pathlib import Path
 from typing import NamedTuple
 
+# `grp` is POSIX-only. We import it lazily-but-at-module-load so the
+# group-ownership check below can run without an inline import,
+# while still keeping Windows hosts importable.
+try:  # pragma: no cover - Windows path
+    import grp as _grp
+except ImportError:  # pragma: no cover - non-POSIX
+    _grp = None  # type: ignore[assignment]
+
 from defenseclaw.config import default_data_path
 from defenseclaw.connector_paths import KNOWN_CONNECTORS, _expand
 
@@ -46,6 +54,17 @@ VERSION_TIMEOUT_SECONDS = 2.0
 # binary as part of a passive discovery scan. Operators with bespoke
 # install layouts can extend the allow-list at runtime via the
 # ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` env var (colon-separated).
+# the default trusted-prefix list previously included
+# normal user-writable tool directories (~/.local/bin, ~/.cargo/bin,
+# ~/.nvm, ~/.asdf, ~/.pyenv, ~/.pipx, ~/Library/Application Support,
+# /Applications) and the only post-resolution check rejected
+# *world-writable* parents. A local agent process that can write to
+# the operator's tool dir could plant `codex` (or any other discovery
+# target) and DefenseClaw's passive scan would exec it. We restrict
+# the default list to system-managed prefixes that require root /
+# package-manager privilege to write. Operators with bespoke install
+# layouts can extend the list at runtime via
+# ``DEFENSECLAW_TRUSTED_BIN_PREFIXES`` (colon-separated).
 _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/usr/bin",
     "/usr/local/bin",
@@ -57,17 +76,6 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/opt/homebrew/sbin",
     "/opt/local/bin",
     "/opt/local/sbin",
-    "~/.local/bin",
-    "~/.cargo/bin",
-    "~/.npm-global/bin",
-    "~/.volta/bin",
-    "~/.nvm",
-    "~/.fnm",
-    "~/.asdf",
-    "~/.pyenv",
-    "~/.pipx",
-    "~/Library/Application Support",
-    "/Applications",
 )
 
 DISCOVERY_PRECEDENCE: tuple[str, ...] = (
@@ -285,6 +293,30 @@ def _is_trusted_binary_path(binary_path: str) -> bool:
     # World-writable parent → an attacker who can write to that dir
     # could swap the binary at any time. Treat as untrusted.
     if parent_st.st_mode & 0o002:
+        return False
+    # also reject group-writable parents unless the
+    # group is the system root group. A non-root user that shares a
+    # group with the parent dir can swap the binary.
+    if parent_st.st_mode & 0o020:
+        grp_name = ""
+        if _grp is not None:
+            try:
+                grp_name = _grp.getgrgid(parent_st.st_gid).gr_name
+            except (KeyError, OSError):
+                grp_name = ""
+        if grp_name not in ("root", "wheel", "admin"):
+            return False
+    # refuse a binary whose own file is writable by
+    # anyone other than the trusted system owner. The user-writable
+    # ~/.local/bin/* case is the canonical exploit path; even if an
+    # operator extends DEFENSECLAW_TRUSTED_BIN_PREFIXES to include it,
+    # we still refuse the individual file when its mode bits expose
+    # group/world write.
+    try:
+        bin_st = os.stat(resolved)
+    except OSError:
+        return False
+    if bin_st.st_mode & 0o022:
         return False
     prefixes = _trusted_bin_prefixes()
     for prefix in prefixes:

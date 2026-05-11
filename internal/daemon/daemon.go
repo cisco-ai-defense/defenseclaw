@@ -33,6 +33,15 @@ const (
 	PIDFileName = "gateway.pid"
 	LogFileName = "gateway.log"
 	EnvDaemon   = "DEFENSECLAW_DAEMON"
+	// EnvDataDir is set by Daemon.Start in the spawned child's
+	// environment so killStaleProcesses can verify that a candidate
+	// process belongs to THIS data directory before signalling it.
+	// Required for the S3.HIGH_BUG fix
+	// "killStaleProcesses can terminate unrelated processes": without
+	// a per-data-dir marker, two legitimate DefenseClaw daemons
+	// running from different profiles cannot tell each other apart by
+	// executable name alone.
+	EnvDataDir = "DEFENSECLAW_DATA_DIR"
 )
 
 var (
@@ -81,7 +90,21 @@ func (d *Daemon) openLogFileForChild() (*os.File, error) {
 type pidInfo struct {
 	PID        int    `json:"pid"`
 	Executable string `json:"executable"`
-	StartTime  int64  `json:"start_time"`
+	// StartTime is the wall-clock time the parent recorded when the
+	// child was spawned. Kept for human/log diagnostics only — DO NOT
+	// use this for PID-reuse detection, since it has no relationship
+	// to the kernel's view of the process. Use StartIdentity instead.
+	StartTime int64 `json:"start_time"`
+	// StartIdentity is an opaque per-process token captured immediately
+	// after spawn (Linux: /proc/<pid>/stat field 22 starttime; Darwin:
+	// `ps -o lstart=`). Compared against the live process's identity in
+	// verifyProcess() to detect PID reuse — i.e. "this PID exists and
+	// the executable matches, but the kernel says the process started
+	// at a different time, so it's a DIFFERENT process that happens to
+	// have inherited our PID". Empty when the platform doesn't support
+	// the lookup (e.g. FreeBSD), in which case the check is skipped.
+	// Closes the second half of chain .
+	StartIdentity string `json:"start_identity,omitempty"`
 }
 
 func (d *Daemon) IsRunning() (bool, int) {
@@ -94,48 +117,127 @@ func (d *Daemon) IsRunning() (bool, int) {
 		return false, 0
 	}
 	if !d.verifyProcess(info) {
+		// Closes (chain ): a stale gateway.pid
+		// pointing at a reused PID must NOT keep status/stop/restart
+		// pinned to the unrelated process. Treat the file as garbage
+		// and remove it so the next operation gets a clean slate.
 		_ = os.Remove(d.pidFile)
 		return false, 0
 	}
 	return true, info.PID
 }
 
+// verifyProcess returns true when the live process at info.PID is the SAME
+// process recorded in the PID file (executable AND start identity match),
+// false when either signal indicates PID reuse, and true when neither signal
+// is available on this platform (best-effort backwards compatibility).
+//
+// Both the executable check and the start-identity check have been hardened
+// to fail-CLOSED when their respective metadata is genuinely unavailable for
+// a process we *can* signal: the previous implementation fell back to "true"
+// on `os.Readlink` errors (Linux) and on `ps` errors (Darwin), which let any
+// unreaped zombie pass verification. Closes .
 func (d *Daemon) verifyProcess(info pidInfo) bool {
-	switch runtime.GOOS {
-	case "linux":
-		return d.verifyProcessLinux(info)
-	case "darwin":
-		return d.verifyProcessDarwin(info)
-	default:
-		return true
+	if !d.verifyExecutable(info) {
+		return false
 	}
-}
-
-func (d *Daemon) verifyProcessLinux(info pidInfo) bool {
-	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
-	if err != nil {
-		return true
-	}
-	if info.Executable != "" && exePath != info.Executable {
+	if !d.verifyStartIdentity(info) {
 		return false
 	}
 	return true
 }
 
-func (d *Daemon) verifyProcessDarwin(info pidInfo) bool {
-	comm, err := processExecutableDarwin(info.PID)
-	if err != nil {
-		// Match the Linux behavior: if process metadata is unavailable in the
-		// current environment, fall back to the liveness check done by IsRunning.
-		return processExists(info.PID)
-	}
-	if info.Executable != "" {
-		exeBase := filepath.Base(info.Executable)
-		if !strings.HasSuffix(comm, exeBase) && comm != exeBase {
+func (d *Daemon) verifyExecutable(info pidInfo) bool {
+	switch runtime.GOOS {
+	case "linux":
+		exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
+		if err != nil {
+			// /proc/<pid>/exe should be readable for any LIVE process the
+			// caller can signal (we already passed processExists). Failing
+			// here means the process is a zombie or has a permission
+			// barrier (kernel namespacing); treat as unverified rather
+			// than the old fail-OPEN behavior.
 			return false
 		}
+		if info.Executable != "" && exePath != info.Executable {
+			return false
+		}
+		return true
+	case "darwin":
+		comm, err := processExecutableDarwin(info.PID)
+		if err != nil {
+			// Same fail-closed posture as Linux: ps must succeed for any
+			// process we can signal; if it fails, do NOT trust the PID.
+			return false
+		}
+		if info.Executable != "" {
+			exeBase := filepath.Base(info.Executable)
+			if !strings.HasSuffix(comm, exeBase) && comm != exeBase {
+				return false
+			}
+		}
+		return true
+	default:
+		return true
 	}
-	return true
+}
+
+func (d *Daemon) verifyStartIdentity(info pidInfo) bool {
+	// Empty StartIdentity means the PID file was written by an older
+	// daemon binary that didn't capture the identity. Skip the check
+	// for backwards compatibility — the executable check above is the
+	// only signal in that case. New PID files always include identity.
+	if info.StartIdentity == "" {
+		return true
+	}
+	live, err := processStartIdentity(info.PID)
+	if err != nil {
+		// Same fail-closed posture as the executable check: identity
+		// must be readable for a live process; if not, do not trust
+		// the PID file.
+		return false
+	}
+	if live == "" {
+		// Platform doesn't support start-identity (e.g. FreeBSD on a
+		// PID file written by Linux). Fall back to the executable check.
+		return true
+	}
+	return live == info.StartIdentity
+}
+
+// stripTokenArgs removes any --token / -token argv pairs (both the
+// `--token <value>` two-arg form and the `--token=<value>` one-arg
+// form) from args. The matching is case-insensitive and applies to
+// both the single- and double-dash spellings since cobra accepts
+// both. This is a defence-in-depth helper used by Daemon.Start to
+// guarantee the gateway token never leaks into the long-lived child
+// process command line, regardless of how the caller assembled the
+// argv slice. Tested in daemon_test.go::TestStripTokenArgs.
+func stripTokenArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	out := make([]string, 0, len(args))
+	skipNext := false
+	for _, a := range args {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		lower := strings.ToLower(a)
+		if lower == "--token" || lower == "-token" {
+			// Eat the flag and its value (if any). If the user
+			// passed a bare `--token` with no follow-up, no value
+			// gets eaten and the loop just continues.
+			skipNext = true
+			continue
+		}
+		if strings.HasPrefix(lower, "--token=") || strings.HasPrefix(lower, "-token=") {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }
 
 func processExecutableDarwin(pid int) (string, error) {
@@ -179,7 +281,30 @@ func (d *Daemon) Start(args []string) (int, error) {
 		return 0, fmt.Errorf("daemon: open /dev/null: %w", err)
 	}
 
-	env := append(os.Environ(), EnvDaemon+"=1")
+	// Defensive scrub: strip any --token / --token=<secret> argv pairs
+	// before exec'ing the long-lived child. Even though
+	// `internal/cli/daemon.go::collectDaemonArgs` no longer emits
+	// these, we strip them here too so any future caller (or stale
+	// systemd unit, supervisord script, etc.) cannot regress and
+	// leave the gateway token visible via `ps` / /proc/<pid>/cmdline
+	// for the lifetime of the daemon. See finding "daemon
+	// start propagates gateway token on the child process command
+	// line".
+	args = stripTokenArgs(args)
+
+	// Strip any inherited DEFENSECLAW_DATA_DIR before re-setting so a
+	// caller that already had it in their environment cannot trick the
+	// child into recording a different data dir than the daemon
+	// actually uses.
+	parentEnv := os.Environ()
+	cleanEnv := make([]string, 0, len(parentEnv)+2)
+	for _, kv := range parentEnv {
+		if strings.HasPrefix(kv, EnvDataDir+"=") || strings.HasPrefix(kv, EnvDaemon+"=") {
+			continue
+		}
+		cleanEnv = append(cleanEnv, kv)
+	}
+	env := append(cleanEnv, EnvDaemon+"=1", EnvDataDir+"="+d.dataDir)
 	cmd := exec.Command(executable, args...)
 	cmd.Env = env
 	cmd.Stdin = devNull
@@ -200,8 +325,27 @@ func (d *Daemon) Start(args []string) (int, error) {
 
 	pid := cmd.Process.Pid
 
-	if err := d.writePIDInfo(pid, executable); err != nil {
+	// Spawn an exit-watcher BEFORE writing the PID file so we can
+	// detect immediate-exit children and avoid leaving a stale
+	// gateway.pid behind. Closes the first half of chain
+	// processExists() alone returned true for
+	// unreaped zombies, so the previous startup verification
+	// recorded a stale PID file for a process that had already died.
+	exitCh := make(chan error, 1)
+	go func() {
+		exitCh <- cmd.Wait()
+	}()
+
+	// Capture the kernel's view of the process start identity right
+	// after spawn so verifyProcess() can detect PID reuse later.
+	// Closes the second half of chain . Errors are
+	// not fatal — falling back to executable-only matching mirrors
+	// the legacy behavior on platforms without /proc.
+	startIdentity, _ := processStartIdentity(pid)
+
+	if err := d.writePIDInfo(pid, executable, startIdentity); err != nil {
 		_ = cmd.Process.Kill()
+		<-exitCh // reap the child so it doesn't become a zombie
 		devNull.Close()
 		_ = logFile.Close()
 		return 0, fmt.Errorf("daemon: write pid: %w", err)
@@ -213,15 +357,25 @@ func (d *Daemon) Start(args []string) (int, error) {
 	devNull.Close()
 	_ = logFile.Close()
 
-	// We do NOT cmd.Wait() from a parent goroutine anymore: on process exit
-	// that goroutine dies too, and there's no pipe to drain. The child is
-	// reparented to init, which reaps it.
-
-	// Give the child a moment to start and verify it's running
-	time.Sleep(100 * time.Millisecond)
-	if !processExists(pid) {
+	// Give the child a 100 ms grace window for its first syscall, then
+	// either confirm it's still alive or detect that it crashed. A
+	// crashed-during-startup child shows up here as cmd.Wait() returning
+	// with the exit status. The previous implementation slept blindly
+	// and called processExists(), which returned true for zombies — so
+	// fast-fail config errors (bind-in-use, missing config) silently
+	// left a stale PID file ().
+	select {
+	case waitErr := <-exitCh:
 		_ = os.Remove(d.pidFile)
-		return 0, fmt.Errorf("daemon: process exited immediately (check %s for errors)", d.logFile)
+		if waitErr != nil {
+			return 0, fmt.Errorf("daemon: process exited immediately (check %s for errors): %w", d.logFile, waitErr)
+		}
+		return 0, fmt.Errorf("daemon: process exited immediately with status 0 (check %s for errors)", d.logFile)
+	case <-time.After(100 * time.Millisecond):
+		// Child is still alive after the grace window. The exitCh
+		// goroutine will continue to run until the child eventually
+		// exits and reaps it (no FD leak because we already closed
+		// our copies of stdin/stdout/stderr).
 	}
 
 	return pid, nil
@@ -295,11 +449,12 @@ func (d *Daemon) readPIDInfo() (pidInfo, error) {
 	return info, nil
 }
 
-func (d *Daemon) writePIDInfo(pid int, executable string) error {
+func (d *Daemon) writePIDInfo(pid int, executable string, startIdentity string) error {
 	info := pidInfo{
-		PID:        pid,
-		Executable: executable,
-		StartTime:  time.Now().Unix(),
+		PID:           pid,
+		Executable:    executable,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: startIdentity,
 	}
 	data, err := json.Marshal(info)
 	if err != nil {

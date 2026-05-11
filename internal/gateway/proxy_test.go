@@ -153,6 +153,18 @@ func newTestProxy(t *testing.T, prov LLMProvider, insp ContentInspector, mode st
 	store, logger := testStoreAndLogger(t)
 	health := NewSidecarHealth()
 
+	// hardening (S2.proxy SSRF): handlePassthrough now
+	// hard-blocks any upstream that resolves to a private/loopback
+	// address, including the "known" provider branch. Legacy fixtures
+	// in this file simulate "known providers" by appending "127.0.0.1"
+	// to providerDomains and pointing httptest servers there; flip
+	// the test-only known-branch bypass for them. The dedicated
+	// TestHandlePassthrough_SSRFHardening test bench still routes
+	// private-IP X-DC-Target-URL values through the "shape" branch,
+	// which is NOT subject to this bypass.
+	passthroughAllowPrivateForTest = true
+	t.Cleanup(func() { passthroughAllowPrivateForTest = false })
+
 	p := &GuardrailProxy{
 		cfg:       cfg,
 		logger:    logger,
@@ -1974,6 +1986,15 @@ func TestIsKnownProviderDomain(t *testing.T) {
 		{"chatgpt backend-api full", "https://chatgpt.com/backend-api/codex/responses", true},
 		{"chatgpt backend-api origin only", "https://chatgpt.com/", false},
 		{"chatgpt wrong path", "https://chatgpt.com/static/app.js", false},
+		// pre-fix the legacy "bedrock-runtime." prefix
+		// matched any host that began with that string, including
+		// attacker-controlled domains. The wildcard form pins the AWS
+		// suffix and rejects host shapes that don't terminate in
+		// .amazonaws.com.
+		{"bedrock attacker prefix spoof", "https://bedrock-runtime.attacker.example", false},
+		{"bedrock missing aws tld", "https://bedrock-runtime.us-east-1.evil.com", false},
+		{"bedrock label injection", "https://bedrock-runtime.us-east-1.evil.amazonaws.com.evil.com", false},
+		{"bedrock case insensitive", "https://Bedrock-Runtime.us-east-1.amazonaws.com/model/invoke", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2660,8 +2681,14 @@ func TestHandlePassthrough_SSRFHardening(t *testing.T) {
 		{"private 172.16.x.x", "http://172.16.0.1:9200/elasticsearch", http.StatusForbidden},
 		{"private 192.168.x.x", "http://192.168.1.1/admin", http.StatusForbidden},
 		{"link-local", "http://169.254.169.254/latest/meta-data/", http.StatusForbidden},
-		{"file protocol blocked", "file:///etc/passwd", http.StatusForbidden},
-		{"ftp protocol blocked", "ftp://evil.com/exfil", http.StatusForbidden},
+		// file:// and ftp:// are now rejected at the X-DC-Target-URL
+		// validation gate (hardening) before branch
+		// classification, returning 400 ("scheme must be http or
+		// https") rather than the legacy 403 ("unknown domain"). Both
+		// are equally good security signals; updated expectation
+		// reflects the upstream rejection layer.
+		{"file protocol blocked", "file:///etc/passwd", http.StatusBadRequest},
+		{"ftp protocol blocked", "ftp://evil.com/exfil", http.StatusBadRequest},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -26,6 +26,8 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
+from pathlib import Path
 
 import click
 
@@ -79,6 +81,75 @@ def _safe_mtime(path: str | None) -> float | None:
         return os.stat(path).st_mtime
     except OSError:
         return None
+
+
+def _resolve_secret_arg(
+    flag: str,
+    *,
+    argv_value: str | None,
+    stdin_flag: bool,
+    file_path: str | None,
+) -> str | None:
+    """Resolve a secret-valued setup option from safe sources.
+
+    ("Setup secret entry can echo or expose
+    credentials"): raw argv values for ``--api-key`` / ``--token`` /
+    ``--access-token`` / ``--hec-token`` leak via shell history,
+    terminal scrollback, CI logs, and ``ps``/``/proc/<pid>/cmdline``.
+    Stdin and file inputs avoid argv exposure entirely. Returns
+    ``None`` when no secret was supplied (caller must keep current).
+    """
+    sources = [
+        ("argv", bool(argv_value)),
+        ("stdin", bool(stdin_flag)),
+        ("file", bool(file_path)),
+    ]
+    chosen = [name for name, on in sources if on]
+    if len(chosen) > 1:
+        raise click.UsageError(
+            f"{flag}/{flag}-stdin/{flag}-file are mutually exclusive "
+            f"(got {', '.join(chosen)})."
+        )
+    if argv_value:
+        click.echo(
+            (
+                f"WARNING: {flag} accepts a secret on argv. The value can "
+                "leak via shell history, terminal scrollback, CI logs, "
+                "and `ps` listings. Prefer the matching env var, "
+                f"{flag}-stdin, or {flag}-file alternatives."
+            ),
+            err=True,
+        )
+        return argv_value.strip()
+    if stdin_flag:
+        if sys.stdin is None or sys.stdin.isatty():
+            raise click.UsageError(
+                f"{flag}-stdin requires the secret on stdin, but stdin is a TTY."
+            )
+        line = sys.stdin.readline()
+        if not line:
+            raise click.UsageError(f"{flag}-stdin received empty input.")
+        return line.rstrip("\r\n")
+    if file_path:
+        path = Path(file_path).expanduser()
+        if path.is_symlink():
+            raise click.UsageError(
+                f"{flag}-file refuses symlinks ({path}); use a regular file."
+            )
+        try:
+            st = path.stat()
+        except OSError as exc:
+            raise click.UsageError(f"{flag}-file: cannot stat {path}: {exc}") from exc
+        if (st.st_mode & 0o077) != 0:
+            raise click.UsageError(
+                f"{flag}-file ({path}) must be 0600 (got {oct(st.st_mode & 0o777)})."
+            )
+        try:
+            data = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise click.UsageError(f"{flag}-file: cannot read {path}: {exc}") from exc
+        return data.strip()
+    return None
 
 
 @click.group()
@@ -323,7 +394,25 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
 @click.option(
     "--api-key",
     default=None,
-    help="Secret value to persist into ~/.defenseclaw/.env under --api-key-env.",
+    help=(
+        "DEPRECATED -- leaks via argv. Prefer the env var named by "
+        "--api-key-env, --api-key-stdin, or --api-key-file."
+    ),
+)
+@click.option(
+    "--api-key-stdin",
+    is_flag=True,
+    default=False,
+    help="Read the LLM API key from stdin (a single line). Avoids argv leak.",
+)
+@click.option(
+    "--api-key-file",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help=(
+        "Path to a 0600-permission file containing the LLM API key. "
+        "The file is read and persisted into .env. Avoids argv leak."
+    ),
 )
 @click.option("--base-url", default=None, help="Provider base URL override.")
 @click.option("--timeout", type=int, default=None, help="LLM timeout in seconds.")
@@ -342,6 +431,8 @@ def setup_llm(
     model: str | None,
     api_key_env: str | None,
     api_key: str | None,
+    api_key_stdin: bool,
+    api_key_file: str | None,
     base_url: str | None,
     timeout: int | None,
     max_retries: int | None,
@@ -362,6 +453,19 @@ def setup_llm(
     """
     cfg = app.cfg
     llm = cfg.llm
+
+    # argv-secret options leak via shell history,
+    # CI logs, and ps. Resolve via the safe alternatives before any
+    # downstream code touches the value. Returns None when no source
+    # was supplied; callers must keep the existing value.
+    resolved_api_key = _resolve_secret_arg(
+        "--api-key",
+        argv_value=api_key,
+        stdin_flag=api_key_stdin,
+        file_path=api_key_file,
+    )
+    if resolved_api_key is not None:
+        api_key = resolved_api_key
 
     if show:
         resolved = cfg.resolve_llm("")
@@ -827,7 +931,16 @@ def _prompt_and_save_secret(env_name: str, current: str, data_dir: str) -> None:
         hint = _mask(effective)
     else:
         hint = "(not set)"
-    val = click.prompt(f"  {env_name} [{hint}]", default="", show_default=False)
+    # ("Setup secret entry can echo or expose
+    # credentials"): default click.prompt echoes input, so typed
+    # secrets show up in terminal scrollback, screen recordings, and
+    # session logs. hide_input=True suppresses the echo.
+    val = click.prompt(
+        f"  {env_name} [{hint}]",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
     secret = val or effective
     if secret:
         _save_secret_to_dotenv(env_name, secret, data_dir)
@@ -866,7 +979,7 @@ def _write_dotenv(path: str, entries: dict[str, str]) -> None:
 
     Note: ``O_CREAT`` only applies the ``0o600`` mode on *initial*
     creation. When the file already exists (common on repeat runs),
-    the previous permission bits survive. We chmod() after the write
+    The previous permission bits survive. We chmod() after the write
     so that repeated invocations keep converging on 0600, even if a
     stray ``chmod 644`` happened out-of-band.
     """
@@ -1255,7 +1368,29 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 @click.option("--host", default=None, help="Gateway host")
 @click.option("--port", type=int, default=None, help="Gateway WebSocket port")
 @click.option("--api-port", type=int, default=None, help="Sidecar REST API port")
-@click.option("--token", default=None, help="Gateway auth token")
+@click.option(
+    "--token",
+    default=None,
+    help=(
+        "DEPRECATED -- leaks via argv. Prefer $DEFENSECLAW_GATEWAY_TOKEN, "
+        "--token-stdin, --token-file, or --ssm-param."
+    ),
+)
+@click.option(
+    "--token-stdin",
+    is_flag=True,
+    default=False,
+    help="Read the gateway token from stdin (a single line). Avoids argv leak.",
+)
+@click.option(
+    "--token-file",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help=(
+        "Path to a 0600-permission file containing the gateway token. "
+        "The file is read and persisted into .env. Avoids argv leak."
+    ),
+)
 @click.option("--ssm-param", default=None, help="AWS SSM parameter name for token")
 @click.option("--ssm-region", default=None, help="AWS region for SSM")
 @click.option("--ssm-profile", default=None, help="AWS CLI profile for SSM")
@@ -1266,6 +1401,8 @@ def setup_gateway(
     app: AppContext,
     remote: bool,
     host, port, api_port, token,
+    token_stdin: bool,
+    token_file,
     ssm_param, ssm_region, ssm_profile,
     verify: bool,
     non_interactive: bool,
@@ -1280,6 +1417,18 @@ def setup_gateway(
     gw = app.cfg.gateway
 
     data_dir = app.cfg.data_dir
+
+    # ("Setup secret entry can echo or expose
+    # credentials"): resolve gateway token through safe sources before
+    # any downstream code touches the value.
+    resolved_token = _resolve_secret_arg(
+        "--token",
+        argv_value=token,
+        stdin_flag=token_stdin,
+        file_path=token_file,
+    )
+    if resolved_token is not None:
+        token = resolved_token
 
     if non_interactive:
         if host is not None:
@@ -4639,11 +4788,54 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 @click.option("--enterprise", "enable_enterprise", is_flag=True, default=False,
               help="Enable remote Splunk Enterprise via HEC endpoint + token")
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
-@click.option("--access-token", default=None, help="Splunk O11y access token")
+@click.option(
+    "--access-token",
+    default=None,
+    help=(
+        "DEPRECATED -- leaks via argv. Prefer the SPLUNK_ACCESS_TOKEN env var, "
+        "--access-token-stdin, or --access-token-file."
+    ),
+)
+@click.option(
+    "--access-token-stdin",
+    is_flag=True,
+    default=False,
+    help="Read the Splunk O11y access token from stdin (a single line). Avoids argv leak.",
+)
+@click.option(
+    "--access-token-file",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help=(
+        "Path to a 0600-permission file containing the Splunk O11y access "
+        "token. The file is read and persisted into .env. Avoids argv leak."
+    ),
+)
 @click.option("--hec-endpoint", default=None,
               help="Remote Splunk Enterprise HEC endpoint")
-@click.option("--hec-token", default=None,
-              help="Remote Splunk Enterprise HEC token")
+@click.option(
+    "--hec-token",
+    default=None,
+    help=(
+        "DEPRECATED -- leaks via argv. Prefer $DEFENSECLAW_SPLUNK_HEC_TOKEN, "
+        "--hec-token-stdin, or --hec-token-file."
+    ),
+)
+@click.option(
+    "--hec-token-stdin",
+    is_flag=True,
+    default=False,
+    help="Read the Splunk Enterprise HEC token from stdin (a single line). Avoids argv leak.",
+)
+@click.option(
+    "--hec-token-file",
+    default=None,
+    type=click.Path(dir_okay=False),
+    help=(
+        "Path to a 0600-permission file containing the Splunk Enterprise HEC "
+        "token. The file is read and persisted into .env. Avoids argv leak."
+    ),
+)
 @click.option("--app-name", default=None, help="OTEL service name (default: defenseclaw)")
 @click.option("--index", "logs_index", default=None,
               help=(
@@ -4675,8 +4867,12 @@ def setup_splunk(
     enable_enterprise: bool,
     realm: str | None,
     access_token: str | None,
+    access_token_stdin: bool,
+    access_token_file: str | None,
     hec_endpoint: str | None,
     hec_token: str | None,
+    hec_token_stdin: bool,
+    hec_token_file: str | None,
     app_name: str | None,
     logs_index: str | None,
     logs_source: str | None,
@@ -4712,6 +4908,26 @@ def setup_splunk(
     if show_credentials:
         _show_splunk_credentials(app.cfg.data_dir)
         return
+
+    # ("Setup secret entry can echo or expose
+    # credentials"): resolve the splunk argv-secret options through the
+    # safe alternatives before any downstream code touches them.
+    resolved_access = _resolve_secret_arg(
+        "--access-token",
+        argv_value=access_token,
+        stdin_flag=access_token_stdin,
+        file_path=access_token_file,
+    )
+    if resolved_access is not None:
+        access_token = resolved_access
+    resolved_hec = _resolve_secret_arg(
+        "--hec-token",
+        argv_value=hec_token,
+        stdin_flag=hec_token_stdin,
+        file_path=hec_token_file,
+    )
+    if resolved_hec is not None:
+        hec_token = resolved_hec
 
     if disable:
         _disable_splunk(app, enable_o11y, enable_logs, enable_enterprise, non_interactive)

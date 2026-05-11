@@ -91,15 +91,17 @@ type APIServer struct {
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
 
-	claudeCodeMu                 sync.Mutex
-	claudeCodeLastComponentScan  time.Time
-	codexMu                      sync.Mutex
-	codexLastComponentScan       time.Time
-	rawTelemetryMu               sync.Mutex
-	rawTelemetryDedupe           *rawTelemetryDeduper
-	llmPromptMu                  sync.Mutex
-	llmPromptBySourceSession     map[string]string
-	llmPromptBySourceSessionTurn map[string]string
+	claudeCodeMu                      sync.Mutex
+	claudeCodeLastComponentScan       time.Time
+	codexMu                           sync.Mutex
+	codexLastComponentScan            time.Time
+	rawTelemetryMu                    sync.Mutex
+	rawTelemetryDedupe                *rawTelemetryDeduper
+	llmPromptMu                       sync.Mutex
+	llmPromptBySourceSession          map[string]string
+	llmPromptBySourceSessionOrder     []string
+	llmPromptBySourceSessionTurn      map[string]string
+	llmPromptBySourceSessionTurnOrder []string
 
 	connectorRegistry *connector.Registry
 }
@@ -845,6 +847,12 @@ type policyEvaluateInput struct {
 type policyEvaluateScanResult struct {
 	MaxSeverity   string `json:"max_severity"`
 	TotalFindings int    `json:"total_findings"`
+	// hardening (S2.scanners): expose the scanner failure
+	// signal so callers driving this debug endpoint can reproduce
+	// the post-scan admission decision a non-zero scanner exit
+	// would yield. Mirrors policy.ScanResultInput.
+	ExitCode  int    `json:"exit_code,omitempty"`
+	ScanError string `json:"scan_error,omitempty"`
 }
 
 func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
@@ -1218,6 +1226,8 @@ func (a *APIServer) handlePolicyEvaluate(w http.ResponseWriter, r *http.Request)
 		input.ScanResult = &policy.ScanResultInput{
 			MaxSeverity:   req.Input.ScanResult.MaxSeverity,
 			TotalFindings: req.Input.ScanResult.TotalFindings,
+			ExitCode:      req.Input.ScanResult.ExitCode,
+			ScanError:     req.Input.ScanResult.ScanError,
 		}
 	}
 
@@ -1524,6 +1534,68 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Target == "" {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
+		return
+	}
+
+	// the legacy handler accepted any directory the
+	// gateway process could read and streamed every regular file
+	// inside it. A caller with the sidecar bearer token could ask
+	// for ~/.defenseclaw, ~/.ssh, /etc, /private/etc/ssh, etc., and
+	// receive a tarball of readable host files. Constrain req.Target
+	// to a directory under one of the configured skill or plugin
+	// roots, after fully resolving symlinks on both sides.
+	resolvedTarget, err := filepath.EvalSymlinks(req.Target)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("target directory not found: %s", req.Target),
+		})
+		return
+	}
+	resolvedAbs, err := filepath.Abs(resolvedTarget)
+	if err != nil {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("target directory not resolvable: %s", req.Target),
+		})
+		return
+	}
+	a.cfgMu.RLock()
+	cfgSnap := a.scannerCfg
+	a.cfgMu.RUnlock()
+	var allowedRoots []string
+	if cfgSnap != nil {
+		allowedRoots = append(allowedRoots, cfgSnap.SkillDirs()...)
+		allowedRoots = append(allowedRoots, cfgSnap.PluginDirs()...)
+	}
+	rootOK := false
+	for _, root := range allowedRoots {
+		if root == "" {
+			continue
+		}
+		rr, rerr := filepath.EvalSymlinks(root)
+		if rerr != nil {
+			continue
+		}
+		rrAbs, aerr := filepath.Abs(rr)
+		if aerr != nil {
+			continue
+		}
+		if resolvedAbs == rrAbs {
+			rootOK = true
+			break
+		}
+		if strings.HasPrefix(resolvedAbs, rrAbs+string(os.PathSeparator)) {
+			rootOK = true
+			break
+		}
+	}
+	if !rootOK {
+		if a.logger != nil {
+			_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch-rejected", req.Target,
+				"reason=outside-skill-roots")
+		}
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "target is not under a configured skill or plugin root",
+		})
 		return
 	}
 
@@ -1988,16 +2060,35 @@ func (a *APIServer) writeGuardrailRuntime() error {
 }
 
 func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.GuardrailInput) (*policy.GuardrailOutput, error) {
+	// when a policy bundle is configured but
+	// either the engine constructor or evaluation fails, the
+	// previous code silently fell back to a built-in
+	// severity-derived decision that allows clean/missing scanner
+	// results and downgrades MEDIUM/HIGH to alert. That converted
+	// every policy outage into a quiet enforcement bypass for
+	// action-mode prompts. We now fail closed: any configured
+	// policy directory whose engine/eval fails returns block in
+	// action mode (and an explicit alert in observe mode for
+	// audit visibility).
 	if a.scannerCfg != nil && a.scannerCfg.PolicyDir != "" {
 		engine, err := policy.New(a.scannerCfg.PolicyDir)
-		if err == nil {
-			out, evalErr := engine.EvaluateGuardrail(ctx, input)
-			if evalErr == nil {
-				return out, nil
-			}
+		if err != nil {
+			return policyOutageVerdict(input,
+				fmt.Sprintf("policy engine load failed: %v", err)), nil
 		}
+		out, evalErr := engine.EvaluateGuardrail(ctx, input)
+		if evalErr != nil {
+			return policyOutageVerdict(input,
+				fmt.Sprintf("policy evaluation failed: %v", evalErr)), nil
+		}
+		return out, nil
 	}
 
+	// No policy directory configured at all — keep the legacy
+	// severity-derived fallback. Operators that want strict
+	// fail-closed behavior on missing policy must configure a
+	// PolicyDir; the absence of one is treated as "no policy"
+	// rather than "policy outage".
 	sev := "NONE"
 	var sources []string
 	for _, res := range []*policy.GuardrailScanResult{input.LocalResult, input.CiscoResult} {
@@ -2021,9 +2112,26 @@ func (a *APIServer) evaluateGuardrailPolicy(ctx context.Context, input policy.Gu
 	return &policy.GuardrailOutput{
 		Action:         action,
 		Severity:       sev,
-		Reason:         "built-in fallback (OPA unavailable)",
+		Reason:         "built-in fallback (no policy configured)",
 		ScannerSources: sources,
 	}, nil
+}
+
+// policyOutageVerdict builds a fail-closed verdict for guardrail
+// evaluations when a configured policy bundle cannot be loaded or
+// evaluated. Action mode blocks; observe mode keeps the request
+// flowing but loud-flags it via alert + would_block-style telemetry.
+func policyOutageVerdict(input policy.GuardrailInput, reason string) *policy.GuardrailOutput {
+	action := "block"
+	if input.Mode == "observe" {
+		action = "alert"
+	}
+	return &policy.GuardrailOutput{
+		Action:         action,
+		Severity:       "HIGH",
+		Reason:         "guardrail failing closed: " + reason,
+		ScannerSources: []string{"policy-outage"},
+	}
 }
 
 // metricsMiddleware records HTTP request count and duration via OTel.
@@ -2116,12 +2224,19 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				// it cannot be replayed against /api/v1/* routes
 				// and is bound to a single connector's OTLP
 				// namespace. See connector/otlp_token.go.
+				//
+				// follow-up: parity with the bearer branch
+				// below — promote the peeked agent identity once
+				// auth has succeeded so audit rows on path-token
+				// authed traffic still carry agent_instance_id.
 				if subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
+					r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 					next.ServeHTTP(w, r)
 					return
 				}
 				if scoped := a.lookupOTLPPathToken(source); scoped != "" &&
 					subtle.ConstantTimeCompare([]byte(pathToken), []byte(scoped)) == 1 {
+					r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -2138,6 +2253,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			return
 		}
 
+		// ("CorrelationMiddleware mints
+		// unauthenticated agent sessions"): now that auth has
+		// succeeded, upgrade the previously peeked agent identity
+		// to a fully minted entry so authenticated traffic still
+		// gets a stable agent_instance_id on its emissions.
+		r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -2706,6 +2827,30 @@ func (a *APIServer) handleCodeScan(w http.ResponseWriter, r *http.Request) {
 
 	if a.logger != nil {
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
+	}
+
+	// H.MEDIUM ("Raw scan JSON stores unredacted secret-bearing
+	// findings"): the persistent path (LogScanWithCorrelation →
+	// audit.scan_persist.go) already runs Description / Location /
+	// Remediation through redaction.ForSinkString before INSERT, and
+	// `defenseclaw scan code --json` (internal/cli/scan_v7.go::findingToV7)
+	// applies the same redaction before serialization. The REST API used
+	// to bypass both — serializing the raw scanner.ScanResult straight to
+	// the response body and leaking matched source lines, raw absolute
+	// paths, and operator-supplied remediation text to any caller. Apply
+	// the same field-level redaction here so all three surfaces (DB row,
+	// CLI JSON, REST response) treat scanner output identically. We
+	// redact AFTER LogScanWithCorrelation has been called: scan_persist.go
+	// re-applies its own redaction before INSERT, so the in-place mutation
+	// here only affects the response body — keeping the existing audit
+	// DB contract untouched. Title is intentionally NOT redacted to stay
+	// symmetric with the persistence path (Title is the rule-name /
+	// operator-searchable summary, not the matched bytes).
+	for i := range result.Findings {
+		f := &result.Findings[i]
+		f.Description = redaction.ForSinkString(f.Description)
+		f.Location = redaction.ForSinkString(f.Location)
+		f.Remediation = redaction.ForSinkString(f.Remediation)
 	}
 
 	a.writeJSON(w, http.StatusOK, result)

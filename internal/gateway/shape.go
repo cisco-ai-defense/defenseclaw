@@ -197,11 +197,10 @@ func isKnownSafeDomain(rawURL string) bool {
 // isPrivateHost returns true when host (a bare IP literal, host:port
 // form, or hostname) resolves to an RFC 1918 / RFC 4193 / loopback /
 // link-local address — the SSRF short list. Accepted inputs:
-//   - bare IP literal:  "10.0.0.1", "::1", "fe80::1%eth0"
-//   - host:port form:   "10.0.0.1:8080"
-//   - bracketed v6:     "[::1]:8080"
-//   - hostname:         "internal.corp", "metadata.google.internal:80"
-//
+// - bare IP literal: "10.0.0.1", "::1", "fe80::1%eth0"
+// - host:port form: "10.0.0.1:8080"
+// - bracketed v6: "[::1]:8080"
+// - hostname: "internal.corp", "metadata.google.internal:80"
 // PR #141 audit M1: hostnames are now resolved via net.LookupHost and
 // every returned address is checked. The previous "skip hostnames"
 // path was a DNS-rebinding hole — an attacker-controlled DNS record
@@ -210,7 +209,19 @@ func isKnownSafeDomain(rawURL string) bool {
 // failure we fail-open (return false) to preserve over-block prevention
 // for legitimate LLM endpoints; callers that need a hard guarantee
 // must layer a network-level egress allowlist on top.
-//
+// stripIPv6Zone removes the zone identifier (e.g. "%lo0", "%eth0") from an
+// IPv6 literal. net.ParseIP returns nil on zone-qualified forms like
+// "::1%lo0" and "fe80::1%lo0", so the zone must be stripped before
+// classification or the literal falls through to DNS resolution (which
+// fails for an IP literal) and the host slips through.
+func stripIPv6Zone(host string) string {
+	h := strings.TrimSpace(host)
+	if i := strings.Index(h, "%"); i >= 0 {
+		return h[:i]
+	}
+	return h
+}
+
 // NOTE: a separate isPrivateIP(net.IP) exists in webhook.go for the
 // webhook SSRF allowlist. This function is the URL-string flavour.
 func isPrivateHost(host string) bool {
@@ -226,15 +237,27 @@ func isPrivateHost(host string) bool {
 	} else if h2, _, err := net.SplitHostPort(h); err == nil {
 		h = h2
 	}
+	// strip IPv6 zone identifier ("%lo0", "%eth0") before
+	// net.ParseIP. Scoped IPv6 literals like "::1%lo0" and "fe80::1%lo0"
+	// are valid dial targets but ParseIP returns nil on the zone-qualified
+	// form, so the pre-fix path fell through to DNS resolution (which
+	// fails for an IP literal), returned false, and let the caller dial
+	// loopback / link-local destinations.
+	h = stripIPv6Zone(h)
 	if ip := net.ParseIP(h); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return true
-		}
-		return false
+		// Delegate to isUnsafeIP (provider.go) so isPrivateHost
+		// classifies the same set of unsafe IPs as the dial guard.
+		// This was historically two divergent predicates: isUnsafeIP
+		// covered CGNAT 100.64/10, ECS 169.254.170.2, and IPv6
+		// ULA fd00::/8 while isPrivateHost did not. Routing both
+		// through the same predicate eliminates the gap so a
+		// CNAME / Host-header attack that lands on a public IP
+		// at the application check but resolves to private at
+		// dial time is still refused at the application check.
+		return isUnsafeIP(ip)
 	}
 	// Hostname — resolve and check every returned address. A single
-	// private result is enough to flag the host: an attacker who
+	// unsafe result is enough to flag the host: an attacker who
 	// returns multiple A records (one public, one 127.0.0.1) is
 	// trying exactly the rebinding trick this branch closes.
 	addrs, err := net.LookupHost(h)
@@ -246,8 +269,7 @@ func isPrivateHost(host string) bool {
 		if resolved == nil {
 			continue
 		}
-		if resolved.IsLoopback() || resolved.IsPrivate() || resolved.IsLinkLocalUnicast() ||
-			resolved.IsLinkLocalMulticast() || resolved.IsUnspecified() {
+		if isUnsafeIP(resolved) {
 			return true
 		}
 	}

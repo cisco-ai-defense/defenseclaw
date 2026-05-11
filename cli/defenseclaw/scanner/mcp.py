@@ -51,6 +51,74 @@ if TYPE_CHECKING:
     pass
 
 
+# env vars whose names contain any of these
+# substrings are treated as potentially sensitive and never inherited
+# into the spawned MCP subprocess during a local scan. This is a
+# deliberately broad allowlist because LLM SDKs ship dozens of
+# provider-specific names (OPENAI_API_KEY, ANTHROPIC_API_KEY,
+# GOOGLE_API_KEY, GEMINI_API_KEY, AZURE_OPENAI_KEY, BEDROCK_*, AWS_*,
+# COHERE_API_KEY, GROQ_API_KEY, MISTRAL_API_KEY, PERPLEXITY_API_KEY,
+# DEEPSEEK_API_KEY, OPENROUTER_API_KEY, XAI_API_KEY, TOGETHER_API_KEY,
+# REPLICATE_API_TOKEN, HF_TOKEN/HUGGINGFACE_TOKEN, ...). Operators that
+# need to preserve a specific env var for the scanned MCP server should
+# put it on the `env:` block of the MCP entry; that block IS preserved.
+_SENSITIVE_ENV_SUBSTRINGS = (
+    "API_KEY", "APIKEY", "API_TOKEN", "TOKEN", "SECRET", "PASSWORD",
+    "PASSWD", "AUTH", "CREDENTIAL", "PRIVATE_KEY", "ACCESS_KEY",
+    "BEARER", "SESSION", "COOKIE", "WEBHOOK", "HEC_TOKEN",
+    "OPENAI", "ANTHROPIC", "GOOGLE", "GEMINI", "AZURE_OPENAI",
+    "BEDROCK", "AWS_", "COHERE", "GROQ", "MISTRAL", "PERPLEXITY",
+    "DEEPSEEK", "OPENROUTER", "XAI_", "TOGETHER", "REPLICATE",
+    "HF_TOKEN", "HUGGINGFACE", "DATABRICKS", "SAGEMAKER",
+    "CISCO", "DEFENSECLAW", "SPLUNK",
+    "GITHUB_TOKEN", "GH_TOKEN", "GITLAB_TOKEN",
+)
+
+# Baseline env vars that are SAFE to inherit into the subprocess —
+# things the spawned MCP server typically needs to find binaries,
+# config dirs, and locale.
+_SAFE_INHERIT_ENV = (
+    "PATH", "HOME", "USER", "SHELL", "TERM", "LOGNAME",
+    "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
+    "PWD", "PYTHONPATH", "NODE_PATH", "DISPLAY",
+)
+
+
+def _is_sensitive_env_name(name: str) -> bool:
+    upper = name.upper()
+    for token in _SENSITIVE_ENV_SUBSTRINGS:
+        if token in upper:
+            return True
+    return False
+
+
+def _safe_subprocess_env(operator_env: dict | None) -> dict:
+    """Build a scrubbed environment for a spawned MCP subprocess.
+
+    a full ``os.environ`` inheritance leaks
+    every operator-set secret to the scanned server. We start from an
+    allowlisted baseline (``PATH``, ``HOME``, ``LANG``, …), strip any
+    name that looks sensitive, then layer on top whatever the operator
+    explicitly placed on ``MCPServerEntry.env``. Operator-supplied
+    values always win — they are the contract for what the MCP server
+    is supposed to see.
+    """
+    out: dict[str, str] = {}
+    for name in _SAFE_INHERIT_ENV:
+        v = os.environ.get(name)
+        if v is None:
+            continue
+        if _is_sensitive_env_name(name):
+            continue
+        out[name] = v
+    if operator_env:
+        for k, v in operator_env.items():
+            if not isinstance(k, str):
+                continue
+            out[k] = "" if v is None else str(v)
+    return out
+
+
 def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     """Translate a legacy ``InspectLLMConfig`` into the unified
     :class:`LLMConfig` shape so we can drive the shared helpers. Used
@@ -131,7 +199,24 @@ class MCPScannerWrapper:
 
         llm = self._llm
         aid = self.cisco_ai_defense
-        self._inject_env()
+
+        # when scanning a LOCAL stdio MCP
+        # server we MUST NOT inject the operator's LLM API key into
+        # os.environ — the mcp-scanner SDK spawns the MCP subprocess
+        # with the parent process's full environment, so any env var
+        # we set here (OPENAI_API_KEY, ANTHROPIC_API_KEY,
+        # GOOGLE_API_KEY, …) leaks to the very server we're about to
+        # scan. The SDK accepts the key via MCPConfig.llm_provider_api_key
+        # below, so the LLM analyzer keeps working without env
+        # injection. Remote scans don't spawn a child process and
+        # need the env injection to keep parity with other scanners.
+        is_local = (
+            server_entry is not None
+            and server_entry.command
+            and not server_entry.url
+        )
+        if not is_local:
+            self._inject_env()
 
         # ``llm_model`` must be LiteLLM-shaped (``provider/model``) —
         # the mcp-scanner SDK passes it straight through to LiteLLM.
@@ -159,8 +244,6 @@ class MCPScannerWrapper:
 
         scanner = MCPSDKScanner(sdk_config)
         analyzers = self._parse_analyzers(AnalyzerEnum)
-
-        is_local = server_entry is not None and server_entry.command and not server_entry.url
 
         start = time.monotonic()
 
@@ -207,8 +290,17 @@ class MCPScannerWrapper:
         server_def: dict = {"command": entry.command}
         if entry.args:
             server_def["args"] = entry.args
-        if entry.env:
-            server_def["env"] = entry.env
+        # ALWAYS hand the spawned MCP
+        # subprocess an explicit, scrubbed env dict. When the MCP SDK
+        # spawns a stdio server with env=None the child inherits the
+        # parent's process environment — including OPENAI_API_KEY,
+        # ANTHROPIC_API_KEY, GOOGLE_API_KEY, AWS_*, GITHUB_TOKEN,
+        # SPLUNK_HEC_TOKEN and every other secret the operator has
+        # exported in their shell. Even when the operator did not
+        # supply env= for the MCP entry, we fall back to a minimal
+        # baseline (PATH/HOME/etc.) plus the operator-specified env
+        # only, never the parent's full environment.
+        server_def["env"] = _safe_subprocess_env(entry.env)
 
         config_data = {"mcpServers": {entry.name: server_def}}
 

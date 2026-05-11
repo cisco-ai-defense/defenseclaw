@@ -279,6 +279,55 @@ def _preflight_check(version: str, os_name: str, arch: str) -> None:
     ux.ok("Release artifacts verified")
 
 
+def _verify_artifact_sha256(path: str, name: str, pinned_env: str, sidecar_url: str) -> None:
+    """verify a downloaded release artifact
+    against either an operator-pinned digest (env var) or a published
+    `<artifact>.sha256` sidecar in the same release. Fail closed if
+    neither is available unless DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1.
+    """
+    import hashlib
+
+    pinned = os.environ.get(pinned_env, "").strip().lower()
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    actual = h.hexdigest().lower()
+
+    if pinned:
+        if pinned != actual:
+            raise click.ClickException(
+                f"checksum mismatch for {name}: expected {pinned} got {actual}"
+            )
+        ux.ok(f"{name}: pinned sha256 match")
+        return
+
+    try:
+        resp = requests.get(sidecar_url, timeout=15, allow_redirects=True)
+        if resp.status_code == 200 and resp.text.strip():
+            published = resp.text.strip().split()[0].lower()
+            if published == actual:
+                ux.ok(f"{name}: published .sha256 sidecar match")
+                return
+            raise click.ClickException(
+                f"checksum mismatch for {name}: published {published} got {actual}"
+            )
+    except requests.RequestException:
+        pass
+
+    if os.environ.get("DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "").strip() == "1":
+        ux.warn(
+            f"{name}: no checksum available and DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED=1 — "
+            "proceeding without verification",
+            indent="  ",
+        )
+        return
+    raise click.ClickException(
+        f"no published .sha256 for {name} and no pinned {pinned_env}; "
+        f"refusing to install unverified artifact"
+    )
+
+
 def _download_gateway(version: str, os_name: str, arch: str, staging_dir: str) -> str:
     """Download the gateway tarball to staging_dir and extract. Returns path to binary."""
     tarball = f"defenseclaw_{version}_{os_name}_{arch}.tar.gz"
@@ -287,6 +336,10 @@ def _download_gateway(version: str, os_name: str, arch: str, staging_dir: str) -
     click.echo(f"  {ux.dim('→')} Downloading gateway binary ({os_name}/{arch}) ...")
     dest = os.path.join(staging_dir, tarball)
     _download_file(url, dest)
+    # verify integrity BEFORE extracting / installing.
+    _verify_artifact_sha256(dest, "gateway tarball",
+                            "DEFENSECLAW_UPGRADE_TARBALL_SHA256",
+                            url + ".sha256")
     subprocess.run(["tar", "-xzf", dest, "-C", staging_dir], check=True, capture_output=True)
     binary = os.path.join(staging_dir, "defenseclaw")
     ux.ok("Gateway binary downloaded")
@@ -301,6 +354,9 @@ def _download_wheel(version: str, staging_dir: str) -> str:
     click.echo(f"  {ux.dim('→')} Downloading Python CLI wheel ...")
     dest = os.path.join(staging_dir, whl_name)
     _download_file(url, dest)
+    _verify_artifact_sha256(dest, "python wheel",
+                            "DEFENSECLAW_UPGRADE_WHL_SHA256",
+                            url + ".sha256")
     ux.ok("Python CLI wheel downloaded")
     return dest
 

@@ -661,6 +661,12 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
+	// ("CorrelationMiddleware mints
+	// unauthenticated agent sessions"): now that the proxy has
+	// authenticated the request, upgrade the previously peeked
+	// agent identity to a fully minted entry so downstream
+	// handlers see a stable agent_instance_id.
+	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 
 	// OpenAI-compatible paths (e.g. /api/v1/chat/completions from OpenRouter)
 	// must use handleChatCompletion which has proper streaming SSE support.
@@ -703,6 +709,42 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// provider entries in providers.json (e.g. "chatgpt.com/backend-api") can
 	// be matched correctly by the allowlist and the provider inference.
 	targetForMatch := targetOrigin + r.URL.Path
+
+	// hardening (S2.proxy): refuse target URLs that embed
+	// userinfo. "https://attacker:password@evil.com/..." is parseable
+	// but the userinfo segment is exfiltrated in the upstream
+	// Authorization header; an attacker who can influence
+	// X-DC-Target-URL gets a free credential-leak primitive even on
+	// known providers. Always strip-and-refuse here.
+	if u, perr := url.Parse(targetOrigin); perr == nil {
+		if u.User != nil {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   u.Hostname(),
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: false,
+				Branch:       "passthrough",
+				Decision:     "block",
+				Reason:       "userinfo-in-target-url",
+				Source:       "go",
+			})
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough: userinfo in X-DC-Target-URL\n")
+			writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must not contain userinfo")
+			return
+		}
+		if u.Scheme != "https" && u.Scheme != "http" {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   u.Hostname(),
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: false,
+				Branch:       "passthrough",
+				Decision:     "block",
+				Reason:       "non-http-scheme",
+				Source:       "go",
+			})
+			writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must use http or https")
+			return
+		}
+	}
 
 	// Three-branch passthrough policy:
 	//   known       → forward and audit as normal (legacy behavior)
@@ -750,18 +792,35 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if branch == "shape" {
-		// SSRF defense-in-depth: never forward an LLM-shaped request
-		// to a private / link-local IP even when AllowUnknownLLMDomains
-		// is on. A malicious skill could point the LLM SDK at the cloud
-		// IMDS endpoint (169.254.169.254) and happen to send a
-		// `messages`-shaped body.
-		if isPrivateHost(targetHost) {
-			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED LLM-shaped passthrough to private IP: %s\n", targetHost)
+	// SSRF defense-in-depth (finding "Provider allowlist can
+	// be spoofed to forward to internal hosts"): apply the
+	// private/link-local resolution check to BOTH the shape AND known
+	// branches. The previous code only ran isPrivateHost in the
+	// "shape" branch; a known provider's hostname could still be
+	// CNAME'd or DNS-rebound to point to an internal/IMDS address,
+	// and the proxy would happily forward there. We now reject any
+	// passthrough whose target host resolves to a private IP --
+	// loopback Ollama is exempted by isOllamaLoopback in
+	// isKnownProviderDomain, which also handles 11434 explicitly.
+	//
+	// Test bypass: legacy tests that point a "known provider" entry
+	// at an httptest server bound on 127.0.0.1 set
+	// passthroughAllowPrivateForTest to true. The bypass only
+	// applies to the "known" branch -- the "shape" and "passthrough"
+	// branches still hard-block private IPs, so the dedicated SSRF
+	// hardening tests that pass private IPs via X-DC-Target-URL
+	// continue to expect 403.
+	if isPrivateHost(targetHost) && !isOllamaLoopback(targetForMatch, 0) {
+		bypass := branch == "known" && passthroughAllowPrivateForTest
+		if !bypass {
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s-branch passthrough to private IP: %s\n", branch, targetHost)
 			emitEgress(r.Context(), mkEgress("block", "private-ip"))
 			writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
 			return
 		}
+	}
+
+	if branch == "shape" {
 		allow := false
 		if p.cfg != nil {
 			allow = p.cfg.AllowUnknownLLMDomains
@@ -896,15 +955,29 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		passthroughReqForTelemetry.Model = label
 	}
 	inspectionText := promptInspectionText(userText)
+	// heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, partial.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, partial.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &passthroughReqForTelemetry, provider)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, label)
 		passthroughPromptID = emitLLMPromptEvent(r.Context(), meta, userText, body)
 
 		t0 := time.Now()
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, partial.Messages, label, mode)
+		// stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
@@ -1123,6 +1196,23 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
+		// scan provider-native tool calls (Anthropic
+		// tool_use, Gemini functionCall, Bedrock toolUse, OpenAI
+		// Responses function_call, OpenAI Chat Completions tool_calls).
+		// Pre-fix only the OpenAI chat-completion JSON path scanned tool
+		// calls; Anthropic / Gemini / Bedrock tool-call payloads were
+		// forwarded unchecked and the agent could execute them without
+		// the configured tool-call rules ever running.
+		if toolCallsRaw := extractPassthroughToolCalls(respBody, provider); toolCallsRaw != nil {
+			if verdict := p.inspectToolCalls(r.Context(), toolCallsRaw); verdict != nil &&
+				verdict.Action == "block" && mode == "action" {
+				msg := blockMessage(customBlockMsg, "tool_call", verdict.Reason)
+				p.enqueueBlockNotification(verdict, "tool_call", partial.Model)
+				p.writeBlockedPassthrough(w, r.URL.Path, provider, partial.Model, false, msg)
+				return
+			}
+		}
+
 		for k, vs := range resp.Header {
 			for _, v := range vs {
 				w.Header().Add(k, v)
@@ -1284,8 +1374,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 }
 
 // extractPassthroughResponseContent extracts assistant text from a non-streaming
-// provider-native response body. Supports Anthropic Messages API, Gemini, and
-// OpenAI Responses API formats.
+// provider-native response body. Supports Anthropic Messages API, Gemini,
+// OpenAI Responses API, OpenAI Chat Completions, Ollama native chat/generate,
+// and Bedrock Converse.
+//
+// pre-fix Ollama and Bedrock envelopes were ignored, so
+// completion inspection silently skipped any prompt-injection that triggered
+// `block` because `content` came back empty and the proxy short-circuited
+// the inspector call. The new branches keep parity with the providers that
+// `inferProviderFromURL` recognises so action-mode passthrough enforcement
+// is uniform across the supported provider surface.
 func extractPassthroughResponseContent(body []byte, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1327,6 +1425,48 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 			return sb.String()
 		}
 
+	case "ollama":
+		// Ollama native chat: {"message": {"content": "..."}}
+		// Ollama native generate: {"response": "..."}
+		var chatResp struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal(body, &chatResp) == nil {
+			if chatResp.Message.Content != "" {
+				return chatResp.Message.Content
+			}
+			if chatResp.Response != "" {
+				return chatResp.Response
+			}
+		}
+
+	case "bedrock":
+		// Bedrock Converse: {"output": {"message": {"content": [{"text": "..."}]}}}
+		// Bedrock InvokeModel responses are model-shaped and re-routed through
+		// the matching provider extractor (anthropic / cohere / etc.) by the
+		// caller, so this branch only handles the Converse envelope.
+		var bedrockResp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &bedrockResp) == nil {
+			var sb strings.Builder
+			for _, c := range bedrockResp.Output.Message.Content {
+				sb.WriteString(c.Text)
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
+		}
+
 	default:
 		// OpenAI Responses API: {"output": [{"content": [{"text": "..."}]}]}
 		var respAPI struct {
@@ -1363,8 +1503,198 @@ func extractPassthroughResponseContent(body []byte, provider string) string {
 	return ""
 }
 
+// extractPassthroughToolCalls returns provider-native tool-call payloads
+// found in a non-streaming response body, normalised into the OpenAI Chat
+// Completions tool_calls JSON shape — `[{id, type:"function",
+// function:{name, arguments}}]` — so it can be fed directly to
+// inspectToolCalls without a separate parser. Returns nil when the body
+// contains no recognised tool-call shape, so the caller can short-circuit
+// inspection.
+//
+// Pre-fix tool-call inspection only ran on the OpenAI chat-completion
+// path; Anthropic `tool_use`, Gemini `functionCall`, Bedrock `toolUse`,
+// and OpenAI Responses `function_call` output sailed through unchecked.
+// The first pass at this function emitted a flat `[{name, arguments}]`
+// shape that did not match the inspector's nested schema, so even when
+// the extractor found a tool call the inspector saw empty name and
+// arguments and returned no findings. The function now emits the
+// nested shape verbatim so the inspector reads the inspectable text
+// rather than empty strings.
+func extractPassthroughToolCalls(body []byte, provider string) json.RawMessage {
+	type fn struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}
+	type call struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function fn     `json:"function"`
+	}
+	var calls []call
+	// argString normalises the various provider representations of the
+	// "arguments" payload into a single Go string that, when fed to
+	// ScanAllRules, exposes the same inspectable substrings as the
+	// native OpenAI Chat Completions wire shape (where `arguments` is
+	// already a JSON string in Go after json.Unmarshal).
+	//
+	//   - Go string: pass through (already unwrapped).
+	//   - json.RawMessage starting with `"`: a JSON-encoded string
+	//     (OpenAI Responses pattern). Unmarshal once to strip the
+	//     wrapping quotes and decode escape sequences.
+	//   - json.RawMessage otherwise: a JSON object/array literal
+	//     (Anthropic input, Gemini args, Bedrock input). Pass the
+	//     raw bytes through so the scanner sees the literal arg keys
+	//     and values.
+	//   - nil/zero-length: empty string.
+	//   - anything else: best-effort json.Marshal.
+	argString := func(args interface{}) string {
+		switch a := args.(type) {
+		case string:
+			return a
+		case json.RawMessage:
+			if len(a) == 0 {
+				return ""
+			}
+			if a[0] == '"' {
+				var unwrapped string
+				if err := json.Unmarshal(a, &unwrapped); err == nil {
+					return unwrapped
+				}
+			}
+			return string(a)
+		case nil:
+			return ""
+		default:
+			b, err := json.Marshal(a)
+			if err != nil {
+				return ""
+			}
+			return string(b)
+		}
+	}
+	addCall := func(name string, args interface{}) {
+		if name == "" {
+			return
+		}
+		calls = append(calls, call{
+			Type:     "function",
+			Function: fn{Name: name, Arguments: argString(args)},
+		})
+	}
+
+	switch provider {
+	case "anthropic":
+		var resp struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name"`
+				Input json.RawMessage `json:"input"`
+			} `json:"content"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Content {
+				if c.Type == "tool_use" {
+					addCall(c.Name, c.Input)
+				}
+			}
+		}
+	case "gemini":
+		var resp struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct {
+						FunctionCall struct {
+							Name string          `json:"name"`
+							Args json.RawMessage `json:"args"`
+						} `json:"functionCall"`
+					} `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Candidates {
+				for _, p := range c.Content.Parts {
+					addCall(p.FunctionCall.Name, p.FunctionCall.Args)
+				}
+			}
+		}
+	case "bedrock":
+		var resp struct {
+			Output struct {
+				Message struct {
+					Content []struct {
+						ToolUse struct {
+							Name  string          `json:"name"`
+							Input json.RawMessage `json:"input"`
+						} `json:"toolUse"`
+					} `json:"content"`
+				} `json:"message"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &resp) == nil {
+			for _, c := range resp.Output.Message.Content {
+				addCall(c.ToolUse.Name, c.ToolUse.Input)
+			}
+		}
+	default:
+		// OpenAI Responses API: {"output": [{"type":"function_call","name":"...","arguments":"..."}]}
+		var respAPI struct {
+			Output []struct {
+				Type      string          `json:"type"`
+				Name      string          `json:"name"`
+				Arguments json.RawMessage `json:"arguments"`
+			} `json:"output"`
+		}
+		if json.Unmarshal(body, &respAPI) == nil {
+			for _, o := range respAPI.Output {
+				if o.Type == "function_call" {
+					addCall(o.Name, o.Arguments)
+				}
+			}
+		}
+		// OpenAI Chat Completions tool calls: {"choices":[{"message":{"tool_calls":[{"function":{"name":"...","arguments":"..."}}]}}]}
+		var respCC struct {
+			Choices []struct {
+				Message struct {
+					ToolCalls []struct {
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if json.Unmarshal(body, &respCC) == nil {
+			for _, c := range respCC.Choices {
+				for _, tc := range c.Message.ToolCalls {
+					addCall(tc.Function.Name, tc.Function.Arguments)
+				}
+			}
+		}
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+	encoded, err := json.Marshal(calls)
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
 // extractSSEChunkText extracts the assistant text delta from a single SSE
 // data JSON object in a streaming provider-native response.
+//
+// pre-fix the default branch only parsed OpenAI Chat
+// Completions `choices[].delta.content`, so OpenAI Responses streams
+// (`response.output_text.delta`), Bedrock Converse streams
+// (`contentBlockDelta`), and Ollama native streams (`message.content`)
+// returned an empty string for every chunk. Empty deltas skipped both
+// the initial-buffer flush and the final completion scan, and the
+// stream was delivered to the client unchanged. The new branches
+// keep the streaming inspector in lockstep with the non-streaming
+// extractor.
 func extractSSEChunkText(data string, provider string) string {
 	switch provider {
 	case "anthropic":
@@ -1398,7 +1728,52 @@ func extractSSEChunkText(data string, provider string) string {
 			return sb.String()
 		}
 
+	case "bedrock":
+		// Bedrock Converse streaming uses contentBlockDelta frames
+		// shaped {"contentBlockDelta":{"delta":{"text":"..."}}}.
+		var chunk struct {
+			ContentBlockDelta struct {
+				Delta struct {
+					Text string `json:"text"`
+				} `json:"delta"`
+			} `json:"contentBlockDelta"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			return chunk.ContentBlockDelta.Delta.Text
+		}
+
+	case "ollama":
+		// Ollama native streaming chat: {"message":{"content":"..."}}
+		// generate: {"response":"..."}
+		var chunk struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+			Response string `json:"response"`
+		}
+		if json.Unmarshal([]byte(data), &chunk) == nil {
+			if chunk.Message.Content != "" {
+				return chunk.Message.Content
+			}
+			return chunk.Response
+		}
+
 	default:
+		// OpenAI Responses API streaming uses event-shaped frames
+		// keyed by `type`, e.g.:
+		//   {"type":"response.output_text.delta","delta":"..."}
+		// Pre-fix the default branch only parsed Chat Completions, so
+		// every Responses chunk yielded an empty string. Detect the
+		// Responses shape first, then fall back to Chat Completions.
+		var rspChunk struct {
+			Type  string `json:"type"`
+			Delta string `json:"delta"`
+		}
+		if json.Unmarshal([]byte(data), &rspChunk) == nil &&
+			strings.HasPrefix(rspChunk.Type, "response.") &&
+			strings.Contains(rspChunk.Type, ".delta") {
+			return rspChunk.Delta
+		}
 		// OpenAI Chat Completions streaming: {"choices":[{"delta":{"content":"..."}}]}
 		var chunk struct {
 			Choices []struct {
@@ -1449,6 +1824,17 @@ func (p *GuardrailProxy) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
 }
+
+// passthroughAllowPrivateForTest is a TEST-ONLY override that
+// disables the universal SSRF private-host check in
+// handlePassthrough. Production code never flips this. Tests that
+// need to forward a "known provider" request to an httptest.NewServer
+// (bound on 127.0.0.1) flip this to true and reset it via t.Cleanup.
+//
+// Keeping the toggle here -- rather than as a build-tag _test.go
+// helper -- means the safety check stays in a single place and we do
+// not maintain two copies of handlePassthrough.
+var passthroughAllowPrivateForTest bool
 
 // providerRegistryMu guards providerDomains / ollamaPorts / providerRegistry.
 // The registry can be rebuilt at runtime via ReloadProviderRegistry() when
@@ -1659,6 +2045,9 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		_, _ = w.Write([]byte(`{"error":{"message":"invalid API key","type":"authentication_error","code":"invalid_api_key"}}`))
 		return
 	}
+	// ("CorrelationMiddleware mints
+	// unauthenticated agent sessions"): mint-after-auth.
+	r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil {
@@ -1707,10 +2096,22 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// Native-binary connectors (zeptoclaw) have no fetch interceptor, so the
-	// request arrives without X-DC-Target-URL / X-AI-Auth. Ask the active
-	// connector to resolve them from its captured config snapshot. Existing
-	// header values win — fetch-interceptor paths are unchanged.
+	// Native-binary connectors (zeptoclaw, codex) have no fetch interceptor,
+	// so the request arrives without X-DC-Target-URL / X-AI-Auth. Ask the
+	// active connector to resolve them from its captured config snapshot.
+	// Existing header values win — fetch-interceptor paths are unchanged.
+	//
+	// IMPORTANT: hydrateConnectorSignals MUST run BEFORE the SSRF guards
+	// below. A previous version of this handler ran the guards immediately
+	// after reading X-DC-Target-URL from the header, which meant the
+	// connector-hydrated path (the only path used by native-binary
+	// connectors) bypassed the structured 400/403 + labeled egress event
+	// entirely — Bifrost's ssrfSafeDialContext caught the actual dial, but
+	// callers got an opaque dial-failure error and the audit pipeline lost
+	// the "chat / block / private-ip" breadcrumb. Now both code paths
+	// (header-supplied and connector-hydrated TargetURL) hit the same
+	// guards, mirroring handlePassthrough at proxy.go:687–747. See
+	// proxy_chat_ssrf_hydrated_test.go for the regression assertion.
 	if !localKeyResolutionDisabled {
 		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
 			if req.TargetURL == "" {
@@ -1718,6 +2119,62 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			}
 			if req.TargetAPIKey == "" {
 				req.TargetAPIKey = connKey
+			}
+		}
+	}
+
+	// hardening (mirror of handlePassthrough at proxy.go:713–747):
+	// the chat-completion path also forwards req.TargetURL into the upstream
+	// provider (Bifrost handles the actual dial); apply the same userinfo /
+	// scheme / private-host guards so an authenticated caller (or a
+	// compromised plugin / connector snapshot) cannot SSRF the gateway into
+	// IMDS / loopback / CGNAT space, and cannot smuggle credentials via
+	// userinfo. This block runs AFTER hydrateConnectorSignals so it covers
+	// both the header-supplied and the connector-hydrated TargetURL.
+	if req.TargetURL != "" {
+		if u, perr := url.Parse(req.TargetURL); perr == nil {
+			if u.User != nil {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   u.Hostname(),
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "userinfo-in-target-url",
+					Source:       "go",
+				})
+				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in X-DC-Target-URL\n")
+				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must not contain userinfo")
+				return
+			}
+			if u.Scheme != "https" && u.Scheme != "http" {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   u.Hostname(),
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "non-http-scheme",
+					Source:       "go",
+				})
+				writeOpenAIError(w, http.StatusBadRequest, "X-DC-Target-URL must use http or https")
+				return
+			}
+			if host := u.Hostname(); host != "" && isPrivateHost(host) &&
+				!isOllamaLoopback(req.TargetURL+r.URL.Path, 0) &&
+				!passthroughAllowPrivateForTest {
+				emitEgress(r.Context(), gatewaylog.EgressPayload{
+					TargetHost:   host,
+					TargetPath:   r.URL.Path,
+					LooksLikeLLM: true,
+					Branch:       "chat",
+					Decision:     "block",
+					Reason:       "private-ip",
+					Source:       "go",
+				})
+				fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+				writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+				return
 			}
 		}
 	}
@@ -1818,9 +2275,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	inspectionText := promptInspectionText(userText)
+	// heartbeat / session-startup gates run on the RAW user text, not
+	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
+	// or session-startup-shaped suffix inside the user-controlled OpenClaw
+	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
+	// payload from these allowlists while the original prompt still flows
+	// upstream.
 	if userText != "" &&
-		!isHeartbeatMessage(inspectionText, req.Messages) &&
-		!isSessionStartupMessage(inspectionText) {
+		!isHeartbeatMessage(userText, req.Messages) &&
+		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
 		meta.PromptID = stableLLMEventID("prompt", meta.Source, meta.SessionID, meta.RequestID, req.Model)
 		promptID = emitLLMPromptEvent(r.Context(), meta, userText, req.RawBody)
@@ -1837,6 +2300,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, req.Messages, req.Model, mode)
+		// stripOpenClawUntrustedEnvelope is keyed on a literal prefix
+		// any client can forge, so we additionally inspect the RAW user text
+		// when the strip actually changed the content. Either path can
+		// trigger a block; we keep the stricter verdict.
+		if inspectionText != userText {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, req.Messages, req.Model, mode)
+			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		elapsed := time.Since(t0)
 
@@ -3357,22 +3828,67 @@ func redactAuthValue(val string) string {
 	return "[set]"
 }
 
-// scrubURLSecrets removes sensitive query parameters (key, api-key, apikey,
-// token) from a URL string before logging.  Returns the original string
-// unmodified when it contains no query string.
+// scrubURLSecrets removes sensitive userinfo and query parameters
+// from a URL string before logging.
+//
+// ("Credential-bearing upstream URLs can be logged"):
+// the legacy implementation returned the original string unchanged
+// when “RawQuery“ was empty, so URLs with userinfo
+// (“https://user:pass@host“) leaked verbatim. It also only redacted
+// four exact lower-case keys ("key", "api-key", "apikey", "token"),
+// missing common credential names like “access_token“,
+// “client_secret“, “X-Amz-Signature“, and “X-Amz-Credential“.
+//
+// The hardened implementation:
+//   - Always parses, so userinfo is rejected even on bare URLs.
+//   - Replaces “url.Userinfo“ with the literal "REDACTED:REDACTED"
+//     when present, preserving the URL shape so log readers can still
+//     correlate by host without the credential bytes.
+//   - Matches query keys case-insensitively against a richer
+//     credential vocabulary.
 func scrubURLSecrets(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.RawQuery == "" {
+	if raw == "" {
 		return raw
 	}
-	q := u.Query()
-	for _, k := range []string{"key", "api-key", "apikey", "token"} {
-		if q.Has(k) {
-			q.Set(k, "REDACTED")
-		}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
 	}
-	u.RawQuery = q.Encode()
+	if u.User != nil {
+		u.User = url.UserPassword("REDACTED", "REDACTED")
+	}
+	if u.RawQuery != "" {
+		q := u.Query()
+		for key := range q {
+			if isSensitiveQueryKey(key) {
+				q.Set(key, "REDACTED")
+			}
+		}
+		u.RawQuery = q.Encode()
+	}
 	return u.String()
+}
+
+// isSensitiveQueryKey reports whether the case-insensitive query key
+// “k“ carries a credential we never want to print to logs. The list
+// covers OAuth2 flows (“access_token“, “refresh_token“,
+// “client_secret“), AWS signature query parameters
+// (“X-Amz-Signature“, “X-Amz-Credential“,
+// “X-Amz-Security-Token“), GCS V4 signed URLs (“X-Goog-Signature“),
+// shared-access signatures (“sig“, “signature“), webhook tokens
+// (“token“, “hub.token“), and the legacy short forms.
+func isSensitiveQueryKey(k string) bool {
+	switch strings.ToLower(k) {
+	case "key", "api-key", "apikey", "api_key",
+		"token", "auth", "authorization", "secret", "password",
+		"access_token", "refresh_token", "id_token", "client_secret",
+		"x-amz-signature", "x-amz-credential", "x-amz-security-token",
+		"x-goog-signature", "x-goog-credential",
+		"sig", "signature", "hub.token", "hub_token",
+		"sas", "se", "sv":
+		return true
+	}
+	return false
 }
 
 // isOllamaLoopback returns true when targetURL points at a loopback
@@ -3436,13 +3952,38 @@ func isKnownProviderDomain(targetURL string) bool {
 }
 
 // matchProviderDomain performs safe domain matching:
-//   - Domains ending in "." are hostname prefixes (e.g. "bedrock-runtime.")
-//   - Domains containing "/" match hostname+path prefix
-//   - All others require exact hostname or subdomain match
+//
+//   - Domains containing "*" use a single-label wildcard match. The "*"
+//     MUST stand for exactly one DNS label between two literal dots
+//     (e.g. "bedrock-runtime.*.amazonaws.com" matches
+//     "bedrock-runtime.us-east-1.amazonaws.com" but NOT
+//     "bedrock-runtime.evil.example" or
+//     "bedrock-runtime.attacker.amazonaws.com.evil.com").
+//   - Domains containing "/" match hostname+path prefix where the
+//     hostname part is exact-or-subdomain (".example.com").
+//   - Domains ending in "." are LEGACY raw-prefix entries. The matcher
+//     refuses trailing-dot entries outright because they were
+//     exploitable: an attacker-chosen X-DC-Target-URL whose hostname
+//     began with "bedrock-runtime." (e.g. "bedrock-runtime.evil.example")
+//     was admitted as a known provider, bypassed the unknown-domain /
+//     private-host checks, and received the upstream Authorization
+//     header. Any operator-supplied custom-providers.json entry of
+//     that form must be updated to a wildcard pattern.
+//   - All others require exact hostname or subdomain match.
 func matchProviderDomain(host, urlPath, domain string) bool {
 	d := strings.ToLower(domain)
+	if d == "" {
+		return false
+	}
 	if strings.HasSuffix(d, ".") {
-		return strings.HasPrefix(host, d)
+		// LEGACY trailing-dot prefix syntax. Refused — this branch
+		// previously matched bedrock-runtime.evil.example to
+		// "bedrock-runtime." and bypassed the SSRF private-host
+		// check.
+		return false
+	}
+	if strings.Contains(d, "*") {
+		return matchWildcardDomain(host, d)
 	}
 	if strings.Contains(d, "/") {
 		parts := strings.SplitN(d, "/", 2)
@@ -3453,6 +3994,38 @@ func matchProviderDomain(host, urlPath, domain string) bool {
 		return strings.HasPrefix(urlPath, pathPart)
 	}
 	return host == d || strings.HasSuffix(host, "."+d)
+}
+
+// matchWildcardDomain implements one-label wildcard matching. A
+// pattern like "a.*.b.c" matches a host iff:
+//   - the host has the literal prefix "a." (the part before the "*")
+//   - the host has the literal suffix ".b.c" (the part after the "*")
+//   - the host is long enough that the prefix and suffix do NOT
+//     overlap (otherwise the "*" matches zero labels, which we refuse)
+//   - the substring of the host between those anchors contains no
+//     "." (so "*" matches exactly one DNS label)
+//
+// Multiple "*" are not supported; such patterns return false.
+func matchWildcardDomain(host, pattern string) bool {
+	parts := strings.Split(pattern, "*")
+	if len(parts) != 2 {
+		return false
+	}
+	prefix, suffix := parts[0], parts[1]
+	if prefix == "" || suffix == "" {
+		return false
+	}
+	if len(host) < len(prefix)+len(suffix) {
+		return false
+	}
+	if !strings.HasPrefix(host, prefix) || !strings.HasSuffix(host, suffix) {
+		return false
+	}
+	middle := host[len(prefix) : len(host)-len(suffix)]
+	if middle == "" || strings.Contains(middle, ".") {
+		return false
+	}
+	return true
 }
 
 // patchRawResponseModel overwrites only the "model" field in raw JSON bytes,

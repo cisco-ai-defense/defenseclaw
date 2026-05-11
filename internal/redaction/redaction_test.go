@@ -401,6 +401,103 @@ func TestForSinkEntity_ShortValuesHideFirstRune(t *testing.T) {
 	}
 }
 
+// TestIsPlaceholder_SpoofedFakeRedaction pins the
+// `<redacted secret>` and `<redacted-evidence secret>` spoof
+// rejection. The pre-fix grammar used a loose prefix/suffix check
+// that treated any `<redacted...>` shape as already-safe; the
+// strict grammar requires len= and sha= fields to match.
+func TestIsPlaceholder_SpoofedFakeRedaction(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	spoofs := []string{
+		"<redacted sk-ant-secret>",
+		"<redacted alice@example.com>",
+		"<redacted len=10>extra",
+		"<redacted len=10 sha=zzzzzzzz>",     // sha not hex
+		"<redacted len=10 sha=ABCDEF12>",     // sha not lowercase hex
+		"<redacted len=foo sha=abcdef12>",    // len not numeric
+		"<redacted-evidence sk-ant-secret>",  // missing len/sha
+		"<redacted-evidence len=10>",         // missing sha
+		"<redacted-evidence len=10 sha=zzz>", // sha wrong shape
+	}
+	for _, s := range spoofs {
+		if isPlaceholder(s) {
+			t.Errorf("isPlaceholder(%q) = true; want false (spoofed)", s)
+		}
+		if isEvidencePlaceholder(s) {
+			t.Errorf("isEvidencePlaceholder(%q) = true; want false (spoofed)", s)
+		}
+		// ForSinkString MUST re-redact the spoof so the secret
+		// suffix never reaches a persistent sink intact.
+		got := ForSinkString(s)
+		if got == s {
+			t.Errorf("ForSinkString(%q) returned spoof unchanged", s)
+		}
+	}
+	// ForSinkEvidence must also re-redact spoofed evidence shapes.
+	got := ForSinkEvidence("<redacted-evidence sk-ant-secret>", -1, -1)
+	if strings.Contains(got, "sk-ant-secret") {
+		t.Errorf("ForSinkEvidence leaked spoofed input: %q", got)
+	}
+}
+
+// TestForSinkReason_SeparatorSecretShapes pins the contract:
+// short separator-bearing credentials must be redacted, not
+// preserved by the safe-token allow-list.
+func TestForSinkReason_SeparatorSecretShapes(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	cases := []struct {
+		in   string
+		leak []string
+	}{
+		{in: "sk-test-123", leak: []string{"sk-test-123"}},
+		{in: "password=hunter-2", leak: []string{"hunter-2"}},
+		{in: "api_key=dev/token", leak: []string{"dev/token"}},
+		{in: "session=abc.def", leak: []string{"abc.def"}},
+		{in: "token=AKIAIOSFODNN7EXAMPLE", leak: []string{"AKIAIOSFODNN7EXAMPLE"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			got := ForSinkReason(tc.in)
+			for _, leak := range tc.leak {
+				if strings.Contains(got, leak) {
+					t.Errorf("ForSinkReason(%q) = %q; leaked %q", tc.in, got, leak)
+				}
+			}
+			if !strings.Contains(got, "<redacted") {
+				t.Errorf("ForSinkReason(%q) = %q; missing redacted marker", tc.in, got)
+			}
+		})
+	}
+}
+
+// TestForSinkReason_PositiveCatalog pins the well-known enum
+// constants and canonical-ID shapes that MUST continue to pass
+// through verbatim so operator-facing reasons stay readable.
+func TestForSinkReason_PositiveCatalog(t *testing.T) {
+	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
+	cases := []string{
+		"action=allow",
+		"mode=observe",
+		"severity=HIGH",
+		"verdict=block",
+		"canonical=SEC-AWS-KEY",
+		"canonical=SEC-AWS-KEY,SEC-GITHUB-TOKEN",
+		"count=42",
+		"exit_code=0",
+		"direction=prompt",
+		"scanner=codeguard",
+		"connector=openclaw",
+		"rule=pii.phone",
+	}
+	for _, in := range cases {
+		got := ForSinkReason(in)
+		if got != in {
+			t.Errorf("ForSinkReason(%q) = %q; want unchanged", in, got)
+		}
+	}
+}
+
 func TestDeterministicHash(t *testing.T) {
 	t.Setenv("DEFENSECLAW_REVEAL_PII", "")
 	a := String("4155551234")

@@ -22,8 +22,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -406,6 +408,79 @@ func TestNewWebhookDispatcherRejectsUnsafeURL(t *testing.T) {
 	})
 	if d != nil {
 		t.Error("expected nil dispatcher when URL is private IP")
+	}
+}
+
+// TestWebhookCheckRedirect_RejectsPrivate pins the SSRF defence at the
+// CheckRedirect closure layer of the webhook HTTP client.
+//
+// Pre-fix: webhooks were validated only at NewWebhookDispatcher time. The
+// http.Client used for actual delivery had no CheckRedirect, so a webhook
+// endpoint could 302 the dispatcher to http://127.0.0.1:6379/ (Redis) or
+// http://169.254.169.254/ (cloud IMDS) and Go's default redirect policy
+// would happily follow it.
+//
+// Post-fix: newWebhookHTTPClient installs a CheckRedirect that re-runs
+// validateWebhookURL on every redirect target.
+func TestWebhookCheckRedirect_RejectsPrivate(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "0")
+	client := newWebhookHTTPClient(30 * time.Second)
+	if client.CheckRedirect == nil {
+		t.Fatalf("CheckRedirect not installed on webhook client")
+	}
+	type tc struct {
+		target  string
+		wantErr bool
+	}
+	cases := []tc{
+		{"https://example.com/path", false},
+		{"https://hooks.slack.com/services/T0/B0/abc", false},
+		// Cloud IMDS / loopback / RFC1918 / link-local — must reject.
+		{"http://169.254.169.254/", true},
+		{"http://127.0.0.1/", true},
+		{"http://[::1]/", true},
+		{"http://10.0.0.5/", true},
+		{"http://192.168.1.50/", true},
+		{"http://[fe80::1]/", true},
+		// Scoped IPv6 must also be rejected.
+		{"http://[::1%25lo0]/", true},
+		// IPv4-mapped IPv6 must also be rejected.
+		{"http://[::ffff:127.0.0.1]/", true},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.target)
+		if err != nil {
+			t.Fatalf("parse %s: %v", c.target, err)
+		}
+		req := &http.Request{URL: u, Method: "POST"}
+		gotErr := client.CheckRedirect(req, nil)
+		if c.wantErr && gotErr == nil {
+			t.Errorf("CheckRedirect(%s) = nil, want error (private/loopback target)", c.target)
+		}
+		if !c.wantErr && gotErr != nil {
+			t.Errorf("CheckRedirect(%s) = %v, want nil (public target)", c.target, gotErr)
+		}
+	}
+}
+
+// TestWebhookCheckRedirect_RejectsLongChain pins the redirect-chain cap
+// (defense-in-depth: even if every hop is public, an attacker can stall the
+// dispatcher with a redirect storm).
+func TestWebhookCheckRedirect_RejectsLongChain(t *testing.T) {
+	client := newWebhookHTTPClient(30 * time.Second)
+	u, err := url.Parse("https://example.com/path")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	req := &http.Request{URL: u, Method: "POST"}
+	// ssrfSafeCheckRedirect caps the chain at 5 redirects; 6 hops in
+	// `via` is the first that exceeds it.
+	via := make([]*http.Request, 6)
+	for i := range via {
+		via[i] = &http.Request{URL: u, Method: "POST"}
+	}
+	if err := client.CheckRedirect(req, via); err == nil {
+		t.Errorf("CheckRedirect(via len=6) = nil, want error (chain cap)")
 	}
 }
 
@@ -1292,5 +1367,38 @@ func TestWebhookRevealFlagDoesNotUnmaskPayloads(t *testing.T) {
 	defer mu.Unlock()
 	if strings.Contains(body, "4155551234") {
 		t.Fatalf("webhook unmasked under reveal flag: %s", body)
+	}
+}
+
+// TestIsPrivateIP_IPv4MappedIPv6 pins isPrivateIP's behavior across the
+// IPv4-mapped IPv6 surface. Without the To4() collapse, the v6-mapped
+// form of a v4 private literal would not match the explicit /8 /12 /16
+// CIDRs because the dotted-quad bytes live inside the v6 representation.
+// After the collapse, every mapped form is correctly classified.
+func TestIsPrivateIP_IPv4MappedIPv6(t *testing.T) {
+	cases := map[string]bool{
+		"::ffff:127.0.0.1":       true,
+		"::ffff:10.0.0.1":        true,
+		"::ffff:192.168.0.10":    true,
+		"::ffff:169.254.169.254": true, // cloud IMDS via v6-mapped
+		"::ffff:172.16.0.1":      true,
+		"::ffff:8.8.8.8":         false,
+		"::ffff:1.2.3.4":         false,
+		"127.0.0.1":              true,
+		"169.254.169.254":        true,
+		"::1":                    true,
+		"fe80::1":                true,
+		"fc00::1":                true,
+		"2001:db8::1":            false,
+		"8.8.8.8":                false,
+	}
+	for s, want := range cases {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			t.Fatalf("test fixture %q is not a valid IP literal", s)
+		}
+		if got := isPrivateIP(ip); got != want {
+			t.Errorf("isPrivateIP(%q) = %v, want %v", s, got, want)
+		}
 	}
 }

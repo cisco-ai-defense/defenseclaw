@@ -30,7 +30,7 @@ func TestWriteAndReadPIDInfo(t *testing.T) {
 	d := New(dir)
 
 	now := time.Now().Unix()
-	err := d.writePIDInfo(12345, "/usr/bin/defenseclaw-gateway")
+	err := d.writePIDInfo(12345, "/usr/bin/defenseclaw-gateway", "")
 	if err != nil {
 		t.Fatalf("writePIDInfo: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestWriteAndReadPIDInfo(t *testing.T) {
 func TestPIDFileIsJSON(t *testing.T) {
 	dir := t.TempDir()
 	d := New(dir)
-	_ = d.writePIDInfo(42, "/tmp/test-bin")
+	_ = d.writePIDInfo(42, "/tmp/test-bin", "")
 
 	data, err := os.ReadFile(d.pidFile)
 	if err != nil {
@@ -240,15 +240,20 @@ func TestVerifyProcessDarwinUsesPS(t *testing.T) {
 	if _, err := processExecutableDarwin(os.Getpid()); err != nil {
 		t.Skipf("darwin process inspection unavailable in this environment: %v", err)
 	}
+	// Capture the live start identity so verifyStartIdentity passes —
+	// otherwise the chain hardening (PID-reuse detection) would
+	// reject the current process for not having a recorded identity.
+	ident, _ := processStartIdentity(os.Getpid())
 
 	info := pidInfo{
-		PID:        os.Getpid(),
-		Executable: exe,
-		StartTime:  time.Now().Unix(),
+		PID:           os.Getpid(),
+		Executable:    exe,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: ident,
 	}
 
-	if !d.verifyProcessDarwin(info) {
-		t.Error("verifyProcessDarwin should return true for current process")
+	if !d.verifyProcess(info) {
+		t.Error("verifyProcess should return true for current process")
 	}
 }
 
@@ -264,15 +269,42 @@ func TestVerifyProcessDarwinRejectsBadPID(t *testing.T) {
 		StartTime:  time.Now().Unix(),
 	}
 
-	if d.verifyProcessDarwin(info) {
-		t.Error("verifyProcessDarwin should return false for non-existent PID")
+	if d.verifyProcess(info) {
+		t.Error("verifyProcess should return false for non-existent PID")
+	}
+}
+
+// TestVerifyProcessRejectsMismatchedStartIdentity pins the second half of
+// chain . A PID file written for a process that
+// later exited and had its PID reused must NOT verify as the original —
+// the start-identity tokens differ even when the executable name happens
+// to match. We simulate this by recording an identity that intentionally
+// disagrees with the current process's live identity.
+func TestVerifyProcessRejectsMismatchedStartIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skipf("test not applicable on %s", runtime.GOOS)
+	}
+	d := New(t.TempDir())
+	exe, _ := os.Executable()
+	live, err := processStartIdentity(os.Getpid())
+	if err != nil || live == "" {
+		t.Skipf("processStartIdentity unavailable: %v", err)
+	}
+	info := pidInfo{
+		PID:           os.Getpid(),
+		Executable:    exe,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: live + "-stale", // simulate PID reuse
+	}
+	if d.verifyProcess(info) {
+		t.Error("verifyProcess must reject a mismatched start identity (PID-reuse case)")
 	}
 }
 
 func TestWritePIDInfoUsesRestrictedPerms(t *testing.T) {
 	dir := t.TempDir()
 	d := New(dir)
-	_ = d.writePIDInfo(99999, "/usr/bin/test")
+	_ = d.writePIDInfo(99999, "/usr/bin/test", "")
 
 	info, err := os.Stat(d.pidFile)
 	if err != nil {
@@ -323,5 +355,173 @@ func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 	err := d.Stop(time.Second)
 	if err != ErrNotRunning {
 		t.Errorf("Stop with no PID file: got %v, want ErrNotRunning", err)
+	}
+}
+
+// TestStripTokenArgs is the regression for finding "daemon
+// start propagates gateway token on the child process command line".
+// Daemon.Start now scrubs --token / --token=<value> from the argv
+// before exec'ing the long-lived child so the secret never reaches
+// the daemon process command line where any local user could read it
+// via ps(1) / /proc/<pid>/cmdline.
+func TestStripTokenArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "two_arg_double_dash",
+			in:   []string{"--host", "127.0.0.1", "--token", "s3cret", "--port", "4000"},
+			want: []string{"--host", "127.0.0.1", "--port", "4000"},
+		},
+		{
+			name: "two_arg_single_dash",
+			in:   []string{"-token", "s3cret", "--port", "4000"},
+			want: []string{"--port", "4000"},
+		},
+		{
+			name: "equals_form_double_dash",
+			in:   []string{"--token=s3cret", "--host", "127.0.0.1"},
+			want: []string{"--host", "127.0.0.1"},
+		},
+		{
+			name: "equals_form_single_dash",
+			in:   []string{"-token=s3cret", "--host", "127.0.0.1"},
+			want: []string{"--host", "127.0.0.1"},
+		},
+		{
+			name: "case_insensitive",
+			in:   []string{"--TOKEN", "s3cret", "--port", "4000"},
+			want: []string{"--port", "4000"},
+		},
+		{
+			name: "no_token_passthrough",
+			in:   []string{"--host", "127.0.0.1", "--port", "4000"},
+			want: []string{"--host", "127.0.0.1", "--port", "4000"},
+		},
+		{
+			name: "empty",
+			in:   nil,
+			want: nil,
+		},
+		{
+			name: "trailing_bare_token",
+			in:   []string{"--host", "127.0.0.1", "--token"},
+			want: []string{"--host", "127.0.0.1"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripTokenArgs(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("stripTokenArgs(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("stripTokenArgs(%v) = %v, want %v", tc.in, got, tc.want)
+				}
+			}
+			// Belt-and-suspenders: assert the secret literal does
+			// not survive in any returned element.
+			for _, a := range got {
+				if a == "s3cret" || a == "--token=s3cret" || a == "-token=s3cret" {
+					t.Fatalf("token leaked through scrub: %q", a)
+				}
+			}
+		})
+	}
+}
+
+// TestDaemonEnvMatchesDataDir is the regression for finding
+// "killStaleProcesses can terminate unrelated processes". Before
+// signalling a candidate stale daemon, killStaleProcesses verifies the
+// process's /proc/<pid>/environ contains BOTH DEFENSECLAW_DAEMON=1 AND
+// DEFENSECLAW_DATA_DIR=<this daemon's data dir>. This test covers the
+// pure parser; the full kill path is exercised by the integration tests
+// since /proc is Linux-only.
+func TestDaemonEnvMatchesDataDir(t *testing.T) {
+	mkenv := func(pairs ...string) []byte {
+		var b []byte
+		for _, p := range pairs {
+			b = append(b, []byte(p)...)
+			b = append(b, 0)
+		}
+		return b
+	}
+
+	cases := []struct {
+		name    string
+		environ []byte
+		dataDir string
+		want    bool
+	}{
+		{
+			name: "matching_data_dir_and_marker",
+			environ: mkenv(
+				"PATH=/usr/bin",
+				"DEFENSECLAW_DAEMON=1",
+				"DEFENSECLAW_DATA_DIR=/home/op/.defenseclaw",
+			),
+			dataDir: "/home/op/.defenseclaw",
+			want:    true,
+		},
+		{
+			name: "different_profile_must_not_match",
+			environ: mkenv(
+				"DEFENSECLAW_DAEMON=1",
+				"DEFENSECLAW_DATA_DIR=/home/op/.dc-profile-2",
+			),
+			dataDir: "/home/op/.defenseclaw",
+			want:    false,
+		},
+		{
+			name: "missing_daemon_marker",
+			environ: mkenv(
+				"DEFENSECLAW_DATA_DIR=/home/op/.defenseclaw",
+			),
+			dataDir: "/home/op/.defenseclaw",
+			want:    false,
+		},
+		{
+			name: "missing_data_dir_marker",
+			environ: mkenv(
+				"DEFENSECLAW_DAEMON=1",
+			),
+			dataDir: "/home/op/.defenseclaw",
+			want:    false,
+		},
+		{
+			name:    "empty_environ",
+			environ: nil,
+			dataDir: "/home/op/.defenseclaw",
+			want:    false,
+		},
+		{
+			name: "empty_data_dir_argument_must_never_match",
+			environ: mkenv(
+				"DEFENSECLAW_DAEMON=1",
+				"DEFENSECLAW_DATA_DIR=",
+			),
+			dataDir: "",
+			want:    false,
+		},
+		{
+			name: "substring_attack_does_not_match",
+			environ: mkenv(
+				"DEFENSECLAW_DAEMON=1",
+				"DEFENSECLAW_DATA_DIR=/home/op/.defenseclaw-other",
+			),
+			dataDir: "/home/op/.defenseclaw",
+			want:    false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := daemonEnvMatchesDataDir(tc.environ, tc.dataDir); got != tc.want {
+				t.Fatalf("daemonEnvMatchesDataDir() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

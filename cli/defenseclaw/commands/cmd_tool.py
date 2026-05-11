@@ -85,21 +85,40 @@ def block(app: AppContext, name: str, source: str, reason: str) -> None:
     """
     from defenseclaw.enforce import PolicyEngine
 
-    target = _target_name(name, source)
     if not reason:
         reason = "manual block via CLI"
 
     pe = PolicyEngine(app.store)
-    pe.block("tool", target, reason)
+
+    # the gateway runtime only checks unscoped
+    # `target_name = <tool>` rows, so a scoped entry like
+    # `filesystem/write_file` was silently never enforced. Until
+    # the runtime grows source-aware tool checks, we honor a
+    # --source request by ALSO writing the global block. The
+    # warning makes the loose-grained behavior explicit instead
+    # of silently mis-scoping the rule.
+    pe.block("tool", name, reason)
+    if source:
+        # Keep the scoped audit row for operator visibility.
+        pe.block("tool", _target_name(name, source),
+                 f"{reason} (scoped audit; runtime enforces globally)")
+        click.echo(
+            f"{ux._style('[tool]', fg='red', bold=True)} {name!r} "
+            f"{ux._style('added to block list', fg='red')} (global; "
+            f"--source {source!r} kept for audit but the runtime cannot scope tool blocks today)"
+        )
+    else:
+        click.echo(
+            f"{ux._style('[tool]', fg='red', bold=True)} {name!r} (global) "
+            f"{ux._style('added to block list', fg='red')}"
+        )
 
     if app.logger:
-        app.logger.log_action("tool-block", target, f"reason={reason}")
-
-    scope_note = f" (scoped to {source!r})" if source else " (global)"
-    click.echo(
-        f"{ux._style('[tool]', fg='red', bold=True)} {name!r}{scope_note} "
-        f"{ux._style('added to block list', fg='red')}"
-    )
+        scope_for_log = _target_name(name, source) if source else name
+        app.logger.log_action(
+            "tool-block", scope_for_log,
+            f"reason={reason} effective_target={name} requested_scope={source or 'global'}",
+        )
 
 
 # ---------------------------------------------------------------------------

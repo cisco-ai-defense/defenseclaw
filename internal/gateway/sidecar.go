@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -321,6 +323,11 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// directory.
 	if retainJudge && store != nil {
 		SetJudgePersistor(func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts) {
+			// Forward the SHA-256 digest of the judge INPUT (computed in
+			// emitJudge from JudgeEmitOpts.InputContent) so judge_responses
+			// rows carry input_hash for forensics/dedup. Historical bug:
+			// this row used to silently drop p.InputHash even when emitJudge
+			// populated it.
 			if err := store.InsertJudgeResponse(audit.JudgeResponse{
 				Kind:       p.Kind,
 				Direction:  string(dir),
@@ -330,6 +337,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 				LatencyMs:  p.LatencyMs,
 				ParseError: p.ParseError,
 				Raw:        p.RawResponse,
+				InputHash:  p.InputHash,
 			}); err != nil {
 				fmt.Fprintf(os.Stderr, "[sidecar] persist judge response: %v\n", err)
 			}
@@ -452,6 +460,34 @@ func (s *Sidecar) Run(ctx context.Context) error {
 			fmt.Fprintf(os.Stderr, "[sidecar] OPA init skipped (falling back to built-in): %v\n", err)
 			emitError(ctx, "opa", "init-failed", "falling back to built-in policies", err)
 		}
+	}
+
+	// ("Redacted AI discovery events expose reversible
+	// path fingerprints"): the AI-discovery service runs in goroutine 5
+	// below and calls runScan(..., "startup") immediately, so it can
+	// produce path digests BEFORE any code inside runGuardrail
+	// executes. If we delay installing the keyed HMAC path-hash key
+	// until runGuardrail (which is goroutine 4 and may even error out
+	// on bad connector config), the first round of AI-discovery payloads
+	// will leak the legacy reversible `sha256:` digests — exactly the
+	// regression flagged.
+	//
+	// Solve this by resolving (and persisting if needed) the gateway
+	// token SYNCHRONOUSLY here, then installing the inventory hash key
+	// before any goroutine starts. ensureGatewayTokenSynthesis is
+	// idempotent: runGuardrail later calls the same helper and gets the
+	// cached value, so the existing Setup() / connector wiring is
+	// unchanged. SetPathHashKey is also idempotent (mutex-protected),
+	// so re-derivation in tests or restart paths stays safe.
+	//
+	// If token synthesis fails here we cannot proceed — the API server
+	// authenticates inbound hook calls with this token. Fail loudly.
+	if apiToken, tokErr := s.ensureGatewayTokenSynthesis(); tokErr != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] FATAL: failed to synthesize gateway token: %v\n", tokErr)
+		emitError(ctx, "sidecar", "token-synthesis-failed", "fatal", tokErr)
+		return fmt.Errorf("sidecar: gateway token synthesis: %w", tokErr)
+	} else {
+		inventory.SetPathHashKey(deriveAIInventoryHashKey(apiToken))
 	}
 
 	var wg sync.WaitGroup
@@ -1198,19 +1234,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	// token into curl headers) and BEFORE the API server starts (which
 	// uses the same token to authenticate inbound hook calls). After
 	// this point, s.cfg.Gateway.Token always has a non-empty value.
-	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
-	apiToken := s.cfg.Gateway.ResolvedToken()
-	if apiToken == "" {
-		tok, err := EnsureGatewayToken(dotenvPath)
-		if err != nil {
-			s.health.SetGuardrail(StateError, err.Error(), nil)
-			return fmt.Errorf("first-boot gateway token: %w", err)
-		}
-		s.cfg.Gateway.Token = tok
-		apiToken = tok
-		// Also push into the process env so subsequent ResolveAPIKey
-		// calls (e.g. judge LLM init) see the synthesized value.
-		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
+	//
+	// ensureGatewayTokenSynthesis is idempotent: if Sidecar.Run already
+	// resolved/synthesized the token synchronously (which it does so the
+	// AI-discovery goroutine can use the keyed path-hash digest from
+	// the very first scan — S2.MEDIUM), this call returns the
+	// already-resolved value without re-reading .env or regenerating.
+	apiToken, err := s.ensureGatewayTokenSynthesis()
+	if err != nil {
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		return fmt.Errorf("first-boot gateway token: %w", err)
 	}
 
 	// S0.12 follow-up: inject credentials into the connector NOW, before
@@ -1965,4 +1998,65 @@ func (s *Sidecar) Client() *Client {
 // Health returns the shared health tracker.
 func (s *Sidecar) Health() *SidecarHealth {
 	return s.health
+}
+
+// ensureGatewayTokenSynthesis resolves and (if absent) generates the
+// gateway token used by the API server's tokenAuth middleware and by
+// every hook script written into the workspace. It is idempotent:
+//
+//	first call:  reads ResolvedToken(); if empty calls EnsureGatewayToken
+//	             which atomically writes DEFENSECLAW_GATEWAY_TOKEN into
+//	             $DEFENSECLAW_HOME/.env at mode 0600, then mirrors into
+//	             os.Setenv so subsequent ResolveAPIKey() calls see it.
+//	later calls: ResolvedToken() now returns the synthesized value,
+//	             so we short-circuit without touching .env or env vars.
+//
+// Sidecar.Run calls this BEFORE spawning any goroutine so the
+// AI-discovery service can install its keyed path-hash digest from the
+// very first scan (S2.MEDIUM). runGuardrail then calls it
+// again on its own goroutine and gets the same already-resolved value
+// — preserving the existing call sequence (Setup → API → guardrail
+// proxy) without race or double-write.
+//
+// Returns an error only when EnsureGatewayToken itself fails (disk
+// full, .env permissions wrong, etc); callers are expected to treat
+// that as fatal because the API server cannot authenticate without a
+// known token.
+func (s *Sidecar) ensureGatewayTokenSynthesis() (string, error) {
+	if tok := s.cfg.Gateway.ResolvedToken(); tok != "" {
+		return tok, nil
+	}
+	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
+	tok, err := EnsureGatewayToken(dotenvPath)
+	if err != nil {
+		return "", err
+	}
+	s.cfg.Gateway.Token = tok
+	// Mirror into the process env so sub-callers (judge LLM init,
+	// hook generators, OTLP path-token loaders) all observe the
+	// same value through their normal os.Getenv lookup path.
+	_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
+	return tok, nil
+}
+
+// deriveAIInventoryHashKey returns the per-installation HMAC key that
+// inventory.SetPathHashKey uses to keyed-hash discovered paths in
+// AI-discovery events. Derivation contract:
+//
+//	key = HMAC-SHA256(apiToken, "ai-discovery/path-hash/v1")
+//
+// Using the gateway token as the HMAC *secret* (rather than reusing it
+// as the key directly) means a leak of the path-hash key alone does not
+// disclose the gateway token. Namespacing with the version label means
+// the derivation can be evolved (v2, v3, ...) without rotating the
+// gateway token. Returning nil for an empty token keeps the legacy
+// unsalted SHA-256 fallback in inventory.hashPath, which is what tests
+// and detached scan utilities (no sidecar / no gateway token) expect.
+func deriveAIInventoryHashKey(apiToken string) []byte {
+	if apiToken == "" {
+		return nil
+	}
+	mac := hmac.New(sha256.New, []byte(apiToken))
+	_, _ = mac.Write([]byte("ai-discovery/path-hash/v1"))
+	return mac.Sum(nil)
 }

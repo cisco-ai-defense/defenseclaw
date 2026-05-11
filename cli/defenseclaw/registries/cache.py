@@ -268,22 +268,54 @@ def merge_manifest_into_index(
         prior = keep.get(key)
         fresh = _verdict_from_entry(entry)
         if prior is not None:
-            # Preserve operator overrides + last successful scan.
-            fresh.approved = prior.approved
-            fresh.rejected = prior.rejected
-            if prior.status in {"clean", "warning", "blocked"}:
-                fresh.status = prior.status
-                fresh.severity = prior.severity
-                fresh.findings = prior.findings
-                fresh.scan_id = prior.scan_id
-                fresh.target = prior.target
-                fresh.last_scanned_at = prior.last_scanned_at
+            # the legacy code matched prior verdicts
+            # by (type, name) only and copied approved/rejected flags
+            # plus prior clean/warning/blocked scan state onto the new
+            # entry. A registry publisher could keep the same name but
+            # change source_url / command / args / url / transport and
+            # inherit a prior trust decision — promotion would then
+            # write the NEW command into asset_policy.mcp.registry.
+            # We drop prior trust state when the executable shape of
+            # the entry has changed.
+            payload_changed = _entry_payload_changed(prior, entry)
+            if not payload_changed:
+                # Preserve operator overrides + last successful scan.
+                fresh.approved = prior.approved
+                fresh.rejected = prior.rejected
+                if prior.status in {"clean", "warning", "blocked"}:
+                    fresh.status = prior.status
+                    fresh.severity = prior.severity
+                    fresh.findings = prior.findings
+                    fresh.scan_id = prior.scan_id
+                    fresh.target = prior.target
+                    fresh.last_scanned_at = prior.last_scanned_at
+            # else: leave fresh as a pending placeholder — payload
+            # diverged, so the operator must re-approve / re-scan.
         new_verdicts.append(fresh)
     idx.verdicts = new_verdicts
     idx.publisher = manifest.publisher
     idx.schema_version = manifest.schema_version
     idx.recount()
     return idx
+
+
+def _entry_payload_changed(prior: EntryVerdict, entry: ManifestEntry) -> bool:
+    """Return True if the executable shape of `entry` differs from
+    `prior` enough that a previous trust decision should not carry
+    over (). We compare every field that affects what
+    the runtime ends up executing/connecting to.
+    """
+    if prior.source_url != entry.source_url:
+        return True
+    if prior.transport != entry.transport:
+        return True
+    if prior.command != entry.command:
+        return True
+    if list(prior.args) != list(entry.args):
+        return True
+    if prior.url != entry.url:
+        return True
+    return False
 
 
 def _verdict_from_entry(entry: ManifestEntry) -> EntryVerdict:

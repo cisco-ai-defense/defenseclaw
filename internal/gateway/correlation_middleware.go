@@ -89,10 +89,64 @@ const maxSessionIDLength = 128
 // unexported so only this package can write to the slots; readers
 // go through the exported helpers below.
 type (
-	sessionIDCtxKey     struct{}
-	traceIDCtxKey       struct{}
-	agentIdentityCtxKey struct{}
+	sessionIDCtxKey         struct{}
+	traceIDCtxKey           struct{}
+	agentIdentityCtxKey     struct{}
+	pendingAgentRegistryKey struct{}
 )
+
+// pendingAgentRegistry pins the registry + inbound agent header that
+// CorrelationMiddleware peeked. Authenticated handlers call
+// PromoteSessionIfAuthenticated to upgrade the peeked identity to a
+// minted entry once they have validated the request.
+type pendingAgentRegistry struct {
+	registry     *AgentRegistry
+	inboundAgent string
+}
+
+func contextWithPendingAgentRegistry(ctx context.Context, reg *AgentRegistry, inboundAgent string) context.Context {
+	if reg == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, pendingAgentRegistryKey{}, pendingAgentRegistry{registry: reg, inboundAgent: inboundAgent})
+}
+
+// PromoteSessionIfAuthenticated mints (or upgrades) the agent
+// instance id for the request's session id once authentication has
+// succeeded. Safe to call from any authenticated handler; idempotent
+// when the session was already minted.
+//
+// The returned context carries the upgraded AgentIdentity AND a
+// refreshed audit.CorrelationEnvelope so downstream audit /
+// gatewaylog / OTel emissions include the newly minted
+// agent_instance_id. When no pending registry is attached (test
+// paths, public health checks) the function returns the input
+// context unchanged.
+func PromoteSessionIfAuthenticated(ctx context.Context) context.Context {
+	if ctx == nil {
+		return ctx
+	}
+	pending, ok := ctx.Value(pendingAgentRegistryKey{}).(pendingAgentRegistry)
+	if !ok || pending.registry == nil {
+		return ctx
+	}
+	sid := SessionIDFromContext(ctx)
+	if sid == "" {
+		return ctx
+	}
+	id := pending.registry.Resolve(ctx, sid, pending.inboundAgent)
+	ctx = ContextWithAgentIdentity(ctx, id)
+	// Refresh the audit envelope so the seven-field correlation
+	// stamped by CorrelationMiddleware picks up the newly minted
+	// agent_instance_id. Without this the envelope captured pre-
+	// auth keeps AgentInstanceID="" and downstream audit rows lose
+	// the join key for authenticated traffic.
+	env := audit.EnvelopeFromContext(ctx)
+	env.AgentID = id.AgentID
+	env.AgentName = id.AgentName
+	env.AgentInstanceID = id.AgentInstanceID
+	return audit.ContextWithEnvelope(ctx, env)
+}
 
 // ContextWithSessionID returns a copy of ctx annotated with id.
 // An empty id is a no-op.
@@ -255,8 +309,23 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				ctx = ContextWithTraceID(ctx, span.SpanContext().TraceID().String())
 			}
 			if registry != nil {
-				id := registry.Resolve(ctx, SessionIDFromContext(ctx), inboundAgent)
+				// ("CorrelationMiddleware
+				// mints unauthenticated agent sessions"):
+				// CorrelationMiddleware runs BEFORE auth on
+				// /health, /metrics, and the proxy chain.
+				// Use ResolvePeek so we never mint a new
+				// session entry from an unauthenticated
+				// request — handlers that pass auth call
+				// PromoteSessionIfAuthenticated below to
+				// upgrade the peeked identity to a fully
+				// minted entry. Combined with the LRU cap
+				// in AgentRegistry, this prevents
+				// unauthenticated callers from amplifying
+				// sidecar memory by flooding unique
+				// X-DefenseClaw-Session-Id values.
+				id := registry.ResolvePeek(ctx, SessionIDFromContext(ctx), inboundAgent)
 				ctx = ContextWithAgentIdentity(ctx, id)
+				ctx = contextWithPendingAgentRegistry(ctx, registry, inboundAgent)
 				if id.AgentID != "" {
 					w.Header().Set(ResponseAgentIDHeader, id.AgentID)
 				}

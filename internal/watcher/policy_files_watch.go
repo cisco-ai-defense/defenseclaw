@@ -46,7 +46,20 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 		hash string
 		keys []string
 	}
+	// ("One unreadable policy file suppresses all
+	// policy change activity"): the previous implementation
+	// returned immediately on any non-IsNotExist os.ReadFile error,
+	// which meant a single permission-denied .yaml under
+	// policy_dir hid every other policy/list change from the
+	// audit log until that error was resolved -- a real
+	// audit/provenance blind spot. We now record an error
+	// activity for the unreadable path, leave its cached state
+	// untouched (so we re-attempt next tick without poisoning the
+	// next-snapshot diff), and continue processing the remaining
+	// files so legitimate policy edits are still observed.
 	next := make(map[string]snap, len(paths))
+	unreadable := make(map[string]struct{}, 0)
+	readErrors := make(map[string]error, 0)
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
@@ -54,7 +67,15 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 				next[p] = snap{hash: "", keys: nil}
 				continue
 			}
-			return
+			// Track separately so we never fire a spurious
+			// "removed" diff for a transient EACCES/EPERM
+			// while keeping the prior cached hash intact.
+			// Defer the audit/telemetry emission until we
+			// hold policyFileMu so we can apply the
+			// transition gate against policyFileUnreadable.
+			unreadable[p] = struct{}{}
+			readErrors[p] = err
+			continue
 		}
 		sum := sha256.Sum256(b)
 		next[p] = snap{
@@ -62,9 +83,55 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 			keys: listKeysFromYAMLBytes(b),
 		}
 	}
+	if len(next) == 0 && len(unreadable) == 0 {
+		return
+	}
 
 	w.policyFileMu.Lock()
 	defer w.policyFileMu.Unlock()
+
+	// Transition gate: emit "unreadable" exactly once when a path
+	// enters the unreadable set, and "recovered" exactly once when it
+	// leaves. Without this gate a persistent EACCES would emit an
+	// activity event every ~2s and flood downstream telemetry/log
+	// storage. We hold policyFileMu so concurrent ticks see a
+	// consistent transition view.
+	for p, err := range readErrors {
+		if _, already := w.policyFileUnreadable[p]; !already {
+			w.recordPolicyFileReadFailure(ctx, p, err)
+			w.policyFileUnreadable[p] = struct{}{}
+		}
+	}
+	for p := range w.policyFileUnreadable {
+		if _, stillBad := unreadable[p]; stillBad {
+			continue
+		}
+		// Path left the unreadable set. Two ways this can happen:
+		//
+		//   a. File became readable again — it appears in `next`
+		//      with a fresh hash. Emit a one-shot "recovered"
+		//      activity so audit consumers see the EACCES window
+		//      close, then drop the path so future regressions
+		//      re-trigger the entry transition.
+		//
+		//   b. File was deleted while in the unreadable set — it
+		//      will NOT appear in `next`. Emitting "recovered" here
+		//      would be misleading: the loop further down already
+		//      emits a "policy_file removed" activity (the missing
+		//      key in policyFileHashes path), so a recovery emit
+		//      would produce the misleading audit trail
+		//      "recovered" → "removed" for the same file in the
+		//      same tick. Suppress recovery in this case and let
+		//      the removed-event correlation stand on its own.
+		//
+		// Either way, drop the path from the unreadable set so a
+		// future EACCES on the same path re-triggers the entry
+		// transition cleanly.
+		if _, stillTracked := next[p]; stillTracked {
+			w.recordPolicyFileReadRecovery(ctx, p)
+		}
+		delete(w.policyFileUnreadable, p)
+	}
 	if len(w.policyFileHashes) == 0 {
 		for p, s := range next {
 			w.policyFileHashes[p] = s.hash
@@ -81,6 +148,13 @@ func (w *InstallWatcher) pollPolicyFilesOnce(ctx context.Context) {
 	}
 	for p := range w.policyFileHashes {
 		if _, ok := next[p]; !ok {
+			// Don't treat an unreadable file as "removed"
+			// -- we couldn't read it this tick, so we have
+			// no evidence it's gone. The recorded read
+			// failure activity is the audit signal here.
+			if _, isUnreadable := unreadable[p]; isUnreadable {
+				continue
+			}
 			changed = append(changed, p)
 		}
 	}
@@ -226,6 +300,71 @@ func (w *InstallWatcher) policyWatchPaths() []string {
 		})
 	}
 	return out
+}
+
+// recordPolicyFileReadFailure emits a single audit + telemetry
+// activity for an unreadable policy file so operators see *that the
+// file is unreadable* without losing change detection on the rest of
+// the watched set. ("One unreadable policy file
+// suppresses all policy change activity") closure: this is the
+// per-file error signal the watcher previously dropped.
+func (w *InstallWatcher) recordPolicyFileReadFailure(ctx context.Context, path string, err error) {
+	targetID := filepath.Base(path)
+	reason := fmt.Sprintf("policy file unreadable: %v", err)
+	_ = w.logger.LogActivity(audit.ActivityInput{
+		Actor:      "watcher",
+		Action:     audit.ActionPolicyReload,
+		TargetType: "policy_file",
+		TargetID:   targetID,
+		Reason:     reason,
+	})
+	if w.otel != nil {
+		w.otel.RecordActivity(ctx, string(audit.ActionPolicyReload), "policy_file", "watcher", 0)
+		w.otel.EmitGatewayEvent(gatewaylog.Event{
+			Timestamp: time.Now().UTC(),
+			EventType: gatewaylog.EventActivity,
+			Severity:  gatewaylog.SeverityWarn,
+			Activity: &gatewaylog.ActivityPayload{
+				Actor:      "watcher",
+				Action:     string(audit.ActionPolicyReload),
+				TargetType: "policy_file",
+				TargetID:   targetID,
+				Reason:     reason,
+			},
+		})
+	}
+}
+
+// recordPolicyFileReadRecovery is the transition-out partner to
+// recordPolicyFileReadFailure: emitted exactly once when an
+// unreadable policy file becomes readable again, so operators can
+// see in the audit log that the EACCES/EPERM blind spot has closed.
+// Severity is INFO (not WARN) since this is a positive transition.
+func (w *InstallWatcher) recordPolicyFileReadRecovery(ctx context.Context, path string) {
+	targetID := filepath.Base(path)
+	reason := "policy file readable again (recovered from prior read error)"
+	_ = w.logger.LogActivity(audit.ActivityInput{
+		Actor:      "watcher",
+		Action:     audit.ActionPolicyReload,
+		TargetType: "policy_file",
+		TargetID:   targetID,
+		Reason:     reason,
+	})
+	if w.otel != nil {
+		w.otel.RecordActivity(ctx, string(audit.ActionPolicyReload), "policy_file", "watcher", 0)
+		w.otel.EmitGatewayEvent(gatewaylog.Event{
+			Timestamp: time.Now().UTC(),
+			EventType: gatewaylog.EventActivity,
+			Severity:  gatewaylog.SeverityInfo,
+			Activity: &gatewaylog.ActivityPayload{
+				Actor:      "watcher",
+				Action:     string(audit.ActionPolicyReload),
+				TargetType: "policy_file",
+				TargetID:   targetID,
+				Reason:     reason,
+			},
+		})
+	}
 }
 
 func listKeysFromYAMLBytes(b []byte) []string {

@@ -62,30 +62,69 @@ type templateData struct {
 // every gateway hiccup bricks the user's agent for the duration of
 // any DefenseClaw outage, which is strictly worse UX than a brief
 // observability gap. Operators who run a strict policy posture can
-// flip this to "closed" via DEFENSECLAW_FAIL_MODE=closed at runtime
-// or — for connectors that route through
-// WriteHookScriptsForConnectorObjectWithOpts — by enabling per-
-// connector enforcement at setup time.
-const defaultHookFailMode = "open"
+// "closed" is the safer default — response-layer failures (4xx,
+// malformed JSON, missing action) BLOCK the tool/prompt at the hook
+// boundary. Operators flip this to "open" via DEFENSECLAW_FAIL_MODE=open
+// at runtime or via the per-connector setup flow (which also persists
+// to guardrail.hook_fail_mode in config.yaml). Closes .
+const defaultHookFailMode = "closed"
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
-// "closed" (case-sensitive — the env var contract is documented as
-// lowercase) collapses to "open" so a typo never accidentally puts
-// the agent into fail-closed mode.
+// "open" (case-sensitive — the env var contract is documented as
+// lowercase) collapses to "closed" so a typo never accidentally puts
+// the agent into fail-OPEN mode at the response-layer boundary
+// (CodeGuard rule codeguard-0-authorization-access-control: deny by
+// default).
 func normalizeHookFailMode(mode string) string {
-	if strings.TrimSpace(mode) == "closed" {
-		return "closed"
+	if strings.TrimSpace(mode) == "open" {
+		return "open"
 	}
-	return "open"
+	return "closed"
 }
 
 // WriteShimScripts generates PATH shim scripts for all high-risk binaries
 // into the given directory. Each shim calls /api/v1/inspect/tool before
 // delegating to the real binary.
+//
+// Kept for backward compatibility with callers (and tests) that have
+// not yet plumbed a gateway bearer token through. New call sites
+// SHOULD use WriteShimScriptsWithToken so the generated shims can
+// authenticate against the API server's tokenAuth middleware —
+// without an Authorization header the inspect endpoint returns 401,
+// the shim's fallback exec's the real binary, and the inspection
+// is silently bypassed. WriteShimScripts internally always lays down
+// a (possibly empty) token file so the shim can find it; an empty
+// token file produces shims that send no Authorization header,
+// matching the loopback-allow path used by developer setups without
+// a configured gateway token.
 func WriteShimScripts(shimDir, apiAddr string) error {
+	return WriteShimScriptsWithToken(shimDir, apiAddr, "")
+}
+
+// WriteShimScriptsWithToken is the token-aware variant of
+// WriteShimScripts. It writes a 0o600 `.token` file alongside the
+// shims (sourced at runtime by every shim template) so the inspect
+// requests carry `Authorization: Bearer <token>` and survive the API
+// server's tokenAuth middleware. Empty token is supported — in that
+// case the shim falls back to the loopback-allow path inside the
+// API server, matching the legacy unauthenticated behaviour.
+func WriteShimScriptsWithToken(shimDir, apiAddr, token string) error {
 	if err := os.MkdirAll(shimDir, 0o755); err != nil {
 		return fmt.Errorf("create shim dir: %w", err)
+	}
+
+	// Companion .token file for shims to source at runtime. Mirrors
+	// the hook flow in WriteHookScriptsWithToken; never bake the
+	// secret into the script body. The file is 0o600 so the shimDir
+	// (0o755) does not expose the token to other local users. An
+	// empty token still produces a well-formed file so the shim's
+	// source-or-fallback logic behaves deterministically across
+	// loopback-allow and authenticated deployments.
+	tokenPath := filepath.Join(shimDir, ".token")
+	tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
+	if err := os.WriteFile(tokenPath, []byte(tokenContent), 0o600); err != nil {
+		return fmt.Errorf("write shim token file: %w", err)
 	}
 
 	data := templateData{APIAddr: apiAddr, FailMode: defaultHookFailMode}
@@ -589,7 +628,11 @@ func ResolveSubprocessPolicy(preferred SubprocessPolicy) SubprocessPolicy {
 }
 
 // SetupSubprocessEnforcement wires the appropriate subprocess enforcement
-// tier based on the resolved policy.
+// tier based on the resolved policy. opts.APIToken is propagated to the
+// shim writer so generated curl/wget/ssh/nc/pip/npm shims can
+// authenticate against the API server's tokenAuth middleware --
+// without it the shim's `||` fallback exec's the real binary on a 401
+// and inspection is silently bypassed.
 func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 	switch policy {
 	case SubprocessSandbox:
@@ -597,13 +640,17 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 			return fmt.Errorf("sandbox policy: %w", err)
 		}
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		// Persist the gateway bearer token alongside the shim scripts
+		// so every inspection call carries an Authorization header.
+		// Without the token the shim had no auth material available
+		// and silently downgraded a 401 response to "allow".
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts (sandbox supplement): %w", err)
 		}
 
 	case SubprocessShims:
 		shimDir := filepath.Join(opts.DataDir, "shims")
-		if err := WriteShimScripts(shimDir, opts.APIAddr); err != nil {
+		if err := WriteShimScriptsWithToken(shimDir, opts.APIAddr, opts.APIToken); err != nil {
 			return fmt.Errorf("shim scripts: %w", err)
 		}
 

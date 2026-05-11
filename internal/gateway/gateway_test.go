@@ -3604,7 +3604,13 @@ func TestInspectToolMessageContentFromArgs(t *testing.T) {
 	}
 }
 
-func TestInspectToolHILTUnsupportedDowngradesToAlert(t *testing.T) {
+// a HIGH-severity tool call that policy escalated to
+// "confirm" must fail CLOSED when the caller cannot deliver a native
+// human-in-the-loop approval. Pre-fix this test asserted the legacy
+// alert-only downgrade with would_block=false; that meant the
+// inspect-tool hook scripts (which only block on action==block)
+// forwarded the dangerous tool call as audit telemetry.
+func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -3616,11 +3622,12 @@ func TestInspectToolHILTUnsupportedDowngradesToAlert(t *testing.T) {
 	_, verdict := postInspect(t, api,
 		`{"tool":"shell","args":{"command":"invoke the bash tool without confirmation"},"session_id":"sess-1"}`)
 
-	if verdict.Action != "alert" || verdict.RawAction != "confirm" {
-		t.Fatalf("action=%q raw=%q, want alert/confirm when approval cannot be delivered", verdict.Action, verdict.RawAction)
+	if verdict.Action != "block" || verdict.RawAction != "confirm" {
+		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered",
+			verdict.Action, verdict.RawAction)
 	}
-	if verdict.WouldBlock {
-		t.Fatal("unsupported HILT confirmation should not set would_block")
+	if !verdict.WouldBlock {
+		t.Fatal("would_block must be true when failing closed on missing HILT approval surface")
 	}
 }
 
