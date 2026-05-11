@@ -6,17 +6,17 @@
 // We do not compile in-browser — when the operator runs the install
 // script, OPA on the host validates the snippet via `opa check`.
 //
-// The textarea-with-line-numbers approach is intentional. A real
-// CodeMirror integration is a future enhancement; right now we
-// optimise for predictable copy/paste behaviour and zero extra
-// bundle size.
+// The source field uses our zero-dep RegoEditor (textarea + transparent
+// highlighted overlay). See ui/rego-editor.tsx for why we don't pull in
+// CodeMirror or Monaco for this niche surface.
 
 'use client';
 
 import { useMemo } from 'react';
 import type { CustomRegoSnippet, Policy } from '../types';
 import { lintRego } from '../lib/rego-lint';
-import { TextField, TextArea } from '../ui/text-field';
+import { TextField } from '../ui/text-field';
+import { RegoEditor } from '../ui/rego-editor';
 
 const STARTER_SNIPPET = (name: string) => `package defenseclaw.custom.${name}
 
@@ -148,13 +148,11 @@ function SnippetEditor({
           onChange={(v) => onChange({ description: v })}
         />
       </div>
-      <TextArea
+      <RegoEditor
         label="source"
-        rows={14}
-        monospace
         value={snippet.source}
         onChange={(v) => onChange({ source: v })}
-        hint="Tab indents are fine; tabs vs spaces don't matter to OPA."
+        hint="Tab inserts 2 spaces · Shift-Tab dedents · highlighting is presentation-only — `opa check` runs on your host at install time."
       />
       {findings.length === 0 ? (
         <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-700 dark:text-emerald-300">
