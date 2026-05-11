@@ -322,6 +322,17 @@ func (g *GuardrailInspector) SetScannerMode(mode string) {
 // then returns a merged verdict. The detection strategy controls whether
 // regex runs alone, triages for LLM adjudication, or the LLM runs first.
 func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	// Scope correction:
+	// Completion/response scanning must only inspect assistant-visible output.
+	// It must not re-scan request-side system prompts, tool definitions,
+	// OpenClaw agent identity files, memory instructions, or workspace guidance.
+	// Otherwise normal agent prompts can trigger cognitive-file rules such as
+	// COG-SOUL, COG-IDENTITY, COG-MEMORY, COG-TOOLS-MD, or COG-AGENTS-MD
+	// during POST-CALL response inspection.
+	if direction == "completion" || direction == "response" {
+		messages = []ChatMessage{{Role: "assistant", Content: content}}
+	}
+
 	strategy := g.effectiveStrategy(direction)
 
 	// Open a span for the whole inspection — stage naming follows
