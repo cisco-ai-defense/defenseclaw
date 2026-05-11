@@ -13,6 +13,7 @@
     "validate-links": "tsx ./scripts/validate-links.ts",
     "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",
     "build:policy-assets": "tsx ./scripts/build-policy-assets.ts",
+    "test:policy-creator": "tsx --test ./scripts/test-policy-creator.ts",
     "postinstall": "fumadocs-mdx && tsx ./scripts/build-policy-assets.ts"
   },
   "dependencies": {
