@@ -150,13 +150,19 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
       if (!scenario) {
         setVerdict('—');
         setReason(null);
+        setError(null);
         return;
       }
       activeInput = scenario.input;
     } else {
       if (!parsedCustom.ok) {
-        // Hold the previous verdict; the inline JSON-parse error
-        // tells the operator why we're not re-running.
+        // No valid input to evaluate. Clear the verdict instead of
+        // holding the previous (possibly different-domain) result —
+        // the inline JSON-parse error tells the operator why.
+        setVerdict('—');
+        setReason(null);
+        setError(null);
+        setEvaluating(false);
         return;
       }
       activeInput = parsedCustom.value;
