@@ -22,6 +22,7 @@ import { LiveTestPane } from '../sections/live-test';
 import { CopyButton } from '../ui/copy-button';
 import { DownloadButton } from '../ui/download-button';
 import { applyAnswers } from './apply';
+import { PreviewDrawer } from './preview-drawer';
 import { PolicySummaryCard } from './summary';
 import {
   ALLOW_CARDS,
@@ -137,6 +138,7 @@ export function QuickStart({
   const installFilename = `install-${policy.name}.sh`;
 
   return (
+    <>
     <div className="space-y-4">
       <Stepper steps={STEPS} current={stepIdx} onJump={setStepIdx} />
 
@@ -211,6 +213,11 @@ export function QuickStart({
         </div>
       </footer>
     </div>
+    {/* Floating verdict-preview pinned to bottom-right. Hidden on the
+     *  Review step since the LiveTestPane is already rendered inline
+     *  there. */}
+    <PreviewDrawer policy={policy} hidden={current.id === 'review'} />
+    </>
   );
 }
 
