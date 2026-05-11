@@ -1105,12 +1105,17 @@ class TestSetupSplunkCommand(unittest.TestCase):
             stderr="",
         )
 
+        # refresh_bundle=False so the test isolates the env-var
+        # passthrough on the `up` invocation. The refresh + restart
+        # cycle is exercised separately in
+        # ``test_setup_refresh_bundle_wiring.py``.
         contract = _bootstrap_bridge(
             self.tmp_dir,
             s3_export=True,
             s3_bucket="agentwatch-demo",
             s3_prefix="agentwatch/defenseclaw",
             aws_region="us-west-2",
+            refresh_bundle=False,
         )
 
         self.assertEqual(contract["hec_token"], "bootstrap-token")
