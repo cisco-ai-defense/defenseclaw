@@ -1,335 +1,239 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
 // SPDX-License-Identifier: Apache-2.0
 //
-// Main entrypoint for the docs-site policy creator. Two-column shell:
+// Top-level entrypoint for the docs-site policy creator. Renders a
+// 2-tab shell:
 //
-//   ┌─────────────────────────────┬──────────────────┐
-//   │ left: collapsible sections  │ right: live test │
-//   └─────────────────────────────┴──────────────────┘
+//   ┌───────────────────────────────────────────────────────────┐
+//   │  [ Quick start ]  [ Playground ]                          │
+//   ├───────────────────────────────────────────────────────────┤
+//   │  Active tab content                                       │
+//   └───────────────────────────────────────────────────────────┘
 //
-// Mounted from MDX as <PolicyCreator />. Holds a single Policy in
-// state and pipes mutations into both the section editors and the
-// Live Test pane.
+// Both tabs read and write the SAME `policy` state, so an operator can
+// answer the Quick Start interview, hop into the Playground for a
+// targeted tweak, and hop back without losing work. The handoff banner
+// in the Playground signals when state arrived from the interview.
 //
-// Phase 1 ships Basics, Severity Matrix, Admission, and Review.
-// Subsequent phases plug additional sections in via SECTION_DEFS
-// without touching the shell.
+// Persistence: the active tab + the current Policy + the Quick Start
+// answers all live in localStorage so a refresh is non-destructive.
+// Nothing leaves the browser.
 
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import type { Policy } from './types';
 import { policyFromPreset } from './lib/presets';
-import { Section } from './ui/section';
-import type { SectionStatus } from './ui/section';
-import { BasicsSection } from './sections/basics';
-import { SeverityMatrixSection } from './sections/severity-matrix';
-import { AdmissionSection } from './sections/admission';
-import { GuardrailSection } from './sections/guardrail';
-import { RulesSection } from './sections/rules';
-import { SuppressionsSection } from './sections/suppressions';
-import { SensitiveToolsSection } from './sections/sensitive-tools';
-import { JudgesSection } from './sections/judges';
-import { CustomRegoSection } from './sections/custom-rego';
-import { FirewallSection } from './sections/firewall';
-import {
-  AuditSection,
-  EnforcementSection,
-  ScannersSection,
-  WatchSection,
-  WebhooksSection,
-} from './sections/ops';
-import { ReviewSection } from './sections/review';
-import { LiveTestPane } from './sections/live-test';
-import { summarize, validatePolicy } from './lib/validators';
+import { Playground } from './playground';
+import { QuickStart } from './quick-start';
+import type { Answers } from './quick-start/questions';
+import { defaultAnswers, deserializeAnswers, serializeAnswers } from './quick-start/questions';
 
-interface SectionDef {
-  id: string;
-  title: string;
-  subtitle: (p: Policy) => string;
-  status: (p: Policy) => SectionStatus;
-  render: (p: Policy, set: (next: Policy) => void) => React.ReactNode;
-}
+type TabId = 'quick-start' | 'playground';
 
-function customizedIfNonEmpty(values: unknown[]): SectionStatus {
-  return values.some((v) => {
-    if (v == null) return false;
-    if (Array.isArray(v)) return v.length > 0;
-    if (typeof v === 'object') return Object.keys(v).length > 0;
-    return Boolean(v);
-  })
-    ? 'customized'
-    : 'untouched';
-}
-
-const SECTION_DEFS: SectionDef[] = [
-  {
-    id: 'basics',
-    title: 'Basics',
-    subtitle: (p) => `name=${p.name || '(unset)'} · base=${p.basedOn}`,
-    status: (p) =>
-      !p.name || p.name === 'my-policy' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(p.name)
-        ? 'warning'
-        : 'customized',
-    render: (p, set) => <BasicsSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'severity-matrix',
-    title: 'Severity matrix',
-    subtitle: (p) => {
-      const overrides = Object.keys(p.scanner_overrides).length;
-      return overrides > 0
-        ? `5 severities · ${overrides} scanner override${overrides === 1 ? '' : 's'}`
-        : '5 severities';
-    },
-    status: (p) =>
-      Object.keys(p.scanner_overrides).length > 0 ? 'customized' : 'untouched',
-    render: (p, set) => <SeverityMatrixSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'admission',
-    title: 'Admission',
-    subtitle: (p) =>
-      `${p.first_party_allow_list.length} allow-list entr${p.first_party_allow_list.length === 1 ? 'y' : 'ies'}`,
-    status: (p) => customizedIfNonEmpty([p.first_party_allow_list]),
-    render: (p, set) => <AdmissionSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'guardrail',
-    title: 'Guardrail',
-    subtitle: (p) =>
-      `block≥${p.guardrail.block_threshold} · alert≥${p.guardrail.alert_threshold} · ${
-        Object.keys(p.guardrail.patterns).length
-      } pattern categor${Object.keys(p.guardrail.patterns).length === 1 ? 'y' : 'ies'}`,
-    status: (p) =>
-      Object.keys(p.guardrail.patterns).length > 0 || p.guardrail.hilt.enabled
-        ? 'customized'
-        : 'untouched',
-    render: (p, set) => <GuardrailSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'rules',
-    title: 'Rule pack',
-    subtitle: (p) => {
-      const total = p.rule_pack.files.reduce((acc, f) => acc + f.rules.length, 0);
-      return `${p.rule_pack.files.length} file${p.rule_pack.files.length === 1 ? '' : 's'} · ${total} rule${total === 1 ? '' : 's'}`;
-    },
-    status: (p) =>
-      p.rule_pack.files.some((f) => f.rules.length > 0) ? 'customized' : 'untouched',
-    render: (p, set) => <RulesSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'suppressions',
-    title: 'Suppressions',
-    subtitle: (p) =>
-      `${p.suppressions.pre_judge_strips.length} pre-judge · ${p.suppressions.finding_suppressions.length} finding · ${p.suppressions.tool_suppressions.length} tool`,
-    status: (p) =>
-      customizedIfNonEmpty([
-        p.suppressions.pre_judge_strips,
-        p.suppressions.finding_suppressions,
-        p.suppressions.tool_suppressions,
-      ]),
-    render: (p, set) => <SuppressionsSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'sensitive-tools',
-    title: 'Sensitive tools',
-    subtitle: (p) =>
-      `${p.sensitive_tools.length} tool${p.sensitive_tools.length === 1 ? '' : 's'}`,
-    status: (p) => customizedIfNonEmpty([p.sensitive_tools]),
-    render: (p, set) => <SensitiveToolsSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'judges',
-    title: 'LLM judges',
-    subtitle: (p) =>
-      p.judges.length === 0
-        ? 'no judges configured'
-        : p.judges.map((j) => j.name).join(', '),
-    status: (p) => customizedIfNonEmpty([p.judges]),
-    render: (p, set) => <JudgesSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'firewall',
-    title: 'Firewall',
-    subtitle: (p) =>
-      `${p.firewall.default_action} · ${p.firewall.allowed_domains.length} allow · ${p.firewall.blocked_destinations.length} block`,
-    status: (p) =>
-      p.firewall.allowed_domains.length > 0 ||
-      p.firewall.blocked_destinations.length > 2 // base ships 2 default IMDS entries
-        ? 'customized'
-        : 'untouched',
-    render: (p, set) => <FirewallSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'webhooks',
-    title: 'Webhooks',
-    subtitle: (p) =>
-      p.webhooks.length === 0
-        ? 'no destinations configured'
-        : `${p.webhooks.length} destination${p.webhooks.length === 1 ? '' : 's'}`,
-    status: (p) => customizedIfNonEmpty([p.webhooks]),
-    render: (p, set) => <WebhooksSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'watch',
-    title: 'Watch (rescan)',
-    subtitle: (p) =>
-      p.watch.rescan_enabled
-        ? `enabled · every ${p.watch.rescan_interval_min} min`
-        : 'disabled',
-    status: () => 'untouched',
-    render: (p, set) => <WatchSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'enforcement',
-    title: 'Enforcement',
-    subtitle: (p) => `max delay ${p.enforcement.max_enforcement_delay_seconds}s`,
-    status: () => 'untouched',
-    render: (p, set) => <EnforcementSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'audit',
-    title: 'Audit',
-    subtitle: (p) => `${p.audit.retention_days} day retention`,
-    status: () => 'untouched',
-    render: (p, set) => <AuditSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'scanners',
-    title: 'Scanner profiles',
-    subtitle: (p) => {
-      const overrides = Object.values(p.scanners).filter(Boolean).length;
-      return overrides > 0
-        ? `${overrides} scanner profile${overrides === 1 ? '' : 's'} overridden`
-        : 'inherit base';
-    },
-    status: (p) =>
-      Object.values(p.scanners).some(Boolean) ? 'customized' : 'untouched',
-    render: (p, set) => <ScannersSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'custom-rego',
-    title: 'Custom Rego (advanced)',
-    subtitle: (p) =>
-      p.custom_rego.length === 0
-        ? 'no snippets'
-        : `${p.custom_rego.length} snippet${p.custom_rego.length === 1 ? '' : 's'}`,
-    status: (p) => customizedIfNonEmpty([p.custom_rego]),
-    render: (p, set) => <CustomRegoSection policy={p} onPolicyChange={set} />,
-  },
-  {
-    id: 'review',
-    title: 'Review & export',
-    subtitle: () => 'Generated YAML + data.json',
-    status: () => 'untouched',
-    render: (p) => <ReviewSection policy={p} />,
-  },
-];
+const LS_TAB = 'dc-policy-creator-tab';
+const LS_POLICY = 'dc-policy-creator-policy';
+const LS_ANSWERS = 'dc-policy-creator-answers';
 
 export default function PolicyCreator() {
-  const initial = useMemo(() => policyFromPreset('default'), []);
-  const [policy, setPolicy] = useState<Policy>(initial);
-  const [openId, setOpenId] = useState<string>('basics');
+  // Lazy initial state: build the default-preset policy once. Replaced
+  // immediately if localStorage has a saved copy.
+  const initialPolicy = useMemo(() => policyFromPreset('default'), []);
+  const [policy, setPolicy] = useState<Policy>(initialPolicy);
+  const [answers, setAnswers] = useState<Answers>(defaultAnswers());
+  const [tab, setTab] = useState<TabId>('quick-start');
+  const [hydrated, setHydrated] = useState(false);
+  // Tracks whether the most recent `policy` mutation came from the
+  // Quick Start interview. Used by the Playground to render the
+  // handoff banner and the "restart Quick Start" affordance.
+  const [arrivedFromQuickStart, setArrivedFromQuickStart] = useState(false);
 
-  const findings = useMemo(() => validatePolicy(policy), [policy]);
-  const counts = useMemo(() => summarize(findings), [findings]);
+  // Hydrate persisted state on mount. We delay setting `hydrated` until
+  // after the first paint so SSR and CSR trees agree.
+  useEffect(() => {
+    try {
+      const rawTab = window.localStorage.getItem(LS_TAB);
+      if (rawTab === 'playground' || rawTab === 'quick-start') setTab(rawTab);
+      const rawPolicy = window.localStorage.getItem(LS_POLICY);
+      if (rawPolicy) setPolicy(JSON.parse(rawPolicy) as Policy);
+      const rawAnswers = window.localStorage.getItem(LS_ANSWERS);
+      if (rawAnswers) setAnswers(deserializeAnswers(JSON.parse(rawAnswers)));
+    } catch {
+      /* malformed — keep initial */
+    }
+    setHydrated(true);
+  }, []);
+
+  // Persist on every change. Skipping the first paint avoids overwriting
+  // a saved state with the default-preset placeholder.
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      window.localStorage.setItem(LS_POLICY, JSON.stringify(policy));
+    } catch {
+      /* quota / private mode — drop silently */
+    }
+  }, [policy, hydrated]);
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      window.localStorage.setItem(LS_ANSWERS, JSON.stringify(serializeAnswers(answers)));
+    } catch {
+      /* quota / private mode — drop silently */
+    }
+  }, [answers, hydrated]);
+  useEffect(() => {
+    if (!hydrated) return;
+    try {
+      window.localStorage.setItem(LS_TAB, tab);
+    } catch {
+      /* quota / private mode — drop silently */
+    }
+  }, [tab, hydrated]);
+
+  // Called by the Quick Start tab when the operator clicks "Open in
+  // Playground". The Quick Start has already mutated `policy` via the
+  // setter on every answer change, so we just flip the tab and arm
+  // the handoff banner.
+  function handleOpenInPlayground() {
+    setArrivedFromQuickStart(true);
+    setTab('playground');
+    // Scroll to top so the section list starts at Basics.
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
+
+  // Called when an operator clicks "Restart Quick Start" from the
+  // Playground. This IS destructive — it resets answers to defaults
+  // and overwrites the current Policy from a clean preset — so we
+  // confirm before nuking state.
+  function handleRestartQuickStart() {
+    if (!confirmRestart(answers)) return;
+    setAnswers(defaultAnswers());
+    setArrivedFromQuickStart(false);
+    setTab('quick-start');
+    if (typeof window !== 'undefined') {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+  }
 
   return (
-    <div className="my-6 grid grid-cols-1 gap-4 rounded-2xl border border-fd-border bg-fd-card/30 p-3 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
-      <div className="flex flex-col overflow-hidden rounded-xl border border-fd-border bg-fd-background">
-        <div className="border-b border-fd-border bg-fd-card px-4 py-3">
-          <h2 className="text-base font-semibold text-fd-foreground">Policy creator</h2>
-          <p className="mt-0.5 text-[11px] text-fd-muted-foreground">
-            Build a DefenseClaw policy section by section. Edits run through the live OPA-WASM
-            engine on the right so you can see verdicts before exporting.
-          </p>
-        </div>
-        <div className="divide-y divide-fd-border">
-          {SECTION_DEFS.map((sec) => (
-            <Section
-              key={sec.id}
-              id={sec.id}
-              title={sec.title}
-              subtitle={sec.subtitle(policy)}
-              status={sec.status(policy)}
-              expanded={openId === sec.id}
-              onToggle={() => setOpenId((cur) => (cur === sec.id ? '' : sec.id))}
-            >
-              {sec.render(policy, setPolicy)}
-            </Section>
-          ))}
-        </div>
-        <FindingsBar
-          counts={counts}
-          findings={findings.slice(0, 6)}
-          totalFindings={findings.length}
-        />
+    <div className="my-6 rounded-2xl border border-fd-border bg-fd-card/30 p-3">
+      <Tabs active={tab} onSwitch={setTab} />
+      <div className="mt-3">
+        {tab === 'quick-start' ? (
+          <QuickStart
+            policy={policy}
+            onPolicyChange={setPolicy}
+            answers={answers}
+            onAnswersChange={setAnswers}
+            onOpenInPlayground={handleOpenInPlayground}
+          />
+        ) : (
+          <Playground
+            policy={policy}
+            onPolicyChange={(next) => {
+              setPolicy(next);
+              // Any direct edit in the Playground breaks the "arrived
+              // from Quick Start" contract — the banner can disappear.
+              setArrivedFromQuickStart(false);
+            }}
+            banner={
+              arrivedFromQuickStart ? (
+                <HandoffBanner onRestart={handleRestartQuickStart} />
+              ) : null
+            }
+          />
+        )}
       </div>
-      <aside className="lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]">
-        <LiveTestPane policy={policy} />
-      </aside>
     </div>
   );
 }
 
-function FindingsBar({
-  counts,
-  findings,
-  totalFindings,
+function Tabs({
+  active,
+  onSwitch,
 }: {
-  counts: { errors: number; warnings: number; info: number };
-  findings: ReturnType<typeof validatePolicy>;
-  totalFindings: number;
+  active: TabId;
+  onSwitch: (next: TabId) => void;
 }) {
-  if (totalFindings === 0) {
-    return (
-      <div className="flex items-center gap-2 border-t border-fd-border bg-emerald-500/10 px-4 py-2 text-[11px] text-emerald-700 dark:text-emerald-300">
-        <span aria-hidden="true">✓</span>
-        <span>No issues. Ready to export.</span>
-      </div>
-    );
-  }
+  const tabs: Array<{ id: TabId; label: string; hint: string }> = [
+    {
+      id: 'quick-start',
+      label: 'Quick start',
+      hint: 'Answer 5 questions, get a complete policy',
+    },
+    {
+      id: 'playground',
+      label: 'Playground',
+      hint: 'Every knob, section by section',
+    },
+  ];
   return (
-    <details className="border-t border-fd-border bg-fd-card">
-      <summary className="flex cursor-pointer items-center gap-3 px-4 py-2 text-[11px] text-fd-foreground">
-        <span aria-hidden="true">⚠</span>
-        <span>
-          {counts.errors > 0 && <span className="text-red-500">{counts.errors} error{counts.errors === 1 ? '' : 's'}</span>}
-          {counts.errors > 0 && (counts.warnings > 0 || counts.info > 0) && ' · '}
-          {counts.warnings > 0 && <span className="text-amber-600">{counts.warnings} warning{counts.warnings === 1 ? '' : 's'}</span>}
-          {counts.warnings > 0 && counts.info > 0 && ' · '}
-          {counts.info > 0 && <span className="text-fd-muted-foreground">{counts.info} info</span>}
-        </span>
-        <span className="ml-auto text-fd-muted-foreground">click to expand</span>
-      </summary>
-      <ul className="divide-y divide-fd-border">
-        {findings.map((f, i) => (
-          <li key={i} className="px-4 py-2 text-[11px]">
-            <div className="flex items-baseline gap-2">
-              <span
-                className={
-                  f.level === 'error'
-                    ? 'text-red-500'
-                    : f.level === 'warning'
-                      ? 'text-amber-600 dark:text-amber-400'
-                      : 'text-fd-muted-foreground'
-                }
-              >
-                {f.level.toUpperCase()}
-              </span>
-              <code className="font-mono text-[10px] text-fd-muted-foreground">{f.location}</code>
-            </div>
-            <div className="text-fd-foreground">{f.message}</div>
-            {f.fix && <div className="text-[10px] text-fd-muted-foreground">Fix: {f.fix}</div>}
-          </li>
-        ))}
-        {totalFindings > findings.length && (
-          <li className="px-4 py-2 text-[11px] text-fd-muted-foreground">
-            …and {totalFindings - findings.length} more.
-          </li>
-        )}
-      </ul>
-    </details>
+    <div
+      role="tablist"
+      aria-label="Policy creator mode"
+      className="flex flex-wrap items-stretch gap-2 rounded-xl border border-fd-border bg-fd-background p-1"
+    >
+      {tabs.map((t) => {
+        const selected = active === t.id;
+        return (
+          <button
+            key={t.id}
+            role="tab"
+            aria-selected={selected}
+            type="button"
+            onClick={() => onSwitch(t.id)}
+            className={[
+              'flex-1 rounded-lg px-3 py-2 text-left transition',
+              selected
+                ? 'bg-fd-card text-fd-foreground shadow-sm ring-1 ring-[var(--brand-cisco)]/40'
+                : 'text-fd-muted-foreground hover:bg-fd-card/60 hover:text-fd-foreground',
+            ].join(' ')}
+          >
+            <div className="text-sm font-semibold">{t.label}</div>
+            <div className="text-[11px] opacity-80">{t.hint}</div>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function HandoffBanner({ onRestart }: { onRestart: () => void }) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-fd-border bg-[var(--brand-cisco)]/5 px-4 py-2 text-[11px] text-fd-foreground">
+      <span>
+        <strong>Loaded from Quick Start.</strong> Every section below is pre-filled with
+        the choices you just made. Tweak anything you like — your edits stick.
+      </span>
+      <button
+        type="button"
+        onClick={onRestart}
+        className="rounded-md border border-fd-border bg-fd-background px-2 py-1 text-[11px] hover:border-[var(--brand-cisco)]"
+      >
+        Restart Quick Start
+      </button>
+    </div>
+  );
+}
+
+// Restart-the-interview confirmation. Skips the prompt when the user
+// hasn't actually answered anything (so a freshly-loaded page never
+// blocks on a needless confirm).
+function confirmRestart(answers: Answers): boolean {
+  if (typeof window === 'undefined') return true;
+  const hasAnswers =
+    answers.block.size > 0 ||
+    answers.allow.size > 0 ||
+    answers.firstPartyExtra.length > 0 ||
+    answers.domainsExtra.length > 0 ||
+    Object.values(answers.sinks).some((s) => s.enabled && s.url) ||
+    answers.posture !== 'default' ||
+    answers.response !== 'alert';
+  if (!hasAnswers) return true;
+  return window.confirm(
+    'Restart the Quick Start interview? This clears every answer you picked. The policy currently loaded in the Playground will be replaced with the result of the empty interview.',
   );
 }
