@@ -29,6 +29,16 @@ import {
   type SinkCard,
 } from './questions';
 
+// Next.js `basePath` ("" or "/defenseclaw") gets baked into the client
+// bundle via NEXT_PUBLIC_BASE_PATH in next.config. Cookbook links are
+// just plain anchors (we want them to open in a new tab so the
+// interview state stays intact), so we prefix manually here — Next's
+// <Link> would do this for us, but only for in-app navigations.
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+function docsHref(path: string): string {
+  return `${BASE_PATH}${path}`;
+}
+
 export interface QuickStartProps {
   policy: Policy;
   onPolicyChange: (next: Policy) => void;
@@ -334,7 +344,7 @@ function CheckCard({
         )}
         {card.cookbookHref && (
           <a
-            href={card.cookbookHref}
+            href={docsHref(card.cookbookHref)}
             target="_blank"
             rel="noopener noreferrer"
             className="ml-auto text-[10px] text-[var(--brand-cisco)] hover:underline"
@@ -385,7 +395,7 @@ function AllowCheckCard({
         )}
         {card.cookbookHref && (
           <a
-            href={card.cookbookHref}
+            href={docsHref(card.cookbookHref)}
             target="_blank"
             rel="noopener noreferrer"
             className="ml-auto text-[10px] text-emerald-600 hover:underline dark:text-emerald-400"
