@@ -154,7 +154,7 @@ func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
 
 	// Surface 3: Hook script for tool inspection
 	hookDir := filepath.Join(opts.DataDir, "hooks")
-	if err := WriteHookScript(hookDir, opts.APIAddr); err != nil {
+	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("openclaw hook script: %w", err)
 	}
 
@@ -557,15 +557,10 @@ func (c *OpenClawConnector) Route(r *http.Request, body []byte) (*ConnectorSigna
 // under <DataDir>/hooks/ are written for proxy-side tool inspection.
 func (c *OpenClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	ocHome := openClawHome()
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{filepath.Join(ocHome, "openclaw.json")},
 		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.Name(), "openclaw.json")},
-		HookScripts:  hooks,
+		HookScripts:  hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{
 			filepath.Join(ocHome, "extensions", "defenseclaw"),
 			filepath.Join(opts.DataDir, "shims"),

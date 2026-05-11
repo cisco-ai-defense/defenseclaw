@@ -379,6 +379,34 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 
 	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: normalizeHookFailMode(failMode)}
 
+	scripts := hookScriptNamesFromExtras(extras)
+
+	for _, name := range scripts {
+		content, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			return fmt.Errorf("read hook template %s: %w", name, err)
+		}
+		rendered, err := renderTemplate(string(content), data)
+		if err != nil {
+			return fmt.Errorf("render hook %s: %w", name, err)
+		}
+		hookPath := filepath.Join(hookDir, name)
+		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+			return fmt.Errorf("write hook %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func hookScriptNamesForConnector(opts SetupOpts, c Connector) []string {
+	var extras []string
+	if owner, ok := c.(HookScriptOwner); ok {
+		extras = owner.HookScriptNames(opts)
+	}
+	return hookScriptNamesFromExtras(extras)
+}
+
+func hookScriptNamesFromExtras(extras []string) []string {
 	scripts := make([]string, 0, len(genericHookScripts)+len(extras))
 	scripts = append(scripts, genericHookScripts...)
 	// De-dup: generic scripts must never collide with connector-owned
@@ -396,22 +424,17 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		seen[n] = struct{}{}
 		scripts = append(scripts, n)
 	}
+	return scripts
+}
 
-	for _, name := range scripts {
-		content, err := hookFS.ReadFile("hooks/" + name)
-		if err != nil {
-			return fmt.Errorf("read hook template %s: %w", name, err)
-		}
-		rendered, err := renderTemplate(string(content), data)
-		if err != nil {
-			return fmt.Errorf("render hook %s: %w", name, err)
-		}
-		hookPath := filepath.Join(hookDir, name)
-		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
-			return fmt.Errorf("write hook %s: %w", name, err)
-		}
+func hookScriptPathsForConnector(opts SetupOpts, c Connector) []string {
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	names := hookScriptNamesForConnector(opts, c)
+	hooks := make([]string, 0, len(names))
+	for _, name := range names {
+		hooks = append(hooks, filepath.Join(hookDir, name))
 	}
-	return nil
+	return hooks
 }
 
 // WriteHookScriptsForConnectorObject is the canonical, interface-driven

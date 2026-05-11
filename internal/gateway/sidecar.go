@@ -1295,16 +1295,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			// switch. Fail loud here and try one re-Setup so the
 			// operator either sees the error or gets a self-healing
 			// install.
-			if missing := verifyHookScriptsOnDisk(setupOpts.DataDir, conn); len(missing) > 0 {
-				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying Setup\n", conn.Name(), missing)
-				if err := conn.Setup(ctx, setupOpts); err != nil {
-					fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup after missing-hook detection failed: %v\n", conn.Name(), err)
-					recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
-				} else if missing := verifyHookScriptsOnDisk(setupOpts.DataDir, conn); len(missing) > 0 {
-					fmt.Fprintf(os.Stderr, "[guardrail] connector %s STILL missing hook scripts after re-Setup: %v — connector marked active but hooks WILL fail with exit 127\n", conn.Name(), missing)
-				} else {
-					fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup restored missing hook scripts\n", conn.Name())
-				}
+			if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook verification failed: %v\n", conn.Name(), err)
+				recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
+				s.health.SetGuardrail(StateError, err.Error(), nil)
+				return err
 			}
 			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
@@ -1608,6 +1603,22 @@ func verifyHookScriptsOnDisk(dataDir string, conn connector.Connector) []string 
 		}
 	}
 	return missing
+}
+
+func verifyHookScriptsOrRetry(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
+	missing := verifyHookScriptsOnDisk(opts.DataDir, conn)
+	if len(missing) == 0 {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying Setup\n", conn.Name(), missing)
+	if err := conn.Setup(ctx, opts); err != nil {
+		return fmt.Errorf("connector %s re-Setup after missing-hook detection failed: %w", conn.Name(), err)
+	}
+	if missing = verifyHookScriptsOnDisk(opts.DataDir, conn); len(missing) > 0 {
+		return fmt.Errorf("connector %s still missing hook scripts after re-Setup: %v", conn.Name(), missing)
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup restored missing hook scripts\n", conn.Name())
+	return nil
 }
 
 // teardownPreviousConnector checks if a different connector was previously

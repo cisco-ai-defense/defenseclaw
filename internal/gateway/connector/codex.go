@@ -451,11 +451,6 @@ func (c *CodexConnector) Route(r *http.Request, body []byte) (*ConnectorSignals,
 // surfaced here so tools that audit DefenseClaw's footprint find
 // them and Teardown can remove them.
 func (c *CodexConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{codexConfigPath()},
 		BackupFiles: []string{
@@ -463,7 +458,7 @@ func (c *CodexConnector) AgentPaths(opts SetupOpts) AgentPaths {
 			filepath.Join(opts.DataDir, "codex_config_backup.json"),
 			filepath.Join(opts.DataDir, "codex_backup.json"),
 		},
-		HookScripts: hooks,
+		HookScripts: hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }

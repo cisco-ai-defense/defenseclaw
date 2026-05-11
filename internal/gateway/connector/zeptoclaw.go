@@ -415,18 +415,13 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 // backed up via managed + legacy backup files. The connector also writes
 // the inspect-* hook scripts into <DataDir>/hooks/ for proxy-side tool inspection.
 func (c *ZeptoClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{zeptoClawConfigPath()},
 		BackupFiles: []string{
 			managedFileBackupPath(opts.DataDir, c.Name(), "config.json"),
 			filepath.Join(opts.DataDir, "zeptoclaw_backup.json"),
 		},
-		HookScripts: hooks,
+		HookScripts: hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }

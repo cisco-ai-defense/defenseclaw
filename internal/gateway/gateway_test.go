@@ -761,6 +761,38 @@ func (r *rollbackConnector) VerifyClean(connector.SetupOpts) error {
 	return nil
 }
 
+type hookRetryConnector struct {
+	stubConnector
+	hooks        []string
+	setupCalls   int
+	writeOnRetry bool
+	setupErr     error
+}
+
+func (h *hookRetryConnector) HookScriptNames(connector.SetupOpts) []string {
+	return h.hooks
+}
+
+func (h *hookRetryConnector) Setup(_ context.Context, opts connector.SetupOpts) error {
+	h.setupCalls++
+	if h.setupErr != nil {
+		return h.setupErr
+	}
+	if !h.writeOnRetry {
+		return nil
+	}
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return err
+	}
+	for _, name := range h.hooks {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T) {
 	dir := t.TempDir()
 	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
@@ -775,6 +807,97 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 	}
 	if got := connector.LoadActiveConnector(dir); got != "codex" {
 		t.Fatalf("active connector = %q, want codex so future mode switches can retry teardown", got)
+	}
+}
+
+func TestVerifyHookScriptsOrRetry_ErrorsWhenRetryStillMissing(t *testing.T) {
+	dir := t.TempDir()
+	conn := &hookRetryConnector{
+		stubConnector: stubConnector{name: "codex"},
+		hooks:         []string{"codex-hook.sh"},
+	}
+
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn)
+	if err == nil {
+		t.Fatal("verifyHookScriptsOrRetry should fail when hooks are still missing after retry")
+	}
+	if conn.setupCalls != 1 {
+		t.Fatalf("retry setup calls = %d, want 1", conn.setupCalls)
+	}
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("verifyHookScriptsOrRetry should not save active connector state, got %q", got)
+	}
+}
+
+func TestVerifyHookScriptsOrRetry_RestoresMissingHook(t *testing.T) {
+	dir := t.TempDir()
+	conn := &hookRetryConnector{
+		stubConnector: stubConnector{name: "codex"},
+		hooks:         []string{"codex-hook.sh"},
+		writeOnRetry:  true,
+	}
+
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn)
+	if err != nil {
+		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
+	}
+	if conn.setupCalls != 1 {
+		t.Fatalf("retry setup calls = %d, want 1", conn.setupCalls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("restored hook missing: %v", err)
+	}
+}
+
+// When every hook is already on disk, verifyHookScriptsOrRetry must not
+// trigger a redundant Setup. This is the common steady-state path on
+// gateway boot when nothing is wrong.
+func TestVerifyHookScriptsOrRetry_NoRetryWhenHooksPresent(t *testing.T) {
+	dir := t.TempDir()
+	conn := &hookRetryConnector{
+		stubConnector: stubConnector{name: "codex"},
+		hooks:         []string{"codex-hook.sh"},
+	}
+
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, "codex-hook.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("seed hook: %v", err)
+	}
+
+	if err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn); err != nil {
+		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
+	}
+	if conn.setupCalls != 0 {
+		t.Fatalf("retry setup calls = %d, want 0 (no retry expected when hooks present)", conn.setupCalls)
+	}
+}
+
+// When the retry Setup itself errors, verifyHookScriptsOrRetry must wrap and
+// surface the error (not silently swallow it). The wrapped error must mention
+// the connector name so operator logs are diagnosable.
+func TestVerifyHookScriptsOrRetry_WrapsSetupError(t *testing.T) {
+	dir := t.TempDir()
+	conn := &hookRetryConnector{
+		stubConnector: stubConnector{name: "codex"},
+		hooks:         []string{"codex-hook.sh"},
+		setupErr:      fmt.Errorf("simulated setup failure"),
+	}
+
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir}, conn)
+	if err == nil {
+		t.Fatal("expected error when retry Setup fails")
+	}
+	if conn.setupCalls != 1 {
+		t.Fatalf("retry setup calls = %d, want 1", conn.setupCalls)
+	}
+	if !strings.Contains(err.Error(), "codex") {
+		t.Errorf("error should name the failing connector, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "simulated setup failure") {
+		t.Errorf("error should wrap the underlying Setup error, got: %v", err)
 	}
 }
 

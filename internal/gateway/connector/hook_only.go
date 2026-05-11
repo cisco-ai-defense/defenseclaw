@@ -466,16 +466,12 @@ func (c *hookOnlyConnector) SetCredentials(gatewayToken, masterKey string) {
 }
 
 func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(opts.DataDir, "hooks", name))
-	}
 	caps := c.Capabilities(opts)
 	patched := uniqueNonEmptyStrings(append([]string{c.configPath(opts)}, caps.Telemetry.ConfigPaths...))
 	return AgentPaths{
 		PatchedFiles: patched,
 		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.name, "config")},
-		HookScripts:  hooks,
+		HookScripts:  hookScriptPathsForConnector(opts, c),
 	}
 }
 

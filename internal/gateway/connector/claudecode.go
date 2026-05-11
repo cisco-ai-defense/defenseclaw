@@ -161,17 +161,32 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
 
-	// Scoped per-connector hook removal: only delete claude-code-hook.sh
-	// (the script we own). The previous behavior — deleting every
-	// connector's hook script via the global hookScripts list — caused
-	// the exit-127 bug during connector switches. See
-	// TeardownSubprocessEnforcement for the full rationale.
+	// Replace our vendor hook with a disabled tombstone so any
+	// already-running Claude Code process that cached the hook path exits
+	// cleanly instead of surfacing repeated exit-127 failures.
 	removeOwnedHookScripts(opts, c)
+	if err := writeDisabledClaudeCodeHook(opts); err != nil {
+		errs = append(errs, fmt.Sprintf("disabled hook: %v", err))
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("claudecode teardown errors: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func writeDisabledClaudeCodeHook(opts SetupOpts) error {
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("ensure hook dir: %w", err)
+	}
+	body := "#!/bin/bash\n" +
+		"# defenseclaw-managed-hook disabled\n" +
+		"# Claude Code connector was torn down. Existing Claude Code processes may\n" +
+		"# keep this hook path cached until restart, so exit successfully\n" +
+		"# without forwarding stale payloads.\n" +
+		"exit 0\n"
+	return atomicWriteFile(filepath.Join(hookDir, "claude-code-hook.sh"), []byte(body), 0o700)
 }
 
 func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
@@ -292,18 +307,13 @@ func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSig
 // surfaced for audit completeness even though they are scoped to
 // <DataDir> and never sourced into the user's shell.
 func (c *ClaudeCodeConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{claudeCodeSettingsPath()},
 		BackupFiles: []string{
 			managedFileBackupPath(opts.DataDir, c.Name(), "settings.json"),
 			filepath.Join(opts.DataDir, "claudecode_backup.json"),
 		},
-		HookScripts: hooks,
+		HookScripts: hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }

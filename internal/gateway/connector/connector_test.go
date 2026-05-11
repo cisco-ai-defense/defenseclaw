@@ -1195,6 +1195,68 @@ func TestClaudeCode_Teardown_RestoresSettings(t *testing.T) {
 	}
 }
 
+// Mirror of TestCodex_Teardown_WritesDisabledHookForCachedProcesses for the
+// Claude Code connector. After Teardown, the on-disk hook script must remain
+// at the path Claude Code may have cached, but with a no-op body so cached
+// processes do not surface exit-127 errors and do not forward stale payloads
+// to the (now removed) hook API endpoint.
+func TestClaudeCode_Teardown_WritesDisabledHookForCachedProcesses(t *testing.T) {
+	dir := t.TempDir()
+	settingsDir := filepath.Join(dir, "claude-settings")
+	if err := os.MkdirAll(settingsDir, 0o755); err != nil {
+		t.Fatalf("mkdir settings: %v", err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	if err := os.WriteFile(settingsPath, []byte(`{}`), 0o644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	ClaudeCodeSettingsPathOverride = settingsPath
+	defer func() { ClaudeCodeSettingsPathOverride = "" }()
+
+	c := NewClaudeCodeConnector()
+	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	hookPath := filepath.Join(dir, "hooks", "claude-code-hook.sh")
+	setupHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read setup hook: %v", err)
+	}
+	if !strings.Contains(string(setupHook), "/api/v1/claude-code/hook") {
+		t.Fatalf("setup hook does not forward to Claude Code hook API\nfile:\n%s", setupHook)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	info, err := os.Stat(hookPath)
+	if err != nil {
+		t.Fatalf("disabled hook missing after teardown: %v", err)
+	}
+	if info.Mode()&0o111 == 0 {
+		t.Fatalf("disabled hook is not executable: mode %v", info.Mode())
+	}
+
+	disabledHook, err := os.ReadFile(hookPath)
+	if err != nil {
+		t.Fatalf("read disabled hook: %v", err)
+	}
+	disabled := string(disabledHook)
+	if !strings.Contains(disabled, "defenseclaw-managed-hook disabled") {
+		t.Errorf("disabled hook missing tombstone marker\nfile:\n%s", disabled)
+	}
+	if !strings.Contains(disabled, "exit 0") {
+		t.Errorf("disabled hook must exit successfully\nfile:\n%s", disabled)
+	}
+	if strings.Contains(disabled, "/api/v1/claude-code/hook") {
+		t.Errorf("disabled hook still forwards stale payloads\nfile:\n%s", disabled)
+	}
+}
+
 func TestClaudeCode_Teardown_PreservesUserHooksAddedAfterSetup(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -3656,6 +3718,26 @@ func TestWriteAllHookScripts_CreatesAllFour(t *testing.T) {
 	}
 }
 
+func TestOpenClawHookWriter_WritesGenericHooksOnly(t *testing.T) {
+	dir := t.TempDir()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, NewOpenClawConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+
+	for _, name := range genericHookScripts {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("generic hook %s not created: %v", name, err)
+		}
+	}
+	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("OpenClaw hook writer should not create vendor hook %s, stat err=%v", name, err)
+		}
+	}
+}
+
 func TestWriteHookScriptsWithToken_InjectsBearerHeader(t *testing.T) {
 	// The claude-code hook posts to /api/v1/claude-code/hook, which the API
 	// server's auth middleware guards with a bearer token. Without the
@@ -4003,9 +4085,14 @@ func TestTeardown_DoesNotDeleteOtherConnectorsHookScripts(t *testing.T) {
 	}
 
 	// Invariant 1: claude-code-hook.sh — the script claudecode owns —
-	// should be removed.
-	if _, err := os.Stat(filepath.Join(hookDir, "claude-code-hook.sh")); !os.IsNotExist(err) {
-		t.Errorf("claude-code-hook.sh should be removed by claudecode.Teardown, got stat err=%v", err)
+	// should be replaced with a disabled tombstone so already-running
+	// Claude Code processes that cached the path do not fail with exit 127.
+	disabledHook, err := os.ReadFile(filepath.Join(hookDir, "claude-code-hook.sh"))
+	if err != nil {
+		t.Fatalf("claude-code-hook.sh disabled tombstone missing after teardown: %v", err)
+	}
+	if !strings.Contains(string(disabledHook), "defenseclaw-managed-hook disabled") {
+		t.Errorf("claude-code-hook.sh should be a disabled tombstone, got:\n%s", string(disabledHook))
 	}
 
 	// Invariant 2: every other connector's hook script and every
@@ -6096,7 +6183,6 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 	dataDir := t.TempDir()
 	opts := SetupOpts{DataDir: dataDir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
-	expected := HookScripts() // canonical list from subprocess.go
 
 	connectors := []Connector{
 		NewZeptoClawConnector(),
@@ -6115,12 +6201,13 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 			t.Fatalf("%s missing AgentPathProvider", conn.Name())
 		}
 		paths := ap.AgentPaths(opts)
-		// Each declared script name from the canonical list should
-		// appear at <DataDir>/hooks/<name> in the connector's
-		// reported HookScripts.
 		got := map[string]bool{}
 		for _, p := range paths.HookScripts {
 			got[filepath.Base(p)] = true
+		}
+		expected := hookScriptNamesForConnector(opts, conn)
+		if len(got) != len(expected) {
+			t.Errorf("%s: AgentPaths.HookScripts has %d unique entries, want %d (got %v)", conn.Name(), len(got), len(expected), paths.HookScripts)
 		}
 		for _, want := range expected {
 			if !got[want] {
