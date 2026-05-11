@@ -86,6 +86,8 @@ defenseclaw = [
     "_data/local_observability_stack/grafana/dashboards/*.json",
     "_data/local_observability_stack/grafana/provisioning/dashboards/*.yml",
     "_data/local_observability_stack/grafana/provisioning/datasources/*.yml",
+    "_data/splunk_o11y_dashboards/*.md",
+    "_data/splunk_o11y_dashboards/terraform/*.tf",
 ]
 
 [tool.uv]

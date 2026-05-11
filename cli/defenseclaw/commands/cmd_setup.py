@@ -116,6 +116,14 @@ from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
 
 setup.add_command(local_observability)
 
+# Register `defenseclaw setup splunk-o11y-dashboards` (Terraform-backed
+# dashboard and detector provisioning for Splunk Observability Cloud).
+from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E402
+    splunk_o11y_dashboards,
+)
+
+setup.add_command(splunk_o11y_dashboards)
+
 # Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
 # notifiers). Distinct from `setup observability add webhook` (generic
 # HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
