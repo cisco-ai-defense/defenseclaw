@@ -34,6 +34,12 @@ import click
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
 from defenseclaw import ux
+from defenseclaw.bundle_refresh import (
+    SPLUNK_COMPOSE_PROJECT,
+    RefreshResult,
+    is_compose_project_running,
+    refresh_splunk_bridge,
+)
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.context import AppContext, pass_ctx
@@ -4674,6 +4680,19 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 @click.option("--skip-test", is_flag=True,
               help="Skip the live HEC probe after remote Splunk Enterprise setup")
 @click.option("--show-credentials", is_flag=True, help="Show Splunk Web login credentials")
+@click.option(
+    "--refresh-bundle/--no-refresh-bundle",
+    "refresh_bundle",
+    default=True,
+    show_default=True,
+    help=(
+        "Before starting local Splunk, refresh ~/.defenseclaw/splunk-bridge/ "
+        "from the wheel/repo bundle so newly-shipped compose, bin, app, and "
+        "s3_exporter changes take effect. Operator secrets (env/.env) are "
+        "preserved. If the stack is already running, it will be stopped, "
+        "refreshed, and restarted automatically."
+    ),
+)
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
 @pass_ctx
 def setup_splunk(
@@ -4700,6 +4719,7 @@ def setup_splunk(
     accept_splunk_license: bool,
     skip_test: bool,
     show_credentials: bool,
+    refresh_bundle: bool,
     non_interactive: bool,
 ) -> None:
     """Configure Splunk integration for DefenseClaw.
@@ -4766,6 +4786,7 @@ def setup_splunk(
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,
             aws_region=aws_region,
+            refresh_bundle=refresh_bundle,
         )
 
     if enable_enterprise:
@@ -5042,6 +5063,7 @@ def _setup_logs(
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
     aws_region: str | None = None,
+    refresh_bundle: bool = True,
 ) -> bool:
     if not _ensure_splunk_license_acceptance(
         accept_splunk_license=accept_splunk_license,
@@ -5070,6 +5092,7 @@ def _setup_logs(
         s3_bucket=s3_bucket,
         s3_prefix=s3_prefix,
         aws_region=aws_region,
+        refresh_bundle=refresh_bundle,
     )
     click.echo("  Local Splunk configured (Free mode from day 1)")
     return True
@@ -5222,6 +5245,7 @@ def _apply_logs_config(
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
     aws_region: str | None = None,
+    refresh_bundle: bool = True,
 ) -> None:
     """Thin alias over ``observability.apply_preset("splunk-hec", ...)``.
 
@@ -5239,6 +5263,7 @@ def _apply_logs_config(
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,
             aws_region=aws_region,
+            refresh_bundle=refresh_bundle,
         )
         if not contract:
             raise SystemExit(1)
@@ -5373,6 +5398,78 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
+def _refresh_and_maybe_restart_splunk_bridge(data_dir: str) -> RefreshResult:
+    """Refresh the seeded Splunk bridge, stopping any running stack first.
+
+    Sequence (all best-effort — refresh failures don't abort the parent
+    setup flow because the operator can still run with a stale bundle):
+
+    1. Detect a running ``defenseclaw-splunk-local`` compose project.
+    2. If running and a bridge binary exists, invoke ``bridge down``
+       to release the compose project (named volumes survive, so user
+       data is preserved across the bounce).
+    3. Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundle. The
+       refresh preserves operator secrets (``env/.env``) and the
+       generated app tarball (``splunk/build/``).
+    4. The caller then runs ``bridge up`` so the freshly refreshed
+       bundle (compose, bin, s3_exporter Dockerfile, app source) is
+       what materializes the next stack.
+
+    Surface every step inline so an operator sees exactly what
+    happened and never has to wonder why a previously-running stack
+    came back up on a different image.
+    """
+    was_running = is_compose_project_running(SPLUNK_COMPOSE_PROJECT)
+    stopped = False
+    if was_running:
+        click.echo(
+            f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle..."
+        )
+        bridge = _resolve_bridge_bin(data_dir)
+        if bridge:
+            try:
+                subprocess.run(
+                    [bridge, "down"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                stopped = True
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                click.echo(f"    warning: could not stop stack: {exc}")
+        else:
+            click.echo(
+                "    warning: bridge binary missing — cannot stop stack cleanly. "
+                "Run 'defenseclaw init' to seed."
+            )
+
+    result = refresh_splunk_bridge(data_dir)
+    result.was_running = was_running
+    result.stopped = stopped
+
+    if result.skipped_reason:
+        click.echo(f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}")
+        return result
+    if result.errors:
+        for err in result.errors[:3]:
+            click.echo(f"  warning: refresh: {err}")
+    if result.refreshed:
+        count = len(result.refreshed_paths)
+        preserved_count = len(result.preserved_paths)
+        click.echo(
+            f"  {ux.bold('Bundle refreshed:')} ~/.defenseclaw/splunk-bridge/ "
+            f"({count} file{'s' if count != 1 else ''} updated, "
+            f"{preserved_count} preserved)"
+        )
+    else:
+        click.echo(
+            f"  {ux.dim('→')} Bundle refresh: no changes "
+            "(seeded copy already matches bundle)"
+        )
+    return result
+
+
 def _bootstrap_bridge(
     data_dir: str,
     *,
@@ -5380,8 +5477,22 @@ def _bootstrap_bridge(
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
     aws_region: str | None = None,
+    refresh_bundle: bool = True,
 ) -> dict[str, str] | None:
-    """Start the local Splunk bridge and return the connection contract."""
+    """Start the local Splunk bridge and return the connection contract.
+
+    When ``refresh_bundle=True`` (the default) we sync
+    ``~/.defenseclaw/splunk-bridge/`` from the wheel/repo bundle before
+    invoking ``up`` so newly-shipped compose, bin, app, and
+    ``s3_exporter/`` changes take effect without requiring the operator
+    to ``rm -rf`` the seeded copy. If a docker-compose project for the
+    Splunk stack is already running we stop it first (Docker named
+    volumes survive ``down``, so user data is preserved) so the new
+    bundle is what gets brought back up.
+    """
+    if refresh_bundle:
+        _refresh_and_maybe_restart_splunk_bridge(data_dir)
+
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
         click.echo("  Splunk bridge runtime not found.")
