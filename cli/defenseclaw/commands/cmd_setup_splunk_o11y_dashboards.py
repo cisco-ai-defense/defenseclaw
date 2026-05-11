@@ -30,16 +30,28 @@ import os
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import click
+import requests
 
 from defenseclaw import ux
 from defenseclaw.context import AppContext
 from defenseclaw.paths import bundled_splunk_o11y_dashboards_terraform_dir
 
 _DEFAULT_WORK_SUBDIR = "splunk-o11y-dashboards"
+
+_DASHBOARD_SPECS = (
+    ("executive", "Executive Agent Watch"),
+    ("guardrail_inspection", "Guardrail and Inspection"),
+    ("connector_ingest", "Connector and OTel Ingest"),
+    ("security_policy", "Security and Policy"),
+    ("token_economics", "DefenseClaw AI Agents Token Economics"),
+    ("runtime_reliability", "Runtime and Reliability"),
+    ("scanners_findings", "Scanners and Findings"),
+)
 
 
 @click.group(
@@ -178,6 +190,7 @@ def plan_cmd(
         skip_validate=skip_validate,
         timeout=timeout,
     )
+    _adopt_existing_resources(prepared, terraform_bin=terraform_bin, timeout=timeout)
     _run_terraform(
         terraform_bin,
         ["plan", "-input=false", f"-state={prepared.state_path}"],
@@ -232,6 +245,7 @@ def apply_cmd(
         skip_validate=skip_validate,
         timeout=timeout,
     )
+    _adopt_existing_resources(prepared, terraform_bin=terraform_bin, timeout=timeout)
     _run_terraform(
         terraform_bin,
         ["plan", "-input=false", f"-state={prepared.state_path}"],
@@ -315,10 +329,20 @@ def destroy_cmd(
 
 
 class _PreparedRun:
-    def __init__(self, work_dir: Path, state_path: Path, env: dict[str, str]) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        state_path: Path,
+        env: dict[str, str],
+        *,
+        name_prefix: str,
+        with_detectors: bool,
+    ) -> None:
         self.work_dir = work_dir
         self.state_path = state_path
         self.env = env
+        self.name_prefix = name_prefix
+        self.with_detectors = with_detectors
 
 
 def _prepare_run(
@@ -361,6 +385,7 @@ def _prepare_run(
     click.echo(f"    API URL:       {resolved_api_url}")
     click.echo(f"    Test label:    {name_prefix or '(none)'}")
     click.echo(f"    Detectors:     {_detector_summary(with_detectors, enable_detectors)}")
+    click.echo("    Adoption:      automatic import of matching existing resources before apply")
     if not with_detectors:
         click.echo(f"    {ux.dim('Use --with-detectors to create Splunk detectors from bundled rules.')}")
     click.echo()
@@ -369,6 +394,8 @@ def _prepare_run(
         work_dir=resolved_work_dir,
         state_path=resolved_state_path,
         env=env,
+        name_prefix=name_prefix,
+        with_detectors=with_detectors,
     )
 
 
@@ -388,6 +415,387 @@ def _run_init_validate(
         _run_terraform(terraform_bin, init_args, cwd=prepared.work_dir, env=prepared.env, timeout=timeout)
     if not skip_validate:
         _run_terraform(terraform_bin, ["validate"], cwd=prepared.work_dir, env=prepared.env, timeout=timeout)
+
+
+@dataclass(frozen=True)
+class _ImportTarget:
+    address: str
+    remote_id: str
+
+
+def _terraform_state_list(terraform_bin: str, *, prepared: _PreparedRun, timeout: int) -> set[str]:
+    result = _run_terraform(
+        terraform_bin,
+        ["state", "list", f"-state={prepared.state_path}"],
+        cwd=prepared.work_dir,
+        env=prepared.env,
+        timeout=timeout,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return set()
+    return {line.strip() for line in (result.stdout or "").splitlines() if line.strip()}
+
+
+def _terraform_console_json(terraform_bin: str, *, prepared: _PreparedRun, expr: str, timeout: int):
+    display = f"{terraform_bin} console"
+    click.echo(f"  {ux.dim('$')} {display}")
+    try:
+        result = subprocess.run(
+            [terraform_bin, "console", "-no-color"],
+            cwd=str(prepared.work_dir),
+            env=prepared.env,
+            text=True,
+            input=expr + "\n",
+            capture_output=True,
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"Terraform executable not found: {terraform_bin}. Install Terraform or pass --terraform-bin."
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise click.ClickException(f"Terraform console timed out after {timeout}s: {display}") from exc
+    except OSError as exc:
+        raise click.ClickException(f"Could not execute Terraform console: {exc}") from exc
+
+    if result.returncode != 0:
+        _echo_captured_failure(result)
+        raise click.ClickException(f"Terraform console failed with exit code {result.returncode}: {display}")
+
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except ValueError as exc:
+        raise click.ClickException(f"Terraform console did not return JSON: {raw[:120]}") from exc
+    if isinstance(decoded, str):
+        try:
+            return json.loads(decoded)
+        except ValueError:
+            return decoded
+    return decoded
+
+
+def _o11y_api_get_json(api_url: str, auth_token: str, path: str, params: dict[str, object] | None = None) -> object:
+    url = f"{api_url.rstrip('/')}/{path.lstrip('/')}"
+    response = requests.get(
+        url,
+        headers={
+            "X-SF-TOKEN": auth_token,
+            "Accept": "application/json",
+        },
+        params=params or {},
+        timeout=30,
+    )
+    try:
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise click.ClickException(f"Splunk O11y API request failed for {url}: {exc}") from exc
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise click.ClickException(f"Splunk O11y API returned invalid JSON for {url}") from exc
+
+
+def _extract_list_payload(payload: object) -> list[object]:
+    if isinstance(payload, list):
+        return payload
+    if not isinstance(payload, dict):
+        return []
+    for key in ("results", "dashboardGroups", "dashboards", "detectors", "charts", "items", "data"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+    for value in payload.values():
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _find_exact_named(items: list[object], expected_name: str, *, group_id: str | None = None) -> dict | None:
+    matches: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("dashboardName") or item.get("title") or "").strip()
+        if name != expected_name:
+            continue
+        if group_id:
+            item_group = str(
+                item.get("dashboardGroupId")
+                or item.get("dashboardGroupID")
+                or item.get("groupId")
+                or item.get("dashboard_group_id")
+                or ""
+            ).strip()
+            if item_group and item_group != group_id:
+                continue
+        matches.append(item)
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise click.ClickException(f"Found multiple O11y resources named {expected_name!r}; cannot adopt safely.")
+    return None
+
+
+def _find_all_named(items: list[object], expected_name: str) -> list[dict]:
+    matches: list[dict] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("dashboardName") or item.get("title") or "").strip()
+        if name == expected_name:
+            matches.append(item)
+    return matches
+
+
+def _resource_id(item: object) -> str:
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        raise click.ClickException(f"Could not determine resource id from O11y object: {item!r}")
+    for key in ("id", "dashboardId", "dashboard_id", "detectorId", "detector_id", "chartId", "chart_id", "groupId"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    raise click.ClickException(f"Could not determine resource id from O11y object: {item!r}")
+
+
+def _expected_dashboard_name(base: str, name_prefix: str) -> str:
+    prefix = name_prefix.strip()
+    return f"{base} ({prefix})" if prefix else base
+
+
+def _expected_group_name(name_prefix: str) -> str:
+    prefix = name_prefix.strip()
+    return f"{prefix} DefenseClaw O11y".strip() if prefix else "DefenseClaw O11y"
+
+
+def _dashboard_group_id(item: dict) -> str:
+    for key in ("dashboardGroupId", "dashboardGroupID", "groupId", "dashboard_group_id"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
+def _terraform_import(terraform_bin: str, *, prepared: _PreparedRun, address: str, remote_id: str, timeout: int) -> None:
+    _run_terraform(
+        terraform_bin,
+        ["import", "-input=false", f"-state={prepared.state_path}", address, remote_id],
+        cwd=prepared.work_dir,
+        env=prepared.env,
+        timeout=timeout,
+    )
+
+
+def _dashboard_charts(detail: object) -> list[dict]:
+    if not isinstance(detail, dict):
+        return []
+    for container in (detail, detail.get("dashboard"), detail.get("data")):
+        if not isinstance(container, dict):
+            continue
+        for key in ("charts", "dashboardCharts", "elements", "items"):
+            value = container.get(key)
+            if isinstance(value, list):
+                charts = [item if isinstance(item, dict) else {"id": str(item)} for item in value if item is not None]
+                if charts:
+                    return charts
+    return []
+
+
+def _adopt_existing_resources(
+    prepared: _PreparedRun,
+    *,
+    terraform_bin: str,
+    timeout: int,
+) -> None:
+    ux.section("Adopting existing Splunk O11y resources")
+    console_data = _terraform_console_json(
+        terraform_bin,
+        prepared=prepared,
+        expr=(
+            "jsonencode({"
+            "single = local.single_value_charts,"
+            "time = local.time_charts,"
+            "table = local.table_charts,"
+            "layouts = local.dashboard_layouts,"
+            "detectors = local.detectors"
+            "})"
+        ),
+        timeout=timeout,
+    )
+    if not isinstance(console_data, dict):
+        raise click.ClickException("Unexpected Terraform console output while loading the dashboard bundle metadata.")
+
+    chart_maps = {
+        "single": console_data.get("single") or {},
+        "time": console_data.get("time") or {},
+        "table": console_data.get("table") or {},
+    }
+    dashboard_layouts = console_data.get("layouts") or {}
+    detector_defs = console_data.get("detectors") or {}
+
+    if not isinstance(chart_maps["single"], dict) or not isinstance(chart_maps["time"], dict) or not isinstance(chart_maps["table"], dict):
+        raise click.ClickException("Unexpected Terraform console output for chart metadata.")
+    if not isinstance(dashboard_layouts, dict) or not isinstance(detector_defs, dict):
+        raise click.ClickException("Unexpected Terraform console output for dashboard or detector metadata.")
+
+    state_addresses = _terraform_state_list(terraform_bin, prepared=prepared, timeout=timeout)
+    api_token = str(prepared.env["TF_VAR_signalfx_auth_token"])
+    api_url = str(prepared.env["TF_VAR_signalfx_api_url"])
+
+    imported = 0
+    resources: list[_ImportTarget] = []
+
+    group_name = _expected_group_name(prepared.name_prefix)
+    dashboard_groups_payload = _extract_list_payload(
+        _o11y_api_get_json(api_url, api_token, "/v2/dashboardgroup", params={"limit": 200, "offset": 0})
+    )
+    candidate_groups = _find_all_named(dashboard_groups_payload, group_name)
+    dashboards_payload = _extract_list_payload(
+        _o11y_api_get_json(api_url, api_token, "/v2/dashboard", params={"limit": 500, "offset": 0})
+    )
+    expected_dashboard_names = {
+        dashboard_key: _expected_dashboard_name(base_name, prepared.name_prefix)
+        for dashboard_key, base_name in _DASHBOARD_SPECS
+    }
+    dashboards_by_group: dict[str, dict[str, dict]] = {}
+    for group_item in candidate_groups:
+        group_id = _resource_id(group_item)
+        group_dashboards: dict[str, dict] = {}
+        for dashboard_key, dashboard_name in expected_dashboard_names.items():
+            dashboard_item = _find_exact_named(dashboards_payload, dashboard_name, group_id=group_id)
+            if dashboard_item is not None:
+                group_dashboards[dashboard_key] = dashboard_item
+        dashboards_by_group[group_id] = group_dashboards
+
+    chosen_group: dict | None = None
+    chosen_group_dashboards: dict[str, dict] = {}
+    if candidate_groups:
+        chosen_group = max(
+            enumerate(candidate_groups),
+            key=lambda pair: (len(dashboards_by_group.get(_resource_id(pair[1]), {})), pair[0]),
+        )[1]
+        chosen_group_dashboards = dashboards_by_group.get(_resource_id(chosen_group), {})
+        top_score = len(chosen_group_dashboards)
+        tied = [
+            item
+            for item in candidate_groups
+            if len(dashboards_by_group.get(_resource_id(item), {})) == top_score
+        ]
+        if len(tied) > 1:
+            tie_ids = ", ".join(f"{_resource_id(item)}" for item in tied)
+            click.echo(
+                f"  warning: multiple dashboard groups named {group_name!r} matched equally ({top_score} dashboards); "
+                f"using the first candidate. IDs: {tie_ids}"
+            )
+
+    if chosen_group is not None and chosen_group_dashboards:
+        group_id = _resource_id(chosen_group)
+        click.echo(f"  Selected dashboard group {group_name!r} (id: {group_id}) for adoption.")
+        resources.append(_ImportTarget("signalfx_dashboard_group.defenseclaw_o11y", group_id))
+        for dashboard_key, dashboard_item in chosen_group_dashboards.items():
+            resources.append(_ImportTarget(f"signalfx_dashboard.{dashboard_key}", _resource_id(dashboard_item)))
+
+        for dashboard_key, dashboard_item in chosen_group_dashboards.items():
+            expected_layout = dashboard_layouts.get(dashboard_key) or []
+            if not isinstance(expected_layout, list):
+                continue
+            dashboard_id = _resource_id(dashboard_item)
+            chart_items = _dashboard_charts(_o11y_api_get_json(api_url, api_token, f"/v2/dashboard/{dashboard_id}"))
+            if len(chart_items) < len(expected_layout):
+                raise click.ClickException(
+                    f"Dashboard {dashboard_item.get('name')!r} has fewer remote charts than the Terraform bundle expects."
+                )
+            for position, chart_layout in enumerate(expected_layout):
+                if not isinstance(chart_layout, dict):
+                    continue
+                chart_key = str(chart_layout.get("key") or "").strip()
+                chart_type = str(chart_layout.get("type") or "").strip()
+                chart_defs = chart_maps.get(chart_type)
+                expected_chart = chart_defs.get(chart_key) if isinstance(chart_defs, dict) else None
+                resource_prefix = {
+                    "single": "signalfx_single_value_chart.single",
+                    "time": "signalfx_time_chart.time",
+                    "table": "signalfx_table_chart.table",
+                }.get(chart_type)
+                if resource_prefix is None:
+                    continue
+                chart_address = f'{resource_prefix}["{chart_key}"]'
+                if chart_address in state_addresses:
+                    continue
+                chart_item = chart_items[position]
+                if isinstance(expected_chart, dict) and isinstance(chart_item, dict):
+                    expected_name = str(expected_chart.get("name") or "").strip()
+                    expected_desc = str(expected_chart.get("description") or "").strip()
+                    remote_name = str(chart_item.get("name") or chart_item.get("title") or "").strip()
+                    remote_desc = str(chart_item.get("description") or "").strip()
+                    if expected_name and remote_name and expected_name != remote_name:
+                        match = None
+                        for candidate in chart_items:
+                            if not isinstance(candidate, dict):
+                                continue
+                            candidate_name = str(candidate.get("name") or candidate.get("title") or "").strip()
+                            candidate_desc = str(candidate.get("description") or "").strip()
+                            if candidate_name == expected_name and (not expected_desc or candidate_desc == expected_desc):
+                                match = candidate
+                                break
+                        if match is not None:
+                            chart_item = match
+                    elif expected_desc and remote_desc and expected_desc != remote_desc:
+                        match = None
+                        for candidate in chart_items:
+                            if not isinstance(candidate, dict):
+                                continue
+                            candidate_name = str(candidate.get("name") or candidate.get("title") or "").strip()
+                            candidate_desc = str(candidate.get("description") or "").strip()
+                            if candidate_name == expected_name and candidate_desc == expected_desc:
+                                match = candidate
+                                break
+                        if match is not None:
+                            chart_item = match
+                resources.append(_ImportTarget(chart_address, _resource_id(chart_item)))
+
+    elif candidate_groups:
+        click.echo(
+            f"  Found {len(candidate_groups)} dashboard groups named {group_name!r}, but none contained matching dashboards."
+        )
+    else:
+        click.echo(f"  No existing dashboard group named {group_name!r} was found; nothing to adopt.")
+
+    if prepared.with_detectors:
+        detector_items = _extract_list_payload(
+            _o11y_api_get_json(api_url, api_token, "/v2/detector", params={"limit": 500, "offset": 0})
+        )
+        for detector_key, detector_def in detector_defs.items():
+            if not isinstance(detector_def, dict):
+                continue
+            detector_name = str(detector_def.get("name") or "").strip()
+            if not detector_name:
+                continue
+            detector_item = _find_exact_named(detector_items, detector_name)
+            if detector_item is None:
+                continue
+            detector_address = f'signalfx_detector.detector["{detector_key}"]'
+            if detector_address in state_addresses:
+                continue
+            resources.append(_ImportTarget(detector_address, _resource_id(detector_item)))
+
+    for resource in resources:
+        if resource.address in state_addresses:
+            continue
+        _terraform_import(terraform_bin, prepared=prepared, address=resource.address, remote_id=resource.remote_id, timeout=timeout)
+        state_addresses.add(resource.address)
+        imported += 1
+
+    if imported:
+        click.echo(f"  Imported {imported} existing resources into the selected Terraform state.")
+    else:
+        click.echo("  No matching existing resources needed import.")
 
 
 def _run_terraform(

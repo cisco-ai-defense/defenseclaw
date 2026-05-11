@@ -48,6 +48,8 @@ The detector set covers:
 
 Preferred DefenseClaw CLI flow:
 
+The CLI automatically imports matching existing dashboards, charts, and detectors when they are already present in O11y, and creates fresh resources when they are not.
+
 ```bash
 defenseclaw setup splunk-o11y-dashboards apply \
   --api-url <api-url-endpoint> \
@@ -72,7 +74,6 @@ defenseclaw setup splunk-o11y-dashboards apply \
 defenseclaw setup splunk-o11y-dashboards apply \
   --api-url <api-url-endpoint> \
   --auth-token <api-access-token> \
-  --name-prefix "Test" \
   --dashboards-only \
   --yes
 ```
