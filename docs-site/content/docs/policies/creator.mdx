@@ -25,6 +25,23 @@ inputs you test against are never uploaded. Saved progress lives in `localStorag
 
 <PolicyCreator />
 
+## Power features
+
+These small affordances exist on top of the two main tabs to shorten the most common loops:
+
+| Feature | Where | What it does |
+| --- | --- | --- |
+| **Live preview drawer** | Quick Start (every step except Review) | Floating bottom-right pane that pipes the in-progress policy through OPA-WASM against canned scenarios. Lets you watch the verdict change as you click cards. |
+| **Custom test input** | Live Test pane (in the drawer or on the Review step) | Switch the input source from "canned scenario" to "custom input" and paste your own JSON. Per-domain drafts persist to `localStorage`. Re-evaluates 250 ms after you stop typing. |
+| **`⌘K` / `Ctrl-K` palette** | Playground | Fuzzy-search every section and knob ("hilt severity", "splunk hec token", "block threshold"). Selecting a result expands the matching section, scrolls to it, and flashes a brief outline. |
+| **Syntax-highlighted Rego editor** | Playground → Custom Rego | Zero-dependency editor: transparent textarea over a tokenized overlay. Tab inserts 2 spaces, Shift-Tab dedents. Highlighting is presentation-only — `opa check` runs on your host at install time. |
+| **Copy share link** | Quick Start Review + Playground Review | Encodes the current policy into the URL fragment as `gzip + base64url`, copies the link to your clipboard. The fragment never leaves your browser as a network request, but the link itself contains the policy — share it like you would the YAML. |
+
+When someone opens a share link, the page decodes the fragment, prompts before replacing any
+in-progress draft, and silently strips the hash. If the payload fails any check (wrong version,
+larger than 1 MB after decompression, doesn't look like a policy, malformed gzip) the page shows a
+yellow banner explaining which check failed instead of clobbering your draft.
+
 ## Quick Start vs. Playground
 
 <Cards>
