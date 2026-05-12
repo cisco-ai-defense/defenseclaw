@@ -431,11 +431,11 @@ func mustBuildEvalJudge(t *testing.T, judge string) *LLMJudge {
 // ----------------------------------------------------------------------------
 
 var injectionFindingToCategory = map[string]string{
-	"JUDGE-INJ-INSTRUCT":  "Instruction Manipulation",
-	"JUDGE-INJ-CONTEXT":   "Context Manipulation",
-	"JUDGE-INJ-OBFUSC":    "Obfuscation",
-	"JUDGE-INJ-SEMANTIC":  "Semantic Manipulation",
-	"JUDGE-INJ-TOKEN":     "Token Exploitation",
+	"JUDGE-INJ-INSTRUCT": "Instruction Manipulation",
+	"JUDGE-INJ-CONTEXT":  "Context Manipulation",
+	"JUDGE-INJ-OBFUSC":   "Obfuscation",
+	"JUDGE-INJ-SEMANTIC": "Semantic Manipulation",
+	"JUDGE-INJ-TOKEN":    "Token Exploitation",
 }
 
 // piiFindingToCategory is defined once in pii_benchmark_test.go historically;
@@ -458,11 +458,11 @@ var exfilFindingToCategory = map[string]string{
 }
 
 var toolInjectionFindingToCategory = map[string]string{
-	"JUDGE-TOOL-INJ-INSTRUCT":  "Instruction Manipulation",
-	"JUDGE-TOOL-INJ-CONTEXT":   "Context Manipulation",
-	"JUDGE-TOOL-INJ-OBFUSC":    "Obfuscation",
-	"JUDGE-TOOL-INJ-EXFIL":     "Data Exfiltration",
-	"JUDGE-TOOL-INJ-DESTRUCT":  "Destructive Commands",
+	"JUDGE-TOOL-INJ-INSTRUCT": "Instruction Manipulation",
+	"JUDGE-TOOL-INJ-CONTEXT":  "Context Manipulation",
+	"JUDGE-TOOL-INJ-OBFUSC":   "Obfuscation",
+	"JUDGE-TOOL-INJ-EXFIL":    "Data Exfiltration",
+	"JUDGE-TOOL-INJ-DESTRUCT": "Destructive Commands",
 }
 
 // safePct returns 100*num/denom guarding against divide-by-zero.
