@@ -22,7 +22,8 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 		t.Fatalf("Init: %v", err)
 	}
 
-	js := NewJudgeStore(store)
+	js := NewJudgeStoreFromAudit(store)
+	t.Cleanup(func() { _ = js.Shutdown(t.Context()) })
 	ctx := ContextWithRequestID(
 		ContextWithSessionID(
 			ContextWithTraceID(
@@ -51,6 +52,12 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 	}
 	if err := js.PersistJudgeEvent(ctx, gatewaylog.DirectionPrompt, p, "my_tool", "tid-1", "pol-1", "app:x"); err != nil {
 		t.Fatalf("PersistJudgeEvent: %v", err)
+	}
+
+	// Async path: drain the queue before asserting rows exist.
+	// Shutdown is idempotent and blocks up to its built-in timeout.
+	if err := js.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 
 	rows, err := store.ListJudgeResponses(5)

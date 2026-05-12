@@ -9,6 +9,22 @@ both are vendor-neutral, and both are configured declaratively in
 > `audit_sinks:`. Config load will refuse to start if the legacy block
 > is present. Migrate as described below.
 
+> **Release note — SQLite write-lock remediation (Phase 1–4):**
+> The sidecar now caps SQLite to a single open connection per database
+> (`SetMaxOpenConns(1)`), applies all performance pragmas via the DSN
+> (so they propagate to every pool connection), retries
+> `database is locked` with exponential backoff, persists LLM-judge
+> bodies through an async batched queue, and stores judge bodies in
+> their own file `~/.defenseclaw/judge_bodies.db` (`audit.judge_bodies_db`
+> in config). New OTel metrics
+> `defenseclaw.sqlite.busy_retries`,
+> `defenseclaw.judge.persist.drops`,
+> `defenseclaw.judge.persist.queue_depth`, and
+> `defenseclaw.judge.persist.batch_size` surface the new pathways —
+> see §4.2 and §5.1. The legacy `judge_responses` table on `audit.db`
+> remains readable but receives no new writes; operators may drop it
+> at their convenience (see §5.1 for the one-liner).
+
 ---
 
 ## 1. Concepts
@@ -334,6 +350,17 @@ The gateway emits the following OTel metrics
 | `defenseclaw.stream.bytes_sent` | http.route, outcome |
 | `defenseclaw.stream.duration_ms` | http.route, outcome |
 
+**SQLite storage (Phase 1–3 write-lock remediation):**
+
+| Metric | Labels | Notes |
+|--------|--------|-------|
+| `defenseclaw.sqlite.busy_retries` | operation | Increments when `database is locked` is observed before a retry succeeds. With Phase 1 (pool cap + DSN pragmas) and Phase 2 (exponential-backoff retry) deployed, this counter should hover near zero in steady state. A non-zero rate is a leading indicator that some new write path bypasses the `audit.Store`/`inventory.Store` helpers. |
+| `defenseclaw.judge.persist.drops` | reason (`queue_full` \| `shutdown` \| `worker_error`) | Phase 3 async judge-persistence queue overflow counter. Any non-zero value means judge bodies were silently discarded — either because the proxy was generating judges faster than the worker could fsync them (raise `guardrail.judge_persist_queue_depth` or `DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE`) or because Shutdown ran out of time before draining (raise the sidecar shutdown grace period). |
+| `defenseclaw.judge.persist.queue_depth` | — | Current size of the async judge queue. Used together with `judge.persist.drops` to size queue depth empirically — a sustained queue depth at the cap is the precondition for drops. |
+| `defenseclaw.judge.persist.batch_size` | — | Histogram of rows committed per worker transaction (target up to 32 rows or every 100 ms). Higher means more rows are sharing a single fsync, which is the entire point of the async queue. |
+
+> **Alerting threshold suggestion:** alert when `rate(defenseclaw_sqlite_busy_retries_total[5m]) > 0` for more than 10 minutes, and page when any non-zero `defenseclaw_judge_persist_drops_total` sample is observed.
+
 **Schema validation:** `defenseclaw.schema.violations` (event_type, code) —
 see §8.1 below.
 
@@ -418,6 +445,40 @@ To opt back into raw evidence for a single `/inspect` HTTP response, use
 the `X-DefenseClaw-Reveal-PII: 1` header documented in `docs/API.md`.
 That path audit-logs the reveal and still writes the redacted copy to
 the store.
+
+---
+
+## 5.1 SQLite storage layout (Phase 4 split)
+
+DefenseClaw's local SQLite footprint is split across two files, each
+hardened with the same connection pool and pragma defaults (WAL,
+`busy_timeout=5000`, `synchronous=NORMAL`, `cache_size=-20000`,
+`temp_store=MEMORY`, `mmap_size=268435456`, `foreign_keys=ON`,
+`SetMaxOpenConns(1)`):
+
+| File | Default path | Tables (selected) | Config key |
+|------|--------------|-------------------|------------|
+| `audit.db` | `~/.defenseclaw/audit.db` | `audit_events`, `activity_events`, `scan_results`, `findings`, `network_egress`, `sink_health` | `audit_db` |
+| `judge_bodies.db` | `~/.defenseclaw/judge_bodies.db` | `judge_responses` | `judge_bodies_db` |
+
+The split exists because retained LLM-judge bodies are the largest and
+highest-frequency rows in the system (each capped at `MaxJudgeRawBytes
+= 64 KiB`). Keeping them in their own DB means audit/activity writers
+on `audit.db` never share a fsync window with judge body INSERTs,
+which is what made the pre-Phase-4 layout vulnerable to
+`SQLITE_BUSY` under burst load.
+
+The legacy `judge_responses` table on `audit.db` is preserved by the
+upgrade (so historical rows remain readable) but never receives new
+writes. Operators who want to reclaim that disk space can drop the
+legacy table at their convenience:
+
+```bash
+sqlite3 ~/.defenseclaw/audit.db "DROP TABLE IF EXISTS judge_responses; VACUUM;"
+```
+
+This is safe at any point after the upgraded sidecar has started; new
+judge bodies always land in `judge_bodies.db`.
 
 ---
 

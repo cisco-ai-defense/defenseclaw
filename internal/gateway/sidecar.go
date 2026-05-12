@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,18 @@ type Sidecar struct {
 	// verdict/judge/lifecycle emission lands here without plumbing
 	// the writer through every call site.
 	events *gatewaylog.Writer
+
+	// judgeStore is the async judge-body persistence queue.
+	// Non-nil only when guardrail.retain_judge_bodies is on.
+	// Sidecar.Run drains it on shutdown so queued bodies survive
+	// SIGTERM.
+	judgeStore *JudgeStore
+
+	// judgeBodyStore is the Phase 4 split-out SQLite database
+	// dedicated to judge_responses. Held here so Sidecar.Run can
+	// close it after the queue drains; the audit.Store keeps
+	// audit_events / activity_events on its own file.
+	judgeBodyStore *audit.JudgeBodyStore
 }
 
 // NewSidecar creates a sidecar instance ready to connect.
@@ -319,59 +332,47 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// flows into gateway.jsonl / sinks, and the InsertJudgeResponse
 	// body stays on disk under the same ACLs as the rest of the data
 	// directory.
+	var (
+		judgeStore     *JudgeStore
+		judgeBodyStore *audit.JudgeBodyStore
+	)
 	if retainJudge && store != nil {
-		SetJudgePersistor(func(ctx context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, opts JudgeEmitOpts) {
-			if err := store.InsertJudgeResponse(audit.JudgeResponse{
-				Kind:       p.Kind,
-				Direction:  string(dir),
-				Model:      p.Model,
-				Action:     p.Action,
-				Severity:   string(p.Severity),
-				LatencyMs:  p.LatencyMs,
-				ParseError: p.ParseError,
-				Raw:        p.RawResponse,
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "[sidecar] persist judge response: %v\n", err)
+		// Resolve the queue depth. Precedence: env override > config
+		// value > built-in default. The env override mirrors the
+		// DEFENSECLAW_PERSIST_JUDGE pattern so operators have a
+		// no-rebuild knob during incident response.
+		queueDepth := cfg.Guardrail.JudgePersistQueueDepth
+		if v := strings.TrimSpace(os.Getenv("DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE")); v != "" {
+			if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+				queueDepth = parsed
 			}
-
-			// Fan out a redacted summary through the audit pipeline.
-			// Using logger.LogEvent keeps the sink filters, run_id
-			// stamping, and OTel emission consistent with every
-			// other audit event — no bespoke Splunk/OTLP wiring here.
-			// RawResponse is intentionally NOT included in Details;
-			// the sinks see only the structured metadata (kind,
-			// model, latency, verdict, parse error). The full body
-			// lives only in SQLite for local forensics.
-			//
-			// v7: merge the request-scoped correlation envelope
-			// (from ctx) with the per-emission overlay (tool +
-			// policy + destination_app derived from the active
-			// request). Without this, every llm-judge-response row
-			// landed in SQLite with agent/session/run/trace NULL
-			// because the closure had no access to request
-			// context — see review finding on empty envelope
-			// coverage for judge rows.
-			if logger != nil {
-				env := audit.MergeEnvelope(audit.EnvelopeFromContext(ctx), audit.CorrelationEnvelope{
-					ToolName:       opts.ToolName,
-					ToolID:         opts.ToolID,
-					PolicyID:       opts.PolicyID,
-					DestinationApp: opts.DestinationApp,
-				})
-				evt := audit.Event{
-					Action:   "llm-judge-response",
-					Target:   p.Model,
-					Actor:    "defenseclaw-gateway",
-					Severity: string(p.Severity),
-					Details: fmt.Sprintf(
-						"kind=%s direction=%s action=%s latency_ms=%d input_bytes=%d parse_error=%q",
-						p.Kind, dir, p.Action, p.LatencyMs, p.InputBytes, p.ParseError,
-					),
-				}
-				audit.ApplyEnvelope(&evt, env)
-				_ = logger.LogEvent(evt)
-			}
-		})
+		}
+		// Phase 4 split: judge bodies live in a dedicated SQLite
+		// file (~/.defenseclaw/judge_bodies.db by default). Falling
+		// back to audit.db on open failure keeps the sidecar
+		// running — better to share the write lock than to drop
+		// judge rows entirely.
+		bodyDBPath := strings.TrimSpace(cfg.JudgeBodiesDB)
+		if bodyDBPath == "" {
+			bodyDBPath = filepath.Join(cfg.DataDir, config.DefaultJudgeBodiesDBName)
+		}
+		var inserter JudgeBodyInserter
+		if bs, openErr := audit.NewJudgeBodyStore(bodyDBPath); openErr == nil {
+			judgeBodyStore = bs
+			inserter = &judgeBodyStoreInserter{s: bs}
+			fmt.Fprintf(os.Stderr, "[sidecar] judge bodies db: %s\n", bodyDBPath)
+		} else {
+			fmt.Fprintf(os.Stderr, "[sidecar] judge bodies db open failed, falling back to audit.db: %v\n", openErr)
+			inserter = &auditStoreInserter{s: store}
+		}
+		// Async judge persistence: rows queue on a buffered channel
+		// and flush in batched transactions on a dedicated worker.
+		// See internal/gateway/judge_store.go for the design notes;
+		// the legacy SetJudgePersistor synchronous closure that
+		// used to live here is gone — its dropped writes under
+		// burst load were the motivating bug for this fix.
+		judgeStore = NewJudgeStore(inserter, logger, queueDepth)
+		SetJudgeResponseStore(judgeStore)
 	}
 
 	// Boot path — no request context exists yet. Writer.Emit stamps
@@ -405,7 +406,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		osNotifier:  osNotifier,
 		alertCtx:    alertCtx,
 		alertCancel: alertCancel,
-		events:      events,
+		events:         events,
+		judgeStore:     judgeStore,
+		judgeBodyStore: judgeBodyStore,
 	}, nil
 }
 
@@ -538,6 +541,29 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
 	if s.webhooks != nil {
 		s.webhooks.Close()
+	}
+	// Drain the async judge-persistence queue BEFORE the audit DB
+	// handle is closed: any rows still buffered after a SIGTERM
+	// must land in SQLite or they are lost forever. Shutdown
+	// bounds the wait to judgePersistShutdownTimeout (5s) so a
+	// pathological DB doesn't wedge the process; drops still
+	// surface as defenseclaw.judge.persist.drops with
+	// reason="shutdown" if we run out of time.
+	if s.judgeStore != nil {
+		// Detach from the global so any post-drain emit path sees a
+		// nil store instead of racing the worker.
+		SetJudgeResponseStore(nil)
+		if err := s.judgeStore.Shutdown(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] judge-store drain: %v\n", err)
+		}
+	}
+	// Close the dedicated judge-bodies DB AFTER the queue has drained
+	// so the worker's final batch lands on disk before we drop the
+	// connection. audit.Logger.Close() below still flushes audit.db.
+	if s.judgeBodyStore != nil {
+		if err := s.judgeBodyStore.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] judge-bodies db close: %v\n", err)
+		}
 	}
 	s.logger.Close()
 	_ = s.client.Close()
