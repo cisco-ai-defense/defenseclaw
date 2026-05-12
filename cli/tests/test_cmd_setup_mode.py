@@ -141,13 +141,10 @@ class TestSetupMode_OpenClawZeptoClawInheritance(_ModeBase):
 class TestSetupMode_IntoObservabilityOnly(_ModeBase):
     """Switching → hook/observability connectors forces observability-only."""
 
-    def test_openclaw_to_codex_disables_codex_enforcement(self):
+    def test_openclaw_to_codex_pins_observe_mode(self):
         gc = self.app.cfg.guardrail
         self.app.cfg.claw.mode = "openclaw"
         gc.connector = "openclaw"
-        # Pre-seed the codex enforcement flag to True so we can prove
-        # the alias zeroes it.
-        gc.codex_enforcement_enabled = True
         gc.mode = "action"
 
         result = self._run("codex")
@@ -155,29 +152,22 @@ class TestSetupMode_IntoObservabilityOnly(_ModeBase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.claw.mode, "codex")
         self.assertEqual(gc.connector, "codex")
-        self.assertFalse(
-            gc.codex_enforcement_enabled,
-            "codex_enforcement_enabled must come back False",
-        )
         # Observability-only forces ``observe`` mode.
         self.assertEqual(gc.mode, "observe")
         # gc.enabled stays True so Go gateway wires hooks + OTel.
         self.assertTrue(gc.enabled)
 
-    def test_zeptoclaw_to_claudecode_disables_claudecode_enforcement(self):
+    def test_zeptoclaw_to_claudecode_pins_observe_mode(self):
         gc = self.app.cfg.guardrail
         self.app.cfg.claw.mode = "zeptoclaw"
         gc.connector = "zeptoclaw"
-        gc.claudecode_enforcement_enabled = True
 
-        result = self._run("claude-code" if False else "claudecode")
-        # ^ Click choice list normalizes case-insensitively but the
-        # canonical literal is ``claudecode`` (no hyphen). The
-        # ``setup claude-code`` ALIAS exists separately.
+        result = self._run("claudecode")
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
-        self.assertFalse(gc.claudecode_enforcement_enabled)
+        self.assertEqual(gc.mode, "observe")
+        self.assertTrue(gc.enabled)
 
     def test_openclaw_to_cursor_sets_hook_observability_mode(self):
         gc = self.app.cfg.guardrail
@@ -202,7 +192,6 @@ class TestSetupMode_OutOfObservabilityOnly(_ModeBase):
         # Coming from codex observability-only setup.
         self.app.cfg.claw.mode = "codex"
         gc.connector = "codex"
-        gc.codex_enforcement_enabled = False
         gc.enabled = True
         gc.mode = "observe"   # what _apply_connector_observability_only
                               # would have written

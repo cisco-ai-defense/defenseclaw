@@ -179,7 +179,6 @@ class DoctorGuardrailTests(unittest.TestCase):
                 model="",
                 port=4000,
                 connector="codex",
-                codex_enforcement_enabled=False,
             ),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),

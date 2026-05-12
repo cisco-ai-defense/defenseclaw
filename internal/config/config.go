@@ -1009,18 +1009,6 @@ type GuardrailConfig struct {
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
 
-	// CodexEnforcementEnabled is DEPRECATED and ignored. It remains in
-	// config.yaml for backwards compatibility and will be removed in a
-	// future release. Codex is hook-only; remove guardrail.codex_enforcement_enabled
-	// from config.yaml to avoid deprecation warnings.
-	CodexEnforcementEnabled bool `mapstructure:"codex_enforcement_enabled" yaml:"codex_enforcement_enabled,omitempty"`
-
-	// ClaudeCodeEnforcementEnabled is DEPRECATED and ignored. It remains in
-	// config.yaml for backwards compatibility and will be removed in a
-	// future release. Claude Code is hook-only; remove guardrail.claudecode_enforcement_enabled
-	// from config.yaml to avoid deprecation warnings.
-	ClaudeCodeEnforcementEnabled bool `mapstructure:"claudecode_enforcement_enabled" yaml:"claudecode_enforcement_enabled,omitempty"`
-
 	// HookFailMode is the operator-chosen response-layer fail mode
 	// for every generated hook script (codex-hook, claude-code-hook,
 	// inspect-*). Two values are supported:

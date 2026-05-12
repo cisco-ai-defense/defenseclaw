@@ -253,10 +253,6 @@ func applyConfigField(c *config.Config, key, val string) {
 		c.Guardrail.HILT.Enabled = boolVal
 	case "guardrail.hilt.min_severity":
 		c.Guardrail.HILT.MinSeverity = strings.ToUpper(strings.TrimSpace(val))
-	case "guardrail.codex_enforcement_enabled":
-		c.Guardrail.CodexEnforcementEnabled = boolVal
-	case "guardrail.claudecode_enforcement_enabled":
-		c.Guardrail.ClaudeCodeEnforcementEnabled = boolVal
 	case "guardrail.host":
 		c.Guardrail.Host = val
 	case "guardrail.port":

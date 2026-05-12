@@ -111,12 +111,6 @@ func TestOverview_ConfigurationBox_PolicyPostureAndEnforcement(t *testing.T) {
 			t.Fatalf("expected Overview configuration to include %q, got:\n%s", want, out)
 		}
 	}
-
-	p.cfg.Guardrail.CodexEnforcementEnabled = true
-	out = stripANSI(p.View(132, 44))
-	if !strings.Contains(out, "Codex proxy enforcement") {
-		t.Fatalf("expected enabled Codex enforcement state in Overview, got:\n%s", out)
-	}
 }
 
 func TestOverview_ConfigurationBox_HILTSupportByConnector(t *testing.T) {

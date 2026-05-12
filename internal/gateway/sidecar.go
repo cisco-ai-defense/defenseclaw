@@ -42,8 +42,6 @@ import (
 	"github.com/google/uuid"
 )
 
-var guardrailEnforcementDeprecationOnce sync.Once
-
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
@@ -1241,10 +1239,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// middleware stay in lockstep.
 		APIToken:     apiToken,
 		WorkspaceDir: workspaceDir,
-		// CodexEnforcement / ClaudeCodeEnforcement are deprecated no-ops (still
-		// wired for config.yaml backwards compatibility). See SetupOpts.
-		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
-		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
 		// HookFailMode is the operator-chosen response-layer fail mode
 		// for every generated hook (see GuardrailConfig.HookFailMode
 		// for the contract). Routed via EffectiveHookFailMode so the
@@ -1254,11 +1248,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailMode(),
 		HILTEnabled:      s.cfg.Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
-	}
-	if s.cfg.Guardrail.CodexEnforcementEnabled || s.cfg.Guardrail.ClaudeCodeEnforcementEnabled {
-		guardrailEnforcementDeprecationOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: guardrail.codex_enforcement_enabled / guardrail.claudecode_enforcement_enabled are deprecated no-ops since the LLM proxy surface was removed. Codex and Claude Code now run hook-only. Remove these keys from config.yaml to silence this warning.\n")
-		})
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the

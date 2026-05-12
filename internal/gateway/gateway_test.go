@@ -272,50 +272,34 @@ func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 //   - skip the bind for openclaw (breaking every existing OpenClaw
 //     install on upgrade, since openclaw's data path goes through
 //     /v1/chat/completions on the proxy port).
-//
-// Each table row exercises one cell of (connector, enforcement
-// flags) → expected bind decision.
 func TestProxyShouldBindForConnector(t *testing.T) {
 	cases := []struct {
-		name          string
-		conn          connector.Connector
-		codexEnf      bool
-		claudeCodeEnf bool
-		expectBind    bool
+		name       string
+		conn       connector.Connector
+		expectBind bool
 	}{
-		{"codex_default_observability", &stubConnector{name: "codex"}, false, false, false},
-		{"codex_enforcement_deprecated_still_no_bind", &stubConnector{name: "codex"}, true, false, false},
-		{"claudecode_default_observability", &stubConnector{name: "claudecode"}, false, false, false},
-		{"claudecode_enforcement_deprecated_still_no_bind", &stubConnector{name: "claudecode"}, false, true, false},
-		// Sibling enforcement flag must NOT cross over: codex
-		// enforcement flipping on shouldn't change claudecode bind
-		// behavior.
-		{"claudecode_observability_with_codex_enf_on", &stubConnector{name: "claudecode"}, true, false, false},
-		// Always-bind connectors stay bound regardless of either flag.
-		{"openclaw_default", &stubConnector{name: "openclaw"}, false, false, true},
-		{"openclaw_with_codex_enf_off", &stubConnector{name: "openclaw"}, false, false, true},
-		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, false, false, true},
-		// New hook-only connectors do not bind the proxy listener in v1.
-		{"hermes_observability", &stubConnector{name: "hermes"}, false, false, false},
-		{"cursor_observability", &stubConnector{name: "cursor"}, false, false, false},
-		{"windsurf_observability", &stubConnector{name: "windsurf"}, false, false, false},
-		{"geminicli_observability", &stubConnector{name: "geminicli"}, false, false, false},
-		{"copilot_observability", &stubConnector{name: "copilot"}, false, false, false},
+		{"codex_observability", &stubConnector{name: "codex"}, false},
+		{"claudecode_observability", &stubConnector{name: "claudecode"}, false},
+		// Always-bind connectors stay bound.
+		{"openclaw_default", &stubConnector{name: "openclaw"}, true},
+		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, true},
+		// New hook-only connectors do not bind the proxy listener.
+		{"hermes_observability", &stubConnector{name: "hermes"}, false},
+		{"cursor_observability", &stubConnector{name: "cursor"}, false},
+		{"windsurf_observability", &stubConnector{name: "windsurf"}, false},
+		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
+		{"copilot_observability", &stubConnector{name: "copilot"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
-		{"unknown_connector", &stubConnector{name: "frobozz"}, false, false, true},
+		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
 		// Nil connector defends against a sidecar startup race where
 		// resolveActiveConnector returns nil before fallback kicks in.
-		{"nil_connector", nil, false, false, true},
+		{"nil_connector", nil, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gc := &config.GuardrailConfig{
-				CodexEnforcementEnabled:      tc.codexEnf,
-				ClaudeCodeEnforcementEnabled: tc.claudeCodeEnf,
-			}
-			got := proxyShouldBindForConnector(tc.conn, gc)
+			got := proxyShouldBindForConnector(tc.conn, &config.GuardrailConfig{})
 			if got != tc.expectBind {
 				t.Errorf("proxyShouldBindForConnector(%v) = %v, want %v",
 					tc.name, got, tc.expectBind)
@@ -328,30 +312,24 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 	cases := []struct {
 		name      string
 		connector string
-		codexEnf  bool
-		claudeEnf bool
 		want      bool
 	}{
-		{"codex_observe", "codex", false, false, false},
-		{"codex_action_deprecated", "codex", true, false, false},
-		{"claudecode_observe", "claudecode", false, false, false},
-		{"claudecode_action_deprecated", "claudecode", false, true, false},
-		{"openclaw", "openclaw", false, false, true},
-		{"zeptoclaw", "zeptoclaw", false, false, true},
-		{"hermes", "hermes", false, false, false},
-		{"cursor", "cursor", false, false, false},
-		{"windsurf", "windsurf", false, false, false},
-		{"geminicli", "geminicli", false, false, false},
-		{"copilot", "copilot", false, false, false},
-		{"unknown", "frobozz", false, false, true},
+		{"codex", "codex", false},
+		{"claudecode", "claudecode", false},
+		{"openclaw", "openclaw", true},
+		{"zeptoclaw", "zeptoclaw", true},
+		{"hermes", "hermes", false},
+		{"cursor", "cursor", false},
+		{"windsurf", "windsurf", false},
+		{"geminicli", "geminicli", false},
+		{"copilot", "copilot", false},
+		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{
 				Guardrail: config.GuardrailConfig{
-					Connector:                    tc.connector,
-					CodexEnforcementEnabled:      tc.codexEnf,
-					ClaudeCodeEnforcementEnabled: tc.claudeEnf,
+					Connector: tc.connector,
 				},
 			}
 			if got := proxyShouldBindForConfiguredConnector(cfg); got != tc.want {
@@ -666,22 +644,6 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 }
 
 func TestShouldRunProviderProbeForConnector(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
-
-	codexConn := connector.NewCodexConnector()
-	claudeConn := connector.NewClaudeCodeConnector()
-
-	for _, conn := range []connector.Connector{codexConn, claudeConn} {
-		probe, ok := conn.(connector.ProviderProbe)
-		if !ok {
-			t.Fatalf("%s does not implement ProviderProbe", conn.Name())
-		}
-		if _, err := probe.HasUsableProviders(); err == nil {
-			t.Fatalf("%s probe unexpectedly passed without upstream credentials; test no longer covers the SSO-only startup regression", conn.Name())
-		}
-	}
-
 	cases := []struct {
 		name string
 		conn connector.Connector
@@ -689,34 +651,15 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "codex_observability_skips_probe",
-			conn: codexConn,
+			name: "codex_hook_only_skips_probe",
+			conn: &stubConnector{name: "codex"},
 			gc:   config.GuardrailConfig{Connector: "codex"},
 			want: false,
 		},
 		{
-			name: "codex_deprecated_enforcement_still_skips_probe",
-			conn: codexConn,
-			gc: config.GuardrailConfig{
-				Connector:                    "codex",
-				CodexEnforcementEnabled:      true,
-				ClaudeCodeEnforcementEnabled: false,
-			},
-			want: false,
-		},
-		{
-			name: "claudecode_observability_skips_probe",
-			conn: claudeConn,
+			name: "claudecode_hook_only_skips_probe",
+			conn: &stubConnector{name: "claudecode"},
 			gc:   config.GuardrailConfig{Connector: "claudecode"},
-			want: false,
-		},
-		{
-			name: "claudecode_deprecated_enforcement_still_skips_probe",
-			conn: claudeConn,
-			gc: config.GuardrailConfig{
-				Connector:                    "claudecode",
-				ClaudeCodeEnforcementEnabled: true,
-			},
 			want: false,
 		},
 		{
@@ -2492,38 +2435,20 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 	cases := []struct {
 		name             string
 		connector        string
-		codexEnforce     bool
-		claudeEnforce    bool
 		wantMode         string
 		wantIntercept    bool
 		wantTelemetryAll []string
 	}{
 		{
-			name:             "codex_observability_default",
+			name:             "codex_observability",
 			connector:        "codex",
 			wantMode:         "observability",
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel", "notify"},
 		},
 		{
-			name:             "codex_enforcement_deprecated_still_observability",
-			connector:        "codex",
-			codexEnforce:     true,
-			wantMode:         "observability",
-			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel", "notify"},
-		},
-		{
-			name:             "claudecode_observability_default",
+			name:             "claudecode_observability",
 			connector:        "claudecode",
-			wantMode:         "observability",
-			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
-		},
-		{
-			name:             "claudecode_enforcement_deprecated_still_observability",
-			connector:        "claudecode",
-			claudeEnforce:    true,
 			wantMode:         "observability",
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel"},
@@ -2561,8 +2486,6 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Guardrail.Connector = c.connector
-			cfg.Guardrail.CodexEnforcementEnabled = c.codexEnforce
-			cfg.Guardrail.ClaudeCodeEnforcementEnabled = c.claudeEnforce
 
 			api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
 			req := httptest.NewRequest(http.MethodGet, "/status", nil)

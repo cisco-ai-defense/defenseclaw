@@ -5,33 +5,25 @@ keywords:
   - DefenseClaw Codex connector
   - Codex hooks
   - Codex observability
-  - Codex enforcement
   - Codex notify bridge
 ---
 
 The Codex connector wires DefenseClaw into [Codex's documented hooks](https://github.com/openai/codex), [native OpenTelemetry exporter](https://github.com/openai/codex/blob/main/docs/otel.md), and the notify bridge for agent-turn-complete events.
 
+<Callout type="info">
+The Codex connector is **hook-only**. There is no LLM-proxy data path — Codex talks directly to its native upstream (`api.openai.com` or the ChatGPT backend) and DefenseClaw observes via hooks + native OTel.
+
+**`mode=action` is fully supported here, hook-natively.** When `guardrail.mode=action` (or `defenseclaw setup codex --mode action`), the `PreToolUse` hook returns a `permissionDecision: "deny"` verdict on policy hits and Codex blocks the tool call inside its own permission flow. No proxy listener is involved.
+</Callout>
+
 ## Setup
 
-<Tabs items={['Observability only', 'Full enforcement']}>
-
-<Tab value="Observability only">
-
 ```bash
-defenseclaw setup codex
+defenseclaw setup codex                # observe (default) — record only
+defenseclaw setup codex --mode action  # block on policy hits via PreToolUse deny
 ```
 
-Pins `claw.mode=codex`, wires hooks + OTel + notify bridge, leaves enforcement off.
-
-</Tab>
-
-<Tab value="Full enforcement">
-
-```bash
-defenseclaw setup guardrail --connector codex --mode action --restart
-```
-
-Flips `guardrail.codex_enforcement_enabled=true` so the proxy listener binds and Codex's `openai_base_url` (in `~/.codex/config.toml`) is pointed at the local DefenseClaw proxy (e.g. `http://127.0.0.1:4000/c/codex`). The proxy then forwards inspected, allowed traffic to the real upstream provider via the gateway's [Bifrost](https://github.com/maximhq/bifrost)-backed router.
+Pins `claw.mode=codex`, wires hooks + OTel + notify bridge. No proxy listener binds for Codex in either mode.
 
 #### What this command sets vs. leaves at defaults
 
@@ -39,107 +31,18 @@ The three flags above explicitly set: connector, mode, and post-setup restart. E
 
 | Knob | Value when omitted | Flag to override |
 | --- | --- | --- |
+| Policy mode | `observe` (record only) | `--mode observe\|action` |
 | Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
 | Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
 | LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
 | Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
 | HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
 | Hook fail-mode | `open` (allow on guardrail-side failure) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
-| Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
 | Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
 | Verify after setup | on | `--no-verify` |
 
 See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
-
-#### Common variations — pick the recipe that fits your phase
-
-<Tabs items={['Pilot (observe)', 'Action + HITL', 'Action + judge', 'Strict / regulated']}>
-
-<Tab value="Pilot (observe)">
-
-```bash
-defenseclaw setup guardrail \
-  --connector codex \
-  --mode observe \
-  --rule-pack permissive \
-  --restart
-```
-
-Nothing blocks. Every prompt and tool call lands in `~/.defenseclaw/gateway.jsonl`. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
-
-</Tab>
-
-<Tab value="Action + HITL">
-
-```bash
-defenseclaw setup guardrail \
-  --connector codex \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --restart
-```
-
-HIGH findings pause for operator approval; CRITICAL still blocks unconditionally. Codex has **no native ask surface**, so HITL approvals downgrade to confirm verdicts in the DefenseClaw TUI / audit log — make sure operators are reachable there. See the [HITL page](/docs/hitl) for the full per-connector matrix.
-
-</Tab>
-
-<Tab value="Action + judge">
-
-```bash
-export DEFENSECLAW_LLM_KEY=<your-key>
-
-defenseclaw setup guardrail \
-  --connector codex \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
-  --judge-api-key-env DEFENSECLAW_LLM_KEY \
-  --restart
-```
-
-Adds the LLM judge as a second pass on regex-flagged prompts. Costs a few cents per turn; cuts false positives meaningfully on semantic jailbreaks regex misses.
-
-</Tab>
-
-<Tab value="Strict / regulated">
-
-```bash
-defenseclaw policy activate strict
-defenseclaw setup guardrail \
-  --connector codex \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity low \
-  --rule-pack strict \
-  --restart
-```
-
-Block ≥ MEDIUM, no allow-list bypass, HITL on every LOW+ event. Pair with the OpenShell sandbox profile and an MCP allow-list for full lockdown.
-
-</Tab>
-
-</Tabs>
-
-#### Decision aids — should I turn this on?
-
-<Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="When --human-approval is worth it. Codex downgrades to confirm verdicts since it has no native ask — operators see them in the TUI / audit log." />
-  <Card href="/docs/setup/guardrail#tabs-by-mode-non-interactive-recipes" title="Mode + judge recipes" description="Side-by-side bash for observe / action / action+HITL / action+judge — copy-paste ready." />
-  <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
-</Cards>
-
-<Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
-</Callout>
-
-</Tab>
-
-</Tabs>
 
 ## Files DefenseClaw will modify
 
@@ -168,7 +71,7 @@ Codex has no native ask surface here. Confirm verdicts are downgraded with `raw_
 
 <Flow
   direction="LR"
-  caption="Three independent channels make Codex one of the most thoroughly inspected agents — even before enforcement."
+  caption="Three independent channels make Codex one of the most thoroughly inspected agents."
 >
   <Node id="codex" kind="agent">Codex</Node>
   <Node id="hooks" kind="connector">{`UserPromptSubmit / PreToolUse /\nPermissionRequest / PostToolUse /\nStop / SessionStart`}</Node>
@@ -182,13 +85,6 @@ Codex has no native ask surface here. Confirm verdicts are downgraded with `raw_
   <Edge from="codex" to="notify" />
   <Edge from="notify" to="gateway" />
 </Flow>
-
-## When to enable enforcement
-
-`guardrail.codex_enforcement_enabled` gates the proxy-redirect path: `openai_base_url` is set to the local proxy (which then proxies upstream via Bifrost), reserved-id strip, and the subprocess sandbox. Observability runs end-to-end without it. Flip it on when:
-
-- The Codex audit log has stable signal (tune your rule pack first).
-- You have a working HITL escalation path — Codex falls back to confirm verdicts so operators need to be reachable.
 
 ## Disable
 

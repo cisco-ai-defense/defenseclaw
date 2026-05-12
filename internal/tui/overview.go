@@ -325,24 +325,21 @@ func (p *OverviewPanel) buildNotices() {
 }
 
 func zeroConnectorRequestsNotice(cfg *config.Config, connectorName string, uptime time.Duration) string {
+	_ = cfg
 	name := FriendlyConnectorName(connectorName)
 	switch strings.ToLower(strings.TrimSpace(connectorName)) {
 	case "codex":
-		if cfg != nil && !cfg.Guardrail.CodexEnforcementEnabled {
-			return fmt.Sprintf(
-				"%s connector has seen 0 hook events after %s — normal until Codex emits a hook/notify event; verify ~/.codex hooks if this persists",
-				name,
-				formatDuration(uptime),
-			)
-		}
+		return fmt.Sprintf(
+			"%s connector has seen 0 hook events after %s — normal until Codex emits a hook/notify event; verify ~/.codex hooks if this persists",
+			name,
+			formatDuration(uptime),
+		)
 	case "claudecode":
-		if cfg != nil && !cfg.Guardrail.ClaudeCodeEnforcementEnabled {
-			return fmt.Sprintf(
-				"%s connector has seen 0 hook events after %s — normal until Claude Code emits a hook event; verify Claude Code hooks if this persists",
-				name,
-				formatDuration(uptime),
-			)
-		}
+		return fmt.Sprintf(
+			"%s connector has seen 0 hook events after %s — normal until Claude Code emits a hook event; verify Claude Code hooks if this persists",
+			name,
+			formatDuration(uptime),
+		)
 	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
 		return fmt.Sprintf(
 			"%s connector has seen 0 hook events after %s — normal until the agent emits a supported hook; verify connector hook setup if this persists",
@@ -668,23 +665,27 @@ func (p *OverviewPanel) connectorEnforcementText() string {
 	}
 
 	connector := p.activeConnectorName()
+	mode := strings.TrimSpace(strings.ToLower(p.cfg.Guardrail.Mode))
+	if mode == "" {
+		mode = "observe"
+	}
+
 	switch connector {
-	case "codex":
-		if p.cfg.Guardrail.CodexEnforcementEnabled {
-			return p.theme.High.Render("Codex proxy enforcement")
-		}
-		return p.theme.Medium.Render("Codex observe-only hooks")
-	case "claudecode":
-		if p.cfg.Guardrail.ClaudeCodeEnforcementEnabled {
-			return p.theme.High.Render("Claude Code proxy enforcement")
-		}
-		return p.theme.Medium.Render("Claude Code observe-only hooks")
 	case "zeptoclaw":
 		return p.theme.High.Render("ZeptoClaw proxy-gated")
 	case "openclaw":
 		return p.theme.High.Render("OpenClaw proxy enforcement")
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
-		return p.theme.Medium.Render(FriendlyConnectorName(connector) + " observe-only hooks")
+	case "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		// Hook-enforced connectors render mode explicitly so the
+		// operator can tell at a glance whether PreToolUse will
+		// block on policy hits. The colour treatment mirrors the
+		// proxy connectors above: action -> high (active blocking),
+		// observe -> medium (passive recording).
+		friendly := FriendlyConnectorName(connector)
+		if mode == "action" {
+			return p.theme.High.Render(friendly + " hook enforcement (action)")
+		}
+		return p.theme.Medium.Render(friendly + " hook observability (observe)")
 	default:
 		return p.theme.Medium.Render(FriendlyConnectorName(connector) + " connector")
 	}

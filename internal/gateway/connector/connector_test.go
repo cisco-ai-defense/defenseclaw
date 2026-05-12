@@ -275,23 +275,21 @@ func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	}
 }
 
-// TestConnector_AllowedHostsProvider_AllBuiltinsImplement is the
-// contract test for S3.3 / F26: every built-in connector must
-// expose AllowedHosts() so the firewall layer can fold its
-// per-connector hostnames into the static deny-by-default
-// allow-list at boot. A future connector that forgets to
-// implement this interface would silently fall through to "no
-// extra hosts" — instead of failing here, that connector's users
-// would see DNS-blocked errors on first chat.
+// TestConnector_AllowedHostsProvider_ProxyBuiltinsImplement is the
+// contract test for S3.3 / F26: every proxy-bound built-in connector
+// must expose AllowedHosts() so the firewall layer can fold its
+// per-connector hostnames into the static deny-by-default allow-list
+// at boot. A future proxy-bound connector that forgets to implement
+// this interface would silently fall through to "no extra hosts" —
+// instead of failing here, that connector's users would see
+// DNS-blocked errors on first chat.
 //
-// We assert two things: (1) every built-in implements the
-// interface; (2) the returned list is non-empty. An empty list
-// is allowed by the contract but for the four shipping
-// connectors it would be meaningless (every one talks to a
-// non-baseline host).
-func TestConnector_AllowedHostsProvider_AllBuiltinsImplement(t *testing.T) {
+// Hook-only connectors (codex, claudecode, hermes, cursor, …) are
+// excluded: their traffic never reaches the firewall because the
+// proxy listener does not bind for them.
+func TestConnector_AllowedHostsProvider_ProxyBuiltinsImplement(t *testing.T) {
 	r := NewDefaultRegistry()
-	for _, name := range []string{"openclaw", "zeptoclaw", "claudecode", "codex"} {
+	for _, name := range []string{"openclaw", "zeptoclaw"} {
 		conn, ok := r.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %q", name)
@@ -1974,7 +1972,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
 // regression test for the codex/claude-code observability-only
-// architecture. With CodexEnforcement=false (the default), Setup must
+// architecture. Codex is hook-only as of PR #265 — Setup must
 // install the [hooks] table and features.hooks=true (so the
 // codex-hook.sh script fires for tool-call telemetry) but must NOT:
 //   - rewrite cfg["openai_base_url"] to the proxy URL (codex talks
@@ -2010,14 +2008,8 @@ env_key = "OPENROUTER_API_KEY"
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	// Pin auth.json to a non-existent path so detectCodexChatGPTMode
-	// returns false (otherwise a developer's local `codex login`
-	// state would alter Setup's behavior).
-	CodexAuthPathOverride = filepath.Join(dir, "no-such-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
-	// CodexEnforcement omitted == false (the production default).
 	opts := SetupOpts{
 		DataDir:   dir,
 		ProxyAddr: "127.0.0.1:4000",
@@ -2115,8 +2107,6 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
@@ -2226,8 +2216,6 @@ log_user_prompt = false
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
@@ -2301,8 +2289,6 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 	}
 	CodexConfigPathOverride = configPath
 	defer func() { CodexConfigPathOverride = "" }()
-	CodexAuthPathOverride = filepath.Join(dir, "no-auth.json")
-	defer func() { CodexAuthPathOverride = "" }()
 
 	c := NewCodexConnector()
 	opts := SetupOpts{
@@ -2873,90 +2859,6 @@ env_key = "OPENAI_API_KEY"
 	}
 	if bu, _ := openai["base_url"].(string); bu != "https://api.openai.com/v1" {
 		t.Errorf("[model_providers.openai].base_url = %q, want pristine OpenAI URL", bu)
-	}
-}
-
-// TestDetectCodexChatGPTMode_ReturnsFalseOnMissingOrMalformed pins the
-// safe-default behavior of detectCodexChatGPTMode() — it must NOT
-// return true (which would force a chatgpt.com routing) when auth.json
-// is absent, malformed, or names a non-chatgpt mode. Symmetrically, it
-// MUST return true when auth.json is well-formed and reports
-// "chatgpt", regardless of casing.
-func TestDetectCodexChatGPTMode_ReturnsFalseOnMissingOrMalformed(t *testing.T) {
-	dir := t.TempDir()
-
-	cases := []struct {
-		name    string
-		setup   func() string // returns auth path (or "" for missing-file case)
-		want    bool
-		comment string
-	}{
-		{
-			name:    "missing file",
-			setup:   func() string { return filepath.Join(dir, "does-not-exist.json") },
-			want:    false,
-			comment: "operator may not have run `codex login` yet",
-		},
-		{
-			name: "malformed JSON",
-			setup: func() string {
-				p := filepath.Join(dir, "broken.json")
-				_ = os.WriteFile(p, []byte("not-json{{"), 0o600)
-				return p
-			},
-			want:    false,
-			comment: "manual edit / disk corruption must not flip routing",
-		},
-		{
-			name: "apikey mode",
-			setup: func() string {
-				p := filepath.Join(dir, "apikey.json")
-				_ = os.WriteFile(p, []byte(`{"auth_mode":"apikey","OPENAI_API_KEY":"sk-fake"}`), 0o600)
-				return p
-			},
-			want:    false,
-			comment: "OPENAI_API_KEY users must keep api.openai.com routing",
-		},
-		{
-			name: "chatgpt mode lowercase",
-			setup: func() string {
-				p := filepath.Join(dir, "chatgpt.json")
-				_ = os.WriteFile(p, []byte(`{"auth_mode":"chatgpt"}`), 0o600)
-				return p
-			},
-			want: true,
-		},
-		{
-			name: "chatgpt mode mixed case",
-			setup: func() string {
-				p := filepath.Join(dir, "chatgpt-mixed.json")
-				_ = os.WriteFile(p, []byte(`{"auth_mode":"ChatGPT"}`), 0o600)
-				return p
-			},
-			want:    true,
-			comment: "case-insensitive match — auth.json shape isn't a public contract",
-		},
-		{
-			name: "empty auth_mode",
-			setup: func() string {
-				p := filepath.Join(dir, "empty-mode.json")
-				_ = os.WriteFile(p, []byte(`{}`), 0o600)
-				return p
-			},
-			want:    false,
-			comment: "absent field defaults to false (safe: keeps api.openai.com)",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			CodexAuthPathOverride = tc.setup()
-			defer func() { CodexAuthPathOverride = "" }()
-			got := detectCodexChatGPTMode()
-			if got != tc.want {
-				t.Fatalf("detectCodexChatGPTMode() = %v, want %v (%s)", got, tc.want, tc.comment)
-			}
-		})
 	}
 }
 
@@ -4105,44 +4007,6 @@ func TestCodex_Setup_Surface1_DoesNotExportGlobalEnv(t *testing.T) {
 	}
 }
 
-// TestCodex_Teardown_RemovesLegacyEnvFiles guarantees that an
-// upgrade-then-uninstall flow ends with the operator's host pristine:
-// even if a previous DefenseClaw release wrote codex_env.sh /
-// codex.env, today's Teardown removes them.
-func TestCodex_Teardown_RemovesLegacyEnvFiles(t *testing.T) {
-	dir := t.TempDir()
-	CodexConfigPathOverride = filepath.Join(dir, "config.toml")
-	defer func() { CodexConfigPathOverride = "" }()
-	c := NewCodexConnector()
-	opts := SetupOpts{
-		DataDir:   dir,
-		ProxyAddr: "127.0.0.1:4000",
-		APIAddr:   "127.0.0.1:18970",
-	}
-	if err := c.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("Setup: %v", err)
-	}
-
-	// Simulate an old install that left these files behind.
-	for _, name := range []string{"codex_env.sh", "codex.env"} {
-		if err := os.WriteFile(filepath.Join(dir, name),
-			[]byte("# stale legacy override\nexport OPENAI_BASE_URL=stale\n"),
-			0o644); err != nil {
-			t.Fatalf("seed legacy %s: %v", name, err)
-		}
-	}
-
-	if err := c.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("Teardown: %v", err)
-	}
-
-	for _, name := range []string{"codex_env.sh", "codex.env", "codex_backup.json"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-			t.Errorf("%s should be removed after Teardown", name)
-		}
-	}
-}
-
 func TestClaudeCode_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -4172,7 +4036,7 @@ func TestClaudeCode_Teardown_Surface1_RemovesEnvFiles(t *testing.T) {
 
 // TestClaudeCode_Setup_DefaultObservability_NoEnvOverride is the
 // headline regression test for the claude-code observability default.
-// With ClaudeCodeEnforcement=false (the default), Setup must register
+// Claude Code is hook-only as of PR #265 — Setup must register
 // hooks (the entry point for tool-call telemetry into
 // /api/v1/claudecode/hook) but must NOT:
 //   - write claudecode_env.sh / claudecode.env (the
@@ -4198,8 +4062,6 @@ func TestClaudeCode_Setup_DefaultObservability_NoEnvOverride(t *testing.T) {
 	defer func() { ClaudeCodeSettingsPathOverride = "" }()
 
 	c := NewClaudeCodeConnector()
-	// ClaudeCodeEnforcement omitted == false (the production
-	// default).
 	opts := SetupOpts{
 		DataDir:   dir,
 		ProxyAddr: "127.0.0.1:4000",
@@ -5107,16 +4969,13 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 	}
 }
 
-// TestSetupOpts_HookFailMode_WinsOverEnforcement validates the
+// TestSetupOpts_HookFailMode_RespectsOperatorChoice validates the
 // resolution rules in WriteHookScriptsForConnectorObjectWithOpts.
-//
-// Deprecated CodexEnforcement / ClaudeCodeEnforcement no longer affect
-// fail mode; only opts.HookFailMode (after normalization) applies.
 //
 // Contract:
 //   - Explicit "closed" stays closed when the connector supports it.
 //   - Empty / invalid HookFailMode normalizes to "open".
-func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
+func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5124,54 +4983,40 @@ func TestSetupOpts_HookFailMode_WinsOverEnforcement(t *testing.T) {
 	cases := []struct {
 		name         string
 		opts         SetupOpts
-		connector    Connector // CodexConnector or ClaudeCodeConnector — picks which enforcement flag the resolution rule consults
+		connector    Connector // CodexConnector or ClaudeCodeConnector — picks which fail-mode the hook is rendered for
 		hookFile     string    // hook script the test inspects (codex-hook.sh / claude-code-hook.sh)
 		wantFailMode string
 	}{
 		{
-			name:         "operator_open_no_enforcement",
+			name:         "codex_operator_open",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
 			wantFailMode: "open",
 		},
 		{
-			name:         "operator_closed_no_enforcement",
+			name:         "codex_operator_closed",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
 			wantFailMode: "closed",
 		},
 		{
-			name:         "operator_open_explicit_wins_over_codex_enforcement",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open", CodexEnforcement: true},
-			connector:    &CodexConnector{},
-			hookFile:     "codex-hook.sh",
-			wantFailMode: "open",
-		},
-		{
-			name:         "operator_open_explicit_wins_over_claudecode_enforcement",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open", ClaudeCodeEnforcement: true},
+			name:         "claudecode_operator_open",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &ClaudeCodeConnector{},
 			hookFile:     "claude-code-hook.sh",
 			wantFailMode: "open",
 		},
 		{
-			name:         "operator_closed_with_codex_enforcement_stays_closed",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed", CodexEnforcement: true},
-			connector:    &CodexConnector{},
-			hookFile:     "codex-hook.sh",
-			wantFailMode: "closed",
-		},
-		{
-			name:         "empty_opts_falls_back_to_open_default",
+			name:         "codex_empty_opts_falls_back_to_open_default",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
 			wantFailMode: "open",
 		},
 		{
-			name:         "garbage_opts_value_normalizes_to_open",
+			name:         "codex_garbage_opts_value_normalizes_to_open",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "this-is-not-a-real-mode"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
@@ -5213,9 +5058,8 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 	}
 	dir := t.TempDir()
 	opts := SetupOpts{
-		APIAddr:          "127.0.0.1:99999",
-		APIToken:         "tok-test",
-		CodexEnforcement: false,
+		APIAddr:  "127.0.0.1:99999",
+		APIToken: "tok-test",
 	}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
@@ -5302,7 +5146,7 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	dir := t.TempDir()
-	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", CodexEnforcement: true}
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
@@ -5383,7 +5227,7 @@ func TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	dir := t.TempDir()
-	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", ClaudeCodeEnforcement: true}
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
@@ -5443,7 +5287,7 @@ func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	dir := t.TempDir()
-	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", ClaudeCodeEnforcement: true}
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
@@ -5498,7 +5342,7 @@ func TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 
 	dir := t.TempDir()
-	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", CodexEnforcement: true}
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test"}
 	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
 		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 	}
@@ -5923,10 +5767,6 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		// Codex routes via config.toml; OPENAI_BASE_URL is
 		// optional/discouraged. Scope is process-only.
 		{"codex", func() Connector { return NewCodexConnector() }, []EnvScope{EnvScopeProcess}},
-		// Claude Code honors ANTHROPIC_BASE_URL at startup but
-		// settings.json hooks are sufficient for guardrail
-		// enforcement, so the var is recommended-not-required.
-		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []EnvScope{EnvScopeProcess}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []EnvScope{EnvScopeNone}},
 		{"cursor", func() Connector { return NewCursorConnector() }, []EnvScope{EnvScopeNone}},
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, []EnvScope{EnvScopeNone}},
@@ -5973,24 +5813,16 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 	}
 }
 
-// TestConnector_ProviderProbe_AllBuiltinsImplement pins the plan A4
-// contract: every built-in connector exposes a HasUsableProviders()
-// hook so the sidecar boot path can refuse to start when no LLM
-// upstream is configured. This is intentionally compile-time mandatory
-// — a connector that drops the implementation should fail this test
-// before it ever ships, since a silent zero-provider boot would let
-// the gateway accept traffic that has no upstream to forward to.
-func TestConnector_ProviderProbe_AllBuiltinsImplement(t *testing.T) {
+// TestConnector_ProviderProbe_ProxyBuiltinsImplement pins the plan A4
+// contract: every proxy-bound built-in connector exposes a
+// HasUsableProviders() hook so the sidecar boot path can refuse to
+// start when no LLM upstream is configured. Hook-only connectors
+// (codex, claudecode, hermes, cursor, windsurf, geminicli, copilot)
+// do not interpose on chat traffic, so the probe does not apply.
+func TestConnector_ProviderProbe_ProxyBuiltinsImplement(t *testing.T) {
 	connectors := []Connector{
 		NewZeptoClawConnector(),
 		NewOpenClawConnector(),
-		NewCodexConnector(),
-		NewClaudeCodeConnector(),
-		NewHermesConnector(),
-		NewCursorConnector(),
-		NewWindsurfConnector(),
-		NewGeminiCLIConnector(),
-		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		if _, ok := conn.(ProviderProbe); !ok {
@@ -6057,8 +5889,8 @@ func TestCodex_AgentPaths_Specifics(t *testing.T) {
 	}
 }
 
-// TestClaudeCode_AgentPaths_Specifics pins the Claude Code
-// footprint: settings.json + claudecode_backup.json + hook scripts.
+// TestClaudeCode_AgentPaths_Specifics pins the Claude Code footprint:
+// settings.json patched, managed pristine backup captured.
 func TestClaudeCode_AgentPaths_Specifics(t *testing.T) {
 	dataDir := t.TempDir()
 	tmpHome := t.TempDir()
@@ -6074,7 +5906,6 @@ func TestClaudeCode_AgentPaths_Specifics(t *testing.T) {
 	}
 	wantBackups := []string{
 		filepath.Join(dataDir, "connector_backups", "claudecode", "settings.json.json"),
-		filepath.Join(dataDir, "claudecode_backup.json"),
 	}
 	if !slices.Equal(paths.BackupFiles, wantBackups) {
 		t.Errorf("BackupFiles = %v, want %v", paths.BackupFiles, wantBackups)

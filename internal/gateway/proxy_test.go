@@ -3340,17 +3340,8 @@ func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
 			bodyJSON: `{"model":"anthropic/claude-sonnet-4.5"}`,
 		},
 		{
-			name: "codex_hook_only_ignores_snapshot",
-			build: func() connector.Connector {
-				c := connector.NewCodexConnector()
-				c.SetProviderSnapshot(map[string]connector.CodexProviderEntry{
-					"openai": {
-						BaseURL: "https://api.openai.com/v1",
-						APIKey:  "sk-codex-snap",
-					},
-				})
-				return c
-			},
+			name:     "codex_hook_only_no_snapshot",
+			build:    func() connector.Connector { return connector.NewCodexConnector() },
 			wantHas:  false,
 			bodyJSON: `{"model":"gpt-5"}`,
 		},

@@ -72,16 +72,6 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// CodexEnforcement and ClaudeCodeEnforcement are deprecated no-ops.
-	// They are still populated from cfg.Guardrail for config.yaml
-	// backwards compatibility and will be removed in a future release.
-	// The Codex and Claude Code LLM chat-proxy surface was removed;
-	// both connectors are hook-only (no openai_base_url /
-	// model_providers rewrite, no ANTHROPIC_BASE_URL override, no
-	// proxy Route() upstream synthesis).
-	CodexEnforcement      bool
-	ClaudeCodeEnforcement bool
-
 	// HookFailMode is the operator-chosen response-layer fail mode
 	// baked into every hook script we write. Values: "open" (default,
 	// allow on response-layer failures) or "closed" (block on

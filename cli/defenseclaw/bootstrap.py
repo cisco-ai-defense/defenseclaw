@@ -490,10 +490,6 @@ def _apply_first_run_choices(
     cfg.guardrail.enabled = True
     cfg.guardrail.judge.enabled = bool(options.with_judge)
     cfg.guardrail.detection_strategy = cfg.guardrail.detection_strategy or "regex_judge"
-    if connector == "codex":
-        cfg.guardrail.codex_enforcement_enabled = profile == "action"
-    if connector == "claudecode":
-        cfg.guardrail.claudecode_enforcement_enabled = profile == "action"
 
     # Honor an explicit operator choice supplied via flag/prompt.
     # Empty string means "leave whatever was loaded alone" — usually

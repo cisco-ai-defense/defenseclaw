@@ -62,11 +62,10 @@ In Claude Code, ask the assistant to run any tool call (e.g. "list files in this
 defenseclaw setup guardrail --connector claudecode --mode action --human-approval --restart
 ```
 
-Three things just changed:
+Two things just changed:
 
-- `guardrail.mode` flipped to `action`. CRITICAL findings now block.
+- `guardrail.mode` flipped to `action`. CRITICAL findings now block via the `PreToolUse` hook's deny verdict.
 - `guardrail.hilt.enabled` flipped to `true`. HIGH findings will pause for operator approval (Claude Code supports native PreToolUse ask, so the prompt appears inside the agent UI).
-- `guardrail.claudecode_enforcement_enabled` was set to `true`. The hook scripts now consult the gateway for an allow/block decision.
 
 </Step>
 
