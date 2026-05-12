@@ -91,14 +91,15 @@ type SplunkHECConfig struct {
 	CircuitBreakerThreshold int
 	CircuitBreakerCooldownS int
 
-	// SourceTypeOverrides maps a canonical audit action, such as
-	// "llm-judge-response", to a dedicated Splunk sourcetype
-	// (e.g. "defenseclaw:judge"). When an event's Action matches
-	// a key, the per-event payload is emitted with the override
-	// sourcetype so Splunk dashboards can segment selected streams
-	// from the generic `_json` audit stream without a free-form grep
-	// on the `action` field. Zero-value map means "use SourceType
-	// for every event" (legacy behaviour).
+	// SourceTypeOverrides maps canonical audit actions, such as
+	// "llm-judge-response" or "guardrail-verdict", to dedicated
+	// Splunk sourcetypes (e.g. "defenseclaw:judge" or
+	// "defenseclaw:verdict"). When an event's Action matches a key,
+	// the per-event payload is emitted with the override sourcetype
+	// so Splunk dashboards can segment judge/verdict streams from
+	// the generic `_json` audit stream without a free-form grep on
+	// the `action` field. Zero-value map means "use SourceType for
+	// every event" (legacy behaviour).
 	SourceTypeOverrides map[string]string
 }
 
