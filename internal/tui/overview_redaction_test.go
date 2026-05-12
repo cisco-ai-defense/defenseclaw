@@ -94,6 +94,13 @@ func TestOverview_ConfigurationBox_HILTObserveInactive(t *testing.T) {
 }
 
 func TestOverview_ConfigurationBox_PolicyPostureAndEnforcement(t *testing.T) {
+	// Codex + mode=action must surface as a hook-enforced action-mode
+	// banner now that the LLM chat-proxy data path no longer applies
+	// to Codex. The deny verdict comes through PreToolUse instead of
+	// the proxy block-response body, but the operator-facing
+	// enforcement story is functionally identical — that's exactly
+	// what this test pins so a future refactor cannot silently fall
+	// back to "observe-only" labeling on an action-mode Codex setup.
 	p := newOverviewForTest()
 	p.cfg.Guardrail.Enabled = true
 	p.cfg.Guardrail.Mode = "action"
@@ -105,11 +112,20 @@ func TestOverview_ConfigurationBox_PolicyPostureAndEnforcement(t *testing.T) {
 		"Policy posture",
 		"balanced: block CRIT, alert MED+",
 		"Enforcement",
-		"Codex observe-only hooks",
+		"Codex hook enforcement (action)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("expected Overview configuration to include %q, got:\n%s", want, out)
 		}
+	}
+
+	// And the observe variant: same connector, switched to observe.
+	// Should flip the enforcement label to the observability variant
+	// so an operator can read posture at a glance.
+	p.cfg.Guardrail.Mode = "observe"
+	out = stripANSI(p.View(132, 44))
+	if !strings.Contains(out, "Codex hook observability (observe)") {
+		t.Fatalf("expected observe-mode hook label for Codex, got:\n%s", out)
 	}
 }
 

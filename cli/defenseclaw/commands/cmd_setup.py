@@ -3826,7 +3826,13 @@ def _interactive_guardrail_setup(
         click.echo(f"  Detected LLM:  {model_name}")
     proxy_port = gc.port or 4000
     if gc.connector in _HOOK_ENFORCED_CONNECTORS:
-        api_port = getattr(app.cfg.gateway, "api_port", 18970)
+        # Reach into ``cfg.gateway`` defensively — the wizard is also
+        # exercised by tests against a SimpleNamespace cfg that may
+        # not carry the gateway sub-config. Falling back to the
+        # canonical default (18970) keeps the message accurate
+        # everywhere it is rendered.
+        gateway_cfg = getattr(app.cfg, "gateway", None)
+        api_port = getattr(gateway_cfg, "api_port", 18970) if gateway_cfg else 18970
         click.echo(
             f"  API port:      {api_port} "
             "(hook endpoint — PreToolUse deny is the enforcement surface; "
@@ -3940,6 +3946,15 @@ def _interactive_guardrail_setup(
     gc.port = proxy_port
 
     # --- LLM Judge section ---
+    #
+    # The judge is a gateway-side verification layer that runs on
+    # any inspectable payload — proxy responses for the proxy data
+    # path, AND hook events (UserPromptSubmit, PreToolUse) for the
+    # hook-enforced connectors. So we offer it for every connector
+    # type. The hook surface stamps the verdict on the deny verdict
+    # exactly the same way the proxy surface stamps it on the
+    # response body, which is why the operator's judge config is
+    # connector-agnostic.
     ux.section("LLM Judge (reduces false positives)")
     ux.subhead("Uses an LLM to verify detections and catch novel attacks.")
     ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")

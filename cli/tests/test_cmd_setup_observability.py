@@ -9,17 +9,23 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the codex / claude-code observability default
-in ``defenseclaw setup guardrail``.
+"""Regression tests for the wizard behavior with hook-enforced
+connectors (codex / claude-code) in ``defenseclaw setup guardrail``.
 
-These tests pin the contract that selecting Codex or Claude Code as the
-connector flips the wizard into observability-only mode: the operator
-sees a single yes/no prompt and the wizard returns with sensible
-defaults, never asking about enforcement mode, scanner engine, or LLM
-judge config. As of PR #265 Codex and Claude Code are hook-only — the
-proxy data path was removed entirely — so this matrix is now a
-correctness invariant rather than a "don't accidentally re-engage the
-proxy" guard.
+Codex and Claude Code are now hook-only — the HTTP chat-proxy data
+path has been removed entirely. The wizard takes the standard
+observe/action mode path. The LLM judge, scanner engine, and block
+message prompts all remain available — they run gateway-side over
+hook event payloads (UserPromptSubmit, PreToolUse) exactly the same
+way they previously ran over proxy responses. The verdict surfaces
+through the agent's native hook bus (PreToolUse deny verdict) in
+action mode instead of through the proxy block-response body.
+
+These tests pin the wizard's default-accept path: an operator who
+walks through with mostly-default answers (observe mode, local
+scanner, no judge, no advanced options) lands on the canonical
+hook-only configuration without any proxy-era artifacts leaking
+back into the persisted ``GuardrailConfig``.
 """
 
 from __future__ import annotations
@@ -102,18 +108,38 @@ def _make_app(connector: str):
 
 class TestObservabilityWizard(unittest.TestCase):
     def _drive_observability(self, connector: str) -> SimpleNamespace:
-        """Run the wizard with a "yes, enable observability" reply.
+        """Run the wizard taking the observability-only path.
 
-        Returns the post-run guardrail config namespace. We mock
-        ``click.confirm`` to always say yes so the wizard takes the
-        enabling path; if it ever tried to ask any *other* question,
-        ``click.prompt`` would raise (it's not mocked) and the test
-        would fail loudly.
+        Returns the post-run guardrail config namespace. The confirm
+        prompts are driven by a sequence rather than a constant True
+        so we can answer "yes" to the initial "Enable guardrail?"
+        gate but "no" to the advanced-options gate further down —
+        the advanced-options branch touches ``app.cfg.privacy`` which
+        our minimal SimpleNamespace stub deliberately doesn't carry.
+        We rely on click's ``confirm`` default-clamping for any
+        additional prompts the wizard might add in the future: each
+        unmatched call takes its default, which is the conservative
+        no-op direction for every prompt in this branch.
         """
         app, gc = _make_app(connector)
 
+        # ``click.confirm`` answer order:
+        #   1. "Enable guardrail?"               → True   (drive the wizard)
+        #   2. "Configure advanced options?"     → False  (skip; privacy attr absent)
+        # Any further confirms fall back to their default via the
+        # side_effect's "ran out of values" StopIteration which click
+        # catches and treats as "take the default" — but we keep an
+        # extra False to be paranoid in case prompt ordering shifts.
+        confirm_answers = iter([True, False, False])
+
+        def _confirm(*args, **kwargs):
+            try:
+                return next(confirm_answers)
+            except StopIteration:
+                return kwargs.get("default", False)
+
         with patch("defenseclaw.commands.cmd_setup.click.confirm",
-                   return_value=True), \
+                   side_effect=_confirm), \
              patch("defenseclaw.commands.cmd_setup.click.prompt",
                    return_value="1"), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
@@ -135,7 +161,8 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertEqual(gc.scanner_mode, "local")
         self.assertEqual(gc.detection_strategy, "regex_only")
         self.assertFalse(gc.judge.enabled,
-                         "Judge must default off in observability mode (no proxy → no judge)")
+                         "Default-accept path declines the judge prompt; "
+                         "operators who want it can opt in on rerun")
         # The observability-only branch now also surfaces the hook
         # fail-mode prompt on initial setup. The mocked ``click.prompt``
         # returns "1" (open), so the persisted value must reflect that —
