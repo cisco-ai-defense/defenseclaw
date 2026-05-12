@@ -1835,6 +1835,7 @@ env_key = "OPENAI_API_KEY"
 		t.Errorf("codex.env must not be written (S8.1 / F31)")
 	}
 }
+
 // the patched ~/.codex/config.toml. Codex's config.toml carries
 // env_key bindings and (after Setup) the DefenseClaw proxy URL. On
 // shared dev hosts the historical 0o644 mode let any local user

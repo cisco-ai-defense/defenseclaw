@@ -790,4 +790,3 @@ func removeOwnedHooks(hookEventValue interface{}, hooksDir string) []interface{}
 	}
 	return list[:n]
 }
-
