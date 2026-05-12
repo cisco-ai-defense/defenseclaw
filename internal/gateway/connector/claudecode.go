@@ -81,22 +81,6 @@ func (c *ClaudeCodeConnector) AllowedHosts() []string {
 }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	// writeEnvOverride installs the ANTHROPIC_BASE_URL redirect that
-	// puts the DefenseClaw proxy in Claude Code's data path. Gated
-	// on opts.ClaudeCodeEnforcement so the default install runs in
-	// observability-only mode: claude code talks DIRECTLY to
-	// api.anthropic.com, no env-override file is written, and no
-	// proxy interception happens. Hooks (next block) and OTel env
-	// (the new patchClaudeCodeOtelEnv block — added in a follow-up
-	// commit) still run, giving complete telemetry without traffic
-	// interception. Operator can flip enforcement back on with
-	// guardrail.claudecode_enforcement_enabled: true in config.yaml.
-	if opts.ClaudeCodeEnforcement {
-		if err := c.writeEnvOverride(opts); err != nil {
-			return fmt.Errorf("claudecode env override: %w", err)
-		}
-	}
-
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: hand the connector itself so HookScriptOwner is the
 	// single source of truth for which vendor templates land here.
@@ -134,17 +118,6 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 	}
 
-	// Subprocess sandbox is part of enforcement: it's consulted by
-	// claude-code-hook.sh's PreToolUse handler to decide whether to
-	// BLOCK a tool call. Skipped in observability mode — the hook
-	// still runs but always allows.
-	if opts.ClaudeCodeEnforcement {
-		policy := ResolveSubprocessPolicy(SubprocessSandbox)
-		if err := SetupSubprocessEnforcement(policy, opts); err != nil {
-			return fmt.Errorf("claudecode subprocess enforcement: %w", err)
-		}
-	}
-
 	return nil
 }
 
@@ -154,8 +127,6 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 	if err := c.restoreClaudeCodeHooks(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("restore hooks: %v", err))
 	}
-
-	c.removeEnvOverride(opts)
 
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
@@ -260,28 +231,13 @@ func (c *ClaudeCodeConnector) SetCredentials(gatewayToken, masterKey string) {
 }
 
 func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
-	cs := &ConnectorSignals{
-		ConnectorName: "claudecode",
-		RawBody:       body,
-		RawModel:      ParseModelFromBody(body),
-		Stream:        ParseStreamFromBody(body),
-	}
-
-	cs.RawAPIKey = r.Header.Get("x-api-key")
-	if cs.RawAPIKey == "" {
-		cs.RawAPIKey = ExtractAPIKey(r)
-	}
-
-	cs.ExtraHeaders = map[string]string{}
-	if v := r.Header.Get("anthropic-version"); v != "" {
-		cs.ExtraHeaders["anthropic-version"] = v
-	}
-
-	if !isChatPath(r.URL.Path) {
-		cs.PassthroughMode = true
-	}
-
-	return cs, nil
+	return &ConnectorSignals{
+		ConnectorName:   "claudecode",
+		RawBody:         body,
+		RawModel:        ParseModelFromBody(body),
+		Stream:          ParseStreamFromBody(body),
+		PassthroughMode: !isChatPath(r.URL.Path),
+	}, nil
 }
 
 // --- AgentPathProvider / EnvRequirementsProvider / HookScriptProvider ---
@@ -622,8 +578,8 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	// https://code.claude.com/docs/en/monitoring-usage and keeps setup
 	// deterministic across upgrades.
 	failMode := "open"
-	if opts.ClaudeCodeEnforcement {
-		failMode = "closed"
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		failMode = normalizeHookFailMode(opts.HookFailMode)
 	}
 	env := map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",

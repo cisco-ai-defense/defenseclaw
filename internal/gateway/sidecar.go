@@ -42,6 +42,8 @@ import (
 	"github.com/google/uuid"
 )
 
+var guardrailEnforcementDeprecationOnce sync.Once
+
 // Sidecar is the long-running process that connects to the agent gateway,
 // watches for skill installs, and exposes a local REST API.
 type Sidecar struct {
@@ -1239,14 +1241,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// middleware stay in lockstep.
 		APIToken:     apiToken,
 		WorkspaceDir: workspaceDir,
-		// Per-connector enforcement gates: when false (the default),
-		// the connector's Setup() installs hooks + native OTel
-		// exporters but skips the proxy-redirect path. See
-		// GuardrailConfig.CodexEnforcementEnabled /
-		// ClaudeCodeEnforcementEnabled in internal/config/config.go
-		// for the rationale. Plumbed through SetupOpts so the codex
-		// and claudecode connectors can branch on a single source of
-		// truth without re-reading config from disk.
+		// CodexEnforcement / ClaudeCodeEnforcement are deprecated no-ops (still
+		// wired for config.yaml backwards compatibility). See SetupOpts.
 		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
 		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
 		// HookFailMode is the operator-chosen response-layer fail mode
@@ -1258,6 +1254,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailMode(),
 		HILTEnabled:      s.cfg.Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
+	}
+	if s.cfg.Guardrail.CodexEnforcementEnabled || s.cfg.Guardrail.ClaudeCodeEnforcementEnabled {
+		guardrailEnforcementDeprecationOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: guardrail.codex_enforcement_enabled / guardrail.claudecode_enforcement_enabled are deprecated no-ops since the LLM proxy surface was removed. Codex and Claude Code now run hook-only. Remove these keys from config.yaml to silence this warning.\n")
+		})
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the
@@ -1404,7 +1405,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			"connector":           conn.Name(),
 			"enforcement_enabled": false,
 			"proxy_port":          "closed",
-			"hint":                fmt.Sprintf("flip on with guardrail.%s_enforcement_enabled: true in config.yaml", conn.Name()),
+			"hint":                "connector uses hooks/native telemetry; local guardrail proxy is not in the LLM data path",
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] observability mode: %s talks directly to its native upstream — proxy port intentionally not bound\n", conn.Name())
 		<-ctx.Done()
@@ -1415,12 +1416,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 // proxyShouldBindForConnector returns true when the active connector
 // requires the proxy listener to be bound — i.e. the agent's data
-// path goes through DefenseClaw. For the observability-default
-// connectors this returns false in observability mode, so the proxy
-// port stays unbound and the agent talks directly to its native upstream.
-// OpenClaw and ZeptoClaw always return true: those connectors were
-// designed around the fetch-interceptor / api_base redirect from day one
-// and have no observability-only path.
+// path goes through DefenseClaw. Codex, Claude Code, and other
+// hook-native connectors return false: their LLM traffic stays
+// direct-to-vendor while telemetry uses hooks/OTel.
+// OpenClaw and ZeptoClaw always return true.
 //
 // Adding a new connector? Default-on (return true) is the
 // conservative choice for guardrail-style adapters; only return
@@ -1431,10 +1430,8 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 		return true
 	}
 	switch conn.Name() {
-	case "codex":
-		return gc.CodexEnforcementEnabled
-	case "claudecode":
-		return gc.ClaudeCodeEnforcementEnabled
+	case "codex", "claudecode":
+		return false
 	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
 		return false
 	default:
@@ -1467,10 +1464,8 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	}
 	switch configuredConnectorName(cfg) {
-	case "codex":
-		return cfg.Guardrail.CodexEnforcementEnabled
-	case "claudecode":
-		return cfg.Guardrail.ClaudeCodeEnforcementEnabled
+	case "codex", "claudecode":
+		return false
 	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
 		return false
 	default:
@@ -1492,12 +1487,9 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             skipping it would break every
 //	                             existing OpenClaw install.
 //	codex / claudecode + loopback host
-//	                           → SKIP. Codex/Claude Code in either
-//	                             observe or action mode emit telemetry
+//	                           → SKIP. These connectors emit telemetry
 //	                             through hooks/native telemetry +
-//	                             local API/audit; action mode can
-//	                             additionally bind the proxy when
-//	                             enforcement is enabled. The loopback
+//	                             local API/audit only. The loopback
 //	                             default (127.0.0.1:18789) means the
 //	                             operator never wired in an OpenClaw
 //	                             daemon — nothing is listening there

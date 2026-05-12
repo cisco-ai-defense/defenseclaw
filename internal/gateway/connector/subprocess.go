@@ -456,7 +456,7 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
-// has access to connector enforcement flags AND the operator's
+// has access to connector setup flags AND the operator's
 // chosen response-layer fail mode (opts.HookFailMode).
 //
 // Resolution order for the response-layer FailMode template var
@@ -470,14 +470,8 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode falls back to per-connector
-//     enforcement: enabling proxy-redirect enforcement
-//     (CodexEnforcement / ClaudeCodeEnforcement) implies a strict
-//     policy posture, so the response-layer default flips to
-//     "closed" too. This only fires when the operator never made
-//     an explicit choice.
-//  3. Otherwise: defaultHookFailMode ("open").
-//  4. Hook-only connectors may use explicit "closed" only when their
+//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("open").
+//  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields.
@@ -485,33 +479,13 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // Transport-layer failures (gateway unreachable / 5xx) are NOT
 // governed by FailMode — they always allow unless the operator opts
 // in via DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of which
-// connector, enforcement state, or HookFailMode value.
+// connector or HookFailMode value.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	var extras []string
 	if owner, ok := c.(HookScriptOwner); ok {
 		extras = owner.HookScriptNames(opts)
 	}
-	// Distinguish "operator did not answer" (empty string — fall
-	// through to enforcement-derived default) from an explicit
-	// "open" answer that must NOT be silently upgraded by the
-	// per-connector enforcement flags below. normalizeHookFailMode
-	// collapses both to "open", so we have to inspect the raw input
-	// here before normalisation to preserve the operator's intent.
-	rawTrimmed := strings.TrimSpace(opts.HookFailMode)
-	explicitChoice := rawTrimmed != ""
 	failMode := normalizeHookFailMode(opts.HookFailMode)
-	if !explicitChoice && failMode != "closed" {
-		switch c.Name() {
-		case "codex":
-			if opts.CodexEnforcement {
-				failMode = "closed"
-			}
-		case "claudecode":
-			if opts.ClaudeCodeEnforcement {
-				failMode = "closed"
-			}
-		}
-	}
 	if hp, ok := c.(HookCapabilityProvider); ok {
 		caps := hp.HookCapabilities(opts)
 		if failMode == "closed" && !caps.SupportsFailClosed {

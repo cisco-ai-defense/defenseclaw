@@ -72,24 +72,13 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// CodexEnforcement and ClaudeCodeEnforcement gate the
-	// proxy-redirect / blocking path for the Codex and Claude Code
-	// connectors respectively. The Sidecar populates these from
-	// cfg.Guardrail.CodexEnforcementEnabled and
-	// cfg.Guardrail.ClaudeCodeEnforcementEnabled. When false (the
-	// default), the connector's Setup() installs hooks + native
-	// OTel exporters but skips the proxy-redirect path
-	// (openai_base_url rewrite, ANTHROPIC_BASE_URL env override,
-	// reserved-id strip, subprocess sandbox). Observability still
-	// runs end-to-end via three independent channels per connector;
-	// see GuardrailConfig.CodexEnforcementEnabled in
-	// internal/config/config.go for the rationale.
-	//
-	// Per-connector flags (rather than a single InstallMode enum)
-	// because OpenClaw and ZeptoClaw run in full guardrail mode
-	// regardless and have no observability-only path; mixing the
-	// gates into one tri-state was producing an unused enforcement
-	// branch for those connectors.
+	// CodexEnforcement and ClaudeCodeEnforcement are deprecated no-ops.
+	// They are still populated from cfg.Guardrail for config.yaml
+	// backwards compatibility and will be removed in a future release.
+	// The Codex and Claude Code LLM chat-proxy surface was removed;
+	// both connectors are hook-only (no openai_base_url /
+	// model_providers rewrite, no ANTHROPIC_BASE_URL override, no
+	// proxy Route() upstream synthesis).
 	CodexEnforcement      bool
 	ClaudeCodeEnforcement bool
 
@@ -97,14 +86,10 @@ type SetupOpts struct {
 	// baked into every hook script we write. Values: "open" (default,
 	// allow on response-layer failures) or "closed" (block on
 	// response-layer failures). The sidecar populates this from
-	// cfg.Guardrail.EffectiveHookFailMode(); per-connector enforcement
-	// flags can still UPGRADE the value to "closed" (because enabling
-	// enforcement signals strict policy posture), but they NEVER
-	// downgrade an explicit "closed" choice to "open". Empty string
-	// is treated as the default ("open"). Transport-layer failures
-	// are governed separately by DEFENSECLAW_STRICT_AVAILABILITY in
-	// the hook scripts themselves and are NOT controlled by this
-	// field.
+	// cfg.Guardrail.EffectiveHookFailMode(); empty string is treated as
+	// the default ("open"). Transport-layer failures (gateway unreachable /
+	// 5xx) are governed separately by DEFENSECLAW_STRICT_AVAILABILITY in
+	// the hook scripts themselves and are NOT controlled by this field.
 	HookFailMode string
 
 	// HILTEnabled tells connectors with native approval surfaces to wire

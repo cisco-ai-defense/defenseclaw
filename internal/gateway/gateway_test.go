@@ -284,9 +284,9 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		expectBind    bool
 	}{
 		{"codex_default_observability", &stubConnector{name: "codex"}, false, false, false},
-		{"codex_enforcement_on", &stubConnector{name: "codex"}, true, false, true},
+		{"codex_enforcement_deprecated_still_no_bind", &stubConnector{name: "codex"}, true, false, false},
 		{"claudecode_default_observability", &stubConnector{name: "claudecode"}, false, false, false},
-		{"claudecode_enforcement_on", &stubConnector{name: "claudecode"}, false, true, true},
+		{"claudecode_enforcement_deprecated_still_no_bind", &stubConnector{name: "claudecode"}, false, true, false},
 		// Sibling enforcement flag must NOT cross over: codex
 		// enforcement flipping on shouldn't change claudecode bind
 		// behavior.
@@ -333,9 +333,9 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		want      bool
 	}{
 		{"codex_observe", "codex", false, false, false},
-		{"codex_action", "codex", true, false, true},
+		{"codex_action_deprecated", "codex", true, false, false},
 		{"claudecode_observe", "claudecode", false, false, false},
-		{"claudecode_action", "claudecode", false, true, true},
+		{"claudecode_action_deprecated", "claudecode", false, true, false},
 		{"openclaw", "openclaw", false, false, true},
 		{"zeptoclaw", "zeptoclaw", false, false, true},
 		{"hermes", "hermes", false, false, false},
@@ -695,14 +695,14 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "codex_enforcement_runs_probe",
+			name: "codex_deprecated_enforcement_still_skips_probe",
 			conn: codexConn,
 			gc: config.GuardrailConfig{
 				Connector:                    "codex",
 				CodexEnforcementEnabled:      true,
 				ClaudeCodeEnforcementEnabled: false,
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name: "claudecode_observability_skips_probe",
@@ -711,13 +711,13 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "claudecode_enforcement_runs_probe",
+			name: "claudecode_deprecated_enforcement_still_skips_probe",
 			conn: claudeConn,
 			gc: config.GuardrailConfig{
 				Connector:                    "claudecode",
 				ClaudeCodeEnforcementEnabled: true,
 			},
-			want: true,
+			want: false,
 		},
 		{
 			name: "openclaw_guardrail_runs_probe",
@@ -2506,11 +2506,11 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantTelemetryAll: []string{"hooks", "otel", "notify"},
 		},
 		{
-			name:             "codex_enforcement_explicit",
+			name:             "codex_enforcement_deprecated_still_observability",
 			connector:        "codex",
 			codexEnforce:     true,
-			wantMode:         "guardrail",
-			wantIntercept:    true,
+			wantMode:         "observability",
+			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel", "notify"},
 		},
 		{
@@ -2521,11 +2521,11 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantTelemetryAll: []string{"hooks", "otel"},
 		},
 		{
-			name:             "claudecode_enforcement_explicit",
+			name:             "claudecode_enforcement_deprecated_still_observability",
 			connector:        "claudecode",
 			claudeEnforce:    true,
-			wantMode:         "guardrail",
-			wantIntercept:    true,
+			wantMode:         "observability",
+			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel"},
 		},
 		{

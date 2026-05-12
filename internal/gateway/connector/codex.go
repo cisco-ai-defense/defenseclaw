@@ -124,27 +124,13 @@ func (c *CodexConnector) AllowedHosts() []string {
 }
 
 func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	// We intentionally do NOT export a global OPENAI_BASE_URL.
+	// Hook-only connector: patchCodexConfig wires hooks, OTel, and the
+	// notify bridge without rewriting provider URLs or exporting a global
+	// OPENAI_BASE_URL.
 	//
-	// codex-cli reads provider routing from
-	// ~/.codex/config.toml's [model_providers.*].base_url, and
-	// patchCodexConfig (called below) rewrites those entries to
-	// point at the DefenseClaw proxy. Setting OPENAI_BASE_URL in
-	// the user's environment additionally would silently route
-	// every other OpenAI-SDK consumer on the host (Python LiteLLM,
-	// the openai CLI, IDE plugins, ad-hoc scripts, even other
-	// agents) through this proxy — a config-blast-radius bug we
-	// explicitly close out as part of S8.1 / F31.
-	//
-	// We still capture whether the operator already had
-	// OPENAI_BASE_URL set so audit / Teardown have provenance, and
-	// we still wire cleanupLegacyEnvFiles into Teardown so any
-	// codex_env.sh / codex.env files left behind by an older
-	// DefenseClaw release get removed; see
+	// Teardown still runs cleanupLegacyEnvFiles so codex_env.sh /
+	// codex.env left by older releases are removed; see
 	// TestCodex_Teardown_RemovesLegacyEnvFiles.
-	if err := c.saveEnvBackup(opts); err != nil {
-		return fmt.Errorf("codex env backup: %w", err)
-	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
@@ -162,23 +148,6 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if opts.InstallCodeGuard {
 		if err := ensureCodexCodeGuardSkill(ctx, opts); err != nil {
 			return fmt.Errorf("codex CodeGuard skill install: %w", err)
-		}
-	}
-
-	// Subprocess sandbox is part of the enforcement path: the policy
-	// is consulted by codex-hook.sh's PreToolUse handler to decide
-	// whether to BLOCK a tool call. In observability-only mode
-	// (opts.CodexEnforcement == false, the default) the hook still
-	// runs, still posts to /api/v1/codex/hook, and still records the
-	// tool call in gateway.jsonl — but it never returns a "block"
-	// decision because the policy is absent, so the agent runs
-	// unimpeded. The hook handler in api.go falls back to "allow"
-	// when the per-data-dir subprocess.json is missing, so this is
-	// safe-by-construction and doesn't require additional plumbing.
-	if opts.CodexEnforcement {
-		policy := ResolveSubprocessPolicy(SubprocessSandbox)
-		if err := SetupSubprocessEnforcement(policy, opts); err != nil {
-			return fmt.Errorf("codex subprocess enforcement: %w", err)
 		}
 	}
 
@@ -411,32 +380,13 @@ func (c *CodexConnector) resolveUpstream() (string, string) {
 }
 
 func (c *CodexConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
-	cs := &ConnectorSignals{
-		ConnectorName: "codex",
-		RawAPIKey:     ExtractAPIKey(r),
-		RawBody:       body,
-		RawModel:      ParseModelFromBody(body),
-		Stream:        ParseStreamFromBody(body),
-		ExtraHeaders:  map[string]string{},
-	}
-
-	// Codex is a native binary with no fetch interceptor to set
-	// X-DC-Target-URL / X-AI-Auth. Resolve the real upstream from the
-	// provider snapshot captured at Setup. Prefer the snapshot key
-	// over the inbound Authorization header so upstream auth stays
-	// consistent with what the user configured in config.toml.
-	if upstream, key := c.resolveUpstream(); upstream != "" {
-		cs.RawUpstream = upstream
-		if key != "" {
-			cs.RawAPIKey = key
-		}
-	}
-
-	if !isChatPath(r.URL.Path) {
-		cs.PassthroughMode = true
-	}
-
-	return cs, nil
+	return &ConnectorSignals{
+		ConnectorName:   "codex",
+		RawBody:         body,
+		RawModel:        ParseModelFromBody(body),
+		Stream:          ParseStreamFromBody(body),
+		PassthroughMode: !isChatPath(r.URL.Path),
+	}, nil
 }
 
 // --- AgentPathProvider / EnvRequirementsProvider / HookScriptProvider ---
@@ -810,167 +760,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		}
 	}
 
-	// Enforcement-mode block: rebuild the pristine provider snapshot
-	// (used by Route() during proxy passthrough), synthesize a
-	// canonical `openai` entry for the snapshot (Codex 5.x can't carry
-	// a [model_providers.openai] block), rewrite openai_base_url to
-	// the proxy, strip reserved IDs, and rewrite custom-provider
-	// base_urls to the proxy.
-	//
-	// In observability mode (opts.CodexEnforcement == false, the
-	// default) this entire block is skipped: codex talks DIRECTLY to
-	// its native upstream (api.openai.com/v1/responses for
-	// OPENAI_API_KEY mode, chatgpt.com/backend-api/codex/responses
-	// for chatgpt mode), no openai_base_url override is written, and
-	// no reserved-ID strip happens. Hooks (the next block) still run
-	// — that's the entry point for tool-call telemetry into
-	// /api/v1/codex/hook. Operator can flip this back on by setting
-	// guardrail.codex_enforcement_enabled: true in config.yaml.
-	if opts.CodexEnforcement {
-		// Capture the provider snapshot from the *pristine* config
-		// (before the rewrite) so Route() can synthesize
-		// X-DC-Target-URL later. If we already have a backup from a
-		// prior Setup, prefer that — the current cfg's base_urls
-		// will all be the proxy URL already.
-		pristineProviders := map[string]interface{}{}
-		if backupExists {
-			// Rebuild pristine providers from backup: every provider
-			// that had an original URL gets it back for snapshot
-			// purposes.
-			if b, err := c.loadConfigBackup(opts.DataDir); err == nil {
-				cur, _ := cfg["model_providers"].(map[string]interface{})
-				for name, provVal := range cur {
-					if isCodexReservedProviderID(name) {
-						// Reserved entries shouldn't be in cur after
-						// a post-fix Setup, but a pre-fix backup may
-						// have left one behind. Skip — we'll
-						// synthesize the canonical openai entry
-						// below.
-						continue
-					}
-					pm, ok := provVal.(map[string]interface{})
-					if !ok {
-						pm = map[string]interface{}{}
-					}
-					clone := map[string]interface{}{}
-					for k, v := range pm {
-						clone[k] = v
-					}
-					if orig, had := b.OriginalBaseURLs[name]; had {
-						clone["base_url"] = orig
-					} else {
-						delete(clone, "base_url")
-					}
-					pristineProviders[name] = clone
-				}
-				// Re-attach reserved blocks from the prior backup so
-				// the snapshot still has the original `openai`
-				// upstream for Route() to point at when codex sends
-				// `/c/codex/responses`.
-				for name, rawBlock := range b.ReservedProviderBlocks {
-					var block interface{}
-					if err := json.Unmarshal(rawBlock, &block); err == nil {
-						pristineProviders[name] = block
-					}
-				}
-			}
-		} else if cur, ok := cfg["model_providers"].(map[string]interface{}); ok {
-			for name, v := range cur {
-				pristineProviders[name] = v
-			}
-		}
-
-		// Always synthesize a canonical `openai` snapshot entry.
-		// Codex 5.x can't carry a [model_providers.openai] block in
-		// config.toml, so the operator's pristine config typically
-		// has no `openai` entry at all. Without this synthetic
-		// record, Route() would have no upstream URL to attach when
-		// codex sends `/c/codex/responses`, and the proxy would 502.
-		// Operator overrides (custom base_url via openai_base_url, or
-		// a backed-up reserved block) win.
-		//
-		// Auth-mode-aware default: when ~/.codex/auth.json reports
-		// `auth_mode: "chatgpt"` (the user logged in via ChatGPT/Plus
-		// rather than supplying an OPENAI_API_KEY), the *only*
-		// endpoint the issued access token is valid against is
-		// `chatgpt.com/backend-api/codex/responses`. Defaulting to
-		// `api.openai.com/v1` in that mode produces a permanent 401
-		// loop in the codex TUI ("Reconnecting… 5/5"), because Codex
-		// retries indefinitely on opaque upstream errors. The
-		// operator's explicit `openai_base_url` (captured in
-		// backup.OriginalOpenAIBaseURL) always wins over both
-		// defaults so an enterprise gateway override is preserved.
-		// Env var OPENAI_API_KEY remains the env key in both modes —
-		// Route() forwards the incoming Authorization header
-		// verbatim, which carries the ChatGPT access token in chatgpt
-		// mode and the OPENAI_API_KEY-derived bearer in api-key mode.
-		if _, ok := pristineProviders["openai"]; !ok {
-			openaiBaseURL := "https://api.openai.com/v1"
-			if detectCodexChatGPTMode() {
-				openaiBaseURL = codexChatGPTBackendURL
-			}
-			if backup.HadOpenAIBaseURL && backup.OriginalOpenAIBaseURL != "" {
-				openaiBaseURL = backup.OriginalOpenAIBaseURL
-			} else if backupExists {
-				if b, err := c.loadConfigBackup(opts.DataDir); err == nil &&
-					b.HadOpenAIBaseURL && b.OriginalOpenAIBaseURL != "" {
-					openaiBaseURL = b.OriginalOpenAIBaseURL
-				}
-			}
-			pristineProviders["openai"] = map[string]interface{}{
-				"name":     "openai",
-				"base_url": openaiBaseURL,
-				"env_key":  "OPENAI_API_KEY",
-			}
-		}
-		c.SetProviderSnapshot(buildCodexProviderSnapshot(pristineProviders))
-
-		proxyURL := "http://" + opts.ProxyAddr + "/c/codex"
-
-		// Built-in `openai` redirect: must use the top-level
-		// openai_base_url field, NOT a [model_providers.openai]
-		// block. Codex 5.x (PR openai/codex#12024) treats `openai`,
-		// `ollama`, and `lmstudio` as reserved built-in provider IDs
-		// and refuses to start with the error:
-		// "model_providers contains reserved built-in provider IDs:
-		// `openai`. Built-in providers cannot be overridden."
-		cfg["openai_base_url"] = proxyURL
-
-		// Strip any reserved-ID entries already present in the config
-		// — either from a pristine pre-DefenseClaw config (rare,
-		// since older Codex accepted them) or from a previous
-		// DefenseClaw setup that pre-dated this fix. Their original
-		// blocks are preserved in backup.ReservedProviderBlocks for
-		// Teardown.
-		providers, _ := cfg["model_providers"].(map[string]interface{})
-		if providers != nil {
-			for _, id := range codexReservedProviderIDs {
-				delete(providers, id)
-			}
-			// Rewrite remaining (custom-named) providers to route
-			// through the proxy. Codex still honors per-provider
-			// base_url for non-built-in IDs (e.g. `openrouter`,
-			// `azure`, `groq`, etc.), so this is the correct path
-			// for those.
-			for name, p := range providers {
-				pm, ok := p.(map[string]interface{})
-				if !ok {
-					pm = map[string]interface{}{}
-				}
-				pm["base_url"] = proxyURL
-				providers[name] = pm
-			}
-			if len(providers) > 0 {
-				cfg["model_providers"] = providers
-			} else {
-				// Avoid leaving an empty [model_providers] table
-				// behind — it's harmless but adds visual noise to
-				// the operator's config.toml. Codex tolerates the
-				// key being absent.
-				delete(cfg, "model_providers")
-			}
-		}
-	}
+	// LLM proxy redirect (openai_base_url / model_providers rewrite) was
+	// removed; Codex is hook-only. restoreCodexConfig() still undoes
+	// legacy proxy patches using codex_config_backup.json when present.
 
 	// Codex's [hooks] table is an inline struct (HookEventsToml) with
 	// per-event fields. It is NOT a path to a hooks.json file —
