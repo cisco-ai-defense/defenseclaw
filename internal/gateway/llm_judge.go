@@ -742,6 +742,12 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 	var reasons []string
 	var signalStrengths []string
 
+	// weakFindings are categories the LLM flagged (label=true) but rated
+	// weak_signal — too ambiguous to count toward severity on their own.
+	// They're preserved for audit, but excluded from the count-based
+	// escalation so weakly-corroborated findings don't stack to CRITICAL.
+	var weakFindings []string
+
 	for cat, findingID := range injectionCategories {
 		entry, ok := data[cat]
 		if !ok {
@@ -752,18 +758,52 @@ func (j *LLMJudge) injectionToVerdictCtx(data map[string]interface{}, sensitiveC
 			continue
 		}
 		label, _ := m["label"].(bool)
-		if label {
-			findings = append(findings, findingID)
-			if r, ok := m["reasoning"].(string); ok && r != "" {
-				reasons = append(reasons, cat+": "+r)
-			}
-			if s, ok := m["signal_strength"].(string); ok && s != "" {
-				signalStrengths = append(signalStrengths, cat+"="+s)
-			}
+		if !label {
+			continue
 		}
+
+		strength := ""
+		if s, ok := m["signal_strength"].(string); ok {
+			strength = strings.ToLower(strings.TrimSpace(s))
+		}
+		if strength != "" {
+			signalStrengths = append(signalStrengths, cat+"="+strength)
+		}
+
+		if r, ok := m["reasoning"].(string); ok && r != "" {
+			reasons = append(reasons, cat+": "+r)
+		}
+
+		// A label=true with weak_signal means "this is ambiguous, I'd
+		// expect corroboration before acting." Track it for audit but
+		// don't count it toward the count-based severity escalation.
+		if strength == "weak_signal" {
+			weakFindings = append(weakFindings, findingID)
+			continue
+		}
+		findings = append(findings, findingID)
 	}
 
+	// No strong findings. If we have weak findings alone, emit MEDIUM
+	// (alert-only) so operators see the signal but traffic isn't blocked.
+	// Zero findings of any kind → clean allow.
 	if len(findings) == 0 {
+		if len(weakFindings) > 0 && !sensitiveContext {
+			sort.Strings(weakFindings)
+			sort.Strings(reasons)
+			sort.Strings(signalStrengths)
+			reason := "judge-injection: " + strings.Join(reasons, "; ")
+			if len(signalStrengths) > 0 {
+				reason += " [signal_strength: " + strings.Join(signalStrengths, ", ") + "]"
+			}
+			return &ScanVerdict{
+				Action:   "alert",
+				Severity: "MEDIUM",
+				Reason:   reason,
+				Findings: weakFindings,
+				Scanner:  "llm-judge-injection",
+			}
+		}
 		return allowVerdict("llm-judge-injection")
 	}
 
@@ -1813,23 +1853,44 @@ func toolInjectionToVerdict(data map[string]interface{}) *ScanVerdict {
 	sort.Strings(reasons)
 	sort.Strings(signalStrengths)
 
-	// Structural attack signals (exfiltration, destructive commands) block on
-	// a single flag — these have no benign interpretation in tool arguments.
-	// Softer signals (obfuscation, instruction/context manipulation) require
-	// corroboration before blocking; a single soft flag is MEDIUM/alert.
-	hasHighConfidence := false
+	// Soft signals (obfuscation, instruction/context manipulation) require
+	// corroboration: single flag → MEDIUM/alert, two or more → HIGH/block,
+	// three or more → CRITICAL/block.
+	//
+	// Structural signals (exfiltration, destructive commands) are always at
+	// least HIGH on a single flag (no benign tool-arg interpretation). They
+	// escalate to CRITICAL when the LLM rates the signal as strong_signal —
+	// meaning the malicious intent is unambiguous and the impact is high.
+	hasHighConfidenceCategory := false
 	for _, f := range findings {
 		if highConfidenceToolFindings[f] {
-			hasHighConfidence = true
+			hasHighConfidenceCategory = true
+			break
+		}
+	}
+
+	// Collect per-category signal strengths for structural findings.
+	structuralStrongSignal := false
+	for _, ss := range signalStrengths {
+		// Format: "Category Name=strong_signal"
+		parts := strings.SplitN(ss, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		catName := strings.TrimSpace(parts[0])
+		strength := strings.ToLower(strings.TrimSpace(parts[1]))
+		findingID := toolInjectionCategories[catName]
+		if highConfidenceToolFindings[findingID] && strength == "strong_signal" {
+			structuralStrongSignal = true
 			break
 		}
 	}
 
 	severity := "MEDIUM"
-	if hasHighConfidence || len(findings) >= 2 {
+	if len(findings) >= 2 || hasHighConfidenceCategory {
 		severity = "HIGH"
 	}
-	if len(findings) >= 3 {
+	if structuralStrongSignal || len(findings) >= 3 {
 		severity = "CRITICAL"
 	}
 
