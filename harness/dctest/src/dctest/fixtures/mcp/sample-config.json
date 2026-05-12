@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "dctest-fixture-echo": {
+      "command": "echo",
+      "args": ["dctest mcp echo server"],
+      "env": {}
+    }
+  }
+}

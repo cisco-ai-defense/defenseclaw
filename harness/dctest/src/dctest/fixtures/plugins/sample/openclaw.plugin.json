@@ -1,0 +1,7 @@
+{
+  "name": "dctest-sample-plugin",
+  "version": "0.1.0",
+  "description": "Sample OpenClaw plugin fixture for dctest plugin scanner.",
+  "main": "index.js",
+  "permissions": ["read"]
+}

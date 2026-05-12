@@ -1,0 +1,47 @@
+cases:
+  - id: connectors.claudecode.install
+    title: defenseclaw setup claude-code installs hooks and ANTHROPIC_BASE_URL 
+      override
+    surface: connector
+    feature: connector.claudecode.install
+    command: defenseclaw setup claude-code --no-interactive
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Pass requires:
+        1. ~/.claude/settings.json exists with hooks configured.
+        2. ANTHROPIC_BASE_URL is either set in env or surfaced in `defenseclaw status`.
+    docs_site_refs:
+      - docs-site/content/docs/connectors/claude-code.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: connectors.claudecode.verify
+    title: defenseclaw-gateway connector verify --connector claudecode
+    surface: connector
+    feature: connector.claudecode.verify
+    command: defenseclaw-gateway connector verify --connector claudecode --json
+    expected_exit_code: 0
+    tags: [json]
+
+  - id: connectors.claudecode.runtime
+    title: Claude Code runs through the gateway and emits an audit row
+    surface: connector
+    feature: connector.claudecode.runtime
+    command: |
+      set -e
+      claude -p "echo hello" --output-format json > /tmp/dctest-cc.json
+      sleep 1
+      defenseclaw-gateway audit export --limit 5 | grep -q claude
+    expected_exit_code: 0
+    requires_internet: true
+    timeout_s: 300
+    human_review_required: true
+
+  - id: connectors.claudecode.teardown
+    title: defenseclaw-gateway connector teardown --connector claudecode
+    surface: connector
+    feature: connector.claudecode.teardown
+    command: defenseclaw-gateway connector teardown --connector claudecode
+    expected_exit_code: 0
+    human_review_required: true

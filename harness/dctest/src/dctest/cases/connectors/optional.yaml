@@ -1,0 +1,75 @@
+cases:
+  - id: connectors.zeptoclaw.install
+    title: defenseclaw setup zeptoclaw scaffolds the ZeptoClaw config
+    surface: connector
+    feature: connector.zeptoclaw.install
+    command: defenseclaw setup zeptoclaw --no-interactive
+    expected_exit_code: 0
+    human_review_required: true
+    docs_site_refs:
+      - docs-site/content/docs/connectors/zeptoclaw.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: connectors.cursor.install
+    title: defenseclaw setup cursor scaffolds workspace hooks.json
+    surface: connector
+    feature: connector.cursor.install
+    command: |
+      set -e
+      WORKDIR=$(mktemp -d -t dctest-cursor.XXXXXX)
+      cd "$WORKDIR"
+      defenseclaw setup cursor --no-interactive
+      find . -name hooks.json -print -quit | xargs -r grep -q defenseclaw
+    expected_exit_code: 0
+    human_review_required: true
+    docs_site_refs:
+      - docs-site/content/docs/connectors/cursor.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: connectors.copilot.install
+    title: defenseclaw setup copilot scaffolds Copilot hooks
+    surface: connector
+    feature: connector.copilot.install
+    command: defenseclaw setup copilot --no-interactive
+    expected_exit_code: 0
+    human_review_required: true
+    docs_site_refs:
+      - docs-site/content/docs/connectors/copilot.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: connectors.geminicli.install
+    title: defenseclaw setup gemini-cli scaffolds Gemini CLI hooks
+    surface: connector
+    feature: connector.geminicli.install
+    command: defenseclaw setup gemini-cli --no-interactive
+    expected_exit_code: 0
+    human_review_required: true
+    docs_site_refs:
+      - docs-site/content/docs/connectors/gemini-cli.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: connectors.windsurf.install
+    title: defenseclaw setup windsurf scaffolds Cascade hooks
+    surface: connector
+    feature: connector.windsurf.install
+    command: defenseclaw setup windsurf --no-interactive
+    expected_exit_code: 0
+    human_review_required: true
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: connectors.hermes.install
+    title: defenseclaw setup hermes patches the Hermes config.yaml
+    surface: connector
+    feature: connector.hermes.install
+    command: defenseclaw setup hermes --no-interactive
+    expected_exit_code: 0
+    human_review_required: true
+    docs_site_refs:
+      - docs-site/content/docs/connectors/hermes.mdx
+    expected_to_fail_at:
+      - cli-registry

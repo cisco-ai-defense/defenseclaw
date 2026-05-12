@@ -1,0 +1,13 @@
+# Roles axis: which DefenseClaw component(s) use the provider.
+#
+# - guardrail-only: provider drives the guardrail inspector only; no LLM judge.
+# - judge-only: judge is enabled with the provider; guardrail uses local rule packs only.
+# - guardrail+judge-same: same provider for both (typical setup).
+# - guardrail+judge-mixed: different provider for judge vs guardrail
+#   (exercises per-component key overrides such as DEFENSECLAW_LLM_KEY).
+
+roles:
+  - guardrail-only
+  - judge-only
+  - guardrail+judge-same
+  - guardrail+judge-mixed

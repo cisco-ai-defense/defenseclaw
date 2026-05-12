@@ -1,0 +1,51 @@
+cases:
+  - id: gateway-api.inspect.tool.allow
+    title: POST /api/v1/inspect/tool allows a benign tool
+    surface: gateway-api
+    feature: api.inspect.tool
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/inspect/tool \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{"tool":"echo","args":["hello"],"actor":"dctest"}'
+    expected_exit_code: 0
+    expected_substrings:
+      - decision
+    requires_sidecar: true
+    requires_services: [gateway]
+    notes_for_agent: |
+      Pass requires `"decision": "allow"`. CSRF defense: the X-DefenseClaw-Client
+      header is required; the next case verifies that omitting it is rejected.
+
+  - id: gateway-api.inspect.tool.csrf-block
+    title: POST /api/v1/inspect/tool without X-DefenseClaw-Client is rejected
+    surface: gateway-api
+    feature: api.inspect.tool.csrf
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/inspect/tool \
+        -H "content-type: application/json" \
+        -d '{"tool":"echo","args":["hello"],"actor":"dctest"}'
+    expected_exit_code: 22
+    requires_sidecar: true
+    requires_services: [gateway]
+    notes_for_agent: |
+      `curl -sf` exits 22 on a 4xx response. Pass requires that exit code
+      OR a clear "csrf" / "missing header" line in stdout. Auth bypass =>
+      verdict=fail with severity critical.
+    tags: [security, csrf]
+
+  - id: gateway-api.inspect.tool.deny
+    title: POST /api/v1/inspect/tool denies a high-risk tool
+    surface: gateway-api
+    feature: api.inspect.tool
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/inspect/tool \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{"tool":"bash","args":["rm","-rf","/"],"actor":"dctest"}'
+    expected_exit_code: 0
+    expected_substrings:
+      - decision
+      - deny
+    requires_sidecar: true
+    requires_services: [gateway]

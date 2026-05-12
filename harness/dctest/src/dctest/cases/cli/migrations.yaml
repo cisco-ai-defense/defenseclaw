@@ -1,0 +1,24 @@
+cases:
+  - id: cli-py.migrations.status
+    title: defenseclaw migrations status reports current schema head
+    surface: python-cli
+    feature: migrations.status
+    command: defenseclaw migrations status --json-output || defenseclaw 
+      migrations status
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.migrations.dry-run
+    title: defenseclaw migrations --dry-run does not mutate the DB
+    surface: python-cli
+    feature: migrations.dry-run
+    command: defenseclaw migrations --dry-run
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    notes_for_agent: |
+      The pass criterion is twofold — no traceback AND `migrations status`
+      reports the same head before and after the dry-run. Capture both.
+    expected_to_fail_at:
+      - cli-registry

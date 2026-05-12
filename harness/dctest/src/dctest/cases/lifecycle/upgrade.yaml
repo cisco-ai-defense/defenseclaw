@@ -1,0 +1,56 @@
+cases:
+  - id: lifecycle.upgrade.dry-run
+    title: defenseclaw upgrade --dry-run prints a plan
+    surface: lifecycle
+    feature: lifecycle.upgrade
+    command: defenseclaw upgrade --dry-run
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    notes_for_agent: |
+      The dry-run must not mutate config or DB. If the system is already on
+      the latest version, "nothing to upgrade" is a pass.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.upgrade.execute
+    title: defenseclaw upgrade runs migrations and reloads sidecar
+    surface: lifecycle
+    feature: lifecycle.upgrade
+    command: |
+      set -e
+      dctest snapshot create $DCTEST_RUN_ID pre-upgrade
+      defenseclaw migrations status > /tmp/dctest-mig-before.txt
+      defenseclaw upgrade --yes --no-interactive
+      defenseclaw migrations status > /tmp/dctest-mig-after.txt
+      defenseclaw status --json | python -c "import json,sys; d=json.load(sys.stdin); assert d['gateway']['running']"
+      dctest snapshot create $DCTEST_RUN_ID post-upgrade
+    expected_exit_code: 0
+    timeout_s: 600
+    human_review_required: true
+    env_overrides:
+      DCTEST_RUN_ID: "${DCTEST_RUN_ID}"
+    notes_for_agent: |
+      Pass requires:
+        1. migrations status advanced (or unchanged with note "already at head").
+        2. Sidecar restarted cleanly.
+        3. Post-snapshot exists.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.reset.basic
+    title: defenseclaw reset clears state but preserves config
+    surface: lifecycle
+    feature: lifecycle.reset
+    command: |
+      set -e
+      dctest snapshot create $DCTEST_RUN_ID pre-reset
+      CONFIG_HASH=$(defenseclaw config show | md5sum)
+      defenseclaw reset --yes
+      NEW_CONFIG_HASH=$(defenseclaw config show | md5sum)
+      [ "$CONFIG_HASH" = "$NEW_CONFIG_HASH" ]
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Pass requires the config file to be byte-identical before and after.
+      If `reset` does not exist in this build, set verdict=skip.

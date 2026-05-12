@@ -1,0 +1,30 @@
+cases:
+  - id: cli-py.keys.list
+    title: defenseclaw keys list
+    surface: python-cli
+    feature: keys.list
+    command: defenseclaw keys list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+      - "sk-"
+      - "AKIA"
+    docs_site_refs:
+      - docs-site/content/docs/reference/keys.mdx
+    notes_for_agent: |
+      keys list must NEVER print raw key values — only labels/fingerprints.
+      If raw `sk-` style values appear, set verdict=fail with severity-critical
+      reasoning.
+
+  - id: cli-py.keys.list.json
+    title: defenseclaw keys list --json
+    surface: python-cli
+    feature: keys.list
+    command: defenseclaw keys list --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "["
+    tags: [json]
+    must_not_contain:
+      - "sk-"
+      - "AKIA"

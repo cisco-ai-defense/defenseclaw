@@ -1,0 +1,16 @@
+{
+  "files": [
+    {
+      "path": "main.py",
+      "language": "python",
+      "content": "import subprocess\n\ndef run(user_input):\n    subprocess.run('echo ' + user_input, shell=True)\n"
+    }
+  ],
+  "target": {
+    "type": "skill",
+    "name": "dctest-seeded-payload"
+  },
+  "options": {
+    "aibom_only": false
+  }
+}

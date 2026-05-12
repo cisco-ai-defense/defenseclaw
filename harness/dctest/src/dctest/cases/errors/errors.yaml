@@ -1,0 +1,149 @@
+cases:
+  - id: errors.bad-config.surface-clear-message
+    title: defenseclaw status with a malformed config.yaml surfaces a clear 
+      error
+    surface: error
+    feature: errors.config
+    command: |
+      set -e
+      cp $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('config', 'malformed.yaml'))") $HOME/.defenseclaw/config.yaml
+      defenseclaw status
+    expected_exit_code: 1
+    expected_substrings:
+      - yaml
+    must_not_contain:
+      - Traceback
+    human_review_required: true
+    notes_for_agent: |
+      Destructive. Take a pre-snapshot, run, then restore $HOME/.defenseclaw
+      from snapshot. The pass criterion is a clear "invalid YAML" message
+      with NO Python traceback.
+
+  - id: errors.sidecar-down.curl-rejection
+    title: API calls fail cleanly when sidecar is down
+    surface: error
+    feature: errors.sidecar-down
+    command: |
+      defenseclaw sidecar stop || true
+      defenseclaw status
+    expected_exit_code: 1
+    expected_substrings:
+      - not running
+    must_not_contain:
+      - Traceback
+    human_review_required: true
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: errors.token-mismatch.401
+    title: Mismatched gateway token returns 401
+    surface: error
+    feature: errors.token-mismatch
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/admin/reload \
+        -H "Authorization: Bearer not-a-real-token" \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{}'
+    expected_exit_code: 22
+    requires_sidecar: true
+    tags: [security]
+
+  - id: errors.missing-llm-key.guardrail-block
+    title: Guardrail with missing LLM key returns clear error
+    surface: error
+    feature: errors.missing-key
+    command: |
+      env -u ANTHROPIC_API_KEY -u OPENAI_API_KEY defenseclaw guardrail evaluate --input "hello" --json
+    expected_exit_code: 1
+    expected_substrings:
+      - key
+    must_not_contain:
+      - Traceback
+
+  - id: errors.malformed-rego
+    title: defenseclaw-gateway policy validate against malformed Rego fails 
+      clean
+    surface: error
+    feature: errors.malformed-rego
+    command: |
+      set -e
+      WORKDIR=$(mktemp -d)
+      cp $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('policies', 'malformed.rego'))") "$WORKDIR/policy.rego"
+      DEFENSECLAW_POLICY_DIR="$WORKDIR" defenseclaw-gateway policy validate
+    expected_exit_code: 1
+    expected_substrings:
+      - rego
+    must_not_contain:
+      - panic
+
+  - id: errors.port-in-use
+    title: Starting the gateway when port is occupied surfaces a clear error
+    surface: error
+    feature: errors.port-in-use
+    command: |
+      set -e
+      python -m http.server 8765 &
+      OCC_PID=$!
+      sleep 1
+      defenseclaw-gateway start || true
+      kill $OCC_PID || true
+    expected_exit_code: 0
+    notes_for_agent: |
+      Pass requires the gateway start to report a clear "port in use" or
+      "bind: address already in use" error WITHOUT a panic. The kill at
+      the end is cleanup.
+
+  - id: errors.scanner-missing-on-path
+    title: skill scan without scanner CLI installed reports a remediation
+    surface: error
+    feature: errors.scanner-missing
+    command: |
+      PATH=/nonexistent defenseclaw skill scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('skills', 'benign'))")
+    expected_exit_code: 1
+    expected_substrings:
+      - install
+    must_not_contain:
+      - Traceback
+
+  - id: errors.fail-mode-toggle-mid-flight
+    title: Toggling fail-mode mid-flight does not leave the gateway in a bad 
+      state
+    surface: error
+    feature: errors.fail-mode-toggle
+    command: |
+      set -e
+      defenseclaw guardrail fail-mode --mode fail-closed
+      defenseclaw guardrail fail-mode --mode fail-open
+      defenseclaw guardrail status
+    expected_exit_code: 0
+    human_review_required: true
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: errors.registry-metadata-only
+    title: registry sync with bad upstream falls back to metadata-only
+    surface: error
+    feature: errors.registry-degradation
+    command: |
+      DEFENSECLAW_REGISTRY_URL=https://example.invalid defenseclaw registry sync --no-promote || true
+      defenseclaw registry list --json | python -c "import json,sys; assert json.load(sys.stdin)"
+    expected_exit_code: 0
+    notes_for_agent: |
+      Pass requires registry list to still parse as JSON (degraded but
+      survivable). If the CLI panics or hangs, verdict=fail.
+
+  - id: errors.webhook.ssrf-blocked
+    title: SSRF target rejected on `setup webhook add`
+    surface: error
+    feature: errors.webhook-ssrf
+    command: defenseclaw setup webhook add --url 
+      http://169.254.169.254/latest/meta-data/ --type generic --no-interactive
+    expected_exit_code: 1
+    expected_substrings:
+      - SSRF
+    must_not_contain:
+      - Traceback
+    tags: [security, ssrf]
+    expected_to_fail_at:
+      - cli-registry

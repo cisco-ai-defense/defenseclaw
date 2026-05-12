@@ -1,0 +1,44 @@
+cases:
+  - id: lifecycle.quickstart.dry-run
+    title: defenseclaw quickstart --no-execute prints a plan and does not mutate
+    surface: lifecycle
+    feature: lifecycle.quickstart
+    command: |
+      set -e
+      BEFORE=$(defenseclaw config show | md5sum)
+      defenseclaw quickstart --no-execute --json || defenseclaw quickstart --no-execute
+      AFTER=$(defenseclaw config show | md5sum)
+      [ "$BEFORE" = "$AFTER" ]
+    expected_exit_code: 0
+    notes_for_agent: |
+      Pass requires the config hash to be unchanged AND the dry-run output
+      to enumerate at least one ordered step.
+    docs_site_refs:
+      - docs-site/content/docs/quickstart.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.quickstart.execute
+    title: defenseclaw quickstart end-to-end against a known-empty home
+    surface: lifecycle
+    feature: lifecycle.quickstart
+    command: |
+      set -e
+      dctest snapshot create $DCTEST_RUN_ID pre-quickstart
+      rm -rf "$HOME/.defenseclaw"
+      defenseclaw quickstart --no-interactive --accept-defaults
+      defenseclaw status --json | python -c "import json,sys; d=json.load(sys.stdin); assert d['gateway']['running']"
+      dctest snapshot create $DCTEST_RUN_ID post-quickstart
+    expected_exit_code: 0
+    human_review_required: true
+    timeout_s: 600
+    env_overrides:
+      DCTEST_RUN_ID: "${DCTEST_RUN_ID}"
+    notes_for_agent: |
+      Destructive; will start the sidecar. Verdict pass requires:
+        1. status shows gateway running.
+        2. ~/.openclaw/extensions/defenseclaw NOT created unless the
+           cell's connector matrix entry is `openclaw`.
+        3. post-snapshot exists.
+    expected_to_fail_at:
+      - cli-registry

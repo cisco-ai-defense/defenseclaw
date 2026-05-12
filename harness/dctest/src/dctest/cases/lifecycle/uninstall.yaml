@@ -1,0 +1,42 @@
+cases:
+  - id: lifecycle.uninstall.basic
+    title: defenseclaw uninstall removes host artifacts and stops sidecar
+    surface: lifecycle
+    feature: lifecycle.uninstall
+    command: |
+      set -e
+      dctest snapshot create $DCTEST_RUN_ID pre-uninstall
+      defenseclaw uninstall --yes
+      ! test -d "$HOME/.defenseclaw"
+      ! pgrep -f defenseclaw-gateway
+      dctest snapshot create $DCTEST_RUN_ID post-uninstall
+    expected_exit_code: 0
+    human_review_required: true
+    env_overrides:
+      DCTEST_RUN_ID: "${DCTEST_RUN_ID}"
+    notes_for_agent: |
+      Destructive. Restore from `pre-uninstall` snapshot at end of run unless
+      the next lifecycle case is `init`. Verdict pass requires:
+        1. $HOME/.defenseclaw is gone (or fully empty).
+        2. No defenseclaw-gateway process running.
+        3. ~/.openclaw/extensions/defenseclaw cleaned up.
+
+  - id: lifecycle.uninstall.preserve-keys
+    title: defenseclaw uninstall --preserve-keys keeps API keys
+    surface: lifecycle
+    feature: lifecycle.uninstall
+    command: |
+      set -e
+      KEYS_BEFORE=$(defenseclaw keys list --json | md5sum)
+      defenseclaw uninstall --yes --preserve-keys
+      defenseclaw init --no-interactive --accept-defaults
+      KEYS_AFTER=$(defenseclaw keys list --json | md5sum)
+      [ "$KEYS_BEFORE" = "$KEYS_AFTER" ]
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Pass requires the hash of `keys list --json` to be identical before and
+      after the uninstall→init cycle. If --preserve-keys is not supported in
+      this build, set verdict=skip with that note.
+    expected_to_fail_at:
+      - cli-registry

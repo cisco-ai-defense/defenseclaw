@@ -95,3 +95,12 @@ output/playwright/
 # between personal workflow notes and the project's canonical docs.
 AGENTS.md
 CLAUDE.md
+
+# dctest manual testing harness — per-run artifacts and the local venv.
+# Each run's directory under runs/<id>/ contains transcripts, verdicts,
+# snapshots, and reports; none of it is portable across machines.
+harness/dctest/runs/*
+!harness/dctest/runs/.gitkeep
+harness/dctest/.venv/
+harness/dctest/.env
+harness/dctest/src/dctest/fixtures/webhook-target/received.jsonl

@@ -1,0 +1,56 @@
+cases:
+  - id: cli-py.status.basic
+    title: defenseclaw status reports sidecar reachability
+    surface: python-cli
+    feature: cli.status
+    command: defenseclaw status
+    expected_exit_code: 0
+    expected_substrings:
+      - gateway
+    must_not_contain:
+      - Traceback
+    tags: [smoke]
+    requires_sidecar: true
+    docs_site_refs:
+      - docs-site/content/docs/reference/cli.mdx
+
+  - id: cli-py.status.json
+    title: defenseclaw status --json is well-formed
+    surface: python-cli
+    feature: cli.status
+    command: defenseclaw status --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "{"
+    tags: [smoke, json]
+    requires_sidecar: true
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: cli-go.status.basic
+    title: defenseclaw-gateway status hits /health
+    surface: go-cli
+    feature: cli.status
+    command: defenseclaw-gateway status
+    expected_exit_code: 0
+    expected_substrings:
+      - ok
+    must_not_contain:
+      - panic
+    tags: [smoke]
+    requires_sidecar: true
+
+  - id: cli-py.status.sidecar-down
+    title: defenseclaw status exits non-zero when sidecar is down
+    surface: python-cli
+    feature: cli.status
+    command: defenseclaw status
+    expected_exit_code: 1
+    expected_substrings:
+      - not running
+    notes_for_agent: |
+      The cell prompt must arrange for the sidecar to be stopped before this case runs.
+      The verdict is `pass` if the CLI surfaces a clear "not running"-style message
+      without a Python traceback. Tracebacks => fail.
+    requires_sidecar: false
+    tags: [error-path]

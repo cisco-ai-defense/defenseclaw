@@ -1,0 +1,42 @@
+cases:
+  - id: cli-py.version.basic
+    title: defenseclaw version prints a semver-shaped string
+    surface: python-cli
+    feature: cli.version
+    command: defenseclaw version
+    expected_exit_code: 0
+    expected_substrings:
+      - "."
+    must_not_contain:
+      - Traceback
+      - panic
+    tags: [smoke]
+    docs_site_refs:
+      - docs-site/content/docs/reference/cli.mdx
+
+  - id: cli-py.version.json
+    title: defenseclaw version --json produces parseable JSON
+    surface: python-cli
+    feature: cli.version
+    command: defenseclaw version --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "{"
+      - "}"
+    must_not_contain:
+      - Traceback
+    tags: [smoke, json]
+    notes_for_agent: |
+      Validate that stdout parses as a JSON object and includes a "version" key.
+
+  - id: cli-go.version.basic
+    title: defenseclaw-gateway --version prints version info
+    surface: go-cli
+    feature: cli.version
+    command: defenseclaw-gateway --version
+    expected_exit_code: 0
+    expected_substrings:
+      - defenseclaw-gateway
+    must_not_contain:
+      - panic
+    tags: [smoke]

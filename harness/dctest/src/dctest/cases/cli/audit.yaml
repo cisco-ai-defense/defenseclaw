@@ -1,0 +1,62 @@
+cases:
+  - id: cli-py.audit.log-activity
+    title: defenseclaw audit log-activity accepts a payload file
+    surface: python-cli
+    feature: audit.log-activity
+    command: |
+      set -e
+      TMP=$(mktemp)
+      cat > "$TMP" <<'EOF'
+      {"actor":"dctest","action":"smoke","target":"none","metadata":{}}
+      EOF
+      defenseclaw audit log-activity --payload-file "$TMP"
+      rm -f "$TMP"
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    requires_sidecar: true
+    docs_site_refs:
+      - docs-site/content/docs/reference/cli.mdx
+
+  - id: cli-go.audit.export.basic
+    title: defenseclaw-gateway audit export writes JSONL
+    surface: go-cli
+    feature: audit.export
+    command: defenseclaw-gateway audit export --limit 10
+    expected_exit_code: 0
+    must_not_contain:
+      - panic
+    notes_for_agent: |
+      stdout should be JSONL — each line is a parseable JSON object.
+
+  - id: cli-go.audit.export.include-activity
+    title: defenseclaw-gateway audit export --include-activity
+    surface: go-cli
+    feature: audit.export
+    command: defenseclaw-gateway audit export --limit 10 --include-activity
+    expected_exit_code: 0
+    must_not_contain:
+      - panic
+
+  - id: cli-go.audit.export.to-file
+    title: defenseclaw-gateway audit export -o writes to disk
+    surface: go-cli
+    feature: audit.export
+    command: |
+      set -e
+      TMP=$(mktemp -t dctest-audit.XXXXXX)
+      defenseclaw-gateway audit export --limit 5 -o "$TMP"
+      test -s "$TMP"
+      head -1 "$TMP" | python -m json.tool > /dev/null
+      rm -f "$TMP"
+    expected_exit_code: 0
+
+  - id: cli-go.audit.export.bad-limit
+    title: defenseclaw-gateway audit export --limit 0 rejected
+    surface: go-cli
+    feature: audit.export
+    command: defenseclaw-gateway audit export --limit 0
+    expected_exit_code: 2
+    must_not_contain:
+      - panic
+    tags: [error-path]

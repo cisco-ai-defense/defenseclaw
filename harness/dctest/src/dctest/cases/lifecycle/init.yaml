@@ -1,0 +1,44 @@
+cases:
+  - id: lifecycle.init.cold-start
+    title: defenseclaw init from a clean home produces a working install
+    surface: lifecycle
+    feature: lifecycle.init
+    command: |
+      set -e
+      dctest snapshot create $DCTEST_RUN_ID pre-init
+      rm -rf "$HOME/.defenseclaw"
+      defenseclaw init --no-interactive --accept-defaults
+      test -d "$HOME/.defenseclaw"
+      defenseclaw status --json | python -c "import json,sys; json.load(sys.stdin)"
+      dctest snapshot create $DCTEST_RUN_ID post-init
+    expected_exit_code: 0
+    human_review_required: true
+    env_overrides:
+      DCTEST_RUN_ID: "${DCTEST_RUN_ID}"
+    notes_for_agent: |
+      Destructive: removes $HOME/.defenseclaw. The case takes a pre-snapshot so
+      restore is possible if init fails. Pass requires:
+        1. $HOME/.defenseclaw recreated.
+        2. defenseclaw status is JSON-parseable.
+        3. Post-snapshot exists.
+      The Cell prompt must ensure DCTEST_RUN_ID is exported in env_overrides.
+    docs_site_refs:
+      - docs-site/content/docs/quickstart.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.init.idempotent
+    title: defenseclaw init twice is a no-op the second time
+    surface: lifecycle
+    feature: lifecycle.init
+    command: |
+      set -e
+      defenseclaw init --no-interactive --accept-defaults
+      diff <(defenseclaw config show) <(defenseclaw init --no-interactive --accept-defaults && defenseclaw config show)
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Verdict pass requires the diff to be empty. Any new fields written during
+      the second init = regression.
+    expected_to_fail_at:
+      - cli-registry

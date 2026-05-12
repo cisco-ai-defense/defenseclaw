@@ -1,0 +1,102 @@
+cases:
+  - id: gateway-api.scan.code.basic
+    title: POST /api/v1/scan/code with a benign body returns findings array
+    surface: gateway-api
+    feature: api.scan.code
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/scan/code \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        --data @$(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'benign-payload.json'))")
+    expected_exit_code: 0
+    expected_substrings:
+      - findings
+    requires_sidecar: true
+    requires_services: [gateway]
+
+  - id: gateway-api.scan.code.seeded
+    title: POST /api/v1/scan/code returns findings on seeded body
+    surface: gateway-api
+    feature: api.scan.code
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/scan/code \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        --data @$(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'seeded-payload.json'))")
+    expected_exit_code: 0
+    expected_substrings:
+      - rule_id
+    requires_sidecar: true
+    requires_services: [gateway]
+
+  - id: gateway-api.network-egress.allow
+    title: POST /api/v1/policy/evaluate-firewall allows api.openai.com
+    surface: gateway-api
+    feature: api.network-egress
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/policy/evaluate-firewall \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{"destination":"api.openai.com","port":443,"protocol":"https","target_type":"skill"}'
+    expected_exit_code: 0
+    expected_substrings:
+      - allow
+    requires_sidecar: true
+    requires_services: [gateway]
+
+  - id: gateway-api.policy.evaluate.deny
+    title: POST /api/v1/policy/evaluate denies on critical finding
+    surface: gateway-api
+    feature: api.policy.evaluate
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/policy/evaluate \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{"target_type":"skill","target_name":"bad","severity":"critical","findings":[{"rule_id":"rule.critical","severity":"critical"}]}'
+    expected_exit_code: 0
+    expected_substrings:
+      - deny
+    requires_sidecar: true
+    requires_services: [gateway]
+
+  - id: gateway-api.policy.reload
+    title: POST /api/v1/policy/reload hot-reloads OPA bundle
+    surface: gateway-api
+    feature: api.policy.reload
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/policy/reload \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{}'
+    expected_exit_code: 0
+    requires_sidecar: true
+    requires_services: [gateway]
+
+  - id: gateway-api.bearer.required
+    title: Bearer-token-protected endpoint rejects missing token
+    surface: gateway-api
+    feature: api.auth.bearer
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/admin/reload \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{}'
+    expected_exit_code: 22
+    requires_sidecar: true
+    requires_services: [gateway]
+    notes_for_agent: |
+      Pass requires curl to fail with 401 (`curl -sf` => exit 22). Authentication
+      bypass on /admin/reload => verdict=fail (severity critical).
+
+  - id: gateway-api.otlp.ingest
+    title: POST /v1/traces (OTLP) accepts a minimal span
+    surface: gateway-api
+    feature: api.otlp.ingest
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/v1/traces \
+        -H "content-type: application/json" \
+        -H "X-DefenseClaw-Client: dctest" \
+        -d '{"resourceSpans":[]}'
+    expected_exit_code: 0
+    requires_sidecar: true
+    requires_services: [gateway]

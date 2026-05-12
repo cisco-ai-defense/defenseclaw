@@ -1,0 +1,30 @@
+cases:
+  - id: skills.fail-mode.open.unblocks-on-judge-down
+    title: fail-open lets traffic through when LLM judge is unreachable
+    surface: connector
+    feature: fail-mode.open
+    command: |
+      DEFENSECLAW_JUDGE_DISABLED=1 defenseclaw guardrail evaluate --input "hello" --json
+    expected_exit_code: 0
+    expected_substrings:
+      - allow
+    notes_for_agent: |
+      Only meaningful when cell.fail_mode=fail-open. Else verdict=skip.
+    docs_site_refs:
+      - docs-site/content/docs/reference/fail-modes.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: skills.fail-mode.closed.blocks-on-judge-down
+    title: fail-closed blocks traffic when LLM judge is unreachable
+    surface: connector
+    feature: fail-mode.closed
+    command: |
+      DEFENSECLAW_JUDGE_DISABLED=1 defenseclaw guardrail evaluate --input "hello" --json
+    expected_exit_code: 0
+    expected_substrings:
+      - deny
+    notes_for_agent: |
+      Only meaningful when cell.fail_mode=fail-closed. Else verdict=skip.
+    expected_to_fail_at:
+      - cli-registry

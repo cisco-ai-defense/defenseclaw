@@ -1,0 +1,67 @@
+cases:
+  - id: cli-py.registry.list
+    title: defenseclaw registry list shows configured registries
+    surface: python-cli
+    feature: registry.list
+    command: defenseclaw registry list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/setup/registries.mdx
+
+  - id: cli-py.registry.list.json
+    title: defenseclaw registry list --json shape
+    surface: python-cli
+    feature: registry.list
+    command: defenseclaw registry list --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "["
+    tags: [json]
+
+  - id: cli-py.registry.add-test-remove
+    title: defenseclaw registry add → test → remove round-trip
+    surface: python-cli
+    feature: registry.crud
+    command: |
+      set -e
+      defenseclaw registry add --name dctest-scratch --url https://example.invalid --type skill --no-interactive || true
+      defenseclaw registry list --json | grep -q dctest-scratch || exit 1
+      defenseclaw registry test dctest-scratch || true
+      defenseclaw registry remove dctest-scratch --yes
+      ! defenseclaw registry list --json | grep -q dctest-scratch
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      State mutation. The test step is allowed to fail (the URL is invalid by
+      design) — what we're verifying is the add/list/remove lifecycle. Snapshot
+      before and after.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: cli-py.registry.sync.no-promote
+    title: defenseclaw registry sync --no-promote previews without promoting
+    surface: python-cli
+    feature: registry.sync
+    command: defenseclaw registry sync --no-promote --json || true
+    expected_exit_code: 0
+    notes_for_agent: |
+      A registry must be configured for this to be meaningful. If none is
+      configured, set verdict=skip. Otherwise verdict=pass requires that
+      `--no-promote` produces a "would promote" preview WITHOUT mutating
+      the active set (verify with `defenseclaw registry list --json` before/after).
+    docs_site_refs:
+      - docs-site/content/docs/setup/registries.mdx
+
+  - id: cli-py.registry.add.bad-flags
+    title: defenseclaw registry add with missing required flag errors cleanly
+    surface: python-cli
+    feature: registry.add
+    command: defenseclaw registry add --name
+    expected_exit_code: 2
+    must_not_contain:
+      - Traceback
+    tags: [error-path]
+    expected_to_fail_at:
+      - cli-registry

@@ -1,0 +1,101 @@
+cases:
+  - id: skills.observability.otlp.local-bundle
+    title: Local observability bundle ingests an OTLP span end-to-end
+    surface: connector
+    feature: observability.otlp
+    command: |
+      set -e
+      cd $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('observability'))")
+      docker compose up -d
+      sleep 5
+      defenseclaw setup observability test --to otlp
+      curl -sf http://127.0.0.1:9090/api/v1/query?query=up | grep -q '"status":"success"'
+      docker compose down
+    expected_exit_code: 0
+    timeout_s: 600
+    human_review_required: true
+    requires_internet: true
+    requires_services: [observability]
+    notes_for_agent: |
+      Heavy. Requires Docker. Pass if the local Prometheus surfaces metrics
+      coming from the gateway. If Docker is unavailable, verdict=blocked.
+    docs_site_refs:
+      - docs-site/content/docs/observability/index.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: skills.observability.audit-jsonl
+    title: Configured JSONL sink appends after a guardrail evaluation
+    surface: connector
+    feature: observability.jsonl
+    command: |
+      set -e
+      LOG=$HOME/.defenseclaw/audit.jsonl
+      BEFORE=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+      defenseclaw guardrail evaluate --input "hello" --json > /dev/null
+      sleep 1
+      AFTER=$(wc -l < "$LOG" 2>/dev/null || echo 0)
+      [ "$AFTER" -gt "$BEFORE" ]
+    expected_exit_code: 0
+    notes_for_agent: |
+      JSONL audit log must have at least one new line after the evaluation.
+      If the sink is not configured, set verdict=skip.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: skills.observability.splunk-triad
+    title: Splunk HEC sink delivers an event
+    surface: connector
+    feature: observability.splunk
+    command: |
+      set -e
+      defenseclaw setup observability test --to splunk
+    expected_exit_code: 0
+    requires_internet: true
+    notes_for_agent: |
+      Requires DEFENSECLAW_SPLUNK_HEC_TOKEN + URL configured. If missing,
+      verdict=skip.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: skills.observability.webhook.delivery
+    title: Notifier webhook delivers to a local sink
+    surface: connector
+    feature: observability.webhook
+    command: |
+      set -e
+      cd $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('webhook-target'))")
+      python webhook_target.py &
+      WT_PID=$!
+      sleep 2
+      defenseclaw setup webhook test --json
+      sleep 2
+      test -s ./received.jsonl
+      kill $WT_PID || true
+    expected_exit_code: 0
+    timeout_s: 120
+    notes_for_agent: |
+      The fixture launches a tiny Python HTTP server on port 9777 and
+      appends every POST body to received.jsonl. Pass requires at least
+      one line in received.jsonl after the test invocation.
+    docs_site_refs:
+      - docs-site/content/docs/setup/webhooks.mdx
+    # NOTE: this case launches its OWN webhook target so we don't require one
+    # to already be running. Don't tag requires_services here.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: skills.observability.webhook.ssrf-block
+    title: Webhook config rejects an SSRF target (169.254.169.254)
+    surface: connector
+    feature: observability.webhook.ssrf
+    command: |
+      defenseclaw setup webhook add --url http://169.254.169.254/latest/meta-data/ --type generic --no-interactive
+    expected_exit_code: 1
+    expected_substrings:
+      - SSRF
+    must_not_contain:
+      - Traceback
+    tags: [security, ssrf]
+    expected_to_fail_at:
+      - cli-registry

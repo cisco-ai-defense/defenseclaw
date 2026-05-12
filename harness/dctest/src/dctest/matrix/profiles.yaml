@@ -1,0 +1,14 @@
+# Policy profile axis.
+# OPA bundle profile and guardrail rule-pack profile are INDEPENDENT axes per
+# docs-site/content/docs/defaults.mdx. The default expand_matrix() samples a
+# few combinations; use `--full-profiles` to enumerate the 3x3 grid.
+
+opa:
+  - permissive
+  - default
+  - strict
+
+pack:
+  - permissive
+  - default
+  - strict
