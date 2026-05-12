@@ -1,0 +1,46 @@
+cases:
+  - id: cli-py.alerts.list
+    title: defenseclaw alerts lists outstanding alerts
+    surface: python-cli
+    feature: alerts.list
+    command: defenseclaw alerts
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    requires_sidecar: true
+    docs_site_refs:
+      - docs-site/content/docs/reference/cli.mdx
+
+  - id: cli-py.alerts.json
+    title: defenseclaw alerts --json
+    surface: python-cli
+    feature: alerts.list
+    command: defenseclaw alerts --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "["
+    tags: [json]
+    requires_sidecar: true
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: cli-py.alerts.acknowledge.dismiss.flow
+    title: alerts acknowledge → dismiss round-trip
+    surface: python-cli
+    feature: alerts.lifecycle
+    command: |
+      set -e
+      ALERT_ID=$(defenseclaw alerts --json | python -c "import json,sys; d=json.load(sys.stdin); print(d[0]['id'] if d else '')")
+      if [ -z "$ALERT_ID" ]; then
+        echo "no alerts to exercise"
+        exit 0
+      fi
+      defenseclaw alerts acknowledge "$ALERT_ID"
+      defenseclaw alerts dismiss "$ALERT_ID"
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      If there are no alerts on the system, set verdict=skip. Otherwise verdict
+      pass requires that the alert's status transitions through acknowledged
+      and then dismissed (verify via `defenseclaw alerts --json`).
+    requires_sidecar: true

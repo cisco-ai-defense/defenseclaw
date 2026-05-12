@@ -1,0 +1,24 @@
+cases:
+  - id: skills.sandbox.python-subprocess.exec
+    title: Sandboxed scanner subprocess exits with a captured return code
+    surface: connector
+    feature: sandbox.scanner
+    command: |
+      defenseclaw skill scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('skills', 'prompt-injection'))") --json
+    expected_exit_code: 0
+    notes_for_agent: |
+      Inspect the scanner_returncode field in the JSON output; pass requires
+      it to be a non-null integer (the scanner subprocess actually ran and
+      returned). Missing returncode => regression (refer to internal/scanner
+      plugin_scanner Python wrapper validation).
+
+  - id: skills.redaction.config
+    title: Redaction config show prints active rules
+    surface: connector
+    feature: redaction
+    command: defenseclaw setup redaction --show
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    expected_to_fail_at:
+      - cli-registry

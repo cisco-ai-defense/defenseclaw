@@ -1,0 +1,25 @@
+# dctest vLLM stub. Replace the image tag with your preferred GPU/CPU build.
+# Mount your model cache to /root/.cache/huggingface so the container doesn't
+# re-download on every up.
+
+services:
+  vllm:
+    image: vllm/vllm-openai:v0.6.3
+    command:
+      - "--model"
+      - "meta-llama/Llama-3.1-8B-Instruct"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]

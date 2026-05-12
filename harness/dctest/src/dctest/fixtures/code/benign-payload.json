@@ -1,0 +1,16 @@
+{
+  "files": [
+    {
+      "path": "main.py",
+      "language": "python",
+      "content": "def add(a, b):\n    return a + b\n"
+    }
+  ],
+  "target": {
+    "type": "skill",
+    "name": "dctest-benign-payload"
+  },
+  "options": {
+    "aibom_only": false
+  }
+}

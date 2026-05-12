@@ -1,0 +1,33 @@
+cases:
+  - id: skills.hitl.approval-required
+    title: HITL approval is required for a high-risk tool
+    surface: connector
+    feature: hitl.approval
+    command: |
+      defenseclaw tool admission --tool bash --argv "rm -rf /tmp/dctest-target" --json
+    expected_exit_code: 0
+    expected_substrings:
+      - require
+    notes_for_agent: |
+      Pass requires a `require-review` decision (or equivalent). If the
+      cell's pack_profile=permissive, set verdict=skip.
+    human_review_required: true
+    docs_site_refs:
+      - docs-site/content/docs/hitl.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: skills.hitl.alert-emitted
+    title: HITL review writes an alert that surfaces in `defenseclaw alerts`
+    surface: connector
+    feature: hitl.alerts
+    command: |
+      set -e
+      defenseclaw tool admission --tool bash --argv "rm -rf /tmp/dctest-target" --json > /dev/null
+      sleep 1
+      defenseclaw alerts --json | grep -q rm
+    expected_exit_code: 0
+    requires_sidecar: true
+    human_review_required: true
+    expected_to_fail_at:
+      - cli-registry

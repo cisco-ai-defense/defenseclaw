@@ -1,0 +1,19 @@
+cases:
+  - id: cli-py.aibom.scan.json
+    title: defenseclaw aibom scan --json produces an AIBOM document
+    surface: python-cli
+    feature: aibom.scan
+    command: defenseclaw aibom scan --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "{"
+    must_not_contain:
+      - Traceback
+    tags: [json, scanning, aibom]
+    docs_site_refs:
+      - docs-site/content/docs/ai-discovery.mdx
+      - docs-site/content/docs/reference/cli.mdx
+    notes_for_agent: |
+      Output must parse as a JSON object with at least a `components` or
+      `agents` key. A `pass` verdict additionally requires that the
+      AIBOM is non-empty (at least one agent or scanner appears).

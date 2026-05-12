@@ -1,0 +1,41 @@
+cases:
+  - id: cli-py.tool.list
+    title: defenseclaw tool list
+    surface: python-cli
+    feature: tool.list
+    command: defenseclaw tool list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.tool.status
+    title: defenseclaw tool status
+    surface: python-cli
+    feature: tool.status
+    command: defenseclaw tool status
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.tool.resolve
+    title: defenseclaw tool resolve <tool> returns admission info
+    surface: python-cli
+    feature: tool.resolve
+    command: defenseclaw tool resolve bash
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: cli-py.tool.admission
+    title: defenseclaw tool admission returns a structured decision
+    surface: python-cli
+    feature: tool.admission
+    command: defenseclaw tool admission --tool bash --json
+    expected_exit_code: 0
+    expected_substrings:
+      - decision
+    tags: [json]
+    expected_to_fail_at:
+      - cli-registry

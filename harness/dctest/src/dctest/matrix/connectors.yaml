@@ -1,0 +1,32 @@
+# Connectors axis. Tier controls whether `dctest matrix list --required-only`
+# (the default) includes a connector. Move a connector to `optional` if you
+# want it skipped on default per-PR runs.
+
+connectors:
+  - id: codex
+    tier: required
+    notes: OpenAI Codex CLI — hook-based.
+  - id: claudecode
+    tier: required
+    notes: Claude Code — hook-based with ANTHROPIC_BASE_URL override.
+  - id: openclaw
+    tier: required
+    notes: OpenClaw plugin — proxy/fetch interceptor with `before_tool_call` HITL.
+  - id: zeptoclaw
+    tier: optional
+    notes: ZeptoClaw — proxy redirect + response-scan.
+  - id: cursor
+    tier: optional
+    notes: Cursor — workspace hooks.json with native ask.
+  - id: copilot
+    tier: optional
+    notes: GitHub Copilot CLI — workspace hooks.
+  - id: geminicli
+    tier: optional
+    notes: Gemini CLI — hooks + native OTLP to gateway.
+  - id: windsurf
+    tier: optional
+    notes: Windsurf Cascade hooks.
+  - id: hermes
+    tier: optional
+    notes: Hermes — config.yaml hooks + skills/plugins/MCP discovery.

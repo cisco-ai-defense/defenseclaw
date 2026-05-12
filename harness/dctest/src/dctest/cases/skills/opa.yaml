@@ -1,0 +1,58 @@
+cases:
+  - id: skills.opa.permissive.allow
+    title: OPA permissive profile allows a benign skill
+    surface: connector
+    feature: guardrail.opa
+    command: defenseclaw-gateway policy evaluate --target-type skill --target-name benign --severity none --findings '[]'
+    expected_exit_code: 0
+    expected_substrings:
+      - allow
+    notes_for_agent: |
+      The case is only meaningful when the cell's opa_profile=permissive.
+      If the active profile is not permissive, set verdict=skip.
+
+  - id: skills.opa.default.review-on-medium
+    title: OPA default profile requires review on medium severity
+    surface: connector
+    feature: guardrail.opa
+    command: defenseclaw-gateway policy evaluate --target-type skill --target-name suspicious --severity medium --findings '[{"rule_id":"rule.medium","severity":"medium"}]'
+    expected_exit_code: 0
+    expected_substrings:
+      - review
+    notes_for_agent: |
+      Only run under opa_profile=default. Else verdict=skip.
+
+  - id: skills.opa.strict.block-on-medium
+    title: OPA strict profile blocks on medium severity
+    surface: connector
+    feature: guardrail.opa
+    command: defenseclaw-gateway policy evaluate --target-type skill --target-name suspicious --severity medium --findings '[{"rule_id":"rule.medium","severity":"medium"}]'
+    expected_exit_code: 0
+    expected_substrings:
+      - deny
+    notes_for_agent: |
+      Only meaningful under opa_profile=strict. Else verdict=skip.
+    docs_site_refs:
+      - docs-site/content/docs/defaults.mdx
+
+  - id: skills.opa.firewall.allow-domain
+    title: OPA firewall allow-list permits api.openai.com
+    surface: connector
+    feature: guardrail.firewall
+    command: defenseclaw-gateway policy evaluate-firewall --destination api.openai.com --port 443 --protocol https --target-type skill
+    expected_exit_code: 0
+    expected_substrings:
+      - allow
+
+  - id: skills.opa.firewall.block-domain
+    title: OPA firewall blocks unknown.example.invalid
+    surface: connector
+    feature: guardrail.firewall
+    command: defenseclaw-gateway policy evaluate-firewall --destination unknown.example.invalid --port 443 --protocol https --target-type skill
+    expected_exit_code: 0
+    expected_substrings:
+      - deny
+    notes_for_agent: |
+      Verify the SSRF protection allow-list logic. Pass requires the decision
+      to be deny/block AND the rule cited in stdout to mention "allow-list"
+      or "not in trusted domains".

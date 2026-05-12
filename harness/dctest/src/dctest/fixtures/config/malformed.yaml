@@ -1,0 +1,10 @@
+# Deliberately malformed YAML used by errors.bad-config.surface-clear-message.
+# The mapping under `gateway:` is missing a key:value separator. Loading
+# this file must produce a clean, actionable error from defenseclaw.
+
+gateway:
+  host: 127.0.0.1
+  port  8765
+  enabled: true
+provider
+  vendor: anthropic

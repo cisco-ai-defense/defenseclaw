@@ -1,0 +1,65 @@
+# Providers axis for the dctest matrix.
+#
+# Each entry produces ProviderSpec(id=..., vendor=..., model=..., endpoint=..., auth_env=...).
+# Endpoints for local providers (vLLM / Ollama) come from Settings defaults
+# unless overridden here. auth_env is the env var dctest doctor checks for.
+
+providers:
+  - id: anthropic-claude-sonnet
+    vendor: anthropic
+    model: claude-sonnet-4-5
+    auth_env: ANTHROPIC_API_KEY
+    notes: Cloud Anthropic Sonnet. Default guardrail/judge for cloud cells.
+
+  - id: anthropic-claude-haiku
+    vendor: anthropic
+    model: claude-haiku-4-5
+    auth_env: ANTHROPIC_API_KEY
+    notes: Cloud Anthropic Haiku. Cheaper guardrail/judge for high-volume cells.
+
+  - id: openai-gpt-4o
+    vendor: openai
+    model: gpt-4o
+    auth_env: OPENAI_API_KEY
+    notes: Cloud OpenAI GPT-4o.
+
+  - id: openai-gpt-4o-mini
+    vendor: openai
+    model: gpt-4o-mini
+    auth_env: OPENAI_API_KEY
+    notes: Cloud OpenAI mini variant.
+
+  - id: vllm-llama-3.1-8b
+    vendor: vllm
+    model: meta-llama/Llama-3.1-8B-Instruct
+    endpoint: http://127.0.0.1:8000/v1
+    auth_env: null
+    notes: Self-hosted vLLM. Compose stub in fixtures/vllm-compose.yaml.
+
+  - id: vllm-qwen-2.5-7b
+    vendor: vllm
+    model: Qwen/Qwen2.5-7B-Instruct
+    endpoint: http://127.0.0.1:8000/v1
+    auth_env: null
+    notes: Same endpoint as Llama; swap model in vLLM compose to switch.
+
+  - id: ollama-llama-3.1
+    vendor: ollama
+    model: llama3.1
+    endpoint: http://127.0.0.1:11434/v1
+    auth_env: null
+    notes: Local Ollama. `ollama pull llama3.1` first.
+
+  - id: ollama-qwen-2.5
+    vendor: ollama
+    model: qwen2.5
+    endpoint: http://127.0.0.1:11434/v1
+    auth_env: null
+    notes: Local Ollama. `ollama pull qwen2.5` first.
+
+  - id: bifrost-default
+    vendor: bifrost
+    model: bifrost-default
+    endpoint: http://127.0.0.1:9090
+    auth_env: BIFROST_API_KEY
+    notes: Cisco AI Defense Bifrost routing layer.

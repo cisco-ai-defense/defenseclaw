@@ -20,7 +20,8 @@ DIST_DIR    := dist
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync \
         set-version \
         _bundle-data \
-        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean \
+        dctest-install dctest-test dctest-doctor dctest-clean
 
 # ---------------------------------------------------------------------------
 # Version stamping
@@ -718,3 +719,38 @@ clean:
 	rm -f coverage.out coverage-py.xml
 	rm -rf cli/defenseclaw/_data
 	find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# dctest manual testing harness
+# ---------------------------------------------------------------------------
+# `harness/dctest/` is an opt-in, agent-driven manual test runner. It does
+# not run during default `make test`. Use the targets below to set it up
+# and exercise it.
+
+DCTEST_DIR    := harness/dctest
+DCTEST_VENV   := $(DCTEST_DIR)/.venv
+DCTEST_PYTHON := $(DCTEST_VENV)/bin/python
+DCTEST_PIP    := $(DCTEST_VENV)/bin/pip
+DCTEST_BIN    := $(DCTEST_VENV)/bin/dctest
+
+$(DCTEST_VENV):
+	@command -v python3.13 >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || \
+		{ echo "python3.13 or python3 required for dctest" >&2; exit 1; }
+	python3.13 -m venv $(DCTEST_VENV) 2>/dev/null || python3 -m venv $(DCTEST_VENV)
+	$(DCTEST_PIP) install --quiet --upgrade pip
+
+dctest-install: $(DCTEST_VENV)
+	$(DCTEST_PIP) install -e "$(DCTEST_DIR)[dev]"
+	@echo "dctest installed. Activate with: source $(DCTEST_VENV)/bin/activate"
+
+dctest-test: dctest-install
+	$(DCTEST_PYTHON) -m pytest $(DCTEST_DIR)/tests -W ignore::DeprecationWarning
+
+dctest-doctor: dctest-install
+	$(DCTEST_BIN) doctor
+
+dctest-clean:
+	rm -rf $(DCTEST_VENV)
+	rm -rf $(DCTEST_DIR)/runs/*
+	rm -f $(DCTEST_DIR)/src/dctest/fixtures/webhook-target/received.jsonl
+	touch $(DCTEST_DIR)/runs/.gitkeep

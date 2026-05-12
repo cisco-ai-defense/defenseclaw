@@ -1,0 +1,59 @@
+cases:
+  - id: cli-py.codeguard.status
+    title: defenseclaw codeguard status
+    surface: python-cli
+    feature: codeguard.status
+    command: defenseclaw codeguard status
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-go.scan.code.benign
+    title: defenseclaw-gateway scan code against benign fixture
+    surface: go-cli
+    feature: scanning.codeguard
+    command: defenseclaw-gateway scan code $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'benign'))") --json
+    expected_exit_code: 0
+    expected_substrings:
+      - findings
+    must_not_contain:
+      - panic
+    tags: [json]
+    docs_site_refs:
+      - docs-site/content/docs/reference/cli.mdx
+
+  - id: cli-go.scan.code.seeded
+    title: defenseclaw-gateway scan code finds seeded weaknesses
+    surface: go-cli
+    feature: scanning.codeguard
+    command: defenseclaw-gateway scan code $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'seeded'))") --json
+    expected_exit_code: 0
+    expected_substrings:
+      - findings
+    notes_for_agent: |
+      The "seeded" fixture intentionally contains CodeGuard rule hits (hard-coded
+      credentials, command injection patterns). Verdict pass requires at least
+      one finding with a non-trivial rule_id. Zero findings => fail.
+    tags: [scanning, codeguard]
+
+  - id: cli-go.scan.code.schema
+    title: defenseclaw-gateway scan code --schema emits the embedded JSON Schema
+    surface: go-cli
+    feature: scanning.codeguard
+    command: defenseclaw-gateway scan code --schema
+    expected_exit_code: 0
+    expected_substrings:
+      - schema
+    notes_for_agent: |
+      Output must parse as a JSON Schema document. The agent should validate
+      that `$schema` (or `type`) is present in the first 1024 bytes.
+
+  - id: cli-go.scan.code.missing-path
+    title: defenseclaw-gateway scan code errors on missing path
+    surface: go-cli
+    feature: scanning.codeguard
+    command: defenseclaw-gateway scan code /nonexistent-$RANDOM
+    expected_exit_code: 1
+    must_not_contain:
+      - panic
+    tags: [error-path]

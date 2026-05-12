@@ -1,0 +1,35 @@
+cases:
+  - id: skills.codeguard.benign
+    title: CodeGuard reports zero high/critical on the benign code fixture
+    surface: connector
+    feature: scanning.codeguard
+    command: defenseclaw-gateway scan code $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'benign'))") --json
+    expected_exit_code: 0
+    must_not_contain:
+      - "\"severity\": \"high\""
+      - "\"severity\": \"critical\""
+    tags: [scanning, codeguard]
+
+  - id: skills.codeguard.seeded
+    title: CodeGuard finds seeded weaknesses
+    surface: connector
+    feature: scanning.codeguard
+    command: defenseclaw-gateway scan code $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'seeded'))") --json
+    expected_exit_code: 0
+    expected_substrings:
+      - findings
+    notes_for_agent: |
+      Verdict pass requires >= 1 finding with non-empty `rule_id` AND
+      `line_number` populated. Findings missing rule_id => fail (regression).
+    tags: [scanning, codeguard]
+
+  - id: skills.codeguard.aibom-mode
+    title: CodeGuard --aibom-only restricts findings to AIBOM-relevant rules
+    surface: connector
+    feature: scanning.codeguard.aibom
+    command: defenseclaw-gateway scan code $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'seeded'))") --aibom-only --json || defenseclaw-gateway scan code $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('code', 'seeded'))") --json
+    expected_exit_code: 0
+    notes_for_agent: |
+      Pass if `--aibom-only` is supported and findings list is a subset of
+      the unrestricted run; otherwise verdict=skip with note "--aibom-only
+      not supported in this build".

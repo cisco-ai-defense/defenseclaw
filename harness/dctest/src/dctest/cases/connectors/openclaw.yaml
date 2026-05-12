@@ -1,0 +1,48 @@
+cases:
+  - id: connectors.openclaw.install
+    title: defenseclaw setup openclaw installs the OpenClaw plugin
+    surface: connector
+    feature: connector.openclaw.install
+    command: defenseclaw setup openclaw --no-interactive
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Pass requires:
+        1. ~/.openclaw/extensions/defenseclaw/openclaw.plugin.json exists.
+        2. The plugin advertises before_tool_call HITL.
+    docs_site_refs:
+      - docs-site/content/docs/connectors/openclaw.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: connectors.openclaw.verify
+    title: defenseclaw-gateway connector verify --connector openclaw
+    surface: connector
+    feature: connector.openclaw.verify
+    command: defenseclaw-gateway connector verify --connector openclaw --json
+    expected_exit_code: 0
+    tags: [json]
+
+  - id: connectors.openclaw.before-tool-call
+    title: OpenClaw before_tool_call hook fires for a blocked tool
+    surface: connector
+    feature: connector.openclaw.runtime
+    command: |
+      curl -sf -X POST http://127.0.0.1:8765/api/v1/inspect/tool -H 'content-type: application/json' \
+        -d '{"tool":"bash","args":["rm","-rf","/"],"actor":"openclaw"}'
+    expected_exit_code: 0
+    expected_substrings:
+      - decision
+      - deny
+    requires_sidecar: true
+    notes_for_agent: |
+      Pass requires `decision: deny` or `require-review`. If `decision: allow`
+      on `rm -rf /`, set verdict=fail (severity critical).
+
+  - id: connectors.openclaw.teardown
+    title: defenseclaw-gateway connector teardown --connector openclaw
+    surface: connector
+    feature: connector.openclaw.teardown
+    command: defenseclaw-gateway connector teardown --connector openclaw
+    expected_exit_code: 0
+    human_review_required: true

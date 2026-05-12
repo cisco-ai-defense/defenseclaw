@@ -1,0 +1,90 @@
+cases:
+  - id: cli-py.agent.discover
+    title: defenseclaw agent discover surfaces installed agent runtimes
+    surface: python-cli
+    feature: agent.discover
+    command: defenseclaw agent discover
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/ai-discovery.mdx
+
+  - id: cli-py.agent.discover.json
+    title: defenseclaw agent discover --json
+    surface: python-cli
+    feature: agent.discover
+    command: defenseclaw agent discover --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "["
+    tags: [json]
+
+  - id: cli-py.agent.usage
+    title: defenseclaw agent usage summarizes recent activity
+    surface: python-cli
+    feature: agent.usage
+    command: defenseclaw agent usage
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    requires_sidecar: true
+
+  - id: cli-py.agent.processes
+    title: defenseclaw agent processes lists detected agent processes
+    surface: python-cli
+    feature: agent.processes
+    command: defenseclaw agent processes
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.agent.components
+    title: defenseclaw agent components lists per-agent components
+    surface: python-cli
+    feature: agent.components
+    command: defenseclaw agent components
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.agent.confidence.policy.show
+    title: defenseclaw agent confidence policy show
+    surface: python-cli
+    feature: agent.confidence
+    command: defenseclaw agent confidence policy show
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.agent.confidence.policy.validate
+    title: defenseclaw agent confidence policy validate
+    surface: python-cli
+    feature: agent.confidence
+    command: defenseclaw agent confidence policy validate
+    expected_exit_code: 0
+
+  - id: cli-py.agent.discovery.status
+    title: defenseclaw agent discovery status reports the watcher state
+    surface: python-cli
+    feature: agent.discovery
+    command: defenseclaw agent discovery status
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.agent.signatures.list
+    title: defenseclaw agent signatures list shows installed signature packs
+    surface: python-cli
+    feature: agent.signatures
+    command: defenseclaw agent signatures list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.agent.signatures.validate
+    title: defenseclaw agent signatures validate
+    surface: python-cli
+    feature: agent.signatures
+    command: defenseclaw agent signatures validate
+    expected_exit_code: 0

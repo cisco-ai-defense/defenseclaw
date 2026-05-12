@@ -1,0 +1,49 @@
+cases:
+  - id: cli-go.start.short
+    title: defenseclaw-gateway start (briefly) and stop via SIGINT
+    surface: go-cli
+    feature: gateway.lifecycle
+    command: |
+      set -e
+      defenseclaw-gateway start &
+      PID=$!
+      sleep 3
+      kill -INT $PID || true
+      wait $PID || true
+    expected_exit_code: 0
+    timeout_s: 30
+    notes_for_agent: |
+      The gateway should bind a port and respond on /health within 3s. Use
+      `curl -sf http://127.0.0.1:8765/health` from a side terminal to confirm
+      (you may insert this into the case command if helpful). Verdict pass
+      requires no panic in stderr and a clean shutdown after SIGINT.
+
+  - id: cli-go.connector.verify
+    title: defenseclaw-gateway connector verify --connector codex
+    surface: go-cli
+    feature: gateway.connector.verify
+    command: defenseclaw-gateway connector verify --connector codex --json
+    expected_exit_code: 0
+    must_not_contain:
+      - panic
+    tags: [json]
+
+  - id: cli-go.connector.teardown.dry
+    title: defenseclaw-gateway connector teardown --dry-run
+    surface: go-cli
+    feature: gateway.connector.teardown
+    command: defenseclaw-gateway connector teardown --connector codex --dry-run 
+      --json
+    expected_exit_code: 0
+    tags: [json]
+    expected_to_fail_at:
+      - cli-registry
+
+  - id: cli-go.audit.export.minimal
+    title: defenseclaw-gateway audit export --limit 1
+    surface: go-cli
+    feature: gateway.audit
+    command: defenseclaw-gateway audit export --limit 1
+    expected_exit_code: 0
+    must_not_contain:
+      - panic

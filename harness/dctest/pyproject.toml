@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dctest"
+version = "0.1.0"
+description = "DefenseClaw manual testing harness (AI-agent-driven, avarice-shaped)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "DefenseClaw" }]
+dependencies = [
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "pyyaml>=6.0",
+    "click>=8.1",
+    "rich>=13.7",
+    "jsonschema>=4.21",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+dctest = "dctest.cli:main"
+
+[tool.hatch.build]
+include = [
+    "src/dctest/**/*.py",
+    "src/dctest/cases/**/*.yaml",
+    "src/dctest/matrix/**/*.yaml",
+    "src/dctest/prompt_assets/**/*.md",
+    "src/dctest/schemas/**/*.json",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dctest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

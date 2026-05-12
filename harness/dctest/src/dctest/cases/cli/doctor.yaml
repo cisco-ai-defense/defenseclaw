@@ -1,0 +1,24 @@
+cases:
+  - id: cli-py.doctor.read-only
+    title: defenseclaw doctor runs read-only and exits cleanly
+    surface: python-cli
+    feature: doctor.basic
+    command: defenseclaw doctor
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    notes_for_agent: |
+      Non-zero exit is acceptable if at least one check reports actionable
+      remediation — pass requires no Python traceback and a clear, structured
+      output. If exit is non-zero, mark verdict=needs-human with the failing
+      check listed.
+
+  - id: cli-py.doctor.json
+    title: defenseclaw doctor --json-output
+    surface: python-cli
+    feature: doctor.basic
+    command: defenseclaw doctor --json-output
+    expected_exit_code: 0
+    expected_substrings:
+      - "{"
+    tags: [json]

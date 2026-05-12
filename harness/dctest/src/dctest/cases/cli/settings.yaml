@@ -1,0 +1,29 @@
+cases:
+  - id: cli-py.settings.save.idempotent
+    title: defenseclaw settings save is idempotent
+    surface: python-cli
+    feature: settings.save
+    command: |
+      set -e
+      cp -f "$HOME/.defenseclaw/settings.yaml" /tmp/dctest.settings.before 2>/dev/null || echo "no settings file" > /tmp/dctest.settings.before
+      defenseclaw settings save
+      cp -f "$HOME/.defenseclaw/settings.yaml" /tmp/dctest.settings.mid 2>/dev/null || echo "no settings file" > /tmp/dctest.settings.mid
+      defenseclaw settings save
+      cp -f "$HOME/.defenseclaw/settings.yaml" /tmp/dctest.settings.after 2>/dev/null || echo "no settings file" > /tmp/dctest.settings.after
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    followup_evidence:
+      - kind: file_diff
+        label: settings-second-save-diff
+        a: /tmp/dctest.settings.mid
+        b: /tmp/dctest.settings.after
+      - kind: file_content
+        label: settings-final
+        path: /tmp/dctest.settings.after
+    notes_for_agent: |
+      Idempotency is verified by the file diff between the FIRST save and the
+      SECOND save (`settings-second-save-diff` followup evidence). The diff
+      MUST be empty. Verdict=pass iff diff is empty AND exit_code==0.
+      A non-empty diff (i.e. the second save mutated the file again) is a
+      regression and the verdict MUST be fail.

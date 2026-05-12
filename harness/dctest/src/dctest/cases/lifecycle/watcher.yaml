@@ -1,0 +1,78 @@
+cases:
+  - id: lifecycle.watcher.start-stop
+    title: defenseclaw watcher start → stop round-trip
+    surface: lifecycle
+    feature: lifecycle.watcher
+    command: |
+      set -e
+      defenseclaw watcher start &
+      W_PID=$!
+      sleep 2
+      defenseclaw watcher status
+      defenseclaw watcher stop
+      sleep 1
+      ! kill -0 $W_PID 2>/dev/null || true
+    expected_exit_code: 0
+    human_review_required: true
+    timeout_s: 60
+    docs_site_refs:
+      - docs-site/content/docs/setup/watcher.mdx
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.watchdog.start-stop
+    title: defenseclaw watchdog start → stop round-trip
+    surface: lifecycle
+    feature: lifecycle.watchdog
+    command: |
+      set -e
+      defenseclaw watchdog start &
+      sleep 2
+      defenseclaw watchdog status
+      defenseclaw watchdog stop
+    expected_exit_code: 0
+    human_review_required: true
+    timeout_s: 60
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.keys.rotate-token
+    title: defenseclaw keys rotate-token issues a fresh sidecar token
+    surface: lifecycle
+    feature: lifecycle.keys.rotate
+    command: |
+      set -e
+      BEFORE=$(defenseclaw keys list --json | md5sum)
+      defenseclaw keys rotate-token --yes
+      AFTER=$(defenseclaw keys list --json | md5sum)
+      [ "$BEFORE" != "$AFTER" ]
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Pass requires the keys digest to change. If rotate-token does not exist
+      in this build, set verdict=skip.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.keys.migrate-llm
+    title: defenseclaw keys migrate-llm imports keys from legacy paths
+    surface: lifecycle
+    feature: lifecycle.keys.migrate
+    command: defenseclaw keys migrate-llm --dry-run || defenseclaw keys 
+      migrate-llm
+    expected_exit_code: 0
+    notes_for_agent: |
+      The migration path is one-shot. Verdict pass when output reports either
+      "no migration needed" or "migrated N keys" without traceback.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.keys.migrate-splunk
+    title: defenseclaw keys migrate-splunk
+    surface: lifecycle
+    feature: lifecycle.keys.migrate
+    command: defenseclaw keys migrate-splunk --dry-run || defenseclaw keys 
+      migrate-splunk
+    expected_exit_code: 0
+    expected_to_fail_at:
+      - cli-registry

@@ -1,0 +1,65 @@
+cases:
+  - id: cli-py.mcp.list.basic
+    title: defenseclaw mcp list returns enrolled MCP servers
+    surface: python-cli
+    feature: mcp.list
+    command: defenseclaw mcp list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/setup/mcp-scanner.mdx
+
+  - id: cli-py.mcp.list.json
+    title: defenseclaw mcp list --json shape
+    surface: python-cli
+    feature: mcp.list
+    command: defenseclaw mcp list --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "["
+    tags: [json]
+
+  - id: cli-py.mcp.scan.fixture
+    title: defenseclaw mcp scan against shipped fixture config
+    surface: python-cli
+    feature: mcp.scan
+    command: defenseclaw mcp scan --config $(python -c "import 
+      dctest.prompt_loader as p; print(p.fixtures_path('mcp', 
+      'sample-config.json'))")
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.mcp.scan.missing-config
+    title: defenseclaw mcp scan errors on missing config
+    surface: python-cli
+    feature: mcp.scan
+    command: defenseclaw mcp scan --config /nonexistent/config-$RANDOM.json
+    expected_exit_code: 1
+    expected_substrings:
+      - not found
+    must_not_contain:
+      - Traceback
+    tags: [error-path]
+    expected_to_fail_at:
+      - cli-registry
+
+  - id: cli-py.mcp.set-unset
+    title: defenseclaw mcp set then unset round-trips
+    surface: python-cli
+    feature: mcp.toggle
+    command: |
+      set -e
+      defenseclaw mcp set --name dctest-fixture --command "echo hi" --json
+      defenseclaw mcp list --json | grep -q dctest-fixture
+      defenseclaw mcp unset dctest-fixture
+      ! defenseclaw mcp list --json | grep -q dctest-fixture
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      State mutation; the verdict requires the post-state to be clean. If the
+      `set` step fails because dctest-fixture is already enrolled, set
+      verdict=blocked with a note to clean up first.
+    expected_to_fail_at:
+      - cli-registry

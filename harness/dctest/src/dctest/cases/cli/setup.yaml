@@ -1,0 +1,75 @@
+cases:
+  - id: cli-py.setup.gateway.non-interactive
+    title: defenseclaw setup gateway --no-interactive
+    surface: python-cli
+    feature: setup.gateway
+    command: defenseclaw setup gateway --no-interactive
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    notes_for_agent: |
+      This may rotate the gateway token. Snapshot before and after; verify
+      `~/.defenseclaw/gateway.token` exists (or `gateway.token` field in
+      config.yaml).
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: cli-py.setup.notifications.list
+    title: defenseclaw setup notifications list
+    surface: python-cli
+    feature: setup.notifications
+    command: defenseclaw setup notifications list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.setup.observability.list
+    title: defenseclaw setup observability list
+    surface: python-cli
+    feature: setup.observability
+    command: defenseclaw setup observability list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/observability/index.mdx
+
+  - id: cli-py.setup.observability.test
+    title: defenseclaw setup observability test
+    surface: python-cli
+    feature: setup.observability
+    command: defenseclaw setup observability test
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    notes_for_agent: |
+      Pass requires that at least one configured sink reports "ok" or
+      "delivered". If no sink is configured, set verdict=skip.
+
+  - id: cli-py.setup.webhook.list
+    title: defenseclaw setup webhook list (notifier webhooks)
+    surface: python-cli
+    feature: setup.webhook
+    command: defenseclaw setup webhook list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/setup/webhooks.mdx
+    notes_for_agent: |
+      The notifier webhook system is separate from audit-sink webhooks — make
+      sure the output reflects ONLY notifier (Slack/PagerDuty/Webex/generic)
+      entries, not raw audit JSONL sinks.
+
+  - id: cli-py.setup.redaction.show
+    title: defenseclaw setup redaction (print active redaction config)
+    surface: python-cli
+    feature: setup.redaction
+    command: defenseclaw setup redaction --show || defenseclaw setup redaction
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/reference/redaction.mdx
+    expected_to_fail_at:
+      - cli-registry

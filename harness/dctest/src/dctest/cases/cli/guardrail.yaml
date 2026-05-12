@@ -1,0 +1,41 @@
+cases:
+  - id: cli-py.guardrail.status
+    title: defenseclaw guardrail status
+    surface: python-cli
+    feature: guardrail.status
+    command: defenseclaw guardrail status
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.guardrail.disable.enable
+    title: guardrail disable → enable round-trip
+    surface: python-cli
+    feature: guardrail.toggle
+    command: |
+      set -e
+      defenseclaw guardrail disable
+      defenseclaw guardrail status | grep -qi disabled
+      defenseclaw guardrail enable
+      defenseclaw guardrail status | grep -qi enabled
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      State mutation. Take a snapshot before. If the system is mid-flight,
+      this can disrupt other in-progress requests — only run in dctest cells.
+
+  - id: cli-py.guardrail.fail-mode.toggle
+    title: defenseclaw guardrail fail-mode toggles fail-open/fail-closed
+    surface: python-cli
+    feature: guardrail.fail-mode
+    command: |
+      set -e
+      defenseclaw guardrail fail-mode --mode fail-closed
+      defenseclaw guardrail status | grep -qi 'fail-closed'
+      defenseclaw guardrail fail-mode --mode fail-open
+      defenseclaw guardrail status | grep -qi 'fail-open'
+    expected_exit_code: 0
+    docs_site_refs:
+      - docs-site/content/docs/reference/fail-modes.mdx
+    expected_to_fail_at:
+      - cli-registry

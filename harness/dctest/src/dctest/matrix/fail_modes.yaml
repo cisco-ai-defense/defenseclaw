@@ -1,0 +1,8 @@
+# Fail-mode axis.
+# `fail-open`: when guardrail/judge/sink is unavailable, DefenseClaw passes the
+# request through. `fail-closed`: DefenseClaw blocks. Controlled by
+# DEFENSECLAW_FAIL_MODE / DEFENSECLAW_STRICT_AVAILABILITY env vars.
+
+fail_modes:
+  - fail-open
+  - fail-closed

@@ -1,0 +1,44 @@
+cases:
+  - id: lifecycle.sidecar.start
+    title: defenseclaw sidecar start brings up the gateway
+    surface: lifecycle
+    feature: lifecycle.sidecar
+    command: |
+      set -e
+      defenseclaw sidecar start
+      sleep 2
+      defenseclaw status --json | python -c "import json,sys; d=json.load(sys.stdin); assert d['gateway']['running']"
+    expected_exit_code: 0
+    human_review_required: true
+    timeout_s: 60
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.sidecar.restart
+    title: defenseclaw sidecar restart cycles the gateway
+    surface: lifecycle
+    feature: lifecycle.sidecar
+    command: defenseclaw sidecar restart
+    expected_exit_code: 0
+    human_review_required: true
+    timeout_s: 120
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: lifecycle.sidecar.stop
+    title: defenseclaw sidecar stop terminates the gateway cleanly
+    surface: lifecycle
+    feature: lifecycle.sidecar
+    command: |
+      set -e
+      defenseclaw sidecar stop
+      sleep 2
+      ! pgrep -f defenseclaw-gateway
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Verdict pass requires no defenseclaw-gateway process after stop. If a
+      stale PID file remains, capture it but treat as a soft failure (note
+      in reasoning, mark needs-human).
+    expected_to_fail_at:
+      - cli-registry

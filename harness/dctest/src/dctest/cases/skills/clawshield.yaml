@@ -1,0 +1,48 @@
+cases:
+  - id: skills.clawshield.local-pack.trigger
+    title: ClawShield local pack triggers on a seeded prompt-injection skill
+    surface: connector
+    feature: scanning.clawshield.local
+    command: defenseclaw skill scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('skills', 'prompt-injection'))") --json
+    expected_exit_code: 0
+    expected_substrings:
+      - injection
+    tags: [scanning, clawshield, local-pack]
+    docs_site_refs:
+      - docs-site/content/docs/setup/skill-scanner.mdx
+
+  - id: skills.clawshield.bifrost.trigger
+    title: ClawShield (Cisco AI Defense / Bifrost) flags the seeded skill
+    surface: connector
+    feature: scanning.clawshield.bifrost
+    command: defenseclaw skill scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('skills', 'cisco-trigger'))") --json
+    expected_exit_code: 0
+    expected_substrings:
+      - injection
+    requires_internet: true
+    requires_provider_kind: [bifrost]
+    tags: [scanning, clawshield, bifrost]
+    notes_for_agent: |
+      Requires DEFENSECLAW_BIFROST_API_KEY in env. If missing, verdict=blocked.
+      Pass requires a finding tagged with the Bifrost provider (look in
+      stdout for "bifrost" or "cisco-ai-defense").
+
+  - id: skills.clawshield.benign-no-finding
+    title: ClawShield against a benign skill produces no high-severity findings
+    surface: connector
+    feature: scanning.clawshield
+    command: defenseclaw skill scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('skills', 'benign'))") --json
+    expected_exit_code: 0
+    must_not_contain:
+      - "\"severity\": \"high\""
+      - "\"severity\": \"critical\""
+    expect_json_path:
+      - "$.findings exists"
+    tags: [scanning, clawshield]
+    notes_for_agent: |
+      The expect_json_path assertion confirms stdout was JSON-parseable AND
+      contained a 'findings' key. Verdict=pass requires:
+        1. exit_code == 0
+        2. expect_json_path 'findings exists' is OK
+        3. No must_not_contain substring is present
+      If stdout was not JSON, verdict=fail with severity high.

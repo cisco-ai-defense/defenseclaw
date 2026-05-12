@@ -1,0 +1,13 @@
+# Scan-type axis. Each value selects a different scanner pipeline.
+# - skill: cisco-ai-skill-scanner subprocess
+# - mcp:   cisco-ai-mcp-scanner subprocess
+# - plugin: plugin scanner
+# - code:  CodeGuard SAST scan (POST /api/v1/scan/code)
+# - aibom: AIBOM / agent discovery scan
+
+scan_types:
+  - skill
+  - mcp
+  - plugin
+  - code
+  - aibom

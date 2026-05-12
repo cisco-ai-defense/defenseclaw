@@ -1,0 +1,128 @@
+cases:
+  - id: cli-py.policy.list
+    title: defenseclaw policy list enumerates policy files
+    surface: python-cli
+    feature: policy.list
+    command: defenseclaw policy list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.policy.show
+    title: defenseclaw policy show prints the active policy YAML
+    surface: python-cli
+    feature: policy.show
+    command: defenseclaw policy show
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.policy.validate
+    title: defenseclaw policy validate accepts the active policy
+    surface: python-cli
+    feature: policy.validate
+    command: defenseclaw policy validate
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.policy.test
+    title: defenseclaw policy test exercises the active policy
+    surface: python-cli
+    feature: policy.test
+    command: defenseclaw policy test
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.policy.create.default
+    title: defenseclaw policy create scaffolds a policy file
+    surface: python-cli
+    feature: policy.create
+    command: |
+      set -e
+      WORKDIR=$(mktemp -d)
+      cd "$WORKDIR"
+      defenseclaw policy create --name dctest-scratch --profile default --output .
+      test -f dctest-scratch.yaml
+    expected_exit_code: 0
+    docs_site_refs:
+      - docs-site/content/docs/policies.mdx
+    notes_for_agent: |
+      Verdict pass requires a scaffolded YAML file to exist in the work dir.
+      Clean up the temp directory in your reasoning step or note it as a follow-up.
+
+    expected_to_fail_at:
+      - cli-registry
+  - id: cli-go.policy.validate
+    title: defenseclaw-gateway policy validate compiles Rego
+    surface: go-cli
+    feature: policy.validate
+    command: defenseclaw-gateway policy validate
+    expected_exit_code: 0
+    must_not_contain:
+      - panic
+
+  - id: cli-go.policy.show
+    title: defenseclaw-gateway policy show outputs data.json
+    surface: go-cli
+    feature: policy.show
+    command: defenseclaw-gateway policy show
+    expected_exit_code: 0
+    expected_substrings:
+      - "{"
+    must_not_contain:
+      - panic
+
+  - id: cli-go.policy.domains
+    title: defenseclaw-gateway policy domains lists firewall domains
+    surface: go-cli
+    feature: policy.domains
+    command: defenseclaw-gateway policy domains
+    expected_exit_code: 0
+
+  - id: cli-go.policy.evaluate
+    title: defenseclaw-gateway policy evaluate runs a dry policy decision
+    surface: go-cli
+    feature: policy.evaluate
+    command: defenseclaw-gateway policy evaluate --target-type skill 
+      --target-name benign --severity none --findings '[]'
+    expected_exit_code: 0
+    must_not_contain:
+      - panic
+    notes_for_agent: |
+      Inspect output for an explicit `decision` field; pass means the engine
+      returned a structured decision (allow|deny|require-review).
+
+  - id: cli-go.policy.evaluate-firewall
+    title: defenseclaw-gateway policy evaluate-firewall allows a permitted 
+      egress
+    surface: go-cli
+    feature: policy.firewall
+    command: defenseclaw-gateway policy evaluate-firewall --destination 
+      api.openai.com --port 443 --protocol https --target-type skill
+    expected_exit_code: 0
+
+  - id: cli-go.policy.reload
+    title: defenseclaw-gateway policy reload hot-reloads via sidecar
+    surface: go-cli
+    feature: policy.reload
+    command: defenseclaw-gateway policy reload
+    expected_exit_code: 0
+    requires_sidecar: true
+
+  - id: cli-go.policy.validate.malformed-rego
+    title: defenseclaw-gateway policy validate rejects malformed Rego
+    surface: go-cli
+    feature: policy.validate
+    command: |
+      set -e
+      WORKDIR=$(mktemp -d)
+      cp $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('policies', 'malformed.rego'))") "$WORKDIR/policy.rego"
+      DEFENSECLAW_POLICY_DIR="$WORKDIR" defenseclaw-gateway policy validate
+    expected_exit_code: 1
+    expected_substrings:
+      - rego
+    must_not_contain:
+      - panic
+    tags: [error-path]

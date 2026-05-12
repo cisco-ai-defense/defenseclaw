@@ -1,0 +1,48 @@
+cases:
+  - id: cli-py.help.top
+    title: defenseclaw --help
+    surface: python-cli
+    feature: help.basic
+    command: defenseclaw --help
+    expected_exit_code: 0
+    expected_substrings:
+      - Usage
+    must_not_contain:
+      - Traceback
+    tags: [smoke]
+
+  - id: cli-go.help.top
+    title: defenseclaw-gateway --help
+    surface: go-cli
+    feature: help.basic
+    command: defenseclaw-gateway --help
+    expected_exit_code: 0
+    expected_substrings:
+      - Usage
+    must_not_contain:
+      - panic
+    tags: [smoke]
+
+  - id: cli-py.unknown-command
+    title: unknown subcommand surfaces a clear error
+    surface: python-cli
+    feature: help.basic
+    command: defenseclaw not-a-real-subcommand
+    expected_exit_code: 2
+    must_not_contain:
+      - Traceback
+    tags: [error-path]
+    expected_to_fail_at:
+      - cli-registry
+
+  - id: cli-go.unknown-command
+    title: gateway unknown subcommand surfaces a clear error
+    surface: go-cli
+    feature: help.basic
+    command: defenseclaw-gateway not-a-real-subcommand
+    expected_exit_code: 1
+    must_not_contain:
+      - panic
+    tags: [error-path]
+    expected_to_fail_at:
+      - cli-registry

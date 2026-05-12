@@ -1,0 +1,92 @@
+cases:
+  - id: cli-py.skill.list.basic
+    title: defenseclaw skill list returns enrolled skills
+    surface: python-cli
+    feature: skill.list
+    command: defenseclaw skill list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/setup/skill-scanner.mdx
+      - docs-site/content/docs/reference/cli.mdx
+
+  - id: cli-py.skill.list.json
+    title: defenseclaw skill list --json shape is documented
+    surface: python-cli
+    feature: skill.list
+    command: defenseclaw skill list --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "["
+    tags: [json]
+    notes_for_agent: |
+      Must parse as JSON array. Each element should at minimum carry
+      a name/id, source, and status field.
+
+  - id: cli-py.skill.scan.benign
+    title: defenseclaw skill scan against a benign fixture
+    surface: python-cli
+    feature: skill.scan
+    command: defenseclaw skill scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('skills', 'benign'))")
+    expected_exit_code: 0
+    must_not_contain:
+      - injection
+      - secret
+    notes_for_agent: |
+      The benign fixture is a SHIPPED skill manifest with no malicious content.
+      Verdict pass requires zero findings (or only informational-severity ones).
+
+  - id: cli-py.skill.scan.malicious
+    title: defenseclaw skill scan against a seeded prompt-injection fixture
+    surface: python-cli
+    feature: skill.scan
+    command: defenseclaw skill scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('skills', 'prompt-injection'))")
+    expected_substrings:
+      - injection
+    notes_for_agent: |
+      Verdict pass requires the scanner to surface at least one finding mentioning
+      prompt injection. If the scanner CLI is not installed, set verdict=blocked.
+    tags: [scanning, clawshield]
+
+  - id: cli-py.skill.scan.missing-path
+    title: defenseclaw skill scan rejects a missing path with a clear error
+    surface: python-cli
+    feature: skill.scan
+    command: defenseclaw skill scan /tmp/does-not-exist-$RANDOM
+    expected_exit_code: 1
+    expected_substrings:
+      - not found
+    must_not_contain:
+      - Traceback
+    tags: [error-path]
+
+  - id: cli-py.skill.block.unblock
+    title: defenseclaw skill block then unblock toggles enforce state
+    surface: python-cli
+    feature: skill.enforce
+    command: |
+      set -e
+      SKILL=$(defenseclaw skill list --json | python -c "import json,sys; d=json.load(sys.stdin); print(d[0]['name'])" || echo "")
+      [ -z "$SKILL" ] && { echo "no skills"; exit 0; }
+      defenseclaw skill block "$SKILL"
+      defenseclaw skill list --json | grep -q '"status": *"blocked"'
+      defenseclaw skill unblock "$SKILL"
+    expected_exit_code: 0
+    human_review_required: true
+    notes_for_agent: |
+      Multi-step state mutation. Take a snapshot before and after. If no skills are
+      enrolled, set verdict=skip with reasoning="no skills present to exercise enforce flow".
+    tags: [enforce]
+
+  - id: cli-py.skill.info.bad-id
+    title: defenseclaw skill info <unknown> errors cleanly
+    surface: python-cli
+    feature: skill.info
+    command: defenseclaw skill info no-such-skill-xyz
+    expected_exit_code: 1
+    expected_substrings:
+      - not found
+    must_not_contain:
+      - Traceback
+    tags: [error-path]

@@ -1,0 +1,54 @@
+cases:
+  - id: cli-py.plugin.list.basic
+    title: defenseclaw plugin list returns enrolled plugins
+    surface: python-cli
+    feature: plugin.list
+    command: defenseclaw plugin list
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.plugin.list.json
+    title: defenseclaw plugin list --json shape
+    surface: python-cli
+    feature: plugin.list
+    command: defenseclaw plugin list --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "["
+    tags: [json]
+
+  - id: cli-py.plugin.scan.fixture
+    title: defenseclaw plugin scan against the shipped fixture
+    surface: python-cli
+    feature: plugin.scan
+    command: defenseclaw plugin scan $(python -c "import dctest.prompt_loader as p; print(p.fixtures_path('plugins', 'sample'))")
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+    docs_site_refs:
+      - docs-site/content/docs/reference/cli.mdx
+
+  - id: cli-py.plugin.scan.missing-path
+    title: defenseclaw plugin scan errors on missing path
+    surface: python-cli
+    feature: plugin.scan
+    command: defenseclaw plugin scan /nonexistent/path-$RANDOM
+    expected_exit_code: 1
+    expected_substrings:
+      - not found
+    must_not_contain:
+      - Traceback
+    tags: [error-path]
+
+  - id: cli-py.plugin.info.bad-id
+    title: defenseclaw plugin info <unknown> errors cleanly
+    surface: python-cli
+    feature: plugin.info
+    command: defenseclaw plugin info no-such-plugin-xyz
+    expected_exit_code: 1
+    expected_substrings:
+      - not found
+    must_not_contain:
+      - Traceback
+    tags: [error-path]

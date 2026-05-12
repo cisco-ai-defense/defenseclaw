@@ -1,0 +1,47 @@
+cases:
+  - id: cli-py.config.path
+    title: defenseclaw config path prints absolute config file path
+    surface: python-cli
+    feature: cli.config
+    command: defenseclaw config path
+    expected_exit_code: 0
+    expected_substrings:
+      - config.yaml
+
+  - id: cli-py.config.show
+    title: defenseclaw config show prints current config
+    surface: python-cli
+    feature: cli.config
+    command: defenseclaw config show
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+      - sk-
+      - "ANTHROPIC_API_KEY="
+    notes_for_agent: |
+      The config should never echo raw API keys. If the agent sees an
+      `sk-...` substring or other unredacted secret, set verdict=fail
+      regardless of other expectations.
+
+  - id: cli-py.config.validate
+    title: defenseclaw config validate accepts current config
+    surface: python-cli
+    feature: cli.config
+    command: defenseclaw config validate
+    expected_exit_code: 0
+    must_not_contain:
+      - Traceback
+
+  - id: cli-py.config.show-json
+    title: defenseclaw config show --json round-trips
+    surface: python-cli
+    feature: cli.config
+    command: defenseclaw config show --json
+    expected_exit_code: 0
+    expected_substrings:
+      - "{"
+    tags: [json]
+    must_not_contain:
+      - "sk-"
+    expected_to_fail_at:
+      - cli-registry
