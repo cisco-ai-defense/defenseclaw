@@ -339,10 +339,17 @@ func ClientIPRedacted(r *http.Request) string {
 // records HTTP semantic attributes. Inner middleware should call
 // enrichHTTPSpanFromContext so defenseclaw.* correlation fields land on
 // the same span.
+//
+// SECURITY (Plan B5): the path-token OTLP endpoint encodes the master gateway
+// bearer token as a URL segment, so the route AND the url.path attribute MUST
+// be sanitized before any backend sees them. Failing to sanitize would leak
+// the master credential into whatever observability sink the gateway exports
+// to. See sanitizeRouteForTelemetry in otel_ingest.go.
 func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler {
 	tracer := otel.Tracer("defenseclaw")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		route := r.URL.Path
+		safePath := sanitizeRouteForTelemetry(r.URL.Path)
+		route := safePath
 		if r.Pattern != "" {
 			route = r.Pattern
 		}
@@ -374,7 +381,7 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 		} else if host != "" {
 			span.SetAttributes(semconv.ServerAddressKey.String(host))
 		}
-		span.SetAttributes(semconv.URLPath(r.URL.Path))
+		span.SetAttributes(semconv.URLPath(safePath))
 		q := r.URL.RawQuery
 		if q != "" {
 			span.SetAttributes(semconv.URLQuery(sanitizeQueryForSpan(q)))

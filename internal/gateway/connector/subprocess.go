@@ -132,6 +132,11 @@ var genericHookScripts = []string{
 var connectorHookScripts = map[string][]string{
 	"claudecode": {"claude-code-hook.sh"},
 	"codex":      {"codex-hook.sh"},
+	"copilot":    {"copilot-hook.sh"},
+	"cursor":     {"cursor-hook.sh"},
+	"geminicli":  {"geminicli-hook.sh"},
+	"hermes":     {"hermes-hook.sh"},
+	"windsurf":   {"windsurf-hook.sh"},
 }
 
 // hookScripts returns the full list of hook scripts (generic + all
@@ -290,8 +295,7 @@ func writeHookHelpers(hookDir string) error {
 //   - inspect-request.sh       (pre-request)
 //   - inspect-response.sh      (post-response)
 //   - inspect-tool-response.sh (post-tool)
-//   - claude-code-hook.sh      (Claude Code lifecycle events)
-//   - codex-hook.sh            (Codex lifecycle events)
+//   - connector-specific lifecycle hooks listed in connectorHookScripts
 //
 // Plan B4: the shared _hardening.sh helper is also written so each
 // hook can `source` it at runtime to pick up the rlimit + env
@@ -450,6 +454,10 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     "closed" too. This only fires when the operator never made
 //     an explicit choice.
 //  3. Otherwise: defaultHookFailMode ("open").
+//  4. Hook-only connectors may use explicit "closed" only when their
+//     documented hook surface supports fail-closed behavior. Unsupported
+//     connectors stay fail-open and rely on their config writer to omit
+//     vendor fail-closed fields.
 //
 // Transport-layer failures (gateway unreachable / 5xx) are NOT
 // governed by FailMode — they always allow unless the operator opts
@@ -479,6 +487,12 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 			if opts.ClaudeCodeEnforcement {
 				failMode = "closed"
 			}
+		}
+	}
+	if hp, ok := c.(HookCapabilityProvider); ok {
+		caps := hp.HookCapabilities(opts)
+		if failMode == "closed" && !caps.SupportsFailClosed {
+			failMode = "open"
 		}
 	}
 	return writeHookScriptsCommonWithFailMode(hookDir, opts.APIAddr, opts.APIToken, failMode, extras)
@@ -599,22 +613,55 @@ func SetupSubprocessEnforcement(policy SubprocessPolicy, opts SetupOpts) error {
 	return nil
 }
 
-// TeardownSubprocessEnforcement removes shim scripts, individual hook scripts,
-// and sandbox policies. It removes files by name rather than nuking the shared
-// hooks/ directory, which may be used by other active connectors.
+// TeardownSubprocessEnforcement removes shim scripts and the sandbox
+// policy file. It deliberately does NOT touch the shared hooks/
+// directory anymore: the previous implementation iterated the GLOBAL
+// `hookScripts` slice (= every connector's *-hook.sh + every generic
+// inspect-*.sh) and deleted them all from the shared dir. When called
+// from one connector's Teardown — e.g. claudecode.Teardown during a
+// claudecode → codex switch — that wiped scripts owned by the
+// incoming connector AND the shared inspect-*.sh helpers. If the
+// follow-up codex.Setup() then failed to re-write codex-hook.sh
+// (silent partial install, mtime race, hostFS read miss, etc.), the
+// agent ended up with an empty hooks/ dir and every hook invocation
+// failed with exit 127 ("command not found").
+//
+// Per-connector hook removal is now the responsibility of each
+// Connector.Teardown via removeOwnedHookScripts, which scopes
+// deletion to the calling connector's own *-hook.sh basenames
+// (HookScriptOwner.HookScriptNames) and leaves the shared
+// inspect-*.sh helpers in place.
 func TeardownSubprocessEnforcement(opts SetupOpts) error {
 	shimDir := filepath.Join(opts.DataDir, "shims")
 	_ = os.RemoveAll(shimDir)
-
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	for _, name := range hookScripts {
-		_ = os.Remove(filepath.Join(hookDir, name))
-	}
 
 	policyPath := filepath.Join(opts.DataDir, "policies", "defenseclaw-policy.yaml")
 	_ = os.Remove(policyPath)
 
 	return nil
+}
+
+// removeOwnedHookScripts removes ONLY the hook scripts the calling
+// connector owns. Generic inspect-*.sh scripts and other connectors'
+// *-hook.sh files are intentionally left in place — they're either
+// shared infrastructure or owned by a different connector that may
+// still be active or about to become active. Removing them here is
+// what produced the exit-127 "command not found" bug during
+// connector switches.
+//
+// If c is nil or does not implement HookScriptOwner this is a no-op.
+func removeOwnedHookScripts(opts SetupOpts, c Connector) {
+	if c == nil {
+		return
+	}
+	owner, ok := c.(HookScriptOwner)
+	if !ok {
+		return
+	}
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	for _, name := range owner.HookScriptNames(opts) {
+		_ = os.Remove(filepath.Join(hookDir, name))
+	}
 }
 
 // ShimBinaries returns the list of binary names that are shimmed.

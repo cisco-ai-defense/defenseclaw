@@ -54,12 +54,12 @@ func TestHandleSkillsKey_B_RoutesToCLI(t *testing.T) {
 		Status: "active",
 	})
 	newM, cmd := m.handleSkillsKey(pressKey("b"))
-	if cmd == nil {
+	mm := newM.(Model)
+	if cmd == nil && !mm.commandPreview.Active {
 		t.Fatal("pressing 'b' must dispatch `defenseclaw skill block`, not mutate local state")
 	}
-	mm := newM.(Model)
-	if mm.activePanel != PanelActivity {
-		t.Errorf("pressing 'b' should switch to PanelActivity so output is visible, got %d", mm.activePanel)
+	if cmd != nil && mm.activePanel != PanelActivity {
+		t.Errorf("pressing 'b' should switch to PanelActivity when it runs immediately, got %d", mm.activePanel)
 	}
 }
 
@@ -71,8 +71,9 @@ func TestHandleSkillsKey_A_RoutesToCLI(t *testing.T) {
 		Name:   "tutor",
 		Status: "active",
 	})
-	_, cmd := m.handleSkillsKey(pressKey("a"))
-	if cmd == nil {
+	newM, cmd := m.handleSkillsKey(pressKey("a"))
+	mm := newM.(Model)
+	if cmd == nil && !mm.commandPreview.Active {
 		t.Fatal("'a' must dispatch `defenseclaw skill allow` for any status")
 	}
 }
@@ -110,7 +111,8 @@ func TestExecuteActionMenuItem_SkillDispatch(t *testing.T) {
 	for key := range seen {
 		key := key
 		t.Run("key_"+key, func(t *testing.T) {
-			if cmd := m.executeActionMenuItem(key); cmd == nil {
+			next, cmd := m.executeActionMenuItem(key)
+			if cmd == nil && !next.commandPreview.Active {
 				t.Fatalf("executeActionMenuItem(%q) returned nil — every SkillActions key must map to a CLI verb", key)
 			}
 		})
@@ -127,7 +129,8 @@ func TestExecuteActionMenuItem_SkillDispatch_NilSelectionSafe(t *testing.T) {
 	m := New(Deps{Config: &config.Config{}})
 	m.activePanel = PanelSkills
 	for _, k := range []string{"b", "a", "u", "d", "e", "q", "r", "n", "s", "i"} {
-		if cmd := m.executeActionMenuItem(k); cmd != nil {
+		next, cmd := m.executeActionMenuItem(k)
+		if cmd != nil || next.commandPreview.Active {
 			t.Errorf("executeActionMenuItem(%q) must be a no-op when no skill is selected", k)
 		}
 	}

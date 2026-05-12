@@ -19,6 +19,8 @@ package tui
 import (
 	"fmt"
 	"strings"
+
+	"charm.land/lipgloss/v2"
 )
 
 // ActionItem represents a single action in the contextual menu.
@@ -92,6 +94,27 @@ func (m *ActionMenu) CursorDown() {
 	if m.cursor < len(m.actions)-1 {
 		m.cursor++
 	}
+}
+
+// ActionAt returns the action key under a terminal coordinate, using the
+// same boxed layout as View. It also moves the keyboard cursor to the
+// clicked row so mouse and keyboard state stay in sync.
+func (m *ActionMenu) ActionAt(x, y int) (string, bool) {
+	if !m.visible {
+		return "", false
+	}
+	view := m.View()
+	rect := newClickBox("menu", 0, 0, lipgloss.Width(view), lipgloss.Height(view))
+	if !rect.contains(x, y) {
+		return "", false
+	}
+	actionStartY := 4 // border + top padding + title + separator
+	idx := y - actionStartY
+	if idx < 0 || idx >= len(m.actions) {
+		return "", true
+	}
+	m.cursor = idx
+	return m.actions[idx].Key, true
 }
 
 // View renders the action menu.
@@ -318,10 +341,8 @@ func ToolActions(status string) []ActionItem {
 }
 
 // MCPActions returns the action items for an MCP server based on its
-// current status. The connector argument is the active agent framework
-// (openclaw / zeptoclaw / claudecode / codex) so the "Unset" item's
-// description names the right config file (openclaw config, ~/.claude/
-// settings.json, ./.mcp.json, ~/.zeptoclaw/config.json), and so we can
+// current status. The connector argument is the active agent framework,
+// so the "Unset" item's description names the right config file and so we can
 // surface a clear "read-only" hint for ZeptoClaw which does not
 // support MCP write through the CLI (connector_paths.set_mcp_server
 // raises MCPWriteUnsupportedError for it).
@@ -367,6 +388,16 @@ func mcpUnsetTargetForConnector(connector string) string {
 		return "./.mcp.json"
 	case "zeptoclaw":
 		return "~/.zeptoclaw/config.json"
+	case "hermes":
+		return "~/.hermes/config.yaml"
+	case "cursor":
+		return "./.cursor/mcp.json"
+	case "windsurf":
+		return "~/.codeium/windsurf/mcp_config.json"
+	case "geminicli":
+		return "~/.gemini/settings.json"
+	case "copilot":
+		return "./.github/mcp.json"
 	default:
 		return "OpenClaw config"
 	}

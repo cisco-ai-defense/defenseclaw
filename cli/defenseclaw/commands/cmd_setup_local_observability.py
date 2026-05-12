@@ -40,6 +40,12 @@ from typing import Any
 import click
 
 from defenseclaw import ux
+from defenseclaw.bundle_refresh import (
+    LOCAL_OBSERVABILITY_COMPOSE_PROJECT,
+    RefreshResult,
+    is_compose_project_running,
+    refresh_local_observability_stack,
+)
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import local_observability_bridge_bin
@@ -63,6 +69,21 @@ _STACK_PORTS: tuple[tuple[int, str], ...] = (
     (4317, "OTLP gRPC"),
     (4318, "OTLP HTTP"),
     (9090, "Prometheus"),
+)
+# Compose project + per-service container names. Kept in lock-step
+# with bundles/local_observability_stack/docker-compose.yml — the
+# preflight uses these to spot a container that shares a service name
+# but was not created by our compose project (e.g. left over from a
+# stray ``docker run --name defenseclaw-grafana`` during ad-hoc
+# debugging) so we can warn instead of letting ``compose up`` abort
+# midway with "Conflict. The container name ... is already in use".
+_COMPOSE_PROJECT = "defenseclaw-observability"
+_STACK_CONTAINERS: tuple[str, ...] = (
+    "defenseclaw-otel-collector",
+    "defenseclaw-prometheus",
+    "defenseclaw-loki",
+    "defenseclaw-tempo",
+    "defenseclaw-grafana",
 )
 
 
@@ -154,6 +175,31 @@ def local_observability(ctx: click.Context) -> None:
         "untouched (e.g. when a different SIEM owns the audit pipeline)."
     ),
 )
+@click.option(
+    "--refresh-bundle/--no-refresh-bundle",
+    "refresh_bundle",
+    default=True,
+    show_default=True,
+    help=(
+        "Before starting the stack, refresh ~/.defenseclaw/observability-stack/ "
+        "from the wheel/repo bundle so newly-shipped bridge / compose changes "
+        "take effect. Operator-editable surfaces (Grafana dashboards, Prometheus "
+        "rules, Loki/Tempo/OTel-Collector configs) are preserved unless "
+        "--refresh-config is also passed. If the stack is already running, it "
+        "will be stopped, refreshed, and restarted automatically."
+    ),
+)
+@click.option(
+    "--refresh-config",
+    "refresh_config",
+    is_flag=True,
+    default=False,
+    help=(
+        "When refreshing the bundle, also overwrite operator-editable surfaces "
+        "(grafana/, prometheus/, loki/, tempo/, otel-collector/). Destructive "
+        "to local dashboard / rule / config edits — opt-in only."
+    ),
+)
 @pass_ctx
 def up_cmd(
     app: AppContext,
@@ -164,10 +210,18 @@ def up_cmd(
     signals: str,
     service_name: str,
     with_audit_sink: bool,
+    refresh_bundle: bool,
+    refresh_config: bool,
 ) -> None:
     """Start the stack, wait for readiness, and wire the gateway config."""
     if not _preflight_docker():
         raise SystemExit(1)
+
+    if refresh_bundle:
+        _refresh_and_maybe_restart_local_observability(
+            app.cfg.data_dir,
+            refresh_config=refresh_config,
+        )
 
     bridge = _resolve_bridge(app.cfg.data_dir)
 
@@ -363,6 +417,86 @@ def _resolve_bridge(data_dir: str) -> str:
     return bridge
 
 
+def _refresh_and_maybe_restart_local_observability(
+    data_dir: str,
+    *,
+    refresh_config: bool,
+) -> RefreshResult:
+    """Refresh the seeded observability stack, stopping any running stack first.
+
+    Sequence:
+
+    1. Detect a running ``defenseclaw-observability`` compose project.
+    2. If running and the bridge binary exists, invoke ``bridge down``
+       so the compose project releases its container names. Volumes
+       (Grafana / Prometheus / Loki / Tempo data) survive ``down`` so
+       the operator's history is preserved across the bounce.
+    3. Refresh ``~/.defenseclaw/observability-stack/`` from the bundle.
+       Operator-editable config surfaces (dashboards, rules, OTel
+       collector config) are preserved by default; pass
+       ``refresh_config=True`` to also overwrite them.
+    4. The caller then runs ``bridge up`` so the freshly refreshed
+       bundle is what materializes the next stack.
+
+    Best-effort throughout: refresh failures or a missing bundle are
+    surfaced as warnings, never raised — the operator can still bring
+    the stack up against the existing seeded copy.
+    """
+    was_running = is_compose_project_running(LOCAL_OBSERVABILITY_COMPOSE_PROJECT)
+    stopped = False
+    if was_running:
+        click.echo(
+            f"  {ux.dim('→')} Stopping running observability stack to refresh bundle..."
+        )
+        bridge = local_observability_bridge_bin(data_dir)
+        if bridge:
+            try:
+                subprocess.run(
+                    [bridge, "down"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    check=False,
+                )
+                stopped = True
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                click.echo(f"    warning: could not stop stack: {exc}")
+        else:
+            click.echo(
+                "    warning: bridge binary missing — cannot stop stack cleanly. "
+                "Run 'defenseclaw init' to seed."
+            )
+
+    result = refresh_local_observability_stack(
+        data_dir, refresh_config=refresh_config,
+    )
+    result.was_running = was_running
+    result.stopped = stopped
+
+    if result.skipped_reason:
+        click.echo(
+            f"  {ux.dim('→')} Bundle refresh skipped: {result.skipped_reason}"
+        )
+        return result
+    if result.errors:
+        for err in result.errors[:3]:
+            click.echo(f"  warning: refresh: {err}")
+    if result.refreshed:
+        count = len(result.refreshed_paths)
+        preserved_count = len(result.preserved_paths)
+        click.echo(
+            f"  {ux.bold('Bundle refreshed:')} ~/.defenseclaw/observability-stack/ "
+            f"({count} file{'s' if count != 1 else ''} updated, "
+            f"{preserved_count} preserved)"
+        )
+    else:
+        click.echo(
+            f"  {ux.dim('→')} Bundle refresh: no changes "
+            "(seeded copy already matches bundle)"
+        )
+    return result
+
+
 def _run_bridge_up(
     bridge: str, *, timeout: int, no_wait: bool,
 ) -> dict[str, Any] | None:
@@ -390,13 +524,35 @@ def _run_bridge_up(
         click.echo(f"  error: could not execute bridge: {exc}", err=True)
         return None
 
+    # Surface bridge stderr (e.g. orphan-container reconcile lines)
+    # whether the run succeeded or failed — silently dropping them
+    # made it impossible to tell why a previously-broken stack
+    # suddenly worked on the next try.
+    for line in (result.stderr or "").splitlines():
+        if line.startswith("reconcile:"):
+            click.echo(f"  {ux.dim('→')} {line}")
+
     if result.returncode != 0:
         click.echo(
             f"  error: bridge failed (exit {result.returncode})",
             err=True,
         )
-        for line in (result.stderr or result.stdout or "").splitlines()[:10]:
+        for line in (result.stderr or result.stdout or "").splitlines()[:20]:
+            if line.startswith("reconcile:"):
+                continue  # already surfaced above
             click.echo(f"    {line}", err=True)
+        # Hint operators at the most common cause now that we
+        # auto-reconcile orphan containers — if compose still failed,
+        # they likely have a *running* foreign container holding the
+        # name (which we deliberately don't auto-kill).
+        click.echo(
+            "  hint: if a non-stack process is holding a "
+            "defenseclaw-* container name (run `docker ps -a "
+            "--filter name=defenseclaw-`), stop it manually before "
+            "retrying, or run `defenseclaw setup local-observability "
+            "reset` to wipe and recreate.",
+            err=True,
+        )
         return None
 
     raw = (result.stdout or "").strip()
@@ -561,6 +717,21 @@ def _preflight_docker() -> bool:
             return False
         ux.ok(f"Port {port} ({label})... available")
 
+    # Look for orphan containers — same name as one of our compose
+    # services but no compose project label (left behind by a stray
+    # ``docker run --name=defenseclaw-grafana ...`` or by an
+    # interrupted ``compose up`` that recreated 4 of 5 services
+    # before bailing). The bridge will ``docker rm -f`` them
+    # transparently in its own ``up`` step; we surface the count
+    # here so the operator sees what happened.
+    orphans = _find_orphan_containers()
+    if orphans:
+        ux.warn(
+            f"Found {len(orphans)} orphan container(s): "
+            f"{', '.join(orphans)} — will reconcile via `docker rm -f` "
+            f"before `compose up`.",
+        )
+
     return True
 
 
@@ -570,12 +741,58 @@ def _port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+def _find_orphan_containers() -> list[str]:
+    """Return the names of containers that share a name with one of our
+    compose services but are NOT labelled as part of our compose
+    project. Best-effort: returns an empty list if Docker is
+    unreachable.
+
+    Empty/missing label is the common case — operators (and prior
+    versions of this CLI) sometimes did ``docker run --name
+    defenseclaw-grafana ...`` to manually iterate on Grafana's bind
+    mounts; a foreign label is what you get when the container was
+    started by a *different* compose project that also named itself
+    ``defenseclaw-X``. Both cause ``docker compose up`` to abort with
+    a name conflict, so we treat them identically.
+    """
+    orphans: list[str] = []
+    for name in _STACK_CONTAINERS:
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "inspect",
+                    "--format",
+                    '{{index .Config.Labels "com.docker.compose.project"}}',
+                    name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return []
+        if result.returncode != 0:
+            # Container does not exist — nothing to reconcile.
+            continue
+        owner = (result.stdout or "").strip()
+        if owner != _COMPOSE_PROJECT:
+            orphans.append(name)
+    return orphans
+
+
 def _port_owned_by_stack(port: int) -> bool:
     """Return True if ``port`` is bound by a defenseclaw-observability container.
 
     Best-effort — returns False if Docker is unreachable. Prevents the
     preflight from falsely blocking a re-invocation of ``up`` while the
     stack is already healthy.
+
+    Handles both single-port (``127.0.0.1:4317->4317/tcp``) and ranged
+    (``127.0.0.1:4317-4318->4317-4318/tcp``) port publish formats. The
+    otel-collector publishes ``4317`` and ``4318`` as a range, so the
+    older single-port substring match silently said "no" for half of
+    our own services.
     """
     try:
         result = subprocess.run(
@@ -583,7 +800,7 @@ def _port_owned_by_stack(port: int) -> bool:
                 "docker",
                 "ps",
                 "--filter",
-                "label=com.docker.compose.project=defenseclaw-observability",
+                f"label=com.docker.compose.project={_COMPOSE_PROJECT}",
                 "--format",
                 "{{.Ports}}",
             ],
@@ -595,8 +812,58 @@ def _port_owned_by_stack(port: int) -> bool:
         return False
     if result.returncode != 0:
         return False
-    needle = f":{port}->"
-    return needle in (result.stdout or "")
+    return _ports_contains(result.stdout or "", port)
+
+
+def _ports_contains(ports_blob: str, port: int) -> bool:
+    """Parse ``docker ps --format {{.Ports}}`` output and return True if
+    ``port`` falls inside any published mapping.
+
+    Each entry in the comma-separated blob looks like:
+
+      ``[host_ip:]host_port[->container_port][/proto]``
+
+    where ``host_port`` (and ``container_port``) may be a single number
+    or an inclusive ``low-high`` range. We treat the host_port side as
+    authoritative because that is what the OS port-conflict check sees.
+    """
+    # Each docker ps row is one line; within a row services can publish
+    # multiple comma-separated mappings. Split on both newlines and
+    # commas before parsing each individual mapping.
+    for line in ports_blob.splitlines():
+        for raw in (entry.strip() for entry in line.split(",")):
+            if not raw:
+                continue
+            # Strip any trailing "/tcp" / "/udp".
+            raw = raw.split("/", 1)[0]
+            # Only published mappings (the ones with ``host->container``)
+            # take a host port. An entry like ``55678-55679`` is a
+            # container-internal port that no host process can collide
+            # with, so we deliberately skip it.
+            if "->" not in raw:
+                continue
+            # Strip the "->container_port" half, keeping just the host side.
+            host_side = raw.split("->", 1)[0]
+            # Drop the optional host IP, e.g. "127.0.0.1:4317".
+            host_port_str = host_side.rsplit(":", 1)[-1]
+            if not host_port_str:
+                continue
+            if "-" in host_port_str:
+                low_str, _, high_str = host_port_str.partition("-")
+                try:
+                    low = int(low_str)
+                    high = int(high_str)
+                except ValueError:
+                    continue
+                if low <= port <= high:
+                    return True
+            else:
+                try:
+                    if int(host_port_str) == port:
+                        return True
+                except ValueError:
+                    continue
+    return False
 
 
 def _parse_signals(raw: str) -> tuple[str, ...]:

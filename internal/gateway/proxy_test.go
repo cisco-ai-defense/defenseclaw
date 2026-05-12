@@ -194,29 +194,6 @@ func mustJSON(t *testing.T, v interface{}) []byte {
 	return b
 }
 
-func hiltIDFromApprovalMessage(t *testing.T, msg string) string {
-	t.Helper()
-	const marker = "approve "
-	idx := strings.Index(msg, marker+"hilt-")
-	if idx < 0 {
-		t.Fatalf("approval message %q does not contain approve hilt-* instruction", msg)
-	}
-	rest := msg[idx+len(marker):]
-	end := 0
-	for end < len(rest) {
-		c := rest[end]
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' {
-			end++
-			continue
-		}
-		break
-	}
-	if end == 0 {
-		t.Fatalf("approval message %q does not contain a HILT id", msg)
-	}
-	return rest[:end]
-}
-
 // parseSSEChunks reads SSE data lines from the response body.
 func parseSSEChunks(t *testing.T, body io.Reader) []json.RawMessage {
 	t.Helper()

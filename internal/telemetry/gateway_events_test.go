@@ -379,7 +379,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 		TenantID:          "tenant-contract",
 		WorkspaceID:       "workspace-contract",
 		Environment:       "prod",
-		DeploymentMode:    "managed",
+		DeploymentMode:    "managed_enterprise",
 		DiscoverySource:   "registry",
 		SchemaVersion:     7,
 		ContentHash:       "hash-contract",
@@ -415,7 +415,7 @@ func TestEmitGatewayEvent_LogAttributeContract(t *testing.T) {
 	assertAttrString(t, rec, "tenant.id", "tenant-contract")
 	assertAttrString(t, rec, "workspace.id", "workspace-contract")
 	assertAttrString(t, rec, "deployment.environment", "prod")
-	assertAttrString(t, rec, "deployment.mode", "managed")
+	assertAttrString(t, rec, "deployment.mode", "managed_enterprise")
 	assertAttrString(t, rec, "discovery.source", "registry")
 	assertAttrString(t, rec, "defenseclaw.content_hash", "hash-contract")
 	assertAttrString(t, rec, "defenseclaw.binary_version", "bin-contract")

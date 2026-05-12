@@ -17,3 +17,33 @@ services:
       - /opt/splunk/var
       - ../splunk/default.yml:/tmp/defaults/default.yml:ro
       - ../splunk:/opt/splunk-claw-bridge/splunk:ro
+
+  splunk-s3-exporter:
+    profiles:
+      - s3-export
+    build:
+      context: ../s3_exporter
+    depends_on:
+      - splunk
+    environment:
+      S3_EXPORT_ENABLED: "${S3_EXPORT_ENABLED:-false}"
+      S3_EXPORT_ONCE: "${S3_EXPORT_ONCE:-false}"
+      S3_BUCKET: "${S3_BUCKET:-}"
+      S3_PREFIX: "${S3_PREFIX:-agentwatch/defenseclaw}"
+      AWS_REGION: "${AWS_REGION:-us-west-2}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      S3_ENDPOINT_URL: "${S3_ENDPOINT_URL:-}"
+      S3_SSE: "${S3_SSE:-AES256}"
+      SPLUNK_BASE_URL: "https://splunk:8089"
+      SPLUNK_VERIFY_TLS: "false"
+      TENANT_ID: "${TENANT_ID:-c3-demo-tenant}"
+      WORKSPACE_ID: "${WORKSPACE_ID:-workspace-demo}"
+      DEPLOYMENT_ENVIRONMENT: "${DEPLOYMENT_ENVIRONMENT:-local}"
+      S3_EXPORT_INTERVAL_SECONDS: "${S3_EXPORT_INTERVAL_SECONDS:-60}"
+      S3_EXPORT_WINDOW_SECONDS: "${S3_EXPORT_WINDOW_SECONDS:-300}"
+      S3_EXPORT_LOOKBACK_SECONDS: "${S3_EXPORT_LOOKBACK_SECONDS:-30}"
+      S3_EXPORT_CHECKPOINT_FILE: "/state/checkpoint.json"
+    volumes:
+      - /state

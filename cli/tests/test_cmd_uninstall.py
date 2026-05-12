@@ -46,10 +46,23 @@ def capture_click_output():
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.commands import cmd_uninstall
+from defenseclaw.commands import cmd_uninstall  # noqa: E402  (sys.path tweak above)
 
 
 class BuildPlanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Same isolation rationale as BuildPlanConnectorTests: keep
+        # `_teardown_connectors` from picking up backup markers that
+        # only exist on the developer's machine.
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch(
+            "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+            return_value=self._tmp.name,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_defaults_preserve_data_and_binaries(self):
         plan = cmd_uninstall._build_plan(
             wipe_data=False,
@@ -163,6 +176,32 @@ class ResolveActiveConnectorTests(unittest.TestCase):
 
 
 class BuildPlanConnectorTests(unittest.TestCase):
+    """`_build_plan` connector resolution.
+
+    These tests exercise the data-dir-walking branch of
+    ``_teardown_connectors`` (it scans for backup-marker files like
+    ``connector_backups/claudecode/settings.json.json`` to detect
+    inactive connectors that DefenseClaw has touched in the past).
+    Without an isolated ``data_dir`` the test inherits whatever the
+    developer happens to have on disk under ``~/.defenseclaw`` —
+    that's how the suite started failing on machines where claudecode
+    had ever been wired up.
+
+    setUp() therefore points ``default_data_path`` at a fresh tempdir
+    so every test sees an empty marker tree and the assertions are
+    deterministic regardless of the real home directory.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        patcher = patch(
+            "defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+            return_value=self._tmp.name,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_plan_records_active_connector(self):
         class Guardrail:
             connector = "codex"
@@ -194,7 +233,10 @@ class BuildPlanConnectorTests(unittest.TestCase):
             guardrail = Guardrail()
             claw = Claw()
 
-        with patch("defenseclaw.commands.cmd_uninstall.config_module.load",
+        with tempfile.TemporaryDirectory() as data_dir, \
+             patch("defenseclaw.commands.cmd_uninstall.config_module.default_data_path",
+                   return_value=data_dir), \
+             patch("defenseclaw.commands.cmd_uninstall.config_module.load",
                    return_value=Cfg()):
             plan = cmd_uninstall._build_plan(
                 wipe_data=False,

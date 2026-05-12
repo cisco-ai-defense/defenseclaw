@@ -1,0 +1,422 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Refresh user-seeded bundle copies from the wheel/repo source.
+
+Both the local Splunk bridge (``~/.defenseclaw/splunk-bridge/``) and the
+local observability stack (``~/.defenseclaw/observability-stack/``) are
+seeded by ``defenseclaw init`` and *never* refreshed by it on a re-run
+(``init`` preserves the seeded copy so operator edits survive). That
+historically meant new bundle code shipped in the wheel — the v0.130
+``s3_exporter/`` sidecar, a fix to ``compose/docker-compose.local.yml``,
+a new dashboard — sat unused on disk forever.
+
+This module is the explicit, opt-out path for picking those up:
+
+* :func:`refresh_splunk_bridge` does an rsync-style overwrite of the
+  whole bridge, preserving only operator-secret files (``env/.env``)
+  and regenerated artefacts (``splunk/build/``). The Splunk bundle is
+  overwhelmingly maintainer-owned (compose, bin, app source,
+  ``s3_exporter/``); the only operator-overrideable Splunk runtime
+  state lives inside the persistent ``splunk_etc`` Docker volume,
+  which we never touch.
+
+* :func:`refresh_local_observability_stack` refreshes maintainer-owned
+  files (``bin/``, ``run.sh``, ``docker-compose.yml``) by default and
+  preserves operator-editable surfaces (Grafana dashboards, Prometheus
+  rules, Loki/Tempo/OTel-Collector configs). Pass
+  ``refresh_config=True`` for a wholesale refresh — that's destructive
+  to operator dashboard edits and so is opt-in.
+
+* :func:`is_compose_project_running` uses ``docker ps`` labels to spot
+  a running stack so callers can stop → refresh → restart in one
+  motion.
+
+All refresh writes go through a tmp dir + ``os.replace`` so a crash
+midway through a copy can't leave the seeded copy half-overwritten.
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from defenseclaw.paths import (
+    bundled_local_observability_dir,
+    bundled_splunk_bridge_dir,
+)
+
+# ---------------------------------------------------------------------------
+# Public dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RefreshResult:
+    """Outcome of a single refresh + (optional) restart cycle.
+
+    All paths are stored as the relative-to-bundle-root strings the
+    caller passed in (e.g. ``"compose/docker-compose.local.yml"``) so
+    they render cleanly in CLI status output.
+    """
+
+    bundle_kind: str
+    seeded_dest: str
+    bundle_source: str
+    refreshed: bool = False
+    refreshed_paths: list[str] = field(default_factory=list)
+    preserved_paths: list[str] = field(default_factory=list)
+    skipped_reason: str | None = None
+    was_running: bool = False
+    stopped: bool = False
+    restarted: bool = False
+    errors: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Splunk bridge refresh
+# ---------------------------------------------------------------------------
+
+
+# Files inside ``~/.defenseclaw/splunk-bridge/`` that the refresh must
+# never overwrite. ``env/.env`` carries the operator's SPLUNK_PASSWORD
+# (and any AWS creds for the s3_exporter sidecar), and ``splunk/build/``
+# is the generated tarball that ``package_local_mode_app.sh`` rebuilds
+# every ``up`` so there is no point in ferrying it across.
+_SPLUNK_BRIDGE_PRESERVE: tuple[str, ...] = (
+    "env/.env",
+    "splunk/build",
+)
+
+_SPLUNK_BRIDGE_DEST_REL: str = "splunk-bridge"
+
+
+def refresh_splunk_bridge(data_dir: str) -> RefreshResult:
+    """Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundled source.
+
+    Returns a :class:`RefreshResult` describing what changed. Never
+    raises for missing source / missing dest — the result captures
+    those as a ``skipped_reason`` so the CLI can render a soft
+    warning instead of crashing the setup flow.
+    """
+    bundle = bundled_splunk_bridge_dir()
+    dest = os.path.join(data_dir, _SPLUNK_BRIDGE_DEST_REL)
+    result = RefreshResult(
+        bundle_kind="splunk-bridge",
+        seeded_dest=dest,
+        bundle_source=str(bundle),
+    )
+
+    if not bundle.is_dir():
+        result.skipped_reason = f"bundled source missing ({bundle})"
+        return result
+
+    if not os.path.isdir(dest):
+        # No prior seed — fall back to a plain copytree. Keeps the
+        # refresh path safe to call before ``init`` has run.
+        try:
+            shutil.copytree(str(bundle), dest)
+        except OSError as exc:
+            result.errors.append(f"initial seed: {exc}")
+            return result
+        bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
+        if os.path.isfile(bridge_bin):
+            try:
+                os.chmod(bridge_bin, 0o755)
+            except OSError as exc:
+                result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+        result.refreshed = True
+        result.refreshed_paths.append("(initial seed)")
+        return result
+
+    refreshed, preserved, errors = _rsync_overwrite(
+        src=Path(bundle),
+        dest=Path(dest),
+        preserve=_SPLUNK_BRIDGE_PRESERVE,
+    )
+    result.refreshed_paths = refreshed
+    result.preserved_paths = preserved
+    result.errors = errors
+    result.refreshed = bool(refreshed)
+
+    bridge_bin = os.path.join(dest, "bin", "splunk-claw-bridge")
+    if os.path.isfile(bridge_bin):
+        try:
+            os.chmod(bridge_bin, 0o755)
+        except OSError as exc:
+            result.errors.append(f"chmod splunk-claw-bridge: {exc}")
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Local observability stack refresh
+# ---------------------------------------------------------------------------
+
+
+# Operator-editable surfaces — preserved unless the caller passes
+# ``refresh_config=True``. Each entry is a relative path inside
+# ``~/.defenseclaw/observability-stack/`` and may be a file or a
+# directory; ``_rsync_overwrite`` treats both correctly.
+_LOCAL_OBSERVABILITY_OPERATOR_PATHS: tuple[str, ...] = (
+    "grafana",
+    "prometheus",
+    "loki",
+    "tempo",
+    "otel-collector",
+)
+
+_LOCAL_OBSERVABILITY_DEST_REL: str = "observability-stack"
+
+
+def refresh_local_observability_stack(
+    data_dir: str,
+    *,
+    refresh_config: bool = False,
+) -> RefreshResult:
+    """Refresh ``~/.defenseclaw/observability-stack/`` from the bundle.
+
+    By default we refresh maintainer-owned files (``bin/``, ``run.sh``,
+    ``docker-compose.yml``) and preserve every operator-editable
+    surface listed in :data:`_LOCAL_OBSERVABILITY_OPERATOR_PATHS`. Set
+    ``refresh_config=True`` to also overwrite those — destructive to
+    Grafana dashboard / Prometheus rule edits, hence opt-in.
+    """
+    bundle = bundled_local_observability_dir()
+    dest = os.path.join(data_dir, _LOCAL_OBSERVABILITY_DEST_REL)
+    result = RefreshResult(
+        bundle_kind="observability-stack",
+        seeded_dest=dest,
+        bundle_source=str(bundle),
+    )
+
+    if not bundle.is_dir():
+        result.skipped_reason = f"bundled source missing ({bundle})"
+        return result
+
+    if not os.path.isdir(dest):
+        try:
+            shutil.copytree(str(bundle), dest)
+        except OSError as exc:
+            result.errors.append(f"initial seed: {exc}")
+            return result
+        _ensure_observability_executables(dest)
+        result.refreshed = True
+        result.refreshed_paths.append("(initial seed)")
+        return result
+
+    preserve: tuple[str, ...] = ()
+    if not refresh_config:
+        preserve = _LOCAL_OBSERVABILITY_OPERATOR_PATHS
+
+    refreshed, preserved, errors = _rsync_overwrite(
+        src=Path(bundle),
+        dest=Path(dest),
+        preserve=preserve,
+    )
+    result.refreshed_paths = refreshed
+    result.preserved_paths = preserved
+    result.errors = errors
+    result.refreshed = bool(refreshed)
+
+    _ensure_observability_executables(dest)
+    return result
+
+
+def _ensure_observability_executables(dest: str) -> None:
+    """Make the bridge entry points executable after a refresh.
+
+    Keeps parity with ``cmd_init._ensure_observability_stack_executables``
+    — re-implemented here so the refresh module has zero dependencies on
+    the (much larger) ``cmd_init`` import chain at import time.
+    """
+    for rel in (
+        os.path.join("bin", "openclaw-observability-bridge"),
+        "run.sh",
+    ):
+        path = os.path.join(dest, rel)
+        if os.path.isfile(path):
+            try:
+                os.chmod(path, 0o755)
+            except OSError:
+                # Non-fatal — the bridge will fail loudly on first
+                # invocation if it really lacks the +x bit, and we
+                # don't want refresh() to abort over a chmod hiccup.
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Compose-project running detection
+# ---------------------------------------------------------------------------
+
+
+# Compose project label values used by each bundle — kept in lockstep
+# with bundles/splunk_local_bridge/compose/docker-compose.local.yml
+# (``name:`` field) and bundles/local_observability_stack/docker-compose.yml.
+SPLUNK_COMPOSE_PROJECT: str = "defenseclaw-splunk-local"
+LOCAL_OBSERVABILITY_COMPOSE_PROJECT: str = "defenseclaw-observability"
+
+
+def is_compose_project_running(project_name: str, *, timeout: float = 5.0) -> bool:
+    """Return True if a docker-compose project has at least one running container.
+
+    Best-effort: returns False if Docker is missing/unreachable rather
+    than raising. Callers use this to decide whether to stop the stack
+    before refreshing the bundle on disk; a False here is correctly
+    interpreted as "nothing to stop".
+    """
+    if not shutil.which("docker"):
+        return False
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "ps",
+                "--filter",
+                f"label=com.docker.compose.project={project_name}",
+                "--filter",
+                "status=running",
+                "--format",
+                "{{.ID}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if result.returncode != 0:
+        return False
+    return bool((result.stdout or "").strip())
+
+
+# ---------------------------------------------------------------------------
+# rsync-style overwrite primitive
+# ---------------------------------------------------------------------------
+
+
+def _rsync_overwrite(
+    *,
+    src: Path,
+    dest: Path,
+    preserve: tuple[str, ...],
+) -> tuple[list[str], list[str], list[str]]:
+    """Copy every file from ``src`` over ``dest``, except ``preserve`` paths.
+
+    Returns ``(refreshed_paths, preserved_paths, errors)`` where each
+    list contains the source-relative paths actually touched / kept /
+    failed. ``preserve`` entries may be either files or directories;
+    a directory in ``preserve`` shields its entire subtree.
+
+    The copy goes through ``shutil.copy2 → tmp → os.replace`` per file
+    so a crash during the loop leaves each file either fully old or
+    fully new (never half-written). We do NOT prune dest-only files —
+    the seeded copy can have generated artefacts (e.g.
+    ``splunk/build/defenseclaw_local_mode.tgz``) that should outlive
+    the refresh.
+    """
+    refreshed: list[str] = []
+    preserved: list[str] = []
+    errors: list[str] = []
+
+    preserve_norm = tuple(p.strip("/") for p in preserve if p)
+
+    for root, dirs, files in os.walk(src):
+        rel_root = os.path.relpath(root, src)
+        if rel_root == ".":
+            rel_root = ""
+
+        # Prune directories that match a preserve entry so we don't
+        # descend into them at all. Track each as preserved so the
+        # caller can show what survived.
+        kept_dirs: list[str] = []
+        for d in dirs:
+            rel_dir = os.path.join(rel_root, d) if rel_root else d
+            if _path_is_preserved(rel_dir, preserve_norm):
+                preserved.append(rel_dir)
+                continue
+            kept_dirs.append(d)
+        dirs[:] = kept_dirs
+
+        for fname in files:
+            rel_file = os.path.join(rel_root, fname) if rel_root else fname
+            if _path_is_preserved(rel_file, preserve_norm):
+                preserved.append(rel_file)
+                continue
+
+            src_path = os.path.join(root, fname)
+            dest_path = os.path.join(str(dest), rel_file)
+            try:
+                os.makedirs(os.path.dirname(dest_path) or ".", exist_ok=True)
+                _atomic_copy_file(src_path, dest_path)
+            except OSError as exc:
+                errors.append(f"{rel_file}: {exc}")
+                continue
+            refreshed.append(rel_file)
+
+    return refreshed, preserved, errors
+
+
+def _path_is_preserved(rel: str, preserve: tuple[str, ...]) -> bool:
+    """Return True if ``rel`` exactly matches or is nested under any preserve entry."""
+    rel_norm = rel.strip("/")
+    for p in preserve:
+        if rel_norm == p:
+            return True
+        if rel_norm.startswith(p + "/"):
+            return True
+    return False
+
+
+def _atomic_copy_file(src_path: str, dest_path: str) -> None:
+    """``shutil.copy2`` to a same-directory tmp file, then ``os.replace``.
+
+    Preserves mode bits via ``copy2``. Same-directory tmp file is
+    required because ``os.replace`` is only atomic on the same
+    filesystem — a tmp in ``/tmp`` could land on a different mount
+    on Linux when ``data_dir`` is on an external volume.
+    """
+    dest_dir = os.path.dirname(dest_path) or "."
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".refresh-", dir=dest_dir,
+    )
+    os.close(fd)
+    try:
+        shutil.copy2(src_path, tmp_path)
+        os.replace(tmp_path, dest_path)
+    except OSError:
+        # Best-effort cleanup of the orphan tmp; re-raise so the
+        # caller logs the original failure.
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+__all__ = [
+    "LOCAL_OBSERVABILITY_COMPOSE_PROJECT",
+    "RefreshResult",
+    "SPLUNK_COMPOSE_PROJECT",
+    "is_compose_project_running",
+    "refresh_local_observability_stack",
+    "refresh_splunk_bridge",
+]

@@ -87,8 +87,8 @@ const (
 	// field on the audit row carries WARN / HIGH / CRITICAL.
 	ActionAlert Action = "alert"
 
-	// Connector observability ingress (codex / claudecode native
-	// telemetry). The OTLP-HTTP receiver in
+	// Connector observability ingress (native OTLP and hook telemetry).
+	// The OTLP-HTTP receiver in
 	// internal/gateway/otel_ingest.go persists one row per
 	// inbound batch so SIEM rollups can answer "is the connector
 	// reporting?" without scanning Loki/Tempo. We split by signal
@@ -100,6 +100,8 @@ const (
 	ActionOTelIngestMetrics   Action = "otel.ingest.metrics"
 	ActionOTelIngestTraces    Action = "otel.ingest.traces"
 	ActionOTelIngestMalformed Action = "otel.ingest.malformed"
+	ActionConnectorHook       Action = "connector-hook"
+	ActionAssetPolicy         Action = "asset-policy"
 
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
@@ -163,6 +165,8 @@ func AllActions() []Action {
 		ActionOTelIngestMetrics,
 		ActionOTelIngestTraces,
 		ActionOTelIngestMalformed,
+		ActionConnectorHook,
+		ActionAssetPolicy,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,

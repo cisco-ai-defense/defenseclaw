@@ -1,0 +1,116 @@
+---
+title: Approve risky tool calls before they fire
+description: HITL is the middle ground between observe and full enforcement. CRITICAL findings still block; HIGH findings pause for the operator. Native ask on Claude Code, Cursor, Copilot CLI, OpenClaw; downgraded confirm elsewhere.
+keywords:
+  - DefenseClaw HITL approval
+  - human in the loop AI agent
+  - DefenseClaw confirm verdict
+  - DefenseClaw native ask
+---
+
+HITL is for the messy middle: actions that *might* be fine, *usually* are fine, but occasionally aren't. CRITICAL findings still block unconditionally — operators are slow, and CRITICAL exists for a reason. HITL is what keeps HIGH findings from being a constant blocker.
+
+<Steps>
+
+<Step>
+
+### Pick a connector with native ask
+
+For the cleanest operator UX, pick a connector with native ask: [OpenClaw](/docs/connectors/openclaw), [Claude Code](/docs/connectors/claudecode) (PreToolUse), [Cursor](/docs/connectors/cursor) (beforeShellExecution / beforeMCPExecution), [GitHub Copilot CLI](/docs/connectors/copilot) (preToolUse). On these connectors the approval prompt surfaces inside the agent UI itself.
+
+```bash
+defenseclaw setup claude-code
+```
+
+</Step>
+
+<Step>
+
+### Enable HITL with the right minimum severity
+
+```bash
+defenseclaw setup guardrail \
+  --connector claudecode \
+  --mode action \
+  --human-approval \
+  --hilt-min-severity high \
+  --restart
+```
+
+`--hilt-min-severity high` means HIGH and CRITICAL findings reach the operator. CRITICAL still blocks regardless; HIGH pauses for approval. Drop to `--hilt-min-severity medium` for very cautious workflows; raise to `--hilt-min-severity critical` if you want HIGH findings to block silently.
+
+</Step>
+
+<Step>
+
+### Trigger an approval
+
+In Claude Code:
+
+> Please move all files matching `*.log` from `/var/log` into `/tmp/log-backup/`.
+
+The default pack flags `mv /var/log/*` as HIGH (touches a system path; not necessarily destructive). HITL pauses the call; Claude Code surfaces a PreToolUse approval prompt with the rendered command and the finding reason.
+
+</Step>
+
+<Step>
+
+### Approve or deny
+
+The operator clicks approve. Claude Code resumes, the command runs, the audit row records both the original finding and the approval decision:
+
+```
+2026-05-08T17:42:20Z  HIGH  fs.system-path-mutation  approved
+  command:    mv /var/log/*.log /tmp/log-backup/
+  finding:    fs.system-path-mutation (HIGH)
+  decision:   approve
+  approver:   vineeth
+  reason:     "log rotation cleanup"
+```
+
+The reason field is operator-supplied and stored in the audit DB.
+
+</Step>
+
+</Steps>
+
+## What about connectors without native ask?
+
+[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Windsurf](/docs/connectors/windsurf) downgrade HITL to a confirm verdict. The agent receives "blocked, awaiting operator approval"; the operator approves via `defenseclaw tui` (or the OpenClaw plugin queue). The raw_action is preserved in the audit log so the operator sees exactly what was requested.
+
+```bash
+defenseclaw tui
+```
+
+The TUI exposes a pending-approvals panel with the connector, hook, finding, and rendered action. Approving from there resumes the agent.
+
+<Flow
+  direction="TB"
+  caption="Native ask is faster (no context switch), but downgraded confirm is safer for long-running autonomous workflows where the operator is not in the agent UI."
+>
+  <Node id="hook" kind="connector">{`Hook fires\nHIGH finding`}</Node>
+  <Node id="native" kind="decision">{`Native ask\nsupported?`}</Node>
+  <Node id="ask" kind="agent">Prompt in agent UI</Node>
+  <Node id="tui" kind="operator">{`Pause, surface in\ndefenseclaw tui`}</Node>
+  <Node id="approve" kind="operator">Approve / deny</Node>
+  <Node id="resume" kind="agent">Resume agent</Node>
+  <Edge from="hook" to="native" />
+  <Edge from="native" to="ask" label="yes" />
+  <Edge from="ask" to="approve" />
+  <Edge from="native" to="tui" label="no" />
+  <Edge from="tui" to="approve" />
+  <Edge from="approve" to="resume" />
+</Flow>
+
+## When HITL is not the right answer
+
+<Callout type="warn">
+HITL is not a substitute for a tuned rule pack. If every other tool call is pausing for approval, the rule pack is too aggressive — fix the policy, not the operator's nerves. If nothing is ever pausing, raise `--hilt-min-severity` or you're paying the latency tax for no benefit.
+</Callout>
+
+## Next
+
+<Cards>
+  <Card title="HITL reference" href="/docs/hitl" description="The full per-connector matrix and decision flow." />
+  <Card title="Switching connectors" href="/docs/setup/guardrail/switching-connectors" description="Move from a downgraded-confirm connector to a native-ask one without losing audit history." />
+</Cards>

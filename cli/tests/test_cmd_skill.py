@@ -807,9 +807,9 @@ class TestSkillScanURL(SkillCommandTestBase):
         self.assertEqual(name, "my-skill")
         self.assertIsNone(version)
 
-    @patch("requests.get")
+    @patch("defenseclaw.registries.adapters._base.http_get")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
-    def test_scan_from_url_tar(self, mock_scanner_cls, mock_requests_get):
+    def test_scan_from_url_tar(self, mock_scanner_cls, mock_http_get):
         import tarfile
 
         # Create a tar.gz with a skill inside
@@ -828,12 +828,7 @@ class TestSkillScanURL(SkillCommandTestBase):
 
         shutil.rmtree(skill_tmpdir)
 
-        # Mock HTTP response
-        mock_resp = MagicMock()
-        mock_resp.headers = {"content-type": "application/gzip"}
-        mock_resp.iter_content.return_value = [tar_bytes]
-        mock_resp.raise_for_status.return_value = None
-        mock_requests_get.return_value = mock_resp
+        mock_http_get.return_value = tar_bytes
 
         # Mock scanner
         mock_scanner = MagicMock()

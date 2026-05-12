@@ -129,8 +129,6 @@ def patch_openclaw_config(
             json.dump(cfg, f, indent=2, ensure_ascii=False)
             f.write("\n")
 
-    _install_codeguard_skill_deferred(openclaw_config_file)
-
     return prev_model or original_model
 
 
@@ -536,17 +534,5 @@ def _backup(path: str) -> None:
 
 
 def _install_codeguard_skill_deferred(openclaw_config_file: str) -> None:
-    """Install the CodeGuard skill when guardrail connects to OpenClaw.
-
-    This handles the case where the user ran ``defenseclaw init``
-    before OpenClaw was installed, then later runs ``defenseclaw
-    guardrail enable``.
-    """
-    try:
-        from defenseclaw.codeguard_skill import ensure_codeguard_skill
-        from defenseclaw.config import load
-
-        cfg = load()
-        ensure_codeguard_skill(cfg.claw_home_dir(), openclaw_config_file)
-    except Exception:
-        pass
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = openclaw_config_file

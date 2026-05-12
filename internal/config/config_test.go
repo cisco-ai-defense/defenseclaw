@@ -124,6 +124,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.DataDir == "" {
 		t.Error("DataDir is empty")
 	}
+	if got, want := cfg.AIDiscovery.ConfidencePolicyPath, filepath.Join(cfg.DataDir, "confidence.yaml"); got != want {
+		t.Errorf("ai_discovery.confidence_policy_path = %q, want %q", got, want)
+	}
 	if cfg.Claw.Mode != ClawOpenClaw {
 		t.Errorf("expected mode %q, got %q", ClawOpenClaw, cfg.Claw.Mode)
 	}
@@ -320,6 +323,39 @@ func TestValidate_InvalidInstall(t *testing.T) {
 	sa.Medium.Install = "reject"
 	if err := sa.Validate(); err == nil {
 		t.Error("expected Validate() to return error for invalid install action")
+	}
+}
+
+func TestValidateDeploymentMode_EmptyAllowed(t *testing.T) {
+	if err := validateDeploymentMode(""); err != nil {
+		t.Fatalf("validateDeploymentMode(empty) returned unexpected error: %v", err)
+	}
+}
+
+func TestValidateDeploymentMode_Valid(t *testing.T) {
+	for _, mode := range []string{
+		string(DeploymentModeManagedEnterprise),
+		string(DeploymentModeUnmanagedBYOD),
+		string(DeploymentModeCICD),
+		string(DeploymentModeSandboxed),
+		string(DeploymentModeServer),
+		string(DeploymentModeSaaS),
+		"managed",
+		"standalone",
+		"ci",
+		"edge",
+	} {
+		t.Run(mode, func(t *testing.T) {
+			if err := validateDeploymentMode(mode); err != nil {
+				t.Fatalf("validateDeploymentMode(%q) returned unexpected error: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestValidateDeploymentMode_Invalid(t *testing.T) {
+	if err := validateDeploymentMode("freeform"); err == nil {
+		t.Fatal("expected validateDeploymentMode to reject free-form value")
 	}
 }
 
@@ -1239,9 +1275,8 @@ func TestConfig_Save_BumpsProvenance(t *testing.T) {
 	// Mutate the config and save again; both hash and generation
 	// must advance. Pinning this guards the "ContentHash stable
 	// across identical saves, fresh per mutation" invariant.
-	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw
-	// connector — kept aligned with the canonical four-connector
-	// enum in schemas/otel/resource.schema.json so this test
+	// "zeptoclaw" matches Connector.Name() for the ZeptoClaw connector.
+	// Keep it aligned with schemas/otel/resource.schema.json so this test
 	// doesn't bake a stale legacy mode string.
 	cfg.Claw.Mode = "zeptoclaw"
 	if err := cfg.Save(); err != nil {
@@ -1383,5 +1418,34 @@ func TestViperDefaultGuardrailHostIsEmpty(t *testing.T) {
 	}
 	if got := cfg.Guardrail.EffectiveHost(); got != "127.0.0.1" {
 		t.Fatalf("EffectiveHost() = %q, want 127.0.0.1", got)
+	}
+}
+
+// TestRecognizedLLMProvidersLockstep guards against drift between the
+// Go-side recognizedLLMProviders set and the Python-side
+// _RECOGNIZED_LLM_PROVIDERS in cli/defenseclaw/config.py. A missing
+// entry on either side surfaces as a one-shot "unknown provider"
+// warning even when the prefix is wired through Bifrost — exactly the
+// regression we hit when "gemini-openai" was added to the gateway and
+// the wizards but never to either recognized-providers map.
+//
+// The Bifrost gateway (internal/gateway/provider.go,
+// internal/gateway/provider_bifrost.go) and both wizards
+// (cli/defenseclaw/commands/cmd_setup.py, internal/tui/setup.go)
+// already accept these prefixes; the recognized-providers maps must
+// follow.
+func TestRecognizedLLMProvidersLockstep(t *testing.T) {
+	mustHave := []string{
+		"openai", "anthropic", "azure", "gemini", "gemini-openai",
+		"vertex_ai", "bedrock", "groq", "mistral", "cohere",
+		"ollama", "vllm", "deepseek", "xai",
+		"fireworks_ai", "perplexity", "huggingface", "replicate",
+		"openrouter", "together_ai", "cerebras",
+		"lm_studio", "lmstudio", "local",
+	}
+	for _, p := range mustHave {
+		if _, ok := recognizedLLMProviders[p]; !ok {
+			t.Errorf("recognizedLLMProviders missing %q — keep this set in lockstep with cli/defenseclaw/config.py:_RECOGNIZED_LLM_PROVIDERS", p)
+		}
 	}
 }

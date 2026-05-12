@@ -44,7 +44,8 @@ Panels are addressable by number (1–9, 0 for Setup) and by `Tab` /
 | 9 | Audit | `audit.go` | Append-only audit store. Every block/allow/scan/config-change is here. |
 | - | Activity | `activity.go` | Live tail of TUI-launched commands (output stream, exit codes). |
 | - | Tools | `tools.go` | Tool block/allow/unblock surface. |
-| 0 | Setup | `setup.go` | All editable config — scanner endpoints, gateway watcher/watchdog, OTel signals, observability sinks, webhooks, guardrail tuning, OpenShell sandbox. |
+| - | Registries | `registries.go` | External skill / MCP catalog sources (corporate HTTPS YAML, smithery.ai, git, ClawHub, file). Sources / Entries / Approved sub-tabs (`1` / `2` / `3`). `s` syncs a single source, `S` syncs all enabled, `a` / `x` approve / reject. Reachable via `R`. See [`docs/REGISTRIES.md`](./REGISTRIES.md). |
+| 0 | Setup | `setup.go` | All editable config — scanner endpoints, gateway watcher/watchdog, OTel signals, observability sinks, webhooks, guardrail tuning, OpenShell sandbox. The Registries wizard wraps `defenseclaw registry add --non-interactive` for first-run discovery. |
 
 ---
 
@@ -53,6 +54,8 @@ Panels are addressable by number (1–9, 0 for Setup) and by `Tab` /
 | Key | Action |
 |-----|--------|
 | `1`–`9`, `0` | Jump to panel by number |
+| `T` | Jump to Tools panel |
+| `R` | Jump to Registries panel (Skills / MCPs panels: jumps with cursor focused on the highlighted entry) |
 | `Tab` / `Shift+Tab` | Cycle panels forward / back |
 | `:` or `Ctrl+K` | Open command palette (any registry entry) |
 | `/` | Filter the active list |

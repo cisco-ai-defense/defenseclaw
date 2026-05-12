@@ -25,13 +25,10 @@ import (
 
 // modeChoice is one row in the picker. Order matches the user-facing
 // presentation order: guardrail-supporting connectors first
-// (openclaw, zeptoclaw), observability-only connectors below
-// (codex, claudecode). The keyboard shortcut is always the connector's
-// initial letter so muscle memory is trivial; `c` is reserved for
-// `codex` and `k` for `claudecode` (the alternative letter on
-// "claude" since c/codex would collide).
+// (openclaw, zeptoclaw), hook/observability connectors below. The keyboard
+// shortcut is stable and unique; collision cases use a memorable alternate.
 type modeChoice struct {
-	wire    string // canonical config value (openclaw / zeptoclaw / codex / claudecode)
+	wire    string // canonical connector config value
 	label   string // user-facing display name
 	hotkey  rune   // single-letter shortcut for this row
 	guardOK bool   // does this connector support enforcement?
@@ -47,15 +44,24 @@ var modePickerChoices = []modeChoice{
 		tagline: "PreToolUse hooks + native OTel + CodeGuard plugin"},
 	{wire: "codex", label: "Codex", hotkey: 'c', guardOK: false,
 		tagline: "hook scripts + native OTel + notify + CodeGuard skill"},
+	{wire: "hermes", label: "Hermes", hotkey: 'h', guardOK: false,
+		tagline: "shell hooks + vendor-native block events"},
+	{wire: "cursor", label: "Cursor", hotkey: 'u', guardOK: false,
+		tagline: "command hooks + event-scoped ask/block"},
+	{wire: "windsurf", label: "Windsurf", hotkey: 'w', guardOK: false,
+		tagline: "Cascade hooks + fail-open block decisions"},
+	{wire: "geminicli", label: "Gemini CLI", hotkey: 'g', guardOK: false,
+		tagline: "settings.json hooks + structured deny responses"},
+	{wire: "copilot", label: "Copilot", hotkey: 'p', guardOK: false,
+		tagline: "workspace hooks + native pre-tool approval"},
 }
 
 // ModePickerModal is the overlay launched by `[m]` on the Overview
-// panel. It lets the operator switch the active claw connector
-// without leaving the TUI; the chosen wire name is dispatched to
-// `defenseclaw setup mode <wire>` by the owning Model so the same
-// inheritance rules (codex/claudecode → observability-only,
-// openclaw↔zeptoclaw → inherit) that the CLI command implements
-// apply uniformly.
+// panel. It lets the operator run first-class connector setup without
+// leaving the TUI; the chosen wire name is dispatched to
+// `defenseclaw setup <connector> --yes` by the owning Model. The
+// command-palette `setup mode` path remains available as a fast
+// scripted switch, but Overview favors the full setup flow.
 //
 // The picker is intentionally small: just a choice list with a
 // preview line at the bottom that explains what will happen when the
@@ -80,9 +86,9 @@ func NewModePickerModal(theme *Theme) ModePickerModal {
 }
 
 // Show opens the picker with currentWire highlighted. The cursor
-// starts on the current row so pressing Enter immediately is a safe
-// no-op (the matching `setup mode` invocation early-returns when
-// target == current).
+// starts on the current row so pressing Enter immediately re-runs
+// the active connector setup. This is intentional: setup can refresh
+// hooks/runtime files even when the selected connector is unchanged.
 func (p *ModePickerModal) Show(currentWire string) {
 	p.visible = true
 	p.current = strings.ToLower(strings.TrimSpace(currentWire))
@@ -145,27 +151,37 @@ func (p *ModePickerModal) Selected() string {
 	return modePickerChoices[p.cursor].wire
 }
 
+func (p *ModePickerModal) ChoiceAt(x, y int) (int, bool) {
+	if !p.visible {
+		return 0, false
+	}
+	view := p.View()
+	rect := newClickBox("mode", 0, 0, lipgloss.Width(view), lipgloss.Height(view))
+	if !rect.contains(x, y) {
+		return 0, false
+	}
+	idx := y - 4 // border + top padding + title + separator
+	if idx < 0 || idx >= len(modePickerChoices) {
+		return 0, true
+	}
+	p.cursor = idx
+	return idx, true
+}
+
 // previewForSwitch returns the human-readable line that explains
-// what moving from p.current to dest will do. Mirrors the
-// inheritance branches in cli/defenseclaw/commands/cmd_setup.py
-// _apply_connector_mode_switch so the TUI never lies about what
-// the CLI is about to do.
+// what confirming dest will do. It describes the full setup aliases
+// (`setup openclaw`, `setup zeptoclaw`, `setup codex`, ...), not the
+// fast/scripted `setup mode` fallback.
 func (p *ModePickerModal) previewForSwitch(dest string) string {
 	prev := p.current
 	if prev == dest {
-		return "Already active — selecting will be a no-op."
+		return "Already active — setup will be re-run to refresh hooks, config, and runtime files."
 	}
-	prevGuard := isGuardrailSupporting(prev)
 	destGuard := isGuardrailSupporting(dest)
-	switch {
-	case prevGuard && destGuard:
-		return "Inherits current guardrail config; previous integration is restored first."
-	case !destGuard:
-		return "Switches to observability-only — restores previous integration, then wires hooks, OTel, and CodeGuard."
-	case prevGuard != destGuard && destGuard:
-		return "Enables guardrail in observe mode (no auto-enforcement) after restoring previous integration."
+	if destGuard {
+		return "Runs full guardrail-capable connector setup and pins claw.mode plus guardrail.connector."
 	}
-	return ""
+	return "Runs observability-only connector setup — wires hooks, native OTel where supported, and CodeGuard surfaces."
 }
 
 func isGuardrailSupporting(wire string) bool {
@@ -175,6 +191,25 @@ func isGuardrailSupporting(wire string) bool {
 	default:
 		return false
 	}
+}
+
+func connectorSetupAlias(wire string) string {
+	switch strings.ToLower(strings.TrimSpace(wire)) {
+	case "claudecode", "claude-code", "claude_code":
+		return "claude-code"
+	case "openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot":
+		return strings.ToLower(strings.TrimSpace(wire))
+	default:
+		return ""
+	}
+}
+
+func connectorSetupCommandForMode(wire string) ([]string, string) {
+	alias := connectorSetupAlias(wire)
+	if alias == "" {
+		return nil, ""
+	}
+	return []string{"setup", alias, "--yes"}, "setup " + alias
 }
 
 // View renders the modal. Returns "" when not visible so the
@@ -242,9 +277,9 @@ func (p *ModePickerModal) View() string {
 	b.WriteString("\n")
 	b.WriteString("\n")
 	if p.theme != nil {
-		b.WriteString(p.theme.Help.Render("↑/↓ move  •  o/z/k/c jump  •  enter confirm  •  esc close"))
+		b.WriteString(p.theme.Help.Render("↑/↓ move  •  o/z/k/c/h/u/w/g/p jump  •  enter confirm  •  esc close"))
 	} else {
-		b.WriteString("↑/↓ move  •  o/z/k/c jump  •  enter confirm  •  esc close")
+		b.WriteString("↑/↓ move  •  o/z/k/c/h/u/w/g/p jump  •  enter confirm  •  esc close")
 	}
 
 	content := b.String()

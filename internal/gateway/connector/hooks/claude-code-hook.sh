@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v3
 # DefenseClaw Claude Code hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/claude-code/hook endpoint. Claude Code pipes
 # the structured JSON event to stdin and reads the response from stdout.
@@ -30,11 +30,18 @@ FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 # Bail early on missing token: see codex-hook.sh +
 # defenseclaw_handle_missing_token in _hardening.sh for rationale.
+DEFENSECLAW_HOOK_CONNECTOR="claudecode"
+DEFENSECLAW_HOOK_NAME="claude-code-hook"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+
 if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token claudecode claude-code-hook "claude-code tool"
 fi
 
-PAYLOAD=$(cat)
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: claudecode hook refusing oversized payload" >&2
+  exit 0
+}
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
@@ -104,7 +111,36 @@ fi
 ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+
+# Anthropic's Claude Code hook protocol — like Codex's — is strictly
+# EITHER structured JSON on stdout with exit 0 (Claude parses the
+# permissionDecision/decision from the JSON) OR exit 2 with the reason
+# on stderr. Doing BOTH is a protocol violation: depending on Claude
+# version, either the exit code wins (and the rich JSON reason is
+# silently replaced with a generic "Hook exited with code 2" surface),
+# or stdout wins inconsistently. This is the same shape bug we hit on
+# codex-hook.sh where Codex explicitly logged
+# "exited with code 2 but did not write a blocking reason to stderr"
+# and then FAILED OPEN. Even where Claude Code currently still blocks
+# on the exit code, mixing the protocols means the operator-facing
+# reason ("matched: SEC-PRIVKEY:Private key") is at risk of being
+# dropped between Claude versions.
+#
+# Resolution: when the gateway gave us structured claude_code_output
+# (every block path in claude_code_hook.go does), trust it and exit 0.
+# Fall back to exit-2-plus-stderr only when no structured output is
+# present.
 if [ "$ACTION" = "block" ]; then
+  if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+    # JSON on stdout already carries permissionDecision=deny /
+    # decision=block. Exit 0 so Claude Code honors it.
+    exit 0
+  fi
+  REASON=$(echo "$RESULT" | jq -r '.reason // empty' 2>/dev/null)
+  if [ -z "$REASON" ]; then
+    REASON="Blocked by DefenseClaw Claude Code policy."
+  fi
+  printf '%s\n' "$REASON" >&2
   exit 2
 fi
 exit 0

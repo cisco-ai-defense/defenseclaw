@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/pelletier/go-toml/v2"
@@ -263,7 +264,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -1785,7 +1786,7 @@ env_key = "OPENAI_API_KEY"
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all five Codex events and pointing at the generated
+// covering all six Codex events and pointing at the generated
 // codex-hook.sh. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
@@ -1813,9 +1814,9 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	raw, _ := os.ReadFile(configPath)
 	content := string(raw)
 
-	// The [hooks] table must be present with each of the five events
+	// The [hooks] table must be present with each of the six events
 	// listed as sub-tables.
-	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"} {
+	for _, evt := range []string{"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"} {
 		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
 			// Accept either dotted or nested rendering.
 			if !strings.Contains(content, evt) {
@@ -1839,12 +1840,45 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	if _, isTable := parsed["hooks"].(map[string]interface{}); !isTable {
 		t.Errorf("hooks key is not a table, got %T", parsed["hooks"])
 	}
+	hooks := parsed["hooks"].(map[string]interface{})
+	state, ok := hooks["state"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks.state missing — Codex would ask the user to review DefenseClaw hooks")
+	}
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	for _, tc := range []struct {
+		eventType string
+		eventKey  string
+		matcher   string
+		timeout   int
+	}{
+		{"SessionStart", "session_start", "startup|resume|clear", 30},
+		{"UserPromptSubmit", "user_prompt_submit", "", 30},
+		{"PreToolUse", "pre_tool_use", "*", 30},
+		{"PermissionRequest", "permission_request", "*", 30},
+		{"PostToolUse", "post_tool_use", "*", 30},
+		{"Stop", "stop", "", 90},
+	} {
+		key := fmt.Sprintf("%s:%s:0:0", configPath, tc.eventKey)
+		entry, ok := state[key].(map[string]interface{})
+		if !ok {
+			t.Fatalf("hooks.state missing trusted entry for %s (%s); state=%v", tc.eventType, key, state)
+		}
+		gotHash, _ := entry["trusted_hash"].(string)
+		wantHash := codexCommandHookHash(tc.eventKey, tc.matcher, hookPath, tc.timeout)
+		if gotHash != wantHash {
+			t.Errorf("trusted_hash for %s = %q, want %q", tc.eventType, gotHash, wantHash)
+		}
+		if _, ok := entry["enabled"]; ok {
+			t.Errorf("trusted state for %s should not force enabled; got %v", tc.eventType, entry)
+		}
+	}
 }
 
 // TestCodex_Setup_DefaultObservability_NoProxyRewrite is the headline
 // regression test for the codex/claude-code observability-only
 // architecture. With CodexEnforcement=false (the default), Setup must
-// install the [hooks] table and features.codex_hooks=true (so the
+// install the [hooks] table and features.hooks=true (so the
 // codex-hook.sh script fires for tool-call telemetry) but must NOT:
 //   - rewrite cfg["openai_base_url"] to the proxy URL (codex talks
 //     directly to its native upstream — api.openai.com or
@@ -1948,8 +1982,11 @@ env_key = "OPENROUTER_API_KEY"
 		t.Error("hooks.PostToolUse missing — tool-result telemetry lost")
 	}
 	features, _ := parsed["features"].(map[string]interface{})
-	if v, _ := features["codex_hooks"].(bool); !v {
-		t.Errorf("features.codex_hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("features.hooks must be true in observability mode (hooks would otherwise be ignored by codex), got=%v", features)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("deprecated features.codex_hooks should be removed to avoid Codex startup warnings, got=%v", features)
 	}
 
 	// Subprocess sandbox JSON must NOT be created — that's
@@ -2032,11 +2069,12 @@ func TestCodex_Setup_WritesOtelBlock(t *testing.T) {
 	// `otel.exporter`" at codex startup — a regression that would block
 	// the entire CLI from launching, not just OTel export. The value
 	// must match the kebab-case serde tag for OtelHttpProtocol::Json,
-	// and "json" specifically is required because the gateway's OTLP-HTTP
-	// receiver only accepts application/json bodies (415s protobuf).
+	// and "json" specifically keeps Codex telemetry on the gateway's
+	// stable receive path. The receiver can normalize protobuf too, but
+	// Codex requires this explicit field either way.
 	protocol, _ := otlphttp["protocol"].(string)
 	if protocol != "json" {
-		t.Errorf("otlp-http protocol = %q, want %q (codex requires this field; gateway only accepts application/json)",
+		t.Errorf("otlp-http protocol = %q, want %q (codex requires this explicit field)",
 			protocol, "json")
 	}
 	headers, _ := otlphttp["headers"].(map[string]interface{})
@@ -2221,7 +2259,7 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 }
 
 // TestCodex_Setup_EnablesHooksFeature confirms the connector writes
-// features.codex_hooks = true into config.toml. Without this, Codex
+// features.hooks = true into config.toml. Without this, Codex
 // ignores any registered hooks because the feature gate defaults to
 // off.
 func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
@@ -2239,9 +2277,167 @@ func TestCodex_Setup_EnablesHooksFeature(t *testing.T) {
 	}
 
 	data, _ := os.ReadFile(configPath)
-	content := string(data)
-	if !strings.Contains(content, "codex_hooks") {
-		t.Errorf("config.toml missing codex_hooks feature flag\nfile:\n%s", content)
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("invalid TOML after Setup: %v", err)
+	}
+	features, _ := parsed["features"].(map[string]interface{})
+	if v, _ := features["hooks"].(bool); !v {
+		t.Errorf("config.toml missing hooks feature flag; features=%v\nfile:\n%s", features, data)
+	}
+	if _, legacy := features["codex_hooks"]; legacy {
+		t.Errorf("config.toml still contains deprecated codex_hooks feature flag\nfile:\n%s", data)
+	}
+}
+
+func TestCodexCommandHookHashMatchesCodexCanonicalIdentity(t *testing.T) {
+	got := codexCommandHookHash("pre_tool_use", "*", "/tmp/hook.sh", 30)
+	want := "sha256:73ec4bb1ffa348f02fcca6c5c0725cc825ba47aa298a7e72eab4e47856cbadbc"
+	if got != want {
+		t.Fatalf("codexCommandHookHash = %q, want %q", got, want)
+	}
+}
+
+func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	hookPath := filepath.Join(dir, "hooks", "codex-hook.sh")
+	key := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	otherKey := codexHookStateKey(codexHookStateKeySource(configPath), "post_tool_use", 2, 0)
+
+	state := map[string]interface{}{
+		key: map[string]interface{}{
+			"trusted_hash": "sha256:user-replacement",
+		},
+		otherKey: map[string]interface{}{
+			"trusted_hash": "sha256:unrelated",
+		},
+	}
+	hooks := map[string]interface{}{"state": state}
+	if removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatalf("user replacement trust state was removed: %v", hooks)
+	}
+	if _, ok := state[key]; !ok {
+		t.Fatalf("user replacement trust entry missing: %v", state)
+	}
+
+	state[key] = map[string]interface{}{
+		"trusted_hash": codexCommandHookHash("pre_tool_use", "*", hookPath, 30),
+	}
+	if !removeOwnedCodexHookState(hooks, configPath, hookPath) {
+		t.Fatal("DefenseClaw-owned trust state was not removed")
+	}
+	if _, ok := state[key]; ok {
+		t.Fatalf("DefenseClaw-owned trust entry still present: %v", state)
+	}
+	if _, ok := state[otherKey]; !ok {
+		t.Fatalf("unrelated trust entry removed: %v", state)
+	}
+}
+
+// TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust is
+// the end-to-end pin for the "user replaced our hook script with their
+// own" workflow: after Setup, the operator may swap the hook command
+// out (or change the timeout/matcher) for any of the events. On
+// Teardown, DefenseClaw must NOT delete those entries because the
+// trusted_hash no longer matches what we wrote. Removing them would
+// silently re-prompt the user to trust their own hooks on next Codex
+// launch — a confusing security UX failure.
+func TestCodex_SetupTeardownRoundtripPreservesUserModifiedHookTrust(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(`model_provider = "openai"
+`), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = "" })
+
+	c := NewCodexConnector()
+	opts := SetupOpts{
+		DataDir:   dir,
+		ProxyAddr: "127.0.0.1:4000",
+		APIAddr:   "127.0.0.1:18970",
+		APIToken:  "tok-test",
+	}
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	// Operator simulates editing config.toml to register their own
+	// PreToolUse hook in place of (or alongside) ours. We model this
+	// by overwriting only the trust-state entry for that event. The
+	// real hook command stays whatever Setup wrote; what matters is
+	// that the trusted_hash diverges from codexCommandHookHash().
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after setup: %v", err)
+	}
+	var parsed map[string]interface{}
+	if err := toml.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	hooks, _ := parsed["hooks"].(map[string]interface{})
+	if hooks == nil {
+		t.Fatalf("hooks block missing after Setup; cannot exercise user-modified branch")
+	}
+	state, _ := hooks["state"].(map[string]interface{})
+	if state == nil {
+		t.Fatalf("hooks.state missing after Setup; cannot exercise user-modified branch")
+	}
+	preToolUseKey := codexHookStateKey(codexHookStateKeySource(configPath), "pre_tool_use", 0, 0)
+	if _, ok := state[preToolUseKey]; !ok {
+		t.Fatalf("expected DefenseClaw to install pre_tool_use trust entry at %q; state=%v", preToolUseKey, state)
+	}
+	state[preToolUseKey] = map[string]interface{}{
+		"trusted_hash": "sha256:user-replacement-do-not-touch",
+	}
+	rewritten, err := toml.Marshal(parsed)
+	if err != nil {
+		t.Fatalf("re-marshal config: %v", err)
+	}
+	if err := os.WriteFile(configPath, rewritten, 0o600); err != nil {
+		t.Fatalf("write user-modified config: %v", err)
+	}
+
+	if err := c.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("teardown: %v", err)
+	}
+
+	postRaw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config after teardown: %v", err)
+	}
+	var post map[string]interface{}
+	if err := toml.Unmarshal(postRaw, &post); err != nil {
+		t.Fatalf("unmarshal post-teardown config: %v", err)
+	}
+
+	postHooks, _ := post["hooks"].(map[string]interface{})
+	if postHooks == nil {
+		t.Fatalf("teardown deleted entire hooks block even though user edits remain:\n%s", postRaw)
+	}
+	postState, _ := postHooks["state"].(map[string]interface{})
+	if postState == nil {
+		t.Fatalf("teardown deleted hooks.state even though user edit at %q must be preserved", preToolUseKey)
+	}
+	entry, ok := postState[preToolUseKey].(map[string]interface{})
+	if !ok {
+		t.Fatalf("teardown removed user trust entry at %q; state=%v", preToolUseKey, postState)
+	}
+	if got, _ := entry["trusted_hash"].(string); got != "sha256:user-replacement-do-not-touch" {
+		t.Fatalf("teardown clobbered user trusted_hash: got=%q want=sha256:user-replacement-do-not-touch", got)
+	}
+
+	// Untouched DefenseClaw entries (other events) must be removed,
+	// since their trusted_hash still matches what we wrote — that's
+	// the recognition signal teardown relies on.
+	for _, eventKey := range []string{"session_start", "user_prompt_submit", "permission_request", "post_tool_use", "stop"} {
+		key := codexHookStateKey(codexHookStateKeySource(configPath), eventKey, 0, 0)
+		if _, present := postState[key]; present {
+			t.Errorf("teardown failed to remove DefenseClaw-owned trust entry for %s at %q", eventKey, key)
+		}
 	}
 }
 
@@ -2433,6 +2629,7 @@ func TestCodex_TeardownWithoutBackup_RemovesManagedConfig(t *testing.T) {
 		"codex-hook.sh",
 		"notify-bridge.sh",
 		"codex_hooks",
+		"trusted_hash",
 		"x-defenseclaw-token",
 		"x-defenseclaw-client",
 		"[otel]",
@@ -2457,7 +2654,7 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 		t.Fatalf("write hook: %v", err)
 	}
 	cfg := map[string]interface{}{
-		"hooks": buildCodexHooksTable(hookPath),
+		"hooks": buildCodexHooksTable(configPath, hookPath),
 		"otel":  buildCodexOtelBlock(SetupOpts{APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}),
 		"notify": []interface{}{
 			"bash",
@@ -3579,8 +3776,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 6 {
-		t.Errorf("HookScripts() returned %d scripts, want 6", len(scripts))
+	if len(scripts) != 11 {
+		t.Errorf("HookScripts() returned %d scripts, want 11", len(scripts))
 	}
 }
 
@@ -3749,6 +3946,81 @@ func TestTeardownSubprocessEnforcement(t *testing.T) {
 	// Verify shims removed
 	if _, err := os.Stat(filepath.Join(dir, "shims")); !os.IsNotExist(err) {
 		t.Error("shims dir should be removed after teardown")
+	}
+}
+
+// TestTeardown_DoesNotDeleteOtherConnectorsHookScripts is a regression
+// test for the exit-127 "command not found" bug observed during a
+// claudecode → codex switch. The old TeardownSubprocessEnforcement
+// iterated the GLOBAL hookScripts slice (every connector's *-hook.sh
+// + every generic inspect-*.sh) and removed them all from the shared
+// hooks dir. When called from one connector's Teardown that wiped
+// scripts owned by the incoming connector AND the shared inspect-*.sh
+// helpers, leaving the agent with an empty hooks/ dir if the
+// follow-up Setup hit any silent partial-install path.
+//
+// The fix scopes per-Teardown deletion to the calling connector's own
+// HookScriptOwner.HookScriptNames basenames. This test simulates the
+// failure: pre-populates hooks/ with codex-hook.sh + inspect-*.sh,
+// runs claudecode.Teardown, and asserts that codex-hook.sh and the
+// generic inspect-*.sh files SURVIVE (only claude-code-hook.sh is
+// removed).
+func TestTeardown_DoesNotDeleteOtherConnectorsHookScripts(t *testing.T) {
+	dir := t.TempDir()
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000"}
+
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+
+	preExisting := []string{
+		"codex-hook.sh",
+		"claude-code-hook.sh",
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
+	}
+	for _, name := range preExisting {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+
+	reg := NewDefaultRegistry()
+	cc, ok := reg.Get("claudecode")
+	if !ok {
+		t.Fatal("claudecode connector missing from registry")
+	}
+
+	if err := cc.Teardown(context.Background(), opts); err != nil {
+		// Some teardown sub-steps (settings.json restore, etc.) may
+		// surface non-fatal errors in a tmp dir without a real
+		// ~/.claude/settings.json. We only care about the hook-dir
+		// invariant here.
+		t.Logf("claudecode.Teardown returned (non-fatal in tmp env): %v", err)
+	}
+
+	// Invariant 1: claude-code-hook.sh — the script claudecode owns —
+	// should be removed.
+	if _, err := os.Stat(filepath.Join(hookDir, "claude-code-hook.sh")); !os.IsNotExist(err) {
+		t.Errorf("claude-code-hook.sh should be removed by claudecode.Teardown, got stat err=%v", err)
+	}
+
+	// Invariant 2: every other connector's hook script and every
+	// generic inspect-*.sh script must survive — they're owned by
+	// other connectors or shared infrastructure.
+	for _, name := range []string{
+		"codex-hook.sh",
+		"inspect-tool.sh",
+		"inspect-request.sh",
+		"inspect-response.sh",
+		"inspect-tool-response.sh",
+	} {
+		if _, err := os.Stat(filepath.Join(hookDir, name)); err != nil {
+			t.Errorf("expected %s to survive claudecode.Teardown, got stat err=%v", name, err)
+		}
 	}
 }
 
@@ -3935,8 +4207,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 4 {
-		t.Errorf("expected 4 built-in connectors, got %d", r.Len())
+	if r.Len() != 9 {
+		t.Errorf("expected 9 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -5278,6 +5550,281 @@ func TestCodexHookScript_FailOpen_DefaultForObservabilitySetup(t *testing.T) {
 	}
 }
 
+// TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo pins the
+// Codex hook protocol contract: when the gateway returns a block
+// verdict with a structured `codex_output` JSON body (which every
+// block path in codex_hook.go does), the hook MUST print that JSON
+// to stdout and exit 0. It MUST NOT exit 2.
+//
+// Codex's hook protocol is strictly either-or:
+//   - exit 0 + JSON on stdout  → Codex parses the JSON decision
+//   - exit 2 + reason on stderr → Codex blocks with stderr text
+//
+// Doing BOTH (exit 2 with stdout JSON and empty stderr) makes Codex
+// pick the exit code, ignore stdout, find an empty stderr, then log
+// "exited with code 2 but did not write a blocking reason to stderr"
+// and FAIL OPEN. We hit that bug live with a CRITICAL prompt-injection
+// pattern (RSA private key paste): the gateway correctly returned
+// permissionDecision=deny on stdout, the hook also exited 2, and the
+// model still got the prompt because Codex treated the hook as
+// malformed.
+func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	// Stand up a tiny gateway stub that returns a verdict shaped
+	// exactly like codex_hook.go:codexResponseFor for action=block on
+	// PreToolUse. The codex_output mirror is the critical bit — it's
+	// the JSON the hook script must echo to stdout.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"matched: PATH-ETC-SHADOW:/etc/shadow access",
+			"findings":["PATH-ETC-SHADOW:/etc/shadow access"],
+			"mode":"action",
+			"would_block":false,
+			"codex_output":{
+				"hookSpecificOutput":{
+					"hookEventName":"PreToolUse",
+					"permissionDecision":"deny",
+					"permissionDecisionReason":"matched: PATH-ETC-SHADOW:/etc/shadow access"
+				}
+			}
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", CodexEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":["bash","-lc","cat /etc/shadow"]}}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should exit 0 when gateway returned structured codex_output (Codex protocol: JSON-on-stdout xor exit-2-on-stderr); got err=%v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
+	}
+
+	// stdout must carry the codex_output JSON Codex will parse.
+	stdoutText := stdout.String()
+	for _, want := range []string{
+		`"hookEventName":"PreToolUse"`,
+		`"permissionDecision":"deny"`,
+		`"permissionDecisionReason":"matched: PATH-ETC-SHADOW:/etc/shadow access"`,
+	} {
+		if !strings.Contains(stdoutText, want) {
+			t.Errorf("stdout missing %q\nfull stdout: %q", want, stdoutText)
+		}
+	}
+	// stderr must be empty (no "blocking" hint, no "fail" log) —
+	// otherwise Codex still logs "did not write a blocking reason to
+	// stderr" because we used the wrong protocol path.
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Errorf("stderr should be empty when block goes via structured stdout JSON, got: %q", stderr.String())
+	}
+}
+
+// TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo pins the
+// same Anthropic-side hook protocol contract that
+// TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo pins for Codex:
+// when the gateway returns a block verdict with a structured
+// claude_code_output JSON body, the hook MUST print that JSON to
+// stdout and exit 0 — NOT exit 2.
+//
+// The bug here was structurally identical to the codex one: the
+// pre-fix script wrote claude_code_output to stdout AND exited 2 on
+// action=block, which is a Claude Code hook protocol violation.
+// Depending on Claude Code version that either silently swaps our
+// rich "matched: SEC-FOO" reason for a generic "Hook exited with code
+// 2" surface, or ignores stdout entirely. Either way the operator
+// loses the actual policy reason, and on some versions the agent
+// fails open the same way Codex did.
+func TestClaudeCodeHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"matched: SEC-PRIVKEY:Private key",
+			"findings":["SEC-PRIVKEY:Private key"],
+			"mode":"action",
+			"would_block":false,
+			"claude_code_output":{
+				"hookSpecificOutput":{
+					"hookEventName":"PreToolUse",
+					"permissionDecision":"deny",
+					"permissionDecisionReason":"matched: SEC-PRIVKEY:Private key"
+				}
+			}
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", ClaudeCodeEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cat /etc/shadow"}}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("hook should exit 0 when gateway returned structured claude_code_output (Claude Code protocol: JSON-on-stdout xor exit-2-on-stderr); got err=%v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
+	}
+
+	stdoutText := stdout.String()
+	for _, want := range []string{
+		`"hookEventName":"PreToolUse"`,
+		`"permissionDecision":"deny"`,
+		`"permissionDecisionReason":"matched: SEC-PRIVKEY:Private key"`,
+	} {
+		if !strings.Contains(stdoutText, want) {
+			t.Errorf("stdout missing %q\nfull stdout: %q", want, stdoutText)
+		}
+	}
+	// stderr must be empty so Claude Code uses the rich JSON reason
+	// instead of the stderr fallback.
+	if strings.TrimSpace(stderr.String()) != "" {
+		t.Errorf("stderr should be empty when block goes via structured stdout JSON, got: %q", stderr.String())
+	}
+}
+
+// TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo
+// mirrors the codex fallback test for symmetry: legacy/edge code
+// paths that don't include a claude_code_output mirror still block
+// via exit 2 with the reason on stderr.
+func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"hypothetical legacy claude verdict",
+			"mode":"action",
+			"would_block":false
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", ClaudeCodeEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &ClaudeCodeConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "claude-code-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("hook should exit 2 when gateway block has no structured claude_code_output, got exit 0\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("exit code = %d, want 2 (legacy block fallback)", exitErr.ExitCode())
+		}
+	}
+	if !strings.Contains(stderr.String(), "hypothetical legacy claude verdict") {
+		t.Errorf("stderr must carry the block reason on the legacy path, got: %q", stderr.String())
+	}
+}
+
+// TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo pins the
+// fallback path: if the gateway ever returns action=block but does
+// NOT include a codex_output mirror (legacy callers, future codex
+// events not yet wired up), the hook must use the exit-2-with-stderr
+// path so Codex still blocks. The reason MUST land on stderr —
+// emitting an empty stderr was the original bug.
+func TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts not supported on windows")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"action":"block",
+			"raw_action":"block",
+			"severity":"CRITICAL",
+			"reason":"hypothetical legacy verdict",
+			"mode":"action",
+			"would_block":false
+		}`))
+	}))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+
+	dir := t.TempDir()
+	opts := SetupOpts{APIAddr: addr, APIToken: "tok-test", CodexEnforcement: true}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	dcHome := t.TempDir()
+
+	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
+	cmd.Env = append(os.Environ(),
+		"PATH="+os.Getenv("PATH"),
+		"DEFENSECLAW_HOME="+dcHome,
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err == nil {
+		t.Fatalf("hook should exit 2 when gateway block has no structured codex_output, got exit 0\nstdout=%q\nstderr=%q",
+			stdout.String(), stderr.String())
+	}
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr.ExitCode() != 2 {
+			t.Errorf("exit code = %d, want 2 (legacy block fallback)", exitErr.ExitCode())
+		}
+	}
+	if !strings.Contains(stderr.String(), "hypothetical legacy verdict") {
+		t.Errorf("stderr must carry the block reason on the legacy path, got: %q", stderr.String())
+	}
+}
+
 func TestInstallOpenClaw_SymlinkedExtDir(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "attacker-owned")
@@ -5501,6 +6048,11 @@ func TestConnector_AgentPathProvider_AllBuiltinsImplement(t *testing.T) {
 		{"openclaw", func() Connector { return NewOpenClawConnector() }},
 		{"codex", func() Connector { return NewCodexConnector() }},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }},
+		{"hermes", func() Connector { return NewHermesConnector() }},
+		{"cursor", func() Connector { return NewCursorConnector() }},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }},
+		{"copilot", func() Connector { return NewCopilotConnector() }},
 	}
 
 	for _, c := range cases {
@@ -5551,6 +6103,11 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		ap, ok := conn.(AgentPathProvider)
@@ -5581,6 +6138,11 @@ func TestConnector_HookScriptProvider_MatchesAgentPaths(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		hsp, ok := conn.(HookScriptProvider)
@@ -5621,6 +6183,11 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		// settings.json hooks are sufficient for guardrail
 		// enforcement, so the var is recommended-not-required.
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []EnvScope{EnvScopeProcess}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []EnvScope{EnvScopeNone}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []EnvScope{EnvScopeNone}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []EnvScope{EnvScopeNone}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []EnvScope{EnvScopeNone}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
 	for _, c := range cases {
@@ -5675,6 +6242,11 @@ func TestConnector_ProviderProbe_AllBuiltinsImplement(t *testing.T) {
 		NewOpenClawConnector(),
 		NewCodexConnector(),
 		NewClaudeCodeConnector(),
+		NewHermesConnector(),
+		NewCursorConnector(),
+		NewWindsurfConnector(),
+		NewGeminiCLIConnector(),
+		NewCopilotConnector(),
 	}
 	for _, conn := range connectors {
 		if _, ok := conn.(ProviderProbe); !ok {
@@ -5813,6 +6385,11 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 	}{
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, []string{"claude-code-hook.sh"}},
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
+		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
+		{"cursor", func() Connector { return NewCursorConnector() }, []string{"cursor-hook.sh"}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
+		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
 		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
 		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
 	}
@@ -5926,6 +6503,96 @@ func TestWriteHookScriptsForConnectorObject_HonoursInterface(t *testing.T) {
 		mustExist(t, filepath.Join(dir, "claude-code-hook.sh"))
 		mustNotExist(t, filepath.Join(dir, "codex-hook.sh"))
 	})
+}
+
+// TestHardening_SweepStaleHookDirs pins the L-3 fix: the v4
+// _hardening.sh helper sweeps orphaned hook-tmp.* directories under
+// DEFENSECLAW_HOME that the EXIT-trap cleanup couldn't remove (SIGKILL,
+// OOM, system reboot mid-hook, etc.). Without this sweep, every
+// fallback-path hook invocation (mktemp absent → uses
+// ${DEFENSECLAW_HOME}/hook-tmp.<PID>) on a long-running host
+// accumulates orphans forever.
+func TestHardening_SweepStaleHookDirs(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find not available")
+	}
+
+	// Materialize the embedded helper to disk so we can source it.
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	dcHome := filepath.Join(tmp, "dchome")
+	if err := os.MkdirAll(dcHome, 0o700); err != nil {
+		t.Fatalf("mkdir dchome: %v", err)
+	}
+
+	// Stale orphans (older than 60 minutes) — must be swept.
+	stale1 := filepath.Join(dcHome, "hook-tmp.11111")
+	stale2 := filepath.Join(dcHome, "hook-tmp.22222")
+	for _, p := range []string{stale1, stale2} {
+		if err := os.MkdirAll(p, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", p, err)
+		}
+		// Drop a tracer file so we can verify the directory is
+		// recursively removed, not just emptied.
+		if err := os.WriteFile(filepath.Join(p, "tracer.txt"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write tracer in %s: %v", p, err)
+		}
+		old := time.Now().Add(-2 * time.Hour)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	// Fresh hook-tmp dir (younger than 60 minutes) — must be preserved
+	// because the active hook could still be using it.
+	fresh := filepath.Join(dcHome, "hook-tmp.33333")
+	if err := os.MkdirAll(fresh, 0o700); err != nil {
+		t.Fatalf("mkdir fresh: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fresh, "tracer.txt"), []byte("y"), 0o600); err != nil {
+		t.Fatalf("write fresh tracer: %v", err)
+	}
+
+	// Unrelated sibling (not matching hook-tmp.*) — must be preserved
+	// regardless of mtime, so that the sweep is conservative about
+	// clobbering operator state.
+	unrelated := filepath.Join(dcHome, "audit-snapshot")
+	if err := os.MkdirAll(unrelated, 0o700); err != nil {
+		t.Fatalf("mkdir unrelated: %v", err)
+	}
+	old := time.Now().Add(-7 * 24 * time.Hour)
+	if err := os.Chtimes(unrelated, old, old); err != nil {
+		t.Fatalf("chtimes unrelated: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", "set -e; source \"$0\"; _defenseclaw_sweep_stale_hook_dirs", helperPath)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+dcHome)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sweep failed: %v\n%s", err, out)
+	}
+
+	for _, p := range []string{stale1, stale2} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("stale dir %s still exists after sweep (err=%v) — orphans accumulate forever in the fallback path", p, err)
+		}
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh dir %s was swept but should have been preserved: %v", fresh, err)
+	}
+	if _, err := os.Stat(unrelated); err != nil {
+		t.Errorf("unrelated dir %s was swept; the sweep must only touch hook-tmp.*: %v", unrelated, err)
+	}
 }
 
 // TestParseHookSchemaVersion pins the digit-extraction contract used
@@ -6088,27 +6755,4 @@ func mustNotExist(t *testing.T, path string) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected %s to NOT exist, got err=%v", path, err)
 	}
-}
-
-// stringSlicesEqual is the order-sensitive equivalent of
-// reflect.DeepEqual for two []string. We use it (rather than
-// reflect.DeepEqual) when the test's *intent* is to communicate
-// "compare two ordered string slices"; reflect.DeepEqual would
-// work but obscures the contract for readers. Equality requires
-// identical lengths and pairwise element equality at every index.
-//
-// Defined here as a local helper rather than imported from a util
-// package because the connector test suite is the only consumer
-// today, and adding a public helper would invite the test-only
-// helper to leak into production code.
-func stringSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

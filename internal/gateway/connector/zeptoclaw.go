@@ -155,6 +155,7 @@ func (c *ZeptoClawConnector) Teardown(ctx context.Context, opts SetupOpts) error
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
+	removeOwnedHookScripts(opts, c)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("zeptoclaw teardown errors: %s", strings.Join(errs, "; "))

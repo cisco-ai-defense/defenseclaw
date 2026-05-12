@@ -1,0 +1,189 @@
+---
+title: Stop Claude Code from running rm -rf
+description: Wire DefenseClaw into Claude Code, observe for a week, then promote to action mode and watch a destructive shell command never reach the disk.
+keywords:
+  - block rm -rf claude code
+  - claude code dangerous shell
+  - DefenseClaw block destructive command
+  - claude code observability
+---
+
+> "I want to observe my Claude Code, and make sure it doesn't run `rm -rf` on my home directory."
+
+That sentence is the original DefenseClaw user story. Here is the entire flow, end to end.
+
+## Outcome
+
+By the end of this story, you'll have:
+
+- Claude Code wired to DefenseClaw via [native hooks + OTel](/docs/connectors/claudecode).
+- A week of audit data in `~/.defenseclaw/audit.db` proving what your agent actually does.
+- An `action` mode policy that blocks `rm -rf <home subtree>` with a CRITICAL finding.
+- An audit row showing the block, with the rule reference for the next reviewer.
+
+<Steps>
+
+<Step>
+
+### Wire Claude Code (observability only)
+
+```bash
+defenseclaw setup claude-code
+```
+
+This is the [observability-only alias](/docs/connectors/claudecode). Claude Code talks directly to its native upstream. DefenseClaw inspects via PreToolUse / PostToolUse / UserPromptSubmit / Stop / PermissionRequest hooks plus the native OTel exporter.
+
+</Step>
+
+<Step>
+
+### Watch the audit log fill up
+
+Open the live dashboard:
+
+```bash
+defenseclaw tui
+```
+
+Or stream the JSONL fan-out from the gateway:
+
+```bash
+tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.connector == "claudecode")'
+```
+
+Open Claude Code and use it normally. Every prompt, tool call, and response shows up. Run this for a week — you want a real picture of your agent's behaviour before the first block decision.
+
+</Step>
+
+<Step>
+
+### Inspect the rule pack
+
+```bash
+ls ~/.defenseclaw/policies/guardrail/default/
+cat ~/.defenseclaw/policies/guardrail/default/shell.yaml
+```
+
+The default pack ships with a CRITICAL rule for recursive deletes against home-directory paths. The `strict` pack adds dot-file targeting and `/var/lib/*`; the `permissive` pack drops to HIGH and only matches `~/`.
+
+</Step>
+
+<Step>
+
+### Promote to action mode with HITL
+
+```bash
+defenseclaw setup guardrail \
+  --connector claudecode \
+  --mode action \
+  --rule-pack default \
+  --human-approval \
+  --hilt-min-severity high \
+  --restart
+```
+
+Three flags matter here:
+
+- `--mode action` — CRITICAL findings now block.
+- `--human-approval` — HIGH findings pause for operator approval.
+- `--hilt-min-severity high` — MEDIUM and LOW still log; only HIGH and above prompt.
+
+Claude Code supports native PreToolUse ask, so the approval prompt surfaces inside the agent UI itself.
+
+</Step>
+
+<Step>
+
+### Trigger the rule
+
+In Claude Code:
+
+> Please run `rm -rf ~/projects/old-experiments` to free disk space.
+
+The PreToolUse hook fires, the gateway scores the command, the default rule pack flags it CRITICAL, and the hook returns `block`. Claude Code never executes the command and surfaces the block reason to the user.
+
+</Step>
+
+<Step>
+
+### Confirm in the audit log
+
+```bash
+defenseclaw alerts --limit 10
+# or live-tail the JSONL fan-out filtered by severity:
+tail -f ~/.defenseclaw/gateway.jsonl \
+  | jq 'select(.connector == "claudecode" and (.severity == "HIGH" or .severity == "CRITICAL"))'
+```
+
+```
+2026-05-08T14:02:11Z  CRITICAL  shell.dangerous-rm  blocked
+  command:    rm -rf ~/projects/old-experiments
+  reason:     recursive delete targeting user home subtree
+  rule:       policies/guardrail/default/shell.yaml:14
+  connector:  claudecode
+  hook:       PreToolUse
+  decision:   block
+```
+
+</Step>
+
+</Steps>
+
+## Why this works the way it does
+
+<Sequence
+  caption="The block decision is made by the gateway, not Claude Code. The hook is the messenger."
+  participants={[
+    { id: 'u',  label: 'User',           kind: 'operator' },
+    { id: 'cc', label: 'Claude Code',    kind: 'agent' },
+    { id: 'h',  label: 'PreToolUse',     kind: 'connector' },
+    { id: 'g',  label: 'Gateway',        kind: 'gateway' },
+    { id: 'p',  label: 'Policy',         kind: 'policy' },
+  ]}
+>
+  <Message from="u"  to="cc" label="rm -rf ~/projects/old-experiments" />
+  <Message from="cc" to="h"  label="PreToolUse(command)" />
+  <Message from="h"  to="g"  label="POST /api/v1/claudecode/hook" />
+  <Message from="g"  to="p"  label="evaluate(command)" />
+  <Message from="p"  to="g"  kind="return" label="CRITICAL · shell.dangerous-rm" />
+  <Message from="g"  to="h"  kind="return" label="block · recursive delete" />
+  <Message from="h"  to="cc" kind="return" label="block" />
+  <Message from="cc" to="u"  kind="return" label="I can't run that — DefenseClaw blocked it." />
+</Sequence>
+
+## Variations
+
+<Accordions>
+
+<Accordion title="What if I want to allow it on a specific path?">
+
+Edit `~/.defenseclaw/policies/guardrail/default/shell.yaml` and add an allow-list entry under the rule. Or downgrade the rule to HIGH and rely on HITL to surface the request — operators with approval rights can let it through interactively.
+
+</Accordion>
+
+<Accordion title="What if I'm running an autonomous agent with no operator?">
+
+Drop HITL (`--no-human-approval`) and rely on `--mode action`. CRITICAL still blocks unconditionally; HIGH blocks instead of pausing. Set up a webhook sink so the audit row reaches your on-call channel.
+
+</Accordion>
+
+<Accordion title="What if I want the same protection on Codex / Cursor / Copilot CLI?">
+
+`defenseclaw setup mode codex` (or `cursor`, `copilot`). The rule pack is connector-agnostic; the hook surface differs. See the [Capability Matrix](/docs/capability-matrix) for the per-connector hook events.
+
+</Accordion>
+
+<Accordion title="What if the gateway is unreachable when the hook fires?">
+
+Default fail-mode is `open` — transport failures allow. Set `DEFENSECLAW_STRICT_AVAILABILITY=1` to enforce fail-closed. Claude Code supports fail-closed natively; for connectors that don't, configure operator-side timeouts.
+
+</Accordion>
+
+</Accordions>
+
+## Next
+
+<Cards>
+  <Card title="Catch a prompt injection on Codex" href="/docs/stories/prompt-injection-codex" description="The same flow, applied to a more interesting threat model." />
+  <Card title="HITL approvals" href="/docs/stories/hitl-approvals" description="The operator side of the loop." />
+</Cards>

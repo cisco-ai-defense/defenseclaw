@@ -32,6 +32,26 @@ const (
 	EnvLinux    Environment = "linux"
 )
 
+type DeploymentMode string
+
+const (
+	DeploymentModeManagedEnterprise DeploymentMode = "managed_enterprise"
+	DeploymentModeUnmanagedBYOD     DeploymentMode = "unmanaged_byod"
+	DeploymentModeCICD              DeploymentMode = "ci_cd"
+	DeploymentModeSandboxed         DeploymentMode = "sandboxed"
+	DeploymentModeServer            DeploymentMode = "server"
+	DeploymentModeSaaS              DeploymentMode = "saas"
+)
+
+var validDeploymentModes = map[string]struct{}{
+	string(DeploymentModeManagedEnterprise): {},
+	string(DeploymentModeUnmanagedBYOD):     {},
+	string(DeploymentModeCICD):              {},
+	string(DeploymentModeSandboxed):         {},
+	string(DeploymentModeServer):            {},
+	string(DeploymentModeSaaS):              {},
+}
+
 const (
 	DefaultDataDirName = ".defenseclaw"
 	DefaultAuditDBName = "audit.db"
@@ -127,6 +147,25 @@ func DefaultConfig() *Config {
 			AllowListBypassScan: true,
 			RescanEnabled:       true,
 			RescanIntervalMin:   60,
+		},
+		AIDiscovery: AIDiscoveryConfig{
+			Enabled:                  true,
+			Mode:                     "enhanced",
+			ScanIntervalMin:          5,
+			ProcessIntervalSec:       60,
+			ScanRoots:                []string{"~"},
+			SignaturePacks:           []string{},
+			AllowWorkspaceSignatures: false,
+			DisabledSignatureIDs:     []string{},
+			IncludeShellHistory:      true,
+			IncludePackageManifests:  true,
+			IncludeEnvVarNames:       true,
+			IncludeNetworkDomains:    true,
+			MaxFilesPerScan:          1000,
+			MaxFileBytes:             512 * 1024,
+			EmitOTel:                 true,
+			StoreRawLocalPaths:       false,
+			ConfidencePolicyPath:     filepath.Join(dataDir, "confidence.yaml"),
 		},
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),

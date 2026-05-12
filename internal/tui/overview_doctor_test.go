@@ -145,6 +145,29 @@ func TestOverview_ZeroRequestNotice_CodexObservabilityUsesHookGuidance(t *testin
 	}
 }
 
+func TestOverview_ZeroRequestNotice_HookOnlyConnectorUsesHookGuidance(t *testing.T) {
+	t.Parallel()
+	p := newOverviewForTest()
+	p.cfg.Claw.Mode = config.ClawMode("copilot")
+	p.cfg.Guardrail.Connector = "copilot"
+	p.SetHealth(&HealthSnapshot{
+		UptimeMS: int64(3 * time.Minute / time.Millisecond),
+		Connector: &ConnectorHealth{
+			Name:     "copilot",
+			State:    "running",
+			Requests: 0,
+		},
+	})
+
+	out := stripANSI(p.View(120, 40))
+	if !strings.Contains(out, "0 hook events") {
+		t.Fatalf("expected Copilot hook-event guidance, got:\n%s", out)
+	}
+	if strings.Contains(out, "gateway port") {
+		t.Fatalf("hook-only connector should not suggest gateway port routing, got:\n%s", out)
+	}
+}
+
 func TestOverview_ZeroRequestNotice_OpenClawKeepsGatewayPortGuidance(t *testing.T) {
 	t.Parallel()
 	p := newOverviewForTest()

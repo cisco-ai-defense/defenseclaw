@@ -2107,6 +2107,33 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(inv["plugins"][0]["id"], "ext1")
         self.assertEqual(inv["plugins"][0]["manifest"], ".codex-plugin/plugin.json")
 
+    def test_codex_inventory_carries_connector_paths(self):
+        """G3: non-OpenClaw inventories carry connector_home /
+        connector_config_files / connector_skill_dirs / connector_plugin_dirs
+        / connector_mcp_files alongside the legacy claw_home /
+        openclaw_config keys, so the TUI renderer can show the right
+        location to operators running against Codex / Claude Code etc.
+        instead of a misleading "~/.openclaw" fallback.
+        """
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        plugin_root = os.path.join(self.tmp, ".codex", "extensions")
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory.subprocess.run"):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual(inv["connector"], "codex")
+        self.assertTrue(inv["connector_home"].endswith(".codex"))
+        self.assertTrue(any(
+            p.endswith("config.toml") for p in inv["connector_config_files"]
+        ))
+        self.assertEqual(inv["connector_skill_dirs"], [skill_root])
+        self.assertEqual(inv["connector_plugin_dirs"], [plugin_root])
+        # Back-compat: legacy keys still present for older readers.
+        self.assertIn("openclaw_config", inv)
+        self.assertIn("claw_home", inv)
+
     def test_claudecode_walks_disk(self):
         cfg = _make_cfg_for_connector(self.tmp, "claudecode")
         skill_root = os.path.join(self.tmp, ".claude", "skills")

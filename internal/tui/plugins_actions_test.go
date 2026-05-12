@@ -56,6 +56,8 @@ func pressKey(key string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "esc":
 		return tea.KeyPressMsg{Code: tea.KeyEscape}
+	case "ctrl+c":
+		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
 	default:
 		return tea.KeyPressMsg{Code: rune(key[0]), Text: key}
 	}
@@ -173,8 +175,8 @@ func TestExecuteActionMenuItem_PluginDispatch(t *testing.T) {
 	for key := range seen {
 		key := key
 		t.Run("key_"+key, func(t *testing.T) {
-			cmd := m.executeActionMenuItem(key)
-			if cmd == nil {
+			next, cmd := m.executeActionMenuItem(key)
+			if cmd == nil && !next.commandPreview.Active {
 				t.Fatalf("executeActionMenuItem(%q) returned nil — every PluginActions key must map to a CLI verb", key)
 			}
 		})
@@ -185,7 +187,8 @@ func TestExecuteActionMenuItem_PluginDispatch_NilSelectionSafe(t *testing.T) {
 	m := New(Deps{Config: &config.Config{}})
 	m.activePanel = PanelPlugins
 	// No items loaded — Selected() returns nil.
-	if cmd := m.executeActionMenuItem("s"); cmd != nil {
+	next, cmd := m.executeActionMenuItem("s")
+	if cmd != nil || next.commandPreview.Active {
 		t.Errorf("executeActionMenuItem on empty plugin list must be a safe no-op, got %v", cmd)
 	}
 }

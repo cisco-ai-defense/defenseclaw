@@ -351,8 +351,9 @@ def setup_sandbox(
     else:
         click.echo("    gateway.token:        not found (sidecar will auto-detect on connect)")
 
-    # 10a. Install CodeGuard skill into the sandbox-owned OpenClaw tree
-    _install_codeguard_to_sandbox(app.cfg, sandbox_home)
+    # 10a. CodeGuard native assets are opt-in and must be installed
+    # explicitly with `defenseclaw codeguard install`.
+    click.echo("    codeguard:           skipped (explicit opt-in required)")
 
     # 10b. Install guardrail plugin into the sandbox-owned OpenClaw extensions
     if app.cfg.guardrail.enabled:
@@ -779,47 +780,10 @@ def _stop_host_openclaw() -> None:
 
 
 def _install_codeguard_to_sandbox(cfg, sandbox_home: str) -> None:
-    """Install CodeGuard skill into the sandbox-owned OpenClaw skills directory.
-
-    Uses sudo because ~/.openclaw/ is owned by sandbox:sandbox at this point.
-    The caller is responsible for chowning the tree afterward.
-    """
-    from defenseclaw.paths import bundled_codeguard_dir
-
-    source_dir = bundled_codeguard_dir()
-    if not source_dir.is_dir() or not (source_dir / "SKILL.md").is_file():
-        click.echo("    codeguard:           skipped (skill source not found)")
-        return
-
-    skill_dirs = cfg.skill_dirs()
-    if not skill_dirs:
-        click.echo("    codeguard:           skipped (no skill directories)")
-        return
-
-    target_dir = os.path.join(skill_dirs[0], "codeguard")
-    subprocess.run(
-        [*_sudo_prefix(), "mkdir", "-p", skill_dirs[0]],
-        capture_output=True, check=False,
-    )
-    subprocess.run(
-        [*_sudo_prefix(), "rm", "-rf", target_dir],
-        capture_output=True, check=False,
-    )
-    subprocess.run(
-        [*_sudo_prefix(), "cp", "-r", str(source_dir), target_dir],
-        capture_output=True, check=False,
-    )
-
-    oc_config = os.path.join(sandbox_home, ".openclaw", "openclaw.json")
-    oc_json = _sudo_read_json(oc_config)
-    if oc_json is not None:
-        skills = oc_json.setdefault("skills", {})
-        entries = skills.setdefault("entries", {})
-        entries["codeguard"] = {"enabled": True}
-        content = _json.dumps(oc_json, indent=2, ensure_ascii=False) + "\n"
-        _sudo_write(content, oc_config)
-
-    click.echo(f"    codeguard:           installed to {target_dir}")
+    """Deprecated no-op: native CodeGuard assets are explicit opt-in only."""
+    _ = cfg
+    _ = sandbox_home
+    click.echo("    codeguard:           skipped (explicit opt-in required)")
 
 
 def _install_guardrail_plugin_to_sandbox(sandbox_home: str) -> None:

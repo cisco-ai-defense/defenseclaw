@@ -43,6 +43,7 @@ DefenseClaw combines a Python operator CLI, a Go gateway sidecar, and an OpenCla
 - **Runtime guardrails** - inspect prompts, completions, and tool calls with regex rules, policy, optional LLM judge, and Cisco AI Defense inspection.
 - **CodeGuard** - built-in static checks for secrets, dangerous execution, unsafe deserialization, weak crypto, injection patterns, and risky file access.
 - **OpenShell sandbox support** - Linux sandbox setup with network, filesystem, syscall, and policy controls.
+- **Registries** - ingest external skill / MCP catalogs (corporate HTTPS YAML, [smithery.ai](https://smithery.ai/), [skills.sh](https://skills.sh/), git, ClawHub) with SSRF guards, scanner-driven verdicts, and auto-promotion into asset policy. See [docs/REGISTRIES.md](docs/REGISTRIES.md).
 - **Audit and observability** - SQLite audit store, JSONL gateway logs, OTLP export, Splunk HEC, webhooks, and local Grafana/Splunk bundles.
 - **Operator UX** - a CLI and TUI for setup, health checks, alerts, block/allow lists, scanner results, and policy workflows.
 
@@ -72,6 +73,7 @@ High-risk deployments should pair DefenseClaw with human review, least-privilege
 | [Splunk App](docs/SPLUNK_APP.md) | Local Splunk app dashboards and investigation flow |
 | [TUI](docs/TUI.md) | Terminal dashboard panels and navigation |
 | [Config Files](docs/CONFIG_FILES.md) | Config locations, environment variables, and policy files |
+| [Registries](docs/REGISTRIES.md) | External skill / MCP catalog ingestion (clawhub, smithery, skills.sh, http, git, file) |
 | [Plugin Development](docs/PLUGINS.md) | Custom scanner plugin workflow and example |
 | [Testing](docs/TESTING.md) | Python, Go, TypeScript, Rego, docs, and CI checks |
 | [Developer Spec](docs/development/DEVELOPER_SPEC.md) | Historical product/developer spec |

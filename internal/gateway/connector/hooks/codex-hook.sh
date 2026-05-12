@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v3
 # DefenseClaw Codex hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/codex/hook endpoint. Codex pipes the
 # structured JSON event to stdin and reads the response from stdout.
@@ -38,11 +38,18 @@ FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 # operator who set DEFENSECLAW_STRICT_AVAILABILITY=1 fail-closed on a
 # missing-token misconfiguration; either way, the bypass is recorded
 # in hook-failures.jsonl.
+DEFENSECLAW_HOOK_CONNECTOR="codex"
+DEFENSECLAW_HOOK_NAME="codex-hook"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
+
 if [ ! -f "${HOOK_DIR}/.token" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ]; then
   defenseclaw_handle_missing_token codex codex-hook "codex tool"
 fi
 
-PAYLOAD=$(cat)
+PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: codex hook refusing oversized payload" >&2
+  exit 0
+}
 API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
@@ -117,7 +124,30 @@ fi
 ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+
+# Codex's hook protocol is strictly EITHER structured JSON on stdout
+# with exit 0 (Codex parses the decision from the JSON) OR exit 2
+# with the reason on stderr (Codex blocks with stderr as the
+# message). Doing BOTH is a protocol violation: Codex sees exit 2,
+# ignores stdout, finds an empty stderr, then logs
+# "exited with code 2 but did not write a blocking reason to stderr"
+# and FAILS OPEN — which is exactly the bug we hit when our gateway
+# returned permissionDecision=deny on stdout AND we exited 2.
+#
+# Resolution: trust the structured JSON when the gateway gave us one
+# (every block path in codex_hook.go does), and only fall back to
+# the exit-2-plus-stderr path when no structured output exists.
 if [ "$ACTION" = "block" ]; then
+  if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+    # JSON on stdout already carries permissionDecision=deny /
+    # decision=block. Exit 0 so Codex honors it.
+    exit 0
+  fi
+  REASON=$(echo "$RESULT" | jq -r '.reason // empty' 2>/dev/null)
+  if [ -z "$REASON" ]; then
+    REASON="Blocked by DefenseClaw Codex policy."
+  fi
+  printf '%s\n' "$REASON" >&2
   exit 2
 fi
 exit 0
