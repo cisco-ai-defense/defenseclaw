@@ -171,7 +171,16 @@ type metricsSet struct {
 	tuiFilterApplied      metric.Int64Counter
 	judgeSemDepth         metric.Int64UpDownCounter
 	judgeSemDrops         metric.Int64Counter
-	// OTel log records + provenance fanout
+	// Judge-body persistence (Phase 3 of the SQLite write-lock fix):
+	// the async queue replaces the synchronous SetJudgePersistor
+	// closure that used to fire two sequential SQLite writes on the
+	// proxy hot path. Drops are the canary signal — a healthy
+	// sidecar should hold this at zero; a non-zero rate means the
+	// queue depth or batch size are mis-tuned for the offered load.
+	judgePersistDrops      metric.Int64Counter
+	judgePersistQueueDepth metric.Int64Gauge
+	judgePersistBatchSize  metric.Int64Histogram
+	// Track 10 (OTel log records + provenance fanout)
 	gatewayEventsEmitted metric.Int64Counter
 	provenanceBumps      metric.Int64Counter
 
@@ -805,7 +814,31 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// v7 instruments — OTel logs + provenance fanout
+	ms.judgePersistDrops, err = m.Int64Counter("defenseclaw.judge.persist.drops",
+		metric.WithUnit("{drop}"),
+		metric.WithDescription("Judge bodies dropped before persistence (queue full)"))
+	if err != nil {
+		return nil, err
+	}
+	ms.judgePersistQueueDepth, err = m.Int64Gauge("defenseclaw.judge.persist.queue_depth",
+		metric.WithUnit("{item}"),
+		metric.WithDescription("Current depth of the async judge-persistence queue"))
+	if err != nil {
+		return nil, err
+	}
+	// Histogram buckets aligned with the 32-row max-batch policy in
+	// JudgeStore.run(): they capture both bursty single-row commits
+	// (latency-dominated) and full-batch commits (fsync-amortized)
+	// so dashboards can distinguish the two regimes.
+	ms.judgePersistBatchSize, err = m.Int64Histogram("defenseclaw.judge.persist.batch_size",
+		metric.WithUnit("{row}"),
+		metric.WithDescription("Rows committed per judge-persistence transaction"),
+		metric.WithExplicitBucketBoundaries(1, 2, 4, 8, 16, 24, 32, 48, 64))
+	if err != nil {
+		return nil, err
+	}
+
+	// v7 instruments — Track 10 OTel logs + provenance
 	ms.gatewayEventsEmitted, err = m.Int64Counter("defenseclaw.gateway.events.emitted",
 		metric.WithUnit("{event}"),
 		metric.WithDescription("Gateway events written through the writer choke point"))
@@ -2391,6 +2424,42 @@ func (p *Provider) RecordJudgeSemaphore(ctx context.Context, delta int64, droppe
 	if dropped {
 		p.metrics.judgeSemDrops.Add(ctx, 1)
 	}
+}
+
+// RecordJudgePersistDrop increments the drop counter when the async
+// judge-persistence queue cannot accept a new job. reason should be
+// a low-cardinality string ("queue_full", "shutdown") so the
+// counter stays Prometheus-friendly.
+func (p *Provider) RecordJudgePersistDrop(ctx context.Context, reason string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.judgePersistDrops.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("reason", reason),
+	))
+}
+
+// RecordJudgePersistQueueDepth snapshots the current depth of the
+// async judge-persistence queue. Called from the worker after every
+// enqueue / drain so dashboards can track queue saturation in real
+// time without needing pollers in the worker.
+func (p *Provider) RecordJudgePersistQueueDepth(ctx context.Context, depth int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.judgePersistQueueDepth.Record(ctx, depth)
+}
+
+// RecordJudgePersistBatchSize records the size of a single committed
+// persistence transaction. Tracking this distribution is how
+// operators verify the worker is actually batching (median should
+// climb toward 32 under load) instead of degenerating into a
+// one-row-per-commit pattern that defeats the purpose of the queue.
+func (p *Provider) RecordJudgePersistBatchSize(ctx context.Context, n int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	p.metrics.judgePersistBatchSize.Record(ctx, n)
 }
 
 // RecordGatewayEventEmitted is called by the gatewaylog.Writer

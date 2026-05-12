@@ -159,6 +159,18 @@ type Config struct {
 
 	DataDir         string                     `mapstructure:"data_dir"              yaml:"data_dir"`
 	AuditDB         string                     `mapstructure:"audit_db"         yaml:"audit_db"`
+	// JudgeBodiesDB is the standalone SQLite file that holds
+	// retained LLM-judge bodies (judge_responses table). Splitting
+	// it out from audit.db isolates the highest-volume write path
+	// (judge bodies, up to MaxJudgeRawBytes = 64 KiB each) from
+	// the comparatively narrow audit_events / activity_events
+	// writes, so the two write-lock domains do not contend.
+	//
+	// Defaults to ~/.defenseclaw/judge_bodies.db; operators can
+	// point this at a separate disk in high-throughput
+	// deployments. The legacy judge_responses rows in audit.db
+	// remain readable; new rows only ever land here.
+	JudgeBodiesDB   string                     `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
 	QuarantineDir   string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
 	PluginDir       string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
 	PolicyDir       string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
@@ -1031,6 +1043,27 @@ type GuardrailConfig struct {
 	// the safety mechanism for downstream sinks; retention is a
 	// local-only decision.
 	RetainJudgeBodies bool `mapstructure:"retain_judge_bodies" yaml:"retain_judge_bodies,omitempty"`
+
+	// JudgePersistQueueDepth caps the buffered channel that
+	// decouples judge persistence from the proxy hot path. Each
+	// slot holds one pending INSERT into judge_responses; the
+	// dedicated worker drains the queue and amortizes fsync cost
+	// by batching up to 32 rows per transaction.
+	//
+	// Tuning notes:
+	//   - 1024 (default) is sized to absorb a ~10-second burst at
+	//     100 RPS of tool-call inspections without dropping rows
+	//     while bounding worst-case memory to ~64 MiB (each row
+	//     is capped at MaxJudgeRawBytes = 64 KiB).
+	//   - Setting this to 0 falls back to the default at boot.
+	//   - DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE env var overrides
+	//     the config value at sidecar boot for emergency tuning
+	//     without a config push.
+	//
+	// Drops show up as defenseclaw.judge.persist.drops with
+	// reason="queue_full"; a sustained non-zero rate is the cue
+	// to bump this knob (or investigate SQLite write throughput).
+	JudgePersistQueueDepth int `mapstructure:"judge_persist_queue_depth" yaml:"judge_persist_queue_depth,omitempty"`
 
 	// AllowUnknownLLMDomains, when true, permits passthrough to hosts
 	// that are NOT listed in providers.json — provided the request
@@ -1991,6 +2024,7 @@ func (c *Config) Save() error {
 func setDefaults(dataDir string) {
 	viper.SetDefault("data_dir", dataDir)
 	viper.SetDefault("audit_db", filepath.Join(dataDir, DefaultAuditDBName))
+	viper.SetDefault("judge_bodies_db", filepath.Join(dataDir, DefaultJudgeBodiesDBName))
 	viper.SetDefault("quarantine_dir", filepath.Join(dataDir, "quarantine"))
 	viper.SetDefault("plugin_dir", filepath.Join(dataDir, "plugins"))
 	viper.SetDefault("policy_dir", filepath.Join(dataDir, "policies"))
@@ -2198,6 +2232,11 @@ func setDefaults(dataDir string) {
 	// with strict storage or privacy constraints can still opt out with
 	// `guardrail.retain_judge_bodies: false` or DEFENSECLAW_PERSIST_JUDGE=0.
 	viper.SetDefault("guardrail.retain_judge_bodies", true)
+	// Buffered async persistence queue: 1024 entries is the sweet
+	// spot between memory ceiling and BUSY absorption under burst
+	// load. See GuardrailConfig.JudgePersistQueueDepth for the
+	// tuning rationale.
+	viper.SetDefault("guardrail.judge_persist_queue_depth", 1024)
 
 	viper.SetDefault("gateway.host", "127.0.0.1")
 	viper.SetDefault("gateway.port", 18789)

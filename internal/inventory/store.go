@@ -28,6 +28,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // InventoryStore is the durable companion to AIStateStore: where the
@@ -52,6 +54,22 @@ type InventoryStore struct {
 	db *sql.DB
 }
 
+// inventoryPragmas mirrors the audit store hardening: every pragma
+// is anchored in the DSN so it is replayed on every connection in
+// the pool (db.Exec PRAGMA only mutates the connection that served
+// it — a classic source of "the busy_timeout I set at boot doesn't
+// apply anymore" surprises). See internal/audit/store.go for the
+// per-setting rationale; the inventory DB benefits from the same
+// WAL + busy_timeout + synchronous=NORMAL + mmap configuration
+// because its writers (RecordScan transactions) can be lengthy.
+const inventoryPragmas = "?_pragma=journal_mode(WAL)" +
+	"&_pragma=busy_timeout(5000)" +
+	"&_pragma=synchronous(NORMAL)" +
+	"&_pragma=cache_size(-20000)" +
+	"&_pragma=temp_store(MEMORY)" +
+	"&_pragma=mmap_size(268435456)" +
+	"&_pragma=foreign_keys(ON)"
+
 // NewInventoryStore opens (or creates) the inventory database at
 // dbPath. The file is created with restrictive permissions (mode
 // 0600) on first creation -- the database can contain workspace
@@ -61,15 +79,20 @@ func NewInventoryStore(dbPath string) (*InventoryStore, error) {
 	if strings.TrimSpace(dbPath) == "" {
 		return nil, errors.New("inventory store: db path is required")
 	}
-	// Ensure parent dir exists with the same restrictive mode the
-	// existing audit store uses.
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, fmt.Errorf("inventory store: ensure parent dir: %w", err)
 	}
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+inventoryPragmas)
 	if err != nil {
 		return nil, fmt.Errorf("inventory store: open db %s: %w", dbPath, err)
 	}
+	// Single-writer pool: SQLite serializes writers internally and
+	// any extra pool connection just races for the same write lock
+	// (surfacing as SQLITE_BUSY). Go's database/sql mutex
+	// serializes callers cleanly when MaxOpenConns is 1.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
 	st := &InventoryStore{db: db}
 	if err := st.init(); err != nil {
 		st.Close() //nolint:errcheck
@@ -94,6 +117,92 @@ func (s *InventoryStore) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+// SQLite BUSY retry policy: see internal/audit/store.go for the
+// matching wrapper. We deliberately keep the constants in lockstep
+// so the two stores age identically. Application-level retry is the
+// safety net layered on top of the DSN busy_timeout=5000 — even
+// with the 5-second pragma wait, a busy storm can in theory
+// outpace SQLite's internal waiter (see the `database is locked`
+// reports that motivated this fix); the retry absorbs those.
+const (
+	sqliteRetryAttempts = 5
+	sqliteRetryBaseMs   = 10
+)
+
+func isSQLiteBusy(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "database is locked") || strings.Contains(s, "SQLITE_BUSY")
+}
+
+// retryBusy runs fn up to sqliteRetryAttempts times with exponential
+// backoff on BUSY. Each retry records a telemetry event so
+// contention shows up on the same counter the audit store uses.
+func retryBusy(ctx context.Context, op string, fn func() error) error {
+	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
+	var err error
+	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
+		err = fn()
+		if !isSQLiteBusy(err) {
+			return err
+		}
+		telemetry.RecordSQLiteBusy(ctx, op)
+		if attempt == sqliteRetryAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+	return err
+}
+
+// execDB / queryDB / scanRow centralize the inventory writes onto the
+// retry helper. They mirror the audit store helpers so contention
+// metrics line up across both DBs.
+func (s *InventoryStore) execDB(ctx context.Context, op, query string, args ...any) (sql.Result, error) {
+	var res sql.Result
+	err := retryBusy(ctx, op, func() error {
+		var execErr error
+		res, execErr = s.db.ExecContext(ctx, query, args...)
+		return execErr
+	})
+	return res, err
+}
+
+func (s *InventoryStore) queryDB(ctx context.Context, op, query string, args ...any) (*sql.Rows, error) {
+	var rows *sql.Rows
+	err := retryBusy(ctx, op, func() error {
+		var qErr error
+		rows, qErr = s.db.QueryContext(ctx, query, args...)
+		return qErr
+	})
+	return rows, err
+}
+
+// runInTx wraps fn in a transaction that is retried (whole-tx) on
+// SQLITE_BUSY at BeginTx time. Once the tx is open, mid-tx BUSY is
+// returned to fn so the caller's invariants are not corrupted by a
+// silent partial replay.
+func (s *InventoryStore) runInTx(ctx context.Context, op string, fn func(*sql.Tx) error) error {
+	return retryBusy(ctx, op, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // inventoryMigrations is the ordered, append-only list of schema
@@ -505,7 +614,7 @@ func (s *InventoryStore) ListComponentLocations(ctx context.Context, ecosystem, 
 	if s == nil || s.db == nil {
 		return nil, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB(ctx, "inventory_locations", `
 		SELECT s.detector, s.state, s.evidence_json, s.last_seen, s.last_active_at
 		FROM ai_signals s
 		WHERE LOWER(s.component_ecosystem) = LOWER(?)
@@ -602,7 +711,7 @@ func (s *InventoryStore) ComponentHistory(ctx context.Context, ecosystem, name s
 	if limit <= 0 || limit > 1000 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.queryDB(ctx, "inventory_history", `
 		SELECT c.scan_id, sc.scanned_at, c.identity_score, c.identity_band,
 		       c.presence_score, c.presence_band, c.detectors, c.policy_version
 		FROM ai_confidence_snapshots c
@@ -637,7 +746,7 @@ func (s *InventoryStore) PruneScansBefore(ctx context.Context, cutoff time.Time)
 	if s == nil || s.db == nil {
 		return 0, nil
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM ai_scans WHERE scanned_at < ?`, cutoff.UTC())
+	res, err := s.execDB(ctx, "inventory_prune", `DELETE FROM ai_scans WHERE scanned_at < ?`, cutoff.UTC())
 	if err != nil {
 		return 0, fmt.Errorf("inventory store: prune scans: %w", err)
 	}
