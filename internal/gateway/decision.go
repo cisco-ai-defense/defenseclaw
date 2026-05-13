@@ -38,6 +38,67 @@ const (
 	severityCritical
 )
 
+// SeverityCriteria is the single source of truth for what each severity
+// level means across the runtime guardrails. Regex rules, LLM judges,
+// the correlator, and human reviewers all reference this rubric so that
+// "CRITICAL" means the same thing in every layer.
+//
+// The line between CRITICAL and HIGH is drawn at: CRITICAL requires the
+// harm to be proven by the content alone (no plausible benign reading,
+// no further attacker action needed). HIGH covers strong adversarial
+// intent or sensitive data that still requires context/action to cause
+// actual harm.
+var SeverityCriteria = map[string]string{
+	"CRITICAL": "Direct unambiguous harm provable from the content alone. " +
+		"Examples: plaintext credentials, completed jailbreak output, " +
+		"SSN/passport/password disclosed, reverse shell, destructive shell command.",
+	"HIGH": "Clear adversarial intent OR high-impact sensitive data that still " +
+		"requires context or a follow-up action to cause harm. " +
+		"Examples: /etc/passwd request, phone number in completion, " +
+		"multi-word injection phrase, SSH key path reference.",
+	"MEDIUM": "Suspicious but ambiguous; benign readings are plausible. Alert, do not block. " +
+		"Examples: single 9-digit number that may or may not be an SSN, " +
+		"single-category injection signal without corroboration.",
+	"LOW": "Weak indicator; content is commonly legitimate. " +
+		"Examples: email in user prompt (self-disclosure), IP address mention.",
+	"NONE": "No concern.",
+}
+
+// SeverityOrder is the canonical ordering of severity labels, from
+// weakest to strongest. Consumers that need to iterate in rank order
+// (e.g. when rendering the rubric in a judge prompt) should use this
+// slice rather than hard-coding a literal.
+var SeverityOrder = []string{"NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"}
+
+// SignalStrengthToSeverity maps the structured-reasoning output used by
+// the LLM judges (see Step 3 / llm_judge.go system prompts) to a
+// severity label. The judges answer two booleans per finding:
+//
+//	unambiguous  — is the malicious intent obvious from the content alone?
+//	high_impact  — would the worst-case outcome cause hard-to-reverse damage?
+//
+// The mapping is deterministic: any drift between a judge's claimed
+// severity and the value returned here is a reconciliation error and
+// should be logged on the finding's decision_path (see Step 5 schema).
+//
+//	unambiguous  high_impact  ->  severity
+//	     T            T            CRITICAL   (strong_signal)
+//	     T            F            HIGH       (signal)
+//	     F            T            MEDIUM     (needs_review)
+//	     F            F            LOW        (weak_signal)
+func SignalStrengthToSeverity(unambiguous, highImpact bool) string {
+	switch {
+	case unambiguous && highImpact:
+		return "CRITICAL"
+	case unambiguous && !highImpact:
+		return "HIGH"
+	case !unambiguous && highImpact:
+		return "MEDIUM"
+	default:
+		return "LOW"
+	}
+}
+
 func guardrailRuntimeAction(cfg *config.Config, severity string, confirmable bool) string {
 	if cfg == nil {
 		return guardrailRuntimeActionForGuardrail(nil, severity, confirmable)

@@ -24,6 +24,11 @@ system_prompt: |
   - Username
   - Password
 
+  SEVERITY RUBRIC (for your own awareness; per-category severity is preconfigured):
+  - CRITICAL: direct unambiguous harm — SSN, passport, driver's license, password.
+  - HIGH:     sensitive identifiers with high impact if leaked (phone numbers in completions).
+  - MEDIUM/LOW: context-dependent identifiers (email in a user prompt, IP addresses).
+
   For each category, provide:
   1. "detection_result": true if PII of this type is detected, false otherwise
   2. "entities": list of detected PII values (empty list if none)

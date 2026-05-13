@@ -248,6 +248,15 @@ var trustExploitRules = []PatternRule{
 	{ID: "TRUST-OUTPUT-CONSTRAINT", Pattern: regexp.MustCompile(`(?i)(?:respond\s+only\s+in\s+(?:hex|base64|rot13|binary|morse|unicode)|encode\s+your\s+(?:response|answer|output)\s+in\s+(?:base64|hex|rot13|url)|output\s+as\s+(?:hex|base64|rot13|url)\s+encoded|(?:rot13|unicode\s+escape|url\s+(?:decode|encode))\s+(?:the|your|this))`), Title: "Forced encoding to bypass filters", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection", "obfuscation"}},
 	// Payload splitting — "start with" technique to seed compliant-looking output
 	{ID: "TRUST-PAYLOAD-SPLIT", Pattern: regexp.MustCompile(`(?i)(?:start\s+your\s+(?:response|answer|output)\s+with\s+["'](?:Sure|Absolutely|Of\s+course|Here\s+is|I\s+can\s+help))|(?:begin\s+by\s+saying\s+["'](?:Sure|Yes|Absolutely))`), Title: "Payload splitting / forced compliance prefix", Severity: "HIGH", Confidence: 0.87, Tags: []string{"prompt-injection"}},
+	// Zero-width character obfuscation — 10+ occurrences of an ASCII
+	// alphanumeric immediately followed by a zero-width character (U+200B
+	// ZWSP, U+200C ZWNJ, U+200D ZWJ, U+FEFF BOM). Two constraints keep this
+	// rule specific: (1) the 10-occurrence threshold is a high bar — a
+	// hand-spliced SSN crosses it, benign text does not; (2) the ASCII
+	// adjacency filter excludes emoji ZWJ sequences (which sit between
+	// non-ASCII emoji glyphs). The pattern catches the attacker technique
+	// of splicing entity values so entity extractors read garbled tokens.
+	{ID: "OBFUSC-UNICODE-ZWSP", Pattern: regexp.MustCompile(`(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`), Title: "Zero-width character obfuscation", Severity: "HIGH", Confidence: 0.95, Tags: []string{"obfuscation"}},
 }
 
 // ---------------------------------------------------------------------------
