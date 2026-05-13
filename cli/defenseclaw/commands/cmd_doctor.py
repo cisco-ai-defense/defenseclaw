@@ -833,10 +833,36 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Cisco AI Defense", f"{display} not set", r=r)
         return
 
-    health_url = endpoint.rstrip("/") + "/health"
+    # Probe the actual inspect route the runtime scanner hits rather
+    # than /health. Two reasons:
+    #
+    # 1. Cisco AI Defense authenticates with the
+    #    ``X-Cisco-AI-Defense-API-Key`` header, not ``Authorization:
+    #    Bearer`` — the gateway-side scanner already sets this (see
+    #    internal/gateway/cisco_inspect.go::Inspect). A doctor probe
+    #    using the wrong header got 403 on preview deployments even
+    #    when the same key worked end-to-end at runtime, which made
+    #    the diagnostic actively misleading ("authentication failed"
+    #    reported against a perfectly good key).
+    #
+    # 2. Some AID deployments (notably preview) don't expose an
+    #    unauthenticated ``/health`` route at all, so even with the
+    #    right header the probe would come back with a 404 / 5xx and
+    #    be hard to interpret. The ``/api/v1/inspect/chat`` route is
+    #    load-bearing on every deployment because the runtime uses
+    #    it, so probing it here exercises the same code path an
+    #    operator's real traffic will hit.
+    probe_url = endpoint.rstrip("/") + "/api/v1/inspect/chat"
+    probe_body = b'{"messages":[{"role":"user","content":"defenseclaw-doctor-probe"}],"metadata":{},"config":{}}'
     code, body = _http_probe(
-        health_url,
-        headers={"Authorization": f"Bearer {api_key}"},
+        probe_url,
+        method="POST",
+        headers={
+            "X-Cisco-AI-Defense-API-Key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        body=probe_body,
         timeout=float(cfg.cisco_ai_defense.timeout_ms) / 1000.0,
     )
 
@@ -847,7 +873,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
     elif code == 0:
         _emit("warn", "Cisco AI Defense", f"endpoint unreachable: {body[:100]}", r=r)
     else:
-        _emit("warn", "Cisco AI Defense", f"HTTP {code} (endpoint may not support /health)", r=r)
+        _emit("warn", "Cisco AI Defense", f"HTTP {code} (unexpected — endpoint responded but not 200)", r=r)
 
 
 def _check_observability(cfg, r: _DoctorResult) -> None:
