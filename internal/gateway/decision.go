@@ -138,6 +138,19 @@ func normalizedGuardrailAction(action string) string {
 	}
 }
 
+func actionRank(action string) int {
+	switch normalizedGuardrailAction(action) {
+	case guardrailActionBlock:
+		return 3
+	case guardrailActionConfirm:
+		return 2
+	case guardrailActionAlert:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // isPromptDirection reports whether the supplied direction string identifies
 // the user → LLM prompt surface. Comparison is case-insensitive and ignores
 // surrounding whitespace.

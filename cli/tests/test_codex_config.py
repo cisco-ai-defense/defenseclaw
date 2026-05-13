@@ -18,7 +18,7 @@ dispatcher coverage.
 
 Codex deliberately has the *narrowest* on-disk surface of the four
 connectors — TOML for general settings, project-local ``.mcp.json``
-for MCP. The ``[hooks]`` block is forward-compat only (plan C3 WONTFIX:
+for MCP. The ``[hooks]`` block is forward-compat only (plan phase C-3 WONTFIX:
 codex doesn't honor it today). Tests here document the shape so any
 future refactor that drops the write must update both this file
 and ``codex.go::Setup``.
@@ -142,7 +142,7 @@ class CodexSkillAndPluginDirsTests(unittest.TestCase):
 
 
 class CodexHooksRoundTripTests(unittest.TestCase):
-    """Plan S2.2 / C3: the ``[hooks]`` block in config.toml is a
+    """Plan S2.2 / phase C-3: the ``[hooks]`` block in config.toml is a
     forward-compat placeholder — codex doesn't honor it today, but
     when it grows external-script hook support, the wiring is on disk.
     Test the shape so a future refactor that drops the write must

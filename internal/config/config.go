@@ -181,6 +181,7 @@ type Config struct {
 	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
 	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
 	Registries      RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
+	AgentControl    AgentControlConfig         `mapstructure:"agent_control"    yaml:"agent_control,omitempty"`
 	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
 	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
 	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
@@ -580,6 +581,7 @@ type OTelConfig struct {
 	Metrics  OTelMetricsConfig  `mapstructure:"metrics"  yaml:"metrics"`
 	Batch    OTelBatchConfig    `mapstructure:"batch"    yaml:"batch"`
 	Resource OTelResourceConfig `mapstructure:"resource" yaml:"resource"`
+	Galileo  OTelGalileoConfig  `mapstructure:"galileo"  yaml:"galileo"`
 }
 
 type OTelTLSConfig struct {
@@ -621,6 +623,67 @@ type OTelBatchConfig struct {
 
 type OTelResourceConfig struct {
 	Attributes map[string]string `mapstructure:"attributes" yaml:"attributes"`
+}
+
+type OTelGalileoConfig struct {
+	Enabled     bool   `mapstructure:"enabled"       yaml:"enabled"`
+	Endpoint    string `mapstructure:"endpoint"      yaml:"endpoint"`
+	APIKeyEnv   string `mapstructure:"api_key_env"   yaml:"api_key_env"`
+	Project     string `mapstructure:"project"       yaml:"project"`
+	ProjectID   string `mapstructure:"project_id"    yaml:"project_id"`
+	LogStream   string `mapstructure:"log_stream"    yaml:"log_stream"`
+	LogStreamID string `mapstructure:"log_stream_id" yaml:"log_stream_id"`
+}
+
+func (c OTelGalileoConfig) EffectiveAPIKeyEnv() string {
+	if env := strings.TrimSpace(c.APIKeyEnv); env != "" {
+		return env
+	}
+	return "GALILEO_API_KEY"
+}
+
+func (c OTelGalileoConfig) ResolvedAPIKey() string {
+	return strings.TrimSpace(os.Getenv(c.EffectiveAPIKeyEnv()))
+}
+
+// AgentControlConfig controls runtime calls to Galileo Agent Control.
+// It is intentionally separate from OTel/Galileo SaaS configuration:
+// Agent Control is an in-cluster policy decision API, while OTel sends
+// the resulting metadata to the configured telemetry backends.
+type AgentControlConfig struct {
+	Enabled   bool   `mapstructure:"enabled"     yaml:"enabled"`
+	URL       string `mapstructure:"url"         yaml:"url"`
+	APIKeyEnv string `mapstructure:"api_key_env" yaml:"api_key_env"`
+	TimeoutMS int    `mapstructure:"timeout_ms"  yaml:"timeout_ms"`
+	AgentName string `mapstructure:"agent_name"  yaml:"agent_name"`
+	FailMode  string `mapstructure:"fail_mode"   yaml:"fail_mode"`
+}
+
+func (c AgentControlConfig) EffectiveAPIKeyEnv() string {
+	if env := strings.TrimSpace(c.APIKeyEnv); env != "" {
+		return env
+	}
+	return "AGENT_CONTROL_API_KEY"
+}
+
+func (c AgentControlConfig) ResolvedAPIKey() string {
+	return strings.TrimSpace(os.Getenv(c.EffectiveAPIKeyEnv()))
+}
+
+func (c AgentControlConfig) EffectiveTimeoutMS() int {
+	if c.TimeoutMS > 0 {
+		return c.TimeoutMS
+	}
+	return 2000
+}
+
+func (c AgentControlConfig) EffectiveFailMode() string {
+	switch strings.ToLower(strings.TrimSpace(c.FailMode)) {
+	case "closed", "fail-closed", "fail_closed":
+		return "closed"
+	default:
+		return "open"
+	}
 }
 
 type FirewallConfig struct {
@@ -1204,6 +1267,7 @@ type GatewayConfig struct {
 	TokenEnv        string `mapstructure:"token_env"         yaml:"token_env"`
 	TLS             bool   `mapstructure:"tls"               yaml:"tls"`
 	TLSSkipVerify   bool   `mapstructure:"tls_skip_verify"   yaml:"tls_skip_verify"`
+	AllowInsecure   bool   `mapstructure:"allow_insecure"    yaml:"allow_insecure"`
 	NoTLS           bool   `mapstructure:"-"                 yaml:"-"`
 	DeviceKeyFile   string `mapstructure:"device_key_file"   yaml:"device_key_file"`
 	AutoApprove     bool   `mapstructure:"auto_approve_safe" yaml:"auto_approve_safe"`
@@ -1279,7 +1343,7 @@ func (g *GatewayConfig) ResolvedToken() string {
 // When gateway.tls is true, TLS is always required. Otherwise, non-loopback hosts
 // require TLS to protect tokens in transit.
 func (g *GatewayConfig) RequiresTLS() bool {
-	if g.NoTLS {
+	if g.NoTLS || g.AllowInsecure {
 		return false
 	}
 	if g.TLS {
@@ -1296,6 +1360,9 @@ func (g *GatewayConfig) RequiresTLS() bool {
 // RequiresTLSWithMode is like RequiresTLS but treats openshell standalone mode as
 // point-to-point (no TLS) unless gateway.tls forces it on.
 func (g *GatewayConfig) RequiresTLSWithMode(openshell *OpenShellConfig) bool {
+	if g.NoTLS || g.AllowInsecure {
+		return false
+	}
 	if g.TLS {
 		return true
 	}
@@ -2253,6 +2320,19 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("notifications.dedup_window", NotificationsDefaultDedupWindow)
 	viper.SetDefault("notifications.max_per_minute", NotificationsDefaultMaxPerMinute)
 
+	viper.SetDefault("agent_control.enabled", false)
+	viper.SetDefault("agent_control.url", "")
+	viper.SetDefault("agent_control.api_key_env", "AGENT_CONTROL_API_KEY")
+	viper.SetDefault("agent_control.timeout_ms", 2000)
+	viper.SetDefault("agent_control.agent_name", "")
+	viper.SetDefault("agent_control.fail_mode", "open")
+	_ = viper.BindEnv("agent_control.enabled", "DEFENSECLAW_AGENT_CONTROL_ENABLED")
+	_ = viper.BindEnv("agent_control.url", "DEFENSECLAW_AGENT_CONTROL_URL", "AGENT_CONTROL_URL")
+	_ = viper.BindEnv("agent_control.api_key_env", "DEFENSECLAW_AGENT_CONTROL_API_KEY_ENV")
+	_ = viper.BindEnv("agent_control.timeout_ms", "DEFENSECLAW_AGENT_CONTROL_TIMEOUT_MS")
+	_ = viper.BindEnv("agent_control.agent_name", "DEFENSECLAW_AGENT_CONTROL_AGENT_NAME", "AGENT_CONTROL_AGENT_NAME")
+	_ = viper.BindEnv("agent_control.fail_mode", "DEFENSECLAW_AGENT_CONTROL_FAIL_MODE")
+
 	viper.SetDefault("otel.enabled", false)
 	viper.SetDefault("otel.protocol", "")
 	viper.SetDefault("otel.endpoint", "")
@@ -2278,6 +2358,13 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("otel.batch.max_export_batch_size", 512)
 	viper.SetDefault("otel.batch.scheduled_delay_ms", 5000)
 	viper.SetDefault("otel.batch.max_queue_size", 2048)
+	viper.SetDefault("otel.galileo.enabled", false)
+	viper.SetDefault("otel.galileo.endpoint", "https://api.galileo.ai/otel/v1/traces")
+	viper.SetDefault("otel.galileo.api_key_env", "GALILEO_API_KEY")
+	viper.SetDefault("otel.galileo.project", "")
+	viper.SetDefault("otel.galileo.project_id", "")
+	viper.SetDefault("otel.galileo.log_stream", "")
+	viper.SetDefault("otel.galileo.log_stream_id", "")
 
 	_ = viper.BindEnv("otel.enabled", "DEFENSECLAW_OTEL_ENABLED")
 	_ = viper.BindEnv("otel.endpoint", "DEFENSECLAW_OTEL_ENDPOINT")
@@ -2292,4 +2379,11 @@ func setDefaults(dataDir string) {
 	_ = viper.BindEnv("otel.logs.endpoint", "DEFENSECLAW_OTEL_LOGS_ENDPOINT")
 	_ = viper.BindEnv("otel.logs.protocol", "DEFENSECLAW_OTEL_LOGS_PROTOCOL")
 	_ = viper.BindEnv("otel.logs.url_path", "DEFENSECLAW_OTEL_LOGS_URL_PATH")
+	_ = viper.BindEnv("otel.galileo.enabled", "DEFENSECLAW_GALILEO_ENABLED")
+	_ = viper.BindEnv("otel.galileo.endpoint", "DEFENSECLAW_GALILEO_ENDPOINT")
+	_ = viper.BindEnv("otel.galileo.api_key_env", "DEFENSECLAW_GALILEO_API_KEY_ENV")
+	_ = viper.BindEnv("otel.galileo.project", "DEFENSECLAW_GALILEO_PROJECT", "GALILEO_PROJECT")
+	_ = viper.BindEnv("otel.galileo.project_id", "DEFENSECLAW_GALILEO_PROJECT_ID", "GALILEO_PROJECT_ID")
+	_ = viper.BindEnv("otel.galileo.log_stream", "DEFENSECLAW_GALILEO_LOG_STREAM", "GALILEO_LOG_STREAM")
+	_ = viper.BindEnv("otel.galileo.log_stream_id", "DEFENSECLAW_GALILEO_LOG_STREAM_ID", "GALILEO_LOG_STREAM_ID")
 }

@@ -92,6 +92,11 @@ type Event struct {
 	ToolName string `json:"tool_name,omitempty"`
 	ToolID   string `json:"tool_id,omitempty"`
 
+	// Structured carries sink-only machine-readable fields that do not have
+	// first-class SQLite columns. Callers must keep this low-cardinality and
+	// pre-sanitized; Details remains the redacted human-readable summary.
+	Structured map[string]any `json:"structured,omitempty"`
+
 	// v7 provenance + identity (SQLite columns from migration 10).
 	SchemaVersion     int    `json:"schema_version,omitempty"`
 	ContentHash       string `json:"content_hash,omitempty"`

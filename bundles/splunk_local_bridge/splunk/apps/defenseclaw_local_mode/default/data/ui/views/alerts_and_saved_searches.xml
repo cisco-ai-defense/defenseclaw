@@ -1,11 +1,11 @@
 <dashboard version="1.1">
   <label>Alerts And Saved Searches</label>
-  <description>Packaged security-operations detections and supporting saved searches for the seeded investigation model.</description>
+  <description>Packaged security-operations detections and supporting saved searches for the production investigation model.</description>
   <row>
     <panel>
       <html>
         <h2>Security operations detection pack</h2>
-        <p>This page now highlights the packaged DefenseClaw Security Ops detection searches that sit on top of the seeded `dcso_*` support layer. The detection searches remain disabled by default, run on a 5-minute schedule with a 15-minute lookback when enabled, and intentionally stop at detect, explain, investigate, and recommend.</p>
+        <p>This page highlights the packaged DefenseClaw Security Ops detection searches that sit on top of the `dcso_*` production support layer. The detection searches remain disabled by default, run on a 5-minute schedule with a 15-minute lookback when enabled, and intentionally stop at detect, explain, investigate, and recommend.</p>
       </html>
     </panel>
   </row>
@@ -60,15 +60,32 @@
       <title>Recent matching security-operations conditions</title>
       <table>
         <search>
-          <query>`dcso_detection_repeated_deny_activity` | eval workflow="Repeated Deny Activity" | table workflow run_id session_id risk_state risk_reason deny_count risk_rule_ids last_seen
-| append [ search `dcso_detection_dangerous_command_or_tool_denied` | eval workflow="Dangerous Command Or Tool Denied" | table workflow run_id session_id risk_state risk_reason dangerous_deny_count deny_count risk_rule_ids last_seen ]
-| append [ search `dcso_detection_policy_bypass_or_retry_after_denial` | eval workflow="Policy Bypass Or Retry After Denial" | table workflow run_id session_id risk_state risk_reason retry_after_deny_count session_retried_count queue_pressure_count risk_rule_ids last_seen ]
-| append [ search `dcso_detection_stuck_or_retry_storm_session` | eval workflow="Stuck Or Retry-Storm Session" | table workflow run_id session_id risk_state risk_reason session_stuck_count session_retried_count queue_pressure_count risk_rule_ids last_seen ]
-| append [ search `dcso_detection_runtime_error_burst_around_risky_run` | eval workflow="Runtime Error Burst Around Risky Run" | table workflow run_id session_id risk_state risk_reason runtime_error_count deny_count risk_rule_ids last_seen ]
-| append [ search `dcso_detection_high_cost_or_long_duration_risky_run` | eval workflow="High-Cost Or Long-Duration Risky Run" | table workflow run_id session_id risk_state risk_reason max_cost_usd max_duration_ms risk_rule_ids last_seen ]
+          <query>`dcso_investigation_rollup`
+| eval __seed=0, workflow=mvappend(
+    if(deny_count&gt;=2, "Repeated Deny Activity", null()),
+    if(dangerous_deny_count&gt;=1, "Dangerous Command Or Tool Denied", null()),
+    if(deny_count&gt;=1 AND retry_after_deny_count&gt;=1, "Policy Bypass Or Retry After Denial", null()),
+    if(session_stuck_count&gt;=1 OR session_retried_count&gt;=2, "Stuck Or Retry-Storm Session", null()),
+    if(runtime_error_count&gt;=2 AND mvfind(risk_rule_ids, "RISK-009")&gt;=0, "Runtime Error Burst Around Risky Run", null()),
+    if((max_cost_usd&gt;=1 OR max_duration_ms&gt;=5000) AND (risk_state="risky" OR risk_state="critical"), "High-Cost Or Long-Duration Risky Run", null())
+  )
+| append [ | makeresults | eval __seed=1, workflow="__none__" ]
+| mvexpand workflow
+| where __seed=0 AND isnotnull(workflow) AND workflow!="" AND workflow!="__none__"
+| eval workflow_order=case(
+    workflow="Repeated Deny Activity", 10,
+    workflow="Dangerous Command Or Tool Denied", 20,
+    workflow="Policy Bypass Or Retry After Denial", 30,
+    workflow="Stuck Or Retry-Storm Session", 40,
+    workflow="Runtime Error Burst Around Risky Run", 50,
+    workflow="High-Cost Or Long-Duration Risky Run", 60,
+    1=1, 99
+  )
+| sort workflow_order - last_seen_epoch
+| table workflow run_id session_id risk_state risk_reason deny_count dangerous_deny_count retry_after_deny_count session_retried_count queue_pressure_count session_stuck_count runtime_error_count max_cost_usd max_duration_ms risk_rule_ids last_seen
 | head 30</query>
-          <earliest>0</earliest>
-          <latest></latest>
+          <earliest>-24h</earliest>
+          <latest>now</latest>
         </search>
         <option name="count">30</option>
         <option name="drilldown">none</option>

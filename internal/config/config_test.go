@@ -764,6 +764,58 @@ func TestLoad_DefaultOTelProtocolEmpty(t *testing.T) {
 	}
 }
 
+func TestLoad_DefaultGalileoConfig(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_GALILEO_ENABLED", "")
+	t.Setenv("DEFENSECLAW_GALILEO_PROJECT", "")
+	t.Setenv("DEFENSECLAW_GALILEO_PROJECT_ID", "")
+	t.Setenv("DEFENSECLAW_GALILEO_LOG_STREAM", "")
+	t.Setenv("DEFENSECLAW_GALILEO_LOG_STREAM_ID", "")
+	t.Setenv("GALILEO_PROJECT", "")
+	t.Setenv("GALILEO_PROJECT_ID", "")
+	t.Setenv("GALILEO_LOG_STREAM", "")
+	t.Setenv("GALILEO_LOG_STREAM_ID", "")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.OTel.Galileo.Enabled {
+		t.Fatal("otel.galileo.enabled default=true want false")
+	}
+	if cfg.OTel.Galileo.Endpoint != "https://api.galileo.ai/otel/v1/traces" {
+		t.Fatalf("otel.galileo.endpoint=%q", cfg.OTel.Galileo.Endpoint)
+	}
+	if cfg.OTel.Galileo.EffectiveAPIKeyEnv() != "GALILEO_API_KEY" {
+		t.Fatalf("api key env=%q want GALILEO_API_KEY", cfg.OTel.Galileo.EffectiveAPIKeyEnv())
+	}
+}
+
+func TestLoad_GalileoEnvAliases(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	t.Setenv("DEFENSECLAW_GALILEO_ENABLED", "true")
+	t.Setenv("DEFENSECLAW_GALILEO_PROJECT_ID", "project-id")
+	t.Setenv("DEFENSECLAW_GALILEO_LOG_STREAM_ID", "log-stream-id")
+	t.Setenv("DEFENSECLAW_GALILEO_API_KEY_ENV", "CUSTOM_GALILEO_KEY")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.OTel.Galileo.Enabled {
+		t.Fatal("otel.galileo.enabled=false want true")
+	}
+	if cfg.OTel.Galileo.ProjectID != "project-id" {
+		t.Fatalf("project_id=%q want project-id", cfg.OTel.Galileo.ProjectID)
+	}
+	if cfg.OTel.Galileo.LogStreamID != "log-stream-id" {
+		t.Fatalf("log_stream_id=%q want log-stream-id", cfg.OTel.Galileo.LogStreamID)
+	}
+	if cfg.OTel.Galileo.EffectiveAPIKeyEnv() != "CUSTOM_GALILEO_KEY" {
+		t.Fatalf("api key env=%q want CUSTOM_GALILEO_KEY", cfg.OTel.Galileo.EffectiveAPIKeyEnv())
+	}
+}
+
 func TestOTelConfig_PerSignalOverride(t *testing.T) {
 	cfg := OTelConfig{
 		Endpoint: "global:4317",

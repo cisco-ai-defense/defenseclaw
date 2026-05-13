@@ -39,15 +39,16 @@ var defaultLogWriter io.Writer = os.Stderr
 
 // ScanVerdict is the result of a guardrail inspection.
 type ScanVerdict struct {
-	Action         string   `json:"action"`
-	Severity       string   `json:"severity"`
-	Reason         string   `json:"reason"`
-	Findings       []string `json:"findings"`
-	EntityCount    int      `json:"entity_count,omitempty"`
-	Scanner        string   `json:"scanner,omitempty"`
-	ScannerSources []string `json:"scanner_sources,omitempty"`
-	CiscoElapsedMs float64  `json:"cisco_elapsed_ms,omitempty"`
-	JudgeFailed    bool     `json:"-"`
+	Action         string                `json:"action"`
+	Severity       string                `json:"severity"`
+	Reason         string                `json:"reason"`
+	Findings       []string              `json:"findings"`
+	EntityCount    int                   `json:"entity_count,omitempty"`
+	Scanner        string                `json:"scanner,omitempty"`
+	ScannerSources []string              `json:"scanner_sources,omitempty"`
+	CiscoElapsedMs float64               `json:"cisco_elapsed_ms,omitempty"`
+	JudgeFailed    bool                  `json:"-"`
+	AgentControl   *agentControlDecision `json:"agent_control,omitempty"`
 }
 
 func allowVerdict(scanner string) *ScanVerdict {

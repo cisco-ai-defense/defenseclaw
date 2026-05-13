@@ -56,16 +56,17 @@ import (
 // APIServer exposes a local REST API for CLI and plugin communication
 // with the running sidecar.
 type APIServer struct {
-	health      *SidecarHealth
-	client      *Client
-	store       *audit.Store
-	logger      *audit.Logger
-	addr        string
-	scannerCfg  *config.Config
-	otel        *telemetry.Provider
-	hilt        *HILTApprovalManager
-	notifier    *notifier.Dispatcher
-	aiDiscovery *inventory.ContinuousDiscoveryService
+	health       *SidecarHealth
+	client       *Client
+	store        *audit.Store
+	logger       *audit.Logger
+	addr         string
+	scannerCfg   *config.Config
+	otel         *telemetry.Provider
+	agentControl *agentControlClient
+	hilt         *HILTApprovalManager
+	notifier     *notifier.Dispatcher
+	aiDiscovery  *inventory.ContinuousDiscoveryService
 
 	// cfgMu protects mutable fields in scannerCfg.Guardrail (Mode,
 	// ScannerMode) which can be changed at runtime via the PATCH
@@ -296,6 +297,7 @@ func NewAPIServer(addr string, health *SidecarHealth, client *Client, store *aud
 	}
 	if len(cfg) > 0 {
 		s.scannerCfg = cfg[0]
+		s.agentControl = newAgentControlClient(cfg[0].AgentControl, string(cfg[0].Claw.Mode))
 	}
 	return s
 }

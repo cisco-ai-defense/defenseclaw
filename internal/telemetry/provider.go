@@ -54,6 +54,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
+const defaultGalileoTracesEndpoint = "https://api.galileo.ai/otel/v1/traces"
+
 // Provider holds the OTel SDK providers and exposes telemetry emission methods.
 // When OTel is disabled, a no-op provider is returned whose methods do nothing.
 type Provider struct {
@@ -272,9 +274,6 @@ func (p *Provider) Shutdown(ctx context.Context) error {
 }
 
 func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string) (*sdktrace.TracerProvider, error) {
-	var exporter sdktrace.SpanExporter
-	var err error
-
 	endpoint := resolveValue(cfg.Traces.Endpoint, cfg.Endpoint)
 	protocol := resolveProtocol(
 		cfg.Traces.Protocol,
@@ -283,78 +282,141 @@ func newTracerProvider(ctx context.Context, cfg config.OTelConfig, res *resource
 		"OTEL_EXPORTER_OTLP_PROTOCOL",
 	)
 
-	if protocol == "http" {
-		opts := []tracehttp.Option{}
-		if endpoint != "" {
-			if host, path, insecure, ok := splitEndpointURL(endpoint); ok {
-				opts = append(opts, tracehttp.WithEndpoint(host))
-				if insecure {
-					opts = append(opts, tracehttp.WithInsecure())
-				}
-				if cfg.Traces.URLPath == "" && path != "" && path != "/" {
-					opts = append(opts, tracehttp.WithURLPath(path))
-				}
-			} else {
-				opts = append(opts, tracehttp.WithEndpoint(endpoint))
-			}
-		}
-		if len(headers) > 0 {
-			opts = append(opts, tracehttp.WithHeaders(headers))
-		}
-		if cfg.Traces.URLPath != "" {
-			opts = append(opts, tracehttp.WithURLPath(cfg.Traces.URLPath))
-		}
-		if cfg.TLS.Insecure {
-			opts = append(opts, tracehttp.WithInsecure())
-		}
-		if cfg.TLS.CACert != "" {
-			tlsCfg, tlsErr := buildTLSConfig(cfg.TLS.CACert)
-			if tlsErr != nil {
-				return nil, tlsErr
-			}
-			opts = append(opts, tracehttp.WithTLSClientConfig(tlsCfg))
-		}
-		exporter, err = tracehttp.New(ctx, opts...)
-	} else {
-		opts := []tracegrpc.Option{}
-		if endpoint != "" {
-			if endpointLooksLikeURL(endpoint) {
-				opts = append(opts, tracegrpc.WithEndpointURL(endpoint))
-			} else {
-				opts = append(opts, tracegrpc.WithEndpoint(endpoint))
-			}
-		}
-		if len(headers) > 0 {
-			opts = append(opts, tracegrpc.WithHeaders(headers))
-		}
-		if cfg.TLS.Insecure {
-			opts = append(opts, tracegrpc.WithInsecure())
-		} else if cfg.TLS.CACert != "" {
-			tlsCfg, tlsErr := buildTLSConfig(cfg.TLS.CACert)
-			if tlsErr != nil {
-				return nil, tlsErr
-			}
-			opts = append(opts, tracegrpc.WithTLSCredentials(credentials.NewTLS(tlsCfg)))
-		}
-		exporter, err = tracegrpc.New(ctx, opts...)
-	}
+	exporter, err := newTraceExporter(ctx, endpoint, protocol, cfg.Traces.URLPath, cfg.TLS, headers)
 	if err != nil {
 		return nil, err
 	}
 
 	sampler := buildSampler(cfg.Traces.Sampler, cfg.Traces.SamplerArg)
-
-	bsp := sdktrace.NewBatchSpanProcessor(exporter,
-		sdktrace.WithMaxExportBatchSize(cfg.Batch.MaxExportBatchSize),
-		sdktrace.WithBatchTimeout(time.Duration(cfg.Batch.ScheduledDelayMs)*time.Millisecond),
-		sdktrace.WithMaxQueueSize(cfg.Batch.MaxQueueSize),
-	)
-
-	return sdktrace.NewTracerProvider(
+	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithResource(res),
-		sdktrace.WithSpanProcessor(bsp),
 		sdktrace.WithSampler(sampler),
-	), nil
+		sdktrace.WithSpanProcessor(newBatchSpanProcessor(exporter, cfg.Batch)),
+	}
+
+	if cfg.Galileo.Enabled {
+		galileoExporter, err := newGalileoTraceExporter(ctx, cfg.Galileo)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, sdktrace.WithSpanProcessor(newBatchSpanProcessor(galileoExporter, cfg.Batch)))
+	}
+
+	return sdktrace.NewTracerProvider(opts...), nil
+}
+
+func newTraceExporter(ctx context.Context, endpoint, protocol, urlPath string, tlsCfg config.OTelTLSConfig, headers map[string]string) (sdktrace.SpanExporter, error) {
+	if protocol == "http" {
+		return newHTTPTraceExporter(ctx, endpoint, urlPath, tlsCfg, headers)
+	}
+
+	opts := []tracegrpc.Option{}
+	if endpoint != "" {
+		if endpointLooksLikeURL(endpoint) {
+			opts = append(opts, tracegrpc.WithEndpointURL(endpoint))
+		} else {
+			opts = append(opts, tracegrpc.WithEndpoint(endpoint))
+		}
+	}
+	if len(headers) > 0 {
+		opts = append(opts, tracegrpc.WithHeaders(headers))
+	}
+	if tlsCfg.Insecure {
+		opts = append(opts, tracegrpc.WithInsecure())
+	} else if tlsCfg.CACert != "" {
+		builtTLSCfg, tlsErr := buildTLSConfig(tlsCfg.CACert)
+		if tlsErr != nil {
+			return nil, tlsErr
+		}
+		opts = append(opts, tracegrpc.WithTLSCredentials(credentials.NewTLS(builtTLSCfg)))
+	}
+	return tracegrpc.New(ctx, opts...)
+}
+
+func newHTTPTraceExporter(ctx context.Context, endpoint, urlPath string, tlsCfg config.OTelTLSConfig, headers map[string]string) (sdktrace.SpanExporter, error) {
+	opts := []tracehttp.Option{}
+	if endpoint != "" {
+		if host, path, insecure, ok := splitEndpointURL(endpoint); ok {
+			opts = append(opts, tracehttp.WithEndpoint(host))
+			if insecure {
+				opts = append(opts, tracehttp.WithInsecure())
+			}
+			if urlPath == "" && path != "" && path != "/" {
+				opts = append(opts, tracehttp.WithURLPath(path))
+			}
+		} else {
+			opts = append(opts, tracehttp.WithEndpoint(endpoint))
+		}
+	}
+	if len(headers) > 0 {
+		opts = append(opts, tracehttp.WithHeaders(headers))
+	}
+	if urlPath != "" {
+		opts = append(opts, tracehttp.WithURLPath(urlPath))
+	}
+	if tlsCfg.Insecure {
+		opts = append(opts, tracehttp.WithInsecure())
+	}
+	if tlsCfg.CACert != "" {
+		builtTLSCfg, tlsErr := buildTLSConfig(tlsCfg.CACert)
+		if tlsErr != nil {
+			return nil, tlsErr
+		}
+		opts = append(opts, tracehttp.WithTLSClientConfig(builtTLSCfg))
+	}
+	return tracehttp.New(ctx, opts...)
+}
+
+func newBatchSpanProcessor(exporter sdktrace.SpanExporter, cfg config.OTelBatchConfig) sdktrace.SpanProcessor {
+	return sdktrace.NewBatchSpanProcessor(exporter,
+		sdktrace.WithMaxExportBatchSize(cfg.MaxExportBatchSize),
+		sdktrace.WithBatchTimeout(time.Duration(cfg.ScheduledDelayMs)*time.Millisecond),
+		sdktrace.WithMaxQueueSize(cfg.MaxQueueSize),
+	)
+}
+
+func newGalileoTraceExporter(ctx context.Context, cfg config.OTelGalileoConfig) (sdktrace.SpanExporter, error) {
+	headers, err := galileoTraceHeaders(cfg)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := strings.TrimSpace(cfg.Endpoint)
+	if endpoint == "" {
+		endpoint = defaultGalileoTracesEndpoint
+	}
+	return newHTTPTraceExporter(ctx, endpoint, "", config.OTelTLSConfig{}, headers)
+}
+
+func galileoTraceHeaders(cfg config.OTelGalileoConfig) (map[string]string, error) {
+	if !cfg.Enabled {
+		return nil, nil
+	}
+
+	apiKey := cfg.ResolvedAPIKey()
+	if apiKey == "" {
+		return nil, fmt.Errorf("galileo: %s is empty", cfg.EffectiveAPIKeyEnv())
+	}
+
+	headers := map[string]string{
+		"Galileo-API-Key": apiKey,
+	}
+	if projectID := strings.TrimSpace(cfg.ProjectID); projectID != "" {
+		headers["projectid"] = projectID
+	} else if project := strings.TrimSpace(cfg.Project); project != "" {
+		headers["project"] = project
+	} else {
+		return nil, fmt.Errorf("galileo: project or project_id is required")
+	}
+
+	if logStreamID := strings.TrimSpace(cfg.LogStreamID); logStreamID != "" {
+		headers["logstreamid"] = logStreamID
+	} else if logStream := strings.TrimSpace(cfg.LogStream); logStream != "" {
+		headers["logstream"] = logStream
+	} else {
+		return nil, fmt.Errorf("galileo: log_stream or log_stream_id is required")
+	}
+
+	return headers, nil
 }
 
 func newLoggerProvider(ctx context.Context, cfg config.OTelConfig, res *resource.Resource, headers map[string]string) (*sdklog.LoggerProvider, error) {

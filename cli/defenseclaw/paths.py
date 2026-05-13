@@ -27,6 +27,7 @@ Editable install (dev):
     <repo>/skills/codeguard/
     <repo>/bundles/splunk_local_bridge/
     <repo>/bundles/local_observability_stack/
+    <repo>/bundles/c3_agent_tokenomics/
     <repo>/extensions/defenseclaw/
 
 Every resolver tries _data/ first (wheel), then repo-relative (dev).
@@ -93,6 +94,14 @@ def bundled_local_observability_dir() -> Path:
     return _first_existing(
         _DATA_DIR / "local_observability_stack",
         _REPO_ROOT / "bundles" / "local_observability_stack",
+    )
+
+
+def bundled_c3_agent_tokenomics_dir() -> Path:
+    """Cisco Cloud Control tokenomics demo fixtures and OpenAPI contract."""
+    return _first_existing(
+        _DATA_DIR / "c3_agent_tokenomics",
+        _REPO_ROOT / "bundles" / "c3_agent_tokenomics",
     )
 
 

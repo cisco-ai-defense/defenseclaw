@@ -2077,25 +2077,36 @@ func TestClientWsURLExplicitTLS(t *testing.T) {
 	}
 }
 
+func TestClientWsURLAllowInsecure(t *testing.T) {
+	cfg := &config.GatewayConfig{Host: "openclaw.defenesclaw.svc.cluster.local", Port: 18789, AllowInsecure: true}
+	c := &Client{cfg: cfg}
+	got := c.wsURL()
+	if got != "ws://openclaw.defenesclaw.svc.cluster.local:18789" {
+		t.Errorf("wsURL() = %q, want ws://openclaw.defenesclaw.svc.cluster.local:18789", got)
+	}
+}
+
 func TestRequiresTLS(t *testing.T) {
 	tests := []struct {
-		host string
-		tls  bool
-		want bool
+		host          string
+		tls           bool
+		allowInsecure bool
+		want          bool
 	}{
-		{"127.0.0.1", false, false},
-		{"localhost", false, false},
-		{"::1", false, false},
-		{"", false, false},
-		{"10.0.0.5", false, true},
-		{"gateway.example.com", false, true},
-		{"127.0.0.1", true, true},
+		{"127.0.0.1", false, false, false},
+		{"localhost", false, false, false},
+		{"::1", false, false, false},
+		{"", false, false, false},
+		{"10.0.0.5", false, false, true},
+		{"gateway.example.com", false, false, true},
+		{"127.0.0.1", true, false, true},
+		{"openclaw.defenesclaw.svc.cluster.local", false, true, false},
 	}
 	for _, tt := range tests {
-		cfg := &config.GatewayConfig{Host: tt.host, TLS: tt.tls}
+		cfg := &config.GatewayConfig{Host: tt.host, TLS: tt.tls, AllowInsecure: tt.allowInsecure}
 		got := cfg.RequiresTLS()
 		if got != tt.want {
-			t.Errorf("RequiresTLS(host=%q, tls=%v) = %v, want %v", tt.host, tt.tls, got, tt.want)
+			t.Errorf("RequiresTLS(host=%q, tls=%v, allow_insecure=%v) = %v, want %v", tt.host, tt.tls, tt.allowInsecure, got, tt.want)
 		}
 	}
 }

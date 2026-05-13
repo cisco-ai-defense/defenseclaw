@@ -655,14 +655,18 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		})
 
 		s.subscribeToSessions(ctx)
+		usageCtx, stopUsageExporter := context.WithCancel(ctx)
+		s.startOpenClawUsageExporter(usageCtx)
 
 		fmt.Fprintf(os.Stderr, "[sidecar] event loop running, waiting for events ...\n")
 
 		select {
 		case <-ctx.Done():
+			stopUsageExporter()
 			s.health.SetGateway(StateStopped, "", nil)
 			return nil
 		case <-s.client.Disconnected():
+			stopUsageExporter()
 			fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
 			_ = s.logger.LogAction("sidecar-disconnected", "", "connection lost, reconnecting")
 			s.health.SetGateway(StateReconnecting, "connection lost", nil)
@@ -1362,6 +1366,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
 		proxy.SetNotifier(s.osNotifier)
+		proxy.SetAgentControlClient(newAgentControlClient(s.cfg.AgentControl, string(s.cfg.Claw.Mode)))
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)

@@ -5,7 +5,7 @@
     <panel>
       <html>
         <h2>Queue and runtime analytics from diagnostics events</h2>
-        <p>This page is now backed by structured diagnostics events. The current health story is diagnostics-driven: queue lane activity, wait behavior, stuck sessions, run attempts, and message processing outcomes. Metrics, traces, and cost analytics remain future work.</p>
+        <p>This page is backed by structured diagnostics events and live OpenClaw metric signals. Queue lane activity, wait behavior, stuck sessions, run attempts, and message processing outcomes are normalized into the same runtime-health view.</p>
       </html>
     </panel>
   </row>

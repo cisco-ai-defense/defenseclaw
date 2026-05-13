@@ -89,16 +89,20 @@ type ToolInspectRequest struct {
 // and claude-code hook responses use so a future generic inspect
 // hook script can read .raw_action / .would_block uniformly.
 type ToolInspectVerdict struct {
-	Action            string        `json:"action"`
-	RawAction         string        `json:"raw_action,omitempty"`
-	Severity          string        `json:"severity"`
-	Confidence        float64       `json:"confidence"`
-	Reason            string        `json:"reason"`
-	Findings          []string      `json:"findings"`
-	DetailedFindings  []RuleFinding `json:"detailed_findings,omitempty"`
-	Mode              string        `json:"mode"`
-	WouldBlock        bool          `json:"would_block,omitempty"`
-	ApprovalTimeoutMS int           `json:"approval_timeout_ms,omitempty"`
+	Action             string                      `json:"action"`
+	RawAction          string                      `json:"raw_action,omitempty"`
+	Severity           string                      `json:"severity"`
+	Confidence         float64                     `json:"confidence"`
+	Reason             string                      `json:"reason"`
+	Findings           []string                    `json:"findings"`
+	DetailedFindings   []RuleFinding               `json:"detailed_findings,omitempty"`
+	Mode               string                      `json:"mode"`
+	WouldBlock         bool                        `json:"would_block,omitempty"`
+	ApprovalTimeoutMS  int                         `json:"approval_timeout_ms,omitempty"`
+	AgentControl       *agentControlDecision       `json:"agent_control,omitempty"`
+	DecisionEvidence   *DecisionEvidence           `json:"decision_evidence,omitempty"`
+	ResponseProtection *ResponseProtectionEvidence `json:"response_protection,omitempty"`
+	ProtectedOutput    json.RawMessage             `json:"protected_output,omitempty"`
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -355,10 +359,21 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if a.agentControl != nil {
+		stage, step := agentControlStepForInspect(&req)
+		decision := a.agentControl.evaluate(ctx, stage, step)
+		mergeAgentControlIntoToolVerdict(verdict, decision)
+		annotateAgentControlSpan(r.Context(), decision)
+		emitAgentControlPolicyDecision(a.otel, decision)
+	}
+
+	verdict = applyBehavioralRiskToToolVerdict(r.Context(), &req, verdict)
 	verdict.applyMode(inspectMode(a.scannerCfg))
 	a.resolveOpenClawInspectConfirm(r.Context(), &req, verdict)
 
 	elapsed := time.Since(t0)
+	decisionEvidence := buildRuntimeDecisionEvidence(r.Context(), "pre_tool", &req, verdict, elapsed)
+	verdict.DecisionEvidence = decisionEvidence
 
 	// verdict.Reason is composed as "matched: <rule-id>:<title>"
 	// which is PII-safe by construction (rule metadata only).
@@ -410,12 +425,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// exporter — trace_id is now pulled from r.Context() by
 		// LogActionCtx (the gateway CorrelationMiddleware seeded
 		// the same trace id into both).
-		_ = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
+		_ = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs,
+			agentControlSpanAttributes(verdict.AgentControl)...)
 	}
 
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",
 		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction)
+	auditDetails = appendRuntimeDecisionEvidenceAudit(auditDetails, decisionEvidence)
 	if req.Content != "" {
 		auditDetails = appendRawTelemetryDetails(auditDetails, "raw_content", []byte(req.Content))
 	}

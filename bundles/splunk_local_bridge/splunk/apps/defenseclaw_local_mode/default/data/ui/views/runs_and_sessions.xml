@@ -1,6 +1,6 @@
 <form version="1.1">
   <label>Runs And Sessions</label>
-  <description>Primary run and session investigation workbench for the seeded security-operations slice.</description>
+  <description>Primary run and session investigation workbench for production security operations.</description>
   <fieldset submitButton="false" autoRun="true">
     <input type="dropdown" token="risk_state" searchWhenChanged="true">
       <label>Candidate risk state</label>
@@ -26,8 +26,8 @@
     <panel>
       <html>
         <h2>Run and session investigation workbench</h2>
-        <p>This is the primary investigation surface for the seeded DefenseClaw + OpenClaw security-operations slice. Start with the candidate queue, pick one run or session, and then inspect the correlated policy, runtime, diagnostics, usage, and trace evidence for that investigation.</p>
-        <p>The workbench stays narrow on purpose: the seeded contract is detect, explain, investigate, and recommend the next useful check. It does not imply automated response or unsupported enrichment domains.</p>
+        <p>This is the primary investigation surface for the DefenseClaw + OpenClaw security-operations slice. Start with the candidate queue, pick one run or session, and then inspect the correlated policy, runtime, diagnostics, usage, and trace evidence for that investigation.</p>
+        <p>The workbench stays narrow on purpose: the production contract is detect, explain, investigate, and recommend the next useful check. It does not imply automated response or unsupported enrichment domains.</p>
       </html>
     </panel>
   </row>

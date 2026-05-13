@@ -60,6 +60,7 @@ type agentHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	HookOutput        map[string]interface{} `json:"hook_output,omitempty"`
+	AgentControl      *agentControlDecision  `json:"agent_control,omitempty"`
 }
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
@@ -200,6 +201,7 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 		attrs = append(attrs, attribute.String("gen_ai.operation.id", req.TurnID))
 	}
 	span.SetAttributes(attrs...)
+	annotateAgentControlTraceSpan(span, resp.AgentControl)
 }
 
 func normalizeAgentHookRequest(connectorName string, payload map[string]interface{}) agentHookRequest {
@@ -392,10 +394,44 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 	}
 
+	var agentControlDecision *agentControlDecision
+	if a.agentControl != nil {
+		stage, step := agentControlStepForAgentHook(req)
+		agentControlDecision = a.agentControl.evaluate(ctx, stage, step)
+		annotateAgentControlSpan(ctx, agentControlDecision)
+		emitAgentControlPolicyDecision(a.otel, agentControlDecision)
+		if agentControlDecision != nil && agentControlDecision.Matched {
+			switch agentControlDecision.Action {
+			case "deny":
+				rawAction = guardrailActionBlock
+				action, wouldBlock = mapHookAction(rawAction, mode, req.HookEventName, caps)
+				if guardrailSeverityRank(severity) < severityHigh {
+					severity = "HIGH"
+				}
+				reason = appendVerdictReason(reason, agentControlReason(agentControlDecision))
+				findings = append(findings, agentControlFinding(agentControlDecision))
+			case "steer":
+				if rawAction == "" || rawAction == guardrailActionAllow {
+					rawAction = guardrailActionAlert
+					action, _ = mapHookAction(rawAction, mode, req.HookEventName, caps)
+				}
+				if guardrailSeverityRank(severity) < severityMedium {
+					severity = "MEDIUM"
+				}
+				reason = appendVerdictReason(reason, agentControlReason(agentControlDecision))
+				findings = append(findings, agentControlFinding(agentControlDecision))
+			case "observe":
+				findings = append(findings, agentControlFinding(agentControlDecision))
+			}
+		}
+	}
+
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock)
 	}
-	return agentHookResponseFor(req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+	resp := agentHookResponseFor(req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+	resp.AgentControl = agentControlDecision
+	return resp
 }
 
 // collectAgentHookAssetDecisions runs the runtime asset-policy

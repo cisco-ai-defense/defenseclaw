@@ -593,6 +593,7 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		DestinationApp:    e.DestinationApp,
 		ToolName:          e.ToolName,
 		ToolID:            e.ToolID,
+		Structured:        e.Structured,
 	})
 }
 

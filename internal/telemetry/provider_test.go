@@ -230,6 +230,163 @@ func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	assertMirroredResourceJoinKeys(t, spans[0].Attributes)
 }
 
+func TestGalileoTraceHeaders_UsesAPIKeyAndRoutingIDs(t *testing.T) {
+	t.Setenv("TEST_GALILEO_API_KEY", "test-galileo-key")
+
+	headers, err := galileoTraceHeaders(config.OTelGalileoConfig{
+		Enabled:     true,
+		APIKeyEnv:   "TEST_GALILEO_API_KEY",
+		Project:     "project-name",
+		ProjectID:   "project-id",
+		LogStream:   "log-stream-name",
+		LogStreamID: "log-stream-id",
+	})
+	if err != nil {
+		t.Fatalf("galileoTraceHeaders: %v", err)
+	}
+
+	for key, want := range map[string]string{
+		"Galileo-API-Key": "test-galileo-key",
+		"projectid":       "project-id",
+		"logstreamid":     "log-stream-id",
+	} {
+		if got := headers[key]; got != want {
+			t.Fatalf("%s=%q want %q", key, got, want)
+		}
+	}
+	if _, ok := headers["project"]; ok {
+		t.Fatal("project name header should not be set when project_id is configured")
+	}
+	if _, ok := headers["logstream"]; ok {
+		t.Fatal("log stream name header should not be set when log_stream_id is configured")
+	}
+}
+
+func TestGalileoTraceHeaders_ValidatesRequiredConfig(t *testing.T) {
+	if _, err := galileoTraceHeaders(config.OTelGalileoConfig{Enabled: true}); err == nil {
+		t.Fatal("expected missing API key error")
+	}
+
+	t.Setenv("TEST_GALILEO_API_KEY", "test-galileo-key")
+	if _, err := galileoTraceHeaders(config.OTelGalileoConfig{
+		Enabled:   true,
+		APIKeyEnv: "TEST_GALILEO_API_KEY",
+		LogStream: "logs",
+	}); err == nil {
+		t.Fatal("expected missing project error")
+	}
+	if _, err := galileoTraceHeaders(config.OTelGalileoConfig{
+		Enabled:   true,
+		APIKeyEnv: "TEST_GALILEO_API_KEY",
+		Project:   "project",
+	}); err == nil {
+		t.Fatal("expected missing log stream error")
+	}
+}
+
+func TestRuntimeSpansIncludeRedactedGalileoInputsAndOutputs(t *testing.T) {
+	t.Run("startup", func(t *testing.T) {
+		p, exp := newTracingProvider(t)
+		p.EmitStartupSpan(context.Background())
+
+		spans := exp.GetSpans()
+		if len(spans) != 1 {
+			t.Fatalf("got %d spans, want 1", len(spans))
+		}
+		for key, want := range map[string]string{
+			"gen_ai.system":          "galileo-otel",
+			"gen_ai.input.messages":  redactedUserMessage,
+			"gen_ai.output.messages": redactedAssistantMessage,
+		} {
+			got, ok := attrByKey(spans[0].Attributes, key)
+			if !ok || got.AsString() != want {
+				t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
+			}
+		}
+	})
+
+	t.Run("agent", func(t *testing.T) {
+		p, exp := newTracingProvider(t)
+		_, span := p.StartAgentSpan(context.Background(), "session-123", "codex", "codex", "openai_codex", "openai")
+		p.EndAgentSpan(span, "")
+
+		spans := exp.GetSpans()
+		if len(spans) != 1 {
+			t.Fatalf("got %d spans, want 1", len(spans))
+		}
+		for key, want := range map[string]string{
+			"gen_ai.system":          "galileo-otel",
+			"gen_ai.input.messages":  redactedUserMessage,
+			"gen_ai.output.messages": redactedAssistantMessage,
+			"gen_ai.provider.name":   "openai",
+		} {
+			got, ok := attrByKey(spans[0].Attributes, key)
+			if !ok || got.AsString() != want {
+				t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
+			}
+		}
+	})
+
+	t.Run("llm", func(t *testing.T) {
+		p, exp := newTracingProvider(t)
+		_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 2048, 0.1)
+		p.EndLLMSpan(span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex")
+
+		spans := exp.GetSpans()
+		if len(spans) != 1 {
+			t.Fatalf("got %d spans, want 1", len(spans))
+		}
+		for key, want := range map[string]string{
+			"gen_ai.input.messages":  redactedUserMessage,
+			"gen_ai.output.messages": redactedAssistantMessage,
+		} {
+			got, ok := attrByKey(spans[0].Attributes, key)
+			if !ok || got.AsString() != want {
+				t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
+			}
+		}
+		if got, ok := attrByKey(spans[0].Attributes, "defenseclaw.content.redacted"); !ok || !got.AsBool() {
+			t.Fatalf("defenseclaw.content.redacted=%v ok=%v want true", got.AsBool(), ok)
+		}
+	})
+
+	t.Run("tool", func(t *testing.T) {
+		p, exp := newTracingProvider(t)
+		args := json.RawMessage(`{"secret":"abc123"}`)
+		_, span := p.StartToolSpan(context.Background(), "shell", "running",
+			args, false, "", "builtin", "",
+			ToolSpanContext{ToolID: "tool-123"})
+		p.EndToolSpan(span, 0, 42, time.Now(), "shell", "builtin")
+
+		spans := exp.GetSpans()
+		if len(spans) != 1 {
+			t.Fatalf("got %d spans, want 1", len(spans))
+		}
+		for key, want := range map[string]string{
+			"gen_ai.input.messages":        redactedUserMessage,
+			"gen_ai.output.messages":       redactedToolMessage,
+			"gen_ai.system":                "galileo-otel",
+			"gen_ai.tool.call.arguments":   redactedToolArguments(len(args)),
+			"gen_ai.tool.call.result":      redactedToolResult(0, 42),
+			"defenseclaw.content.redacted": "true",
+		} {
+			got, ok := attrByKey(spans[0].Attributes, key)
+			if !ok {
+				t.Fatalf("%s missing", key)
+			}
+			if key == "defenseclaw.content.redacted" {
+				if !got.AsBool() {
+					t.Fatalf("%s=false want true", key)
+				}
+				continue
+			}
+			if got.AsString() != want {
+				t.Fatalf("%s=%q want %q", key, got.AsString(), want)
+			}
+		}
+	})
+}
+
 func TestStartApprovalSpan_RawCommandOnlyWhenRedactionDisabled(t *testing.T) {
 	redaction.SetDisableAll(false)
 	t.Cleanup(func() { redaction.SetDisableAll(false) })

@@ -5,7 +5,7 @@
     <panel>
       <html>
         <h2>Structured gateway logs</h2>
-        <p>This page is now backed by the structured <code>openclaw:gateway:json</code> signal family. It is the primary local troubleshooting surface for subsystem errors, noisy components, and raw gateway-log evidence.</p>
+        <p>This page accepts structured <code>openclaw:gateway:json</code> events and gateway-shaped local HEC envelopes. It is the primary local troubleshooting surface for subsystem errors, noisy components, and raw gateway-log evidence.</p>
       </html>
     </panel>
   </row>

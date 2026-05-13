@@ -1,0 +1,1009 @@
+# Live-derived DefenseClaw/OpenClaw lab stack for the isovalent-demo EKS cluster.
+# Secret values are intentionally omitted; create the required Secrets first.
+# The defenesclaw namespace spelling matches the running lab DNS names.
+apiVersion: v1
+kind: Namespace
+metadata:
+  annotations:
+    splunk.com/index: defenseclaw
+  labels:
+    app: defenseclaw
+    app.kubernetes.io/name: defenseclaw
+  name: defenesclaw
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: defenseclaw-data
+  namespace: defenesclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: gp2
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openclaw-data
+  namespace: defenesclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: gp2
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: splunk-local-etc
+  namespace: defenesclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+  storageClassName: gp2
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: splunk-local-var
+  namespace: defenesclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 30Gi
+  storageClassName: gp2
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: agent-control
+  name: agent-control-postgres-data
+  namespace: defenesclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: gp2
+  volumeMode: Filesystem
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: defenseclaw-config
+  namespace: defenesclaw
+data:
+  config.yaml: |
+    data_dir: /home/node/.defenseclaw
+    audit_db: /home/node/.defenseclaw/audit.db
+    quarantine_dir: /home/node/.defenseclaw/quarantine
+    plugin_dir: /home/node/.defenseclaw/plugins
+    policy_dir: /opt/defenseclaw/policies
+    environment: defenseclaw
+    claw:
+      mode: openclaw
+      home_dir: /home/node/.openclaw
+      config_file: /home/node/.openclaw/openclaw.json
+    gateway:
+      enabled: true
+      host: openclaw.defenesclaw.svc.cluster.local
+      port: 18789
+      token_env: OPENCLAW_GATEWAY_TOKEN
+      allow_insecure: true
+      device_key_file: /home/node/.defenseclaw/device.key
+      auto_approve_safe: false
+      reconnect_ms: 800
+      max_reconnect_ms: 15000
+      approval_timeout_s: 30
+      api_host: defenseclaw.defenesclaw.svc.cluster.local
+      api_bind: 0.0.0.0
+      api_port: 18970
+      otlp_forward_http_endpoint: http://splunk-otel-collector-agent.otel-splunk.svc:4318
+      watcher:
+        enabled: false
+        skill:
+          enabled: false
+          take_action: false
+          dirs: []
+        plugin:
+          enabled: false
+          take_action: false
+          dirs: []
+    scanners:
+      skill_scanner:
+        binary: skill-scanner
+        policy: permissive
+        lenient: true
+      mcp_scanner:
+        binary: mcp-scanner
+        analyzers: yara
+      plugin_scanner: defenseclaw-plugin-scanner
+      codeguard: /opt/defenseclaw/skills/codeguard
+    guardrail:
+      enabled: false
+      mode: observe
+      scanner_mode: local
+      bind: 0.0.0.0
+      port: 4000
+    otel:
+      enabled: true
+      endpoint: splunk-otel-collector-agent.otel-splunk.svc:4317
+      protocol: grpc
+      tls:
+        insecure: true
+      traces:
+        enabled: true
+      logs:
+        enabled: true
+      metrics:
+        enabled: true
+        export_interval_s: 30
+      galileo:
+        enabled: true
+        endpoint: https://api.galileo.ai/otel/v1/traces
+        api_key_env: GALILEO_API_KEY
+        project_id: 0ba7b20d-8262-44c4-b230-547a0cd74b2b
+        log_stream_id: 82b893bd-fa1f-411e-81e8-e12ca66692ad
+    audit_sinks:
+      - name: splunk-hec-splunk-local
+        kind: splunk_hec
+        enabled: true
+        batch_size: 50
+        flush_interval_s: 5
+        splunk_hec:
+          endpoint: https://splunk-local.defenesclaw.svc.cluster.local:8088/services/collector/event
+          token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN
+          index: defenseclaw_local
+          source: defenseclaw
+          sourcetype: defenseclaw:json
+          verify_tls: false
+    agent_control:
+      enabled: true
+      url: http://agent-control.defenesclaw.svc.cluster.local:8000
+      api_key_env: AGENT_CONTROL_API_KEY
+      timeout_ms: 2000
+      agent_name: defenseclaw-openclaw
+      fail_mode: open
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/name: defenseclaw
+  name: defenseclaw-client-config
+  namespace: defenesclaw
+data:
+  config.yaml: |
+    gateway:
+      host: openclaw.defenesclaw.svc.cluster.local
+      port: 18789
+      api_host: defenseclaw.defenesclaw.svc.cluster.local
+      api_port: 18970
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: openclaw
+  name: openclaw-config
+  namespace: defenesclaw
+data:
+  AGENTS.md: |
+    # OpenClaw Test Lab
+
+    This gateway is running inside the single-use Kubernetes test lab.
+
+    Priorities:
+    - Keep changes scoped to the lab namespace unless explicitly asked otherwise.
+    - Preserve telemetry flowing to the local Splunk OpenTelemetry collector.
+    - Prefer concise diagnostics and direct verification commands.
+  openclaw.json: |
+    {
+      "gateway": {
+        "mode": "local",
+        "port": 18789,
+        "bind": "lan",
+        "auth": {
+          "mode": "token",
+          "token": "${OPENCLAW_GATEWAY_TOKEN}",
+          "allowTailscale": false
+        },
+        "controlUi": {
+          "allowedOrigins": [
+            "https://openclaw.rosa.fso-tme.eoha.p3.openshiftapps.com",
+            "https://aef6ae6eb19ee43fa91af9eda8e002b9-941781231.us-east-1.elb.amazonaws.com"
+          ]
+        }
+      },
+      "plugins": {
+        "enabled": true,
+        "allow": [
+          "defenseclaw",
+          "diagnostics-otel"
+        ],
+        "entries": {
+          "defenseclaw": {
+            "enabled": true
+          },
+          "diagnostics-otel": {
+            "enabled": true
+          }
+        },
+        "slots": {
+          "memory": "none"
+        }
+      },
+      "diagnostics": {
+        "enabled": true,
+        "otel": {
+          "enabled": true,
+          "endpoint": "http://defenseclaw.defenesclaw.svc.cluster.local:18970",
+          "protocol": "http/protobuf",
+          "headers": {
+            "Authorization": "Bearer ${OPENCLAW_GATEWAY_TOKEN}",
+            "X-DefenseClaw-Client": "openclaw-diagnostics-otel",
+            "x-defenseclaw-source": "openclaw"
+          },
+          "serviceName": "openclaw-gateway",
+          "traces": true,
+          "metrics": true,
+          "logs": true,
+          "sampleRate": 0.2,
+          "flushIntervalMs": 60000
+        }
+      },
+      "commands": {
+        "restart": false
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: defenseclaw
+    app.kubernetes.io/name: defenseclaw
+  name: defenseclaw
+  namespace: defenesclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: defenseclaw
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        splunk.com/index: defenseclaw
+        splunk.com/sourcetype: defenseclaw:otel
+      labels:
+        app: defenseclaw
+        app.kubernetes.io/name: defenseclaw
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: defenseclaw
+          image: 637423309390.dkr.ecr.us-east-1.amazonaws.com/defenseclaw:0.5.0-aims-upstream-20260513021048-5603bd8
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: HOME
+              value: /home/node
+            - name: OTEL_SERVICE_NAME
+              value: defenseclaw
+            - name: DEFENSECLAW_DECISION_EVIDENCE
+              value: "true"
+          envFrom:
+            - secretRef:
+                name: defenseclaw-secrets
+            - secretRef:
+                name: splunk-local-secrets
+            - secretRef:
+                name: agent-control-secrets
+          ports:
+            - containerPort: 18970
+              name: api
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /home/node/.defenseclaw
+              name: defenseclaw-data
+            - mountPath: /home/node/.defenseclaw/config.yaml
+              name: defenseclaw-config
+              readOnly: true
+              subPath: config.yaml
+            - mountPath: /tmp
+              name: tmp
+      volumes:
+        - name: defenseclaw-data
+          persistentVolumeClaim:
+            claimName: defenseclaw-data
+        - name: defenseclaw-config
+          configMap:
+            name: defenseclaw-config
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/name: defenseclaw
+  name: defenseclaw
+  namespace: defenesclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: defenseclaw
+  ports:
+    - name: api
+      port: 18970
+      protocol: TCP
+      targetPort: api
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+  labels:
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/name: defenseclaw
+  name: defenseclaw-ui
+  namespace: defenesclaw
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: defenseclaw
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: openclaw
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: openclaw
+  name: openclaw
+  namespace: defenesclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: gateway
+      app.kubernetes.io/name: openclaw
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        defenseclaw.io/openclaw-version: 2026.4.9
+        defenseclaw.io/workspace-perms-fix: 2026-04-10-2
+        instrumentation.opentelemetry.io/inject-nodejs: "false"
+        splunk.com/exclude: "true"
+      labels:
+        app: openclaw
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/name: openclaw
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      initContainers:
+        - name: defenseclaw-plugin-bootstrap
+          image: 637423309390.dkr.ecr.us-east-1.amazonaws.com/defenseclaw:0.5.0-agent-control-allow-insecure-optpath-20260509001148-f809759e0f16
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              mkdir -p /var/openclaw/extensions/defenseclaw
+              mkdir -p /var/openclaw/defenseclaw-client
+              mkdir -p /var/openclaw/workspace
+              cp -R /opt/defenseclaw/extensions/defenseclaw/. /var/openclaw/extensions/defenseclaw/
+              chmod 2775 /var/openclaw /var/openclaw/workspace
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 0
+            runAsNonRoot: false
+            runAsUser: 0
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /var/openclaw
+              name: openclaw-data
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw@sha256:d65cc3d5fd0c8b1f752c2f70377843230112250c10e99c3b61769234c217c5db
+          imagePullPolicy: IfNotPresent
+          command:
+            - node
+            - openclaw.mjs
+            - gateway
+            - --bind
+            - lan
+            - --port
+            - "18789"
+          env:
+            - name: HOME
+              value: /home/node
+            - name: OPENCLAW_CONFIG_DIR
+              value: /home/node/.openclaw
+            - name: NODE_ENV
+              value: production
+            - name: NODE_OPTIONS
+              value: --max-old-space-size=1536
+            - name: TERM
+              value: xterm-256color
+            - name: OPENCLAW_CONTROL_UI_ALLOWED_ORIGIN
+              value: https://openclaw.rosa.fso-tme.eoha.p3.openshiftapps.com
+          envFrom:
+            - secretRef:
+                name: openclaw-secrets
+                optional: true
+          ports:
+            - containerPort: 18789
+              name: gateway
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: gateway
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /home/node/.openclaw
+              name: openclaw-data
+            - mountPath: /home/node/.openclaw/openclaw.json
+              name: openclaw-config
+              readOnly: true
+              subPath: openclaw.json
+            - mountPath: /home/node/.openclaw/workspace/AGENTS.md
+              name: openclaw-config
+              readOnly: true
+              subPath: AGENTS.md
+            - mountPath: /home/node/.defenseclaw
+              name: openclaw-data
+              subPath: defenseclaw-client
+            - mountPath: /home/node/.defenseclaw/config.yaml
+              name: defenseclaw-client-config
+              readOnly: true
+              subPath: config.yaml
+            - mountPath: /tmp
+              name: tmp
+      volumes:
+        - name: openclaw-data
+          persistentVolumeClaim:
+            claimName: openclaw-data
+        - name: openclaw-config
+          configMap:
+            name: openclaw-config
+        - name: defenseclaw-client-config
+          configMap:
+            name: defenseclaw-client-config
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: openclaw
+  name: openclaw
+  namespace: defenesclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: openclaw
+  ports:
+    - name: gateway
+      port: 18789
+      protocol: TCP
+      targetPort: gateway
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:637423309390:certificate/806b127c-b3bc-40d4-9428-a69c56de3d1f
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+  labels:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: openclaw
+  name: openclaw-ui
+  namespace: defenesclaw
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/name: openclaw
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: splunk-local
+    app.kubernetes.io/name: splunk-local
+  name: splunk-local
+  namespace: defenesclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: splunk-local
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: splunk-local
+        app.kubernetes.io/name: splunk-local
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: splunk
+          image: 637423309390.dkr.ecr.us-east-1.amazonaws.com/defenseclaw@sha256:20d1433533d039a5da4cb68ea6c8ddb64dd333f0830c5e7e598fe62d01436f63
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: SPLUNK_START_ARGS
+              value: --accept-license
+            - name: SPLUNK_GENERAL_TERMS
+              value: --accept-sgt-current-at-splunk-com
+          envFrom:
+            - secretRef:
+                name: splunk-local-secrets
+          ports:
+            - containerPort: 8000
+              name: web
+              protocol: TCP
+            - containerPort: 8088
+              name: hec
+              protocol: TCP
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - >-
+                    /opt/splunk-claw-bridge/splunk/bin/bootstrap_local_mode.sh &&
+                    curl -sk -u "${SPLUNK_ADMIN_USER:-admin}:${SPLUNK_PASSWORD}"
+                    "${SPLUNK_MGMT_URL:-https://127.0.0.1:8089}/services/authorization/roles/${DEFENSECLAW_LOCAL_USERNAME:-defenseclaw_local_user}"
+                    -d imported_roles=user
+                    -d srchIndexesAllowed=${DEFENSECLAW_INDEX:-defenseclaw_local}
+                    -d srchIndexesDefault=${DEFENSECLAW_INDEX:-defenseclaw_local}
+                    -d srchJobsQuota=25
+                    -d rtSrchJobsQuota=5
+                    -d cumulativeSrchJobsQuota=50
+                    -d cumulativeRTSrchJobsQuota=10 >/dev/null
+          startupProbe:
+            tcpSocket:
+              port: web
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 60
+          livenessProbe:
+            tcpSocket:
+              port: web
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 4
+          readinessProbe:
+            tcpSocket:
+              port: hec
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 18
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - mountPath: /opt/splunk/etc
+              name: splunk-etc
+            - mountPath: /opt/splunk/var
+              name: splunk-var
+            - mountPath: /tmp
+              name: tmp
+      volumes:
+        - name: splunk-etc
+          persistentVolumeClaim:
+            claimName: splunk-local-etc
+        - name: splunk-var
+          persistentVolumeClaim:
+            claimName: splunk-local-var
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: splunk-local
+    app.kubernetes.io/name: splunk-local
+  name: splunk-local
+  namespace: defenesclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: splunk-local
+  ports:
+    - name: web
+      port: 8000
+      protocol: TCP
+      targetPort: web
+    - name: hec
+      port: 8088
+      protocol: TCP
+      targetPort: hec
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:637423309390:certificate/806b127c-b3bc-40d4-9428-a69c56de3d1f
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+  labels:
+    app: splunk-local
+    app.kubernetes.io/component: web
+    app.kubernetes.io/name: splunk-local
+  name: splunk-local-ui
+  namespace: defenesclaw
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: splunk-local
+  ports:
+    - name: http
+      port: 80
+      protocol: TCP
+      targetPort: web
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: agent-control
+  name: agent-control-postgres
+  namespace: defenesclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: database
+      app.kubernetes.io/name: agent-control
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: database
+        app.kubernetes.io/name: agent-control
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 70
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_DB
+              value: agent_control
+            - name: POSTGRES_USER
+              value: agent_control
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agent-control-secrets
+                  key: AGENT_CONTROL_POSTGRES_PASSWORD
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - containerPort: 5432
+              name: postgres
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U agent_control -d agent_control
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U agent_control -d agent_control
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 70
+            runAsNonRoot: true
+            runAsUser: 70
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agent-control-postgres-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: agent-control
+  name: agent-control-postgres
+  namespace: defenesclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: agent-control
+  ports:
+    - name: postgres
+      port: 5432
+      protocol: TCP
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: agent-control
+  name: agent-control
+  namespace: defenesclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: server
+      app.kubernetes.io/name: agent-control
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: server
+        app.kubernetes.io/name: agent-control
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: server
+          image: 637423309390.dkr.ecr.us-east-1.amazonaws.com/agent-control:with-evaluators-20260508040830
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: AGENT_CONTROL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: agent-control-secrets
+                  key: AGENT_CONTROL_DB_URL
+            - name: AGENT_CONTROL_HOST
+              value: 0.0.0.0
+            - name: AGENT_CONTROL_PORT
+              value: "8000"
+            - name: AGENT_CONTROL_API_KEY_ENABLED
+              value: "true"
+            - name: AGENT_CONTROL_CORS_ORIGINS
+              value: http://localhost:4000
+          envFrom:
+            - secretRef:
+                name: agent-control-secrets
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            runAsGroup: 1000
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile:
+              type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: agent-control
+  name: agent-control
+  namespace: defenesclaw
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: agent-control
+  ports:
+    - name: http
+      port: 8000
+      protocol: TCP
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:637423309390:certificate/806b127c-b3bc-40d4-9428-a69c56de3d1f
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+  labels:
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/name: agent-control
+  name: agent-control-ui
+  namespace: defenesclaw
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: agent-control
+  ports:
+    - name: https
+      port: 443
+      protocol: TCP
+      targetPort: http

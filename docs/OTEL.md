@@ -592,6 +592,12 @@ otel:
     max_export_batch_size: 512
     scheduled_delay_ms: 5000
     max_queue_size: 2048
+  galileo:
+    enabled: false                                      # add a second trace exporter to Galileo
+    endpoint: "https://api.galileo.ai/otel/v1/traces"
+    api_key_env: "GALILEO_API_KEY"
+    project_id: ""                                      # or project name via project
+    log_stream_id: ""                                   # or log stream name via log_stream
   resource:
     attributes:                                         # additional resource attrs
       deployment.environment: "production"
@@ -605,6 +611,11 @@ otel:
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Override `otel.endpoint` |
 | `OTEL_EXPORTER_OTLP_HEADERS` | Override `otel.headers` |
 | `OTEL_RESOURCE_ATTRIBUTES` | Additional resource attributes |
+| `DEFENSECLAW_GALILEO_ENABLED` | Enable the Galileo trace exporter without changing the primary OTLP exporter |
+| `DEFENSECLAW_GALILEO_ENDPOINT` | Override `otel.galileo.endpoint` |
+| `DEFENSECLAW_GALILEO_API_KEY_ENV` | Env var name holding the Galileo API key, default `GALILEO_API_KEY` |
+| `DEFENSECLAW_GALILEO_PROJECT_ID` / `GALILEO_PROJECT_ID` | Galileo project routing ID |
+| `DEFENSECLAW_GALILEO_LOG_STREAM_ID` / `GALILEO_LOG_STREAM_ID` | Galileo log stream routing ID |
 
 ### Go Config Struct
 

@@ -425,6 +425,70 @@ func TestOTLPIngest_Logs_PromotesCodexTokenUsage(t *testing.T) {
 	}
 }
 
+func TestOTLPIngest_Logs_PersistsUsageMetricsForSplunkDashboards(t *testing.T) {
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger}
+	body := `{
+		"resourceLogs": [{
+			"resource": {
+				"attributes": [{"key": "service.name", "value": {"stringValue": "openclaw"}}]
+			},
+			"scopeLogs": [{
+				"logRecords": [{
+					"attributes": [
+						{"key": "event.name", "value": {"stringValue": "codex.sse_event"}},
+						{"key": "event.kind", "value": {"stringValue": "response.completed"}},
+						{"key": "model", "value": {"stringValue": "gpt-5-codex"}},
+						{"key": "input_tokens", "value": {"intValue": "123"}},
+						{"key": "output_tokens", "value": {"intValue": "45"}},
+						{"key": "duration_ms", "value": {"intValue": "2500"}}
+					]
+				}]
+			}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/logs", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "openclaw")
+	w := httptest.NewRecorder()
+
+	a.handleOTLPLogs(w, req)
+	logger.Close()
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+
+	rows, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var tokenRows, durationRows int
+	for _, row := range rows {
+		if row.Action != string(audit.ActionOTelIngestMetrics) {
+			continue
+		}
+		switch row.Target {
+		case "otlp:metrics:usage":
+			if strings.Contains(row.Details, "metric_name=openclaw.tokens") &&
+				strings.Contains(row.Details, "model=gpt-5-codex") {
+				tokenRows++
+			}
+		case "otlp:metrics:duration":
+			if strings.Contains(row.Details, "metric_name=openclaw.run.duration_ms") &&
+				strings.Contains(row.Details, "model=gpt-5-codex") {
+				durationRows++
+			}
+		}
+	}
+	if tokenRows != 2 {
+		t.Fatalf("token usage audit rows = %d, want 2; rows=%+v", tokenRows, rows)
+	}
+	if durationRows != 1 {
+		t.Fatalf("duration audit rows = %d, want 1; rows=%+v", durationRows, rows)
+	}
+}
+
 func TestOTLPIngest_Metrics_PromotesClaudeCodeTokenUsage(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	otelProvider, err := telemetry.NewProviderForTest(reader)
@@ -507,6 +571,144 @@ func TestOTLPIngest_Metrics_PromotesClaudeCodeTokenUsage(t *testing.T) {
 	}
 	if got["input"] != 321 || got["cacheRead"] != 17 {
 		t.Fatalf("token histogram sums = %#v, want input=321 cacheRead=17", got)
+	}
+}
+
+func TestOTLPIngest_Metrics_PersistsOpenClawUsageMetricsForSplunkDashboards(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	otelProvider, err := telemetry.NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer otelProvider.Shutdown(context.Background())
+
+	store, logger := newOTLPIngestTestStore(t)
+	a := &APIServer{store: store, logger: logger}
+	a.SetOTelProvider(otelProvider)
+	body := `{
+		"resourceMetrics": [{
+			"resource": {
+				"attributes": [{"key": "service.name", "value": {"stringValue": "openclaw"}}]
+			},
+			"scopeMetrics": [{
+				"metrics": [
+					{
+						"name": "openclaw.tokens",
+						"unit": "1",
+						"sum": {
+							"aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+							"dataPoints": [
+								{
+									"attributes": [
+										{"key": "openclaw.token", "value": {"stringValue": "input"}},
+										{"key": "openclaw.provider", "value": {"stringValue": "openai"}},
+										{"key": "openclaw.model", "value": {"stringValue": "gpt-5.4"}},
+										{"key": "openclaw.channel", "value": {"stringValue": "local"}}
+									],
+									"asInt": "7700000"
+								},
+								{
+									"attributes": [
+										{"key": "openclaw.token", "value": {"stringValue": "total"}},
+										{"key": "openclaw.provider", "value": {"stringValue": "openai"}},
+										{"key": "openclaw.model", "value": {"stringValue": "gpt-5.4"}},
+										{"key": "openclaw.channel", "value": {"stringValue": "local"}}
+									],
+									"asInt": "15500000"
+								}
+							]
+						}
+					},
+					{
+						"name": "openclaw.cost.usd",
+						"unit": "1",
+						"sum": {
+							"aggregationTemporality": "AGGREGATION_TEMPORALITY_CUMULATIVE",
+							"dataPoints": [{
+								"attributes": [
+									{"key": "openclaw.provider", "value": {"stringValue": "openai"}},
+									{"key": "openclaw.model", "value": {"stringValue": "gpt-5.4"}}
+								],
+								"asDouble": 16.62
+							}]
+						}
+					},
+					{
+						"name": "openclaw.run.duration_ms",
+						"unit": "ms",
+						"histogram": {
+							"dataPoints": [{
+								"attributes": [
+									{"key": "openclaw.provider", "value": {"stringValue": "openai"}},
+									{"key": "openclaw.model", "value": {"stringValue": "gpt-5.4"}}
+								],
+								"sum": 12000,
+								"count": "2"
+							}]
+						}
+					}
+				]
+			}]
+		}]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/metrics", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-defenseclaw-source", "openclaw")
+	w := httptest.NewRecorder()
+
+	a.handleOTLPMetrics(w, req)
+	logger.Close()
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", w.Code, w.Body.String())
+	}
+
+	rows, err := store.ListEvents(20)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	var tokenTotalRows, tokenInputRows, costRows, durationRows int
+	for _, row := range rows {
+		if row.Action != string(audit.ActionOTelIngestMetrics) || row.Target != "otlp:metrics:openclaw" {
+			continue
+		}
+		switch {
+		case strings.Contains(row.Details, "metric_name=openclaw.tokens ") &&
+			strings.Contains(row.Details, "provider=openai") &&
+			strings.Contains(row.Details, "model=gpt-5.4") &&
+			strings.Contains(row.Details, "token_type=total"):
+			tokenTotalRows++
+		case strings.Contains(row.Details, "metric_name=openclaw.tokens.input ") &&
+			strings.Contains(row.Details, "token_type=input"):
+			tokenInputRows++
+		case strings.Contains(row.Details, "metric_name=openclaw.cost.usd ") &&
+			strings.Contains(row.Details, "provider=openai") &&
+			strings.Contains(row.Details, "model=gpt-5.4"):
+			costRows++
+		case strings.Contains(row.Details, "metric_name=openclaw.run.duration_ms "):
+			durationRows++
+		}
+	}
+	if tokenTotalRows != 1 {
+		t.Fatalf("openclaw token total rows = %d, want 1; rows=%+v", tokenTotalRows, rows)
+	}
+	if tokenInputRows != 1 {
+		t.Fatalf("openclaw token input rows = %d, want 1; rows=%+v", tokenInputRows, rows)
+	}
+	if costRows != 1 {
+		t.Fatalf("openclaw cost rows = %d, want 1; rows=%+v", costRows, rows)
+	}
+	if durationRows != 1 {
+		t.Fatalf("openclaw duration rows = %d, want 1; rows=%+v", durationRows, rows)
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	tokenMetric := findMetric(rm, "gen_ai.client.token.usage")
+	if tokenMetric == nil {
+		t.Fatal("expected gen_ai.client.token.usage metric")
 	}
 }
 

@@ -633,6 +633,7 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/skills
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
+	@mkdir -p cli/defenseclaw/_data/c3_agent_tokenomics
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
@@ -657,6 +658,7 @@ _bundle-data:
 	@# so dashboard / dashcfg edits propagate without restarting the obs stack.
 	rsync -a --delete --inplace bundles/splunk_local_bridge/        cli/defenseclaw/_data/splunk_local_bridge/
 	rsync -a --delete --inplace bundles/local_observability_stack/  cli/defenseclaw/_data/local_observability_stack/
+	rsync -a --delete --inplace bundles/c3_agent_tokenomics/        cli/defenseclaw/_data/c3_agent_tokenomics/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:

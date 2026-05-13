@@ -1,0 +1,345 @@
+openapi: 3.0.3
+info:
+  title: Cisco Cloud Control Agent Tokenomics with Galileo Runtime Governance
+  version: 0.2.0
+  description: >-
+    Read-only Cisco Cloud Control-facing endpoint. Splunk Observability is the source of truth
+    for tokenomics; Galileo runtime controls and evals are optional server-side
+    enrichment returned when include_galileo=true.
+servers:
+  - url: http://127.0.0.1:8787
+paths:
+  /healthz:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+  /v1/c3/agent-tokenomics/summary:
+    get:
+      summary: Cisco Cloud Control Agent Tokenomics summary
+      parameters:
+        - in: query
+          name: tenant_id
+          schema:
+            type: string
+          example: c3-demo-tenant
+        - in: query
+          name: workspace_id
+          schema:
+            type: string
+          example: wayne-demo
+        - in: query
+          name: start
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: end
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: include_galileo
+          schema:
+            type: boolean
+            default: false
+          description: Attach Galileo runtime controls and eval evidence.
+      responses:
+        '200':
+          description: O11y tokenomics summary, optionally enriched with Galileo runtime governance evidence.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentTokenomicsResponse'
+components:
+  schemas:
+    AgentTokenomicsResponse:
+      type: object
+      required:
+        - schema_version
+        - generated_at
+        - source
+        - summary
+        - top_agents
+        - top_models
+        - token_mix
+        - recommendations
+        - deep_links
+      properties:
+        schema_version:
+          type: string
+          enum:
+            - c3.agent_tokenomics.v0.1
+            - c3.agent_tokenomics.v0.2
+        generated_at:
+          type: string
+          format: date-time
+        source:
+          type: string
+          enum:
+            - splunk_o11y_signalflow
+            - splunk_o11y_signalflow+galileo
+        tenant_id:
+          type: string
+        workspace_id:
+          type: string
+        summary:
+          $ref: '#/components/schemas/TokenSummary'
+        top_agents:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopAgent'
+        top_models:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopModel'
+        token_mix:
+          type: array
+          items:
+            $ref: '#/components/schemas/TokenMixRow'
+        recommendations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recommendation'
+        deep_links:
+          type: object
+          additionalProperties:
+            type: string
+        galileo:
+          $ref: '#/components/schemas/GalileoSummary'
+        runtime_governance_cards:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuntimeCard'
+        runtime_governance_evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/RuntimeEvidenceRow'
+        executive_banner:
+          type: string
+    TokenSummary:
+      type: object
+      properties:
+        total_tokens:
+          type: number
+        input_tokens:
+          type: number
+        output_tokens:
+          type: number
+        cached_tokens:
+          type: number
+        reasoning_tokens:
+          type: number
+        tool_tokens:
+          type: number
+        request_count:
+          type: integer
+        session_count:
+          type: integer
+        trace_count:
+          type: integer
+        active_agents:
+          type: integer
+    TopAgent:
+      type: object
+      properties:
+        agent_name:
+          type: string
+        service_name:
+          type: string
+        connector:
+          type: string
+        tokens:
+          type: number
+        requests:
+          type: integer
+        sessions:
+          type: integer
+        session_ids:
+          type: array
+          items:
+            type: string
+        trace_ids:
+          type: array
+          items:
+            type: string
+        runtime_only:
+          type: boolean
+        galileo:
+          nullable: true
+          $ref: '#/components/schemas/AgentRuntimeSummary'
+    TopModel:
+      type: object
+      properties:
+        model:
+          type: string
+        provider:
+          type: string
+        tokens:
+          type: number
+        requests:
+          type: integer
+        sessions:
+          type: integer
+    TokenMixRow:
+      type: object
+      properties:
+        token_type:
+          type: string
+        tokens:
+          type: number
+        percentage:
+          type: number
+    Recommendation:
+      type: object
+      properties:
+        title:
+          type: string
+        why:
+          type: string
+        action:
+          type: string
+    RuntimeCard:
+      type: object
+      properties:
+        title:
+          type: string
+        value:
+          type: number
+        subtitle:
+          type: string
+    GalileoSummary:
+      type: object
+      properties:
+        project:
+          type: string
+          nullable: true
+        project_id:
+          type: string
+          nullable: true
+        log_stream:
+          type: string
+          nullable: true
+        log_stream_id:
+          type: string
+          nullable: true
+        trace_count:
+          type: integer
+        agents_with_runtime_controls:
+          type: integer
+        runtime_control_events:
+          type: integer
+        allows:
+          type: integer
+        denies:
+          type: integer
+        warns:
+          type: integer
+        steers:
+          type: integer
+        logs:
+          type: integer
+        human_reviews:
+          type: integer
+        failed_evals:
+          type: integer
+        agent_summaries:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/AgentRuntimeSummary'
+    AgentRuntimeSummary:
+      type: object
+      properties:
+        agent_name:
+          type: string
+        trace_ids:
+          type: array
+          items:
+            type: string
+        session_ids:
+          type: array
+          items:
+            type: string
+        runtime_control_events:
+          type: integer
+        allows:
+          type: integer
+        denies:
+          type: integer
+        warns:
+          type: integer
+        steers:
+          type: integer
+        logs:
+          type: integer
+        human_reviews:
+          type: integer
+        eval_count:
+          type: integer
+        failed_evals:
+          type: integer
+        max_severity:
+          type: string
+        top_reasons:
+          type: array
+          items:
+            type: string
+        deep_links:
+          type: array
+          items:
+            type: string
+        join_keys:
+          type: object
+          additionalProperties:
+            type: integer
+    RuntimeEvidenceRow:
+      type: object
+      properties:
+        agent_name:
+          type: string
+        decision:
+          type: string
+          enum: [allow, deny, warn, steer, log, human_review]
+        severity:
+          type: string
+          enum: [INFO, LOW, MEDIUM, HIGH, CRITICAL]
+        reason:
+          type: string
+        target:
+          type: string
+        action:
+          type: string
+        control_id:
+          type: string
+        policy_id:
+          type: string
+        evidence_ref:
+          type: string
+        trace_id:
+          type: string
+        session_id:
+          type: string
+        deep_link:
+          type: string
+        join_key:
+          type: string
+          enum: [trace_id, session_id, agent_name, agent_name_unmatched]
+        token_pressure:
+          type: object
+          properties:
+            tokens:
+              type: number
+            percentage_of_total:
+              type: number
+            rank:
+              type: integer
+              nullable: true

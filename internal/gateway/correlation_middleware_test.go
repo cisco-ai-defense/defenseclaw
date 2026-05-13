@@ -8,6 +8,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -31,7 +32,7 @@ func TestContextHelpers_RoundTrip(t *testing.T) {
 	if got := TraceIDFromContext(ctx); got != "abcdef" {
 		t.Errorf("TraceIDFromContext=%q, want abcdef", got)
 	}
-	if got := AgentIdentityFromContext(ctx); got != id {
+	if got := AgentIdentityFromContext(ctx); !reflect.DeepEqual(got, id) {
 		t.Errorf("AgentIdentityFromContext=%+v, want %+v", got, id)
 	}
 }
@@ -46,7 +47,7 @@ func TestContextHelpers_NilSafe(t *testing.T) {
 	if got := TraceIDFromContext(nilCtx); got != "" {
 		t.Errorf("nil ctx TraceID = %q", got)
 	}
-	if got := AgentIdentityFromContext(nilCtx); got != (AgentIdentity{}) {
+	if got := AgentIdentityFromContext(nilCtx); !got.IsZero() {
 		t.Errorf("nil ctx AgentIdentity = %+v", got)
 	}
 }
@@ -268,7 +269,7 @@ func TestCorrelationMiddleware_BoundsPolicyAndDestination(t *testing.T) {
 func TestCorrelationMiddleware_NilRegistryTolerated(t *testing.T) {
 	mw := CorrelationMiddleware(nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := AgentIdentityFromContext(r.Context()); got != (AgentIdentity{}) {
+		if got := AgentIdentityFromContext(r.Context()); !got.IsZero() {
 			t.Errorf("expected zero AgentIdentity with nil registry, got %+v", got)
 		}
 	}))

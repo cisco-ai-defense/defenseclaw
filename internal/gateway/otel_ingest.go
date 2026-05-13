@@ -188,7 +188,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	}
 	source = normalizeConnectorTelemetrySource(source)
 	ctx := r.Context()
-	if id := agentIdentityForOTLPSource(source); id != (AgentIdentity{}) {
+	if id := agentIdentityForOTLPSource(source); !id.IsZero() {
 		ctx = ContextWithAgentIdentity(ctx, id)
 	}
 
@@ -274,11 +274,18 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	// local-observability-stack's Loki receives codex/claudecode
 	// telemetry directly — no extra audit OTLP sink needed.
 	a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", stats.Records, bodyBytes)
-	for _, usage := range extractOTLPTokenUsage(summaryBody, signal, source) {
+	tokenUsage := extractOTLPTokenUsage(summaryBody, signal, source)
+	for _, usage := range tokenUsage {
 		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, usage.agentName, SharedAgentRegistry().AgentID(), usage.tokenType, usage.tokens)
 	}
-	for _, duration := range extractOTLPOperationDurations(summaryBody, signal, source) {
+	durations := extractOTLPOperationDurations(summaryBody, signal, source)
+	for _, duration := range durations {
 		a.otel.RecordLLMDuration(ctx, duration.operationName, duration.providerName, duration.model, duration.agentName, SharedAgentRegistry().AgentID(), duration.durationSeconds)
+	}
+	if signal == otelSignalMetrics && source == "openclaw" {
+		a.persistOTLPDashboardMetricAuditEvents(source, sessionID, extractOTLPMetricDashboardValues(summaryBody, source))
+	} else {
+		a.persistOTLPUsageMetricAuditEvents(source, sessionID, tokenUsage, durations)
 	}
 	a.otel.EmitConnectorTelemetryLog(ctx, string(signal), source, "ok", stats.Records, bodyBytes, summary)
 
@@ -438,6 +445,21 @@ type otelLLMDuration struct {
 	model           string
 	agentName       string
 	durationSeconds float64
+}
+
+type otelDashboardMetric struct {
+	metricName   string
+	value        float64
+	unit         string
+	provider     string
+	model        string
+	operation    string
+	tokenType    string
+	channel      string
+	component    string
+	temporality  string
+	sourceSignal string
+	gatewayHost  string
 }
 
 // extractOTLPTokenUsage promotes connector-native OTLP log fields into
@@ -609,7 +631,7 @@ func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
 		serviceName := otlpString(resourceAttrs, "service.name")
 		for _, scope := range resource.ScopeMetrics {
 			for _, metric := range scope.Metrics {
-				if metric.Name != "claude_code.token.usage" {
+				if metric.Name != "claude_code.token.usage" && metric.Name != "openclaw.tokens" {
 					continue
 				}
 				points := metric.Sum.DataPoints
@@ -618,22 +640,37 @@ func extractOTLPMetricTokenUsage(body []byte, source string) []otelTokenUsage {
 				}
 				for _, point := range points {
 					attrs := otlpAttributesToMap(point.Attributes)
-					tokenType := normalizeClaudeCodeTokenType(otlpString(attrs, "type"))
+					tokenType := normalizeOTLPTokenType(firstNonEmpty(
+						otlpString(attrs, "type"),
+						otlpString(attrs, "openclaw.token"),
+					))
 					tokens := otlpDataPointInt(point.AsInt, point.AsDouble)
 					if tokenType == "" || tokens <= 0 {
 						continue
 					}
 					agentName := source
 					if agentName == "" || agentName == "unknown" {
-						agentName = firstNonEmpty(serviceName, "claudecode")
+						agentName = firstNonEmpty(serviceName, "unknown")
 					}
 					out = append(out, otelTokenUsage{
-						operationName: "chat",
-						providerName:  firstNonEmpty(source, serviceName, "claudecode"),
-						model:         firstNonEmpty(otlpString(attrs, "model"), "unknown"),
-						agentName:     agentName,
-						tokenType:     tokenType,
-						tokens:        tokens,
+						operationName: firstNonEmpty(openclawMetricOperationName(metric.Name, attrs), "chat"),
+						providerName: firstNonEmpty(
+							otlpString(attrs, "openclaw.provider"),
+							otlpString(attrs, "gen_ai.provider.name"),
+							source,
+							serviceName,
+							"claudecode",
+						),
+						model: firstNonEmpty(
+							otlpString(attrs, "openclaw.model"),
+							otlpString(attrs, "gen_ai.response.model"),
+							otlpString(attrs, "gen_ai.request.model"),
+							otlpString(attrs, "model"),
+							"unknown",
+						),
+						agentName: agentName,
+						tokenType: tokenType,
+						tokens:    tokens,
 					})
 				}
 			}
@@ -726,20 +763,20 @@ func extractOTLPMetricDurations(body []byte, source string) []otelLLMDuration {
 						continue
 					}
 					attrs := otlpAttributesToMap(point.Attributes)
-					out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, normalizeDurationByUnit(sum/float64(count), metric.Unit), "chat"))
+					out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, normalizeDurationByUnit(sum/float64(count), metric.Unit), openclawMetricOperationName(metric.Name, attrs)))
 				}
 				for _, point := range metric.Gauge.DataPoints {
 					attrs := otlpAttributesToMap(point.Attributes)
 					seconds := otlpMetricPointDurationSeconds(point, metric.Unit)
 					if seconds > 0 {
-						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
+						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, openclawMetricOperationName(metric.Name, attrs)))
 					}
 				}
 				for _, point := range metric.Sum.DataPoints {
 					attrs := otlpAttributesToMap(point.Attributes)
 					seconds := otlpMetricPointDurationSeconds(point, metric.Unit)
 					if seconds > 0 {
-						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, "chat"))
+						out = append(out, otelDurationFromAttrs(attrs, resourceAttrs, source, seconds, openclawMetricOperationName(metric.Name, attrs)))
 					}
 				}
 			}
@@ -789,7 +826,8 @@ func extractOTLPTraceDurations(body []byte, source string) []otelLLMDuration {
 }
 
 type otlpMetricPoints struct {
-	DataPoints []otlpMetricDataPoint `json:"dataPoints"`
+	AggregationTemporality string                `json:"aggregationTemporality"`
+	DataPoints             []otlpMetricDataPoint `json:"dataPoints"`
 }
 
 type otlpMetricDataPoint struct {
@@ -981,6 +1019,16 @@ func otlpDataPointInt(rawInt, rawDouble json.RawMessage) int64 {
 	return 0
 }
 
+func otlpDataPointFloat(rawInt, rawDouble json.RawMessage) float64 {
+	if len(rawDouble) > 0 && string(rawDouble) != "null" {
+		return parseOTLPNumberFloat(rawDouble)
+	}
+	if len(rawInt) > 0 && string(rawInt) != "null" {
+		return parseOTLPNumberFloat(rawInt)
+	}
+	return 0
+}
+
 func parseOTLPNumber(raw json.RawMessage) int64 {
 	var asNumber json.Number
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
@@ -1099,10 +1147,10 @@ func normalizeDurationByUnit(value float64, unit string) float64 {
 func isLLMDurationMetric(name string) bool {
 	name = strings.ToLower(strings.TrimSpace(name))
 	switch name {
-	case "gen_ai.client.operation.duration", "gen_ai.operation.duration", "llm.operation.duration", "claude_code.operation.duration", "codex.operation.duration":
+	case "gen_ai.client.operation.duration", "gen_ai.operation.duration", "llm.operation.duration", "claude_code.operation.duration", "codex.operation.duration", "openclaw.run.duration_ms":
 		return true
 	default:
-		return strings.Contains(name, "operation.duration") && (strings.Contains(name, "gen_ai") || strings.Contains(name, "llm") || strings.Contains(name, "codex") || strings.Contains(name, "claude"))
+		return strings.Contains(name, "operation.duration") && (strings.Contains(name, "gen_ai") || strings.Contains(name, "llm") || strings.Contains(name, "codex") || strings.Contains(name, "claude") || strings.Contains(name, "openclaw"))
 	}
 }
 
@@ -1129,12 +1177,20 @@ func otelDurationFromAttrs(attrs, resourceAttrs map[string]interface{}, source s
 	}
 	return otelLLMDuration{
 		operationName: firstNonEmpty(
+			otlpString(attrs, "openclaw.operation"),
 			otlpString(attrs, "gen_ai.operation.name"),
 			fallbackOperation,
 			"chat",
 		),
-		providerName: firstNonEmpty(otlpString(attrs, "gen_ai.provider.name"), source, serviceName, "unknown"),
+		providerName: firstNonEmpty(
+			otlpString(attrs, "openclaw.provider"),
+			otlpString(attrs, "gen_ai.provider.name"),
+			source,
+			serviceName,
+			"unknown",
+		),
 		model: firstNonEmpty(
+			otlpString(attrs, "openclaw.model"),
 			otlpString(attrs, "gen_ai.response.model"),
 			otlpString(attrs, "gen_ai.request.model"),
 			otlpString(attrs, "model"),
@@ -1145,13 +1201,341 @@ func otelDurationFromAttrs(attrs, resourceAttrs map[string]interface{}, source s
 	}
 }
 
-func normalizeClaudeCodeTokenType(tokenType string) string {
+func normalizeOTLPTokenType(tokenType string) string {
 	switch strings.TrimSpace(tokenType) {
-	case "input", "output", "cacheRead", "cacheCreation":
+	case "input", "output", "cacheRead", "cacheCreation", "cache_read", "cache_write", "prompt", "total":
 		return strings.TrimSpace(tokenType)
 	default:
 		return ""
 	}
+}
+
+func extractOTLPMetricDashboardValues(body []byte, source string) []otelDashboardMetric {
+	var envelope struct {
+		ResourceMetrics []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeMetrics []struct {
+				Metrics []struct {
+					Name      string              `json:"name"`
+					Unit      string              `json:"unit"`
+					Sum       otlpMetricPoints    `json:"sum"`
+					Gauge     otlpMetricPoints    `json:"gauge"`
+					Histogram otlpHistogramPoints `json:"histogram"`
+				} `json:"metrics"`
+			} `json:"scopeMetrics"`
+		} `json:"resourceMetrics"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+
+	var out []otelDashboardMetric
+	for _, resource := range envelope.ResourceMetrics {
+		resourceAttrs := otlpAttributesToMap(resource.Resource.Attributes)
+		for _, scope := range resource.ScopeMetrics {
+			for _, metric := range scope.Metrics {
+				if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(metric.Name)), "openclaw.") {
+					continue
+				}
+				temporality := firstNonEmpty(metric.Sum.AggregationTemporality, "unknown")
+				for _, point := range metric.Sum.DataPoints {
+					attrs := otlpAttributesToMap(point.Attributes)
+					if dashboardMetric, ok := openclawDashboardMetricFromAttrs(metric.Name, metric.Unit, otlpDataPointFloat(point.AsInt, point.AsDouble), attrs, resourceAttrs, source, temporality); ok {
+						out = append(out, dashboardMetric)
+					}
+				}
+				for _, point := range metric.Gauge.DataPoints {
+					attrs := otlpAttributesToMap(point.Attributes)
+					if dashboardMetric, ok := openclawDashboardMetricFromAttrs(metric.Name, metric.Unit, otlpDataPointFloat(point.AsInt, point.AsDouble), attrs, resourceAttrs, source, "gauge"); ok {
+						out = append(out, dashboardMetric)
+					}
+				}
+				for _, point := range metric.Histogram.DataPoints {
+					count := parseOTLPNumber(point.Count)
+					sum := parseOTLPNumberFloat(point.Sum)
+					if count <= 0 || sum <= 0 {
+						continue
+					}
+					attrs := otlpAttributesToMap(point.Attributes)
+					if dashboardMetric, ok := openclawDashboardMetricFromAttrs(metric.Name, metric.Unit, sum/float64(count), attrs, resourceAttrs, source, "histogram_avg"); ok {
+						out = append(out, dashboardMetric)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func openclawDashboardMetricFromAttrs(name, unit string, value float64, attrs, resourceAttrs map[string]interface{}, source, temporality string) (otelDashboardMetric, bool) {
+	if value <= 0 {
+		return otelDashboardMetric{}, false
+	}
+	tokenType := normalizeOTLPTokenType(otlpString(attrs, "openclaw.token"))
+	metricName := strings.TrimSpace(name)
+	if metricName == "openclaw.tokens" {
+		if tokenType == "" {
+			return otelDashboardMetric{}, false
+		}
+		if tokenType != "total" {
+			metricName = "openclaw.tokens." + tokenType
+		}
+	}
+	serviceName := otlpString(resourceAttrs, "service.name")
+	return otelDashboardMetric{
+		metricName: metricName,
+		value:      value,
+		unit:       openclawDashboardMetricUnit(metricName, unit),
+		provider: firstNonEmpty(
+			otlpString(attrs, "openclaw.provider"),
+			otlpString(attrs, "gen_ai.provider.name"),
+			source,
+			serviceName,
+			"unknown",
+		),
+		model: firstNonEmpty(
+			otlpString(attrs, "openclaw.model"),
+			otlpString(attrs, "gen_ai.response.model"),
+			otlpString(attrs, "gen_ai.request.model"),
+			otlpString(attrs, "model"),
+			"unknown",
+		),
+		operation:   openclawMetricOperationName(name, attrs),
+		tokenType:   tokenType,
+		channel:     firstNonEmpty(otlpString(attrs, "openclaw.channel"), "unknown"),
+		component:   firstNonEmpty(otlpString(attrs, "openclaw.lane"), otlpString(attrs, "openclaw.source"), otlpString(attrs, "openclaw.webhook"), otlpString(attrs, "openclaw.state"), source, "unknown"),
+		temporality: temporality,
+	}, true
+}
+
+func openclawDashboardMetricUnit(metricName, unit string) string {
+	defaultUnit := openclawMetricDefaultUnit(metricName)
+	if strings.TrimSpace(unit) == "" || strings.TrimSpace(unit) == "1" {
+		return defaultUnit
+	}
+	return strings.TrimSpace(unit)
+}
+
+func openclawMetricDefaultUnit(metricName string) string {
+	switch metricName {
+	case "openclaw.tokens":
+		return "tokens"
+	case "openclaw.cost.usd":
+		return "usd"
+	}
+	if strings.HasPrefix(metricName, "openclaw.tokens.") {
+		return "tokens"
+	}
+	if strings.HasSuffix(metricName, "_ms") || strings.HasSuffix(metricName, ".duration_ms") {
+		return "ms"
+	}
+	return "1"
+}
+
+func openclawMetricOperationName(metricName string, attrs map[string]interface{}) string {
+	if op := firstNonEmpty(otlpString(attrs, "openclaw.operation"), otlpString(attrs, "gen_ai.operation.name")); op != "" {
+		return op
+	}
+	switch strings.TrimSpace(metricName) {
+	case "openclaw.tokens", "openclaw.cost.usd", "openclaw.run.duration_ms", "openclaw.context.tokens":
+		return "chat"
+	case "openclaw.queue.depth", "openclaw.queue.wait_ms", "openclaw.queue.lane.enqueue", "openclaw.queue.lane.dequeue":
+		return "queue"
+	case "openclaw.message.queued", "openclaw.message.processed", "openclaw.message.duration_ms":
+		return "message"
+	case "openclaw.webhook.received", "openclaw.webhook.error", "openclaw.webhook.duration_ms":
+		return "webhook"
+	case "openclaw.session.state", "openclaw.session.stuck", "openclaw.session.stuck_age_ms":
+		return "session"
+	case "openclaw.run.attempt":
+		return "run"
+	default:
+		return "openclaw"
+	}
+}
+
+func (a *APIServer) persistOTLPUsageMetricAuditEvents(source, sessionID string, usages []otelTokenUsage, durations []otelLLMDuration) {
+	for _, usage := range usages {
+		if usage.tokens <= 0 {
+			continue
+		}
+		metric := map[string]any{
+			"metric_name":    "openclaw.tokens",
+			"metric_value":   usage.tokens,
+			"unit":           "tokens",
+			"provider":       otelAuditLabel(usage.providerName, source),
+			"model":          otelAuditLabel(usage.model, "unknown"),
+			"operation":      otelAuditLabel(usage.operationName, "chat"),
+			"token_type":     otelAuditLabel(usage.tokenType, "unknown"),
+			"connector":      otelAuditLabel(source, "unknown"),
+			"source_signal":  "otlp",
+			"dashboard_hint": "model_usage",
+		}
+		details := fmt.Sprintf(
+			"metric_name=openclaw.tokens metric_value=%d unit=tokens provider=%s model=%s operation=%s token_type=%s connector=%s",
+			usage.tokens,
+			metric["provider"],
+			metric["model"],
+			metric["operation"],
+			metric["token_type"],
+			metric["connector"],
+		)
+		ev := audit.Event{
+			Timestamp:  time.Now().UTC(),
+			Action:     string(audit.ActionOTelIngestMetrics),
+			Target:     "otlp:metrics:usage",
+			Actor:      source,
+			Details:    details,
+			Severity:   "INFO",
+			AgentName:  firstNonEmpty(usage.agentName, source),
+			SessionID:  sessionID,
+			Structured: metric,
+		}
+		if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
+			fmt.Fprintf(otelIngestLogSink(), "[otel-ingest] usage metric persist failed (source=%s metric=openclaw.tokens): %v\n", source, err)
+		}
+	}
+
+	for _, duration := range durations {
+		if duration.durationSeconds <= 0 {
+			continue
+		}
+		durationMS := duration.durationSeconds * 1000
+		metric := map[string]any{
+			"metric_name":    "openclaw.run.duration_ms",
+			"metric_value":   durationMS,
+			"unit":           "ms",
+			"provider":       otelAuditLabel(duration.providerName, source),
+			"model":          otelAuditLabel(duration.model, "unknown"),
+			"operation":      otelAuditLabel(duration.operationName, "chat"),
+			"connector":      otelAuditLabel(source, "unknown"),
+			"source_signal":  "otlp",
+			"dashboard_hint": "model_usage",
+		}
+		details := fmt.Sprintf(
+			"metric_name=openclaw.run.duration_ms metric_value=%.3f unit=ms provider=%s model=%s operation=%s connector=%s",
+			durationMS,
+			metric["provider"],
+			metric["model"],
+			metric["operation"],
+			metric["connector"],
+		)
+		ev := audit.Event{
+			Timestamp:  time.Now().UTC(),
+			Action:     string(audit.ActionOTelIngestMetrics),
+			Target:     "otlp:metrics:duration",
+			Actor:      source,
+			Details:    details,
+			Severity:   "INFO",
+			AgentName:  firstNonEmpty(duration.agentName, source),
+			SessionID:  sessionID,
+			Structured: metric,
+		}
+		if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
+			fmt.Fprintf(otelIngestLogSink(), "[otel-ingest] usage metric persist failed (source=%s metric=openclaw.run.duration_ms): %v\n", source, err)
+		}
+	}
+}
+
+func (a *APIServer) persistOTLPDashboardMetricAuditEvents(source, sessionID string, metrics []otelDashboardMetric) {
+	persistDashboardMetricAuditEvents(a.logger, a.store, source, sessionID, "otlp:metrics:openclaw", metrics)
+}
+
+func persistDashboardMetricAuditEvents(logger *audit.Logger, store *audit.Store, source, sessionID, target string, metrics []otelDashboardMetric) {
+	for _, m := range metrics {
+		if m.metricName == "" || m.value <= 0 {
+			continue
+		}
+		structured := map[string]any{
+			"metric_name":    otelAuditLabel(m.metricName, "unknown"),
+			"metric_value":   m.value,
+			"unit":           otelAuditLabel(m.unit, "1"),
+			"provider":       otelAuditLabel(m.provider, source),
+			"model":          otelAuditLabel(m.model, "unknown"),
+			"operation":      otelAuditLabel(m.operation, "openclaw"),
+			"connector":      otelAuditLabel(source, "unknown"),
+			"component":      otelAuditLabel(m.component, source),
+			"channel":        otelAuditLabel(m.channel, "unknown"),
+			"temporality":    otelAuditLabel(m.temporality, "unknown"),
+			"source_signal":  otelAuditLabel(firstNonEmpty(m.sourceSignal, "otlp"), "otlp"),
+			"dashboard_hint": "openclaw_metric",
+		}
+		if m.tokenType != "" {
+			structured["token_type"] = otelAuditLabel(m.tokenType, "unknown")
+		}
+		if m.gatewayHost != "" {
+			structured["gateway_host"] = otelAuditLabel(m.gatewayHost, "unknown")
+		}
+		if host, err := os.Hostname(); err == nil && strings.TrimSpace(host) != "" {
+			structured["collector_host"] = otelAuditLabel(host, "unknown")
+		}
+		details := fmt.Sprintf(
+			"metric_name=%s metric_value=%.6f unit=%s provider=%s model=%s operation=%s component=%s channel=%s temporality=%s connector=%s",
+			structured["metric_name"],
+			m.value,
+			structured["unit"],
+			structured["provider"],
+			structured["model"],
+			structured["operation"],
+			structured["component"],
+			structured["channel"],
+			structured["temporality"],
+			structured["connector"],
+		)
+		if m.tokenType != "" {
+			details += fmt.Sprintf(" token_type=%s", structured["token_type"])
+		}
+		ev := audit.Event{
+			Timestamp:  time.Now().UTC(),
+			Action:     string(audit.ActionOTelIngestMetrics),
+			Target:     target,
+			Actor:      source,
+			Details:    details,
+			Severity:   "INFO",
+			AgentName:  source,
+			SessionID:  sessionID,
+			Structured: structured,
+		}
+		if err := persistAuditEvent(logger, store, ev); err != nil {
+			fmt.Fprintf(otelIngestLogSink(), "[otel-ingest] dashboard metric persist failed (source=%s metric=%s): %v\n", source, m.metricName, err)
+		}
+	}
+}
+
+func otelAuditLabel(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		value = strings.TrimSpace(fallback)
+	}
+	if value == "" {
+		value = "unknown"
+	}
+	var b strings.Builder
+	b.Grow(len(value))
+	lastDash := false
+	for i := 0; i < len(value) && b.Len() < 128; i++ {
+		c := value[i]
+		allowed := (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '_' || c == '-' || c == '.' || c == ':' || c == '/'
+		if allowed {
+			b.WriteByte(c)
+			lastDash = false
+			continue
+		}
+		if !lastDash {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if out == "" {
+		return "unknown"
+	}
+	return out
 }
 
 func firstNonEmpty(vals ...string) string {

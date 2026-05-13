@@ -195,6 +195,10 @@ func (r *AgentRegistry) AgentInstanceForSession(sessionID string) string {
 func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID string) AgentIdentity {
 	_ = ctx
 	logicalID := strings.TrimSpace(inboundAgentID)
+	task := TaskIdentityFromContext(ctx)
+	if task.ParentAgentID != "" {
+		logicalID = task.ParentAgentID
+	}
 	if logicalID == "" {
 		logicalID = r.AgentID()
 	}
@@ -203,10 +207,15 @@ func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID s
 		logicalName = logicalID
 	}
 	id := AgentIdentity{
-		AgentID:           logicalID,
-		AgentName:         logicalName,
-		AgentType:         logicalName,
-		SidecarInstanceID: r.SidecarInstanceID(),
+		AgentID:              logicalID,
+		AgentName:            logicalName,
+		AgentType:            logicalName,
+		SidecarInstanceID:    r.SidecarInstanceID(),
+		TaskID:               task.TaskID,
+		TaskType:             task.TaskType,
+		TaskTokenID:          task.TokenID,
+		TaskAllowedResources: append([]string(nil), task.AllowedResources...),
+		TaskScopes:           append([]string(nil), task.Scopes...),
 	}
 	if sessionID != "" {
 		// agent_instance_id is session-scoped per the observability
@@ -224,9 +233,27 @@ func (r *AgentRegistry) Resolve(ctx context.Context, sessionID, inboundAgentID s
 // AgentIdentity is the value object returned by Resolve. The three
 // ID fields mirror the gatewaylog.Event envelope 1:1.
 type AgentIdentity struct {
-	AgentID           string
-	AgentName         string
-	AgentType         string
-	AgentInstanceID   string
-	SidecarInstanceID string
+	AgentID              string
+	AgentName            string
+	AgentType            string
+	AgentInstanceID      string
+	SidecarInstanceID    string
+	TaskID               string
+	TaskType             string
+	TaskTokenID          string
+	TaskAllowedResources []string
+	TaskScopes           []string
+}
+
+func (id AgentIdentity) IsZero() bool {
+	return id.AgentID == "" &&
+		id.AgentName == "" &&
+		id.AgentType == "" &&
+		id.AgentInstanceID == "" &&
+		id.SidecarInstanceID == "" &&
+		id.TaskID == "" &&
+		id.TaskType == "" &&
+		id.TaskTokenID == "" &&
+		len(id.TaskAllowedResources) == 0 &&
+		len(id.TaskScopes) == 0
 }

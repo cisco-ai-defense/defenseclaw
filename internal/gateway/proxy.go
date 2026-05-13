@@ -104,6 +104,7 @@ type GuardrailProxy struct {
 	webhooks     *WebhookDispatcher
 	hilt         *HILTApprovalManager
 	notifier     *notifier.Dispatcher
+	agentControl *agentControlClient
 
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
@@ -172,6 +173,11 @@ func (p *GuardrailProxy) SetHILTApprovalManager(m *HILTApprovalManager) {
 // stays clean.
 func (p *GuardrailProxy) SetNotifier(n *notifier.Dispatcher) {
 	p.notifier = n
+}
+
+// SetAgentControlClient wires Galileo Agent Control runtime evaluation.
+func (p *GuardrailProxy) SetAgentControlClient(c *agentControlClient) {
+	p.agentControl = c
 }
 
 // agentNameForRequest picks the most specific agent name available.
@@ -1837,6 +1843,18 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 
 		verdict := p.inspector.Inspect(r.Context(), "prompt", inspectionText, req.Messages, req.Model, mode)
+		if p.agentControl != nil {
+			decision := p.agentControl.evaluate(r.Context(), "pre", agentControlStepForLLM("pre", req.Model, inspectionText, "", map[string]string{
+				"session_id": meta.SessionID,
+				"request_id": meta.RequestID,
+				"source":     meta.Source,
+				"direction":  "prompt",
+			}))
+			verdict = mergeAgentControlIntoScanVerdict(verdict, decision)
+			annotateAgentControlSpan(agentCtx, decision)
+			annotateAgentControlTraceSpan(grSpan, decision)
+			emitAgentControlPolicyDecision(p.otel, decision)
+		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
 		elapsed := time.Since(t0)
 
@@ -1977,6 +1995,18 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 		postCtx, postCancel := p.postCallContext(r.Context())
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
+		if p.agentControl != nil {
+			decision := p.agentControl.evaluate(postCtx, "post", agentControlStepForLLM("post", aliasModel, promptInspectionText(lastUserText(req.Messages)), content, map[string]string{
+				"session_id": responseMeta.SessionID,
+				"request_id": responseMeta.RequestID,
+				"source":     responseMeta.Source,
+				"direction":  "completion",
+			}))
+			verdict = mergeAgentControlIntoScanVerdict(verdict, decision)
+			annotateAgentControlTraceSpan(llmSpan, decision)
+			annotateAgentControlTraceSpan(grSpan, decision)
+			emitAgentControlPolicyDecision(p.otel, decision)
+		}
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
 		elapsed := time.Since(t0)
@@ -2025,6 +2055,7 @@ func (p *GuardrailProxy) handleNonStreamingRequest(w http.ResponseWriter, r *htt
 	// --- Post-call inspection: tool call arguments ---
 	if len(resp.Choices) > 0 && resp.Choices[0].Message != nil {
 		if verdict := p.inspectToolCalls(r.Context(), resp.Choices[0].Message.ToolCalls); verdict != nil {
+			annotateAgentControlTraceSpan(llmSpan, verdict.AgentControl)
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil,
 				rawTelemetryField{key: "raw_tool_calls", raw: resp.Choices[0].Message.ToolCalls})
 			if verdict.Action == "block" && mode == "action" {
@@ -2314,6 +2345,20 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 		postCtx, postCancel := p.postCallContext(r.Context())
 		respMessages := []ChatMessage{{Role: "assistant", Content: content}}
 		verdict := p.inspector.Inspect(postCtx, "completion", content, respMessages, aliasModel, mode)
+		if p.agentControl != nil {
+			meta := proxyLLMEventMeta(p, r, req, providerName)
+			decision := p.agentControl.evaluate(postCtx, "post", agentControlStepForLLM("post", aliasModel, promptInspectionText(lastUserText(req.Messages)), content, map[string]string{
+				"session_id": meta.SessionID,
+				"request_id": meta.RequestID,
+				"source":     meta.Source,
+				"direction":  "completion",
+				"stream":     "true",
+			}))
+			verdict = mergeAgentControlIntoScanVerdict(verdict, decision)
+			annotateAgentControlTraceSpan(llmSpan, decision)
+			annotateAgentControlTraceSpan(grSpan, decision)
+			emitAgentControlPolicyDecision(p.otel, decision)
+		}
 		postCancel()
 		p.resolveConfirm(r.Context(), r, verdict, "completion", aliasModel, mode)
 		elapsed := time.Since(t0)
@@ -2357,6 +2402,7 @@ func (p *GuardrailProxy) handleStreamingRequest(w http.ResponseWriter, r *http.R
 	emitLLMResponseEvent(r.Context(), streamResponseMeta, accumulated.String(), accumulated.String(), streamFinishReasons)
 	if len(assembledTC) > 0 {
 		if verdict := p.inspectToolCalls(r.Context(), assembledTC); verdict != nil {
+			annotateAgentControlTraceSpan(llmSpan, verdict.AgentControl)
 			p.recordTelemetry(r.Context(), "tool-call", aliasModel, verdict, 0, nil, nil,
 				rawTelemetryField{key: "raw_tool_calls", raw: assembledTC})
 			if verdict.Action == "block" && mode == "action" {
@@ -3484,6 +3530,13 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		}
 		details += fmt.Sprintf(" reason=%s", reason)
 	}
+	if verdict.AgentControl != nil {
+		details += fmt.Sprintf(" agent_control_action=%s agent_control_matched=%v agent_control_control_id=%d",
+			verdict.AgentControl.Action, verdict.AgentControl.Matched, verdict.AgentControl.ControlID)
+		if verdict.AgentControl.Error != "" {
+			details += " agent_control_error=" + verdict.AgentControl.Error
+		}
+	}
 
 	// Emit canonical finding IDs for cross-scanner correlation. The scanner
 	// (local-pattern / CiscoAID / judge) produces raw finding strings; the
@@ -3964,15 +4017,32 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	}
 
 	var allFindings []RuleFinding
+	var agentControlDecision *agentControlDecision
 	for _, tc := range toolCalls {
 		toolName := tc.Function.Name
 		args := tc.Function.Arguments
+
+		if p.agentControl != nil {
+			decision := p.agentControl.evaluate(ctx, "pre", agentControlStepForToolCall(toolName, json.RawMessage(args), map[string]string{
+				"tool_call_id": tc.ID,
+				"tool_type":    tc.Type,
+				"direction":    "tool_call",
+			}))
+			annotateAgentControlSpan(ctx, decision)
+			emitAgentControlPolicyDecision(p.otel, decision)
+			if decision != nil && (agentControlDecision == nil || agentControlActionRank(decision.Action) > agentControlActionRank(agentControlDecision.Action)) {
+				agentControlDecision = decision
+			}
+		}
 
 		findings := ScanAllRules(args, toolName)
 		allFindings = append(allFindings, findings...)
 	}
 
 	if len(allFindings) == 0 {
+		if agentControlDecision != nil && agentControlDecision.Matched {
+			return mergeAgentControlIntoScanVerdict(nil, agentControlDecision)
+		}
 		return nil
 	}
 
@@ -4009,13 +4079,13 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		p.otel.RecordGuardrailEvaluation(ctx, p.connectorName()+":tool-call-inspect", action)
 	}
 
-	return &ScanVerdict{
+	return mergeAgentControlIntoScanVerdict(&ScanVerdict{
 		Action:         action,
 		Severity:       severity,
 		Reason:         strings.Join(top, ", "),
 		Findings:       FindingStrings(allFindings),
 		ScannerSources: []string{"tool-call-inspect"},
-	}
+	}, agentControlDecision)
 }
 
 // toolCallAccumulator merges streaming tool-call deltas by index, properly

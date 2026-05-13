@@ -1,0 +1,409 @@
+# Live-derived values for the isovalent-demo splunk-otel-collector release.
+# Tokens and DB credentials are referenced from existing Kubernetes Secrets.
+clusterName: isovalent-demo
+cloudProvider: aws
+distribution: eks
+environment: isovalent-demo
+terminationGracePeriodSeconds: 30
+
+autodetect:
+  prometheus: true
+
+certmanager:
+  enabled: true
+
+operator:
+  enabled: true
+
+secret:
+  create: false
+  name: splunk-otel-collector
+  validateSecret: true
+
+splunkObservability:
+  accessToken: ""
+  profilingEnabled: true
+  realm: us1
+
+gateway:
+  enabled: true
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
+  extraEnvs:
+    - name: SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY
+      valueFrom:
+        secretKeyRef:
+          name: splunk-otel-collector
+          key: splunk_observability_access_token_secondary
+  config:
+    exporters:
+      otlphttp/entities_secondary:
+        headers:
+          X-SF-TOKEN: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+        logs_endpoint: https://ingest.us1.signalfx.com/v3/event
+      otlphttp/secondary:
+        headers:
+          X-SF-TOKEN: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+        metrics_endpoint: https://ingest.us1.signalfx.com/v2/datapoint/otlp
+        sending_queue:
+          num_consumers: 32
+        traces_endpoint: https://ingest.us1.signalfx.com/v2/trace/otlp
+      signalfx/secondary:
+        access_token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+        api_url: https://api.us1.signalfx.com
+        ingest_url: https://ingest.us1.signalfx.com
+        sending_queue:
+          num_consumers: 32
+      splunk_hec/o11y_secondary:
+        disable_compression: true
+        endpoint: https://ingest.us1.signalfx.com/v1/log
+        log_data_enabled: false
+        profiling_data_enabled: true
+        sending_queue:
+          num_consumers: 32
+        token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+    service:
+      pipelines:
+        logs:
+          exporters:
+            - splunk_hec/o11y
+            - splunk_hec/o11y_secondary
+        logs/entities:
+          exporters:
+            - otlphttp/entities
+            - otlphttp/entities_secondary
+        metrics:
+          exporters:
+            - signalfx
+            - signalfx/secondary
+        metrics/collector:
+          exporters:
+            - signalfx
+            - signalfx/secondary
+        traces:
+          exporters:
+            - otlphttp
+            - signalfx
+            - otlphttp/secondary
+            - signalfx/secondary
+
+agent:
+  extraEnvs:
+    - name: SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY
+      valueFrom:
+        secretKeyRef:
+          name: splunk-otel-collector
+          key: splunk_observability_access_token_secondary
+  config:
+    exporters:
+      signalfx/histograms_secondary:
+        access_token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+        api_url: https://api.us1.signalfx.com
+        ingest_url: https://ingest.us1.signalfx.com
+        send_otlp_histograms: true
+      signalfx/host_metadata_secondary:
+        access_token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+        api_url: https://api.us1.signalfx.com
+        correlation: null
+        exclude_metrics:
+          - metric_name: "**"
+        ingest_url: https://ingest.us1.signalfx.com
+        root_path: /hostfs
+        sync_host_metadata: true
+    extensions:
+      k8s_observer:
+        auth_type: serviceAccount
+        observe_pods: true
+    processors:
+      filter/includemetrics:
+        metrics:
+          include:
+            match_type: strict
+            metric_names:
+              - container.cpu.usage
+              - container.memory.rss
+              - k8s.container.restarts
+              - k8s.pod.phase
+              - node_namespace_pod_container
+              - tcp.resets
+              - tcp.syn_timeouts
+              - cilium_api_limiter_processed_requests_total
+              - cilium_api_limiter_processing_duration_seconds
+              - cilium_bpf_map_ops_total
+              - cilium_controllers_group_runs_total
+              - cilium_controllers_runs_total
+              - cilium_endpoint_state
+              - cilium_errors_warnings_total
+              - cilium_ip_addresses
+              - cilium_ipam_capacity
+              - cilium_kubernetes_events_total
+              - cilium_policy_l7_total
+              - cilium_proxy_upstream_reply_seconds_bucket
+              - hubble_dns_queries_total
+              - hubble_dns_responses_total
+              - hubble_drop_total
+              - hubble_flows_processed_total
+              - hubble_http_request_duration_seconds_bucket
+              - hubble_http_requests_total
+              - hubble_icmp_total
+              - hubble_policy_verdicts_total
+              - hubble_tcp_flags_total
+              - tetragon_events_total
+              - tetragon_dns_cache_evictions_total
+              - tetragon_dns_cache_misses_total
+              - tetragon_dns_total
+              - tetragon_http_response_total
+              - tetragon_http_stats_latency_bucket
+              - tetragon_http_stats_latency_count
+              - tetragon_http_stats_latency_sum
+              - tetragon_icmp_datagrams_total
+              - tetragon_layer3_event_errors_total
+              - tetragon_socket_stats_retransmitsegs_total
+              - tetragon_socket_stats_rxbytes_total
+              - tetragon_socket_stats_rxsegs_total
+              - tetragon_socket_stats_srtt_count
+              - tetragon_socket_stats_srtt_sum
+              - tetragon_socket_stats_txbytes_total
+              - tetragon_socket_stats_txsegs_total
+              - tetragon_socket_stats_udp_retrieve_total
+              - tetragon_socket_stats_udp_rxbytes_total
+              - tetragon_socket_stats_udp_txbytes_total
+              - tetragon_socket_stats_udp_txsegs_total
+      resourcedetection:
+        detectors:
+          - system
+        system:
+          hostname_sources:
+            - os
+    receivers:
+      kubeletstats:
+        collection_interval: 30s
+        insecure_skip_verify: true
+      prometheus/isovalent_cilium:
+        config:
+          scrape_configs:
+            - job_name: cilium_metrics_9962
+              kubernetes_sd_configs:
+                - role: pod
+              metrics_path: /metrics
+              relabel_configs:
+                - action: keep
+                  regex: cilium
+                  source_labels:
+                    - __meta_kubernetes_pod_label_k8s_app
+                - replacement: ${__meta_kubernetes_pod_ip}:9962
+                  source_labels:
+                    - __meta_kubernetes_pod_ip
+                  target_label: __address__
+                - replacement: cilium_metrics_9962
+                  target_label: job
+              scrape_interval: 30s
+            - job_name: hubble_metrics_9965
+              kubernetes_sd_configs:
+                - role: pod
+              metrics_path: /metrics
+              relabel_configs:
+                - action: keep
+                  regex: cilium
+                  source_labels:
+                    - __meta_kubernetes_pod_label_k8s_app
+                - replacement: ${__meta_kubernetes_pod_ip}:9965
+                  source_labels:
+                    - __meta_kubernetes_pod_ip
+                  target_label: __address__
+                - replacement: hubble_metrics_9965
+                  target_label: job
+              scrape_interval: 30s
+      prometheus/isovalent_envoy:
+        config:
+          scrape_configs:
+            - job_name: envoy_metrics_9964
+              kubernetes_sd_configs:
+                - role: pod
+              metrics_path: /metrics
+              relabel_configs:
+                - action: keep
+                  regex: cilium-envoy
+                  source_labels:
+                    - __meta_kubernetes_pod_label_k8s_app
+                - replacement: ${__meta_kubernetes_pod_ip}:9964
+                  source_labels:
+                    - __meta_kubernetes_pod_ip
+                  target_label: __address__
+                - replacement: cilium_metrics_9964
+                  target_label: job
+              scrape_interval: 30s
+      prometheus/isovalent_operator:
+        config:
+          scrape_configs:
+            - job_name: cilium_operator_metrics_9963
+              kubernetes_sd_configs:
+                - role: pod
+              metrics_path: /metrics
+              relabel_configs:
+                - action: keep
+                  regex: operator
+                  source_labels:
+                    - __meta_kubernetes_pod_label_io_cilium_app
+                - replacement: cilium_metrics_9963
+                  target_label: job
+              scrape_interval: 30s
+      prometheus/isovalent_tetragon:
+        config:
+          scrape_configs:
+            - job_name: tetragon_metrics_2112
+              kubernetes_sd_configs:
+                - role: pod
+              metrics_path: /metrics
+              relabel_configs:
+                - action: keep
+                  regex: tetragon
+                  source_labels:
+                    - __meta_kubernetes_pod_label_app_kubernetes_io_name
+                - replacement: ${__meta_kubernetes_pod_ip}:2112
+                  source_labels:
+                    - __meta_kubernetes_pod_ip
+                  target_label: __address__
+                - replacement: tetragon_metrics_2112
+                  target_label: job
+              scrape_interval: 30s
+    service:
+      pipelines:
+        metrics:
+          receivers:
+            - prometheus/isovalent_cilium
+            - prometheus/isovalent_envoy
+            - prometheus/isovalent_operator
+            - prometheus/isovalent_tetragon
+            - hostmetrics
+            - kubeletstats
+            - otlp
+          processors:
+            - filter/includemetrics
+            - resourcedetection
+          exporters:
+            - otlp
+            - signalfx/host_metadata
+            - signalfx/host_metadata_secondary
+        metrics/histograms:
+          exporters:
+            - signalfx/histograms
+            - signalfx/histograms_secondary
+
+clusterReceiver:
+  extraEnvs:
+    - name: SPLUNK_DBMON_POSTGRES_ENDPOINT
+      value: streaming-postgres.streaming-service-app.svc.cluster.local:5432
+    - name: SPLUNK_DBMON_EVENT_ENDPOINT
+      value: https://ingest.us1.signalfx.com/v3/event
+    - name: SPLUNK_DBMON_POSTGRES_USERNAME
+      valueFrom:
+        secretKeyRef:
+          name: streaming-postgres-dbmon
+          key: username
+    - name: SPLUNK_DBMON_POSTGRES_PASSWORD
+      valueFrom:
+        secretKeyRef:
+          name: streaming-postgres-dbmon
+          key: password
+    - name: SPLUNK_DBMON_ACCESS_TOKEN
+      valueFrom:
+        secretKeyRef:
+          name: streaming-postgres-dbmon
+          key: access-token
+    - name: SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY
+      valueFrom:
+        secretKeyRef:
+          name: splunk-otel-collector
+          key: splunk_observability_access_token_secondary
+  config:
+    exporters:
+      otlphttp/dbmon:
+        headers:
+          X-SF-Token: ${env:SPLUNK_DBMON_ACCESS_TOKEN}
+          X-splunk-instrumentation-library: dbmon
+        logs_endpoint: ${env:SPLUNK_DBMON_EVENT_ENDPOINT}
+        sending_queue:
+          batch:
+            flush_timeout: 15s
+            max_size: 10485760
+            sizer: bytes
+      otlphttp/dbmon_secondary:
+        headers:
+          X-SF-Token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+          X-splunk-instrumentation-library: dbmon
+        logs_endpoint: ${env:SPLUNK_DBMON_EVENT_ENDPOINT}
+        sending_queue:
+          batch:
+            flush_timeout: 15s
+            max_size: 10485760
+            sizer: bytes
+      signalfx/secondary:
+        access_token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+        api_url: https://api.us1.signalfx.com
+        disable_default_translation_rules: true
+        ingest_url: https://ingest.us1.signalfx.com
+        timeout: 10s
+      signalfx/histograms_secondary:
+        access_token: ${SPLUNK_OBSERVABILITY_ACCESS_TOKEN_SECONDARY}
+        api_url: https://api.us1.signalfx.com
+        disable_default_translation_rules: true
+        ingest_url: https://ingest.us1.signalfx.com
+        send_otlp_histograms: true
+        timeout: 10s
+    receivers:
+      postgresql:
+        collection_interval: 10s
+        endpoint: ${env:SPLUNK_DBMON_POSTGRES_ENDPOINT}
+        username: ${env:SPLUNK_DBMON_POSTGRES_USERNAME}
+        password: ${env:SPLUNK_DBMON_POSTGRES_PASSWORD}
+        databases:
+          - streaming
+        tls:
+          insecure: true
+        events:
+          db.server.query_sample:
+            enabled: true
+          db.server.top_query:
+            enabled: true
+    service:
+      pipelines:
+        logs/dbmon:
+          receivers:
+            - postgresql
+          processors:
+            - memory_limiter
+            - batch
+            - resourcedetection
+            - resource/add_environment
+          exporters:
+            - otlphttp/dbmon
+            - otlphttp/dbmon_secondary
+        metrics:
+          exporters:
+            - signalfx
+            - signalfx/secondary
+        metrics/collector:
+          exporters:
+            - signalfx
+            - signalfx/secondary
+        metrics/dbmon:
+          receivers:
+            - postgresql
+          processors:
+            - memory_limiter
+            - batch
+            - resourcedetection
+            - resource/add_environment
+          exporters:
+            - signalfx
+            - signalfx/secondary
+        metrics/histograms:
+          exporters:
+            - signalfx/histograms
+            - signalfx/histograms_secondary

@@ -378,6 +378,10 @@ func TestLoggerLogEventSinkForwarding(t *testing.T) {
 		Actor:    "defenseclaw-rescan",
 		Details:  "new finding",
 		Severity: "CRITICAL",
+		Structured: map[string]any{
+			"metric_name":  "openclaw.tokens",
+			"metric_value": int64(1234567),
+		},
 	}
 	if err := logger.LogEvent(evt); err != nil {
 		t.Fatalf("LogEvent: %v", err)
@@ -393,6 +397,12 @@ func TestLoggerLogEventSinkForwarding(t *testing.T) {
 	}
 	if got[0].Severity != "CRITICAL" {
 		t.Fatalf("severity = %q, want CRITICAL", got[0].Severity)
+	}
+	if got[0].Structured["metric_name"] != "openclaw.tokens" {
+		t.Fatalf("structured metric_name = %#v, want openclaw.tokens", got[0].Structured["metric_name"])
+	}
+	if got[0].Structured["metric_value"] != int64(1234567) {
+		t.Fatalf("structured metric_value = %#v, want 1234567", got[0].Structured["metric_value"])
 	}
 }
 

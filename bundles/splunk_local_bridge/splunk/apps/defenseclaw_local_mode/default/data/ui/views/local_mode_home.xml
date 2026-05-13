@@ -27,7 +27,7 @@
       <html>
         <h2>Security operations command center</h2>
         <p>This overview is now the narrow command center for the first DefenseClaw + OpenClaw + Splunk security-operations slice. It shows the current risk distribution, the highest-priority investigations, the packaged detection activity, and a direct path into the run and session workbench.</p>
-        <p>The underlying investigation model is built on the seeded `dcso_*` support layer: DefenseClaw policy decisions, OpenClaw runtime evidence, diagnostics and queue health, usage metrics, and trace spans.</p>
+        <p>The underlying investigation model is built on the `dcso_*` production support layer: DefenseClaw policy decisions, OpenClaw runtime evidence, diagnostics and queue health, usage metrics, and trace spans.</p>
       </html>
     </panel>
   </row>
@@ -135,7 +135,7 @@
       <title>Investigation entry</title>
       <table>
         <search>
-          <query>| makeresults | eval action="Open run and session workbench", run_id="$run_id$", session_id="$session_id$", risk_state="$risk_state$" | where run_id!="*" OR session_id!="*" | table action run_id session_id risk_state</query>
+          <query>| makeresults | eval action="Open run and session workbench", run_id="$run_id$", session_id="$session_id$", risk_state="$risk_state$" | where run_id!="*" OR session_id!="*" | table action run_id session_id risk_state | append [ search `dcso_top_risky_runs_sessions` | head 1 | eval action="Open highest-risk investigation" | table action run_id session_id risk_state ] | head 1</query>
           <earliest>0</earliest>
           <latest></latest>
         </search>

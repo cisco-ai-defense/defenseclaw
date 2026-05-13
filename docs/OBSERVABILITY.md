@@ -85,9 +85,11 @@ three partial ones (SQLite, OTel, JSONL).
 
 `internal/telemetry` is a plain OTLP client — gRPC or HTTP, logs +
 metrics + traces, configurable via `otel:` in the config file or the
-standard `OTEL_*` environment variables. There is **no** Splunk-specific
-coupling in the telemetry stack; operators who need a Splunk access
-token put it in `otel.headers` or `OTEL_EXPORTER_OTLP_HEADERS`.
+standard `OTEL_*` environment variables. The primary exporter stays
+vendor-neutral; operators who need a Splunk access token put it in
+`otel.headers` or `OTEL_EXPORTER_OTLP_HEADERS`. Optional fan-out
+exporters, such as `otel.galileo`, add destination-specific trace export
+without replacing the primary OTLP pipeline.
 
 ---
 

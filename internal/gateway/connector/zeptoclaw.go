@@ -33,7 +33,7 @@ import (
 // LLM response stream.
 //
 // === BY-DESIGN: ZeptoClaw before_tool hook wiring is WONTFIX (architectural) ===
-// Plan C3 / matrix §"Out of scope". ZeptoClaw's HooksConfig.before_tool is a
+// Connector plan phase C-3 / matrix §"Out of scope". ZeptoClaw's HooksConfig.before_tool is a
 // notification list — an in-process callback signal — NOT an external-script
 // trigger. The shape is `[]HookRule{Match, Action}`, structured objects, not
 // shell paths. There is no schema slot for "run /path/to/inspect-tool.sh
@@ -56,7 +56,7 @@ import (
 //
 // Do NOT add a "patch before_tool to point at our script" branch in Setup —
 // it will silently no-op or, worse, write a malformed HookRule and break
-// the user's config. See plan C3 + docs/CONNECTOR-MATRIX.md "By-design
+// the user's config. See connector plan phase C-3 + docs/CONNECTOR-MATRIX.md "By-design
 // connector limitations" for the canonical statement.
 type ZeptoClawConnector struct {
 	gatewayToken string

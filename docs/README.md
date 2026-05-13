@@ -38,6 +38,8 @@ DefenseClaw is the governance layer for OpenClaw and agentic AI runtimes. It sca
 | [OpenTelemetry](OTEL.md) | OTEL signal specification and Splunk mapping |
 | [OTEL Implementation Status](OTEL-IMPLEMENTATION-STATUS.md) | Implementation tracking notes |
 | [Splunk App](SPLUNK_APP.md) | Local Splunk app purpose, dashboards, signals, and investigation flow |
+| [DefenseClaw Demo Package](DEFENSECLAW_DEMO_PACKAGE.md) | Full demo package with 5, 25, 45, and 60 minute scripts |
+| [Galileo DefenseClaw Demo Datasets](GALILEO_DEFENSECLAW_DATASETS.md) | Agent Watch prompt, datasets, Playground recipe, and runtime-evidence experiments |
 | [TUI](TUI.md) | Dashboard usage, keybindings, and navigation |
 | [E2E](E2E.md) | End-to-end test harnesses and local validation |
 

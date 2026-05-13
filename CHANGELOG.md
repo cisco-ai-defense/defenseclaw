@@ -136,7 +136,7 @@ branch's baseline. Each is additive — there is no removed protection.
   interface-driven entry point; the legacy package-level
   `connectorHookScripts` map remains as a backward-compatible shim and
   delegates through the connector registry.
-- **C3** ZeptoClaw `before_tool` and Codex hook invocation are
+- **Phase C-3** ZeptoClaw `before_tool` and Codex hook invocation are
   documented as **WONTFIX (architectural)** in
   `docs/CONNECTOR-MATRIX.md`. Both are limitations of the host agents
   (no settings-based external-script hook support); the proxy-side
@@ -255,7 +255,7 @@ The rollup is gated by a four-step verification suite:
 
 - **ed25519 plugin manifest signing** (S0.1) — deferred.
 - **ZeptoClaw `before_tool` hook wiring** — architecturally not
-  feasible (host-side limitation); documented as WONTFIX in C3.
+  feasible (host-side limitation); documented as WONTFIX in phase C-3.
 - **Codex external-script hook invocation** — host-side limitation;
   the `[hooks]` block we write is forward-compat, never invoked
   by today's `codex` binary.

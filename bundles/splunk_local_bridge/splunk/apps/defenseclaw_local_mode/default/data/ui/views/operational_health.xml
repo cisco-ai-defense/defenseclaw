@@ -79,7 +79,7 @@
       <title>Source and sourcetype validation</title>
       <table>
         <search>
-          <query>index=defenseclaw_local | stats count by source sourcetype host | sort - count | head 20</query>
+          <query>search index=defenseclaw_local | stats count by source sourcetype host | sort - count | head 20</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>

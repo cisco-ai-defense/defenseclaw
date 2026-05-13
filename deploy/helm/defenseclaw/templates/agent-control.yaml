@@ -1,0 +1,109 @@
+{{- if .Values.agentControl.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  name: {{ .Values.agentControl.name }}
+spec:
+  replicas: {{ .Values.agentControl.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: server
+      app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: server
+        app.kubernetes.io/name: {{ .Values.agentControl.name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.agentControl.securityContext | nindent 8 }}
+      containers:
+        - name: server
+          image: "{{ .Values.agentControl.image.repository }}:{{ .Values.agentControl.image.tag }}"
+          imagePullPolicy: {{ .Values.agentControl.image.pullPolicy }}
+          env:
+            - name: AGENT_CONTROL_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentControl.dbUrlSecret.name }}
+                  key: {{ .Values.agentControl.dbUrlSecret.key }}
+            {{- range .Values.agentControl.env }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+          envFrom:
+            {{- range .Values.agentControl.envFromSecrets }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+          ports:
+            - containerPort: {{ .Values.agentControl.service.port }}
+              name: http
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          resources:
+            {{- toYaml .Values.agentControl.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.agentControl.containerSecurityContext | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  name: {{ .Values.agentControl.name }}
+spec:
+  type: {{ .Values.agentControl.service.type }}
+  selector:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  ports:
+    - name: http
+      port: {{ .Values.agentControl.service.port }}
+      protocol: TCP
+      targetPort: http
+{{- if .Values.agentControl.uiService.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  annotations:
+    {{- toYaml .Values.agentControl.uiService.annotations | nindent 4 }}
+  labels:
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  name: {{ .Values.agentControl.uiService.name }}
+spec:
+  type: {{ .Values.agentControl.uiService.type }}
+  selector:
+    app.kubernetes.io/component: server
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  ports:
+    - name: https
+      port: {{ .Values.agentControl.uiService.port }}
+      protocol: TCP
+      targetPort: http
+{{- end }}
+{{- end }}

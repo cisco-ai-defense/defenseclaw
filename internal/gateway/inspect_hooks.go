@@ -142,6 +142,16 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	verdict := a.buildVerdict(ruleFindings, "prompt", false)
+	if a.agentControl != nil {
+		decision := a.agentControl.evaluate(r.Context(), "pre", agentControlStepForLLM("pre", req.Model, req.Content, "", map[string]string{
+			"session_id": req.SessionID,
+			"request_id": RequestIDFromContext(r.Context()),
+			"direction":  "prompt",
+		}))
+		mergeAgentControlIntoToolVerdict(verdict, decision)
+		annotateAgentControlSpan(r.Context(), decision)
+		emitAgentControlPolicyDecision(a.otel, decision)
+	}
 	// Apply the prompt-surface UX contract before mode handling so
 	// "action" mode operators see alert (instead of block) and "observe"
 	// mode operators see the same audit reason explaining the demotion.
@@ -212,6 +222,16 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		return
 	}
 	verdict := a.buildVerdict(ruleFindings, "completion", false)
+	if a.agentControl != nil {
+		decision := a.agentControl.evaluate(r.Context(), "post", agentControlStepForLLM("post", req.Model, "", req.Content, map[string]string{
+			"session_id": req.SessionID,
+			"request_id": RequestIDFromContext(r.Context()),
+			"direction":  "completion",
+		}))
+		mergeAgentControlIntoToolVerdict(verdict, decision)
+		annotateAgentControlSpan(r.Context(), decision)
+		emitAgentControlPolicyDecision(a.otel, decision)
+	}
 	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
@@ -265,6 +285,7 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	protection := protectToolResponseForAgent(r.Context(), &req)
 	outputStr := truncateInspectContent(string(req.Output), maxInspectContentLen)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> post-tool tool=%q output_len=%d exit_code=%d\n",
@@ -279,7 +300,24 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		return
 	}
 	verdict := a.buildVerdict(ruleFindings, "tool_response", false)
+	if a.agentControl != nil {
+		decision := a.agentControl.evaluate(r.Context(), "post", agentControlStep{
+			Type:   "tool",
+			Name:   req.Tool,
+			Input:  map[string]interface{}{"exit_code": req.ExitCode},
+			Output: agentControlInputFromRaw(req.Output),
+			Context: agentControlContext(map[string]string{
+				"session_id": req.SessionID,
+				"request_id": RequestIDFromContext(r.Context()),
+				"direction":  "tool_response",
+			}),
+		})
+		mergeAgentControlIntoToolVerdict(verdict, decision)
+		annotateAgentControlSpan(r.Context(), decision)
+		emitAgentControlPolicyDecision(a.otel, decision)
+	}
 	verdict.applyMode(inspectMode(a.scannerCfg))
+	attachResponseProtectionToVerdict(verdict, protection, req.Output)
 
 	elapsed := time.Since(t0)
 

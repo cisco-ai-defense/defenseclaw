@@ -147,4 +147,4 @@ proxy already covers the scenario via `ToolModeBoth` and response-scan.
   every row, including which commit shipped each piece.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — overview of the proxy → connector
   → agent flow.
-- Plan: `pr194_single_rollup` Phase C3.
+- Plan: `pr194_single_rollup` Cisco Cloud Control phase.

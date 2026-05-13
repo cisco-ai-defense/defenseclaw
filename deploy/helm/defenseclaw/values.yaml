@@ -1,0 +1,256 @@
+replicaCount: 1
+
+image:
+  repository: 637423309390.dkr.ecr.us-east-1.amazonaws.com/defenseclaw
+  tag: 0.5.0-aims-upstream-20260513021048-5603bd8
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+podAnnotations:
+  splunk.com/index: defenseclaw
+  splunk.com/sourcetype: defenseclaw:otel
+
+env:
+  HOME: /home/node
+  OTEL_SERVICE_NAME: defenseclaw
+  DEFENSECLAW_DECISION_EVIDENCE: "true"
+
+envFromSecrets:
+  - defenseclaw-secrets
+  - splunk-local-secrets
+  - agent-control-secrets
+
+service:
+  type: ClusterIP
+  port: 18970
+
+uiService:
+  enabled: true
+  type: LoadBalancer
+  port: 80
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+    service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+
+agentControl:
+  enabled: true
+  name: agent-control
+  replicaCount: 1
+  image:
+    repository: 637423309390.dkr.ecr.us-east-1.amazonaws.com/agent-control
+    tag: with-evaluators-20260508040830
+    pullPolicy: IfNotPresent
+  env:
+    - name: AGENT_CONTROL_HOST
+      value: 0.0.0.0
+    - name: AGENT_CONTROL_PORT
+      value: "8000"
+    - name: AGENT_CONTROL_API_KEY_ENABLED
+      value: "true"
+    - name: AGENT_CONTROL_CORS_ORIGINS
+      value: http://localhost:4000
+  dbUrlSecret:
+    name: agent-control-secrets
+    key: AGENT_CONTROL_DB_URL
+  envFromSecrets:
+    - agent-control-secrets
+  service:
+    type: ClusterIP
+    port: 8000
+  uiService:
+    enabled: true
+    name: agent-control-ui
+    type: LoadBalancer
+    port: 443
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-backend-protocol: http
+      service.beta.kubernetes.io/aws-load-balancer-connection-idle-timeout: "3600"
+      service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:us-east-1:637423309390:certificate/806b127c-b3bc-40d4-9428-a69c56de3d1f
+      service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  securityContext:
+    fsGroup: 1000
+    fsGroupChangePolicy: OnRootMismatch
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    runAsGroup: 1000
+    runAsNonRoot: true
+    runAsUser: 1000
+    capabilities:
+      drop:
+        - ALL
+    seccompProfile:
+      type: RuntimeDefault
+  postgres:
+    enabled: true
+    name: agent-control-postgres
+    replicaCount: 1
+    image:
+      repository: postgres
+      tag: 16-alpine
+      pullPolicy: IfNotPresent
+    database: agent_control
+    user: agent_control
+    pgdata: /var/lib/postgresql/data/pgdata
+    passwordSecret:
+      name: agent-control-secrets
+      key: AGENT_CONTROL_POSTGRES_PASSWORD
+    service:
+      type: ClusterIP
+      port: 5432
+    persistence:
+      enabled: true
+      existingClaim: agent-control-postgres-data
+      claimName: agent-control-postgres-data
+      size: 10Gi
+      storageClassName: gp2
+    securityContext:
+      fsGroup: 70
+      fsGroupChangePolicy: OnRootMismatch
+    containerSecurityContext:
+      allowPrivilegeEscalation: false
+      runAsGroup: 70
+      runAsNonRoot: true
+      runAsUser: 70
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
+
+persistence:
+  enabled: true
+  existingClaim: defenseclaw-data
+  size: 5Gi
+  storageClassName: gp2
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+securityContext:
+  fsGroup: 1000
+  fsGroupChangePolicy: OnRootMismatch
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+configYaml: |
+  data_dir: /home/node/.defenseclaw
+  audit_db: /home/node/.defenseclaw/audit.db
+  quarantine_dir: /home/node/.defenseclaw/quarantine
+  plugin_dir: /home/node/.defenseclaw/plugins
+  policy_dir: /opt/defenseclaw/policies
+  environment: defenseclaw
+  claw:
+    mode: openclaw
+    home_dir: /home/node/.openclaw
+    config_file: /home/node/.openclaw/openclaw.json
+  gateway:
+    enabled: true
+    host: openclaw.defenesclaw.svc.cluster.local
+    port: 18789
+    token_env: OPENCLAW_GATEWAY_TOKEN
+    allow_insecure: true
+    device_key_file: /home/node/.defenseclaw/device.key
+    auto_approve_safe: false
+    reconnect_ms: 800
+    max_reconnect_ms: 15000
+    approval_timeout_s: 30
+    api_host: defenseclaw.defenesclaw.svc.cluster.local
+    api_bind: 0.0.0.0
+    api_port: 18970
+    otlp_forward_http_endpoint: http://splunk-otel-collector-agent.otel-splunk.svc:4318
+    watcher:
+      enabled: false
+      skill:
+        enabled: false
+        take_action: false
+        dirs: []
+      plugin:
+        enabled: false
+        take_action: false
+        dirs: []
+  scanners:
+    skill_scanner:
+      binary: skill-scanner
+      policy: permissive
+      lenient: true
+    mcp_scanner:
+      binary: mcp-scanner
+      analyzers: yara
+    plugin_scanner: defenseclaw-plugin-scanner
+    codeguard: /opt/defenseclaw/skills/codeguard
+  guardrail:
+    enabled: false
+    mode: observe
+    scanner_mode: local
+    bind: 0.0.0.0
+    port: 4000
+  otel:
+    enabled: true
+    endpoint: splunk-otel-collector-agent.otel-splunk.svc:4317
+    protocol: grpc
+    tls:
+      insecure: true
+    traces:
+      enabled: true
+    logs:
+      enabled: true
+    metrics:
+      enabled: true
+      export_interval_s: 30
+    galileo:
+      enabled: true
+      endpoint: https://api.galileo.ai/otel/v1/traces
+      api_key_env: GALILEO_API_KEY
+      project_id: 0ba7b20d-8262-44c4-b230-547a0cd74b2b
+      log_stream_id: 82b893bd-fa1f-411e-81e8-e12ca66692ad
+  audit_sinks:
+    - name: splunk-hec-splunk-local
+      kind: splunk_hec
+      enabled: true
+      batch_size: 50
+      flush_interval_s: 5
+      splunk_hec:
+        endpoint: https://splunk-local.defenesclaw.svc.cluster.local:8088/services/collector/event
+        token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN
+        index: defenseclaw_local
+        source: defenseclaw
+        sourcetype: defenseclaw:json
+        verify_tls: false
+  agent_control:
+    enabled: true
+    url: http://agent-control.defenesclaw.svc.cluster.local:8000
+    api_key_env: AGENT_CONTROL_API_KEY
+    timeout_ms: 2000
+    agent_name: defenseclaw-openclaw
+    fail_mode: open
+
+clientConfigYaml: |
+  gateway:
+    host: openclaw.defenesclaw.svc.cluster.local
+    port: 18789
+    api_host: defenseclaw.defenesclaw.svc.cluster.local
+    api_port: 18970

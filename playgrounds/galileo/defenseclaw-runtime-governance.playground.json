@@ -1,0 +1,109 @@
+{
+  "name": "defenseclaw-runtime-governance",
+  "description": "Galileo Playground recipe for demonstrating DefenseClaw runtime governance, Agent Control decisions, and safety evals.",
+  "project": {
+    "name": "clus-demo",
+    "id": "0ba7b20d-8262-44c4-b230-547a0cd74b2b",
+    "log_stream_id": "82b893bd-fa1f-411e-81e8-e12ca66692ad",
+    "console_url": "https://app.galileo.ai"
+  },
+  "prompt": {
+    "name": "defenseclaw-runtime-governance",
+    "id": "1a327ae4-264d-4036-80f6-f8a424158a91",
+    "selected_version": 2,
+    "selected_version_id": "a7e61200-cc43-4fbe-941f-331095be3f4e",
+    "source": "prompts/galileo/defenseclaw-runtime-governance.md",
+    "variables": [
+      "user_prompt",
+      "cluster_context",
+      "agent_name",
+      "guardrail_mode"
+    ]
+  },
+  "model": {
+    "default_alias": "gpt-4.1-nano",
+    "settings": {
+      "temperature": 0.2,
+      "max_tokens": 700,
+      "top_p": 1.0
+    }
+  },
+  "datasets": [
+    {
+      "name": "defenseclaw-safe-ops",
+      "id": "1cb6a564-91f8-4c4a-a4b8-9ee9e44e5fdb",
+      "rows": 3,
+      "default_metrics": [
+        "instruction_adherence",
+        "tool_selection_quality",
+        "correctness",
+        "context_adherence"
+      ],
+      "demo_purpose": "Shows normal read-only cluster operations passing cleanly."
+    },
+    {
+      "name": "defenseclaw-prompt-injection-pre-llm",
+      "id": "8633dc49-c9f0-4179-b7be-a9c371910eba",
+      "rows": 3,
+      "default_metrics": [
+        "prompt_injection",
+        "instruction_adherence",
+        "output_pii"
+      ],
+      "demo_purpose": "Shows pre-LLM prompt injection attempts that should be observed by Agent Control."
+    },
+    {
+      "name": "defenseclaw-dangerous-tool-pre-tool",
+      "id": "fa039b81-a70a-41cd-aacd-4e3c5e2488fe",
+      "rows": 4,
+      "default_metrics": [
+        "tool_selection_quality",
+        "tool_errors",
+        "output_pii",
+        "instruction_adherence"
+      ],
+      "demo_purpose": "Shows dangerous shell/tool requests that should be denied before execution."
+    },
+    {
+      "name": "defenseclaw-pii-post-llm",
+      "id": "810e5961-5bef-4615-8280-180238b6f1ac",
+      "rows": 3,
+      "default_metrics": [
+        "output_pii",
+        "instruction_adherence"
+      ],
+      "demo_purpose": "Shows post-LLM steering/redaction behavior for sensitive outputs."
+    },
+    {
+      "name": "defenseclaw-ambiguous-admin-intent",
+      "id": "6a404e8b-5952-44d8-aa4c-7362b319ecca",
+      "rows": 3,
+      "default_metrics": [
+        "instruction_adherence",
+        "tool_selection_quality",
+        "prompt_injection",
+        "agent_flow"
+      ],
+      "demo_purpose": "Shows approval-seeking behavior for risky but plausible admin requests."
+    },
+    {
+      "name": "defenseclaw-grounded-cluster-review",
+      "id": "c750e742-59d6-47e0-bc99-c8721386e9eb",
+      "rows": 3,
+      "default_metrics": [
+        "context_adherence",
+        "correctness",
+        "instruction_adherence"
+      ],
+      "demo_purpose": "Shows grounded answers about the live isovalent-demo cluster and repo/cluster drift."
+    }
+  ],
+  "console_setup": [
+    "Open the clus-demo project in Galileo SaaS.",
+    "Open Playground.",
+    "Select the defenseclaw-runtime-governance prompt.",
+    "Select one DefenseClaw dataset at a time from this manifest.",
+    "Use the dataset's default_metrics list as the Playground metric set.",
+    "Run the dataset, inspect row-level outputs, then log the experiment when the result is useful for the demo."
+  ]
+}

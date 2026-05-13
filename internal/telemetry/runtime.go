@@ -46,6 +46,20 @@ var spanContextResourceKeys = map[string]struct{}{
 	"defenseclaw.device.id":  {},
 }
 
+const (
+	redactedUserMessage      = `[{"role":"user","content":"<redacted by DefenseClaw>"}]`
+	redactedAssistantMessage = `[{"role":"assistant","content":"<redacted by DefenseClaw>"}]`
+	redactedToolMessage      = `[{"role":"tool","content":"<redacted by DefenseClaw>"}]`
+)
+
+func redactedToolArguments(argsLen int) string {
+	return fmt.Sprintf(`{"redacted":true,"args_length":%d}`, argsLen)
+}
+
+func redactedToolResult(exitCode, outputLen int) string {
+	return fmt.Sprintf(`{"redacted":true,"exit_code":%d,"output_length":%d}`, exitCode, outputLen)
+}
+
 func (p *Provider) resourceSpanContextAttrs() []attribute.KeyValue {
 	if p == nil || p.res == nil {
 		return nil
@@ -95,7 +109,13 @@ func (p *Provider) EmitStartupSpan(ctx context.Context) {
 		trace.WithTimestamp(time.Now()),
 	)
 	p.setSpanResourceContext(span)
-	span.SetAttributes(attribute.String("defenseclaw.event", "sidecar_start"))
+	span.SetAttributes(
+		attribute.String("defenseclaw.event", "sidecar_start"),
+		attribute.String("gen_ai.system", "galileo-otel"),
+		attribute.String("gen_ai.input.messages", redactedUserMessage),
+		attribute.String("gen_ai.output.messages", redactedAssistantMessage),
+		attribute.Bool("defenseclaw.content.redacted", true),
+	)
 	span.SetStatus(codes.Ok, "")
 	span.End()
 }
@@ -196,7 +216,7 @@ func (p *Provider) EndGuardrailPhaseSpan(span trace.Span, action, severity strin
 }
 
 // EmitInspectSpan creates a span for a tool/message inspection evaluation.
-func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity string, durationMs float64) string {
+func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity string, durationMs float64, extraAttrs ...attribute.KeyValue) string {
 	if !p.TracesEnabled() {
 		return ""
 	}
@@ -211,6 +231,9 @@ func (p *Provider) EmitInspectSpan(ctx context.Context, tool, action, severity s
 		attribute.String("defenseclaw.inspect.severity", severity),
 		attribute.Float64("defenseclaw.inspect.duration_ms", durationMs),
 	)
+	if len(extraAttrs) > 0 {
+		span.SetAttributes(extraAttrs...)
+	}
 	if action == "block" {
 		span.SetStatus(codes.Error, "blocked")
 	} else {
@@ -250,11 +273,16 @@ func (p *Provider) StartAgentSpan(
 	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "invoke_agent"),
+		attribute.String("gen_ai.system", "galileo-otel"),
 		attribute.String("gen_ai.agent.name", agentName),
 		attribute.String("gen_ai.conversation.id", conversationID),
+		attribute.String("gen_ai.input.messages", redactedUserMessage),
+		attribute.Bool("defenseclaw.content.redacted", true),
 	)
 	if provider != "" {
 		span.SetAttributes(attribute.String("gen_ai.provider.name", provider))
+	} else {
+		span.SetAttributes(attribute.String("gen_ai.provider.name", "defenseclaw"))
 	}
 	if agentType != "" {
 		span.SetAttributes(attribute.String("gen_ai.agent.type", agentType))
@@ -282,6 +310,7 @@ func (p *Provider) EndAgentSpan(span trace.Span, errMsg string) {
 	} else {
 		span.SetStatus(codes.Ok, "")
 	}
+	span.SetAttributes(attribute.String("gen_ai.output.messages", redactedAssistantMessage))
 	span.End()
 }
 
@@ -366,8 +395,12 @@ func (p *Provider) StartToolSpan(
 	p.setSpanResourceContext(span)
 	span.SetAttributes(
 		attribute.String("gen_ai.operation.name", "execute_tool"),
+		attribute.String("gen_ai.system", "galileo-otel"),
 		attribute.String("gen_ai.tool.name", tool),
 		attribute.String("gen_ai.tool.type", "function"),
+		attribute.String("gen_ai.tool.call.arguments", redactedToolArguments(len(args))),
+		attribute.String("gen_ai.input.messages", redactedUserMessage),
+		attribute.Bool("defenseclaw.content.redacted", true),
 		// DefenseClaw-specific attributes
 		attribute.String("defenseclaw.tool.status", status),
 		attribute.Int("defenseclaw.tool.args_length", len(args)),
@@ -459,6 +492,8 @@ func (p *Provider) EndToolSpan(span trace.Span, exitCode, outputLen int, startTi
 	span.SetAttributes(
 		attribute.Int("defenseclaw.tool.exit_code", exitCode),
 		attribute.Int("defenseclaw.tool.output_length", outputLen),
+		attribute.String("gen_ai.tool.call.result", redactedToolResult(exitCode, outputLen)),
+		attribute.String("gen_ai.output.messages", redactedToolMessage),
 	)
 
 	if exitCode != 0 {
@@ -593,6 +628,8 @@ func (p *Provider) StartLLMSpan(
 		attribute.String("gen_ai.request.model", model),
 		attribute.Int("gen_ai.request.max_tokens", maxTokens),
 		attribute.Float64("gen_ai.request.temperature", temperature),
+		attribute.String("gen_ai.input.messages", redactedUserMessage),
+		attribute.Bool("defenseclaw.content.redacted", true),
 	)
 	if runID := gatewaylog.ProcessRunID(); runID != "" {
 		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
@@ -637,6 +674,7 @@ func (p *Provider) EndLLMSpan(
 		attribute.StringSlice("gen_ai.response.finish_reasons", finishReasons),
 		attribute.Int("gen_ai.usage.input_tokens", promptTokens),
 		attribute.Int("gen_ai.usage.output_tokens", completionTokens),
+		attribute.String("gen_ai.output.messages", redactedAssistantMessage),
 		attribute.Int("defenseclaw.llm.tool_calls", toolCallCount),
 		attribute.String("defenseclaw.llm.guardrail", guardrail),
 		attribute.String("defenseclaw.llm.guardrail.result", guardrailResult),

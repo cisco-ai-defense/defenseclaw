@@ -1,6 +1,6 @@
 <form version="1.1">
   <label>Search And Drilldown</label>
-  <description>Scoped raw-search pivots for the seeded DefenseClaw and OpenClaw investigation model.</description>
+  <description>Scoped raw-search pivots for the DefenseClaw and OpenClaw production investigation model.</description>
   <fieldset submitButton="false" autoRun="true">
     <input type="text" token="run_id" searchWhenChanged="true">
       <label>run_id</label>

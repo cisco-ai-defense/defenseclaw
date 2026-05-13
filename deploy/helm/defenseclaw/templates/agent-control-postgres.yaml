@@ -1,0 +1,93 @@
+{{- if and .Values.agentControl.enabled .Values.agentControl.postgres.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  name: {{ .Values.agentControl.postgres.name }}
+spec:
+  replicas: {{ .Values.agentControl.postgres.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: database
+      app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: database
+        app.kubernetes.io/name: {{ .Values.agentControl.name }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.agentControl.postgres.securityContext | nindent 8 }}
+      containers:
+        - name: postgres
+          image: "{{ .Values.agentControl.postgres.image.repository }}:{{ .Values.agentControl.postgres.image.tag }}"
+          imagePullPolicy: {{ .Values.agentControl.postgres.image.pullPolicy }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.agentControl.postgres.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.agentControl.postgres.user | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.agentControl.postgres.passwordSecret.name }}
+                  key: {{ .Values.agentControl.postgres.passwordSecret.key }}
+            - name: PGDATA
+              value: {{ .Values.agentControl.postgres.pgdata | quote }}
+          ports:
+            - containerPort: {{ .Values.agentControl.postgres.service.port }}
+              name: postgres
+              protocol: TCP
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U {{ .Values.agentControl.postgres.user }} -d {{ .Values.agentControl.postgres.database }}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -U {{ .Values.agentControl.postgres.user }} -d {{ .Values.agentControl.postgres.database }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
+          securityContext:
+            {{- toYaml .Values.agentControl.postgres.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.agentControl.postgres.persistence.existingClaim | default .Values.agentControl.postgres.persistence.claimName }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  name: {{ .Values.agentControl.postgres.name }}
+spec:
+  type: {{ .Values.agentControl.postgres.service.type }}
+  selector:
+    app.kubernetes.io/component: database
+    app.kubernetes.io/name: {{ .Values.agentControl.name }}
+  ports:
+    - name: postgres
+      port: {{ .Values.agentControl.postgres.service.port }}
+      protocol: TCP
+      targetPort: postgres
+{{- end }}

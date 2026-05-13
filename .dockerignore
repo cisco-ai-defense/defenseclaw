@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.DS_Store
+dist
+build
+artifacts
+docs-site/node_modules
+extensions/defenseclaw/node_modules
+extensions/defenseclaw/dist

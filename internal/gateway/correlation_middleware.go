@@ -254,6 +254,7 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 			} else if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
 				ctx = ContextWithTraceID(ctx, span.SpanContext().TraceID().String())
 			}
+			ctx = taskIdentityContextFromHeaders(ctx, r.Header)
 			if registry != nil {
 				id := registry.Resolve(ctx, SessionIDFromContext(ctx), inboundAgent)
 				ctx = ContextWithAgentIdentity(ctx, id)
