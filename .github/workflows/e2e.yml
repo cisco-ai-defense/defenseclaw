@@ -229,6 +229,19 @@ jobs:
           }
 
       - name: Install DefenseClaw
+        # These E2E jobs activate guardrail.connector=openclaw later on,
+        # which forces OpenClawConnector.Setup() to run. That Setup
+        # refuses to plant a placeholder extension and exits with
+        # "openclaw extension is not bundled in this gateway build"
+        # (internal/gateway/connector/openclaw.go:131). `make install`
+        # skips the plugin build by default via
+        # `maybe-openclaw-plugin-install`, which only fires when
+        # CONNECTOR=openclaw is set. Export it here so the plugin
+        # builds + installs and the gateway's //go:embed of
+        # openclaw_extension picks up a real dist/ tree instead of the
+        # .placeholder.
+        env:
+          CONNECTOR: openclaw
         run: make install
 
       - name: Activate venv
@@ -737,6 +750,19 @@ jobs:
           }
 
       - name: Install DefenseClaw
+        # These E2E jobs activate guardrail.connector=openclaw later on,
+        # which forces OpenClawConnector.Setup() to run. That Setup
+        # refuses to plant a placeholder extension and exits with
+        # "openclaw extension is not bundled in this gateway build"
+        # (internal/gateway/connector/openclaw.go:131). `make install`
+        # skips the plugin build by default via
+        # `maybe-openclaw-plugin-install`, which only fires when
+        # CONNECTOR=openclaw is set. Export it here so the plugin
+        # builds + installs and the gateway's //go:embed of
+        # openclaw_extension picks up a real dist/ tree instead of the
+        # .placeholder.
+        env:
+          CONNECTOR: openclaw
         run: make install
 
       - name: Activate venv
