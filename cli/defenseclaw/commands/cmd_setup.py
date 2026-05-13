@@ -4399,9 +4399,20 @@ def _restart_services(
     if connector == "openclaw":
         _restart_openclaw_gateway()
         _check_openclaw_gateway(oc_host, oc_port)
-    else:
+    elif connector in _PROXY_BACKED_CONNECTORS:
+        # OpenClaw is the only proxy-backed connector that owns its own
+        # gateway process; others (ZeptoClaw today) get the proxy
+        # message without the separate openclaw-gateway restart step.
         ux.subhead(
             f"{connector} connector: traffic will route through defenseclaw-gateway proxy."
+        )
+    elif connector in _HOOK_ENFORCED_CONNECTORS:
+        # No proxy listener binds for hook-only connectors — the agent
+        # talks directly to its native upstream and DefenseClaw
+        # observes/enforces via the hook bus on the sidecar API port.
+        ux.subhead(
+            f"{connector} connector: enforcement via hook bus on the sidecar API port. "
+            f"No proxy listener — {connector} talks directly to its native upstream."
         )
 
     click.echo()
