@@ -11,7 +11,6 @@
 package gateway
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -182,14 +181,9 @@ func TestHasSensitiveFileContext(t *testing.T) {
 	}
 }
 
-// TestInjectionToVerdictCtx_SensitiveContextUnCapsSingleCategory pins
-// the guard for the "cat my etc passwd" class of bypass. With the
-// default profile (min_categories_for_high=2,
-// single_category_max_severity=MEDIUM), a single JUDGE-INJ-INSTRUCT
-// hit would normally downgrade to MEDIUM/alert and pass through.
-// When the caller signals that the prompt matches a sensitive-file
-// token, the verdict stays HIGH/block.
-func TestInjectionToVerdictCtx_SensitiveContextUnCapsSingleCategory(t *testing.T) {
+// TestInjectionToVerdictCtx_SingleCategoryIsHigh: a single injection
+// category maps to HIGH regardless of the sensitive-context signal.
+func TestInjectionToVerdictCtx_SingleCategoryIsHigh(t *testing.T) {
 	j := testJudge()
 	data := map[string]interface{}{
 		"Instruction Manipulation": map[string]interface{}{
@@ -202,30 +196,17 @@ func TestInjectionToVerdictCtx_SensitiveContextUnCapsSingleCategory(t *testing.T
 		"Token Exploitation":    map[string]interface{}{"reasoning": "clean", "label": false},
 	}
 
-	// Baseline: without sensitive context, single-category hit is
-	// capped by the default profile.
-	plain := j.injectionToVerdictCtx(data, false)
-	if plain.Severity != "MEDIUM" || plain.Action != "alert" {
-		t.Fatalf("baseline: got %s/%s, want MEDIUM/alert (single-cat cap)",
-			plain.Severity, plain.Action)
-	}
-
-	// With sensitive context: same single-category finding is
-	// promoted to HIGH/block and annotated.
-	boosted := j.injectionToVerdictCtx(data, true)
-	if boosted.Severity != "HIGH" || boosted.Action != "block" {
-		t.Fatalf("boosted: got %s/%s, want HIGH/block", boosted.Severity, boosted.Action)
-	}
-	if want := "sensitive-file-context"; !strings.Contains(boosted.Reason, want) {
-		t.Errorf("boosted reason missing %q annotation: %q", want, boosted.Reason)
+	for _, sensitive := range []bool{false, true} {
+		v := j.injectionToVerdictCtx(data, sensitive)
+		if v.Severity != "HIGH" || v.Action != "block" {
+			t.Fatalf("sensitive=%v: got %s/%s, want HIGH/block", sensitive, v.Severity, v.Action)
+		}
 	}
 }
 
-// TestInjectionToVerdict_PreservesLegacyBehavior ensures the
-// parameterless variant (used by existing unit tests) continues to
-// apply the single-category cap as before — Task 2 must not regress
-// the default-profile tolerance for benign imperative phrasing.
-func TestInjectionToVerdict_PreservesLegacyBehavior(t *testing.T) {
+// TestInjectionToVerdict_SingleCategoryIsHigh covers the parameterless
+// variant.
+func TestInjectionToVerdict_SingleCategoryIsHigh(t *testing.T) {
 	j := testJudge()
 	data := map[string]interface{}{
 		"Instruction Manipulation": map[string]interface{}{"reasoning": "override", "label": true},
@@ -235,7 +216,7 @@ func TestInjectionToVerdict_PreservesLegacyBehavior(t *testing.T) {
 		"Token Exploitation":       map[string]interface{}{"reasoning": "clean", "label": false},
 	}
 	v := j.injectionToVerdict(data)
-	if v.Severity != "MEDIUM" || v.Action != "alert" {
-		t.Fatalf("legacy path: got %s/%s, want MEDIUM/alert", v.Severity, v.Action)
+	if v.Severity != "HIGH" || v.Action != "block" {
+		t.Fatalf("got %s/%s, want HIGH/block", v.Severity, v.Action)
 	}
 }

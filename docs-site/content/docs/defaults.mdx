@@ -61,11 +61,11 @@ The rule pack directory (`policies/guardrail/<name>/`) holds the regex YAMLs, ju
 
 | Pack | `rules/` files | `judge/` prompts | `suppressions.yaml` | `sensitive-tools.yaml` |
 | --- | --- | --- | --- | --- |
-| `permissive` | injection, secrets, c2, commands, cognitive, trust-exploit, sensitive-paths, local-patterns, enterprise-data | injection, pii, tool-injection (less aggressive thresholds) | broad — `git status`, doc reads suppressed | minimal |
-| `default` | same nine families as permissive | injection, pii, tool-injection (medium thresholds) | moderate | balanced |
-| `strict` | same nine + tighter regex | injection, pii, tool-injection (low thresholds) | none | aggressive |
+| `permissive` | injection, secrets, c2, commands, cognitive, trust-exploit, sensitive-paths, local-patterns, enterprise-data | injection, pii, exfil, tool-injection (less aggressive thresholds) | broad — `git status`, doc reads suppressed | minimal |
+| `default` | same nine families as permissive | injection, pii, exfil, tool-injection (medium thresholds) | moderate | balanced |
+| `strict` | same nine + tighter regex | injection, pii, exfil, tool-injection (low thresholds) | none | aggressive |
 
-Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.
+All three packs share the same [severity rubric](/docs/policies#shared-severity-rubric) and the same `signal_strength` output schema — only the per-category thresholds and suppression scope differ between packs. Switching the rule pack does *not* enable the LLM judge — that's a separate `guardrail.judge.enabled` toggle in your operator config (default: `false`). Flipping the rule pack only changes which prompt YAMLs the judge will run *if* you've enabled it.
 
 ## What `setup guardrail` actually writes
 

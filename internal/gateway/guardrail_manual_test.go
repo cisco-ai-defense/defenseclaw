@@ -499,9 +499,8 @@ func TestFullFlow_RegexJudge_DangerousCommandBlocks(t *testing.T) {
 // judgeSweep had no effect (the regression we want to catch).
 func TestJudgeSweep_EngagesOnNoSignalContent(t *testing.T) {
 	// Injection-judge schema: per-category map of {label,reasoning}.
-	// Two categories labelled true so len(findings) >= minForHigh (default
-	// is 2 in the stock rule pack) → the verdict stays HIGH rather than
-	// being capped at MEDIUM by the single-category rule.
+	// Two categories labelled true → verdict is CRITICAL under the
+	// unified rubric (min_categories_for_critical=2).
 	judgeBlock := `{
 		"Instruction Manipulation": {"label": true, "reasoning": "request paraphrases an exfiltration command"},
 		"Context Manipulation":     {"label": true, "reasoning": "invokes an out-of-band channel (‘address I dm'd you’) to bypass oversight"},
@@ -556,7 +555,7 @@ func TestJudgeSweep_EngagesOnNoSignalContent(t *testing.T) {
 	if after <= before {
 		t.Fatalf("judge_sweep=true should have invoked the judge on NO_SIGNAL content; captured %d → %d", before, after)
 	}
-	if v.Action != "alert" {
+	if v.Action != "block" || v.Severity != "CRITICAL" {
 		t.Errorf("judge-sweep verdict should propagate; action=%s severity=%s reason=%s", v.Action, v.Severity, v.Reason)
 	}
 

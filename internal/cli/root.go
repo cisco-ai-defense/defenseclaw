@@ -94,6 +94,14 @@ Run without arguments to start the sidecar daemon.`,
 		}
 
 		auditLog = audit.NewLogger(auditStore)
+
+		// Register the sliding-window correlator so EmitScanResult
+		// runs it against every persisted scan's session window.
+		// A failure to load the embedded pattern set logs to stderr
+		// and leaves correlation disabled — the rest of the guardrail
+		// stack is unaffected.
+		installCorrelator(auditStore, os.Stderr)
+
 		// Re-run with the resolved data dir in case DEFENSECLAW_HOME
 		// redirected it; second call is a no-op when paths match.
 		if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {

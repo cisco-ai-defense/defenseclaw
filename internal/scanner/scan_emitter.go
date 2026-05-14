@@ -27,6 +27,37 @@ type ScanTelemetry interface {
 	RecordScanFindingByRule(ctx context.Context, scannerName, ruleID, severity string)
 }
 
+// Correlator runs after findings are persisted to detect multi-step
+// attack flows (lethal trifecta, escalation chains, destructive
+// flows) by reading a session's recent findings and matching them
+// against declared patterns. Nil means "don't run correlation".
+type Correlator interface {
+	RunForSession(ctx context.Context, sessionID, agentInstanceID string, pers ScanPersistence, target string, meta ScanFindingMeta) error
+}
+
+// defaultCorrelator holds the package-level correlator installed at
+// sidecar boot. Accessed only via SetCorrelator / the read in
+// EmitScanResult, so a plain pointer with a mutex is plenty — this
+// is not a hot path.
+var defaultCorrelator Correlator
+
+// SetCorrelator installs the correlator that EmitScanResult will run
+// after every successful InsertScanFindings. Pass nil to disable.
+// Intended to be called once at sidecar boot from the gateway wiring
+// layer so the scanner package stays free of guardrail imports.
+func SetCorrelator(c Correlator) { defaultCorrelator = c }
+
+// findingEnricher is the hook that maps a finding's rule_id + tags
+// to the lethal-trifecta data axes. Nil when the sidecar hasn't
+// wired up guardrail.AxesForRuleID yet — see cli/correlator_wire.go.
+var findingEnricher func(*Finding) []string
+
+// SetFindingEnricher installs the axis-labeling hook that runs on
+// every finding emitted through EmitScanResult. The hook is called
+// only when Finding.DataAxis is empty, so scanner-specific code that
+// already sets axes (e.g. clawshield tagging by content hash) wins.
+func SetFindingEnricher(f func(*Finding) []string) { findingEnricher = f }
+
 // ScanSummaryParams is the v7 scan_results row payload.
 type ScanSummaryParams struct {
 	ScanID            string
@@ -90,6 +121,17 @@ func EmitScanResult(
 
 	for i := range result.Findings {
 		result.Findings[i].RuleID = EnsureRuleID(&result.Findings[i], result.Scanner)
+		// Auto-populate DataAxis labels when the finding creator left
+		// them blank. The enricher (installed by the guardrail wiring
+		// layer at boot) maps the finding's RuleID, Tags, and Category
+		// to one or more of the three lethal-trifecta axes. Keeping
+		// this at the emission boundary avoids touching every regex
+		// rule site; the enricher is a one-import hook.
+		if len(result.Findings[i].DataAxis) == 0 && findingEnricher != nil {
+			if axes := findingEnricher(&result.Findings[i]); len(axes) > 0 {
+				result.Findings[i].DataAxis = axes
+			}
+		}
 	}
 
 	targetType := result.EffectiveTargetType()
@@ -159,6 +201,15 @@ func EmitScanResult(
 		}
 		if err := pers.InsertScanFindings(scanID, result.Target, result.Findings, meta); err != nil {
 			return scanID, err
+		}
+
+		// Correlator runs once per scan, after findings are persisted.
+		// Match failures are non-fatal — a correlator hiccup shouldn't
+		// drop the scan itself. Only runs when session correlation
+		// IDs are present; out-of-session scans (CLI audits, batch
+		// jobs) skip correlation entirely.
+		if c := defaultCorrelator; c != nil && meta.SessionID != "" && meta.AgentInstanceID != "" {
+			_ = c.RunForSession(ctx, meta.SessionID, meta.AgentInstanceID, pers, result.Target, meta)
 		}
 	}
 

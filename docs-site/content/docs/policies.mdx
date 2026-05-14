@@ -11,28 +11,30 @@ keywords:
   - first-party allow list
 ---
 
-DefenseClaw makes one decision per event: **allow, ask, or deny**. The plumbing that turns a prompt or a tool call into that decision lives in three layers:
+DefenseClaw makes one decision per event: **allow, ask, or deny**. The plumbing that turns a prompt or a tool call into that decision lives in five layers:
 
 <Flow
   direction="TB"
-  caption="Cheap deterministic rules first. The judge is only consulted when needed. Suppression is the last line before the verdict is recorded."
+  caption="Cheap deterministic rules first. The judge is only consulted when needed. The correlator watches across events. Suppression is the last line before the verdict is recorded."
 >
   <Node id="event" kind="generic">{`Event\nprompt · tool · finding`}</Node>
   <Node id="pre" kind="policy">{`Pre-judge strips\nredact · truncate`}</Node>
   <Node id="rules" kind="policy">{`Regex rules\ndeterministic`}</Node>
   <Node id="judge" kind="policy">{`LLM judge\noptional second opinion`}</Node>
+  <Node id="corr" kind="policy">{`Session correlator\ncross-event patterns`}</Node>
   <Node id="suppr" kind="policy">{`Suppression layer\nallow lists · signatures`}</Node>
   <Node id="repo" kind="policy">{`Repo policy\nOPA · Rego`}</Node>
   <Node id="verdict" kind="generic">{`Verdict\nallow · ask · deny`}</Node>
   <Edge from="event" to="pre" />
   <Edge from="pre" to="rules" />
   <Edge from="rules" to="judge" />
-  <Edge from="judge" to="suppr" />
+  <Edge from="judge" to="corr" />
+  <Edge from="corr" to="suppr" />
   <Edge from="suppr" to="repo" />
   <Edge from="repo" to="verdict" />
 </Flow>
 
-You can enable any subset. Plain regex is enough for many secrets and obvious prompt-injection patterns; the LLM judge catches the long tail; OPA Rego owns the operator's organisational rules; suppressions keep all of it usable.
+You can enable any subset. Plain regex is enough for many secrets and obvious prompt-injection patterns; the LLM judge catches the long tail; the session correlator watches across events for multi-turn patterns like the lethal trifecta; OPA Rego owns the operator's organisational rules; suppressions keep all of it usable.
 
 ## Layer 1 — Repo policies (OPA / Rego)
 
@@ -152,11 +154,36 @@ Anything `severity: high` triggers `deny` by default, `medium` triggers `ask` (H
 
 ## Layer 3 — LLM judge
 
-The LLM judge is an *optional* second opinion that fires when the deterministic rules don't have a clean answer. It's particularly useful for:
+The LLM judge is an *optional* second opinion that fires when the deterministic rules don't have a clean answer. Four domain-specific judges ship out of the box — **injection**, **PII**, **exfil**, and **tool-injection** — each with its own category taxonomy, few-shot examples, and structured output schema. They're particularly useful for:
 
 - Subtle prompt injection that doesn't match a regex.
 - Tool calls whose stated purpose disagrees with their effects (most common in MCP).
 - Categorical content checks — "does this prompt try to extract proprietary code?"
+
+### Shared severity rubric
+
+All four judges evaluate against the same severity rubric. The rubric is embedded directly in each judge's system prompt so verdicts stay consistent across categories.
+
+| Tier | Meaning |
+| --- | --- |
+| **CRITICAL** | Direct unambiguous harm, provable from the content alone. Credential exfil, destructive shell, jailbreak succeeded, SSN/passport disclosed. |
+| **HIGH** | Clear adversarial intent or high-impact sensitive data. Prompt injection with explicit override, `/etc/passwd` probe, phone number in completion. |
+| **MEDIUM** | Suspicious but ambiguous. Benign readings are plausible. |
+| **LOW** | Weak indicator; context-dependent (e.g. user self-disclosing their own email). |
+| **NONE** | No concern. |
+
+### Signal-strength scoring
+
+For each category a judge flags, it also emits a `signal_strength` label derived from two booleans: *unambiguous* (no plausible benign reading) and *high_impact* (hard-to-reverse damage possible).
+
+| `unambiguous` | `high_impact` | `signal_strength` |
+| --- | --- | --- |
+| ✓ | ✓ | `strong_signal` |
+| ✓ | ✗ | `signal` |
+| ✗ | ✓ | `needs_review` |
+| ✗ | ✗ | `weak_signal` |
+
+The Go-side verdict aggregation uses these labels to keep weakly-corroborated flags from stacking to CRITICAL. A `weak_signal` on a single category downgrades to MEDIUM/alert; `strong_signal` on a structural category (destructive command, exfil channel) escalates to CRITICAL. The calibration metrics for this path are reproducible via `go test -run TestEval` — see the [evaluation corpus README](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/testdata/eval_corpus/README.md) for the scorecard.
 
 Configuration lives in `judge.yaml` inside each rule pack:
 
@@ -244,6 +271,76 @@ These keep the operator from being asked to approve cosmetic actions (`git statu
 | `tool_suppressions` | At HITL prompt time | Cutting noise without changing what gets logged |
 
 Together they make it realistic to leave the gateway in `action` mode without operator fatigue.
+
+## Layer 5 — Session correlator
+
+The first four layers evaluate each event in isolation. The **correlator** is the cross-event layer: it watches the recent-finding stream for the same session and raises a synthetic `CORR-*` meta-finding when a pattern of individually-benign-looking events combines into something worse.
+
+This closes a class of attacks where no single event crosses the action threshold on its own, but the sequence across turns is an exfil path — for example, Simon Willison's **lethal trifecta** (untrusted content + sensitive data access + external egress in the same session).
+
+### How it runs
+
+<Flow direction="TB" caption="The correlator runs over the last N findings per session on every new finding insert. A match writes a synthetic CORR-<id> row back into scan_findings.">
+  <Node id="events" kind="generic">{`New finding\ninserted`}</Node>
+  <Node id="window" kind="policy">{`Sliding window\nlast N findings in session`}</Node>
+  <Node id="patterns" kind="policy">{`Pattern matcher\naxes · severities · fingerprints`}</Node>
+  <Node id="synth" kind="policy">{`CORR-* meta-finding\nseverity_on_match`}</Node>
+  <Node id="sinks" kind="generic">{`Audit DB\n+ webhook / Splunk / Rego`}</Node>
+  <Edge from="events" to="window" />
+  <Edge from="window" to="patterns" />
+  <Edge from="patterns" to="synth" />
+  <Edge from="synth" to="sinks" />
+</Flow>
+
+Every finding DefenseClaw records is tagged with a **data axis** (one or more of `ingress_untrusted`, `sensitive_access`, `egress_external`) and — on the tool-call surface — a **tool capability class** (`read_fs`, `write_fs`, `exec_shell`, `network_fetch`, `send_message`, `none`). Regex rules and judge categories each declare their axis in a seed mapping (`internal/guardrail/defaults/axes.go`), so patterns can reason across detectors without hard-coding rule IDs.
+
+### Bundled patterns
+
+Four patterns ship in `internal/guardrail/defaults/correlation-patterns.yaml`:
+
+| Pattern ID | Window | Match severity | Trigger |
+| --- | --- | --- | --- |
+| `LETHAL-TRIFECTA` | 30 events | CRITICAL | All three axes (`ingress_untrusted`, `sensitive_access`, `egress_external`) present in the session. |
+| `TRIFECTA-WITH-FINGERPRINT-MATCH` | 30 events | CRITICAL | Same content fingerprint seen in a `sensitive_access` finding and a later `egress_external` finding — direct exfil, not just temporal coincidence. |
+| `ESCALATION-CHAIN` | 10 events | CRITICAL | MEDIUM → HIGH → HIGH severity progression inside the same session — attacker iterating on a prompt. |
+| `DESTRUCTIVE-FLOW` | 50 events | CRITICAL | An `exec_shell` capability call matching a known destructive rule (`CMD-RM-RF`, `CMD-MKFS`, `CMD-DD-IF`) in the same session as prior `sensitive_access` findings. |
+
+Each pattern sets its own window size — `ESCALATION-CHAIN` wants the progression tight; `DESTRUCTIVE-FLOW` tolerates 50 events between a credential read and an `rm -rf`.
+
+### What the operator sees
+
+When a pattern matches, the correlator writes a synthetic row into `scan_findings`:
+
+```yaml
+scanner: "correlator"
+rule_id: "CORR-LETHAL-TRIFECTA"
+severity: CRITICAL
+tags: ["correlation", "LETHAL-TRIFECTA"]
+description: |
+  contributing findings:
+    - INJ-IGNORE-ALL   at 2026-05-12T14:03:11Z
+    - SENSITIVE-PATH-SSH-KEY at 2026-05-12T14:05:42Z
+    - SRC-FETCH        at 2026-05-12T14:06:18Z
+```
+
+The same row is emitted to every configured sink — Splunk, webhooks, the TUI audit panel, and the Rego decision engine. `CORR-*` findings are always CRITICAL, so they route to operator attention immediately without needing per-sink threshold changes.
+
+<Callout>
+The correlator is **detect-and-alert**, not detect-and-block. The contributing findings were already evaluated in-flight; the CORR row lands *after* the offending request has been allowed. Use the audit log or webhook sink to act on the correlation — or wire the `CORR-*` rule_id prefix into your Rego to quarantine subsequent requests in the same session.
+</Callout>
+
+### Why alert-only, not block
+
+Promoting a later request in the session to *deny* based on an earlier pattern match has two honest costs:
+
+- It inverts the existing "each request is evaluated on its own" contract.
+- It can cause spurious blocks on legitimate parallel/retry traffic in the same session.
+
+Three ways to act on correlations without code changes:
+
+- Tail `scan_findings` for `rule_id LIKE 'CORR-%'` and invoke a custom script.
+- Wire the existing Splunk / webhook sink to any CRITICAL severity — `CORR-*` inherits automatically.
+- Match the `CORR-*` rule_id prefix in Rego and emit stricter per-session policy decisions.
 
 ## Authoring custom rule packs
 

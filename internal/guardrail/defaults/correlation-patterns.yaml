@@ -1,0 +1,56 @@
+# Sliding-window correlation patterns.
+#
+# The correlator evaluates these patterns on every new finding insert
+# against the last N findings in the same session. A match writes a
+# synthetic CORR-<PATTERN_ID> finding back into scan_findings at
+# severity_on_match.
+#
+# See internal/guardrail/correlator.go for the matcher semantics.
+
+patterns:
+  - id: LETHAL-TRIFECTA
+    description: |
+      Untrusted content + sensitive data access + external egress in
+      the same session. The three ingredients of Willison's lethal
+      trifecta — any agent exposed to all three has an indirect-prompt-
+      injection exfil path.
+    window_events: 30
+    severity_on_match: CRITICAL
+    all_of:
+      - axis: ingress_untrusted
+      - axis: sensitive_access
+      - axis: egress_external
+
+  - id: TRIFECTA-WITH-FINGERPRINT-MATCH
+    description: |
+      Stronger variant: the SAME content fingerprint appears in a
+      sensitive_access finding AND a later egress_external finding.
+      This is direct exfil, not just temporal coincidence.
+    window_events: 30
+    severity_on_match: CRITICAL
+    fingerprint_chain:
+      - axis: sensitive_access
+      - axis: egress_external
+
+  - id: ESCALATION-CHAIN
+    description: |
+      Escalating severity within a session (MEDIUM -> HIGH -> HIGH)
+      suggests an attacker iterating on a prompt; promote to CRITICAL.
+    window_events: 10
+    severity_on_match: CRITICAL
+    sequence:
+      - severity: MEDIUM
+      - severity: HIGH
+      - severity: HIGH
+
+  - id: DESTRUCTIVE-FLOW
+    description: |
+      A destructive shell capability invoked in the same session as a
+      prior sensitive_access finding. Indicates active exploitation
+      rather than reconnaissance.
+    window_events: 50
+    severity_on_match: CRITICAL
+    all_of:
+      - tool_capability_class: exec_shell
+        min_severity: HIGH
+      - axis: sensitive_access
