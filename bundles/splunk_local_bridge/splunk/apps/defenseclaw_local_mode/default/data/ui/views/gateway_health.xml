@@ -7,8 +7,8 @@
       <title>Circuit breaker state (Splunk HEC sink)</title>
       <single>
         <search>
-          <query>`defenseclaw_circuit_breaker_events` | stats latest(circuit_state) as circuit_state latest(circuit_state_num) as circuit_state_num by component | stats max(circuit_state_num) as worst_state | eval state_label=case(worst_state=0, "closed", worst_state=1, "half-open", worst_state=2, "open", 1=1, "unknown")</query>
-          <earliest>-15m</earliest>
+          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | stats latest(circuit_state) as circuit_state latest(circuit_state_num) as circuit_state_num by component | stats max(circuit_state_num) as worst_state | eval state_label=case(worst_state=0, "closed", worst_state=1, "half-open", worst_state=2, "open", 1=1, "unknown")</query>
+          <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
         <option name="field">state_label</option>
@@ -82,7 +82,7 @@
       <title>Circuit breaker state over time</title>
       <chart>
         <search>
-          <query>`defenseclaw_circuit_breaker_events` | timechart span=5m max(circuit_state_num) as circuit_state_num | eval circuit_state=case(circuit_state_num=0, "closed", circuit_state_num=1, "half-open", circuit_state_num=2, "open", 1=1, "unknown")</query>
+          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | timechart span=5m max(circuit_state_num) as circuit_state_num | eval circuit_state=case(circuit_state_num=0, "closed", circuit_state_num=1, "half-open", circuit_state_num=2, "open", 1=1, "unknown")</query>
           <earliest>-1h</earliest>
           <latest>now</latest>
         </search>
@@ -139,7 +139,7 @@
       <title>Recent circuit breaker state changes</title>
       <table>
         <search>
-          <query>`defenseclaw_circuit_breaker_events` | table timestamp component circuit_state action severity details | sort - timestamp | head 25</query>
+          <query>`defenseclaw_circuit_breaker_events` | search action="circuit_breaker.*" | table timestamp component circuit_state action severity details | sort - timestamp | head 25</query>
           <earliest>-24h</earliest>
           <latest>now</latest>
         </search>
