@@ -102,6 +102,25 @@ type APIServer struct {
 	llmPromptBySourceSessionTurn map[string]string
 
 	connectorRegistry *connector.Registry
+
+	// ciscoInspector calls the Cisco AI Defense /api/v1/inspect/chat
+	// route from the hook lane (inspectToolPolicy +
+	// inspectMessageContent). nil when no API key is configured —
+	// the lane silently skips AID and falls back to the existing
+	// regex + CodeGuard verdict in that case. Wired by the sidecar
+	// at boot via SetCiscoInspector. Only the proxy lane held an
+	// AID client historically; this field extends coverage to the
+	// hook surface (Codex / Claude Code / Cursor / Windsurf /
+	// Hermes / Gemini / Copilot) so MCP tool calls and tool results
+	// reach AID without per-script changes.
+	ciscoInspector *CiscoInspectClient
+}
+
+// SetCiscoInspector wires the Cisco AI Defense client onto the API
+// server. Pass nil to disable the hook-lane AID call (e.g. when the
+// operator did not configure cisco_ai_defense.api_key_env).
+func (a *APIServer) SetCiscoInspector(c *CiscoInspectClient) {
+	a.ciscoInspector = c
 }
 
 // SetOTelProvider attaches the OTel provider so guardrail events

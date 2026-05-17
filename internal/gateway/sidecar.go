@@ -1755,6 +1755,16 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
 	api.SetHILTApprovalManager(s.hilt)
+	// Wire the Cisco AI Defense inspector onto the API server so the
+	// hook lane (inspectToolPolicy / inspectMessageContent) can forward
+	// tool calls + tool results to AID for operators who configured
+	// cisco_ai_defense.api_key_env. NewCiscoInspectClient returns nil
+	// when no key resolves; the hook lane silently skips AID in that
+	// case and falls back to the regex + CodeGuard verdict.
+	if cisco := NewCiscoInspectClient(&s.cfg.CiscoAIDefense, filepath.Join(s.cfg.DataDir, ".env")); cisco != nil {
+		cisco.SetTelemetry(s.otel)
+		api.SetCiscoInspector(cisco)
+	}
 	api.SetAIDiscoveryService(s.aiDiscovery)
 	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {

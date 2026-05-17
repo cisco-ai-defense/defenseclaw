@@ -917,6 +917,36 @@ type CiscoAIDefenseConfig struct {
 	APIKeyEnv    string   `mapstructure:"api_key_env"    yaml:"api_key_env"`
 	TimeoutMs    int      `mapstructure:"timeout_ms"     yaml:"timeout_ms"`
 	EnabledRules []string `mapstructure:"enabled_rules"  yaml:"enabled_rules"`
+
+	// ScanHookSurface controls whether the hook lane (PreToolUse +
+	// PostToolUse + UserPromptSubmit on hook-only connectors like
+	// Codex / Claude Code / Cursor / Windsurf / Hermes / Gemini /
+	// Copilot) forwards payloads to Cisco AI Defense.
+	//
+	// Pre-existing AID integration only fires on the proxy lane
+	// (chat prompts + completions) for OpenClaw / ZeptoClaw, so
+	// without this flag tool calls and tool results on hook-only
+	// connectors never reach AID.
+	//
+	// When the API key is unset this flag is a no-op (the AID lane
+	// is silently skipped). Default is true so an operator who
+	// configures the AID key gets coverage on every surface; flip
+	// to false to scope AID to the proxy lane only (e.g. when
+	// pricing per-call matters and the operator already gets
+	// per-tool coverage from the bundled regex rule pack).
+	ScanHookSurface *bool `mapstructure:"scan_hook_surface" yaml:"scan_hook_surface,omitempty"`
+}
+
+// HookSurfaceEnabled reports whether the AID lane should fire on the
+// hook-side surfaces. Defaults to true (opt-out) so an operator who
+// sets `cisco_ai_defense.api_key_env` gets coverage on every surface
+// without having to flip a second flag. Returns false when the
+// pointer is explicitly set to false.
+func (c *CiscoAIDefenseConfig) HookSurfaceEnabled() bool {
+	if c == nil || c.ScanHookSurface == nil {
+		return true
+	}
+	return *c.ScanHookSurface
 }
 
 // ResolvedAPIKey returns the API key from the env var (if set) or the direct value.

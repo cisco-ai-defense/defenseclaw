@@ -158,6 +158,104 @@ func clampPromptDirectionToolVerdict(verdict *ToolInspectVerdict, direction stri
 		fmt.Sprintf("policy-action=%s %s", original, promptSurfaceClampReason))
 }
 
+// hookAIDInspect runs the optional Cisco AI Defense lane on the
+// hook-side surface (tool calls + tool results + UserPromptSubmit
+// for hook-only connectors). Returns nil when the AID lane is off
+// (no inspector wired, ScanHookSurface=false, or AID client returns
+// nil for any reason — bad payload, transport failure, etc.).
+//
+// The proxy lane keeps owning chat prompts + completions for
+// OpenClaw / ZeptoClaw, so this lane only fires on directions the
+// proxy never sees: tool_call, tool_result, and the prompt
+// direction emitted from UserPromptSubmit on hook-only connectors.
+// Surface gating is intentional — without it, OpenClaw operators
+// who set scanner_mode=remote AND configure cisco_ai_defense.api_key
+// would double-scan chat traffic (proxy lane + hook lane).
+func (a *APIServer) hookAIDInspect(toolName string, content string) *ScanVerdict {
+	if a == nil || a.ciscoInspector == nil {
+		return nil
+	}
+	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+		return nil
+	}
+	if content == "" {
+		return nil
+	}
+	// Prepend the tool name to the content so AID classifiers that
+	// match on tool-name strings (e.g. "Limit JIRA actions" /
+	// "createJiraIssue") have it visible. AID's /inspect/chat reads
+	// content as a free-text user message; the structured tool name
+	// would otherwise be lost on the wire.
+	body := content
+	if toolName != "" && toolName != "message" {
+		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
+	}
+	return a.ciscoInspector.Inspect([]ChatMessage{{Role: "user", Content: body}})
+}
+
+// mergeWithAIDVerdict folds an AID ScanVerdict into an existing
+// ToolInspectVerdict using strictest-wins semantics: action escalates
+// (allow → alert → block), severity escalates, findings concatenate.
+// Used by the hook-lane callers below.
+func mergeWithAIDVerdict(local *ToolInspectVerdict, aid *ScanVerdict) *ToolInspectVerdict {
+	if aid == nil {
+		return local
+	}
+	rank := func(action string) int {
+		switch strings.ToLower(action) {
+		case "block":
+			return 3
+		case "confirm", "ask":
+			return 2
+		case "alert":
+			return 1
+		default:
+			return 0
+		}
+	}
+	sevRank := func(s string) int {
+		switch strings.ToUpper(s) {
+		case "CRITICAL":
+			return 4
+		case "HIGH":
+			return 3
+		case "MEDIUM":
+			return 2
+		case "LOW":
+			return 1
+		default:
+			return 0
+		}
+	}
+	if local == nil {
+		local = &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+	}
+	// AID-only escalation path: escalate the action when AID is
+	// stricter, escalate the severity when AID is stricter, append
+	// findings + reason so the audit trail shows both lanes.
+	if rank(aid.Action) > rank(local.Action) {
+		local.Action = aid.Action
+	}
+	if sevRank(aid.Severity) > sevRank(local.Severity) {
+		local.Severity = aid.Severity
+	}
+	if len(aid.Findings) > 0 {
+		// Tag AID findings so operators can tell them apart from
+		// regex / CodeGuard hits when reading the audit log.
+		for _, f := range aid.Findings {
+			local.Findings = append(local.Findings, "ai-defense:"+f)
+		}
+	}
+	if aid.Reason != "" {
+		if local.Reason != "" {
+			local.Reason = local.Reason + "; " + aid.Reason
+		} else {
+			local.Reason = aid.Reason
+		}
+	}
+	return local
+}
+
 // inspectToolPolicy runs all rule categories against the tool args.
 // No tool-name gating — every pattern fires on every tool.
 func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdict {
@@ -188,6 +286,13 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 	}
 
 	if len(ruleFindings) == 0 && len(cgFindings) == 0 {
+		// Regex + CodeGuard found nothing locally. Give the AID lane a
+		// turn — operators with custom AID policies (e.g. block
+		// `createJiraIssue`, throttle `addComment`) want their rules to
+		// fire even when no DefenseClaw built-in pattern matched.
+		if aid := a.hookAIDInspect(toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
+			return mergeWithAIDVerdict(nil, aid)
+		}
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 
@@ -219,7 +324,7 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 		findingStrs = append(findingStrs, fmt.Sprintf("codeguard:%s:%s", cf.ID, cf.Title))
 	}
 
-	return &ToolInspectVerdict{
+	verdict := &ToolInspectVerdict{
 		Action:           action,
 		Severity:         severity,
 		Confidence:       confidence,
@@ -227,6 +332,17 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 		Findings:         findingStrs,
 		DetailedFindings: ruleFindings,
 	}
+
+	// AID lane: also forward to Cisco AI Defense when the operator has
+	// configured a key. Strictest verdict wins via mergeWithAIDVerdict.
+	// We send the rule reasons text rather than just the args because
+	// AID's classifier reads free-text content; the rule names give it
+	// useful context. The lane is silent when no AID client is wired
+	// or when ScanHookSurface=false.
+	if aid := a.hookAIDInspect(toolName, argsStr); aid != nil {
+		verdict = mergeWithAIDVerdict(verdict, aid)
+	}
+	return verdict
 }
 
 // runCodeGuardOnArgs extracts path/content from write_file/edit_file args
@@ -281,6 +397,12 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 	ruleFindings := ScanAllRules(content, "message")
 
 	if len(ruleFindings) == 0 {
+		// Regex found nothing locally. Give the AID lane a turn —
+		// custom AID policies (e.g. organisation-specific PII rules)
+		// may match where the bundled regex pack didn't.
+		if aid := a.hookAIDInspect("message", content); aid != nil && aid.Action != "allow" && aid.Action != "" {
+			return mergeWithAIDVerdict(nil, aid)
+		}
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 
@@ -297,7 +419,7 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 		reasons = append(reasons, f.RuleID+":"+f.Title)
 	}
 
-	return &ToolInspectVerdict{
+	verdict := &ToolInspectVerdict{
 		Action:           action,
 		Severity:         severity,
 		Confidence:       confidence,
@@ -305,6 +427,15 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 		Findings:         FindingStrings(ruleFindings),
 		DetailedFindings: ruleFindings,
 	}
+
+	// AID lane: forward the message content to Cisco AI Defense when
+	// configured. mergeWithAIDVerdict escalates strictness — AID block
+	// trumps regex alert, AID HIGH trumps regex MEDIUM, etc. Lane is a
+	// no-op when no client is wired.
+	if aid := a.hookAIDInspect("message", content); aid != nil {
+		verdict = mergeWithAIDVerdict(verdict, aid)
+	}
+	return verdict
 }
 
 func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
