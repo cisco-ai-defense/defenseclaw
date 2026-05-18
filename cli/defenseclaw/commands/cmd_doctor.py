@@ -540,19 +540,27 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """Return a detail string when the proxy port is expected to be closed.
 
-    Observability-only connectors feed DefenseClaw through hooks/native
-    telemetry while the agent talks directly to its upstream provider. In
-    that mode port 4000 is deliberately unbound, so doctor must not report
-    a hard proxy failure.
+    Hook-enforced connectors feed DefenseClaw through the agent's
+    native hook bus (PreToolUse / UserPromptSubmit / PostToolUse)
+    while the agent talks directly to its upstream provider. Port
+    4000 is deliberately unbound in that topology, so doctor must
+    not report a hard proxy failure. Action mode IS supported on
+    this surface — enforcement happens via the PreToolUse deny
+    verdict, not the proxy.
     """
     connector = _active_connector(cfg)
     gc = cfg.guardrail
-    if connector == "codex" and not getattr(gc, "codex_enforcement_enabled", False):
-        return "observability-only for Codex — proxy port intentionally closed"
-    if connector == "claudecode" and not getattr(gc, "claudecode_enforcement_enabled", False):
-        return "observability-only for Claude Code — proxy port intentionally closed"
-    if connector in {"hermes", "cursor", "windsurf", "geminicli", "copilot"}:
-        return f"observability-only for {connector} — proxy port intentionally closed"
+    if connector in {"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}:
+        mode = (getattr(gc, "mode", "") or "observe").strip().lower()
+        if mode == "action":
+            return (
+                f"hook-enforced for {connector} (mode=action via PreToolUse deny) — "
+                "proxy port intentionally closed"
+            )
+        return (
+            f"hook-driven for {connector} (mode=observe) — proxy port "
+            "intentionally closed"
+        )
     return ""
 
 

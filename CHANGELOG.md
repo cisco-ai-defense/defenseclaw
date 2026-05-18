@@ -4,7 +4,123 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — PR #194 single-rollup (security floor + connector polymorphism + test parity)
+## [Unreleased] — Codex / Claude Code hook-only enforcement (no proxy data path)
+
+This rollup removes the LLM-proxy data path for the Codex and Claude
+Code connectors and unifies them on the agent's native hook bus for
+both observation and enforcement. The `PreToolUse` hook returns a
+`permissionDecision: "deny"` verdict on policy hits and the agent
+blocks the tool call inside its own permission flow. Codex and
+Claude Code now talk directly to their native upstreams in both
+`observe` and `action` mode.
+
+### Breaking changes
+
+- **`guardrail.codex_enforcement_enabled` removed** from
+  `~/.defenseclaw/config.yaml`. The field was the on/off switch for
+  the now-deleted proxy-driven enforcement path. Enforcement is now
+  selected by the existing `guardrail.mode` field (`action` returns
+  a PreToolUse deny verdict on policy hits; `observe` records only).
+  The upgrade migration strips the field automatically — see
+  "Migrations" below.
+- **`guardrail.claudecode_enforcement_enabled` removed** from
+  `~/.defenseclaw/config.yaml`. Same shape and rationale as the
+  Codex flag above. The upgrade migration strips the field
+  automatically.
+- **`SetupOpts.CodexEnforcement` and `SetupOpts.ClaudeCodeEnforcement`
+  removed** from the Go connector `Setup()` contract. Out-of-tree
+  connector implementations that read these fields must drop the
+  references; they were always observable booleans without their own
+  feature surface, and `Mode` is the canonical knob now.
+- **Codex / Claude Code proxy listener no longer binds** at gateway
+  start when the active connector is `codex` or `claudecode`, even
+  if `guardrail.mode=action`. Port 4000 stays closed — the
+  enforcement path is the hook bus, not the proxy. Operators who
+  relied on the proxy URL (`http://localhost:4000/...`) appearing in
+  the agent config need to remove those overrides; the connectors
+  patch the agent's native upstream back to its vendor default at
+  upgrade time.
+
+### Enforcement
+
+- **`defenseclaw setup codex --mode action`** and
+  **`defenseclaw setup claude-code --mode action`** newly provision
+  hook-driven enforcement: the PreToolUse hook returns a deny
+  verdict on policy hits and the agent blocks the tool call inside
+  its own permission flow. `--mode observe` (the default) keeps the
+  previous record-only behavior.
+- The shared connector-alias factory used by the other hook-
+  enforced connectors (`hermes`, `cursor`, `windsurf`, `geminicli`,
+  `copilot`) gains the same `--mode {observe,action}` knob.
+- The interactive wizard (`defenseclaw setup guardrail`) drops the
+  Codex/Claude Code "observability-only vs. proxy" fork; the
+  standard observe/action mode prompt now drives both connectors.
+- The TUI overview's Enforcement row reflects the effective mode
+  per connector: `<Agent> hook enforcement (action)` when
+  `guardrail.mode=action`, otherwise `<Agent> hook observability
+  (observe)`. `defenseclaw doctor` likewise reports `hook-enforced
+  for codex (mode=action via PreToolUse deny) — proxy port
+  intentionally closed` in its `Guardrail proxy` check.
+
+### CLI plumbing
+
+- The `_OBSERVABILITY_ONLY_CONNECTORS` set in `cli/defenseclaw/
+  commands/cmd_setup.py` was split into `_PROXY_BACKED_CONNECTORS`
+  (`openclaw`, `zeptoclaw`) and `_HOOK_ENFORCED_CONNECTORS`
+  (everything else). The old name remains as a backstop alias so
+  out-of-tree imports keep resolving. New call sites must use the
+  named sets.
+- `_apply_connector_observability_only` was renamed to
+  `_apply_hook_connector_setup` and now takes a `mode` argument
+  (defaulting to `observe`). The legacy name remains as a thin
+  shim that forces `observe` for any out-of-tree callers.
+- Inert helpers `_set_connector_enforcement`,
+  `_connector_enforcement_flag`, and `_connector_enforcement_enabled`
+  were deleted along with their last call sites.
+
+### Migrations
+
+- New 0.5.0 sub-step
+  **`_migrate_0_5_0_strip_codex_enforcement_keys`** rewrites
+  `~/.defenseclaw/config.yaml` to remove
+  `guardrail.codex_enforcement_enabled` and
+  `guardrail.claudecode_enforcement_enabled` if present. The strip
+  is byte-level (no YAML round-trip) so operator comments, blank
+  lines, and surrounding key order under `guardrail:` are preserved
+  exactly. `guardrail.mode` is left untouched — the operator's
+  existing enforcement posture carries through to the hook surface.
+- Migration is idempotent and runs automatically on
+  `defenseclaw upgrade`. Failures are logged via `defenseclaw
+  doctor --fix` and never block the upgrade.
+
+### Tests
+
+- Go test suite updated:
+  - `TestSetupOpts_HookFailMode_RespectsOperatorChoice` no longer
+    references `CodexEnforcement` / `ClaudeCodeEnforcement`.
+  - `TestProxyShouldBindForConnector` /
+    `TestAPIStatusEmitsConnectorMode` /
+    `TestShouldRunProviderProbeForConnector` assert the proxy stays
+    unbound for codex/claudecode regardless of `Guardrail.Mode`.
+  - `TestConnector_AllowedHostsProvider_ProxyBuiltinsImplement`
+    (renamed from `_AllBuiltinsImplement`) only covers
+    proxy-backed connectors.
+  - `TestCodex_Teardown_RemovesLegacyEnvFiles` and the analogous
+    Claude Code env-file tests were removed alongside the helpers
+    they covered.
+  - `TestModePickerModal_PreviewMatchesSetupAliases` updated for
+    the new "proxy-backed connector setup" / "hook-driven
+    connector setup" preview strings.
+- Python CLI test suite updated:
+  - `test_cmd_init.py` and `test_cmd_doctor.py` no longer assert
+    on `codex_enforcement_enabled`.
+  - `test_cmd_setup_mode.py`,
+    `test_cmd_setup_observability.py`,
+    `test_cmd_setup_codex_claudecode_alias.py`, and
+    `test_guardrail.py` were rewritten to cover the hook-driven
+    mode contract end-to-end.
+
+## [Pre-PR-265] — PR #194 single-rollup (security floor + connector polymorphism + test parity)
 
 This rollup closes the audit gaps identified in the v3 connector
 review and lands PR #141's matrix in a single coherent set of

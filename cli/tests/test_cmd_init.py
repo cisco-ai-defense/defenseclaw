@@ -155,7 +155,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertEqual(cfg["claw"]["mode"], "codex")
         self.assertEqual(cfg["guardrail"]["connector"], "codex")
         self.assertTrue(cfg["guardrail"]["enabled"])
-        self.assertFalse(cfg["guardrail"]["codex_enforcement_enabled"])
         self.assertEqual(cfg["guardrail"]["detection_strategy"], "regex_judge")
 
     def test_first_run_persists_llm_secret_to_dotenv_not_config(self):

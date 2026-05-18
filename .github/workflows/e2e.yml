@@ -229,7 +229,27 @@ jobs:
           }
 
       - name: Install DefenseClaw
-        run: make install
+        # These E2E jobs activate guardrail.connector=openclaw later on,
+        # which forces OpenClawConnector.Setup() to run. That Setup
+        # refuses to plant a placeholder extension and exits with
+        # "openclaw extension is not bundled in this gateway build"
+        # (internal/gateway/connector/openclaw.go:131).
+        #
+        # The Makefile's default target graph is subtle:
+        #   install: cli-install gateway-install maybe-openclaw-plugin-install
+        # and `gateway` depends on `sync-openclaw-extension`, which drops
+        # a `.placeholder` if extensions/defenseclaw/dist/ isn't there yet.
+        # With `CONNECTOR=openclaw` set, `maybe-openclaw-plugin-install`
+        # later builds the TS plugin — but the gateway binary has already
+        # been compiled with the placeholder embedded. Rebuilding the
+        # plugin dist/ after the fact does not re-run //go:embed.
+        #
+        # The right order is: build the TS plugin first (populates
+        # extensions/defenseclaw/dist/), THEN run install so that
+        # `gateway-install` -> `sync-openclaw-extension` picks up the
+        # real tree. `make plugin install` gives us that sequence in
+        # one line.
+        run: make plugin install
 
       - name: Activate venv
         run: |
@@ -737,7 +757,27 @@ jobs:
           }
 
       - name: Install DefenseClaw
-        run: make install
+        # These E2E jobs activate guardrail.connector=openclaw later on,
+        # which forces OpenClawConnector.Setup() to run. That Setup
+        # refuses to plant a placeholder extension and exits with
+        # "openclaw extension is not bundled in this gateway build"
+        # (internal/gateway/connector/openclaw.go:131).
+        #
+        # The Makefile's default target graph is subtle:
+        #   install: cli-install gateway-install maybe-openclaw-plugin-install
+        # and `gateway` depends on `sync-openclaw-extension`, which drops
+        # a `.placeholder` if extensions/defenseclaw/dist/ isn't there yet.
+        # With `CONNECTOR=openclaw` set, `maybe-openclaw-plugin-install`
+        # later builds the TS plugin — but the gateway binary has already
+        # been compiled with the placeholder embedded. Rebuilding the
+        # plugin dist/ after the fact does not re-run //go:embed.
+        #
+        # The right order is: build the TS plugin first (populates
+        # extensions/defenseclaw/dist/), THEN run install so that
+        # `gateway-install` -> `sync-openclaw-extension` picks up the
+        # real tree. `make plugin install` gives us that sequence in
+        # one line.
+        run: make plugin install
 
       - name: Activate venv
         run: |

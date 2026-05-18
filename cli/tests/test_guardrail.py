@@ -1021,7 +1021,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(self.app.cfg.guardrail.claudecode_enforcement_enabled)
+        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
 
     def test_non_interactive_codex_observe_flag_enables_enforcement(self):
@@ -1043,7 +1043,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertTrue(self.app.cfg.guardrail.codex_enforcement_enabled)
+        self.assertEqual(self.app.cfg.guardrail.connector, "codex")
         self.assertEqual(self.app.cfg.guardrail.mode, "observe")
 
     def test_agent_alias_still_works(self):

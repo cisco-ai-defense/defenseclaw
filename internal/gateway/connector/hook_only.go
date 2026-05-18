@@ -409,21 +409,48 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return nil
 }
 
+// Teardown restores the host agent's config (or removes our entries
+// when restoration is unsafe) AND replaces the hook script with a
+// disabled tombstone.
+//
+// The tombstone step is unconditional and runs even when the config
+// restore path returns early. The reason is symmetric with codex /
+// claudecode: host agents that have been running since before teardown
+// (cursor desktop, copilot IDE session, hermes daemon) cache the
+// absolute hook path at startup and will keep invoking it for the life
+// of the process. Without the tombstone they hit either:
+//
+//   - exit-127 ("command not found") if the file was deleted, or
+//   - a strict-availability fail-closed block when
+//     DEFENSECLAW_STRICT_AVAILABILITY=1 and the gateway is gone.
+//
+// Errors from the config and tombstone steps are joined so a tombstone
+// failure does not mask a config-restore failure (or vice versa).
 func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error {
 	_ = ctx
+	var errs []string
+
 	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
 	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path)
-	if err != nil {
-		return fmt.Errorf("%s restore config backup: %w", c.name, err)
+	switch {
+	case err != nil:
+		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
+	case !restored:
+		hookScript := filepath.Join(opts.DataDir, "hooks", c.scriptName)
+		if err := c.removeConfigEntries(path, hookScript); err != nil {
+			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
+		} else {
+			discardManagedFileBackup(opts.DataDir, c.name, "config")
+		}
 	}
-	if restored {
-		return nil
+
+	if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
+		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
 	}
-	hookScript := filepath.Join(opts.DataDir, "hooks", c.scriptName)
-	if err := c.removeConfigEntries(path, hookScript); err != nil {
-		return fmt.Errorf("%s remove hook entries: %w", c.name, err)
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%s teardown: %s", c.name, strings.Join(errs, "; "))
 	}
-	discardManagedFileBackup(opts.DataDir, c.name, "config")
 	return nil
 }
 
@@ -466,16 +493,12 @@ func (c *hookOnlyConnector) SetCredentials(gatewayToken, masterKey string) {
 }
 
 func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(opts.DataDir, "hooks", name))
-	}
 	caps := c.Capabilities(opts)
 	patched := uniqueNonEmptyStrings(append([]string{c.configPath(opts)}, caps.Telemetry.ConfigPaths...))
 	return AgentPaths{
 		PatchedFiles: patched,
 		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.name, "config")},
-		HookScripts:  hooks,
+		HookScripts:  hookScriptPathsForConnector(opts, c),
 	}
 }
 

@@ -637,10 +637,6 @@ func (p *SetupPanel) loadSections() {
 					Hint: "Ask before supported high-risk actions in action mode. Defaults off; strict blocks still win."},
 				{Label: "Approval Min Severity", Key: "guardrail.hilt.min_severity", Kind: "choice", Value: hiltMinSeverityValue(c.Guardrail.HILT.MinSeverity), Options: []string{"HIGH", "MEDIUM", "LOW", "CRITICAL"},
 					Hint: "Minimum severity that can become a human approval prompt when Human Approval is on."},
-				{Label: "Codex Enforcement", Key: "guardrail.codex_enforcement_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.CodexEnforcementEnabled),
-					Hint: "Put Codex traffic in the blocking proxy path. Off keeps Codex in observe mode."},
-				{Label: "Claude Code Enforcement", Key: "guardrail.claudecode_enforcement_enabled", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.ClaudeCodeEnforcementEnabled),
-					Hint: "Put Claude Code traffic in the blocking proxy path. Off keeps hooks/OTel in observe mode."},
 				{Label: "Host", Key: "guardrail.host", Kind: "string", Value: c.Guardrail.Host,
 					Hint: "Bind address for the proxy. Defaults to 127.0.0.1 (avoids ::1 vs 127.0.0.1 dial issues on macOS)."},
 				{Label: "Port", Key: "guardrail.port", Kind: "int", Value: fmt.Sprintf("%d", c.Guardrail.Port),
@@ -2097,10 +2093,10 @@ func (p *SetupPanel) connectorSetupWizardFields() []wizardFormField {
 	}
 	return []wizardFormField{
 		{Label: "Connector", Kind: "choice", Options: []string{"openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}, Value: connector, Default: connector, Required: true, Hint: "Connector setup target. Claude Code maps to `setup claude-code`."},
-		{Label: "Guardrail Mode", Kind: "choice", Options: []string{"observe", "action"}, Value: mode, Default: mode, Hint: "Used by OpenClaw/ZeptoClaw setup; ignored for observability-only connectors."},
-		{Label: "Scanner Mode", Kind: "choice", Options: []string{"local", "remote", "both"}, Value: scannerMode, Default: scannerMode, Hint: "Used by OpenClaw/ZeptoClaw setup; ignored for observability-only connectors."},
+		{Label: "Guardrail Mode", Kind: "choice", Options: []string{"observe", "action"}, Value: mode, Default: mode, Hint: "observe records only; action blocks. Hook-enforced connectors block via PreToolUse deny verdict (no proxy)."},
+		{Label: "Scanner Mode", Kind: "choice", Options: []string{"local", "remote", "both"}, Value: scannerMode, Default: scannerMode, Hint: "Used by OpenClaw/ZeptoClaw setup; hook-enforced connectors default to local."},
 		{Label: "Restart Gateway", Kind: "bool", Value: "yes", Default: "yes", Hint: "Restart gateway after setup so connector hooks/runtime files are rewired."},
-		{Label: "Local Stack", Kind: "bool", Value: "no", Default: "no", Hint: "For observability-only connectors, also run the bundled local observability stack."},
+		{Label: "Local Stack", Kind: "bool", Value: "no", Default: "no", Hint: "For hook-enforced connectors, also run the bundled local observability stack."},
 		{Label: "Verify After Setup", Kind: "bool", Value: "yes", Default: "yes", Hint: "Run guardrail connectivity checks for OpenClaw/ZeptoClaw setup."},
 	}
 }

@@ -565,29 +565,16 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 	intercept := true
 	var telemetry []string
 
-	a.cfgMu.RLock()
-	gc := config.GuardrailConfig{}
-	if a.scannerCfg != nil {
-		gc = a.scannerCfg.Guardrail
-	}
-	a.cfgMu.RUnlock()
-
 	switch name {
 	case "codex":
-		if !gc.CodexEnforcementEnabled {
-			mode = "observability"
-			intercept = false
-		}
+		mode = "observability"
+		intercept = false
 		// codex telemetry always wires all three channels (hooks,
 		// the [otel.exporter.otlp-http] block, the notify bridge).
-		// Setup() runs these unconditionally; we only gate proxy
-		// interception on enforcement.
 		telemetry = []string{"hooks", "otel", "notify"}
 	case "claudecode":
-		if !gc.ClaudeCodeEnforcementEnabled {
-			mode = "observability"
-			intercept = false
-		}
+		mode = "observability"
+		intercept = false
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}

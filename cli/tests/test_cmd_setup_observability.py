@@ -9,17 +9,23 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the codex / claude-code observability default
-in ``defenseclaw setup guardrail``.
+"""Regression tests for the wizard behavior with hook-enforced
+connectors (codex / claude-code) in ``defenseclaw setup guardrail``.
 
-These tests pin the contract that selecting Codex or Claude Code as the
-connector flips the wizard into observability-only mode: the operator
-sees a single yes/no prompt and the wizard returns with sensible
-defaults, never asking about enforcement mode, scanner engine, or LLM
-judge config. A regression that quietly re-engaged those prompts would
-silently revive the proxy data path (because gc.codex_enforcement_enabled
-would default-flip somewhere in that branch) and break the
-"no traffic interception for codex / claude-code" architectural goal.
+Codex and Claude Code are now hook-only — the HTTP chat-proxy data
+path has been removed entirely. The wizard takes the standard
+observe/action mode path. The LLM judge, scanner engine, and block
+message prompts all remain available — they run gateway-side over
+hook event payloads (UserPromptSubmit, PreToolUse) exactly the same
+way they previously ran over proxy responses. The verdict surfaces
+through the agent's native hook bus (PreToolUse deny verdict) in
+action mode instead of through the proxy block-response body.
+
+These tests pin the wizard's default-accept path: an operator who
+walks through with mostly-default answers (observe mode, local
+scanner, no judge, no advanced options) lands on the canonical
+hook-only configuration without any proxy-era artifacts leaking
+back into the persisted ``GuardrailConfig``.
 """
 
 from __future__ import annotations
@@ -84,8 +90,6 @@ def _make_app(connector: str):
         detection_strategy_tool_call="",
         judge_sweep=True,
         rule_pack_dir="",
-        codex_enforcement_enabled=False,
-        claudecode_enforcement_enabled=False,
         hook_fail_mode="",
     )
 
@@ -104,18 +108,38 @@ def _make_app(connector: str):
 
 class TestObservabilityWizard(unittest.TestCase):
     def _drive_observability(self, connector: str) -> SimpleNamespace:
-        """Run the wizard with a "yes, enable observability" reply.
+        """Run the wizard taking the observability-only path.
 
-        Returns the post-run guardrail config namespace. We mock
-        ``click.confirm`` to always say yes so the wizard takes the
-        enabling path; if it ever tried to ask any *other* question,
-        ``click.prompt`` would raise (it's not mocked) and the test
-        would fail loudly.
+        Returns the post-run guardrail config namespace. The confirm
+        prompts are driven by a sequence rather than a constant True
+        so we can answer "yes" to the initial "Enable guardrail?"
+        gate but "no" to the advanced-options gate further down —
+        the advanced-options branch touches ``app.cfg.privacy`` which
+        our minimal SimpleNamespace stub deliberately doesn't carry.
+        We rely on click's ``confirm`` default-clamping for any
+        additional prompts the wizard might add in the future: each
+        unmatched call takes its default, which is the conservative
+        no-op direction for every prompt in this branch.
         """
         app, gc = _make_app(connector)
 
+        # ``click.confirm`` answer order:
+        #   1. "Enable guardrail?"               → True   (drive the wizard)
+        #   2. "Configure advanced options?"     → False  (skip; privacy attr absent)
+        # Any further confirms fall back to their default via the
+        # side_effect's "ran out of values" StopIteration which click
+        # catches and treats as "take the default" — but we keep an
+        # extra False to be paranoid in case prompt ordering shifts.
+        confirm_answers = iter([True, False, False])
+
+        def _confirm(*args, **kwargs):
+            try:
+                return next(confirm_answers)
+            except StopIteration:
+                return kwargs.get("default", False)
+
         with patch("defenseclaw.commands.cmd_setup.click.confirm",
-                   return_value=True), \
+                   side_effect=_confirm), \
              patch("defenseclaw.commands.cmd_setup.click.prompt",
                    return_value="1"), \
              patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
@@ -127,43 +151,30 @@ class TestObservabilityWizard(unittest.TestCase):
             _interactive_guardrail_setup(app, gc, agent_name=connector)
         return gc
 
-    def test_codex_observability_flow_sets_enforcement_false(self):
+    def test_codex_observability_flow_lands_in_observe_mode(self):
         gc = self._drive_observability("codex")
         self.assertTrue(gc.enabled,
                         "Wizard should enable telemetry for codex even in observability mode")
-        self.assertFalse(gc.codex_enforcement_enabled,
-                         "codex_enforcement_enabled MUST default false in the wizard")
         # Sensible "if-flipped-on-later" defaults — these get persisted
-        # so the YAML stays loadable, not because the gateway reads
-        # them in observability mode.
+        # so the YAML stays loadable.
         self.assertEqual(gc.mode, "observe")
         self.assertEqual(gc.scanner_mode, "local")
         self.assertEqual(gc.detection_strategy, "regex_only")
         self.assertFalse(gc.judge.enabled,
-                         "Judge must default off in observability mode (no proxy → no judge)")
-        # The observability-only branch now also surfaces the
-        # hook fail-mode prompt on initial setup. The mocked
-        # ``click.prompt`` returns "1" (open), so the persisted value
-        # must reflect that — confirms the prompt was reached and the
-        # operator's answer was applied. Previously this branch
-        # bypassed the prompt entirely, leaving operators with no
-        # opportunity to set hook_fail_mode at first-time setup.
+                         "Default-accept path declines the judge prompt; "
+                         "operators who want it can opt in on rerun")
+        # The observability-only branch now also surfaces the hook
+        # fail-mode prompt on initial setup. The mocked ``click.prompt``
+        # returns "1" (open), so the persisted value must reflect that —
+        # confirms the prompt was reached and the operator's answer was
+        # applied.
         self.assertEqual(gc.hook_fail_mode, "open")
 
-    def test_claudecode_observability_flow_sets_enforcement_false(self):
+    def test_claudecode_observability_flow_lands_in_observe_mode(self):
         gc = self._drive_observability("claudecode")
         self.assertTrue(gc.enabled)
-        self.assertFalse(gc.claudecode_enforcement_enabled,
-                         "claudecode_enforcement_enabled MUST default false in the wizard")
-        # Sibling flag must NOT cross over — this is the same
-        # isolation guarantee the Go-side helper test pins.
-        self.assertFalse(gc.codex_enforcement_enabled,
-                         "claudecode wizard run must not flip codex enforcement")
         self.assertEqual(gc.mode, "observe")
         self.assertFalse(gc.judge.enabled)
-        # See test_codex_observability_flow_sets_enforcement_false
-        # for the rationale: hook_fail_mode prompt now fires in the
-        # observability-only path too on initial setup.
         self.assertEqual(gc.hook_fail_mode, "open")
 
     def test_observability_decline_disables_connector(self):
@@ -184,92 +195,7 @@ class TestObservabilityWizard(unittest.TestCase):
             _interactive_guardrail_setup(app, gc, agent_name="codex")
         self.assertFalse(gc.enabled)
 
-    def test_claudecode_action_flow_sets_enforcement_true(self):
-        app, gc = _make_app("claudecode")
-
-        # Prompt order in the guardrail-setup branch (integration=2)
-        # for action mode:
-        #   1. integration mode ("2" = guardrail setup w/ proxy)
-        #   2. enforcement mode ("2" = action)
-        #   3. hook fail-mode prompt ("1" = open) — fires because
-        #      gc.mode starts empty (initial setup) AND we flipped
-        #      to action.
-        #   4. NEW (post-HITL-hoist) HILT severity prompt — fires
-        #      only when the prior ``Human approval?`` confirm
-        #      returned True. We answer NO to that confirm below
-        #      so this severity prompt does NOT fire here.
-        #   5. scanner engine ("1" = local)
-        #
-        # Confirms (in order):
-        #   a. "Enable guardrail?" → True
-        #   b. NEW: "Human approval for risky actions?" → False
-        #      (so no HILT severity prompt fires next)
-        #   c. "Enable LLM judge?" → False
-        #   d. "Configure advanced options?" → False
-        prompts = iter(["2", "2", "1", "1"])
-        confirms = iter([True, False, False, False])
-
-        with patch("defenseclaw.commands.cmd_setup.click.prompt",
-                   side_effect=lambda *args, **kwargs: next(prompts)), \
-             patch("defenseclaw.commands.cmd_setup.click.confirm",
-                   side_effect=lambda *args, **kwargs: next(confirms)), \
-             patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
-                   return_value="claudecode"), \
-             patch("defenseclaw.commands.cmd_setup._print_connector_info",
-                   return_value=None), \
-             patch("defenseclaw.commands.cmd_setup.click.echo",
-                   return_value=None):
-            _interactive_guardrail_setup(app, gc, agent_name="claudecode")
-
-        self.assertTrue(gc.enabled)
-        self.assertTrue(gc.claudecode_enforcement_enabled)
-        self.assertEqual(gc.mode, "action")
-        self.assertEqual(gc.scanner_mode, "local")
-        self.assertFalse(gc.judge.enabled)
-        # The fail-mode prompt persisted "open" — confirming the
-        # wizard's interactive choice survives without the operator
-        # having to hand-edit YAML afterward.
-        self.assertEqual(gc.hook_fail_mode, "open")
-        # HILT was offered (action mode) and declined — gc.hilt
-        # stays at the fixture default. This pins the new inline-
-        # HILT contract: action-mode runs ALWAYS get a HILT
-        # confirm, but declining it is a no-op rather than a
-        # second prompt cascade.
-        self.assertFalse(gc.hilt.enabled)
-
-    def test_codex_guardrail_observe_flow_sets_enforcement_true(self):
-        app, gc = _make_app("codex")
-
-        # Prompt order in the guardrail-setup branch (integration=2):
-        #   1. integration mode ("2" = guardrail setup w/ proxy)
-        #   2. enforcement mode ("1" = observe)
-        #   3. NEW v3 hook fail-mode prompt ("1" = open) — fires on
-        #      initial setup even when mode stays observe, because
-        #      gc.mode starts empty in the fixture.
-        #   4. scanner engine ("1" = local)
-        prompts = iter(["2", "1", "1", "1"])
-        confirms = iter([True, False, False])
-
-        with patch("defenseclaw.commands.cmd_setup.click.prompt",
-                   side_effect=lambda *args, **kwargs: next(prompts)), \
-             patch("defenseclaw.commands.cmd_setup.click.confirm",
-                   side_effect=lambda *args, **kwargs: next(confirms)), \
-             patch("defenseclaw.commands.cmd_setup._select_connector_interactive",
-                   return_value="codex"), \
-             patch("defenseclaw.commands.cmd_setup._print_connector_info",
-                   return_value=None), \
-             patch("defenseclaw.commands.cmd_setup.click.echo",
-                   return_value=None):
-            _interactive_guardrail_setup(app, gc, agent_name="codex")
-
-        self.assertTrue(gc.enabled)
-        self.assertTrue(gc.codex_enforcement_enabled)
-        self.assertEqual(gc.mode, "observe")
-        self.assertEqual(gc.scanner_mode, "local")
-        self.assertFalse(gc.judge.enabled)
-        self.assertEqual(gc.hook_fail_mode, "open")
-
-    def test_openclaw_does_not_use_observability_path(self):
+    def test_openclaw_uses_full_enforcement_path(self):
         """OpenClaw must fall through to the full enforcement-prompts
         path. We assert this by mocking ``click.prompt`` to raise — if
         the wizard reaches the enforcement-mode / scanner-engine /
@@ -297,14 +223,6 @@ class TestObservabilityWizard(unittest.TestCase):
              patch("defenseclaw.commands.cmd_setup.click.echo",
                    return_value=None):
             _interactive_guardrail_setup(app, gc, agent_name="openclaw")
-
-        # Either the wizard exited at "Enable guardrail?" (fine — first
-        # confirm was False) OR it walked into the prompt section. The
-        # critical guarantee is that ``codex_enforcement_enabled`` /
-        # ``claudecode_enforcement_enabled`` remain False (we never
-        # accidentally flip them ON for an openclaw install).
-        self.assertFalse(gc.codex_enforcement_enabled)
-        self.assertFalse(gc.claudecode_enforcement_enabled)
 
 
 if __name__ == "__main__":

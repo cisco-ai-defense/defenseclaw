@@ -272,50 +272,34 @@ func (s *stubConnector) VerifyClean(connector.SetupOpts) error { return nil }
 //   - skip the bind for openclaw (breaking every existing OpenClaw
 //     install on upgrade, since openclaw's data path goes through
 //     /v1/chat/completions on the proxy port).
-//
-// Each table row exercises one cell of (connector, enforcement
-// flags) → expected bind decision.
 func TestProxyShouldBindForConnector(t *testing.T) {
 	cases := []struct {
-		name          string
-		conn          connector.Connector
-		codexEnf      bool
-		claudeCodeEnf bool
-		expectBind    bool
+		name       string
+		conn       connector.Connector
+		expectBind bool
 	}{
-		{"codex_default_observability", &stubConnector{name: "codex"}, false, false, false},
-		{"codex_enforcement_on", &stubConnector{name: "codex"}, true, false, true},
-		{"claudecode_default_observability", &stubConnector{name: "claudecode"}, false, false, false},
-		{"claudecode_enforcement_on", &stubConnector{name: "claudecode"}, false, true, true},
-		// Sibling enforcement flag must NOT cross over: codex
-		// enforcement flipping on shouldn't change claudecode bind
-		// behavior.
-		{"claudecode_observability_with_codex_enf_on", &stubConnector{name: "claudecode"}, true, false, false},
-		// Always-bind connectors stay bound regardless of either flag.
-		{"openclaw_default", &stubConnector{name: "openclaw"}, false, false, true},
-		{"openclaw_with_codex_enf_off", &stubConnector{name: "openclaw"}, false, false, true},
-		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, false, false, true},
-		// New hook-only connectors do not bind the proxy listener in v1.
-		{"hermes_observability", &stubConnector{name: "hermes"}, false, false, false},
-		{"cursor_observability", &stubConnector{name: "cursor"}, false, false, false},
-		{"windsurf_observability", &stubConnector{name: "windsurf"}, false, false, false},
-		{"geminicli_observability", &stubConnector{name: "geminicli"}, false, false, false},
-		{"copilot_observability", &stubConnector{name: "copilot"}, false, false, false},
+		{"codex_observability", &stubConnector{name: "codex"}, false},
+		{"claudecode_observability", &stubConnector{name: "claudecode"}, false},
+		// Always-bind connectors stay bound.
+		{"openclaw_default", &stubConnector{name: "openclaw"}, true},
+		{"zeptoclaw_default", &stubConnector{name: "zeptoclaw"}, true},
+		// New hook-only connectors do not bind the proxy listener.
+		{"hermes_observability", &stubConnector{name: "hermes"}, false},
+		{"cursor_observability", &stubConnector{name: "cursor"}, false},
+		{"windsurf_observability", &stubConnector{name: "windsurf"}, false},
+		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
+		{"copilot_observability", &stubConnector{name: "copilot"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
-		{"unknown_connector", &stubConnector{name: "frobozz"}, false, false, true},
+		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
 		// Nil connector defends against a sidecar startup race where
 		// resolveActiveConnector returns nil before fallback kicks in.
-		{"nil_connector", nil, false, false, true},
+		{"nil_connector", nil, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			gc := &config.GuardrailConfig{
-				CodexEnforcementEnabled:      tc.codexEnf,
-				ClaudeCodeEnforcementEnabled: tc.claudeCodeEnf,
-			}
-			got := proxyShouldBindForConnector(tc.conn, gc)
+			got := proxyShouldBindForConnector(tc.conn, &config.GuardrailConfig{})
 			if got != tc.expectBind {
 				t.Errorf("proxyShouldBindForConnector(%v) = %v, want %v",
 					tc.name, got, tc.expectBind)
@@ -328,30 +312,24 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 	cases := []struct {
 		name      string
 		connector string
-		codexEnf  bool
-		claudeEnf bool
 		want      bool
 	}{
-		{"codex_observe", "codex", false, false, false},
-		{"codex_action", "codex", true, false, true},
-		{"claudecode_observe", "claudecode", false, false, false},
-		{"claudecode_action", "claudecode", false, true, true},
-		{"openclaw", "openclaw", false, false, true},
-		{"zeptoclaw", "zeptoclaw", false, false, true},
-		{"hermes", "hermes", false, false, false},
-		{"cursor", "cursor", false, false, false},
-		{"windsurf", "windsurf", false, false, false},
-		{"geminicli", "geminicli", false, false, false},
-		{"copilot", "copilot", false, false, false},
-		{"unknown", "frobozz", false, false, true},
+		{"codex", "codex", false},
+		{"claudecode", "claudecode", false},
+		{"openclaw", "openclaw", true},
+		{"zeptoclaw", "zeptoclaw", true},
+		{"hermes", "hermes", false},
+		{"cursor", "cursor", false},
+		{"windsurf", "windsurf", false},
+		{"geminicli", "geminicli", false},
+		{"copilot", "copilot", false},
+		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &config.Config{
 				Guardrail: config.GuardrailConfig{
-					Connector:                    tc.connector,
-					CodexEnforcementEnabled:      tc.codexEnf,
-					ClaudeCodeEnforcementEnabled: tc.claudeEnf,
+					Connector: tc.connector,
 				},
 			}
 			if got := proxyShouldBindForConfiguredConnector(cfg); got != tc.want {
@@ -666,22 +644,6 @@ func TestSidecarFleetRPCsEnabled(t *testing.T) {
 }
 
 func TestShouldRunProviderProbeForConnector(t *testing.T) {
-	t.Setenv("OPENAI_API_KEY", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
-
-	codexConn := connector.NewCodexConnector()
-	claudeConn := connector.NewClaudeCodeConnector()
-
-	for _, conn := range []connector.Connector{codexConn, claudeConn} {
-		probe, ok := conn.(connector.ProviderProbe)
-		if !ok {
-			t.Fatalf("%s does not implement ProviderProbe", conn.Name())
-		}
-		if _, err := probe.HasUsableProviders(); err == nil {
-			t.Fatalf("%s probe unexpectedly passed without upstream credentials; test no longer covers the SSO-only startup regression", conn.Name())
-		}
-	}
-
 	cases := []struct {
 		name string
 		conn connector.Connector
@@ -689,35 +651,16 @@ func TestShouldRunProviderProbeForConnector(t *testing.T) {
 		want bool
 	}{
 		{
-			name: "codex_observability_skips_probe",
-			conn: codexConn,
+			name: "codex_hook_only_skips_probe",
+			conn: &stubConnector{name: "codex"},
 			gc:   config.GuardrailConfig{Connector: "codex"},
 			want: false,
 		},
 		{
-			name: "codex_enforcement_runs_probe",
-			conn: codexConn,
-			gc: config.GuardrailConfig{
-				Connector:                    "codex",
-				CodexEnforcementEnabled:      true,
-				ClaudeCodeEnforcementEnabled: false,
-			},
-			want: true,
-		},
-		{
-			name: "claudecode_observability_skips_probe",
-			conn: claudeConn,
+			name: "claudecode_hook_only_skips_probe",
+			conn: &stubConnector{name: "claudecode"},
 			gc:   config.GuardrailConfig{Connector: "claudecode"},
 			want: false,
-		},
-		{
-			name: "claudecode_enforcement_runs_probe",
-			conn: claudeConn,
-			gc: config.GuardrailConfig{
-				Connector:                    "claudecode",
-				ClaudeCodeEnforcementEnabled: true,
-			},
-			want: true,
 		},
 		{
 			name: "openclaw_guardrail_runs_probe",
@@ -761,6 +704,26 @@ func (r *rollbackConnector) VerifyClean(connector.SetupOpts) error {
 	return nil
 }
 
+// fakeHookOwner is a minimal stubConnector that satisfies the
+// HookScriptOwner contract so the narrow verifyHookScriptsOrRetry path
+// can be exercised without a full builtin connector. setupCalls
+// counts Setup invocations so tests can assert the narrow retry path
+// never re-runs full Setup.
+type fakeHookOwner struct {
+	stubConnector
+	hooks      []string
+	setupCalls int
+}
+
+func (h *fakeHookOwner) HookScriptNames(connector.SetupOpts) []string {
+	return h.hooks
+}
+
+func (h *fakeHookOwner) Setup(_ context.Context, _ connector.SetupOpts) error {
+	h.setupCalls++
+	return nil
+}
+
 func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T) {
 	dir := t.TempDir()
 	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
@@ -775,6 +738,133 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 	}
 	if got := connector.LoadActiveConnector(dir); got != "codex" {
 		t.Fatalf("active connector = %q, want codex so future mode switches can retry teardown", got)
+	}
+}
+
+// TestFailGuardrailWithRollback_ChainsHealthAndTeardown locks the
+// sidecar fail-loud contract: both the conn.Setup() error branch and
+// the verifyHookScriptsOrRetry error branch in runGuardrail funnel
+// through failGuardrailWithRollback, which MUST (a) run Teardown +
+// VerifyClean via recordAndRollbackFailedConnectorSetup, (b) persist
+// the partially-installed connector name so the next boot can finish
+// cleaning up, (c) flip Guardrail health to StateError with the
+// wrapped error message visible to operators, and (d) return the
+// wrapped error so the sidecar errCh propagates it. A future refactor
+// that drops any of these steps fails this test loudly.
+func TestFailGuardrailWithRollback_ChainsHealthAndTeardown(t *testing.T) {
+	dir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+	s := &Sidecar{health: NewSidecarHealth()}
+
+	bootErr := fmt.Errorf("connector codex hook verification failed: missing [codex-hook.sh]")
+	got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{DataDir: dir}, conn, "hook verification", bootErr)
+	if got != bootErr {
+		t.Fatalf("failGuardrailWithRollback should return the input error verbatim, got: %v", got)
+	}
+	if !conn.teardownCalled {
+		t.Fatal("failGuardrailWithRollback did not chain into connector Teardown")
+	}
+	if !conn.verifyCalled {
+		t.Fatal("failGuardrailWithRollback did not chain into connector VerifyClean")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "codex" {
+		t.Fatalf("active connector state = %q, want codex (operator must see what failed on next boot)", got)
+	}
+	snap := s.health.Snapshot()
+	if snap.Guardrail.State != StateError {
+		t.Fatalf("Guardrail health state = %q, want %q", snap.Guardrail.State, StateError)
+	}
+	if !strings.Contains(snap.Guardrail.LastError, "missing [codex-hook.sh]") {
+		t.Errorf("Guardrail health LastError should surface the operator-visible cause, got: %q", snap.Guardrail.LastError)
+	}
+}
+
+// failGuardrailWithRollback must be a no-op when given nil inputs so
+// the caller never has to guard the call site itself.
+func TestFailGuardrailWithRollback_NilInputs(t *testing.T) {
+	s := &Sidecar{health: NewSidecarHealth()}
+	if got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{}, nil, "setup", fmt.Errorf("ignored")); got == nil {
+		t.Errorf("nil connector should still return the input error, got nil")
+	}
+	if got := s.failGuardrailWithRollback(context.Background(), connector.SetupOpts{}, &rollbackConnector{stubConnector: stubConnector{name: "x"}}, "setup", nil); got != nil {
+		t.Errorf("nil err should short-circuit and return nil, got: %v", got)
+	}
+}
+
+// When the retry hook writer cannot find the template (script name not
+// in the embedded FS), verifyHookScriptsOrRetry must wrap and surface
+// the error rather than silently swallowing it. The wrapped error must
+// mention the connector name so operator logs are diagnosable.
+func TestVerifyHookScriptsOrRetry_WrapsWriterError(t *testing.T) {
+	dir := t.TempDir()
+	conn := &fakeHookOwner{
+		stubConnector: stubConnector{name: "fakeconnector"},
+		hooks:         []string{"does-not-exist-in-embed.sh"},
+	}
+
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn)
+	if err == nil {
+		t.Fatal("expected error when hook writer cannot find embedded template")
+	}
+	if conn.setupCalls != 0 {
+		t.Fatalf("narrow retry must NOT re-run Setup; got %d Setup calls", conn.setupCalls)
+	}
+	if !strings.Contains(err.Error(), "fakeconnector") {
+		t.Errorf("error should name the failing connector, got: %v", err)
+	}
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("verifyHookScriptsOrRetry should not save active connector state, got %q", got)
+	}
+}
+
+// Happy-path retry: an owner whose hook script IS in the embedded FS
+// triggers a successful narrow hook-writer run, producing the missing
+// hook script on disk WITHOUT re-running Setup.
+func TestVerifyHookScriptsOrRetry_RestoresMissingHook(t *testing.T) {
+	dir := t.TempDir()
+	conn := connector.NewCodexConnector()
+
+	err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn)
+	if err != nil {
+		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "hooks", "codex-hook.sh")); err != nil {
+		t.Fatalf("restored hook missing: %v", err)
+	}
+	// Narrow retry must also lay down the generic inspect-*.sh helpers
+	// because the writer treats them as the shared baseline.
+	if _, err := os.Stat(filepath.Join(dir, "hooks", "inspect-tool.sh")); err != nil {
+		t.Fatalf("generic inspect-tool.sh missing after narrow retry: %v", err)
+	}
+}
+
+// When every owned hook is already on disk, verifyHookScriptsOrRetry
+// must skip the retry entirely. This is the common steady-state path
+// on gateway boot when nothing is wrong, and the test guards against a
+// regression where the writer is invoked unconditionally and either
+// thrashes disk or clobbers operator-edited content.
+func TestVerifyHookScriptsOrRetry_NoRetryWhenHooksPresent(t *testing.T) {
+	dir := t.TempDir()
+	conn := connector.NewCodexConnector()
+
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hooks: %v", err)
+	}
+	const seedSentinel = "# operator-seeded sentinel — not the embedded template\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(hookDir, "codex-hook.sh"), []byte(seedSentinel), 0o700); err != nil {
+		t.Fatalf("seed hook: %v", err)
+	}
+
+	if err := verifyHookScriptsOrRetry(context.Background(), connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}, conn); err != nil {
+		t.Fatalf("verifyHookScriptsOrRetry: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(hookDir, "codex-hook.sh"))
+	if err != nil {
+		t.Fatalf("re-read seeded hook: %v", err)
+	}
+	if string(body) != seedSentinel {
+		t.Errorf("seeded codex-hook.sh body was overwritten — retry path ran unexpectedly\ngot:\n%s", body)
 	}
 }
 
@@ -2345,40 +2435,22 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 	cases := []struct {
 		name             string
 		connector        string
-		codexEnforce     bool
-		claudeEnforce    bool
 		wantMode         string
 		wantIntercept    bool
 		wantTelemetryAll []string
 	}{
 		{
-			name:             "codex_observability_default",
+			name:             "codex_observability",
 			connector:        "codex",
 			wantMode:         "observability",
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel", "notify"},
 		},
 		{
-			name:             "codex_enforcement_explicit",
-			connector:        "codex",
-			codexEnforce:     true,
-			wantMode:         "guardrail",
-			wantIntercept:    true,
-			wantTelemetryAll: []string{"hooks", "otel", "notify"},
-		},
-		{
-			name:             "claudecode_observability_default",
+			name:             "claudecode_observability",
 			connector:        "claudecode",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
-		},
-		{
-			name:             "claudecode_enforcement_explicit",
-			connector:        "claudecode",
-			claudeEnforce:    true,
-			wantMode:         "guardrail",
-			wantIntercept:    true,
 			wantTelemetryAll: []string{"hooks", "otel"},
 		},
 		{
@@ -2414,8 +2486,6 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := &config.Config{}
 			cfg.Guardrail.Connector = c.connector
-			cfg.Guardrail.CodexEnforcementEnabled = c.codexEnforce
-			cfg.Guardrail.ClaudeCodeEnforcementEnabled = c.claudeEnforce
 
 			api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
 			req := httptest.NewRequest(http.MethodGet, "/status", nil)

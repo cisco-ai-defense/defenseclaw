@@ -179,7 +179,6 @@ class DoctorGuardrailTests(unittest.TestCase):
                 model="",
                 port=4000,
                 connector="codex",
-                codex_enforcement_enabled=False,
             ),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
@@ -221,7 +220,62 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.failed, 0)
         self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
-        self.assertIn("observability-only for geminicli", result.checks[0]["detail"])
+        # `_check_guardrail_proxy` now reports the mode alongside the
+        # connector so an operator reading `doctor` can immediately
+        # see whether the closed proxy port reflects an observe-mode
+        # configuration (no enforcement) or an action-mode one
+        # (enforcement runs through PreToolUse deny). The default
+        # GuardrailConfig in this fixture leaves ``gc.mode`` at the
+        # canonical ``"observe"`` default, so we expect the observe
+        # variant of the message here.
+        self.assertIn("hook-driven for geminicli", result.checks[0]["detail"])
+        self.assertIn("mode=observe", result.checks[0]["detail"])
+        self.assertIn("proxy port intentionally closed", result.checks[0]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_hook_only_connector_in_action_mode_reports_pretooluse_enforcement(self, mock_probe):
+        """Hook-enforced connector in action mode: the closed-port
+        detail must surface ``mode=action via PreToolUse deny`` so an
+        operator running `doctor` sees that enforcement IS happening
+        — the proxy is closed *because* the hook bus has taken over,
+        not because enforcement is off.
+
+        Regression: an earlier wording said ``observability-only`` for
+        every hook-enforced connector regardless of mode, which made
+        action-mode Codex / Claude Code installations look passive.
+        """
+        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                mode="action",
+                model="",
+                port=4000,
+                connector="codex",
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "codex"
+        result = _DoctorResult()
+
+        _check_guardrail_proxy(cfg, result)
+
+        # Action mode on a hook-enforced connector must NEVER probe
+        # the proxy port — the listener doesn't bind in this topology.
+        mock_probe.assert_not_called()
+        self.assertEqual(result.failed, 0)
+        self.assertEqual(result.warned, 0)
+        self.assertEqual(result.passed, 1)
+        detail = result.checks[0]["detail"]
+        self.assertIn("hook-enforced for codex", detail)
+        self.assertIn("mode=action via PreToolUse deny", detail)
+        self.assertIn("proxy port intentionally closed", detail)
 
     def test_hilt_disabled_is_pass(self):
         cfg = Config(
