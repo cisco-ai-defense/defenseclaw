@@ -316,10 +316,11 @@ func (c *CodexConnector) HookCapabilities(opts SetupOpts) HookCapability {
 // renderer canonicalizes header keys to lower-case so the resulting
 // TOML matches the wire format codex's deserializer expects.
 //
-// ResourceAttributes match the wire identity codex's native OTel
-// exporter publishes, so dashboards keyed on service.name see the
-// same value regardless of which channel (hook vs. native OTLP)
-// carried the event.
+// ServiceName / ResourceAttributes are intentionally omitted —
+// codex's documented [otel] schema doesn't accept those keys, and
+// codex emits its own richer identity tags (originator, model,
+// auth_mode, etc.) on every span/metric. See the inline comment in
+// the returned spec for the full rationale and links.
 //
 // LogUserPrompts is driven by the global redaction toggle: when the
 // operator has explicitly disabled redaction we flip codex's native
@@ -333,20 +334,43 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	if opts.APIToken != "" {
 		headers["x-defenseclaw-token"] = opts.APIToken
 	}
+	// Intentionally NOT setting ServiceName / ResourceAttributes
+	// on codex's NativeOTLPSpec — see F1 rationale below.
+	//
+	// Codex's documented [otel] TOML schema accepts exactly:
+	// environment, log_user_prompt, exporter, trace_exporter,
+	// metrics_exporter (and the per-exporter sub-tables). No
+	// service_name / resource_attributes key exists, and the
+	// schema is published as strict (see
+	// https://github.com/openai/codex/issues/17012). Writing those
+	// keys risks codex rejecting the config at startup.
+	//
+	// Codex's OTel SDK also emits its own intrinsic identity tags
+	// on every metric — auth_mode, originator, session_source,
+	// model, app.version — and uses different service.name values
+	// for its sub-processes (codex-app-server, codex_exec). Forcing
+	// service.name=codex from outside would COLLAPSE that natural
+	// distinction, making dashboards LESS useful than they are
+	// today. Operators who need to identify codex traffic should
+	// filter on the connector header (x-defenseclaw-source=codex)
+	// or on codex's intrinsic originator tag.
+	//
+	// The M3 work (consistent resource attributes across all
+	// connectors) applies to env-block-style connectors like
+	// claudecode where the agent's natural service.name would
+	// otherwise be useless to operators. For TOML/path-token
+	// connectors that already self-identify (codex, geminicli),
+	// the upstream tags are richer than anything we could
+	// synthesize from the outside.
 	return HookProfile{
 		Name:                "codex",
 		Capabilities:        c.HookCapabilities(opts),
 		SupportsTraceparent: true,
 		NativeOTLP: &NativeOTLPSpec{
-			Kind:        NativeOTLPTOMLBlock,
-			Endpoint:    "http://" + opts.APIAddr,
-			Protocol:    "json",
-			Headers:     headers,
-			ServiceName: "codex",
-			ResourceAttributes: map[string]string{
-				"service.name":          "codex",
-				"defenseclaw.connector": "codex",
-			},
+			Kind:           NativeOTLPTOMLBlock,
+			Endpoint:       "http://" + opts.APIAddr,
+			Protocol:       "json",
+			Headers:        headers,
 			LogUserPrompts: redaction.DisableAll(),
 		},
 		// Profile-driven callbacks consumed by the unified hook

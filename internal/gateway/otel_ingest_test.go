@@ -1028,6 +1028,17 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 	if canonical[0].SessionID != "turn-abc" {
 		t.Errorf("SessionID = %q, want %q (codex notify rows must fall back to turn-id when thread-id is absent)", canonical[0].SessionID, "turn-abc")
 	}
+	// F2: synthetic row must carry the same SessionID as the
+	// canonical row so SIEM joins on session_id correlate the
+	// pair. The synthetic row used to drop session_id because
+	// CorrelationMiddleware only sees the inbound HTTP headers
+	// (no X-DefenseClaw-Session-Id from notify-bridge.sh) and the
+	// payload-derived value was never threaded into the audit
+	// envelope. enrichAgentHookContext now refreshes the envelope
+	// so this assertion passes.
+	if synthetic[0].SessionID != "turn-abc" {
+		t.Errorf("synthetic row SessionID = %q, want %q (F2: must inherit from req.SessionID)", synthetic[0].SessionID, "turn-abc")
+	}
 	if strings.Contains(canonical[0].Details, body) {
 		t.Fatalf("Details stored raw notify body: %q", canonical[0].Details)
 	}
@@ -1129,6 +1140,14 @@ func TestCodexNotify_PrefersThreadIDForSessionCorrelation(t *testing.T) {
 	}
 	if got, want := canonical[0].SessionID, "thread-123"; got != want {
 		t.Fatalf("SessionID = %q, want %q", got, want)
+	}
+	// F2: synthetic row must carry the SAME session id as the
+	// canonical row, even when thread-id is preferred over
+	// turn-id. enrichAgentHookContext reads req.SessionID which
+	// codexNotifyToAgentHookRequest set from codexNotifySessionID,
+	// so the two rows MUST agree.
+	if got, want := synthetic[0].SessionID, "thread-123"; got != want {
+		t.Fatalf("synthetic row SessionID = %q, want %q (F2)", got, want)
 	}
 	if !strings.Contains(canonical[0].Details, "thread_id=") {
 		t.Fatalf("Details missing thread_id summary: %q", canonical[0].Details)

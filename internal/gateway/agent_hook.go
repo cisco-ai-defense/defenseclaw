@@ -289,9 +289,66 @@ func enrichAgentHookSpanSynthetic(ctx context.Context) {
 
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {
 	ctx = ContextWithSessionID(ctx, req.SessionID)
-	ctx = ContextWithAgentIdentity(ctx, agentIdentityForGenericHook(ctx, req))
+	identity := agentIdentityForGenericHook(ctx, req)
+	ctx = ContextWithAgentIdentity(ctx, identity)
+	// Refresh the audit correlation envelope with payload-derived
+	// correlation. CorrelationMiddleware snapshots the envelope
+	// from the HTTP headers BEFORE this handler runs; for hook
+	// connectors the session_id / agent_id arrive in the JSON
+	// body (the hook shell scripts don't set
+	// X-DefenseClaw-Session-Id), so without this refresh every
+	// audit row written by logConnectorHookAuditEnvelope would
+	// land with session_id=NULL and agent_id=NULL — defeating
+	// SIEM correlation between hook decisions and LLM events.
+	//
+	// MergeEnvelope's contract is "non-empty base fields always
+	// win"; we override that by clearing matching fields when the
+	// payload provides a more specific value, so a hook posted on
+	// a different session than the inbound header (the synthetic
+	// codex-notify path is the canonical case) takes precedence.
+	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
 	enrichHTTPSpanFromContext(ctx)
 	return ctx
+}
+
+// refreshAuditEnvelopeFromHook copies payload-derived correlation
+// fields (session_id, agent_id, agent_name, agent_instance_id) onto
+// the audit envelope stored in ctx, so every downstream
+// logger.LogActionCtx call writes the right row.
+//
+// Why not just overwrite the envelope unconditionally? Because the
+// middleware-set envelope may already carry tenant correlation the
+// payload doesn't know about (RunID, TraceID, RequestID, PolicyID,
+// DestinationApp). We refresh only the four hook-derived fields and
+// leave the rest of the envelope intact.
+//
+// Empty payload fields are no-ops — a hook event without a session
+// id still respects whatever the middleware resolved, so today's
+// rows that DO have a session id (because the operator stuck a
+// loadbalancer that injects the header) keep it.
+func refreshAuditEnvelopeFromHook(ctx context.Context, req agentHookRequest, identity AgentIdentity) context.Context {
+	env := audit.EnvelopeFromContext(ctx)
+	changed := false
+	if sid := strings.TrimSpace(req.SessionID); sid != "" && env.SessionID != sid {
+		env.SessionID = sid
+		changed = true
+	}
+	if aid := strings.TrimSpace(identity.AgentID); aid != "" && env.AgentID != aid {
+		env.AgentID = aid
+		changed = true
+	}
+	if name := strings.TrimSpace(identity.AgentName); name != "" && env.AgentName != name {
+		env.AgentName = name
+		changed = true
+	}
+	if instance := strings.TrimSpace(identity.AgentInstanceID); instance != "" && env.AgentInstanceID != instance {
+		env.AgentInstanceID = instance
+		changed = true
+	}
+	if !changed {
+		return ctx
+	}
+	return audit.ContextWithEnvelope(ctx, env)
 }
 
 func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) AgentIdentity {

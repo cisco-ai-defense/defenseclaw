@@ -94,6 +94,51 @@ deleted.
   panics on `nil` `warned` argument so a misuse cannot silently
   re-enable silent trust of loopback callers.
 
+### Follow-ups from live E2E testing (F1, F2)
+
+- **Codex `[otel]` block no longer carries `service_name` /
+  `resource_attributes` (F1).** Earlier review iterations of this PR
+  set both fields on `CodexConnector.HookProfile().NativeOTLPSpec` —
+  but codex's documented `[otel]` schema (see codex
+  config-reference) doesn't define those keys, and the published
+  schema is strict
+  ([openai/codex#17012](https://github.com/openai/codex/issues/17012)).
+  Writing them risks codex rejecting the operator's config at
+  startup.
+
+  Codex also already emits richer intrinsic identity tags
+  (`originator`, `model`, `auth_mode`, `app.version`,
+  `session_source`) and uses different `service.name` values for
+  its sub-processes (`codex-app-server`, `codex_exec`); forcing
+  `service.name=codex` from outside would have *collapsed* the
+  natural distinction. M3 (consistent resource attributes across
+  connectors) therefore applies only to env-block-style connectors
+  (claudecode); TOML/path-token connectors that self-identify
+  (codex, geminicli) keep their upstream tags.
+
+  `TestNativeOTLPShape_Codex` now asserts the *absence* of
+  `service_name` / `resource_attributes` so a future contributor
+  can't silently re-introduce the regression.
+- **Hook audit rows now carry `session_id` and `agent_id` (F2).**
+  `CorrelationMiddleware` snapshots the audit envelope from the
+  inbound HTTP headers — but no DefenseClaw-managed hook shell
+  script sets `X-DefenseClaw-Session-Id`, the session id always
+  arrives in the JSON payload. Result before F2: every audit row
+  written by `logConnectorHookAuditEnvelope` (`connector-hook` AND
+  `connector-hook-synthetic`) landed with `session_id=NULL` and
+  `agent_id=NULL`, defeating SIEM correlation between hook
+  decisions and the matching LLM events.
+
+  `enrichAgentHookContext` now refreshes the audit envelope with
+  `req.SessionID` and the resolved agent identity, so both regular
+  and synthetic hook rows correlate. Header-supplied identity is
+  preserved when the payload doesn't override (see
+  `TestRefreshAuditEnvelopeFromHook_*`).
+
+  Operators upgrading from a prior build will see
+  `session_id`/`agent_id` populate immediately on the next hook
+  event; pre-existing audit rows are not back-filled.
+
 ## [Previous-Unreleased] — Codex / Claude Code hook-only enforcement (no proxy data path)
 
 This rollup removes the LLM-proxy data path for the Codex and Claude

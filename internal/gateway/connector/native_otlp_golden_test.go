@@ -42,6 +42,13 @@ func fixedSetupOpts(t *testing.T) SetupOpts {
 // schema-required shape. Codex's deserializer is kebab-case and
 // rejects missing keys, so this test guards the four documented
 // top-level fields and the per-signal exporter sub-shape.
+//
+// Equally important: this test ASSERTS that we do not emit
+// service_name / resource_attributes keys. Codex's documented
+// schema does not define them (see codex config-reference) and
+// the published schema is published as strict (see
+// https://github.com/openai/codex/issues/17012). Writing them would
+// risk codex rejecting the operator's config at startup.
 func TestNativeOTLPShape_Codex(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
@@ -54,6 +61,20 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 	for _, want := range []string{"log_user_prompt", "exporter", "trace_exporter", "metrics_exporter"} {
 		if _, ok := block[want]; !ok {
 			t.Errorf("missing required codex [otel] key %q", want)
+		}
+	}
+
+	// Guard against accidentally re-adding service_name /
+	// resource_attributes — codex's [otel] schema does not accept
+	// them. If a future contributor wants codex telemetry tagged
+	// with defenseclaw resource attributes they have two options:
+	// (1) wrap codex's launch with an OTEL_* env var injection
+	// (out of scope for this connector — codex spawns its own
+	// subshells), or (2) lobby the codex team to add support for
+	// these keys in the [otel] schema.
+	for _, banned := range []string{"service_name", "resource_attributes", "service.name", "resource.attributes"} {
+		if _, present := block[banned]; present {
+			t.Errorf("codex [otel] must NOT carry %q — schema does not define it; see HookProfile rationale", banned)
 		}
 	}
 

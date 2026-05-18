@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -485,6 +486,116 @@ func TestAgentHookDispatch_RedactsReason(t *testing.T) {
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(got[0].Body, "AKIAIOSFODNN7EXAMPLE") {
 		t.Errorf("toast body must not contain raw AWS-key-shaped secret; got %q", got[0].Body)
+	}
+}
+
+// TestRefreshAuditEnvelopeFromHook_PropagatesPayloadCorrelation is the
+// focused F2 unit test. The CorrelationMiddleware can only stamp
+// fields the inbound request carries in headers, but hook payloads
+// carry session_id / agent_id in the JSON body — every audit row
+// written by logConnectorHookAuditEnvelope therefore dropped those
+// fields. The helper introduced for F2 refreshes the audit envelope
+// from req.SessionID + the resolved identity so downstream rows
+// correlate.
+func TestRefreshAuditEnvelopeFromHook_PropagatesPayloadCorrelation(t *testing.T) {
+	// Header-derived envelope simulates CorrelationMiddleware
+	// running first: it sees the trace/run/request ids the
+	// gateway is willing to expose but no session/agent because
+	// the hook scripts don't set X-DefenseClaw-Session-Id.
+	headerEnv := audit.CorrelationEnvelope{
+		RunID:     "run-abc",
+		TraceID:   "trace-def",
+		RequestID: "req-ghi",
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), headerEnv)
+
+	req := agentHookRequest{
+		ConnectorName: "codex",
+		HookEventName: "Stop",
+		SessionID:     "thread-123",
+		AgentID:       "agent-001",
+		AgentName:     "codex",
+	}
+	identity := AgentIdentity{
+		AgentID:         "agent-001",
+		AgentName:       "codex",
+		AgentInstanceID: "agent-instance-zzz",
+	}
+
+	got := audit.EnvelopeFromContext(refreshAuditEnvelopeFromHook(ctx, req, identity))
+
+	// Payload-derived fields must land on the envelope.
+	if got.SessionID != "thread-123" {
+		t.Errorf("SessionID = %q, want %q (payload-derived)", got.SessionID, "thread-123")
+	}
+	if got.AgentID != "agent-001" {
+		t.Errorf("AgentID = %q, want %q (identity-resolved)", got.AgentID, "agent-001")
+	}
+	if got.AgentName != "codex" {
+		t.Errorf("AgentName = %q, want %q", got.AgentName, "codex")
+	}
+	if got.AgentInstanceID != "agent-instance-zzz" {
+		t.Errorf("AgentInstanceID = %q, want %q", got.AgentInstanceID, "agent-instance-zzz")
+	}
+
+	// Header-derived fields must NOT be clobbered.
+	if got.RunID != "run-abc" {
+		t.Errorf("RunID = %q, want %q (refresh must not drop header-derived)", got.RunID, "run-abc")
+	}
+	if got.TraceID != "trace-def" {
+		t.Errorf("TraceID = %q, want %q", got.TraceID, "trace-def")
+	}
+	if got.RequestID != "req-ghi" {
+		t.Errorf("RequestID = %q, want %q", got.RequestID, "req-ghi")
+	}
+}
+
+// TestRefreshAuditEnvelopeFromHook_EmptyPayloadIsNoOp guards the
+// inverse path: when the hook payload has nothing to add (an inbound
+// header already populated everything, or the connector simply
+// doesn't expose those fields), the helper must not zero out the
+// envelope.
+func TestRefreshAuditEnvelopeFromHook_EmptyPayloadIsNoOp(t *testing.T) {
+	headerEnv := audit.CorrelationEnvelope{
+		SessionID: "session-from-header",
+		AgentID:   "agent-from-header",
+		AgentName: "agent-name-from-header",
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), headerEnv)
+
+	got := audit.EnvelopeFromContext(refreshAuditEnvelopeFromHook(
+		ctx,
+		agentHookRequest{ConnectorName: "codex"}, // no SessionID
+		AgentIdentity{},                          // no AgentID
+	))
+
+	if got.SessionID != "session-from-header" {
+		t.Errorf("SessionID = %q, want preserved %q", got.SessionID, "session-from-header")
+	}
+	if got.AgentID != "agent-from-header" {
+		t.Errorf("AgentID = %q, want preserved %q", got.AgentID, "agent-from-header")
+	}
+}
+
+// TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale guards the
+// synthetic-row case: when the inbound HTTP request carried a stale
+// session id (or no session id) and the payload supplies a fresher
+// one, the payload wins. This is what makes the connector-hook-
+// synthetic row track the canonical codex.notify.* row by session.
+func TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale(t *testing.T) {
+	headerEnv := audit.CorrelationEnvelope{
+		SessionID: "stale-session",
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), headerEnv)
+
+	got := audit.EnvelopeFromContext(refreshAuditEnvelopeFromHook(
+		ctx,
+		agentHookRequest{ConnectorName: "codex", SessionID: "thread-123"},
+		AgentIdentity{},
+	))
+
+	if got.SessionID != "thread-123" {
+		t.Errorf("SessionID = %q, want %q (payload must override stale header value)", got.SessionID, "thread-123")
 	}
 }
 
