@@ -116,10 +116,11 @@ from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
 
 setup.add_command(local_observability)
 
-# Import the Splunk O11y dashboard bundle command so it can be registered
-# under `defenseclaw setup splunk dashboards` after the Splunk group is
-# defined below.
+# Import the Terraform-backed Splunk O11y dashboard installer so the
+# interactive Splunk wizard can reuse the same idempotent apply path and
+# the command group can be registered below.
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E402
+    apply_dashboards,
     splunk_o11y_dashboards,
 )
 
@@ -128,12 +129,6 @@ from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E40
 # HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
 # disambiguation.
 from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
-
-# Import the Terraform-backed Splunk O11y dashboard installer so the
-# interactive Splunk wizard can reuse the same idempotent apply path.
-from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E402
-    apply_dashboards,
-)
 
 setup.add_command(webhook)
 

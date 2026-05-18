@@ -28,7 +28,6 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (
     _api_url_from_ingest_endpoint,
     splunk_o11y_dashboards,
@@ -178,7 +177,11 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                 return FakeResponse(
                     {
                         "charts": [
-                            {"id": "chart-1", "name": "Verdicts", "description": "All DefenseClaw gateway verdicts in the selected time range."}
+                            {
+                                "id": "chart-1",
+                                "name": "Verdicts",
+                                "description": "All DefenseClaw gateway verdicts in the selected time range.",
+                            }
                         ]
                     }
                 )
@@ -232,8 +235,22 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
         self.assertEqual(
             import_cmds,
             [
-                ["terraform", "import", "-input=false", f"-state={tmp_path / 'state' / 'terraform.tfstate'}", "signalfx_dashboard_group.defenseclaw_o11y", "dg-1"],
-                ["terraform", "import", "-input=false", f"-state={tmp_path / 'state' / 'terraform.tfstate'}", "signalfx_dashboard.executive", "db-1"],
+                [
+                    "terraform",
+                    "import",
+                    "-input=false",
+                    f"-state={tmp_path / 'state' / 'terraform.tfstate'}",
+                    "signalfx_dashboard_group.defenseclaw_o11y",
+                    "dg-1",
+                ],
+                [
+                    "terraform",
+                    "import",
+                    "-input=false",
+                    f"-state={tmp_path / 'state' / 'terraform.tfstate'}",
+                    "signalfx_dashboard.executive",
+                    "db-1",
+                ],
             ],
         )
 
@@ -346,7 +363,14 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         import_cmds = [call["cmd"] for call in calls if call["cmd"][1] == "import"]
         self.assertIn(
-            ["terraform", "import", "-input=false", f"-state={tmp_path / 'state' / 'terraform.tfstate'}", "signalfx_dashboard_group.defenseclaw_o11y", "dg-best"],
+            [
+                "terraform",
+                "import",
+                "-input=false",
+                f"-state={tmp_path / 'state' / 'terraform.tfstate'}",
+                "signalfx_dashboard_group.defenseclaw_o11y",
+                "dg-best",
+            ],
             import_cmds,
         )
 
