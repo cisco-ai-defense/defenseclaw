@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -49,18 +50,28 @@ func init() {
 	rootCmd.AddCommand(auditCmd)
 }
 
-// auditActionEnum is the allow-list from schemas/audit-event.json (action field).
-var auditActionEnum = map[string]struct{}{
-	"init": {}, "stop": {}, "ready": {}, "scan": {}, "scan-start": {}, "rescan": {}, "rescan-start": {},
-	"block": {}, "allow": {}, "warn": {}, "quarantine": {}, "restore": {}, "disable": {}, "enable": {},
-	"deploy": {}, "drift": {}, "network-egress-blocked": {}, "network-egress-allowed": {},
-	"guardrail-block": {}, "guardrail-warn": {}, "guardrail-allow": {},
-	"approval-request": {}, "approval-granted": {}, "approval-denied": {},
-	"tool-call": {}, "tool-result": {},
-	"config-update": {}, "policy-update": {}, "policy-reload": {}, "action": {},
-	"acknowledge-alerts": {}, "dismiss-alerts": {},
-	"webhook-delivered": {}, "webhook-failed": {}, "sink-failure": {}, "sink-restored": {},
-	"alert": {},
+// isKnownAuditAction reports whether s is a registered action recognized by
+// the v7 schema. It delegates to internal/audit (the canonical registry) so
+// this exporter never drifts from the source of truth again — every action
+// added to internal/audit/actions.go is automatically accepted here without a
+// second list to maintain.
+//
+// Historically a hand-maintained `auditActionEnum` map lived here and silently
+// fell behind whenever a new action (e.g. connector-hook,
+// connector-hook-synthetic, codex.notify.*) was registered. That caused
+// `defenseclaw audit export` to remap perfectly valid hook rows to
+// `action: "action"` with the original value tucked into
+// `legacy_action=…` inside the details blob, breaking SIEM dashboards that
+// keyed on the actual action. Routing through audit.IsKnownAction +
+// audit.IsKnownActionPrefix permanently closes that drift gap.
+func isKnownAuditAction(s string) bool {
+	if audit.IsKnownAction(s) {
+		return true
+	}
+	if audit.IsKnownActionPrefix(s) {
+		return true
+	}
+	return false
 }
 
 func runAuditExport(_ *cobra.Command, _ []string) error {
@@ -314,7 +325,7 @@ func normalizeSeverity(s string) string {
 
 func normalizeAuditAction(action, details string) (string, string) {
 	a := strings.TrimSpace(action)
-	if _, ok := auditActionEnum[a]; ok {
+	if isKnownAuditAction(a) {
 		return a, details
 	}
 	prefix := "legacy_action=" + a
@@ -336,7 +347,7 @@ func validateAuditEventMap(ev map[string]any) error {
 		return fmt.Errorf("invalid audit event: missing timestamp")
 	}
 	act, _ := ev["action"].(string)
-	if _, ok := auditActionEnum[act]; !ok {
+	if !isKnownAuditAction(act) {
 		return fmt.Errorf("invalid audit event: unknown action %q", act)
 	}
 	sev, _ := ev["severity"].(string)
