@@ -201,6 +201,16 @@ func LoadAllOTLPPathTokens(dataDir string) (map[OTLPPathTokenScope]string, error
 	return out, nil
 }
 
+// IsValidOTLPScope reports whether scope is in the closed allow-list of
+// known per-source OTLP scopes. Exposed so the gateway's lazy reload path
+// (api.go lookupOTLPPathToken) can decline disk I/O for arbitrary path
+// segments — the OTLP receiver receives the source segment straight from
+// the URL, so we MUST refuse to touch disk for typos, fuzzing probes, or
+// random scope strings.
+func IsValidOTLPScope(scope OTLPPathTokenScope) bool {
+	return validOTLPScope(scope)
+}
+
 func validOTLPScope(scope OTLPPathTokenScope) bool {
 	if !otlpScopeRE.MatchString(string(scope)) {
 		return false

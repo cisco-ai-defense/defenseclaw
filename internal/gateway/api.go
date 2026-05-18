@@ -79,13 +79,19 @@ type APIServer struct {
 	// the path-token branch in tokenAuth), so the map is held under
 	// an RWMutex to keep the hot path lock-free for readers.
 	//
-	// The map is populated lazily: SetOTLPPathTokens replaces the
-	// snapshot when the sidecar boots after a connector setup
-	// minted a new token; lookupOTLPPathToken treats an absent
-	// scope as "no scoped token configured" and falls through to
-	// the master-token comparison.
-	otlpPathTokenMu sync.RWMutex
-	otlpPathTokens  map[connector.OTLPPathTokenScope]string
+	// The map is populated at boot by SetOTLPPathTokens AND refreshed
+	// lazily by lookupOTLPPathToken on cache miss for KNOWN scopes —
+	// the latter closes the boot-vs-setup race where the sidecar boots
+	// with an empty/stale map, the operator subsequently runs
+	// `defenseclaw setup geminicli` (which mints a fresh on-disk
+	// token), and the next OTLP request would otherwise 401 because the
+	// in-memory snapshot hasn't been refreshed. The reload is rate-
+	// limited per scope by otlpPathTokenReloadAt below so a hostile or
+	// noisy caller cannot turn the auth path into a per-request disk
+	// stampede.
+	otlpPathTokenMu        sync.RWMutex
+	otlpPathTokens         map[connector.OTLPPathTokenScope]string
+	otlpPathTokenReloadAt  map[connector.OTLPPathTokenScope]time.Time
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
@@ -152,24 +158,86 @@ func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]st
 	a.otlpPathTokens = cp
 }
 
+// otlpPathTokenReloadMinInterval bounds disk I/O on the loopback OTLP auth
+// path. After a cache miss for a known scope we re-read the on-disk token
+// file at most once per scope per this interval; the next miss before the
+// interval elapses returns "" (request 401s) without touching disk. 500ms
+// is short enough that the very next OTLP retry after `defenseclaw setup
+// geminicli` succeeds in real operator workflows, and long enough that an
+// attacker probing /otlp/geminicli/<random>/v1/* cannot weaponise the
+// reload into a disk DoS.
+const otlpPathTokenReloadMinInterval = 500 * time.Millisecond
+
 // lookupOTLPPathToken returns the per-source scoped OTLP path-token
 // for *source*, or "" when no token has been provisioned for that
 // source. *source* is the URL segment from
 // /otlp/<source>/<token>/v1/<signal>; it is matched against the
 // closed allow-list of known OTLPPathTokenScope values so an
 // attacker cannot trigger a map lookup against arbitrary scopes.
+//
+// On cache miss for a KNOWN scope this method attempts a single
+// rate-limited disk reload via connector.LoadOTLPPathToken (F4 fix):
+// the sidecar's boot-time SetOTLPPathTokens snapshot would otherwise
+// stay stale forever after a subsequent `defenseclaw setup geminicli`
+// mint, breaking Gemini's loopback OTLP exporter even though the
+// settings.json the operator just wrote contains the correct value.
+// Unknown scopes never trigger disk I/O.
 func (a *APIServer) lookupOTLPPathToken(source string) string {
+	scope := connector.OTLPPathTokenScope(source)
+
+	// Fast path: read under RLock.
 	a.otlpPathTokenMu.RLock()
-	defer a.otlpPathTokenMu.RUnlock()
-	if a.otlpPathTokens == nil {
+	if a.otlpPathTokens != nil {
+		if tok := a.otlpPathTokens[scope]; tok != "" {
+			a.otlpPathTokenMu.RUnlock()
+			return tok
+		}
+	}
+	a.otlpPathTokenMu.RUnlock()
+
+	// Slow path: cache miss. Only refresh from disk for scopes the
+	// gateway actually knows about. This prevents fuzzers and typo'd
+	// URLs from turning the auth check into a disk-stampede primitive.
+	if !connector.IsValidOTLPScope(scope) {
 		return ""
 	}
-	scope := connector.OTLPPathTokenScope(source)
-	// We deliberately do not validate scope membership here — the
-	// map only contains scopes that were already validated when
-	// SetOTLPPathTokens populated it, so an unknown source segment
-	// simply misses the map and returns "".
-	return a.otlpPathTokens[scope]
+	dataDir := a.configDataDir()
+	if dataDir == "" {
+		return ""
+	}
+
+	a.otlpPathTokenMu.Lock()
+	defer a.otlpPathTokenMu.Unlock()
+
+	// Double-check after upgrading the lock — another goroutine may
+	// have reloaded while we were waiting.
+	if a.otlpPathTokens != nil {
+		if tok := a.otlpPathTokens[scope]; tok != "" {
+			return tok
+		}
+	}
+	// Rate-limit per-scope reloads so a flood of misses doesn't issue
+	// one disk read per request.
+	if a.otlpPathTokenReloadAt != nil {
+		if last, ok := a.otlpPathTokenReloadAt[scope]; ok &&
+			time.Since(last) < otlpPathTokenReloadMinInterval {
+			return ""
+		}
+	}
+	if a.otlpPathTokenReloadAt == nil {
+		a.otlpPathTokenReloadAt = make(map[connector.OTLPPathTokenScope]time.Time)
+	}
+	a.otlpPathTokenReloadAt[scope] = time.Now()
+
+	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
+	if err != nil || tok == "" {
+		return ""
+	}
+	if a.otlpPathTokens == nil {
+		a.otlpPathTokens = make(map[connector.OTLPPathTokenScope]string)
+	}
+	a.otlpPathTokens[scope] = tok
+	return tok
 }
 
 func (a *APIServer) SetHILTApprovalManager(m *HILTApprovalManager) {
