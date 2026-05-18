@@ -92,6 +92,26 @@ Claude Code now talk directly to their native upstreams in both
 - Migration is idempotent and runs automatically on
   `defenseclaw upgrade`. Failures are logged via `defenseclaw
   doctor --fix` and never block the upgrade.
+- **`defenseclaw setup codex` now heals pre-PR-#265 installs in place.**
+  The legacy setup rewrote `~/.codex/config.toml`'s top-level
+  `openai_base_url` to `http://127.0.0.1:<port>/c/codex`. PR #265
+  deleted the matching proxy mount but left the operator's
+  `config.toml` carrying a now-broken value, so every Codex turn
+  failed with `stream disconnected before completion` against the
+  closed loopback port. `patchCodexConfig` now strips any
+  `openai_base_url` whose URL shape matches the loopback `/c/codex`
+  pattern DefenseClaw itself wrote (scheme `http(s)`, host
+  `127.0.0.1` / `localhost` / `::1`, path beginning `/c/codex`). An
+  operator's enterprise gateway URL is preserved unchanged —
+  `TestCodex_Setup_DefaultObservability_NoProxyRewrite` continues
+  to gate that contract, and `TestIsDefenseClawCodexProxyRedirect`
+  pins the strip detector's full accept/reject surface.
+- **Known follow-up:** `Teardown` does not yet apply the same heal,
+  so `defenseclaw teardown codex` against a pre-PR-#265 install can
+  restore the stale `openai_base_url` from the managed-file backup
+  snapshot captured at the original Setup. Operators uninstalling
+  DefenseClaw should re-run `setup codex` once before `teardown`,
+  or hand-strip the line. Tracked as the immediate next PR.
 
 ### Tests
 

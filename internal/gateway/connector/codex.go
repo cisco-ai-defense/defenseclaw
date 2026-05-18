@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -378,6 +379,36 @@ var codexHookGroups = []struct {
 	{"Stop", "", 90},
 }
 
+// isDefenseClawCodexProxyRedirect reports whether v is the loopback
+// LLM-proxy URL DefenseClaw itself wrote into ~/.codex/config.toml on
+// pre-PR-#265 installs. Matching is strict on three axes so an
+// operator's enterprise gateway URL is never mistaken for ours:
+//
+//   - scheme must be http or https (rejects file://, ws://, etc.)
+//   - host must be loopback (127.0.0.1, ::1, or the literal "localhost")
+//   - path must begin with /c/codex (the legacy proxy mount point)
+//
+// Any port is accepted because the historical default of :4000 was
+// configurable via `setup` and operators may have overridden it.
+func isDefenseClawCodexProxyRedirect(v string) bool {
+	u, err := url.Parse(strings.TrimSpace(v))
+	if err != nil {
+		return false
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "127.0.0.1", "::1", "localhost":
+	default:
+		return false
+	}
+	path := strings.TrimSuffix(u.Path, "/")
+	return path == "/c/codex" || strings.HasPrefix(path, "/c/codex/")
+}
+
 func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) error {
 	configPath := codexConfigPath()
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
@@ -393,6 +424,22 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		if err := toml.Unmarshal(raw, &cfg); err != nil {
 			return fmt.Errorf("parse codex config: %w", err)
 		}
+	}
+
+	// Heal pre-PR-#265 installs that injected a DefenseClaw LLM-proxy
+	// redirect at the top-level `openai_base_url`. The proxy listener
+	// no longer binds (the value points at a closed loopback port), so
+	// leaving the key in place causes every Codex turn to fail with
+	// "stream disconnected before completion" against the dead
+	// 127.0.0.1:<port>/c/codex endpoint.
+	//
+	// The strip is intentionally narrow: it only deletes values whose
+	// URL shape matches the loopback /c/codex pattern DefenseClaw
+	// itself wrote. An operator's enterprise gateway URL (e.g.
+	// https://gateway.corp.example/openai) is preserved and continues
+	// to be covered by TestCodex_Setup_DefaultObservability_NoProxyRewrite.
+	if v, ok := cfg["openai_base_url"].(string); ok && isDefenseClawCodexProxyRedirect(v) {
+		delete(cfg, "openai_base_url")
 	}
 
 	backupPath := filepath.Join(opts.DataDir, "codex_config_backup.json")
