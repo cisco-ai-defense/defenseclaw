@@ -355,7 +355,11 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		// file (~/.defenseclaw/judge_bodies.db by default). Falling
 		// back to audit.db on open failure keeps the sidecar
 		// running — better to share the write lock than to drop
-		// judge rows entirely.
+		// judge rows entirely. The fallback is announced via the
+		// structured audit logger (`gateway.judge_bodies.fallback`)
+		// so operators see it in the same Splunk/OTLP stream that
+		// surfaces the `defenseclaw.sqlite.busy_retries` regression
+		// the fallback re-enables.
 		bodyDBPath := strings.TrimSpace(cfg.JudgeBodiesDB)
 		if bodyDBPath == "" {
 			bodyDBPath = filepath.Join(cfg.DataDir, config.DefaultJudgeBodiesDBName)
@@ -364,9 +368,30 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		if bs, openErr := audit.NewJudgeBodyStore(bodyDBPath); openErr == nil {
 			judgeBodyStore = bs
 			inserter = &judgeBodyStoreInserter{s: bs}
-			fmt.Fprintf(os.Stderr, "[sidecar] judge bodies db: %s\n", bodyDBPath)
+			if logger != nil {
+				_ = logger.LogEvent(audit.Event{
+					Action:   "gateway.judge_bodies.ready",
+					Actor:    "defenseclaw-gateway",
+					Severity: "INFO",
+					Details:  "path=" + bodyDBPath,
+				})
+			}
 		} else {
-			fmt.Fprintf(os.Stderr, "[sidecar] judge bodies db open failed, falling back to audit.db: %v\n", openErr)
+			if logger != nil {
+				_ = logger.LogEvent(audit.Event{
+					Action:   "gateway.judge_bodies.fallback",
+					Actor:    "defenseclaw-gateway",
+					Severity: "ERROR",
+					Details: fmt.Sprintf(
+						"path=%s error=%v fallback=audit.db",
+						bodyDBPath, openErr,
+					),
+				})
+			} else {
+				// Boot-time fallback: logger isn't wired yet. Stderr
+				// is the best we have until the sidecar is fully up.
+				fmt.Fprintf(os.Stderr, "[sidecar] judge bodies db open failed, falling back to audit.db: %v\n", openErr)
+			}
 			inserter = &auditStoreInserter{s: store}
 		}
 		// Async judge persistence: rows queue on a buffered channel
@@ -553,20 +578,62 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	// pathological DB doesn't wedge the process; drops still
 	// surface as defenseclaw.judge.persist.drops with
 	// reason="shutdown" if we run out of time.
+	judgeStoreClosed := true
 	if s.judgeStore != nil {
 		// Detach from the global so any post-drain emit path sees a
 		// nil store instead of racing the worker.
 		SetJudgeResponseStore(nil)
 		if err := s.judgeStore.Shutdown(ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] judge-store drain: %v\n", err)
+			if s.logger != nil {
+				_ = s.logger.LogEvent(audit.Event{
+					Action:   "gateway.judge_store.drain_timeout",
+					Actor:    "defenseclaw-gateway",
+					Severity: "ERROR",
+					Details:  "error=" + err.Error(),
+				})
+			} else {
+				fmt.Fprintf(os.Stderr, "[sidecar] judge-store drain: %v\n", err)
+			}
 		}
+		// Even on a returned error, the worker eventually drains. We
+		// MUST NOT close the underlying DB until IsClosed() is true,
+		// otherwise the worker hits a use-after-close on tx.Commit /
+		// tx.Insert and either panics or corrupts the connection
+		// pool. IsClosed becomes true the instant doneCh is closed
+		// (the worker's only defer).
+		judgeStoreClosed = s.judgeStore.IsClosed()
 	}
 	// Close the dedicated judge-bodies DB AFTER the queue has drained
 	// so the worker's final batch lands on disk before we drop the
-	// connection. audit.Logger.Close() below still flushes audit.db.
+	// connection. If Shutdown timed out and the worker is still
+	// inside a tx, skipping Close is the only safe option — the OS
+	// reclaims the file handle on process exit (which is imminent
+	// for a SIGTERM-driven Stop path) and the alternative is a
+	// guaranteed panic on the writer goroutine. audit.Logger.Close()
+	// below still flushes audit.db.
 	if s.judgeBodyStore != nil {
-		if err := s.judgeBodyStore.Close(); err != nil {
-			fmt.Fprintf(os.Stderr, "[sidecar] judge-bodies db close: %v\n", err)
+		if !judgeStoreClosed {
+			if s.logger != nil {
+				_ = s.logger.LogEvent(audit.Event{
+					Action:   "gateway.judge_bodies.close_skipped",
+					Actor:    "defenseclaw-gateway",
+					Severity: "ERROR",
+					Details:  "reason=worker_still_running",
+				})
+			} else {
+				fmt.Fprintf(os.Stderr, "[sidecar] judge-bodies db close skipped: worker still running\n")
+			}
+		} else if err := s.judgeBodyStore.Close(); err != nil {
+			if s.logger != nil {
+				_ = s.logger.LogEvent(audit.Event{
+					Action:   "gateway.judge_bodies.close_error",
+					Actor:    "defenseclaw-gateway",
+					Severity: "ERROR",
+					Details:  "error=" + err.Error(),
+				})
+			} else {
+				fmt.Fprintf(os.Stderr, "[sidecar] judge-bodies db close: %v\n", err)
+			}
 		}
 	}
 	s.logger.Close()

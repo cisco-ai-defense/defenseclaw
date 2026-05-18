@@ -18,7 +18,9 @@ package audit
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -290,4 +292,116 @@ func intToString(i int) string {
 		i /= 10
 	}
 	return digits
+}
+
+// TestJudgeBodyStore_CreatesParentDirAndChmod pins the M6 fix:
+// NewJudgeBodyStore is responsible for the full filesystem hygiene
+// of the dedicated judge-bodies DB, including creating any missing
+// parent directories with 0700 perms and tightening the SQLite file
+// to 0600. Without this, the store either failed to open against a
+// fresh data dir (production regression) OR left judge bodies
+// world-readable on multi-user hosts (privacy regression).
+//
+// Skipped on Windows where Unix-style perm bits do not apply.
+func TestJudgeBodyStore_CreatesParentDirAndChmod(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits not applicable on Windows")
+	}
+	base := t.TempDir()
+	// Two missing levels of parent dir: forces MkdirAll to actually
+	// do work. Mirrors the production case where ~/.defenseclaw/
+	// already exists but a future subdir layout doesn't.
+	dbPath := filepath.Join(base, "missing", "deeper", "judge_bodies.db")
+
+	store, err := NewJudgeBodyStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewJudgeBodyStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	parentInfo, err := os.Stat(filepath.Dir(dbPath))
+	if err != nil {
+		t.Fatalf("stat parent dir: %v", err)
+	}
+	if mode := parentInfo.Mode().Perm(); mode != 0o700 {
+		t.Fatalf("parent dir mode = %o, want 0700 (regression: judge bodies dir would be world-readable)", mode)
+	}
+
+	fileInfo, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat db file: %v", err)
+	}
+	if mode := fileInfo.Mode().Perm(); mode != 0o600 {
+		t.Fatalf("db file mode = %o, want 0600 (regression: judge bodies file would be world-readable)", mode)
+	}
+}
+
+// TestJudgeBodyStore_RejectsEmptyPath ensures NewJudgeBodyStore
+// returns a deterministic error for the misconfiguration case
+// instead of silently writing to "./judge_bodies.db" (which the
+// old code path would have done after we added MkdirAll on an
+// empty Dir()).
+func TestJudgeBodyStore_RejectsEmptyPath(t *testing.T) {
+	if _, err := NewJudgeBodyStore(""); err == nil {
+		t.Fatal("NewJudgeBodyStore(\"\") = nil, expected error")
+	}
+	if _, err := NewJudgeBodyStore("   "); err == nil {
+		t.Fatal("NewJudgeBodyStore(\"   \") = nil, expected error (whitespace)")
+	}
+}
+
+// TestJudgeBodyStore_OpenErrorTier covers the L11 fix: the open-time
+// error tier ("judge_body:") must NOT bleed through the shared
+// openSQLite helper's "audit:" prefix. Operators triage by tier
+// label; a wrong tier sends them to the wrong runbook.
+func TestJudgeBodyStore_OpenErrorTier(t *testing.T) {
+	// Create the parent dir as a file rather than a directory so
+	// MkdirAll fails inside NewJudgeBodyStore. This exercises the
+	// pre-open failure path; we don't need openSQLite to fail to
+	// validate the error tier.
+	parent := filepath.Join(t.TempDir(), "block")
+	if err := os.WriteFile(parent, []byte("not a dir"), 0o600); err != nil {
+		t.Fatalf("seed block file: %v", err)
+	}
+	dbPath := filepath.Join(parent, "judge_bodies.db")
+	_, err := NewJudgeBodyStore(dbPath)
+	if err == nil {
+		t.Fatal("expected error opening into a file path, got nil")
+	}
+	if !strings.HasPrefix(err.Error(), "judge_body:") {
+		t.Fatalf("error tier = %q, want prefix \"judge_body:\" (regression: L11)", err.Error())
+	}
+	if strings.Contains(err.Error(), "audit:") {
+		t.Fatalf("error message leaks audit tier: %q (regression: L11)", err.Error())
+	}
+}
+
+// TestJudgeBodyStore_InsertJudgeResponseCtx covers the L10 fix:
+// the context-aware single-row variant must thread cancellation
+// through to the underlying retryBusy loop. A pre-cancelled
+// context returns the cancellation error promptly instead of
+// proceeding to write.
+func TestJudgeBodyStore_InsertJudgeResponseCtx(t *testing.T) {
+	store, err := NewJudgeBodyStore(filepath.Join(t.TempDir(), "judge_bodies.db"))
+	if err != nil {
+		t.Fatalf("NewJudgeBodyStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	row := JudgeResponse{
+		Kind: "llm-judge",
+		Raw:  `{"verdict":"allow"}`,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.InsertJudgeResponseCtx(ctx, row); err == nil {
+		t.Fatal("InsertJudgeResponseCtx(cancelled) = nil, want error (regression: L10)")
+	}
+
+	// Sanity: the original (non-ctx) entry-point still works against
+	// the same store after a cancellation attempt — we did not corrupt
+	// state.
+	if err := store.InsertJudgeResponse(row); err != nil {
+		t.Fatalf("InsertJudgeResponse (post-cancel sanity): %v", err)
+	}
 }

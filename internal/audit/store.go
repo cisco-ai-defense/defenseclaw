@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -231,12 +232,45 @@ func NewStore(dbPath string) (*Store, error) {
 	return st, nil
 }
 
+// sqliteCoded is the structural interface implemented by the
+// modernc.org/sqlite *Error type (Code() int returns the underlying
+// SQLite result code). We match on it via errors.As so the
+// detection survives error-wrapping (fmt.Errorf("...: %w", err))
+// and stays decoupled from the concrete driver type.
+type sqliteCoded interface {
+	Code() int
+}
+
+// SQLite result codes we treat as "transient contention; safe to
+// retry". Values mirror modernc.org/sqlite/lib (SQLITE_BUSY = 5,
+// SQLITE_LOCKED = 6). Hard-coded here to avoid pulling the driver
+// into a typed import that the rest of the package doesn't need.
+const (
+	sqliteCodeBusy   = 5
+	sqliteCodeLocked = 6
+)
+
+// isSQLiteBusy reports whether err signals transient SQLite write
+// contention. We check the driver's result code first (the
+// authoritative source) and fall back to a substring match so the
+// detection stays robust against driver versions that surface BUSY
+// only in the rendered message (older modernc releases, or third-
+// party drivers that wrap errors before returning them).
 func isSQLiteBusy(err error) bool {
 	if err == nil {
 		return false
 	}
+	var coded sqliteCoded
+	if errors.As(err, &coded) {
+		switch coded.Code() {
+		case sqliteCodeBusy, sqliteCodeLocked:
+			return true
+		}
+	}
 	s := err.Error()
-	return strings.Contains(s, "database is locked") || strings.Contains(s, "SQLITE_BUSY")
+	return strings.Contains(s, "database is locked") ||
+		strings.Contains(s, "SQLITE_BUSY") ||
+		strings.Contains(s, "SQLITE_LOCKED")
 }
 
 // SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
@@ -1608,9 +1642,16 @@ func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
 	return nil
 }
 
-// Commit closes the transaction. After Commit returns, every
-// subsequent method call on this handle is a no-op error so a buggy
-// caller cannot accidentally double-commit.
+// Commit closes the transaction. We only flip b.committed=true on
+// SUCCESS; a failed Commit leaves the handle in a state where the
+// caller's Rollback() will still drive tx.Rollback() to release the
+// connection. Without that order the connection can stay pinned in
+// "transaction-in-progress" mode until the *sql.DB pool closes the
+// underlying connection, blocking subsequent writes.
+//
+// After a successful Commit, every subsequent Commit/Rollback call
+// on this handle is a no-op so a buggy caller cannot accidentally
+// double-commit.
 func (b *JudgeBatch) Commit() error {
 	if b == nil || b.tx == nil {
 		return fmt.Errorf("audit: judge batch handle is nil")
@@ -1618,12 +1659,19 @@ func (b *JudgeBatch) Commit() error {
 	if b.committed {
 		return nil
 	}
+	if err := b.tx.Commit(); err != nil {
+		return err
+	}
 	b.committed = true
-	return b.tx.Commit()
+	return nil
 }
 
-// Rollback is the cleanup path on commit failure. Idempotent so the
-// worker can call it without tracking whether Commit ran.
+// Rollback is the cleanup path on commit failure or per-row error.
+// Idempotent so the worker can call it without tracking whether
+// Commit already ran successfully (in which case Rollback is a
+// no-op). When Commit FAILED, b.committed stays false and we
+// genuinely drive tx.Rollback() — which is the bug-fix that keeps
+// the SQLite connection from being pinned mid-tx.
 func (b *JudgeBatch) Rollback() error {
 	if b == nil || b.tx == nil {
 		return nil
@@ -1631,6 +1679,10 @@ func (b *JudgeBatch) Rollback() error {
 	if b.committed {
 		return nil
 	}
+	// Mark committed BEFORE calling tx.Rollback so a concurrent
+	// retry (or a buggy double-call) doesn't fire two rollbacks
+	// on the same handle, which would surface as
+	// "sql: transaction has already been committed or rolled back".
 	b.committed = true
 	return b.tx.Rollback()
 }

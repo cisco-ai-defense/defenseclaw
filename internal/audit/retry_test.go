@@ -19,6 +19,8 @@ package audit
 import (
 	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
 	"testing"
 )
 
@@ -139,5 +141,136 @@ func TestExecDB_RetriesAndPropagates(t *testing.T) {
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		"abc", "2026-01-01T00:00:00Z", "test", "x", "y", "", "INFO"); err != nil {
 		t.Fatalf("execDB success path failed: %v", err)
+	}
+}
+
+// codedErr is a test double that implements the structural
+// sqliteCoded interface (Code() int). Used to verify isSQLiteBusy
+// detects BUSY / LOCKED via the modernc driver's typed error path —
+// the only authoritative source of the SQLite result code — even
+// when the error is wrapped through fmt.Errorf("...: %w").
+type codedErr struct {
+	code int
+	msg  string
+}
+
+func (e *codedErr) Error() string { return e.msg }
+func (e *codedErr) Code() int     { return e.code }
+
+// TestIsSQLiteBusy_CodedDetection pins the L8 fix: SQLITE_BUSY (5)
+// and SQLITE_LOCKED (6) must both retry. Any other code falls
+// through to the substring path, which we also exercise.
+func TestIsSQLiteBusy_CodedDetection(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"sqlite_busy_typed", &codedErr{code: sqliteCodeBusy, msg: "busy"}, true},
+		{"sqlite_locked_typed", &codedErr{code: sqliteCodeLocked, msg: "locked"}, true},
+		{"sqlite_constraint_typed", &codedErr{code: 19, msg: "constraint"}, false},
+		{"wrapped_typed_busy", fmt.Errorf("audit: %w", &codedErr{code: sqliteCodeBusy, msg: "busy"}), true},
+		{"substring_locked_message", errors.New("SQLITE_LOCKED: shared cache contention"), true},
+		{"substring_busy_message", errors.New("database is locked"), true},
+		{"substring_legacy_busy", errors.New("SQLITE_BUSY: cannot start a transaction within a transaction"), true},
+		{"non_busy_message", errors.New("syntax error near 'FROM'"), false},
+		{"nil_error", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSQLiteBusy(tc.err); got != tc.want {
+				t.Fatalf("isSQLiteBusy(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJudgeBatch_CommitFailureLeavesRollbackable pins the M4 fix:
+// when tx.Commit() returns an error, JudgeBatch.committed MUST
+// remain false so a subsequent Rollback() actually drives the
+// underlying tx.Rollback() (and releases the SQLite write lock).
+// The old code set committed=true *before* commit and left the
+// connection pinned mid-tx on any commit failure.
+//
+// We force a deterministic commit failure by rolling back the
+// underlying tx out-of-band before calling JudgeBatch.Commit(). The
+// stdlib then returns "sql: transaction has already been committed
+// or rolled back" from tx.Commit(). White-box access to JudgeBatch.tx
+// is the cleanest way to set this up without standing up an
+// elaborate fault-injection harness.
+func TestJudgeBatch_CommitFailureLeavesRollbackable(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	// Pre-roll-back the tx so JudgeBatch.Commit() sees a guaranteed
+	// failure path. White-box construction is intentional — we need
+	// to drive the exact M4 code path.
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("seed rollback: %v", err)
+	}
+	batch := &JudgeBatch{tx: tx}
+
+	if err := batch.Commit(); err == nil {
+		t.Fatal("Commit on already-rolled-back tx returned nil; cannot exercise M4")
+	}
+
+	// The committed flag must still be false. A second Commit call
+	// must again return an error (regression: old code returned nil
+	// here because committed=true short-circuited the second call).
+	if err := batch.Commit(); err == nil {
+		t.Fatal("second Commit after failure returned nil; committed flag set prematurely (regression: M4)")
+	}
+
+	// Rollback after a failed Commit must NOT be a no-op. The first
+	// call attempts the real tx.Rollback (which itself returns an
+	// error because the tx is already done), then flips committed=true
+	// for subsequent idempotency. The first call MUST return non-nil
+	// — that's how we know it didn't short-circuit on committed=true.
+	if err := batch.Rollback(); err == nil {
+		t.Fatal("first Rollback after failed Commit returned nil; committed flag was set prematurely (regression: M4)")
+	}
+
+	// Second Rollback IS a no-op — committed=true after the first.
+	if err := batch.Rollback(); err != nil {
+		t.Fatalf("second Rollback returned %v, want nil (idempotency)", err)
+	}
+}
+
+// TestJudgeBatch_CommitSuccessIsIdempotent: the post-Commit state
+// is "no further work needed" — calling Commit again must be a
+// safe no-op, and Rollback must also be a safe no-op. This pins
+// the post-success branch of the M4 logic that we did NOT touch.
+func TestJudgeBatch_CommitSuccessIsIdempotent(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	batch, err := store.BeginJudgeBatch(context.Background())
+	if err != nil {
+		t.Fatalf("BeginJudgeBatch: %v", err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("first Commit: %v", err)
+	}
+	if err := batch.Commit(); err != nil {
+		t.Fatalf("second Commit (idempotency): %v", err)
+	}
+	if err := batch.Rollback(); err != nil {
+		t.Fatalf("post-commit Rollback (idempotency): %v", err)
 	}
 }
