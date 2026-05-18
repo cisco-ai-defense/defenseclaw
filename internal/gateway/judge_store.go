@@ -10,6 +10,8 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,6 +49,17 @@ const (
 	// the worker to drain. If we exceed this, drops are recorded
 	// for the remainder so dashboards reflect data loss honestly.
 	judgePersistShutdownTimeout = 5 * time.Second
+
+	// judgePersistFlushTimeout bounds the SQLite work for a single
+	// batch (BeginTx + inserts + Commit). Picked to be longer than
+	// the DSN-resident busy_timeout=5000 so retryBusy can absorb
+	// transient contention, but short enough that a wedged DB
+	// surfaces as drops within one Shutdown window
+	// (judgePersistShutdownTimeout) instead of pinning the worker
+	// forever. Combined with the sidecar's "skip Close on Shutdown
+	// timeout" guard this also bounds the use-after-close exposure
+	// of the underlying *sql.Tx.
+	judgePersistFlushTimeout = 8 * time.Second
 )
 
 // JudgeBodyInserter is the minimal surface a JudgeStore needs from
@@ -116,10 +129,22 @@ type JudgeStore struct {
 	stopCh   chan struct{}
 	doneCh   chan struct{}
 
-	// shutdownRequested flips to non-zero the first time Shutdown is
-	// called. Enqueue checks it so post-shutdown calls are accounted
-	// for as drops instead of being silently sent into a doomed
-	// channel.
+	// enqueueMu serializes producers against Shutdown so a send can
+	// never race past the worker exit. Producers take RLock for the
+	// brief moment they touch j.queue; Shutdown takes the write
+	// Lock, flips `closed`, and *then* signals the worker. After the
+	// Lock is held no producer can be mid-send, so by the time the
+	// worker observes the stop signal the queue is the authoritative
+	// snapshot of work-in-flight. Drop-on-shutdown is recorded for
+	// every producer that arrives after `closed` is true.
+	enqueueMu sync.RWMutex
+	closed    bool
+
+	// shutdownRequested flips to true on the first Shutdown call so
+	// concurrent Shutdown calls share the same drain wait without
+	// closing stopCh twice. Distinct from `closed` because that flag
+	// is observed by producers under enqueueMu, whereas this one
+	// gates the lifecycle transition itself.
 	shutdownRequested atomic.Bool
 }
 
@@ -208,8 +233,17 @@ func (j *JudgeStore) PersistJudgeEvent(ctx context.Context, dir gatewaylog.Direc
 // enqueue is the non-blocking submit. We choose drop-on-full over
 // block-on-full because the proxy hot path must never wait on the
 // audit DB — a wedged DB would otherwise wedge the proxy.
+//
+// Concurrency: the RLock + `closed` flag pair guarantees no producer
+// can send into j.queue after Shutdown has released the work-in-
+// flight snapshot to the worker. Without this gate, a Shutdown that
+// ran between the legacy shutdownRequested.Load() check and the
+// channel send could leave a job stuck in the queue with no worker
+// to drain it (and no drop telemetry to surface the loss).
 func (j *JudgeStore) enqueue(job judgePersistJob) error {
-	if j.shutdownRequested.Load() {
+	j.enqueueMu.RLock()
+	defer j.enqueueMu.RUnlock()
+	if j.closed {
 		telemetry.RecordJudgePersistDrop(job.ctx, "shutdown")
 		return nil
 	}
@@ -302,52 +336,113 @@ func (j *JudgeStore) run() {
 }
 
 // flushBatch commits the buffered jobs in a single SQLite
-// transaction. Errors are logged and dropped — we never re-queue,
-// because a stuck DB would otherwise reload the same poison batch
-// forever and starve the queue.
+// transaction.
+//
+// Three failure modes the worker has to surface honestly:
+//
+//   - BeginJudgeBatch failed → the whole batch is lost; every job
+//     records a drop with reason="tx_begin_failed".
+//   - Per-row Insert failed → that row's body never landed; drop
+//     with reason="insert_failed" and we MUST NOT fan out the
+//     redacted audit row, otherwise SIEM rows out-live their
+//     forensic body. This is the partial-failure case the original
+//     implementation silently lost.
+//   - Commit failed → every row in the batch is rolled back; drop
+//     all with reason="tx_commit_failed" and skip fan-out for the
+//     whole batch.
+//
+// Errors are logged once at the source (via the audit logger so
+// operators see a structured event, not a stderr line) and never
+// re-queued: a wedged DB would otherwise reload the same poison
+// batch forever and starve the queue.
+//
+// The tx itself runs under judgePersistFlushTimeout so a wedged DB
+// can never pin the worker longer than one Shutdown window —
+// keeping the use-after-close blast radius bounded.
 func (j *JudgeStore) flushBatch(jobs []judgePersistJob) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), judgePersistFlushTimeout)
+	defer cancel()
+
 	tx, err := j.store.BeginJudgeBatch(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[judge_store] begin batch (size=%d): %v\n", len(jobs), err)
+		j.logErrorEvent("judge_persist.begin_batch", err, map[string]string{
+			"batch_size": strconv.Itoa(len(jobs)),
+		})
 		for _, jb := range jobs {
 			telemetry.RecordJudgePersistDrop(jb.ctx, "tx_begin_failed")
 		}
 		return
 	}
-	inserted := 0
+
+	// Track each job's outcome so post-commit fan-out only fires for
+	// rows that actually made it to disk.
+	committed := make([]judgePersistJob, 0, len(jobs))
 	for _, jb := range jobs {
 		row := buildJudgeRow(jb)
 		if err := tx.InsertJudgeResponse(row); err != nil {
-			fmt.Fprintf(os.Stderr, "[judge_store] insert (kind=%s): %v\n", jb.payload.Kind, err)
+			j.logErrorEvent("judge_persist.insert", err, map[string]string{
+				"kind": string(jb.payload.Kind),
+			})
+			telemetry.RecordJudgePersistDrop(jb.ctx, "insert_failed")
 			continue
 		}
-		inserted++
+		committed = append(committed, jb)
 	}
+
 	if err := tx.Commit(); err != nil {
 		// Best-effort rollback; ignore secondary error so we don't
 		// shadow the commit failure for the operator.
 		_ = tx.Rollback()
-		fmt.Fprintf(os.Stderr, "[judge_store] commit batch (size=%d): %v\n", len(jobs), err)
-		// Treat every job in the failed batch as a drop so dashboards
-		// reflect reality.
+		j.logErrorEvent("judge_persist.commit", err, map[string]string{
+			"batch_size":      strconv.Itoa(len(jobs)),
+			"committed_count": strconv.Itoa(len(committed)),
+		})
+		// A failed Commit means the whole tx rolled back — every job
+		// (including the ones whose per-row Insert succeeded inside
+		// the tx) is now lost. Record drops for the full batch so
+		// dashboards reflect reality, and skip the audit fan-out:
+		// SIEM rows must never out-race the local forensic copy.
 		for _, jb := range jobs {
 			telemetry.RecordJudgePersistDrop(jb.ctx, "tx_commit_failed")
 		}
 		return
 	}
-	telemetry.RecordJudgePersistBatchSize(ctx, int64(inserted))
+	telemetry.RecordJudgePersistBatchSize(ctx, int64(len(committed)))
 
 	// Fan out the redacted summary AFTER the body commit succeeds so
-	// SIEM rows never out-race the local forensic copy. The fan-out
-	// runs on the worker goroutine (still off the proxy hot path)
-	// and tolerates a nil logger so tests don't need the full audit
-	// pipeline.
+	// SIEM rows never out-race the local forensic copy. Iterate over
+	// `committed` (not `jobs`) so a row that failed its INSERT but
+	// landed inside an otherwise-successful batch does not produce a
+	// dangling audit_events row.
 	if j.logger != nil {
-		for _, jb := range jobs {
+		for _, jb := range committed {
 			j.fanoutAudit(jb)
 		}
 	}
+}
+
+// logErrorEvent routes worker-level failures through the configured
+// audit logger when present, falling back to stderr only when the
+// store was constructed without one (unit tests). The structured
+// path keeps Splunk/OTLP/webhook sinks in sync with the in-process
+// `defenseclaw.judge.persist.*` counters that already track the
+// same failure modes.
+func (j *JudgeStore) logErrorEvent(action string, err error, details map[string]string) {
+	if j.logger != nil {
+		parts := make([]string, 0, 1+len(details))
+		parts = append(parts, "error="+err.Error())
+		for k, v := range details {
+			parts = append(parts, k+"="+v)
+		}
+		_ = j.logger.LogEvent(audit.Event{
+			Action:   action,
+			Actor:    "defenseclaw-gateway",
+			Severity: "ERROR",
+			Details:  strings.Join(parts, " "),
+		})
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[judge_store] %s: %v (%v)\n", action, err, details)
 }
 
 // fanoutAudit emits the redacted audit event for one job. Mirrors
@@ -415,6 +510,21 @@ func buildJudgeRow(jb judgePersistJob) audit.JudgeResponse {
 // judgePersistShutdownTimeout for the drain to complete. Sidecar
 // stop wires this in front of the audit.Store close so every
 // queued body lands on disk before the DB handle is released.
+//
+// Concurrency contract: by the time Shutdown returns, either
+//
+//   - j.doneCh is closed and the worker is no longer running (safe
+//     to close the underlying DB), OR
+//   - the returned error is non-nil and the worker MAY still be
+//     running, in which case the caller MUST NOT close the DB
+//     handle the worker is writing into (see sidecar.go Stop()
+//     for the "skip close on drain error" guard).
+//
+// We take enqueueMu.Lock before signaling the worker so producers
+// in-flight at the moment Shutdown is called either (a) finish
+// their send before stopCh is closed (worker drains them) or (b)
+// see j.closed=true and record a "shutdown" drop. There is no
+// third path where a job is silently leaked into the channel.
 func (j *JudgeStore) Shutdown(ctx context.Context) error {
 	if j == nil {
 		return nil
@@ -423,14 +533,38 @@ func (j *JudgeStore) Shutdown(ctx context.Context) error {
 		// Already shutting down — wait on the existing drain.
 		return j.waitForDrain(ctx)
 	}
+	j.enqueueMu.Lock()
+	j.closed = true
+	j.enqueueMu.Unlock()
 	j.stopOnce.Do(func() { close(j.stopCh) })
 	return j.waitForDrain(ctx)
+}
+
+// IsClosed reports whether the worker goroutine has finished
+// draining. Exposed so the sidecar (and tests) can verify the
+// "safe to close the underlying DB" precondition without racing
+// the worker. Returns true ONLY after the worker has exited.
+func (j *JudgeStore) IsClosed() bool {
+	if j == nil {
+		return true
+	}
+	select {
+	case <-j.doneCh:
+		return true
+	default:
+		return false
+	}
 }
 
 func (j *JudgeStore) waitForDrain(ctx context.Context) error {
 	// Default budget if the caller passes a bare Background.
 	deadlineCh := time.After(judgePersistShutdownTimeout)
+	// ctxDone reflects EITHER cancellation OR deadline; we honor both
+	// so a SIGTERM-driven shutdown propagating context.WithCancel
+	// terminates promptly instead of waiting out the 5 s budget.
+	var ctxDone <-chan struct{}
 	if ctx != nil {
+		ctxDone = ctx.Done()
 		if dl, ok := ctx.Deadline(); ok {
 			if d := time.Until(dl); d > 0 {
 				deadlineCh = time.After(d)
@@ -442,6 +576,9 @@ func (j *JudgeStore) waitForDrain(ctx context.Context) error {
 		return nil
 	case <-deadlineCh:
 		return fmt.Errorf("judge_store: shutdown timed out after %s", judgePersistShutdownTimeout)
+	case <-ctxDone:
+		// ctx.Err() is non-nil here per the contract of Done().
+		return ctx.Err()
 	}
 }
 

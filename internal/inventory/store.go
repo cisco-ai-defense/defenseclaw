@@ -131,12 +131,35 @@ const (
 	sqliteRetryBaseMs   = 10
 )
 
+// sqliteCoded mirrors the structural interface used in
+// internal/audit/store.go — the modernc.org/sqlite *Error type
+// implements Code() int. errors.As on this shape lets us detect
+// SQLITE_BUSY (5) / SQLITE_LOCKED (6) reliably even after
+// fmt.Errorf("...: %w", err) wrapping.
+type sqliteCoded interface {
+	Code() int
+}
+
+const (
+	sqliteCodeBusy   = 5
+	sqliteCodeLocked = 6
+)
+
 func isSQLiteBusy(err error) bool {
 	if err == nil {
 		return false
 	}
+	var coded sqliteCoded
+	if errors.As(err, &coded) {
+		switch coded.Code() {
+		case sqliteCodeBusy, sqliteCodeLocked:
+			return true
+		}
+	}
 	s := err.Error()
-	return strings.Contains(s, "database is locked") || strings.Contains(s, "SQLITE_BUSY")
+	return strings.Contains(s, "database is locked") ||
+		strings.Contains(s, "SQLITE_BUSY") ||
+		strings.Contains(s, "SQLITE_LOCKED")
 }
 
 // retryBusy runs fn up to sqliteRetryAttempts times with exponential

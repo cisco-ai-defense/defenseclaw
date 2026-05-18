@@ -19,8 +19,11 @@ package audit
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -57,17 +60,56 @@ type JudgeBodyStore struct {
 // dbPath, applies the same DSN-resident pragmas + single-connection
 // pool the audit store uses, and runs the standalone migration list
 // in init(). Returns a ready-to-write store.
+//
+// On first creation we ensure the parent directory exists (0700) and
+// then chmod the SQLite file down to 0600 — judge bodies can include
+// snippets of the model prompt/output and must not inherit the
+// process umask's default 0644. Mirrors the inventory store hygiene
+// in internal/inventory/store.go.
 func NewJudgeBodyStore(dbPath string) (*JudgeBodyStore, error) {
+	if strings.TrimSpace(dbPath) == "" {
+		return nil, errors.New("judge_body: db path is required")
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		return nil, fmt.Errorf("judge_body: ensure parent dir: %w", err)
+	}
 	db, err := openSQLite(dbPath)
 	if err != nil {
-		return nil, fmt.Errorf("judge_body: open db %s: %w", dbPath, err)
+		// Strip the leading "audit:" tier that openSQLite stamps so
+		// the operator sees the correct subsystem in the wrapped
+		// error chain. openSQLite is shared across both DBs, so the
+		// tier disambiguation happens at the caller boundary.
+		return nil, fmt.Errorf("judge_body: open db %s: %w", dbPath, unwrapOpenSQLiteErr(err))
 	}
 	st := &JudgeBodyStore{db: db}
 	if err := st.init(); err != nil {
 		_ = st.Close()
 		return nil, err
 	}
+	// Tighten file permissions even if SQLite created the file with
+	// the default umask. Done after init() so the file definitely
+	// exists. Non-fatal: some sandboxed environments (containers
+	// with read-only mounts, NFS without chmod support) reject this
+	// and we still want the sidecar up.
+	if err := os.Chmod(dbPath, 0o600); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "[judge_body] could not chmod %s to 0600: %v\n", dbPath, err)
+	}
 	return st, nil
+}
+
+// unwrapOpenSQLiteErr strips the shared "audit:" prefix from the
+// openSQLite helper so the caller-side wrap shows the right tier.
+// Falls back to the original error when the prefix isn't present.
+func unwrapOpenSQLiteErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	const prefix = "audit: "
+	if strings.HasPrefix(msg, prefix) {
+		return errors.New(strings.TrimPrefix(msg, prefix))
+	}
+	return err
 }
 
 // Close releases the underlying connection pool. Idempotent.
@@ -207,7 +249,18 @@ func (s *JudgeBodyStore) applyMigration(ver int, m migration) error {
 // audit store version (truncation, default IDs/timestamps, fail-
 // closed marshaling) so callers behave identically against either
 // backend.
+//
+// Deprecated: prefer InsertJudgeResponseCtx so caller cancellation
+// and request-scoped deadlines flow through to retryBusy.
 func (s *JudgeBodyStore) InsertJudgeResponse(e JudgeResponse) error {
+	return s.InsertJudgeResponseCtx(context.Background(), e)
+}
+
+// InsertJudgeResponseCtx is the context-aware variant. Used by the
+// async worker so a SIGTERM-cancelled request immediately aborts
+// any in-flight retryBusy loop instead of waiting out the backoff
+// schedule.
+func (s *JudgeBodyStore) InsertJudgeResponseCtx(ctx context.Context, e JudgeResponse) error {
 	if e.Raw == "" {
 		return nil
 	}
@@ -225,7 +278,7 @@ func (s *JudgeBodyStore) InsertJudgeResponse(e JudgeResponse) error {
 	if e.FailClosedApplied {
 		failClosed = 1
 	}
-	_, err := s.execDB(context.Background(), "judge_body_insert",
+	_, err := s.execDB(ctx, "judge_body_insert",
 		`INSERT INTO judge_responses
 			(id, timestamp, kind, direction, model, action, severity, latency_ms,
 			 parse_error, raw_response, request_id, trace_id, run_id, session_id, input_hash,
@@ -274,11 +327,19 @@ func (s *JudgeBodyStore) InsertJudgeResponse(e JudgeResponse) error {
 // ListJudgeResponses returns the most recent N persisted judge bodies
 // from the standalone DB. Same shape as Store.ListJudgeResponses
 // for caller parity.
+//
+// Deprecated: prefer ListJudgeResponsesCtx so caller cancellation
+// flows through.
 func (s *JudgeBodyStore) ListJudgeResponses(limit int) ([]JudgeResponse, error) {
+	return s.ListJudgeResponsesCtx(context.Background(), limit)
+}
+
+// ListJudgeResponsesCtx is the context-aware variant of ListJudgeResponses.
+func (s *JudgeBodyStore) ListJudgeResponsesCtx(ctx context.Context, limit int) ([]JudgeResponse, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.queryDB(context.Background(), "judge_body_list", `
+	rows, err := s.queryDB(ctx, "judge_body_list", `
 		SELECT id, timestamp, kind, COALESCE(direction,''), COALESCE(model,''),
 			COALESCE(action,''), COALESCE(severity,''), COALESCE(latency_ms,0),
 			COALESCE(parse_error,''), raw_response,
