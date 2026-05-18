@@ -82,6 +82,14 @@ type JudgeYAML struct {
 	Categories           map[string]JudgeCategory `yaml:"categories"`
 	MinCategoriesForHigh int                      `yaml:"min_categories_for_high,omitempty"`
 	SingleCategoryMaxSev string                   `yaml:"single_category_max_severity,omitempty"`
+	// MinCategoriesForCritical is the threshold at which a judge verdict
+	// escalates to CRITICAL. Previously hardcoded as `len(findings) >= 3`
+	// in the injection judge and `len(findings) >= 2` in the exfil judge;
+	// moving to YAML lets operators tune per profile and lets the two
+	// judges share a common verdict-derivation code path. Value of 0
+	// means "never escalate to CRITICAL from this judge alone" (the
+	// correlator still can, via cross-finding patterns).
+	MinCategoriesForCritical int `yaml:"min_categories_for_critical,omitempty"`
 }
 
 type JudgeCategory struct {

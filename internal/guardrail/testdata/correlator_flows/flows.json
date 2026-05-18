@@ -1,0 +1,109 @@
+{
+  "flows": [
+    {
+      "id": "lethal-trifecta/ssh-leak-via-webhook",
+      "description": "Classic lethal trifecta — user turn brings untrusted instructions, tool call reads SSH key, completion sends to webhook.site.",
+      "events": [
+        {"rule_id": "INJ-IGNORE-PREVIOUS", "severity": "HIGH"},
+        {"rule_id": "PATH-SSH-KEY", "severity": "HIGH"},
+        {"rule_id": "C2-WEBHOOK-SITE", "severity": "HIGH"}
+      ],
+      "expect_fires": ["LETHAL-TRIFECTA"]
+    },
+    {
+      "id": "lethal-trifecta/aws-cred-to-ngrok",
+      "description": "Same trifecta with different rule IDs — tests axis-based matching independent of specific rules.",
+      "events": [
+        {"rule_id": "TRUST-AUTHORITY-CLAIM", "severity": "HIGH"},
+        {"rule_id": "CRED-AWS-FILE", "severity": "HIGH"},
+        {"rule_id": "C2-NGROK", "severity": "HIGH"}
+      ],
+      "expect_fires": ["LETHAL-TRIFECTA"]
+    },
+    {
+      "id": "lethal-trifecta/missing-ingress",
+      "description": "Sensitive access + egress but no ingress-untrusted marker — should NOT fire trifecta (covered by a narrower pattern if needed).",
+      "events": [
+        {"rule_id": "PATH-SSH-KEY", "severity": "HIGH"},
+        {"rule_id": "C2-WEBHOOK-SITE", "severity": "HIGH"}
+      ],
+      "expect_not_fires": ["LETHAL-TRIFECTA"]
+    },
+    {
+      "id": "escalation-chain/iterating-attacker",
+      "description": "Attacker iterating from MEDIUM -> HIGH -> HIGH across 3 turns.",
+      "events": [
+        {"severity": "MEDIUM"},
+        {"severity": "HIGH"},
+        {"severity": "HIGH"}
+      ],
+      "expect_fires": ["ESCALATION-CHAIN"]
+    },
+    {
+      "id": "escalation-chain/only-mediums",
+      "description": "Multiple MEDIUMs without the follow-up HIGH steps should not escalate.",
+      "events": [
+        {"severity": "MEDIUM"},
+        {"severity": "MEDIUM"},
+        {"severity": "MEDIUM"}
+      ],
+      "expect_not_fires": ["ESCALATION-CHAIN"]
+    },
+    {
+      "id": "destructive-flow/ssh-then-rm-rf",
+      "description": "Read SSH key in turn 1, execute destructive rm -rf in turn 2 — indicates active exploitation.",
+      "events": [
+        {"rule_id": "PATH-SSH-KEY", "severity": "HIGH"},
+        {"rule_id": "SHELL-DESTRUCTIVE-RM-RF", "severity": "CRITICAL", "tool_capability_class": "exec_shell"}
+      ],
+      "expect_fires": ["DESTRUCTIVE-FLOW"]
+    },
+    {
+      "id": "destructive-flow/destructive-without-recon",
+      "description": "Destructive command with no prior sensitive-access — already CRITICAL on its own, but should NOT fire DESTRUCTIVE-FLOW (no flow, just single action).",
+      "events": [
+        {"rule_id": "SHELL-DESTRUCTIVE-RM-RF", "severity": "CRITICAL", "tool_capability_class": "exec_shell"}
+      ],
+      "expect_not_fires": ["DESTRUCTIVE-FLOW"]
+    },
+    {
+      "id": "fingerprint-chain/same-value-exfil",
+      "description": "Same fingerprint appears in sensitive-access and egress — direct exfil evidence.",
+      "events": [
+        {"rule_id": "PATH-SSH-KEY", "severity": "HIGH", "content_fingerprint": "abc12345"},
+        {"rule_id": "C2-WEBHOOK-SITE", "severity": "HIGH", "content_fingerprint": "abc12345"}
+      ],
+      "expect_fires": ["TRIFECTA-WITH-FINGERPRINT-MATCH"]
+    },
+    {
+      "id": "fingerprint-chain/different-values",
+      "description": "Sensitive-access and egress findings present, but fingerprints differ — no direct link.",
+      "events": [
+        {"rule_id": "PATH-SSH-KEY", "severity": "HIGH", "content_fingerprint": "aaaaaaaa"},
+        {"rule_id": "C2-WEBHOOK-SITE", "severity": "HIGH", "content_fingerprint": "bbbbbbbb"}
+      ],
+      "expect_not_fires": ["TRIFECTA-WITH-FINGERPRINT-MATCH"]
+    },
+    {
+      "id": "multiple-patterns/trifecta-and-destructive",
+      "description": "A session that exhibits both trifecta conditions and the destructive flow — both patterns fire.",
+      "events": [
+        {"rule_id": "INJ-IGNORE-ALL", "severity": "HIGH"},
+        {"rule_id": "PATH-SSH-KEY", "severity": "HIGH"},
+        {"rule_id": "C2-WEBHOOK-SITE", "severity": "HIGH"},
+        {"rule_id": "SHELL-DESTRUCTIVE-RM-RF", "severity": "CRITICAL", "tool_capability_class": "exec_shell"}
+      ],
+      "expect_fires": ["LETHAL-TRIFECTA", "DESTRUCTIVE-FLOW"]
+    },
+    {
+      "id": "no-match/benign-session",
+      "description": "Session with only individual LOW findings, no combinations.",
+      "events": [
+        {"severity": "LOW"},
+        {"severity": "LOW"},
+        {"severity": "LOW"}
+      ],
+      "expect_not_fires": ["LETHAL-TRIFECTA", "ESCALATION-CHAIN", "DESTRUCTIVE-FLOW", "TRIFECTA-WITH-FINGERPRINT-MATCH"]
+    }
+  ]
+}

@@ -771,7 +771,8 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 		return
 	}
 
-	latencyMs := time.Since(start).Milliseconds()
+	elapsed := time.Since(start)
+	latencyMs := elapsed.Milliseconds()
 	severity := deriveSeverity(verdict.Severity)
 	categories := categoriesOf(verdict.Findings)
 
@@ -811,6 +812,8 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 			"", "",
 		)
 	}
+
+	r.persistSessionPromptScan(verdict, sessionKey, messageID, elapsed)
 
 	fmt.Fprintf(os.Stderr,
 		"[sidecar] session.message prompt-scan session=%s msg=%s action=%s severity=%s findings=%d (%dms judge=%v)\n",

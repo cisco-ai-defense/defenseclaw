@@ -213,3 +213,51 @@ func TestClampPromptDirectionVerdict(t *testing.T) {
 		}
 	})
 }
+
+func TestSignalStrengthToSeverity(t *testing.T) {
+	cases := []struct {
+		unambiguous bool
+		highImpact  bool
+		want        string
+	}{
+		{true, true, "CRITICAL"},
+		{true, false, "HIGH"},
+		{false, true, "MEDIUM"},
+		{false, false, "LOW"},
+	}
+	for _, c := range cases {
+		got := SignalStrengthToSeverity(c.unambiguous, c.highImpact)
+		if got != c.want {
+			t.Errorf("SignalStrengthToSeverity(%v, %v) = %q, want %q",
+				c.unambiguous, c.highImpact, got, c.want)
+		}
+	}
+}
+
+func TestSeverityCriteriaCoversAllLevels(t *testing.T) {
+	for _, level := range SeverityOrder {
+		desc, ok := SeverityCriteria[level]
+		if !ok {
+			t.Errorf("SeverityCriteria missing entry for %q", level)
+			continue
+		}
+		if strings.TrimSpace(desc) == "" {
+			t.Errorf("SeverityCriteria[%q] is empty", level)
+		}
+	}
+	if len(SeverityCriteria) != len(SeverityOrder) {
+		t.Errorf("SeverityCriteria size %d != SeverityOrder size %d — entries drifted",
+			len(SeverityCriteria), len(SeverityOrder))
+	}
+}
+
+func TestSeverityOrderMatchesRanks(t *testing.T) {
+	// Ensure SeverityOrder aligns with the iota-based ranks so that
+	// index(SeverityOrder, label) matches guardrailSeverityRank(label).
+	for i, label := range SeverityOrder {
+		rank := guardrailSeverityRank(label)
+		if rank != i {
+			t.Errorf("SeverityOrder[%d]=%q rank=%d, want %d", i, label, rank, i)
+		}
+	}
+}

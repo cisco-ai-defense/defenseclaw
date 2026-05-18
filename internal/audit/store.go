@@ -838,6 +838,61 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Sliding-window correlator enrichment: six columns on
+		// scan_findings so the correlator can intersect lethal-
+		// trifecta axes across a session's recent findings without
+		// reaching back into the cleartext content.
+		//
+		//   data_axis               — CSV of ingress_untrusted /
+		//                             sensitive_access / egress_external
+		//   tool_capability_class   — read_fs / write_fs / exec_shell /
+		//                             network_fetch / send_message
+		//   content_fingerprint     — sha256(redacted_value)[:8]
+		//   external_endpoint       — host or URL for network findings
+		//   turn_id                 — monotonic per-session counter
+		//   decision_path           — JSON audit trail of severity
+		//                             derivation (regex match, judge
+		//                             category, sensitive-context boost,
+		//                             rubric reconciliation)
+		description: "correlator: enrich scan_findings with axis/capability/fingerprint/endpoint/turn/path",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "scan_findings")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"scan_findings", "data_axis", `ALTER TABLE scan_findings ADD COLUMN data_axis TEXT`},
+				{"scan_findings", "tool_capability_class", `ALTER TABLE scan_findings ADD COLUMN tool_capability_class TEXT`},
+				{"scan_findings", "content_fingerprint", `ALTER TABLE scan_findings ADD COLUMN content_fingerprint TEXT`},
+				{"scan_findings", "external_endpoint", `ALTER TABLE scan_findings ADD COLUMN external_endpoint TEXT`},
+				{"scan_findings", "turn_id", `ALTER TABLE scan_findings ADD COLUMN turn_id INTEGER`},
+				{"scan_findings", "decision_path", `ALTER TABLE scan_findings ADD COLUMN decision_path TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			if _, err := ex.Exec(
+				`CREATE INDEX IF NOT EXISTS idx_scan_findings_session_turn ` +
+					`ON scan_findings(session_id, agent_instance_id, turn_id)`,
+			); err != nil {
+				return fmt.Errorf("create idx_scan_findings_session_turn: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
