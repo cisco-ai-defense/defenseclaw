@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v4
 # DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
@@ -69,10 +69,17 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
+# PR 4 / Phase B.3 — W3C trace propagation.
+TRACE_HEADER_ARGS=()
+if command -v mapfile >/dev/null 2>&1; then
+  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/cursor/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: cursor-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

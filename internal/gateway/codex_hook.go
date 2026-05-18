@@ -131,16 +131,49 @@ func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
 		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
 		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
 		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
+		// PR 3 / Phase B.2 — connector parity. Codex's notify path
+		// already publishes token usage via RecordCodexNotify; this
+		// extra emission gives the hook surface the same shape so
+		// dashboards alerting on hook-level decisions also see
+		// turn-level cost without joining two metric families.
+		a.otel.RecordHookOutcome(ctx, "codex", req.HookEventName, resp.Action, resp.Severity, resp.WouldBlock)
+		if usage := extractHookPayloadTokenUsage(req.Payload); usage != (hookTokenUsage{}) {
+			model := usage.Model
+			if model == "" {
+				model = strings.TrimSpace(req.Model)
+			}
+			a.otel.RecordHookTokenUsage(ctx, "codex", model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+		}
 		a.otel.EmitConnectorTelemetryLog(ctx, "hook", "codex", "ok", 1, int64(len(b)),
 			fmt.Sprintf("source=hook connector=codex event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
 				req.HookEventName, codexToolName(req), resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
 	}
 
-	details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-		resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-	details = appendRawTelemetryDetails(details, "raw_payload", b)
-	details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-	a.logConnectorHookAudit(ctx, "codex", req.HookEventName, details)
+	// PR 2 / Phase B.1: emit the structured audit envelope. The
+	// legacy line stays under the flag-off path (default) so
+	// existing greps keep matching during rollout. The "hook" raw
+	// origin and rawEventIDs are part of the structured record so
+	// downstream sinks can join native-OTLP traffic with the hook
+	// surface via canonical raw_event_ids.
+	env := HookAuditEnvelope{
+		Connector:   "codex",
+		Event:       req.HookEventName,
+		Result:      "ok",
+		Action:      resp.Action,
+		RawAction:   resp.RawAction,
+		Severity:    resp.Severity,
+		Mode:        resp.Mode,
+		Reason:      resp.Reason,
+		WouldBlock:  resp.WouldBlock,
+		ElapsedMs:   elapsed.Milliseconds(),
+		BodyBytes:   int64(len(b)),
+		RawOrigin:   "hook",
+		RawEventIDs: rawEventIDs,
+	}
+	if redaction.DisableAll() && len(b) > 0 {
+		env.RawPayload = string(b)
+	}
+	a.logConnectorHookAuditEnvelope(ctx, env)
 
 	a.writeJSON(w, http.StatusOK, resp)
 }

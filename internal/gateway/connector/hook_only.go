@@ -23,7 +23,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -191,6 +190,69 @@ func (c *hookOnlyConnector) SubprocessPolicy() SubprocessPolicy     { return Sub
 func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string     { return []string{c.scriptName} }
 func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return c.Capabilities(opts).Hooks
+}
+
+// HookProfile implements HookProfileProvider for the 5 generic
+// hook-only connectors. Today only geminicli emits native OTLP (via
+// the JSON-block telemetry section in settings.json with a scoped
+// path-token); cursor, windsurf, hermes, and copilot return spec=nil
+// because their CLIs do not expose a native OTel exporter. When a
+// future copilot/cursor release adds native OTLP support, that
+// connector can flip its branch here to return a non-nil spec
+// without changing the dispatcher.
+//
+// SupportsTraceparent is false for the entire generic family today
+// — the inspect-*.sh scripts these connectors ship do not forward
+// DEFENSECLAW_TRACEPARENT. Phase B.3 (PR 4) flips it to true once
+// the v6 hardening helper lands AND the per-vendor hook scripts are
+// regenerated.
+func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
+	profile := HookProfile{
+		Name:                c.name,
+		Capabilities:        c.HookCapabilities(opts),
+		SupportsTraceparent: false,
+	}
+	if c.name == "geminicli" {
+		profile.NativeOTLP = geminiCLINativeOTLPSpec(opts)
+	}
+	return profile
+}
+
+// geminiCLINativeOTLPSpec returns the JSON-block spec for Gemini CLI
+// native OTLP. The spec carries an unresolved PathToken/PathScope —
+// the installer is expected to call EnsureOTLPPathToken on disk and
+// inject the token before rendering. This matches the way
+// patchGeminiTelemetry handles the mint today; the spec only carries
+// the descriptive shape.
+//
+// patchGeminiTelemetry calls spec.JSONBlock() to produce the
+// telemetry object embedded in settings.json.
+func geminiCLINativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
+	spec := &NativeOTLPSpec{
+		Kind:           NativeOTLPJSONBlock,
+		Endpoint:       "http://" + strings.TrimSpace(opts.APIAddr),
+		Protocol:       "http",
+		PathScope:      OTLPScopeGeminiCLI,
+		LogUserPrompts: redaction.DisableAll(),
+	}
+	// Best-effort: mint or load the scoped token here so the spec
+	// can render its endpoint deterministically. patchGeminiTelemetry
+	// runs the same EnsureOTLPPathToken call before serializing the
+	// block; this duplicates the cheap lookup so callers that only
+	// want the descriptive spec (parity tests, doctor reports) see
+	// the resolved URL.
+	if opts.DataDir != "" {
+		if tok, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err == nil && tok != "" {
+			spec.PathToken = tok
+		}
+	}
+	if spec.PathToken == "" && strings.TrimSpace(opts.APIToken) != "" {
+		// Backwards-compat: deployments without an on-disk scoped
+		// token fall back to opts.APIToken. patchGeminiTelemetry
+		// keeps the same behaviour and warns the operator.
+		spec.PathToken = opts.APIToken
+	}
+	return spec
 }
 
 func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
@@ -946,30 +1008,37 @@ func patchGeminiTelemetry(path string, opts SetupOpts) error {
 		pathToken = opts.APIToken
 	}
 	telemetry := ensureJSONObject(cfg, "telemetry")
-	endpoint := "http://" + strings.TrimSpace(opts.APIAddr) + "/otlp/geminicli/" + url.PathEscape(pathToken)
-	// Gemini CLI's settings.json schema (see
-	// https://geminicli.com/docs/reference/configuration/) constrains
-	// `telemetry.target` to {"local","gcp"}, names the protocol field
-	// `otlpProtocol` with values {"grpc","http"}, and rejects unknown
-	// keys outright (so a former `managedBy` marker now fails the
-	// loader with "Unrecognized key(s) in object").
+
+	// Spec-driven: drive the telemetry block from the connector's
+	// NativeOTLPSpec via spec.JSONBlock(). The spec emits the same
+	// shape Gemini CLI's settings.json schema requires
+	// (https://geminicli.com/docs/reference/configuration/):
+	// enabled/target/useCollector/otlpEndpoint/otlpProtocol/logPrompts.
 	//
-	// We therefore use target=local + useCollector=true to forward to
-	// our loopback OTLP-HTTP receiver, which accepts both protobuf
-	// (default for `otlpProtocol: http`) and OTLP-JSON. The marker we
-	// rely on for teardown detection is the path-scoped endpoint URL
-	// containing "/otlp/geminicli/" — that pattern is already unique
-	// to DefenseClaw, so removing the unsupported `managedBy` key is
-	// safe (see removeManagedGeminiTelemetry).
-	telemetry["enabled"] = true
-	telemetry["target"] = "local"
-	telemetry["useCollector"] = true
-	telemetry["otlpEndpoint"] = endpoint
-	telemetry["otlpProtocol"] = "http"
-	telemetry["logPrompts"] = redaction.DisableAll()
-	// Drop legacy keys that older defenseclaw versions wrote — they
-	// are unrecognized by the current Gemini schema and would crash
-	// `gemini` startup if a stale settings.json is upgraded in place.
+	// We always override spec.PathToken with the canonical token
+	// just resolved above, so the disk-write path is the single
+	// source of truth for which token is embedded (the spec's
+	// best-effort lookup may have raced with another sidecar mint).
+	//
+	// Legacy keys "managedBy" and "protocol" are unrecognized by
+	// the current Gemini schema and would crash `gemini` startup
+	// if a stale settings.json is upgraded in place, so we delete
+	// them unconditionally — that is also how
+	// removeManagedGeminiTelemetry detects DefenseClaw-managed
+	// blocks for teardown (it keys on the path-scoped endpoint URL
+	// containing "/otlp/geminicli/").
+	spec := geminiCLINativeOTLPSpec(opts)
+	if spec == nil {
+		return fmt.Errorf("geminicli: nil NativeOTLPSpec")
+	}
+	spec.PathToken = pathToken
+	block, err := spec.JSONBlock()
+	if err != nil {
+		return fmt.Errorf("geminicli: render OTLP block: %w", err)
+	}
+	for k, v := range block {
+		telemetry[k] = v
+	}
 	delete(telemetry, "managedBy")
 	delete(telemetry, "protocol")
 	return writeJSONObject(path, cfg)

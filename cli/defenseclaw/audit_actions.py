@@ -98,8 +98,9 @@ ACTION_OTEL_INGEST_LOGS: Final[str]      = "otel.ingest.logs"
 ACTION_OTEL_INGEST_METRICS: Final[str]   = "otel.ingest.metrics"
 ACTION_OTEL_INGEST_TRACES: Final[str]    = "otel.ingest.traces"
 ACTION_OTEL_INGEST_MALFORMED: Final[str] = "otel.ingest.malformed"
-ACTION_CONNECTOR_HOOK: Final[str]        = "connector-hook"
-ACTION_ASSET_POLICY: Final[str]          = "asset-policy"
+ACTION_CONNECTOR_HOOK: Final[str]              = "connector-hook"
+ACTION_CONNECTOR_HOOK_SYNTHETIC: Final[str]    = "connector-hook-synthetic"
+ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
@@ -154,6 +155,7 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_OTEL_INGEST_TRACES,
     ACTION_OTEL_INGEST_MALFORMED,
     ACTION_CONNECTOR_HOOK,
+    ACTION_CONNECTOR_HOOK_SYNTHETIC,
     ACTION_ASSET_POLICY,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,

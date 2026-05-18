@@ -4,7 +4,97 @@ All notable changes to this project are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com) and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — Codex / Claude Code hook-only enforcement (no proxy data path)
+## [Unreleased] — Hook collector unification
+
+This rollup unifies the agent hook collector across all 7
+connectors (codex, claudecode, hermes, cursor, windsurf, geminicli,
+copilot) onto a single declarative `HookProfile`-driven pipeline.
+There are **no new environment variables** — the unification is the
+default and only path; the V1 OTLP builders and the per-phase
+feature flags that existed in early review iterations have been
+deleted.
+
+### Behaviour changes (no flag)
+
+- **W3C trace propagation is always on** for hook routes
+  (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`). The gateway
+  consumes `traceparent` / `tracestate` so hook spans root on the
+  agent's parent trace; `_hardening.sh` v6 emits the headers from
+  every hook script. Extraction is route-scoped via
+  `shouldExtractHookTrace`; all other routes (health, REST, OTLP
+  ingest) continue to mint a fresh root span regardless of what
+  the caller sent.
+- **Native OTLP for codex / claudecode / geminicli is spec-driven**
+  through the shared `connector.NativeOTLPSpec` renderer
+  (`TOMLBlock` / `EnvBlock` / `JSONBlock`). The V1 builders are
+  gone; shape tests in
+  `internal/gateway/connector/native_otlp_golden_test.go` lock the
+  wire format codex/claudecode/gemini consume.
+- **Audit `details` column always carries both forms**: the
+  structured `HookAuditEnvelope` JSON (under the `details_json=`
+  key) and the legacy `connector=… action=… raw_action=…` tail.
+  Existing operator log greps keep matching; jq pipelines can
+  parse the JSON inline. No env-var toggle.
+- **Codex `/api/v1/codex/notify` synthesizes a Stop event** through
+  `handleAgentHookSynthetic`. The canonical
+  `codex.notify.<sanitized-type>` audit row is preserved one-per-
+  inbound; the synthetic envelope is persisted under
+  `audit.ActionConnectorHookSynthetic` so SIEM rules pinned on
+  `codex.notify%` keep their row counts and new dashboards can
+  reason about the synthesized Stop separately.
+- **codex / claudecode dispatch through `handleUnifiedConnectorHook`**
+  (which delegates evaluation to the existing bespoke handlers for
+  PluginInput-v1 / notify-bridge response shaping). The wrapper is
+  the single gate that guarantees the audit / metrics / dedup /
+  trace-propagation code paths ran.
+
+### Observability parity
+
+- `defenseclaw_connector_hook_outcome_total` and
+  `defenseclaw_connector_hook_tokens_total` counters added to
+  `internal/telemetry/metrics.go`; emitted by every hook handler
+  including the synthetic path. Dashboards can compute block rate
+  and cost per connector via PromQL without joining the native
+  OTLP channel.
+- `defenseclaw_connector_hook_unified_dispatch_total` added so
+  operators can confirm traffic is flowing through the unified
+  pipeline (vs. an out-of-tree handler registration that bypasses
+  audit/metrics).
+- New audit action `connector-hook-synthetic` (Go +
+  `cli/defenseclaw/audit_actions.py` + `OBSERVABILITY-CONTRACT.md`)
+  for the synthetic Stop visibility row.
+
+### Connector profile surface
+
+- New `connector.HookProfile.Decode`, `MapVerdict`, and `Respond`
+  function fields let codex / claudecode declare their per-event
+  wire shape declaratively.
+- `connector.AcceptLoopbackWithWarning` centralizes the loopback
+  authentication carve-out (currently used by
+  `CodexConnector.Authenticate`). The helper now panics on
+  `warned == nil` so a future caller cannot silently disable the
+  `[SECURITY] loopback bypass` log via a typo; operators continue
+  to see one warning per process when a gateway token is configured
+  but loopback is exercised. See the expanded paragraph in
+  `.deepsec/data/defenseclaw/INFO.md`.
+
+### Security fixes folded in
+
+- **Trace propagation route scope (H1).**
+  `extractIncomingTraceContext` is now path-aware
+  (`shouldExtractHookTrace`) so only hook + notify routes consume
+  inbound `traceparent`. Closes the regression where any caller
+  hitting `/health` could splice a trace ID into the gateway's
+  trace tree.
+- **Synthetic audit visibility (M1).** The synthetic codex notify
+  path now persists a `HookAuditEnvelope` under
+  `ActionConnectorHookSynthetic` instead of suppressing the row;
+  SIEM dashboards no longer regress when codex notify fires.
+- **Loopback bypass footgun (M2).** `AcceptLoopbackWithWarning`
+  panics on `nil` `warned` argument so a misuse cannot silently
+  re-enable silent trust of loopback callers.
+
+## [Previous-Unreleased] — Codex / Claude Code hook-only enforcement (no proxy data path)
 
 This rollup removes the LLM-proxy data path for the Codex and Claude
 Code connectors and unifies them on the agent's native hook bus for

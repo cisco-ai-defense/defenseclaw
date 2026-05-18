@@ -1,0 +1,248 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package connector
+
+import (
+	"encoding/json"
+	"reflect"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// fixedSetupOpts produces a deterministic SetupOpts so the shape
+// checks below are stable across machines. We deliberately use a
+// placeholder address and a short token: the renderers must not
+// inject anything ENV-derived (hostname, USER, $HOME) into the OTLP
+// payload.
+func fixedSetupOpts(t *testing.T) SetupOpts {
+	t.Helper()
+	return SetupOpts{
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+		DataDir:  t.TempDir(),
+	}
+}
+
+// TestNativeOTLPShape_Codex pins the codex [otel] table to the
+// schema-required shape. Codex's deserializer is kebab-case and
+// rejects missing keys, so this test guards the four documented
+// top-level fields and the per-signal exporter sub-shape.
+func TestNativeOTLPShape_Codex(t *testing.T) {
+	t.Parallel()
+	opts := fixedSetupOpts(t)
+
+	block := buildCodexOtelBlock(opts)
+	if len(block) == 0 {
+		t.Fatal("buildCodexOtelBlock returned empty map; spec validation likely failed")
+	}
+
+	for _, want := range []string{"log_user_prompt", "exporter", "trace_exporter", "metrics_exporter"} {
+		if _, ok := block[want]; !ok {
+			t.Errorf("missing required codex [otel] key %q", want)
+		}
+	}
+
+	// Each per-signal exporter must carry endpoint + protocol +
+	// headers under the otlp-http sub-key. Drift here means the
+	// codex CLI will refuse the config at startup with a
+	// missing-field flavour error.
+	for _, signal := range []string{"exporter", "trace_exporter", "metrics_exporter"} {
+		exp, ok := block[signal].(map[string]interface{})
+		if !ok {
+			t.Errorf("%s: not a map", signal)
+			continue
+		}
+		otlp, ok := exp["otlp-http"].(map[string]interface{})
+		if !ok {
+			t.Errorf("%s.otlp-http: not a map", signal)
+			continue
+		}
+		if got, _ := otlp["protocol"].(string); got != "json" {
+			t.Errorf("%s.otlp-http.protocol = %q; want \"json\"", signal, got)
+		}
+		ep, _ := otlp["endpoint"].(string)
+		if !strings.HasPrefix(ep, "http://"+opts.APIAddr) {
+			t.Errorf("%s.otlp-http.endpoint = %q; want http://%s prefix", signal, ep, opts.APIAddr)
+		}
+		hdrs := toStringMap(otlp["headers"])
+		if hdrs["x-defenseclaw-token"] != opts.APIToken {
+			t.Errorf("%s.otlp-http.headers[x-defenseclaw-token] = %q; want %q", signal, hdrs["x-defenseclaw-token"], opts.APIToken)
+		}
+		if hdrs["x-defenseclaw-source"] != "codex" {
+			t.Errorf("%s.otlp-http.headers[x-defenseclaw-source] = %q; want \"codex\"", signal, hdrs["x-defenseclaw-source"])
+		}
+		if hdrs["x-defenseclaw-client"] == "" {
+			t.Errorf("%s.otlp-http.headers[x-defenseclaw-client] missing (gateway CSRF gate would reject)", signal)
+		}
+	}
+}
+
+// TestNativeOTLPShape_ClaudeCode pins the claudecode env block to
+// the shape the vendor's settings.json injects into the CLI process.
+// Keys are matched explicitly because Claude Code's OTel SDK reads
+// each one by name; OTEL_EXPORTER_OTLP_HEADERS / OTEL_RESOURCE_ATTRIBUTES
+// values are parsed as unordered comma-separated key=value sets.
+func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
+	t.Parallel()
+	opts := fixedSetupOpts(t)
+
+	env := buildClaudeCodeOtelEnv(opts)
+	if len(env) == 0 {
+		t.Fatal("buildClaudeCodeOtelEnv returned empty map; spec validation likely failed")
+	}
+
+	for _, want := range []string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY",
+		"DEFENSECLAW_FAIL_MODE",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		"OTEL_EXPORTER_OTLP_HEADERS",
+		"OTEL_EXPORTER_OTLP_PROTOCOL",
+		"OTEL_LOGS_EXPORTER",
+		"OTEL_METRICS_EXPORTER",
+		"OTEL_RESOURCE_ATTRIBUTES",
+		"OTEL_SERVICE_NAME",
+	} {
+		if _, ok := env[want]; !ok {
+			t.Errorf("missing required claudecode env var %q", want)
+		}
+	}
+
+	if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
+		t.Errorf("CLAUDE_CODE_ENABLE_TELEMETRY = %q; want \"1\"", env["CLAUDE_CODE_ENABLE_TELEMETRY"])
+	}
+	if env["OTEL_SERVICE_NAME"] != "claudecode" {
+		t.Errorf("OTEL_SERVICE_NAME = %q; want \"claudecode\"", env["OTEL_SERVICE_NAME"])
+	}
+	if env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/json" {
+		t.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL = %q; want \"http/json\"", env["OTEL_EXPORTER_OTLP_PROTOCOL"])
+	}
+	if !strings.HasPrefix(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://"+opts.APIAddr) {
+		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want http://%s prefix",
+			env["OTEL_EXPORTER_OTLP_ENDPOINT"], opts.APIAddr)
+	}
+
+	headers := splitOTelHeader(env["OTEL_EXPORTER_OTLP_HEADERS"])
+	wantHeaders := map[string]bool{
+		"x-defenseclaw-source=claudecode":          true,
+		"x-defenseclaw-client=claudecode-otel/1.0": true,
+		"x-defenseclaw-token=" + opts.APIToken:     true,
+	}
+	for _, h := range headers {
+		delete(wantHeaders, h)
+	}
+	if len(wantHeaders) != 0 {
+		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing entries %v; got %v",
+			wantHeaders, env["OTEL_EXPORTER_OTLP_HEADERS"])
+	}
+
+	resAttrs := splitOTelHeader(env["OTEL_RESOURCE_ATTRIBUTES"])
+	wantAttrs := map[string]bool{
+		"service.name=claudecode":          true,
+		"defenseclaw.connector=claudecode": true,
+	}
+	for _, a := range resAttrs {
+		delete(wantAttrs, a)
+	}
+	if len(wantAttrs) != 0 {
+		t.Errorf("OTEL_RESOURCE_ATTRIBUTES missing entries %v; got %v",
+			wantAttrs, env["OTEL_RESOURCE_ATTRIBUTES"])
+	}
+}
+
+// TestNativeOTLPShape_GeminiCLI pins the Gemini CLI telemetry
+// sub-object to the schema the vendor's settings.json loader
+// requires: enabled/target/useCollector/otlpEndpoint/otlpProtocol/
+// logPrompts, with the path-scoped endpoint that the gateway's
+// tokenAuth middleware accepts for the gemini scope.
+func TestNativeOTLPShape_GeminiCLI(t *testing.T) {
+	t.Parallel()
+	opts := fixedSetupOpts(t)
+	const fixedToken = "test-gemini-token"
+
+	spec := geminiCLINativeOTLPSpec(opts)
+	if spec == nil {
+		t.Fatal("geminiCLINativeOTLPSpec returned nil")
+	}
+	spec.PathToken = fixedToken
+	got, err := spec.JSONBlock()
+	if err != nil {
+		t.Fatalf("spec.JSONBlock: %v", err)
+	}
+
+	want := map[string]interface{}{
+		"enabled":      true,
+		"target":       "local",
+		"useCollector": true,
+		"otlpEndpoint": "http://127.0.0.1:18970/otlp/geminicli/" + fixedToken,
+		"otlpProtocol": "http",
+		"logPrompts":   spec.LogUserPrompts,
+	}
+
+	if !reflect.DeepEqual(want, got) {
+		t.Fatalf("geminicli telemetry block mismatch:\n  want=%s\n   got=%s",
+			mustJSON(want), mustJSON(got))
+	}
+}
+
+// toStringMap canonicalizes header keys to lower-case so values
+// produced by either map[string]string or map[string]interface{}
+// renderers compare equal.
+func toStringMap(v interface{}) map[string]string {
+	out := map[string]string{}
+	switch m := v.(type) {
+	case map[string]interface{}:
+		for k, vv := range m {
+			out[strings.ToLower(k)], _ = vv.(string)
+		}
+	case map[string]string:
+		for k, vv := range m {
+			out[strings.ToLower(k)] = vv
+		}
+	}
+	return out
+}
+
+// splitOTelHeader parses comma-separated key=value lists per the
+// OTel spec, with the key half lower-cased so case differences from
+// the renderer don't cause spurious mismatches.
+func splitOTelHeader(v string) []string {
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		eq := strings.IndexByte(p, '=')
+		if eq <= 0 {
+			out = append(out, p)
+			continue
+		}
+		out = append(out, strings.ToLower(p[:eq])+"="+p[eq+1:])
+	}
+	sort.Strings(out)
+	return out
+}
+
+func mustJSON(v interface{}) string {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return "<encode error: " + err.Error() + ">"
+	}
+	return string(b)
+}

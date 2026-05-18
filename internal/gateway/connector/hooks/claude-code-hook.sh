@@ -1,8 +1,12 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v4
 # DefenseClaw Claude Code hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/claude-code/hook endpoint. Claude Code pipes
 # the structured JSON event to stdin and reads the response from stdout.
+#
+# v4 (Phase B.3 / PR 4): forwards W3C trace context (traceparent /
+# tracestate) when the agent has exported it via DEFENSECLAW_TRACEPARENT
+# or OTEL_TRACEPARENT. See codex-hook.sh for the full rollout note.
 set -euo pipefail
 
 # Fail-open guard. See inspect-request.sh for rationale.
@@ -80,10 +84,17 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
+# PR 4 / Phase B.3 — W3C trace propagation.
+TRACE_HEADER_ARGS=()
+if command -v mapfile >/dev/null 2>&1; then
+  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -64,6 +65,54 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 	}
 	_ = a.logger.LogActionCtx(ctx, string(audit.ActionConnectorHook), eventType,
 		fmt.Sprintf("connector=%s %s", connectorName, details))
+}
+
+// logConnectorHookAuditEnvelope is the structured-audit entry point
+// every connector hook handler should use once it has a fully-built
+// HookAuditEnvelope.
+//
+// The audit `details` column always carries BOTH forms:
+//
+//   - the legacy "connector=… action=… raw_action=…" key=value tail
+//     for backwards-compatible operator log greps (Splunk SPL,
+//     `grep "raw_action=block"`, etc.); and
+//   - the JSON envelope under the literal key `details_json=` for
+//     structured log pipelines (Loki, Datadog, jq scripts).
+//
+// The dual format is intentional: it gives operators the freedom to
+// migrate at their own pace and never makes the audit row less
+// information-rich than the prior release. The JSON value is
+// strconv.Quote'd so it can carry embedded commas and quotes without
+// breaking the surrounding tail.
+//
+// stripLogInjectionRunes runs on every string field in both forms,
+// per codeguard-0-logging: a hostile prompt that smuggles CR/LF/ANSI
+// escapes cannot forge fake audit rows or corrupt the operator's
+// terminal.
+//
+// Optional action override: when env.Action carries a non-default
+// audit action (today: ActionConnectorHookSynthetic for synthetic
+// codex-notify-derived events), the override is used instead of the
+// canonical ActionConnectorHook. Sinks that want to keep "1 row per
+// codex.notify in" should filter on action=connector-hook only.
+func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) {
+	if a.logger == nil {
+		return
+	}
+	env.Connector = normalizeHookTelemetryLabel(env.Connector, "unknown")
+	env.Event = normalizeHookTelemetryLabel(env.Event, "unknown")
+	if env.Result == "" {
+		env.Result = "ok"
+	}
+	auditAction := string(audit.ActionConnectorHook)
+	if env.AuditActionOverride != "" {
+		auditAction = env.AuditActionOverride
+	}
+	jsonDetails := renderHookAuditEnvelope(env)
+	legacy := renderHookAuditLegacyDetails(env)
+	combined := fmt.Sprintf("connector=%s %s details_json=%s",
+		env.Connector, legacy, strconv.Quote(jsonDetails))
+	_ = a.logger.LogActionCtx(ctx, auditAction, env.Event, combined)
 }
 
 func (a *APIServer) logAssetPolicyAudit(ctx context.Context, target, details string) {

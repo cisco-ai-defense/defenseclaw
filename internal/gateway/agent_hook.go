@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
@@ -86,6 +87,19 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		req.CWD = sanitizeHookCWD(req.CWD)
 		ctx := enrichAgentHookContext(r.Context(), req)
 
+		// PR 6 / Phase D — profile-driven raw event remembering.
+		// Every connector that maps to a hook event with prompt /
+		// tool-call / tool-result shape now gets dedup IDs for
+		// joining native OTLP traffic with the hook surface. The
+		// IDs flow into the audit envelope below so a SIEM query
+		// can correlate a guardrail block with the upstream OTLP
+		// log without bespoke per-connector wiring.
+		//
+		// hookOnly connectors (hermes/cursor/etc.) previously had
+		// no dedup coverage; this addition is additive — empty IDs
+		// are dropped by the envelope omitempty rule.
+		rawEventIDs := a.rememberHookRawEvents(req)
+
 		// Emit the LLM event (prompt/tool/response) BEFORE the
 		// evaluator runs. Mirrors handleClaudeCodeHook /
 		// handleCodexHook ordering: the audit/event log captures
@@ -118,18 +132,159 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.otel.RecordConnectorHookInvocation(ctx, connectorName, req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
 			a.otel.RecordInspectEvaluation(ctx, connectorName+":"+req.HookEventName, resp.Action, resp.Severity)
 			a.otel.RecordInspectLatency(ctx, connectorName+":"+req.HookEventName, float64(elapsed.Milliseconds()))
+			// PR 3 / Phase B.2 — parity metrics every connector emits.
+			// Outcome is unconditional (the dashboard panel always
+			// has a series per connector); token usage runs only when
+			// the payload carries usable counters so we never emit
+			// zero-valued series that bloat the TSDB.
+			a.otel.RecordHookOutcome(ctx, connectorName, req.HookEventName, resp.Action, resp.Severity, resp.WouldBlock)
+			usage := extractHookPayloadTokenUsage(req.Payload)
+			a.otel.RecordHookTokenUsage(ctx, connectorName, usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 			a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, "ok", 1, int64(len(b)),
 				fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
 					connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
 		}
 
-		details := fmt.Sprintf("action=%s raw_action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-			resp.Action, resp.RawAction, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-		details = appendRawTelemetryDetails(details, "raw_payload", b)
-		a.logConnectorHookAudit(ctx, connectorName, req.HookEventName, details)
+		// Build the structured envelope once and let
+		// logConnectorHookAuditEnvelope persist BOTH the JSON
+		// envelope AND the legacy key=value tail in the audit
+		// `details` column. The envelope carries the same fields
+		// the legacy formatter produced (action, raw_action,
+		// severity, mode, would_block, elapsed) plus structured
+		// raw-event metadata; the dual format means existing
+		// operator log greps and new jq-based pipelines are both
+		// served without an env-var toggle.
+		env := HookAuditEnvelope{
+			Connector:   connectorName,
+			Event:       req.HookEventName,
+			Result:      "ok",
+			Action:      resp.Action,
+			RawAction:   resp.RawAction,
+			Severity:    resp.Severity,
+			Mode:        resp.Mode,
+			Reason:      resp.Reason,
+			WouldBlock:  resp.WouldBlock,
+			ElapsedMs:   elapsed.Milliseconds(),
+			BodyBytes:   int64(len(b)),
+			RawOrigin:   rawOriginIfHook(rawEventIDs),
+			RawEventIDs: rawEventIDs,
+		}
+		if redaction.DisableAll() && len(b) > 0 {
+			env.RawPayload = string(b)
+		}
+		a.logConnectorHookAuditEnvelope(ctx, env)
 
 		a.writeJSON(w, http.StatusOK, resp)
 	}
+}
+
+// handleAgentHookSynthetic runs the same unified evaluate + audit +
+// metrics pipeline as handleAgentHook but skips the HTTP-decode
+// step. Callers (handleCodexNotify) construct a fully populated
+// agentHookRequest themselves so the unified collector can ingest
+// non-HTTP-shaped signals (codex notify fire-and-forget POSTs,
+// future webhook-style integrations) the same way as a hook-shaped
+// POST.
+//
+// The function intentionally does NOT write to w — callers own the
+// transport-layer response shape (codex notify returns 200 / "{}"
+// regardless of evaluator outcome, hook POSTs return the
+// agentHookResponse JSON). rawBody is supplied only so the audit
+// envelope can compute BodyBytes; it is never reparsed.
+//
+// Telemetry: same shape as handleAgentHook —
+// RecordConnectorHookInvocation, RecordHookOutcome,
+// RecordHookTokenUsage, span enrichment, plus a structured audit
+// envelope persisted under audit.ActionConnectorHookSynthetic.
+//
+// Why a DIFFERENT audit action? The caller (handleCodexNotify)
+// already persists the canonical `codex.notify.<sanitized-type>`
+// audit row, and downstream SIEM rules pin "1 codex.notify in → 1
+// codex.notify.* row out". Routing the synthetic envelope under
+// ActionConnectorHookSynthetic keeps that contract intact while
+// adding a separate row class for the synthetic Stop event so
+// connector.hook dashboards see the synthesized invocation; the
+// two action constants are independent so neither row count
+// changes when the other moves.
+//
+// The OTel attributes carry `defenseclaw.hook.synthetic=true` so
+// dashboards can filter synthetic events out of the "real" hook
+// traffic when needed (set by enrichAgentHookSpanSynthetic).
+func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName string, req agentHookRequest, rawBody []byte) agentHookResponse {
+	ctx = enrichAgentHookContext(ctx, req)
+	rawEventIDs := a.rememberHookRawEvents(req)
+	a.emitAgentHookLLMEvent(ctx, req, rawBody)
+
+	t0 := time.Now()
+	resp := a.evaluateAgentHook(ctx, req)
+	elapsed := time.Since(t0)
+	enrichAgentHookSpan(ctx, req, resp, elapsed)
+	enrichAgentHookSpanSynthetic(ctx)
+
+	if a.health != nil {
+		a.health.RecordConnectorRequest()
+		if resp.Action == "block" {
+			a.health.RecordToolBlock()
+		}
+	}
+
+	if a.otel != nil {
+		reason := resp.Action
+		if resp.WouldBlock {
+			reason = "would_block"
+		}
+		a.otel.RecordConnectorHookInvocation(ctx, connectorName, req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
+		a.otel.RecordInspectEvaluation(ctx, connectorName+":"+req.HookEventName, resp.Action, resp.Severity)
+		a.otel.RecordInspectLatency(ctx, connectorName+":"+req.HookEventName, float64(elapsed.Milliseconds()))
+		a.otel.RecordHookOutcome(ctx, connectorName, req.HookEventName, resp.Action, resp.Severity, resp.WouldBlock)
+		usage := extractHookPayloadTokenUsage(req.Payload)
+		a.otel.RecordHookTokenUsage(ctx, connectorName, usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, "ok", 1, int64(len(rawBody)),
+			fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d synthetic=true",
+				connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
+	}
+
+	// Persist the synthetic envelope under a distinct audit action
+	// so the canonical caller row count stays intact while SIEM /
+	// dashboards still see the synthesized Stop event. See the
+	// function godoc for the row-counting contract.
+	env := HookAuditEnvelope{
+		Connector:           connectorName,
+		Event:               req.HookEventName,
+		Result:              "ok",
+		Action:              resp.Action,
+		RawAction:           resp.RawAction,
+		Severity:            resp.Severity,
+		Mode:                resp.Mode,
+		Reason:              resp.Reason,
+		WouldBlock:          resp.WouldBlock,
+		ElapsedMs:           elapsed.Milliseconds(),
+		BodyBytes:           int64(len(rawBody)),
+		RawOrigin:           rawOriginIfHook(rawEventIDs),
+		RawEventIDs:         rawEventIDs,
+		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
+		Extra:               map[string]string{"synthetic": "true"},
+	}
+	if redaction.DisableAll() && len(rawBody) > 0 {
+		env.RawPayload = string(rawBody)
+	}
+	a.logConnectorHookAuditEnvelope(ctx, env)
+	return resp
+}
+
+// enrichAgentHookSpanSynthetic stamps a defenseclaw.hook.synthetic
+// attribute on the active span so dashboards built on top of
+// RecordConnectorHookInvocation can split "real" hook POSTs from
+// notify-bridge synthetic Stop events. Kept as a separate helper so
+// the existing enrichAgentHookSpan signature does not grow a
+// boolean parameter (every existing call site would otherwise need
+// updating).
+func enrichAgentHookSpanSynthetic(ctx context.Context) {
+	span := trace.SpanFromContext(ctx)
+	if span == nil || !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.Bool("defenseclaw.hook.synthetic", true))
 }
 
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {

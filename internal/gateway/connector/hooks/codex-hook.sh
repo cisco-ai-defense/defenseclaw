@@ -1,8 +1,16 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v4
 # DefenseClaw Codex hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/codex/hook endpoint. Codex pipes the
 # structured JSON event to stdin and reads the response from stdout.
+#
+# v4 (Phase B.3 / PR 4): forwards W3C trace context. If the agent has
+# already exported DEFENSECLAW_TRACEPARENT / OTEL_TRACEPARENT (etc.)
+# the validated values are sent to the gateway as traceparent /
+# tracestate headers so the hook span links back to the agent's
+# parent span. Validation happens in _hardening.sh — a malformed
+# value is silently dropped (the hook still posts to the gateway, it
+# just starts a new root span).
 set -euo pipefail
 
 # Fail-open guard. See inspect-request.sh for rationale.
@@ -90,10 +98,22 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
+# PR 4 / Phase B.3 — W3C trace propagation. mapfile fills
+# TRACE_HEADER_ARGS with a sequence of `-H "traceparent: …"` /
+# `-H "tracestate: …"` arguments; invalid env values are dropped
+# by defenseclaw_extract_trace_context. On bash<4 the array stays
+# empty (set -u-safe expansion below) so older shells degrade
+# gracefully.
+TRACE_HEADER_ARGS=()
+if command -v mapfile >/dev/null 2>&1; then
+  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: codex-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

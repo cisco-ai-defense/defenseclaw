@@ -354,7 +354,14 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 			route = r.Pattern
 		}
 		spanName := r.Method + " " + route
-		ctx, span := tracer.Start(r.Context(), spanName,
+		// Pull the W3C traceparent header from the request so the
+		// hook span links back to the agent's parent span.
+		// extractIncomingTraceContext returns r.Context() unchanged
+		// for routes other than /api/v1/<connector>/hook and
+		// /api/v1/codex/notify; see shouldExtractHookTrace for the
+		// security justification.
+		parentCtx := extractIncomingTraceContext(r.Context(), r)
+		ctx, span := tracer.Start(parentCtx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attribute.String("defenseclaw.http.server", serverName)),
 		)

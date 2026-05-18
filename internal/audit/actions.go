@@ -101,7 +101,16 @@ const (
 	ActionOTelIngestTraces    Action = "otel.ingest.traces"
 	ActionOTelIngestMalformed Action = "otel.ingest.malformed"
 	ActionConnectorHook       Action = "connector-hook"
-	ActionAssetPolicy         Action = "asset-policy"
+	// ActionConnectorHookSynthetic identifies a hook audit row that
+	// was synthesized by the gateway from a vendor-specific
+	// telemetry endpoint (today: codex's /api/v1/codex/notify
+	// agent-turn-complete callback). The canonical vendor row
+	// (e.g. codex.notify.agent-turn-complete) is always written
+	// too, so downstream SIEM rules that count "1 codex.notify in
+	// → 1 row out" keep working; this action lets new dashboards
+	// reason about the synthesized event without disturbing them.
+	ActionConnectorHookSynthetic Action = "connector-hook-synthetic"
+	ActionAssetPolicy            Action = "asset-policy"
 
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
@@ -166,6 +175,7 @@ func AllActions() []Action {
 		ActionOTelIngestTraces,
 		ActionOTelIngestMalformed,
 		ActionConnectorHook,
+		ActionConnectorHookSynthetic,
 		ActionAssetPolicy,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,

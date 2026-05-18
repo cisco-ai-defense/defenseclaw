@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v5
+# defenseclaw-managed-hook v6
 # Plan B4 / S0.4: shell-side hook hardening helpers.
 #
 # Schema versions:
@@ -35,6 +35,27 @@
 #        well above the largest legitimate prompt) using `head -c` and
 #        emits a transport-category log line + fail-closed error when
 #        the cap is exceeded so we don't silently truncate JSON.
+#   v6 — adds W3C trace context forwarding helpers. Hooks can now
+#        propagate an existing trace into the gateway via traceparent /
+#        tracestate headers so a single span in the operator's APM
+#        connects "agent saw tool call" → "gateway evaluated hook" →
+#        "scanner emitted finding" → "audit row persisted". The two
+#        new helpers:
+#          - defenseclaw_extract_trace_context: parses
+#            DEFENSECLAW_TRACEPARENT / DEFENSECLAW_TRACESTATE / the
+#            OTEL_* equivalents from the agent's exported env. Returns
+#            a curl -H argument array via stdout in line-buffered form
+#            (one header per line) so callers can ingest it with
+#            `mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)`.
+#          - defenseclaw_validate_traceparent: enforces the W3C format
+#            (version-traceid-spanid-flags, 55 chars total, all hex)
+#            before emitting the header so a hostile env value can't
+#            forge an arbitrary string into the gateway's trace
+#            context.
+#        The Go side accepts the headers only on the two hook-bearing
+#        routes (/api/v1/<connector>/hook, /api/v1/codex/notify) via
+#        shouldExtractHookTrace, so an unscoped caller cannot splice
+#        an arbitrary trace context into the gateway's trace tree.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
 # codex-hook.sh, inspect-*.sh) BEFORE any agent-supplied data is touched.
@@ -367,4 +388,116 @@ defenseclaw_read_stdin_capped() {
   fi
   printf '%s' "$body"
   return 0
+}
+
+# defenseclaw_validate_traceparent returns 0 when $1 matches the W3C
+# trace context format (RFC 9110-bis / draft-ietf-tcs-traceparent):
+#
+#   version "-" trace-id "-" parent-id "-" trace-flags
+#
+#   version   :=  2 lower-hex chars
+#   trace-id  := 32 lower-hex chars, MUST NOT be all-zero
+#   parent-id := 16 lower-hex chars, MUST NOT be all-zero
+#   flags     :=  2 lower-hex chars
+#
+# Total 55 characters with the three dashes. Validation is intentionally
+# strict: the gateway treats traceparent as trusted input that joins
+# the agent's span tree with the gateway's. A hostile env value that
+# spoofs e.g. an admin's request would otherwise re-write the trace
+# graph.
+defenseclaw_validate_traceparent() {
+  local v="${1:-}"
+  case "${#v}" in
+    55) : ;;
+    *) return 1 ;;
+  esac
+  # Layout check: dashes at positions 3, 36, 53 (1-indexed).
+  case "$v" in
+    ??-????????????????????????????????-????????????????-??) : ;;
+    *) return 1 ;;
+  esac
+  # Strict-hex check: any non-hex char rejects.
+  case "$v" in
+    *[!0-9a-f-]*) return 1 ;;
+  esac
+  # Trace-id and parent-id must not be all-zero.
+  local trace_id parent_id
+  trace_id="${v:3:32}"
+  parent_id="${v:36:16}"
+  case "$trace_id" in
+    00000000000000000000000000000000) return 1 ;;
+  esac
+  case "$parent_id" in
+    0000000000000000) return 1 ;;
+  esac
+  return 0
+}
+
+# defenseclaw_validate_tracestate accepts the comma-separated key=value
+# list defined by W3C. We bound the length to 512 bytes (W3C SHOULD
+# limit, the gateway also enforces it server-side) and refuse any byte
+# that would be log-injectable. Only ASCII printables, "=", ",", "@",
+# "_", "/", "-", and whitespace are permitted — matching the
+# tracestate ABNF. The allow-list is expressed via a $'...' ANSI-C
+# string so the literal tab inside the bracket expression survives
+# bash's POSIX glob parser (a bare \t would be a syntax error).
+defenseclaw_validate_tracestate() {
+  local v="${1:-}"
+  if [ ${#v} -gt 512 ]; then
+    return 1
+  fi
+  local _allowed=$'A-Za-z0-9=,@_/. \t-'
+  case "$v" in
+    *[!$_allowed]*) return 1 ;;
+  esac
+  return 0
+}
+
+# defenseclaw_extract_trace_context emits one curl `-H "..."` argument
+# per line (no carriage returns) for every trace header that should be
+# forwarded to the gateway. Callers consume the output via
+# `mapfile -t HEADERS < <(defenseclaw_extract_trace_context)` which
+# preserves the exact quoting curl expects.
+#
+# Source precedence (first non-empty wins per header):
+#
+#   traceparent:  DEFENSECLAW_TRACEPARENT, then TRACEPARENT, then
+#                 OTEL_TRACEPARENT.
+#   tracestate:   DEFENSECLAW_TRACESTATE,  then TRACESTATE,  then
+#                 OTEL_TRACESTATE.
+#
+# Validation runs on every candidate; an invalid value is logged via
+# defenseclaw_log_hook_failure (response category — bad input from
+# the agent) and skipped silently. The hook still posts to the
+# gateway; it just does so without trace propagation, which fails
+# safe (gateway starts a new root span).
+defenseclaw_extract_trace_context() {
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
+  local hook_name="${DEFENSECLAW_HOOK_NAME:-unknown}"
+
+  local tp
+  tp="${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-${OTEL_TRACEPARENT:-}}}"
+  if [ -n "$tp" ]; then
+    if defenseclaw_validate_traceparent "$tp"; then
+      printf '%s\n' "-H"
+      printf '%s\n' "traceparent: $tp"
+    else
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "rejected malformed traceparent (length=${#tp})" \
+        response "${FAIL_MODE:-open}"
+    fi
+  fi
+
+  local ts
+  ts="${DEFENSECLAW_TRACESTATE:-${TRACESTATE:-${OTEL_TRACESTATE:-}}}"
+  if [ -n "$ts" ]; then
+    if defenseclaw_validate_tracestate "$ts"; then
+      printf '%s\n' "-H"
+      printf '%s\n' "tracestate: $ts"
+    else
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "rejected malformed tracestate (length=${#ts})" \
+        response "${FAIL_MODE:-open}"
+    fi
+  fi
 }

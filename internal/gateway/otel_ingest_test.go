@@ -986,6 +986,12 @@ func TestOTLPIngest_MalformedPersistsTypedAuditAction(t *testing.T) {
 // codex.notify.agent-turn-complete explicitly; everything else
 // must still pass IsKnownActionPrefix so future codex notify types
 // don't get rejected by audit-event validators.
+//
+// The unified hook collector always synthesizes a parallel Stop
+// event for the notify payload, so this test also asserts the
+// presence of exactly one connector-hook-synthetic row alongside
+// the canonical notify row. SIEM rules pinned on
+// `action LIKE 'codex.notify%'` continue to see a single match.
 func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 	store, logger := newOTLPIngestTestStore(t)
 	a := &APIServer{store: store, logger: logger}
@@ -1003,30 +1009,30 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	rows, err := store.ListEvents(10)
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
+	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	if len(canonical) != 1 {
+		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
 	}
-	if len(rows) != 1 {
-		t.Fatalf("rows=%d want 1", len(rows))
+	if len(synthetic) != 1 {
+		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
 	}
-	if got, want := rows[0].Action, "codex.notify.agent-turn-complete"; got != want {
+	if got, want := canonical[0].Action, "codex.notify.agent-turn-complete"; got != want {
 		t.Errorf("Action = %q, want %q", got, want)
 	}
 	// Must satisfy *either* the static enum OR the prefix matcher.
 	// audit-event.json validators in downstream SIEMs use the same
 	// disjunction.
-	if !audit.IsKnownAction(rows[0].Action) && !audit.IsKnownActionPrefix(rows[0].Action) {
-		t.Errorf("audit Action %q matches neither IsKnownAction nor IsKnownActionPrefix", rows[0].Action)
+	if !audit.IsKnownAction(canonical[0].Action) && !audit.IsKnownActionPrefix(canonical[0].Action) {
+		t.Errorf("audit Action %q matches neither IsKnownAction nor IsKnownActionPrefix", canonical[0].Action)
 	}
-	if rows[0].SessionID != "turn-abc" {
-		t.Errorf("SessionID = %q, want %q (codex notify rows must fall back to turn-id when thread-id is absent)", rows[0].SessionID, "turn-abc")
+	if canonical[0].SessionID != "turn-abc" {
+		t.Errorf("SessionID = %q, want %q (codex notify rows must fall back to turn-id when thread-id is absent)", canonical[0].SessionID, "turn-abc")
 	}
-	if strings.Contains(rows[0].Details, body) {
-		t.Fatalf("Details stored raw notify body: %q", rows[0].Details)
+	if strings.Contains(canonical[0].Details, body) {
+		t.Fatalf("Details stored raw notify body: %q", canonical[0].Details)
 	}
-	if !strings.Contains(rows[0].Details, "body_sha256") || !strings.Contains(rows[0].Details, "body_len") {
-		t.Fatalf("Details missing redacted notify summary fields: %q", rows[0].Details)
+	if !strings.Contains(canonical[0].Details, "body_sha256") || !strings.Contains(canonical[0].Details, "body_len") {
+		t.Fatalf("Details missing redacted notify summary fields: %q", canonical[0].Details)
 	}
 }
 
@@ -1085,14 +1091,14 @@ func TestCodexNotify_NoTypePersistsBareAction(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	rows, err := store.ListEvents(10)
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
+	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	if len(canonical) != 1 {
+		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
 	}
-	if len(rows) != 1 {
-		t.Fatalf("rows=%d want 1", len(rows))
+	if len(synthetic) != 1 {
+		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
 	}
-	if got, want := rows[0].Action, string(audit.ActionCodexNotify); got != want {
+	if got, want := canonical[0].Action, string(audit.ActionCodexNotify); got != want {
 		t.Errorf("Action = %q, want %q (no type → bare codex.notify)", got, want)
 	}
 }
@@ -1114,20 +1120,53 @@ func TestCodexNotify_PrefersThreadIDForSessionCorrelation(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
+	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	if len(canonical) != 1 {
+		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
+	}
+	if len(synthetic) != 1 {
+		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
+	}
+	if got, want := canonical[0].SessionID, "thread-123"; got != want {
+		t.Fatalf("SessionID = %q, want %q", got, want)
+	}
+	if !strings.Contains(canonical[0].Details, "thread_id=") {
+		t.Fatalf("Details missing thread_id summary: %q", canonical[0].Details)
+	}
+	if !strings.Contains(canonical[0].Details, "turn_id=") {
+		t.Fatalf("Details missing turn_id summary: %q", canonical[0].Details)
+	}
+}
+
+// splitCodexNotifyAuditRows fetches the audit-store contents and
+// partitions them into the two row classes the codex notify
+// pipeline produces:
+//
+//   - canonical: action == "codex.notify[.suffix]" — the row the
+//     SIEM has always seen, one per inbound notify;
+//   - synthetic: action == ActionConnectorHookSynthetic — the
+//     visibility row written by the unified hook collector when it
+//     synthesizes a Stop event from the same payload.
+//
+// Centralizing the split in a helper means every test asserting
+// the contract reads the same way and a future SIEM rule writer
+// can grep for one symbol to discover the row taxonomy.
+func splitCodexNotifyAuditRows(t *testing.T, store *audit.Store) (canonical, synthetic []audit.Event) {
+	t.Helper()
 	rows, err := store.ListEvents(10)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("rows=%d want 1", len(rows))
+	for _, r := range rows {
+		switch {
+		case strings.HasPrefix(r.Action, string(audit.ActionCodexNotify)):
+			canonical = append(canonical, r)
+		case r.Action == string(audit.ActionConnectorHookSynthetic):
+			synthetic = append(synthetic, r)
+		default:
+			t.Fatalf("unexpected audit Action=%q (test fixture should only produce codex.notify* + %s)",
+				r.Action, audit.ActionConnectorHookSynthetic)
+		}
 	}
-	if got, want := rows[0].SessionID, "thread-123"; got != want {
-		t.Fatalf("SessionID = %q, want %q", got, want)
-	}
-	if !strings.Contains(rows[0].Details, "thread_id=") {
-		t.Fatalf("Details missing thread_id summary: %q", rows[0].Details)
-	}
-	if !strings.Contains(rows[0].Details, "turn_id=") {
-		t.Fatalf("Details missing turn_id summary: %q", rows[0].Details)
-	}
+	return canonical, synthetic
 }

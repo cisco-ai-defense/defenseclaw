@@ -138,16 +138,41 @@ func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request)
 		a.otel.RecordConnectorHookInvocation(ctx, "claudecode", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
 		a.otel.RecordInspectEvaluation(ctx, "claudecode:"+req.HookEventName, resp.Action, resp.Severity)
 		a.otel.RecordInspectLatency(ctx, "claudecode:"+req.HookEventName, float64(elapsed.Milliseconds()))
+		// PR 3 / Phase B.2 — parity emission. PostToolUse payloads
+		// frequently include claude_code.token.usage; we forward
+		// those into the hook surface so a single PromQL query
+		// covers cost-per-event without joining the native OTLP
+		// channel.
+		a.otel.RecordHookOutcome(ctx, "claudecode", req.HookEventName, resp.Action, resp.Severity, resp.WouldBlock)
+		if usage := extractHookPayloadTokenUsage(req.Payload); usage != (hookTokenUsage{}) {
+			a.otel.RecordHookTokenUsage(ctx, "claudecode", usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
+		}
 		a.otel.EmitConnectorTelemetryLog(ctx, "hook", "claudecode", "ok", 1, int64(len(b)),
 			fmt.Sprintf("source=hook connector=claudecode event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
 				req.HookEventName, claudeCodeToolName(req), resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
 	}
 
-	details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-		resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-	details = appendRawTelemetryDetails(details, "raw_payload", b)
-	details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-	a.logConnectorHookAudit(ctx, "claudecode", req.HookEventName, details)
+	// PR 2 / Phase B.1: structured audit envelope (see codex
+	// equivalent for the rollout contract).
+	env := HookAuditEnvelope{
+		Connector:   "claudecode",
+		Event:       req.HookEventName,
+		Result:      "ok",
+		Action:      resp.Action,
+		RawAction:   resp.RawAction,
+		Severity:    resp.Severity,
+		Mode:        resp.Mode,
+		Reason:      resp.Reason,
+		WouldBlock:  resp.WouldBlock,
+		ElapsedMs:   elapsed.Milliseconds(),
+		BodyBytes:   int64(len(b)),
+		RawOrigin:   "hook",
+		RawEventIDs: rawEventIDs,
+	}
+	if redaction.DisableAll() && len(b) > 0 {
+		env.RawPayload = string(b)
+	}
+	a.logConnectorHookAuditEnvelope(ctx, env)
 
 	a.writeJSON(w, http.StatusOK, resp)
 }

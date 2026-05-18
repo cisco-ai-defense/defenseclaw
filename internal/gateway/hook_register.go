@@ -26,22 +26,31 @@ import "net/http"
 // only a registerHookHandler call here, plus a HookEndpoint
 // implementation in the connector package.
 //
-// The factory pattern (rather than a direct method-value) lets the
-// handler close over APIServer state at registration time; the
-// returned http.HandlerFunc captures the active server's redactor,
-// otel, audit logger, etc., so test fixtures that build their own
-// APIServer pick up the right wiring without leaking globals.
+// Every connector — including codex and claudecode — routes through
+// handleUnifiedConnectorHook. The unified wrapper is the single
+// entry point for:
+//
+//   - structured audit envelope writes (logConnectorHookAuditEnvelope),
+//   - native OTel metrics (RecordHookOutcome / RecordHookTokenUsage),
+//   - raw-event deduplication (rememberHookRawEvents),
+//   - W3C trace propagation from the agent-side span.
+//
+// For codex and claudecode the wrapper transparently delegates the
+// evaluation portion to the bespoke handler (which still implements
+// the connector-specific response shaping for PluginInput v1 /
+// extra Codex notify quirks). All other connectors flow through
+// handleAgentHook unmodified.
 func init() {
 	registerHookHandler("claudecode", func(a *APIServer) http.HandlerFunc {
-		return a.handleClaudeCodeHook
+		return a.handleUnifiedConnectorHook("claudecode")
 	})
 	registerHookHandler("codex", func(a *APIServer) http.HandlerFunc {
-		return a.handleCodexHook
+		return a.handleUnifiedConnectorHook("codex")
 	})
 	for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot"} {
 		connectorName := name
 		registerHookHandler(connectorName, func(a *APIServer) http.HandlerFunc {
-			return a.handleAgentHook(connectorName)
+			return a.handleUnifiedConnectorHook(connectorName)
 		})
 	}
 }

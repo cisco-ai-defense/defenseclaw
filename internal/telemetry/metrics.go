@@ -70,6 +70,23 @@ type metricsSet struct {
 	hookInvocations    metric.Int64Counter
 	hookLatency        metric.Float64Histogram
 
+	// PR 3 / Phase B.2 — connector hook parity with codex notify.
+	// hookTokens: split by kind=prompt|completion|total so dashboards
+	// can sum any subset; bounded by connector × model cardinality.
+	// hookOutcome: split by action × severity × would_block so the
+	// alerting rules can group on "alerts that became blocks".
+	hookTokens  metric.Int64Counter
+	hookOutcome metric.Int64Counter
+
+	// unifiedHookDispatch bumps on every invocation of
+	// handleUnifiedConnectorHook. Operators graph it to confirm
+	// every connector's hook traffic is flowing through the unified
+	// dispatcher (vs. an out-of-tree handler registration that
+	// bypasses audit/metrics emission). Cardinality is bounded by
+	// connector (7 today); no event dimension to keep the series
+	// cheap — operators join with hookOutcome for richer breakdowns.
+	unifiedHookDispatch metric.Int64Counter
+
 	// Audit store metrics
 	auditDBErrors metric.Int64Counter
 	auditEvents   metric.Int64Counter
@@ -317,6 +334,40 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		// sub-100ms so dashboards can spot regressions long before
 		// they're user-visible; the long tail still captures stalls.
 		metric.WithExplicitBucketBoundaries(1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// PR 3 / Phase B.2 — hook token usage + outcome counters.
+	// Token-usage counters are additive across kind={prompt,completion,total}
+	// so a sum-by-connector PromQL gives the full token throughput per
+	// connector without joining three series. The metric name uses the
+	// same defenseclaw.connector.hook.* prefix as the existing
+	// invocations + latency counters so dashboards can build one
+	// per-connector panel that surfaces all four signals.
+	ms.hookTokens, err = m.Int64Counter("defenseclaw.connector.hook.tokens",
+		metric.WithUnit("{token}"),
+		metric.WithDescription("Token usage attributable to connector hook invocations. Split by kind=prompt|completion|total."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	ms.hookOutcome, err = m.Int64Counter("defenseclaw.connector.hook.outcome",
+		metric.WithUnit("{decision}"),
+		metric.WithDescription("Connector hook outcomes labelled by action, severity, and would_block."),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// unifiedHookDispatch is a single-dimension counter (connector)
+	// to keep cardinality minimal; richer breakdowns can be derived
+	// from hookOutcome which is filtered to the same request set.
+	ms.unifiedHookDispatch, err = m.Int64Counter("defenseclaw.connector.hook.unified_dispatch",
+		metric.WithUnit("{invocation}"),
+		metric.WithDescription("Count of hook invocations routed through the unified hook collector, by connector."),
 	)
 	if err != nil {
 		return nil, err
@@ -1371,6 +1422,111 @@ func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector,
 	}
 	p.metrics.hookInvocations.Add(ctx, 1, metric.WithAttributes(attrs...))
 	p.metrics.hookLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))
+}
+
+// RecordHookTokenUsage records token-usage counts attributable to a
+// connector hook invocation. Promotes the same prompt/completion/total
+// triple that codex's notify endpoint and the OTLP ingestion path
+// already publish — so every connector reaches LLM-cost-dashboard
+// parity through the hook surface alone.
+//
+// Connector + model are required labels; missing values are
+// normalized to "unknown" so unlabeled hits still aggregate into a
+// catch-all bucket (rather than vanishing into the unlabeled time
+// series that PromQL filters drop).
+//
+// Counts that are <= 0 are silently ignored so a connector that
+// reports only one of the three fields does not record bogus zero-
+// valued time series. Callers should pass the parsed token counts
+// directly; the gateway runs no further normalization.
+func (p *Provider) RecordHookTokenUsage(ctx context.Context, connector, model string, promptTokens, completionTokens, totalTokens int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		connector = "unknown"
+	}
+	model = strings.TrimSpace(model)
+	if model == "" {
+		model = "unknown"
+	}
+	record := func(kind string, value int64) {
+		if value <= 0 {
+			return
+		}
+		p.metrics.hookTokens.Add(ctx, value, metric.WithAttributes(
+			attribute.String("connector", connector),
+			attribute.String("model", model),
+			attribute.String("kind", kind),
+		))
+	}
+	record("prompt", promptTokens)
+	record("completion", completionTokens)
+	record("total", totalTokens)
+}
+
+// RecordHookOutcome records a single hook decision split by the
+// dimensions dashboards already group on: connector, event, action,
+// severity, and the would_block bool. Operators alert on the same
+// dimensions in PromQL and SQL, so the counter is intentionally
+// labelled with all five — cardinality is bounded by event * action
+// (small finite sets) so the would_block dimension stays free.
+//
+// elapsedMs is logged with the corresponding hookLatency histogram
+// already; this helper is a separate counter so dashboards can
+// compute "block rate" without coupling to the latency exporter.
+func (p *Provider) RecordHookOutcome(ctx context.Context, connector, eventType, action, severity string, wouldBlock bool) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		connector = "unknown"
+	}
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		eventType = "unknown"
+	}
+	action = strings.TrimSpace(action)
+	if action == "" {
+		action = "unknown"
+	}
+	severity = strings.TrimSpace(severity)
+	if severity == "" {
+		severity = "NONE"
+	}
+	p.metrics.hookOutcome.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("connector", connector),
+		attribute.String("event_type", eventType),
+		attribute.String("action", action),
+		attribute.String("severity", severity),
+		attribute.Bool("would_block", wouldBlock),
+	))
+}
+
+// RecordUnifiedHookDispatch bumps the unified hook dispatch
+// counter every time handleUnifiedConnectorHook routes a request.
+// Operators graph per-connector counts to confirm every hook
+// surface is flowing through the unified pipeline (which owns
+// audit / metrics / dedup / trace propagation), not an
+// out-of-tree handler registration that bypasses them.
+//
+// Cardinality is bounded by len(registered connectors); the counter
+// is intentionally one-dimensional (connector only) so the series
+// remains cheap. Richer breakdowns come from hookOutcome which is
+// filtered to the same request set.
+func (p *Provider) RecordUnifiedHookDispatch(ctx context.Context, connector string) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		connector = "unknown"
+	}
+	p.metrics.unifiedHookDispatch.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("connector", connector),
+	))
 }
 
 // RecordAuditDBError records an SQLite audit store operation failure.
