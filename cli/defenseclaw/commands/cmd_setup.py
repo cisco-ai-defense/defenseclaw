@@ -129,6 +129,12 @@ from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E40
 # disambiguation.
 from defenseclaw.commands.cmd_setup_webhook import webhook  # noqa: E402
 
+# Import the Terraform-backed Splunk O11y dashboard installer so the
+# interactive Splunk wizard can reuse the same idempotent apply path.
+from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E402
+    apply_dashboards,
+)
+
 setup.add_command(webhook)
 
 # Register `defenseclaw setup provider` (custom-providers.json overlay).
@@ -4949,6 +4955,8 @@ def _interactive_splunk_setup(
         _interactive_o11y(app, realm, access_token, app_name)
         did_o11y = True
         click.echo()
+        _interactive_o11y_dashboards(app)
+        click.echo()
 
     if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
         did_logs = _interactive_logs(app)
@@ -5013,6 +5021,44 @@ def _interactive_o11y(
     )
 
 
+def _interactive_o11y_dashboards(app: AppContext) -> bool:
+    click.echo()
+    click.echo("  Splunk O11y Dashboards")
+    click.echo("  ──────────────────────")
+    click.echo()
+    if not click.confirm("  Install Splunk Observability Cloud dashboards now?", default=False):
+        return False
+
+    o11y_api_token = click.prompt(
+        "  O11y API token (not the ingest token)",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
+    if not o11y_api_token:
+        click.echo("  error: O11y API token is required to install dashboards", err=True)
+        raise SystemExit(1)
+
+    apply_dashboards(
+        app,
+        api_url=None,
+        o11y_api_token=o11y_api_token,
+        name_prefix="",
+        with_detectors=False,
+        enable_detectors=False,
+        detector_notifications=(),
+        work_dir=None,
+        state_path=None,
+        terraform_bin="terraform",
+        plugin_dir=None,
+        skip_init=False,
+        skip_validate=False,
+        timeout=900,
+        yes=True,
+    )
+    return True
+
+
 def _prompt_splunk_token(current: str | None) -> str:
     env_val = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
     if current:
@@ -5022,7 +5068,12 @@ def _prompt_splunk_token(current: str | None) -> str:
     else:
         hint = "(not set)"
 
-    val = click.prompt(f"  Access token [{hint}]", default="", show_default=False, hide_input=True)
+    val = click.prompt(
+        f"  O11y ingest access token [{hint}]",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
     if val:
         return val
     return current or env_val

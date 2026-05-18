@@ -94,7 +94,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                     "apply",
                     "--api-url",
                     "https://api.realm.signalfx.com",
-                    "--auth-token",
+                    "--o11y-api-token",
                     "secret-token",
                     "--name-prefix",
                     "Smoke",
@@ -213,7 +213,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                     "apply",
                     "--api-url",
                     "https://api.realm.signalfx.com",
-                    "--auth-token",
+                    "--o11y-api-token",
                     "secret-token",
                     "--name-prefix",
                     "Smoke",
@@ -329,7 +329,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                     "apply",
                     "--api-url",
                     "https://api.realm.signalfx.com",
-                    "--auth-token",
+                    "--o11y-api-token",
                     "secret-token",
                     "--name-prefix",
                     "Smoke",
@@ -393,7 +393,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
                     "plan",
                     "--api-url",
                     "https://api.realm.signalfx.com",
-                    "--auth-token",
+                    "--o11y-api-token",
                     "secret-token",
                     "--work-dir",
                     str(tmp_path / "tf-work"),
@@ -425,7 +425,7 @@ class SplunkO11yDashboardCommandTests(unittest.TestCase):
             )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Splunk O11y token not found. Pass --auth-token.", result.output)
+        self.assertIn("Splunk O11y token not found. Pass --o11y-api-token.", result.output)
 
     def test_api_url_derives_from_ingest_realm(self) -> None:
         self.assertEqual(

@@ -222,7 +222,7 @@ For Splunk Observability Cloud, use the dashboard bundle at
 ```bash
 defenseclaw setup splunk dashboards apply \
   --api-url <api-endpoint> \
-  --auth-token <api-access-token> \
+  --o11y-api-token <api-access-token> \
   --with-detectors \
   --enable-detectors \
   --yes

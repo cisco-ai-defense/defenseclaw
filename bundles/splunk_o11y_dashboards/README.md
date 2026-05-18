@@ -53,7 +53,7 @@ The CLI automatically imports matching existing dashboards and detectors when th
 ```bash
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --auth-token <api-access-token> \
+  --o11y-api-token <api-access-token> \
   --yes
 ```
 
@@ -63,7 +63,7 @@ defenseclaw setup splunk dashboards apply \
 | Flag | Purpose |
 |---|---|
 | `--api-url <url>` | Splunk Observability Cloud API URL|
-| `--auth-token <token>` | Splunk O11y API access token. |
+| `--o11y-api-token <token>` | Splunk O11y API access token. |
 | `--with-detectors` | Create detectors along with dashboards. Omit this flag for dashboards only. |
 | `--enable-detectors` | Create detectors enabled instead of disabled. This only matters when `--with-detectors` is set. |
 | `--dashboards-only` | Explicitly skip detectors. This is the default when `--with-detectors` is not provided. |
@@ -73,7 +73,7 @@ defenseclaw setup splunk dashboards apply \
 ```bash
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --auth-token <api-access-token> \
+  --o11y-api-token <api-access-token> \
   --dashboards-only \
   --yes
 ```
@@ -83,7 +83,7 @@ Create detectors, left disabled:
 ```bash
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --auth-token <api-access-token> \
+  --o11y-api-token <api-access-token> \
   --with-detectors \
   --yes
 ```
@@ -93,7 +93,7 @@ Create detectors enabled:
 ```bash
 defenseclaw setup splunk dashboards apply \
   --api-url <api-url-endpoint> \
-  --auth-token <api-access-token> \
+  --o11y-api-token <api-access-token> \
   --with-detectors \
   --enable-detectors \
   --yes

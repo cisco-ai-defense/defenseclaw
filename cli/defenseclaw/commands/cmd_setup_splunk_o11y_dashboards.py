@@ -18,9 +18,9 @@
 
 This command is intentionally a thin Terraform driver. It copies the bundled
 Terraform module into the user's DefenseClaw data directory, resolves the
-Splunk Observability Cloud API URL/token from config or environment, and runs
-Terraform with the token supplied through ``TF_VAR_*`` rather than command-line
-arguments.
+Splunk Observability Cloud API URL from config or environment, and requires an
+explicit Splunk O11y API token for Terraform via ``TF_VAR_*`` rather than
+command-line arguments.
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def _dashboard_options(func):
         help="Label dashboard groups, dashboards, and detectors. Useful for smoke tests.",
     )(func)
     func = click.option(
-        "--auth-token",
+        "--o11y-api-token",
         default=None,
         help="Splunk O11y API access token. Required unless provided explicitly.",
     )(func)
@@ -157,7 +157,7 @@ def _dashboard_options(func):
 def plan_cmd(
     ctx: click.Context,
     api_url: str | None,
-    auth_token: str | None,
+    o11y_api_token: str | None,
     name_prefix: str,
     with_detectors: bool,
     enable_detectors: bool,
@@ -172,9 +172,9 @@ def plan_cmd(
 ) -> None:
     """Show Terraform changes for the O11y dashboard bundle."""
     prepared = _prepare_run(
-        ctx,
+        ctx.find_object(AppContext),
         api_url=api_url,
-        auth_token=auth_token,
+        o11y_api_token=o11y_api_token,
         name_prefix=name_prefix,
         with_detectors=with_detectors,
         enable_detectors=enable_detectors,
@@ -212,7 +212,7 @@ def apply_cmd(
     ctx: click.Context,
     yes: bool,
     api_url: str | None,
-    auth_token: str | None,
+    o11y_api_token: str | None,
     name_prefix: str,
     with_detectors: bool,
     enable_detectors: bool,
@@ -226,43 +226,23 @@ def apply_cmd(
     timeout: int,
 ) -> None:
     """Create or update the O11y dashboards."""
-    prepared = _prepare_run(
-        ctx,
+    apply_dashboards(
+        ctx.find_object(AppContext),
         api_url=api_url,
-        auth_token=auth_token,
+        o11y_api_token=o11y_api_token,
         name_prefix=name_prefix,
         with_detectors=with_detectors,
         enable_detectors=enable_detectors,
         detector_notifications=detector_notifications,
         work_dir=work_dir,
         state_path=state_path,
-    )
-    _run_init_validate(
-        prepared,
         terraform_bin=terraform_bin,
         plugin_dir=plugin_dir,
         skip_init=skip_init,
         skip_validate=skip_validate,
         timeout=timeout,
+        yes=yes,
     )
-    _adopt_existing_resources(prepared, terraform_bin=terraform_bin, timeout=timeout)
-    _run_terraform(
-        terraform_bin,
-        ["plan", "-input=false", f"-state={prepared.state_path}"],
-        cwd=prepared.work_dir,
-        env=prepared.env,
-        timeout=timeout,
-    )
-    if not yes:
-        click.confirm("Apply these Splunk Observability Cloud changes?", abort=True)
-    _run_terraform(
-        terraform_bin,
-        ["apply", "-input=false", "-auto-approve", f"-state={prepared.state_path}"],
-        cwd=prepared.work_dir,
-        env=prepared.env,
-        timeout=timeout,
-    )
-    _print_dashboard_outputs(prepared, terraform_bin=terraform_bin, timeout=timeout)
 
 
 @splunk_o11y_dashboards.command("destroy")
@@ -277,7 +257,7 @@ def destroy_cmd(
     ctx: click.Context,
     yes: bool,
     api_url: str | None,
-    auth_token: str | None,
+    o11y_api_token: str | None,
     name_prefix: str,
     with_detectors: bool,
     enable_detectors: bool,
@@ -292,9 +272,9 @@ def destroy_cmd(
 ) -> None:
     """Destroy O11y objects managed by the selected Terraform state."""
     prepared = _prepare_run(
-        ctx,
+        ctx.find_object(AppContext),
         api_url=api_url,
-        auth_token=auth_token,
+        o11y_api_token=o11y_api_token,
         name_prefix=name_prefix,
         with_detectors=with_detectors,
         enable_detectors=enable_detectors,
@@ -346,10 +326,10 @@ class _PreparedRun:
 
 
 def _prepare_run(
-    ctx: click.Context,
+    app: AppContext | None,
     *,
     api_url: str | None,
-    auth_token: str | None,
+    o11y_api_token: str | None,
     name_prefix: str,
     with_detectors: bool,
     enable_detectors: bool,
@@ -357,12 +337,11 @@ def _prepare_run(
     work_dir: Path | None,
     state_path: Path | None,
 ) -> _PreparedRun:
-    app = ctx.find_object(AppContext)
     data_dir = _resolve_data_dir(app)
     resolved_work_dir = (work_dir or data_dir / _DEFAULT_WORK_SUBDIR / "terraform").expanduser()
     resolved_state_path = (state_path or data_dir / _DEFAULT_WORK_SUBDIR / "terraform.tfstate").expanduser()
     resolved_api_url = _resolve_api_url(api_url, app)
-    resolved_auth_token = _resolve_auth_token(auth_token)
+    resolved_o11y_api_token = _resolve_o11y_api_token(o11y_api_token)
 
     _sync_terraform_bundle(resolved_work_dir)
     resolved_state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,7 +349,7 @@ def _prepare_run(
     env = os.environ.copy()
     env.update(
         {
-            "TF_VAR_signalfx_auth_token": resolved_auth_token,
+            "TF_VAR_signalfx_auth_token": resolved_o11y_api_token,
             "TF_VAR_signalfx_api_url": resolved_api_url,
             "TF_VAR_name_prefix": name_prefix,
             "TF_VAR_create_detectors": _tf_bool(with_detectors),
@@ -397,6 +376,63 @@ def _prepare_run(
         name_prefix=name_prefix,
         with_detectors=with_detectors,
     )
+
+
+def apply_dashboards(
+    app: AppContext | None,
+    *,
+    api_url: str | None,
+    o11y_api_token: str | None,
+    name_prefix: str,
+    with_detectors: bool,
+    enable_detectors: bool,
+    detector_notifications: tuple[str, ...],
+    work_dir: Path | None,
+    state_path: Path | None,
+    terraform_bin: str,
+    plugin_dir: Path | None,
+    skip_init: bool,
+    skip_validate: bool,
+    timeout: int,
+    yes: bool,
+) -> None:
+    prepared = _prepare_run(
+        app,
+        api_url=api_url,
+        o11y_api_token=o11y_api_token,
+        name_prefix=name_prefix,
+        with_detectors=with_detectors,
+        enable_detectors=enable_detectors,
+        detector_notifications=detector_notifications,
+        work_dir=work_dir,
+        state_path=state_path,
+    )
+    _run_init_validate(
+        prepared,
+        terraform_bin=terraform_bin,
+        plugin_dir=plugin_dir,
+        skip_init=skip_init,
+        skip_validate=skip_validate,
+        timeout=timeout,
+    )
+    _adopt_existing_resources(prepared, terraform_bin=terraform_bin, timeout=timeout)
+    _run_terraform(
+        terraform_bin,
+        ["plan", "-input=false", f"-state={prepared.state_path}"],
+        cwd=prepared.work_dir,
+        env=prepared.env,
+        timeout=timeout,
+    )
+    if not yes:
+        click.confirm("Apply these Splunk Observability Cloud changes?", abort=True)
+    _run_terraform(
+        terraform_bin,
+        ["apply", "-input=false", "-auto-approve", f"-state={prepared.state_path}"],
+        cwd=prepared.work_dir,
+        env=prepared.env,
+        timeout=timeout,
+    )
+    _print_dashboard_outputs(prepared, terraform_bin=terraform_bin, timeout=timeout)
 
 
 def _run_init_validate(
@@ -491,12 +527,17 @@ def _terraform_console_json(terraform_bin: str, *, prepared: _PreparedRun, expr:
     return decoded
 
 
-def _o11y_api_get_json(api_url: str, auth_token: str, path: str, params: dict[str, object] | None = None) -> object:
+def _o11y_api_get_json(
+    api_url: str,
+    o11y_api_token: str,
+    path: str,
+    params: dict[str, object] | None = None,
+) -> object:
     url = f"{api_url.rstrip('/')}/{path.lstrip('/')}"
     response = requests.get(
         url,
         headers={
-            "X-SF-TOKEN": auth_token,
+            "X-SF-TOKEN": o11y_api_token,
             "Accept": "application/json",
         },
         params=params or {},
@@ -666,7 +707,7 @@ def _adopt_existing_resources(
         raise click.ClickException("Unexpected Terraform console output for dashboard or detector metadata.")
 
     state_addresses = _terraform_state_list(terraform_bin, prepared=prepared, timeout=timeout)
-    api_token = str(prepared.env["TF_VAR_signalfx_auth_token"])
+    o11y_api_token = str(prepared.env["TF_VAR_signalfx_auth_token"])
     api_url = str(prepared.env["TF_VAR_signalfx_api_url"])
 
     imported = 0
@@ -701,11 +742,11 @@ def _adopt_existing_resources(
 
     group_name = _expected_group_name(prepared.name_prefix)
     dashboard_groups_payload = _extract_list_payload(
-        _o11y_api_get_json(api_url, api_token, "/v2/dashboardgroup", params={"limit": 200, "offset": 0})
+        _o11y_api_get_json(api_url, o11y_api_token, "/v2/dashboardgroup", params={"limit": 200, "offset": 0})
     )
     candidate_groups = _find_all_named(dashboard_groups_payload, group_name)
     dashboards_payload = _extract_list_payload(
-        _o11y_api_get_json(api_url, api_token, "/v2/dashboard", params={"limit": 500, "offset": 0})
+        _o11y_api_get_json(api_url, o11y_api_token, "/v2/dashboard", params={"limit": 500, "offset": 0})
     )
     expected_dashboard_names = {
         dashboard_key: _expected_dashboard_name(base_name, prepared.name_prefix)
@@ -775,7 +816,7 @@ def _adopt_existing_resources(
 
     if prepared.with_detectors:
         detector_items = _extract_list_payload(
-            _o11y_api_get_json(api_url, api_token, "/v2/detector", params={"limit": 500, "offset": 0})
+            _o11y_api_get_json(api_url, o11y_api_token, "/v2/detector", params={"limit": 500, "offset": 0})
         )
         for detector_key, detector_def in detector_defs.items():
             if not isinstance(detector_def, dict):
@@ -896,11 +937,11 @@ def _resolve_data_dir(app: AppContext | None) -> Path:
     return Path.home() / ".defenseclaw"
 
 
-def _resolve_auth_token(auth_token: str | None) -> str:
-    if auth_token:
-        return auth_token
+def _resolve_o11y_api_token(o11y_api_token: str | None) -> str:
+    if o11y_api_token:
+        return o11y_api_token
     raise click.ClickException(
-        "Splunk O11y token not found. Pass --auth-token."
+        "Splunk O11y token not found. Pass --o11y-api-token."
     )
 
 
