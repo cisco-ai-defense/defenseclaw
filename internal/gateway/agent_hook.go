@@ -18,22 +18,56 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
+
+// fallbackConnectorRegistry is a process-singleton built on first
+// use, exclusively for code paths that look up connector
+// capabilities BEFORE APIServer.connectorRegistry is set (early
+// init, tests that bypass NewAPIServer, plugin discovery probes).
+//
+// Why a singleton: NewDefaultRegistry registers eight builtin
+// connectors and walks the plugin directory; on the hook hot path
+// (every hookCapabilities call), constructing it per-invocation
+// turns each block-vs-allow decision into eight allocations and a
+// directory walk. The singleton amortises that to once per process.
+//
+// Thread-safety: sync.Once gives us a happens-before guarantee on
+// the assignment, and Registry.Get is documented as concurrent-safe
+// for read traffic. We never mutate the singleton after init —
+// that's intentional, because the production path already builds a
+// per-server registry in NewAPIServer; this is the legacy fallback.
+var (
+	fallbackConnectorRegistryOnce sync.Once
+	fallbackConnectorRegistry     *connector.Registry
+)
+
+func getFallbackConnectorRegistry() *connector.Registry {
+	fallbackConnectorRegistryOnce.Do(func() {
+		fallbackConnectorRegistry = connector.NewDefaultRegistry()
+	})
+	return fallbackConnectorRegistry
+}
 
 type agentHookRequest struct {
 	ConnectorName string
@@ -128,10 +162,28 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// that map under the right top-level JSON key
 		// (claude_code_output / codex_output / hook_output) so the
 		// wire shape stays byte-identical for each agent CLI.
+		//
+		// safeEvaluateHook wraps the evaluator in a deferred
+		// recover: a panic in any connector-specific scan / asset
+		// probe / inspectToolPolicy path no longer terminates the
+		// HTTP request uncaught. Pre-PR-#284 each bespoke handler
+		// could panic independently (blast radius: one connector);
+		// post-fold this is the SOLE hot path for every connector,
+		// so unrecovered panics would take the whole agent estate
+		// down at once. The recover emits a RecordPanic counter
+		// with subsystem=gateway and synthesises a safe fail-open
+		// response (action=allow, would_block=true, reason carries
+		// "internal evaluator error"). Operators alert on
+		// defenseclaw.panics.total{subsystem="gateway"} and on the
+		// `result="panic"` label on the standard hook invocation
+		// counter.
 		t0 := time.Now()
-		resp := a.evaluateBespokeOrGenericHook(ctx, connectorName, req, b, payload)
+		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, b, payload)
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
+		if panicked {
+			enrichAgentHookSpanPanic(ctx)
+		}
 
 		if a.health != nil {
 			a.health.RecordConnectorRequest()
@@ -144,11 +196,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 
 		if a.otel != nil {
-			reason := resp.Action
-			if resp.WouldBlock {
-				reason = "would_block"
+			result := "ok"
+			reason := normalizeHookReasonLabel(resp.Action, resp.WouldBlock)
+			if panicked {
+				result = "panic"
+				reason = "panic"
 			}
-			a.otel.RecordConnectorHookInvocation(ctx, connectorName, req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
+			a.otel.RecordConnectorHookInvocation(ctx, connectorName, req.HookEventName, result, reason, float64(elapsed.Milliseconds()))
 			a.otel.RecordInspectEvaluation(ctx, connectorName+":"+req.HookEventName, resp.Action, resp.Severity)
 			a.otel.RecordInspectLatency(ctx, connectorName+":"+req.HookEventName, float64(elapsed.Milliseconds()))
 			// PR 3 / Phase B.2 — parity metrics every connector emits.
@@ -159,9 +213,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.otel.RecordHookOutcome(ctx, connectorName, req.HookEventName, resp.Action, resp.Severity, resp.WouldBlock)
 			usage := extractHookPayloadTokenUsage(req.Payload)
 			a.otel.RecordHookTokenUsage(ctx, connectorName, usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
-			a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, "ok", 1, int64(len(b)),
-				fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
-					connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
+			a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, result, 1, int64(len(b)),
+				fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d result=%s",
+					connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds(), result))
 		}
 
 		// Build the structured envelope once and let
@@ -173,10 +227,14 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// raw-event metadata; the dual format means existing
 		// operator log greps and new jq-based pipelines are both
 		// served without an env-var toggle.
+		envResult := "ok"
+		if panicked {
+			envResult = "panic"
+		}
 		env := HookAuditEnvelope{
 			Connector:   connectorName,
 			Event:       req.HookEventName,
-			Result:      "ok",
+			Result:      envResult,
 			Action:      resp.Action,
 			RawAction:   resp.RawAction,
 			Severity:    resp.Severity,
@@ -188,9 +246,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			RawOrigin:   rawOriginIfHook(rawEventIDs),
 			RawEventIDs: rawEventIDs,
 		}
-		if redaction.DisableAll() && len(b) > 0 {
-			env.RawPayload = string(b)
+		if panicked {
+			env.Extra = map[string]string{"panic": "true"}
 		}
+		attachRawPayload(&env, b)
 		a.logConnectorHookAuditEnvelope(ctx, env)
 
 		// Render the wire response with the connector-specific
@@ -316,11 +375,20 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	rawEventIDs := a.rememberHookRawEvents(req)
 	a.emitAgentHookLLMEvent(ctx, req, rawBody)
 
+	// Synthetic paths use the generic evaluator (notify carries no
+	// scan/tool context), but they still need panic safety: the
+	// codex-notify caller writes "{}" and a 200 regardless of
+	// outcome, but the audit + metrics pipeline below this MUST
+	// run even when the evaluator dies. Same RecordPanic +
+	// fail-open contract as handleAgentHook.
 	t0 := time.Now()
-	resp := a.evaluateAgentHook(ctx, req)
+	resp, panicked := a.safeEvaluateSyntheticHook(ctx, connectorName, req)
 	elapsed := time.Since(t0)
 	enrichAgentHookSpan(ctx, req, resp, elapsed)
 	enrichAgentHookSpanSynthetic(ctx)
+	if panicked {
+		enrichAgentHookSpanPanic(ctx)
+	}
 
 	if a.health != nil {
 		a.health.RecordConnectorRequest()
@@ -330,29 +398,39 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	}
 
 	if a.otel != nil {
-		reason := resp.Action
-		if resp.WouldBlock {
-			reason = "would_block"
+		result := "ok"
+		reason := normalizeHookReasonLabel(resp.Action, resp.WouldBlock)
+		if panicked {
+			result = "panic"
+			reason = "panic"
 		}
-		a.otel.RecordConnectorHookInvocation(ctx, connectorName, req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
+		a.otel.RecordConnectorHookInvocation(ctx, connectorName, req.HookEventName, result, reason, float64(elapsed.Milliseconds()))
 		a.otel.RecordInspectEvaluation(ctx, connectorName+":"+req.HookEventName, resp.Action, resp.Severity)
 		a.otel.RecordInspectLatency(ctx, connectorName+":"+req.HookEventName, float64(elapsed.Milliseconds()))
 		a.otel.RecordHookOutcome(ctx, connectorName, req.HookEventName, resp.Action, resp.Severity, resp.WouldBlock)
 		usage := extractHookPayloadTokenUsage(req.Payload)
 		a.otel.RecordHookTokenUsage(ctx, connectorName, usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, "ok", 1, int64(len(rawBody)),
-			fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d synthetic=true",
-				connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
+		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, result, 1, int64(len(rawBody)),
+			fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d synthetic=true result=%s",
+				connectorName, req.HookEventName, req.ToolName, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds(), result))
 	}
 
 	// Persist the synthetic envelope under a distinct audit action
 	// so the canonical caller row count stays intact while SIEM /
 	// dashboards still see the synthesized Stop event. See the
 	// function godoc for the row-counting contract.
+	envResult := "ok"
+	if panicked {
+		envResult = "panic"
+	}
+	extra := map[string]string{"synthetic": "true"}
+	if panicked {
+		extra["panic"] = "true"
+	}
 	env := HookAuditEnvelope{
 		Connector:           connectorName,
 		Event:               req.HookEventName,
-		Result:              "ok",
+		Result:              envResult,
 		Action:              resp.Action,
 		RawAction:           resp.RawAction,
 		Severity:            resp.Severity,
@@ -364,11 +442,9 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		RawOrigin:           rawOriginIfHook(rawEventIDs),
 		RawEventIDs:         rawEventIDs,
 		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
-		Extra:               map[string]string{"synthetic": "true"},
+		Extra:               extra,
 	}
-	if redaction.DisableAll() && len(rawBody) > 0 {
-		env.RawPayload = string(rawBody)
-	}
+	attachRawPayload(&env, rawBody)
 	a.logConnectorHookAuditEnvelope(ctx, env)
 	return resp
 }
@@ -386,6 +462,222 @@ func enrichAgentHookSpanSynthetic(ctx context.Context) {
 		return
 	}
 	span.SetAttributes(attribute.Bool("defenseclaw.hook.synthetic", true))
+}
+
+// enrichAgentHookSpanPanic stamps a defenseclaw.hook.panic attribute
+// on the active span AND sets the span status to Error so trace
+// backends surface the failure even though the HTTP response itself
+// was 200 (we fail-open with would_block=true rather than dropping
+// the connection — see safeEvaluateHook for the rationale).
+//
+// Marking Error is what lets Tempo / Jaeger / Honeycomb filters
+// like "status=error" and the OTel collector's error-rate panel
+// see panic-recovered hook spans without scanning every attribute.
+// The attribute is additionally set so per-span detail views and
+// drill-downs can split "ordinary upstream error" from "DefenseClaw
+// internal evaluator panic".
+func enrichAgentHookSpanPanic(ctx context.Context) {
+	span := trace.SpanFromContext(ctx)
+	if span == nil || !span.IsRecording() {
+		return
+	}
+	span.SetAttributes(attribute.Bool("defenseclaw.hook.panic", true))
+	span.SetStatus(codes.Error, "hook evaluator panic recovered (fail-open)")
+}
+
+// hookReasonLabelAllowlist constrains the `reason` Prometheus/OTLP
+// label cardinality on the connector-hook invocation counter. Verdicts
+// from the evaluator are an enum today (allow/block/alert/confirm)
+// but nothing in the type system enforces that at the metric
+// boundary; if a future evaluator branch were to leak free-form text
+// into resp.Action, the TSDB would absorb arbitrary cardinality.
+// Anything outside this set collapses to "other" so dashboards stay
+// stable.
+//
+// Synthesized labels:
+//   - would_block: resp.Action would have blocked except mode != "action".
+//   - panic:       safeEvaluateHook caught a panic.
+//   - other:       anything not modelled here (must never reach prod).
+//   - none:        empty action (defensive — shouldn't happen).
+var hookReasonLabelAllowlist = map[string]struct{}{
+	"allow":       {},
+	"block":       {},
+	"alert":       {},
+	"confirm":     {},
+	"would_block": {},
+	"panic":       {},
+	"other":       {},
+	"none":        {},
+}
+
+// normalizeHookReasonLabel projects (resp.Action, resp.WouldBlock)
+// onto the bounded hookReasonLabelAllowlist so the connector-hook
+// invocation counter cannot grow unbounded reason cardinality.
+func normalizeHookReasonLabel(action string, wouldBlock bool) string {
+	if wouldBlock {
+		return "would_block"
+	}
+	a := strings.TrimSpace(action)
+	if a == "" {
+		return "none"
+	}
+	a = strings.ToLower(a)
+	if _, ok := hookReasonLabelAllowlist[a]; ok {
+		return a
+	}
+	return "other"
+}
+
+// hookPanicRawPayloadCap is the byte cap applied to env.RawPayload
+// when redaction is globally disabled (DEFENSECLAW_REDACTION_DISABLE=1).
+// 64 KiB is large enough to cover any realistic prompt + tool-call
+// payload but small enough that a 10 MiB hostile POST cannot amplify
+// through json.Marshal → strconv.Quote → SQLite insert → every audit
+// sink. Bytes beyond the cap are dropped and a SHA-256 hash of the
+// full body + the truncated-size marker land in env.Extra so SIEM
+// rules can still detect "same body, replayed" and operators can
+// verify the upstream body via tracing if needed.
+const hookPanicRawPayloadCap = 64 * 1024
+
+// attachRawPayload conditionally attaches the request body to the
+// audit envelope, applying the M3 cap so a hostile or malformed
+// payload cannot turn one POST into a multi-megabyte SQLite row.
+// Only runs when redaction.DisableAll() returned true (operator
+// explicitly disabled all redaction); otherwise raw bodies must not
+// reach persistent storage at all.
+func attachRawPayload(env *HookAuditEnvelope, body []byte) {
+	if env == nil || len(body) == 0 {
+		return
+	}
+	if !redaction.DisableAll() {
+		return
+	}
+	if len(body) <= hookPanicRawPayloadCap {
+		env.RawPayload = string(body)
+		return
+	}
+	if env.Extra == nil {
+		env.Extra = map[string]string{}
+	}
+	env.RawPayload = string(body[:hookPanicRawPayloadCap])
+	env.Extra["raw_payload_truncated"] = "true"
+	env.Extra["raw_payload_full_bytes"] = strconv.Itoa(len(body))
+	env.Extra["raw_payload_sha256"] = hashRawPayloadHex(body)
+}
+
+// hashRawPayloadHex returns the first 16 hex chars of the SHA-256
+// of body. 64 bits is enough to deduplicate replay-storms in SIEM
+// rules without bloating audit rows; full digest would be 64 hex
+// chars per truncated row.
+func hashRawPayloadHex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:8])
+}
+
+// safeEvaluateHook wraps the bespoke-or-generic evaluator with a
+// deferred recover so a panic in any connector-specific code path
+// (asset-policy probes, scanner invocations, codex notify-bridge
+// fan-out, …) cannot terminate the HTTP request uncaught.
+//
+// Threat model: pre-PR-#284 each connector owned its own bespoke
+// HTTP handler, so a panic blast-radius was one connector. After
+// the full fold this is the SOLE hot path for every connector;
+// an unrecovered panic would take the entire agent estate down at
+// once. The recover:
+//
+//   - records defenseclaw.panics.total{subsystem="gateway"} (the
+//     v7 process-health counter from track-7-capacity-slo) so
+//     existing SRE alerting fires without us inventing a new
+//     metric.
+//   - logs the recovered value + stack to stderr (only place we
+//     have during a panic — the structured logger may itself be
+//     the panic source).
+//   - returns a SAFE fail-open agentHookResponse:
+//     action=allow, raw_action=allow, severity=WARN, would_block=true,
+//     mode="unknown" (the evaluator that resolves mode never
+//     ran), reason carries a stable "defenseclaw internal
+//     evaluator error" string so operator log greps can find the
+//     row, additional_context carries an operator-facing hint.
+//
+// We deliberately fail OPEN (allow) rather than fail-closed (block)
+// because: a panic likely means a transient bug in a single
+// evaluator branch, and silently blocking every agent's every
+// tool call would be a worse production incident than carrying
+// on with telemetry-only mode. would_block=true preserves the
+// guardrail intent ("I would have blocked this in stricter
+// posture") and result="panic" + audit row + RecordPanic counter
+// give SRE every signal they need to investigate.
+//
+// The bool return tells the caller whether to label downstream
+// metrics + audit envelope with result="panic". Without it, the
+// caller would have to inspect the response to infer "did we
+// panic?" which is fragile.
+func (a *APIServer) safeEvaluateHook(
+	ctx context.Context,
+	connectorName string,
+	req agentHookRequest,
+	rawBody []byte,
+	payload map[string]interface{},
+) (resp agentHookResponse, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
+			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
+		}
+	}()
+	resp = a.evaluateBespokeOrGenericHook(ctx, connectorName, req, rawBody, payload)
+	return resp, false
+}
+
+// safeEvaluateSyntheticHook is the synthetic-path counterpart of
+// safeEvaluateHook. Same fail-open contract; the generic evaluator
+// is the only callee (notify-bridge events have no per-connector
+// scan / asset-policy semantics).
+func (a *APIServer) safeEvaluateSyntheticHook(
+	ctx context.Context,
+	connectorName string,
+	req agentHookRequest,
+) (resp agentHookResponse, panicked bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			panicked = true
+			resp = safeHookPanicResponse(connectorName, req.HookEventName, r)
+			a.handleHookPanic(ctx, connectorName, req.HookEventName, r)
+		}
+	}()
+	resp = a.evaluateAgentHook(ctx, req)
+	return resp, false
+}
+
+// safeHookPanicResponse builds the agentHookResponse returned when
+// safeEvaluateHook / safeEvaluateSyntheticHook recover from a panic.
+// The fields here are deliberately conservative — see
+// safeEvaluateHook godoc for the fail-open rationale.
+func safeHookPanicResponse(connectorName, eventName string, _ any) agentHookResponse {
+	return agentHookResponse{
+		Action:            "allow",
+		RawAction:         "allow",
+		Severity:          "WARN",
+		Mode:              "unknown",
+		WouldBlock:        true,
+		Reason:            "defenseclaw internal evaluator error",
+		AdditionalContext: fmt.Sprintf("DefenseClaw hook evaluator for %s/%s recovered from an internal error; the action was allowed with would_block=true. Operators: check defenseclaw.panics.total and recent audit rows with extra.panic=true.", connectorName, eventName),
+	}
+}
+
+// handleHookPanic centralises the side-effects of a recovered hook
+// panic: metric increment, stderr log with stack, optional EventError
+// emission via Provider.emitPanicRecovered (already wired into
+// RecordPanic). Safe to call with nil otel / nil logger; both
+// branches are nil-guarded.
+func (a *APIServer) handleHookPanic(ctx context.Context, connectorName, eventName string, recovered any) {
+	stack := debug.Stack()
+	fmt.Fprintf(os.Stderr, "[gateway] PANIC recovered in hook evaluator connector=%s event=%s value=%v\n%s\n",
+		connectorName, eventName, recovered, stack)
+	if a != nil && a.otel != nil {
+		a.otel.RecordPanic(ctx, gatewaylog.SubsystemGateway)
+	}
 }
 
 func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.Context {
@@ -663,7 +955,23 @@ func inferAgentHookEvent(payload map[string]interface{}) string {
 	return ""
 }
 
+// hookEvaluatorPanicHook is a test-only seam: when non-nil it is
+// invoked at the top of evaluateAgentHook, allowing
+// agent_hook_panic_test.go to inject a controlled panic and verify
+// safeEvaluateHook's recover path end-to-end through the HTTP layer.
+//
+// Production callers leave this nil; the nil-check on the hot path is
+// one branch on a never-taken conditional and compiles to a single
+// load + cmp + jz — sub-nanosecond, no allocation. It is intentionally
+// NOT gated on a build tag so the test seam stays type-correct in the
+// production binary (we have learned the hard way that build-tagged
+// seams drift out of sync with their callers — see PR #189).
+var hookEvaluatorPanicHook func()
+
 func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest) agentHookResponse {
+	if hookEvaluatorPanicHook != nil {
+		hookEvaluatorPanicHook()
+	}
 	mode := a.agentHookMode(req.ConnectorName)
 	if a.scannerCfg != nil && !a.agentHookEnabled(req.ConnectorName) {
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
@@ -893,7 +1201,16 @@ func normalizeAgentHookMode(mode string) string {
 func (a *APIServer) hookCapabilities(name string) connector.HookCapability {
 	reg := a.connectorRegistry
 	if reg == nil {
-		reg = connector.NewDefaultRegistry()
+		// Lazy singleton — see getFallbackConnectorRegistry. The
+		// hook hot path used to call connector.NewDefaultRegistry()
+		// per request, paying a fresh registry build (eight
+		// connectors + plugin directory walk) on every block /
+		// allow decision in tests that bypass NewAPIServer. The
+		// production path always supplies a non-nil
+		// a.connectorRegistry; this branch only fires for legacy
+		// constructions, and it now uses a process-singleton to
+		// keep p99 hookCapabilities cost flat.
+		reg = getFallbackConnectorRegistry()
 	}
 	conn, ok := reg.Get(name)
 	if !ok {

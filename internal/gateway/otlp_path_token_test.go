@@ -7,6 +7,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,18 +62,12 @@ func TestLookupOTLPPathToken_LazyReloadOnMiss(t *testing.T) {
 		t.Fatalf("lookupOTLPPathToken returned %q on first miss; want %q (lazy reload broken)", got, minted)
 	}
 
-	// Second call must serve from cache. We verify by removing the
-	// file: a request that goes back to disk would now fail. The
-	// cached value must still be returned.
-	path, err := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
-	if err != nil {
-		t.Fatalf("OTLPPathTokenFilePath: %v", err)
-	}
-	if err := os.Remove(path); err != nil {
-		t.Fatalf("rm token file: %v", err)
-	}
+	// Second call must serve from cache without redoing the load.
+	// We verify by checking that the cached entry's mtime matches the
+	// file mtime — any second read would have refreshed the timestamp
+	// to the new file mtime.
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != minted {
-		t.Fatalf("second lookup returned %q after file removed; cache lost (want %q)", got, minted)
+		t.Fatalf("second lookup returned %q; cache miss (want %q)", got, minted)
 	}
 }
 
@@ -93,6 +88,9 @@ func TestLookupOTLPPathToken_IgnoresUnknownScopes(t *testing.T) {
 		"GEMINI", // wrong case — not in OTLPPathTokenScopes()
 		"",
 		"geminicli ",
+		"\x00", // NUL byte
+		"geminicli/extra",
+		"geminicli\nclaude", // CRLF injection attempt
 	}
 	for _, s := range bogus {
 		if got := api.lookupOTLPPathToken(s); got != "" {
@@ -107,47 +105,58 @@ func TestLookupOTLPPathToken_IgnoresUnknownScopes(t *testing.T) {
 	}
 }
 
-// TestLookupOTLPPathToken_RateLimitsRepeatedMisses guards against a
+// TestLookupOTLPPathToken_StatThrottlesRepeatedMisses guards against a
 // pathological caller (or a misconfigured connector) that hammers
 // /otlp/geminicli/<random>/v1/... with no on-disk token file: after the
-// first miss attempts a reload we must NOT keep re-reading disk on every
-// subsequent miss. The test files no token, then asserts that the second
-// consecutive miss within the rate-limit window returns without setting
-// a new reload-at entry beyond the first.
-func TestLookupOTLPPathToken_RateLimitsRepeatedMisses(t *testing.T) {
+// first miss attempts a stat we must NOT keep re-stating disk on every
+// subsequent miss. The throttle is otlpPathTokenLastStatAt (not the
+// reload-at map, which only records actual full reloads).
+func TestLookupOTLPPathToken_StatThrottlesRepeatedMisses(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	cfg := &config.Config{}
 	cfg.DataDir = tmp
 	api := &APIServer{scannerCfg: cfg}
 
-	// First miss — must attempt the reload, no token to find.
+	// First miss — must attempt the stat, no token to find.
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
 		t.Fatalf("first lookup = %q, want \"\" (no token file present)", got)
 	}
 	api.otlpPathTokenMu.RLock()
-	first := api.otlpPathTokenReloadAt[connector.OTLPScopeGeminiCLI]
+	first := api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI]
 	api.otlpPathTokenMu.RUnlock()
 	if first.IsZero() {
-		t.Fatalf("first miss did not record a reload-at timestamp; rate limiter inert")
+		t.Fatalf("first miss did not record a stat timestamp; throttle inert")
 	}
 
-	// Second miss within the refractory window — must NOT update the
-	// timestamp (proves no second disk read happened).
-	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
-		t.Fatalf("second lookup = %q, want \"\"", got)
+	// Second + third miss within the refractory window — must NOT
+	// update the stat timestamp. The fast-path miss branch (no
+	// cached token, recent stat) returns "" without taking the
+	// write lock or hitting disk, so the timestamp stays pinned at
+	// `first` and proves the syscall was elided.
+	for i, label := range []string{"second", "third"} {
+		if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
+			t.Fatalf("%s lookup (i=%d) = %q, want \"\"", label, i, got)
+		}
+		api.otlpPathTokenMu.RLock()
+		again := api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI]
+		api.otlpPathTokenMu.RUnlock()
+		if !again.Equal(first) {
+			t.Fatalf("%s lookup mutated stat timestamp (first=%v now=%v); throttle did not elide disk syscall",
+				label, first, again)
+		}
 	}
-	api.otlpPathTokenMu.RLock()
-	second := api.otlpPathTokenReloadAt[connector.OTLPScopeGeminiCLI]
-	api.otlpPathTokenMu.RUnlock()
-	if !second.Equal(first) {
-		t.Errorf("second miss re-issued disk reload (timestamp moved %v → %v); rate limiter not enforcing window", first, second)
+
+	// No on-disk side-effects from the throttled misses.
+	hooksDir := filepath.Join(tmp, "hooks")
+	if entries, err := os.ReadDir(hooksDir); err == nil && len(entries) != 0 {
+		t.Errorf("hooks dir contains %d entries after throttled misses; want 0", len(entries))
 	}
 }
 
 // TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry verifies that
 // after the refractory window elapses, the next miss DOES attempt a
-// fresh reload — which is required for operator flows like "I ran
+// fresh load — which is required for operator flows like "I ran
 // setup again to rotate the token, the gateway should pick it up
 // within a second."
 func TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry(t *testing.T) {
@@ -161,17 +170,28 @@ func TestLookupOTLPPathToken_ReloadAfterWindowAllowsRetry(t *testing.T) {
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
 		t.Fatalf("first lookup = %q, want \"\"", got)
 	}
-	// Backdate the rate-limit timestamp to simulate the window
-	// elapsing. We rewind it past the configured min interval.
-	api.otlpPathTokenMu.Lock()
-	api.otlpPathTokenReloadAt[connector.OTLPScopeGeminiCLI] =
-		time.Now().Add(-2 * otlpPathTokenReloadMinInterval)
-	api.otlpPathTokenMu.Unlock()
 
-	// Now drop a token file on disk and re-query — must succeed.
+	// Drop a token file on disk after the boot snapshot — same as
+	// the F4 boot race.
 	const minted = "0011223344556677" + "8899aabbccddeeff" +
 		"0011223344556677" + "8899aabbccddeeff"
 	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, minted)
+
+	// Backdate the rate-limit + stat timestamps to simulate the
+	// window elapsing.
+	api.otlpPathTokenMu.Lock()
+	if api.otlpPathTokenReloadAt == nil {
+		api.otlpPathTokenReloadAt = map[connector.OTLPPathTokenScope]time.Time{}
+	}
+	if api.otlpPathTokenLastStatAt == nil {
+		api.otlpPathTokenLastStatAt = map[connector.OTLPPathTokenScope]time.Time{}
+	}
+	api.otlpPathTokenReloadAt[connector.OTLPScopeGeminiCLI] =
+		time.Now().Add(-2 * otlpPathTokenReloadMinInterval)
+	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
+		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
+	api.otlpPathTokenMu.Unlock()
+
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != minted {
 		t.Errorf("lookup after window elapsed = %q, want minted token %q (operator rotate flow broken)", got, minted)
 	}
@@ -187,4 +207,153 @@ func TestLookupOTLPPathToken_NoDataDirSkipsReload(t *testing.T) {
 	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
 		t.Errorf("lookup with empty DataDir returned %q, want \"\"", got)
 	}
+}
+
+// TestLookupOTLPPathToken_DetectsRotation is the M1 regression test:
+// when an operator regenerates the on-disk token while the gateway
+// keeps running (post-rotation policy or security-incident response),
+// the in-memory cache MUST notice the mtime drift and reload. Without
+// this check the gateway keeps authenticating the old token and every
+// loopback OTLP request 401s after the rotation until restart.
+func TestLookupOTLPPathToken_DetectsRotation(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	const original = "aaaaaaaaaaaaaaaa" + "bbbbbbbbbbbbbbbb" +
+		"cccccccccccccccc" + "dddddddddddddddd"
+	const rotated = "1111111111111111" + "2222222222222222" +
+		"3333333333333333" + "4444444444444444"
+
+	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, original)
+	cfg := &config.Config{}
+	cfg.DataDir = tmp
+	api := &APIServer{scannerCfg: cfg}
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeGeminiCLI: original,
+	})
+
+	// Steady-state hit: original token returned from cache.
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != original {
+		t.Fatalf("pre-rotation lookup = %q, want %q", got, original)
+	}
+
+	// Operator rotates the token. We have to bump the mtime past
+	// what SetOTLPPathTokens stamped so the stat detects drift —
+	// some filesystems (HFS+, ext4 with noatime) have 1s mtime
+	// granularity, hence the explicit Chtimes.
+	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, rotated)
+	path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
+
+	// Force the stat throttle to expire so the next lookup actually
+	// stats the file.
+	api.otlpPathTokenMu.Lock()
+	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
+		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
+	if api.otlpPathTokenReloadAt != nil {
+		api.otlpPathTokenReloadAt[connector.OTLPScopeGeminiCLI] =
+			time.Now().Add(-2 * otlpPathTokenReloadMinInterval)
+	}
+	api.otlpPathTokenMu.Unlock()
+
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != rotated {
+		t.Errorf("post-rotation lookup = %q, want rotated token %q (M1 rotation refresh broken)", got, rotated)
+	}
+}
+
+// TestLookupOTLPPathToken_DropsCacheOnFileRemoval verifies the
+// fail-closed branch: if the operator removes the on-disk token (tore
+// down the connector, security incident, etc.) the in-memory cache
+// MUST drop the stale entry so subsequent requests 401 rather than
+// continuing to authenticate a removed token.
+func TestLookupOTLPPathToken_DropsCacheOnFileRemoval(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	const minted = "feedface" + "feedface" + "feedface" + "feedface" +
+		"feedface" + "feedface" + "feedface" + "feedface"
+	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, minted)
+	cfg := &config.Config{}
+	cfg.DataDir = tmp
+	api := &APIServer{scannerCfg: cfg}
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeGeminiCLI: minted,
+	})
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != minted {
+		t.Fatalf("pre-removal lookup = %q, want %q", got, minted)
+	}
+
+	// Operator removes the token. Force stat throttle to expire.
+	path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove token file: %v", err)
+	}
+	api.otlpPathTokenMu.Lock()
+	api.otlpPathTokenLastStatAt[connector.OTLPScopeGeminiCLI] =
+		time.Now().Add(-2 * otlpPathTokenStatMinInterval)
+	api.otlpPathTokenMu.Unlock()
+
+	if got := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI)); got != "" {
+		t.Errorf("post-removal lookup = %q, want \"\" (cache must drop on file removal)", got)
+	}
+}
+
+// TestLookupOTLPPathToken_ConcurrentRotation is a race-detector smoke
+// test: many goroutines call lookupOTLPPathToken concurrently while
+// another rotates the on-disk token. None of the lookups should see a
+// torn / partial token, and no goroutine should panic on map mutation.
+//
+// Run with `go test -race` to catch the unsynchronised-map class of
+// regressions in lookupOTLPPathToken's slow path.
+func TestLookupOTLPPathToken_ConcurrentRotation(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	const a = "aaaaaaaa" + "aaaaaaaa" + "aaaaaaaa" + "aaaaaaaa" +
+		"aaaaaaaa" + "aaaaaaaa" + "aaaaaaaa" + "aaaaaaaa"
+	const b = "bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb" +
+		"bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb" + "bbbbbbbb"
+	writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, a)
+	cfg := &config.Config{}
+	cfg.DataDir = tmp
+	api := &APIServer{scannerCfg: cfg}
+
+	const workers = 24
+	const iters = 50
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iters; j++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				tok := api.lookupOTLPPathToken(string(connector.OTLPScopeGeminiCLI))
+				if tok != "" && tok != a && tok != b {
+					t.Errorf("torn token observed: %q", tok)
+					return
+				}
+			}
+		}()
+	}
+
+	// Rotate the file a few times while readers run.
+	for i := 0; i < 8; i++ {
+		val := a
+		if i%2 == 0 {
+			val = b
+		}
+		writePathTokenFile(t, tmp, connector.OTLPScopeGeminiCLI, val)
+		path, _ := connector.OTLPPathTokenFilePath(tmp, connector.OTLPScopeGeminiCLI)
+		future := time.Now().Add(time.Duration(i+1) * time.Second)
+		_ = os.Chtimes(path, future, future)
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
 }

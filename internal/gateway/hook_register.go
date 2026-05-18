@@ -27,19 +27,25 @@ import "net/http"
 // implementation in the connector package.
 //
 // Every connector — including codex and claudecode — routes through
-// handleUnifiedConnectorHook. The unified wrapper is the single
-// entry point for:
+// handleUnifiedConnectorHook, which delegates to the unified
+// handleAgentHook (see bespoke_hook_adapter.go for the dispatch
+// shims that route claudecode/codex through their bespoke
+// EVALUATORS while keeping all shared concerns in a single place).
+// The unified handler owns:
 //
 //   - structured audit envelope writes (logConnectorHookAuditEnvelope),
 //   - native OTel metrics (RecordHookOutcome / RecordHookTokenUsage),
-//   - raw-event deduplication (rememberHookRawEvents),
-//   - W3C trace propagation from the agent-side span.
+//   - raw-event deduplication (rememberBespokeOrGenericRawEvents),
+//   - W3C trace propagation from the agent-side span,
+//   - panic recovery (safeEvaluateHook) so a single evaluator bug
+//     no longer takes the entire agent estate down.
 //
-// For codex and claudecode the wrapper transparently delegates the
-// evaluation portion to the bespoke handler (which still implements
-// the connector-specific response shaping for PluginInput v1 /
-// extra Codex notify quirks). All other connectors flow through
-// handleAgentHook unmodified.
+// PR #284 deleted the bespoke handleClaudeCodeHook /
+// handleCodexHook handlers; only the bespoke evaluators
+// (evaluateClaudeCodeHook / evaluateCodexHook), LLM-event
+// emitters, and raw-event dedupers remain — invoked via the
+// adapter shims because they read connector-specific request
+// fields that the generic agentHookRequest does not model.
 func init() {
 	registerHookHandler("claudecode", func(a *APIServer) http.HandlerFunc {
 		return a.handleUnifiedConnectorHook("claudecode")

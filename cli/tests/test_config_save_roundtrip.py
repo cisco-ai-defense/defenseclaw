@@ -168,27 +168,73 @@ class TestConfigSaveRoundtripPreservesAuditSinks(unittest.TestCase):
 
 
 class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
-    """``otel.resource.attributes:`` lives two levels deep and is the second
-    documented unmodeled key (see writer.py constants
-    ``_RESOURCE_PRESET_ID_KEY`` / ``_RESOURCE_PRESET_NAME_KEY``). The
-    deep-merge must rescue it without disturbing dataclass-owned siblings."""
+    """The deep-merge rescues operator-added unmodelled subkeys (e.g. a
+    custom ``otel.exporter.foo``) without disturbing dataclass-owned
+    siblings. Modelled dict-typed leaves like ``otel.headers`` and
+    ``otel.resource.attributes`` are NOT in this preserve set —
+    they're dataclass-authoritative on save (see
+    :class:`TestConfigSaveAuthoritativeNestedDicts`)."""
 
-    def test_otel_resource_attributes_survives_when_otel_is_modeled(self):
+    def test_otel_round_trip_preserves_attributes_when_dataclass_loads_them(self):
+        """A load → save with no edits preserves operator-set
+        otel.resource.attributes. The dataclass loader (_merge_otel)
+        copies headers / attributes from the YAML, so the dataclass
+        round-trip output already contains them; the new
+        authoritative-path replace happens with the same content,
+        leaving the file functionally unchanged. This test guards
+        the load+save no-op path (the operator-friendly case)."""
+        from defenseclaw.config import (
+            OTelConfig,
+            OTelResourceConfig,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            with open(cfg_path, "w") as f:
+                yaml.safe_dump({"data_dir": tmpdir, "environment": "macos"}, f)
+
+            # Construct the Config with otel populated as if the
+            # loader had read the YAML — we deliberately bypass the
+            # module-level `load()` so the test is hermetic and
+            # independent of $HOME / $DEFENSECLAW_HOME.
+            cfg = _make_cfg(
+                tmpdir,
+                otel=OTelConfig(
+                    enabled=True,
+                    protocol="http",
+                    resource=OTelResourceConfig(
+                        attributes={
+                            "defenseclaw.preset": "splunk-o11y",
+                            "defenseclaw.preset_name": "Splunk Observability Cloud",
+                            "service.name": "defenseclaw-gateway",
+                        },
+                    ),
+                ),
+            )
+            cfg.save()
+
+            with open(cfg_path) as f:
+                after = yaml.safe_load(f)
+
+        self.assertIn("resource", after["otel"])
+        self.assertIn("attributes", after["otel"]["resource"])
+        attrs = after["otel"]["resource"]["attributes"]
+        self.assertEqual(attrs["defenseclaw.preset"], "splunk-o11y")
+        self.assertEqual(attrs["service.name"], "defenseclaw-gateway")
+
+    def test_unmodelled_otel_subkeys_survive(self):
+        """Operator-added subkeys that the dataclass does NOT model —
+        e.g. a forward-compat ``otel.exporter.foo`` block — survive a
+        save where the dataclass leaves the parent ``otel`` block
+        otherwise default. The recursion still preserves unmodelled
+        keys at non-authoritative paths; only the explicit
+        ``otel.headers`` / ``otel.resource.attributes`` paths are
+        replace-on-save."""
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_path = os.path.join(tmpdir, "config.yaml")
             seeded = {
                 "data_dir": tmpdir,
                 "otel": {
-                    "enabled": True,
-                    "protocol": "http",
-                    "resource": {
-                        "attributes": {
-                            "defenseclaw.preset": "splunk-o11y",
-                            "defenseclaw.preset_name": "Splunk Observability Cloud",
-                            "service.name": "defenseclaw-gateway",
-                        },
-                    },
-                    "traces": {"enabled": True, "endpoint": "ingest.example.com"},
+                    "exporter": {"foo": {"enabled": True, "extra": "bar"}},
                 },
             }
             with open(cfg_path, "w") as f:
@@ -200,13 +246,199 @@ class TestConfigSaveRoundtripPreservesNestedKeys(unittest.TestCase):
             with open(cfg_path) as f:
                 after = yaml.safe_load(f)
 
-        # resource.attributes is NOT modelled by the Python dataclass,
-        # so it must be rescued from the file by the nested merge.
-        self.assertIn("resource", after["otel"])
-        self.assertIn("attributes", after["otel"]["resource"])
-        attrs = after["otel"]["resource"]["attributes"]
-        self.assertEqual(attrs["defenseclaw.preset"], "splunk-o11y")
-        self.assertEqual(attrs["service.name"], "defenseclaw-gateway")
+        self.assertIn("exporter", after.get("otel", {}))
+        self.assertEqual(after["otel"]["exporter"]["foo"]["extra"], "bar")
+
+
+class TestConfigSaveAuthoritativeNestedDicts(unittest.TestCase):
+    """Security regression suite for the second P1 finding: when the
+    Python dataclass intentionally clears a modeled
+    secret-bearing dict (``cfg.otel.headers = {}`` for OTLP
+    credential rotation; ``cfg.otel.resource.attributes = {}`` for
+    tenant-identifier flip), the on-disk file MUST reflect the
+    clear. The pre-fix deep-merge preserved file keys whenever
+    ``new`` was empty, leaving stale ``Authorization`` headers and
+    stale ``service.name`` resource attributes on disk."""
+
+    def test_otel_headers_clear_overwrites_existing_authorization(self):
+        from defenseclaw.config import OTelConfig
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            seeded = {
+                "data_dir": tmpdir,
+                "otel": {
+                    "enabled": True,
+                    "headers": {
+                        # not a real token — placeholder that
+                        # would be a credential-class leak if it
+                        # survived a clear
+                        "Authorization": "Bearer test-stale-rotated-out",
+                        "x-honeycomb-team": "team-stale",
+                    },
+                },
+            }
+            with open(cfg_path, "w") as f:
+                yaml.safe_dump(seeded, f, sort_keys=False)
+
+            # Simulate an operator rotating credentials by
+            # clearing headers explicitly.
+            cfg = _make_cfg(
+                tmpdir,
+                otel=OTelConfig(enabled=True, headers={}),
+            )
+            cfg.save()
+
+            with open(cfg_path) as f:
+                after = yaml.safe_load(f)
+
+        headers = after.get("otel", {}).get("headers", {})
+        self.assertNotIn(
+            "Authorization", headers,
+            msg=("stale Authorization header survived an explicit "
+                 "cfg.otel.headers={} save — credential leak across rotation"),
+        )
+        self.assertNotIn("x-honeycomb-team", headers)
+        # The dataclass-emitted empty dict is allowed to render as
+        # `headers: {}` or to be stripped entirely; both encode
+        # "no headers". We only require the stale keys are gone.
+        self.assertEqual(headers, {})
+
+    def test_otel_resource_attributes_clear_drops_service_name(self):
+        from defenseclaw.config import (
+            OTelConfig,
+            OTelResourceConfig,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            seeded = {
+                "data_dir": tmpdir,
+                "otel": {
+                    "enabled": True,
+                    "resource": {
+                        "attributes": {
+                            "service.name": "tenant-old",
+                            "deployment.environment": "prod-east",
+                        },
+                    },
+                },
+            }
+            with open(cfg_path, "w") as f:
+                yaml.safe_dump(seeded, f, sort_keys=False)
+
+            cfg = _make_cfg(
+                tmpdir,
+                otel=OTelConfig(
+                    enabled=True,
+                    resource=OTelResourceConfig(attributes={}),
+                ),
+            )
+            cfg.save()
+
+            with open(cfg_path) as f:
+                after = yaml.safe_load(f)
+
+        attrs = after.get("otel", {}).get("resource", {}).get("attributes", {})
+        self.assertNotIn(
+            "service.name", attrs,
+            msg=("stale service.name attribute survived an explicit "
+                 "attributes={} save — tenant identifier leak"),
+        )
+        self.assertEqual(attrs, {})
+
+
+class TestConfigSavePreservesFileMode(unittest.TestCase):
+    """P1 security regression: ``Config.save()`` must NOT widen the
+    file mode of an existing config.yaml. The pre-fix path opened
+    a temp via ``open(tmp, 'w')`` (umask-honoring, typically 0644)
+    and ``os.replace``d it onto a 0600 live file, silently
+    downgrading the mode to 0644 — exposing gateway / OTLP
+    credentials carried in the file (e.g. ``gateway.token``,
+    ``otel.headers.Authorization``)."""
+
+    def test_save_preserves_existing_0600_mode(self):
+        """A 0600 config.yaml stays 0600 across save."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            with open(cfg_path, "w") as f:
+                yaml.safe_dump({"data_dir": tmpdir, "environment": "macos"}, f)
+            os.chmod(cfg_path, 0o600)
+
+            cfg = _make_cfg(tmpdir)
+            cfg.save()
+
+            mode = os.stat(cfg_path).st_mode & 0o777
+        self.assertEqual(
+            mode, 0o600,
+            msg=("Config.save widened mode to %o; pre-fix umask-honoring "
+                 "open() leaked secrets to group/other readers" % mode),
+        )
+
+    def test_save_first_create_is_0600(self):
+        """A first-save (no pre-existing file) lands at 0600 — the
+        explicit O_EXCL + 0o600 mode in os.open ensures the umask
+        cannot widen the new file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            self.assertFalse(os.path.exists(cfg_path))
+
+            cfg = _make_cfg(tmpdir)
+            cfg.save()
+
+            self.assertTrue(os.path.exists(cfg_path))
+            mode = os.stat(cfg_path).st_mode & 0o777
+        self.assertEqual(
+            mode, 0o600,
+            msg=("First-save mode = %o (want 0o600). Process umask "
+                 "must not widen the new file." % mode),
+        )
+
+    def test_save_does_not_widen_stricter_existing_mode(self):
+        """A 0400 (read-only) config.yaml is not widened to 0600.
+        Some operators ship 0400 by policy; save must narrow on
+        existing-mode mirror, never widen."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            with open(cfg_path, "w") as f:
+                yaml.safe_dump({"data_dir": tmpdir, "environment": "macos"}, f)
+            os.chmod(cfg_path, 0o400)
+            # Make parent dir writable so os.replace can rename.
+            os.chmod(tmpdir, 0o700)
+
+            cfg = _make_cfg(tmpdir)
+            cfg.save()
+
+            mode = os.stat(cfg_path).st_mode & 0o777
+        # 0o400 is the stricter case — `target_mode = existing & 0o600 = 0o400`
+        # so the live file lands at 0o400.
+        self.assertEqual(
+            mode, 0o400,
+            msg=("Config.save widened 0o400 to %o; mode mirror was "
+                 "supposed to narrow-only, not widen." % mode),
+        )
+
+    def test_save_strips_world_readable_bits_on_legacy_0644(self):
+        """If a pre-fix install left the file at 0644 (the bug we're
+        fixing), the next save with this code MUST narrow it back to
+        0600. This is the upgrade path: an operator running a fixed
+        sidecar should see their leaky 0644 file fixed on the next
+        ``defenseclaw setup`` invocation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_path = os.path.join(tmpdir, "config.yaml")
+            with open(cfg_path, "w") as f:
+                yaml.safe_dump({"data_dir": tmpdir, "environment": "macos"}, f)
+            os.chmod(cfg_path, 0o644)
+
+            cfg = _make_cfg(tmpdir)
+            cfg.save()
+
+            mode = os.stat(cfg_path).st_mode & 0o777
+        # existing & 0o600 = 0o600, so the live file should narrow
+        # from 0o644 to 0o600.
+        self.assertEqual(
+            mode, 0o600,
+            msg=("Save did not narrow legacy 0o644 to 0o600; got %o. "
+                 "Upgrade path leaves credentials world-readable." % mode),
+        )
 
 
 class TestConfigSaveDataclassStillWins(unittest.TestCase):

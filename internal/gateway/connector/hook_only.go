@@ -201,16 +201,23 @@ func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 // connector can flip its branch here to return a non-nil spec
 // without changing the dispatcher.
 //
-// SupportsTraceparent is false for the entire generic family today
-// — the inspect-*.sh scripts these connectors ship do not forward
-// DEFENSECLAW_TRACEPARENT. Phase B.3 (PR 4) flips it to true once
-// the v6 hardening helper lands AND the per-vendor hook scripts are
-// regenerated.
+// SupportsTraceparent is true for the entire generic family: every
+// shipped hook script (cursor-hook.sh, windsurf-hook.sh,
+// hermes-hook.sh, geminicli-hook.sh, copilot-hook.sh — see
+// internal/gateway/connector/hooks/) sources _hardening.sh and
+// invokes defenseclaw_extract_trace_context to forward the W3C
+// traceparent / tracestate headers from DEFENSECLAW_TRACEPARENT
+// (or TRACEPARENT / OTEL_TRACEPARENT). The pre-v6 era was when
+// only codex / claudecode forwarded the header; v6 generalised the
+// helper so the profile MUST advertise this capability or the
+// gateway expects a fresh root span where the script is actually
+// shipping a remote parent — collapsing trace continuity in
+// dashboards.
 func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	profile := HookProfile{
 		Name:                c.name,
 		Capabilities:        c.HookCapabilities(opts),
-		SupportsTraceparent: false,
+		SupportsTraceparent: true,
 	}
 	if c.name == "geminicli" {
 		profile.NativeOTLP = geminiCLINativeOTLPSpec(opts)

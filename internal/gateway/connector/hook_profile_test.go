@@ -43,13 +43,18 @@ func TestHookProfileMatrix(t *testing.T) {
 		wantSupportsClosed bool
 		wantHasBlockEvents bool
 	}{
+		// SupportsTraceparent is true for every shipped
+		// connector: every per-vendor hook script in
+		// internal/gateway/connector/hooks/ sources
+		// _hardening.sh and forwards DEFENSECLAW_TRACEPARENT
+		// via defenseclaw_extract_trace_context.
 		{"codex", true, NativeOTLPTOMLBlock, true, false, true, true},
 		{"claudecode", true, NativeOTLPEnvBlock, true, true, true, true},
-		{"geminicli", false, NativeOTLPJSONBlock, true, false, true, true},
-		{"copilot", false, "", true, true, false, true},
-		{"cursor", false, "", true, true, true, true},
-		{"windsurf", false, "", true, false, false, true},
-		{"hermes", false, "", true, false, false, true},
+		{"geminicli", true, NativeOTLPJSONBlock, true, false, true, true},
+		{"copilot", true, "", true, true, false, true},
+		{"cursor", true, "", true, true, true, true},
+		{"windsurf", true, "", true, false, false, true},
+		{"hermes", true, "", true, false, false, true},
 	}
 
 	reg := NewDefaultRegistry()

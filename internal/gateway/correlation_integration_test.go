@@ -522,6 +522,14 @@ func TestCorrelation_RequestEnvelopeLandsOnAuditAndSink(t *testing.T) {
 	handler := requestIDMiddleware(CorrelationMiddleware(reg)(inner))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/guardrail/evaluate", nil)
+	// Loopback RemoteAddr matches the trust gate the
+	// CorrelationMiddleware uses to admit inbound traceparent into
+	// the audit envelope (H1 hardening): only loopback callers may
+	// declare a trace id, every other caller falls through to the
+	// local OTel span. Hook scripts and the LLM forward-proxy hop
+	// always run from 127.0.0.1, so this matches the production
+	// trust boundary for trace splice.
+	req.RemoteAddr = "127.0.0.1:54321"
 	req.Header.Set(SessionIDHeader, "sess-i1")
 	req.Header.Set(RequestIDHeader, "req-i1-envelope-0001")
 	req.Header.Set("traceparent",

@@ -65,6 +65,47 @@ func TestRenderHookAuditEnvelope_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestRenderHookAuditEnvelope_PreRedactsReason is the M2 regression
+// test: free-form text fields (today, just Reason) must be pre-
+// redacted before the envelope is folded into the audit row. Without
+// this, the downstream sanitiseEvent → redaction.ForSinkReason path
+// tokenises on ", " / "; " literals INSIDE the strconv.Quote'd JSON
+// value and corrupts the JSON envelope every audit sink writes.
+//
+// We don't try to assert "this exact PII pattern got redacted" —
+// that's the redaction package's job. We DO assert that the rendered
+// envelope JSON remains parseable AND that PII-suggestive substrings
+// survive only in already-redacted form (the ForSinkReason marker
+// `<redacted-` prefix). That's the actionable invariant: downstream
+// jq/SIEM rules need parseable JSON, regardless of what the operator
+// puts in Reason.
+func TestRenderHookAuditEnvelope_PreRedactsReason(t *testing.T) {
+	env := HookAuditEnvelope{
+		Connector: "codex",
+		Event:     "PreToolUse",
+		Reason:    "blocked: contact admin@example.com, see ticket TKT-1234; key=AKIAABCDEFGHIJKLMNOP",
+	}
+	rendered := renderHookAuditEnvelope(env)
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(rendered), &decoded); err != nil {
+		t.Fatalf("envelope JSON not parseable after Reason pre-redaction: %v\nraw=%s", err, rendered)
+	}
+	reasonOut, _ := decoded["reason"].(string)
+	// The PII patterns must NOT appear verbatim — the redaction
+	// pipeline replaces them with placeholder markers like
+	// "<redacted-email-1>" or "<redacted-credential-1>". We do not
+	// pin the exact marker text (that's an internal redaction
+	// contract), only that the raw value is gone.
+	for _, leaked := range []string{
+		"admin@example.com",
+		"AKIAABCDEFGHIJKLMNOP",
+	} {
+		if strings.Contains(reasonOut, leaked) {
+			t.Errorf("reason field leaked raw PII %q\n  got=%q", leaked, reasonOut)
+		}
+	}
+}
+
 // TestRenderHookAuditEnvelope_LogInjection covers the codeguard-0-logging
 // requirement: a hostile prompt that smuggles CR/LF/ANSI escapes into
 // any string field must not be able to forge an extra log line or
@@ -148,5 +189,46 @@ func TestRenderHookAuditLegacyDetails_LogInjection(t *testing.T) {
 		if strings.Contains(got, bad) {
 			t.Errorf("legacy details leaked %q; got=%q", bad, got)
 		}
+	}
+}
+
+// TestRenderHookAuditLegacyDetails_ExtraKeysSortedDeterministically
+// is the L3 regression test: Go's map iteration is intentionally
+// randomized, so a naive `for k, v := range env.Extra` writes
+// different output orderings across runs — breaking snapshot tests
+// and confusing operators who grep for stable log lines. The
+// formatter must sort Extra keys before emitting.
+func TestRenderHookAuditLegacyDetails_ExtraKeysSortedDeterministically(t *testing.T) {
+	env := HookAuditEnvelope{
+		Action: "block",
+		Extra: map[string]string{
+			"zeta":    "1",
+			"alpha":   "2",
+			"middle":  "3",
+			"omega":   "4",
+			"bravo":   "5",
+			"yankee":  "6",
+			"charlie": "7",
+		},
+	}
+	// 10 renders must produce byte-identical output. With un-sorted
+	// iteration this would fail intermittently across Go runtimes.
+	first := renderHookAuditLegacyDetails(env)
+	for i := 0; i < 9; i++ {
+		next := renderHookAuditLegacyDetails(env)
+		if next != first {
+			t.Fatalf("legacy details non-deterministic across runs:\n  first=%q\n  next =%q", first, next)
+		}
+	}
+
+	// Verify sorted ascending: alpha < bravo < charlie < middle < omega < yankee < zeta.
+	wantOrder := []string{"alpha=2", "bravo=5", "charlie=7", "middle=3", "omega=4", "yankee=6", "zeta=1"}
+	pos := 0
+	for _, want := range wantOrder {
+		idx := strings.Index(first[pos:], want)
+		if idx < 0 {
+			t.Fatalf("legacy details missing %q (or out of order):\n  got=%q", want, first)
+		}
+		pos += idx + len(want)
 	}
 }

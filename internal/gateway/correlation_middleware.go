@@ -41,6 +41,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
@@ -249,10 +250,54 @@ func CorrelationMiddleware(registry *AgentRegistry) func(http.Handler) http.Hand
 				ctx = ContextWithSessionID(ctx, sid)
 			}
 			inboundAgent := strings.TrimSpace(r.Header.Get(AgentIDHeader))
-			if tid := traceIDFromHeaders(r.Header); tid != "" {
-				ctx = ContextWithTraceID(ctx, tid)
-			} else if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
-				ctx = ContextWithTraceID(ctx, span.SpanContext().TraceID().String())
+			// Adopt the inbound W3C traceparent into the audit
+			// envelope ONLY for callers we trust to declare a
+			// trace id. The OTel HTTP middleware wraps OUTSIDE
+			// tokenAuth, so an unauthenticated, non-loopback
+			// caller reaches this middleware before the auth
+			// check. Mirroring the inbound traceparent into the
+			// audit envelope for ANY caller would let such an
+			// attacker stamp an arbitrary trace id onto
+			// downstream audit rows for the rest of the request,
+			// poisoning SIEM correlation joins and giving
+			// attackers cheap noise injection into trace
+			// dashboards.
+			//
+			// Trust gate: loopback only.
+			//
+			// Note this is INTENTIONALLY broader than the gate
+			// `shouldExtractHookTrace` enforces in
+			// `extractIncomingTraceContext` (which scopes the
+			// OTel server span's parent extraction to
+			// `/api/v1/<connector>/hook` + `/api/v1/codex/notify`).
+			// The audit envelope's trace_id is a single field on
+			// each persisted row; it does not propagate into
+			// child spans, so the blast radius of a hostile
+			// trace_id is bounded to "noise injection into
+			// SIEM joins" — strictly less than the OTel span
+			// tree splice the tighter gate defends against.
+			//
+			// Loopback is the trust boundary in practice: hook
+			// scripts and the codex notify-bridge always POST
+			// from 127.0.0.1, and the LLM forward-proxy hop
+			// (`/v1/guardrail/evaluate`) likewise carries
+			// `traceparent` from the legitimate agent → proxy →
+			// gateway leg in dev workflows. A cross-network
+			// caller has no legitimate reason to declare a
+			// trace id on ANY route; for them we drop the
+			// parent and fall back below to the local OTel
+			// span's trace id (which is always server-issued
+			// and matches whatever the OTel HTTP middleware
+			// decided for the server span).
+			if connector.IsLoopback(r) {
+				if tid := traceIDFromHeaders(r.Header); tid != "" {
+					ctx = ContextWithTraceID(ctx, tid)
+				}
+			}
+			if TraceIDFromContext(ctx) == "" {
+				if span := trace.SpanFromContext(ctx); span.SpanContext().IsValid() {
+					ctx = ContextWithTraceID(ctx, span.SpanContext().TraceID().String())
+				}
 			}
 			if registry != nil {
 				id := registry.Resolve(ctx, SessionIDFromContext(ctx), inboundAgent)

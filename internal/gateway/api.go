@@ -20,6 +20,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -80,18 +81,32 @@ type APIServer struct {
 	// an RWMutex to keep the hot path lock-free for readers.
 	//
 	// The map is populated at boot by SetOTLPPathTokens AND refreshed
-	// lazily by lookupOTLPPathToken on cache miss for KNOWN scopes —
-	// the latter closes the boot-vs-setup race where the sidecar boots
-	// with an empty/stale map, the operator subsequently runs
-	// `defenseclaw setup geminicli` (which mints a fresh on-disk
-	// token), and the next OTLP request would otherwise 401 because the
-	// in-memory snapshot hasn't been refreshed. The reload is rate-
-	// limited per scope by otlpPathTokenReloadAt below so a hostile or
-	// noisy caller cannot turn the auth path into a per-request disk
-	// stampede.
-	otlpPathTokenMu        sync.RWMutex
-	otlpPathTokens         map[connector.OTLPPathTokenScope]string
-	otlpPathTokenReloadAt  map[connector.OTLPPathTokenScope]time.Time
+	// lazily by lookupOTLPPathToken in two cases:
+	//
+	//  1. Cache miss for a KNOWN scope (F4 fix). Closes the
+	//     boot-vs-setup race where the sidecar boots with an empty
+	//     or stale map, the operator subsequently runs
+	//     `defenseclaw setup geminicli` (which mints a fresh on-disk
+	//     token), and the next OTLP request would otherwise 401
+	//     because the in-memory snapshot hasn't been refreshed.
+	//  2. Mtime drift for a HIT scope (M1 fix). Closes the rotation
+	//     gap where an operator regenerates the on-disk token (e.g.
+	//     post-rotation policy or a security-incident response)
+	//     while the gateway keeps running. Without this check the
+	//     in-memory token wins forever and every loopback OTLP
+	//     request after the rotation 401s until the gateway is
+	//     restarted.
+	//
+	// Both refreshes are rate-limited per scope by otlpPathTokenReloadAt
+	// so a hostile or noisy caller cannot turn the auth path into a
+	// per-request disk stampede. Values are kept as a small
+	// otlpPathTokenEntry struct that carries the token AND the mtime
+	// observed when it was loaded, so rotation detection is a single
+	// os.Stat (no full read on the steady-state path).
+	otlpPathTokenMu         sync.RWMutex
+	otlpPathTokens          map[connector.OTLPPathTokenScope]otlpPathTokenEntry
+	otlpPathTokenReloadAt   map[connector.OTLPPathTokenScope]time.Time
+	otlpPathTokenLastStatAt map[connector.OTLPPathTokenScope]time.Time
 
 	// policyReloader, when set, is called by the /policy/reload handler
 	// to atomically refresh the shared OPA engine used by the watcher.
@@ -135,6 +150,14 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 	a.otel = p
 }
 
+// otlpPathTokenEntry bundles the cached path-token with the mtime of
+// the on-disk file when it was last loaded. Rotation detection
+// compares the live mtime against this value via a cheap os.Stat.
+type otlpPathTokenEntry struct {
+	token string
+	mtime time.Time
+}
+
 // SetOTLPPathTokens replaces the in-memory snapshot of per-source
 // OTLP path-tokens. Called by the sidecar at boot once
 // ${data_dir}/hooks/.otlp-<source>.token files have been minted.
@@ -144,6 +167,14 @@ func (a *APIServer) SetOTelProvider(p *telemetry.Provider) {
 // map (a subset of OTLPPathTokenScopes()) is supported: scopes
 // missing from the map fall back to the master-token comparison in
 // tokenAuth so we do not break legacy deployments.
+//
+// Mtime is sampled from the on-disk file when available so the
+// rotation-detection path in lookupOTLPPathToken can avoid an
+// immediate reload on the first request after boot. If stat fails
+// (the boot caller may pass values not yet on disk in test
+// environments) the mtime is left as the zero value, which forces
+// the first lookup to reload — strictly safer than caching a token
+// we can't compare against the file system.
 func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]string) {
 	a.otlpPathTokenMu.Lock()
 	defer a.otlpPathTokenMu.Unlock()
@@ -151,22 +182,42 @@ func (a *APIServer) SetOTLPPathTokens(tokens map[connector.OTLPPathTokenScope]st
 		a.otlpPathTokens = nil
 		return
 	}
-	cp := make(map[connector.OTLPPathTokenScope]string, len(tokens))
+	dataDir := a.configDataDir()
+	cp := make(map[connector.OTLPPathTokenScope]otlpPathTokenEntry, len(tokens))
 	for k, v := range tokens {
-		cp[k] = v
+		entry := otlpPathTokenEntry{token: v}
+		if dataDir != "" {
+			if path, err := connector.OTLPPathTokenFilePath(dataDir, k); err == nil {
+				if info, err := os.Stat(path); err == nil {
+					entry.mtime = info.ModTime()
+				}
+			}
+		}
+		cp[k] = entry
 	}
 	a.otlpPathTokens = cp
 }
 
 // otlpPathTokenReloadMinInterval bounds disk I/O on the loopback OTLP auth
-// path. After a cache miss for a known scope we re-read the on-disk token
-// file at most once per scope per this interval; the next miss before the
-// interval elapses returns "" (request 401s) without touching disk. 500ms
-// is short enough that the very next OTLP retry after `defenseclaw setup
-// geminicli` succeeds in real operator workflows, and long enough that an
-// attacker probing /otlp/geminicli/<random>/v1/* cannot weaponise the
-// reload into a disk DoS.
+// path. After a cache miss OR a rotation-suspected hit for a known scope
+// we re-read the on-disk token file at most once per scope per this
+// interval; subsequent requests before the interval elapses use the
+// in-memory value (or "" on miss) without touching disk. 500ms is short
+// enough that the very next OTLP retry after `defenseclaw setup geminicli`
+// or a token rotation succeeds in real operator workflows, and long enough
+// that an attacker probing /otlp/geminicli/<random>/v1/* cannot weaponise
+// the reload into a disk DoS.
 const otlpPathTokenReloadMinInterval = 500 * time.Millisecond
+
+// otlpPathTokenStatMinInterval bounds os.Stat calls on the hot
+// auth-check path. We only check the on-disk mtime once per scope per
+// this interval; in between, every request reuses the cached entry
+// without any system call. 1s is short enough that a rotated token
+// is picked up within the human-perceptible window (operators don't
+// expect "rotate then immediately retry" to succeed without a brief
+// delay) and long enough to keep the per-request cost on the hot
+// path effectively free.
+const otlpPathTokenStatMinInterval = 1 * time.Second
 
 // lookupOTLPPathToken returns the per-source scoped OTLP path-token
 // for *source*, or "" when no token has been provisioned for that
@@ -175,55 +226,140 @@ const otlpPathTokenReloadMinInterval = 500 * time.Millisecond
 // closed allow-list of known OTLPPathTokenScope values so an
 // attacker cannot trigger a map lookup against arbitrary scopes.
 //
-// On cache miss for a KNOWN scope this method attempts a single
-// rate-limited disk reload via connector.LoadOTLPPathToken (F4 fix):
-// the sidecar's boot-time SetOTLPPathTokens snapshot would otherwise
-// stay stale forever after a subsequent `defenseclaw setup geminicli`
-// mint, breaking Gemini's loopback OTLP exporter even though the
-// settings.json the operator just wrote contains the correct value.
+// Three refresh triggers:
+//
+//   - F4 boot-race: empty in-memory map, on-disk file exists →
+//     lazy load on miss.
+//   - M1 rotation: on-disk mtime moved past the cached mtime →
+//     evict + reload.
+//   - Reload error / disappearance: file removed → drop the
+//     in-memory entry so the next request 401s instead of
+//     authenticating a stale token forever.
+//
+// All three refreshes share the same per-scope rate limiter
+// (otlpPathTokenReloadAt) so a hostile or noisy caller cannot
+// turn the auth path into a disk-stampede primitive. Stat calls
+// for rotation detection are gated by otlpPathTokenLastStatAt
+// to keep the steady-state per-request cost effectively zero.
 // Unknown scopes never trigger disk I/O.
 func (a *APIServer) lookupOTLPPathToken(source string) string {
 	scope := connector.OTLPPathTokenScope(source)
 
-	// Fast path: read under RLock.
+	// Fast path: read under RLock and decide whether a stat is due.
+	// The stat throttle (otlpPathTokenLastStatAt) is checked for
+	// BOTH cache-hit and cache-miss cases — a missing token file
+	// for a known scope must not turn into one os.Stat per request,
+	// or a hostile caller probing /otlp/geminicli/<random>/v1/*
+	// before any operator-side setup mints the on-disk token can
+	// weaponise the auth check into a per-request disk syscall.
 	a.otlpPathTokenMu.RLock()
+	var (
+		cached       otlpPathTokenEntry
+		haveCached   bool
+		statDueScope bool
+	)
 	if a.otlpPathTokens != nil {
-		if tok := a.otlpPathTokens[scope]; tok != "" {
-			a.otlpPathTokenMu.RUnlock()
-			return tok
-		}
+		cached, haveCached = a.otlpPathTokens[scope]
 	}
+	lastStat := a.otlpPathTokenLastStatAt[scope]
+	statDueScope = lastStat.IsZero() || time.Since(lastStat) >= otlpPathTokenStatMinInterval
 	a.otlpPathTokenMu.RUnlock()
 
-	// Slow path: cache miss. Only refresh from disk for scopes the
-	// gateway actually knows about. This prevents fuzzers and typo'd
-	// URLs from turning the auth check into a disk-stampede primitive.
+	// Steady-state hot path: cached, fresh-enough, no stat due.
+	if haveCached && cached.token != "" && !statDueScope {
+		return cached.token
+	}
+
+	// Throttled miss path: we statted this exact scope recently
+	// and the cache is still empty (or never seen). Another stat
+	// inside the refractory window would return the same "no
+	// file" answer, so skip the syscall entirely and serve the
+	// equivalent empty result. !statDueScope implies !lastStat.IsZero(),
+	// and lastStat is only populated below AFTER IsValidOTLPScope
+	// passes, so this branch cannot be reached for an unknown
+	// scope — keeping the closed-allow-list discipline intact.
+	if !statDueScope && (!haveCached || cached.token == "") {
+		return ""
+	}
+
 	if !connector.IsValidOTLPScope(scope) {
 		return ""
 	}
 	dataDir := a.configDataDir()
 	if dataDir == "" {
+		// No data dir wired (early-boot / test). Return whatever
+		// was set via SetOTLPPathTokens; we cannot stat the disk.
+		if haveCached {
+			return cached.token
+		}
 		return ""
 	}
 
 	a.otlpPathTokenMu.Lock()
 	defer a.otlpPathTokenMu.Unlock()
 
-	// Double-check after upgrading the lock — another goroutine may
-	// have reloaded while we were waiting.
+	// Re-read cache after upgrading the lock — another goroutine
+	// may have already done the work we were about to do.
 	if a.otlpPathTokens != nil {
-		if tok := a.otlpPathTokens[scope]; tok != "" {
-			return tok
+		if e, ok := a.otlpPathTokens[scope]; ok {
+			cached = e
+			haveCached = ok && e.token != ""
 		}
 	}
-	// Rate-limit per-scope reloads so a flood of misses doesn't issue
-	// one disk read per request.
+
+	// Rate-limit reloads so a flood of misses or rotation probes
+	// can't issue one disk read per request.
 	if a.otlpPathTokenReloadAt != nil {
 		if last, ok := a.otlpPathTokenReloadAt[scope]; ok &&
 			time.Since(last) < otlpPathTokenReloadMinInterval {
+			if haveCached {
+				return cached.token
+			}
 			return ""
 		}
 	}
+
+	// Stat the on-disk file. We do this regardless of whether we
+	// have a cached entry: a missing file means the operator has
+	// torn down the connector, in which case authenticating the
+	// stale in-memory token would be a regression. A present file
+	// with an unchanged mtime is the steady-state path and avoids
+	// the read+parse cost.
+	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, scope)
+	if err != nil {
+		return ""
+	}
+	if a.otlpPathTokenLastStatAt == nil {
+		a.otlpPathTokenLastStatAt = make(map[connector.OTLPPathTokenScope]time.Time)
+	}
+	a.otlpPathTokenLastStatAt[scope] = time.Now()
+
+	info, statErr := os.Stat(tokenPath)
+	if statErr != nil {
+		if !os.IsNotExist(statErr) {
+			// Transient error (permission flip, FS hiccup). Don't
+			// invalidate; return the cached value if any.
+			if haveCached {
+				return cached.token
+			}
+			return ""
+		}
+		// File is gone — drop any stale cached entry and fail
+		// closed so the next OTLP request 401s rather than
+		// authenticating a removed token.
+		if a.otlpPathTokens != nil {
+			delete(a.otlpPathTokens, scope)
+		}
+		return ""
+	}
+
+	// Cached entry is still current — refresh the stat timestamp
+	// (already done above) and return without disk-read cost.
+	if haveCached && cached.mtime.Equal(info.ModTime()) {
+		return cached.token
+	}
+
+	// Either no cache yet or mtime moved → reload from disk.
 	if a.otlpPathTokenReloadAt == nil {
 		a.otlpPathTokenReloadAt = make(map[connector.OTLPPathTokenScope]time.Time)
 	}
@@ -231,12 +367,19 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 
 	tok, err := connector.LoadOTLPPathToken(dataDir, scope)
 	if err != nil || tok == "" {
+		// Read failed after a successful stat: race with rotation
+		// rename, or unreadable file. Drop the cache so we don't
+		// keep authenticating a token that can no longer be
+		// verified against disk.
+		if a.otlpPathTokens != nil {
+			delete(a.otlpPathTokens, scope)
+		}
 		return ""
 	}
 	if a.otlpPathTokens == nil {
-		a.otlpPathTokens = make(map[connector.OTLPPathTokenScope]string)
+		a.otlpPathTokens = make(map[connector.OTLPPathTokenScope]otlpPathTokenEntry)
 	}
-	a.otlpPathTokens[scope] = tok
+	a.otlpPathTokens[scope] = otlpPathTokenEntry{token: tok, mtime: info.ModTime()}
 	return tok
 }
 
@@ -552,7 +695,10 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 	}
 	reg := a.connectorRegistry
 	if reg == nil {
-		reg = connector.NewDefaultRegistry()
+		// Reuse the lazy singleton instead of paying a fresh
+		// NewDefaultRegistry() build (eight builtin
+		// registrations) on every /connectors GET.
+		reg = getFallbackConnectorRegistry()
 	}
 	type connectorEntry struct {
 		Name               string                           `json:"name"`
@@ -1977,7 +2123,7 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 				token = r.Header.Get("X-DefenseClaw-Token")
 			}
 			expected := a.scannerCfg.Gateway.Token
-			if expected == "" || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+			if expected == "" || token == "" || !constantTimeStringMatch(token, expected) {
 				a.writeJSON(w, http.StatusForbidden, map[string]string{
 					"error": "guardrail config changes require a valid gateway token — set DEFENSECLAW_GATEWAY_TOKEN",
 				})
@@ -2190,12 +2336,12 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				// it cannot be replayed against /api/v1/* routes
 				// and is bound to a single connector's OTLP
 				// namespace. See connector/otlp_token.go.
-				if subtle.ConstantTimeCompare([]byte(pathToken), []byte(expected)) == 1 {
+				if constantTimeStringMatch(pathToken, expected) {
 					next.ServeHTTP(w, r)
 					return
 				}
 				if scoped := a.lookupOTLPPathToken(source); scoped != "" &&
-					subtle.ConstantTimeCompare([]byte(pathToken), []byte(scoped)) == 1 {
+					constantTimeStringMatch(pathToken, scoped) {
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -2206,7 +2352,7 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(token), []byte(expected)) != 1 {
+		if !constantTimeStringMatch(token, expected) {
 			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_token")
 			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
@@ -2214,6 +2360,38 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// constantTimeStringMatch returns true iff a == b without leaking
+// the timing of WHERE the strings diverge, AND without leaking the
+// length of `expected` to a probing caller.
+//
+// Background (L6 hardening): subtle.ConstantTimeCompare(a, b) is
+// constant-time WITHIN equal-length inputs, but it short-circuits
+// with zero on a length mismatch. All gateway tokens today are
+// 64-char hex (EnsureGatewayToken + EnsureOTLPPathToken both write
+// 32 bytes hex-encoded), so the practical leak is bounded by that
+// invariant. However:
+//
+//  1. A future caller (operator-provided token, plugin-supplied
+//     scope) could feed a different-length value, regressing the
+//     invariant silently.
+//  2. The codeguard rule for constant-time crypto explicitly calls
+//     out length-leak risk; defence in depth is cheap here.
+//
+// The fix is to hash both inputs with SHA-256 first, then compare
+// the fixed-width 32-byte digests in constant time. The hash
+// adds ≈microseconds to the auth path (negligible vs. socket I/O)
+// and removes any timing observability of length differences.
+//
+// We deliberately do NOT use HMAC + a process-local key: the
+// inputs are themselves high-entropy CSPRNG tokens and we're
+// comparing for equality, not protecting against precomputation
+// of "what's the token?" — the digest never leaves this comparison.
+func constantTimeStringMatch(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }
 
 func (a *APIServer) emitHTTPAuthFailure(ctx context.Context, r *http.Request, route string, code gatewaylog.ErrorCode, metricReason string) {

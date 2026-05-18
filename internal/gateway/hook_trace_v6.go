@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"go.opentelemetry.io/otel/propagation"
 )
 
@@ -33,19 +34,30 @@ var hookTraceV6Propagator propagation.TextMapPropagator = propagation.TraceConte
 // shouldExtractHookTrace reports whether the inbound request belongs
 // to a route that participates in agent-side trace propagation.
 //
-// SECURITY (codeguard-0-logging + codeguard-0-mcp-security):
-// Trace extraction is intentionally scoped — accepting traceparent
-// on every route would let any caller (including unauthenticated
-// /health probes) splice an arbitrary trace into the gateway's
-// trace tree. Splice is only legal from a process that we already
-// shipped a hook script to, and those scripts only POST to:
+// SECURITY (codeguard-0-logging + codeguard-0-mcp-security, H1):
+// Trace extraction is intentionally scoped on THREE axes — accepting
+// traceparent on every route would let any caller (including
+// unauthenticated /health probes) splice an arbitrary trace into
+// the gateway's trace tree. The OTel HTTP middleware wraps OUTSIDE
+// tokenAuth, so this function runs BEFORE the auth check; we cannot
+// rely on the auth gate to filter traffic. Instead we gate on:
 //
-//   - /api/v1/<connector>/hook  (registered by registerConnectorHookRoutes)
-//   - /api/v1/codex/notify       (the codex notify-bridge shim)
+//  1. Path shape — must be /api/v1/codex/notify or
+//     /api/v1/<connector>/hook for a CONNECTOR THAT REGISTERED A
+//     HOOK HANDLER. A request to /api/v1/unregistered/hook is
+//     refused trace splice even though the OTel middleware sees it
+//     before the mux 404.
+//  2. Loopback — every shipped hook script (cursor, codex,
+//     claude-code, hermes, geminicli, copilot, windsurf) POSTs to
+//     127.0.0.1:<api-port>; the codex notify-bridge ships a
+//     127.0.0.1 URL too. A non-loopback caller has no legitimate
+//     reason to splice into the hook trace tree, so we drop the
+//     parent context for any RemoteAddr that is not loopback.
 //
-// The path check below is a strict suffix match against those two
-// shapes. Any other route returns false and the gateway mints a
-// fresh root span regardless of what the caller sent.
+// The tokenAuth check still runs after this and rejects the
+// request body, but by then the parent context has already been
+// safely dropped — the server span exists as a fresh root, never
+// rooted under an attacker-supplied trace id.
 func shouldExtractHookTrace(r *http.Request) bool {
 	if r == nil || r.URL == nil {
 		return false
@@ -54,13 +66,28 @@ func shouldExtractHookTrace(r *http.Request) bool {
 	if !strings.HasPrefix(p, "/api/v1/") {
 		return false
 	}
-	switch {
-	case strings.HasSuffix(p, "/hook"):
-		return true
-	case p == "/api/v1/codex/notify":
+	// Loopback gate (H1): hook scripts only POST from 127.0.0.1.
+	// A non-loopback caller cannot legitimately participate in
+	// hook trace propagation, regardless of path shape. This
+	// closes the gap left by the auth-runs-after-OTel order.
+	if !connector.IsLoopback(r) {
+		return false
+	}
+	if p == "/api/v1/codex/notify" {
 		return true
 	}
-	return false
+	// /api/v1/<connector>/hook — require <connector> to be a name
+	// registered via registerHookHandler.
+	rest := strings.TrimPrefix(p, "/api/v1/")
+	if !strings.HasSuffix(rest, "/hook") {
+		return false
+	}
+	connectorName := strings.TrimSuffix(rest, "/hook")
+	if connectorName == "" || strings.Contains(connectorName, "/") {
+		return false
+	}
+	_, ok := connectorHookHandlerByName[connectorName]
+	return ok
 }
 
 // extractIncomingTraceContext pulls a W3C trace context out of the

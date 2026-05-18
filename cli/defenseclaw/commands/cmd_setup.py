@@ -4809,6 +4809,16 @@ def setup_splunk(
         return
 
     if s3_export:
+        # The S3 exporter ships as a sidecar to the local Splunk
+        # docker compose stack — there is no Docker-free S3 path. Emit
+        # a one-line notice so operators are not surprised when the
+        # Docker pre-flight checks below run.
+        if not enable_logs:
+            click.echo(
+                "  note: --s3-export implies --logs (the S3 exporter is a "
+                "sidecar to the local Splunk stack). Running Docker pre-flight "
+                "checks…"
+            )
         enable_logs = True
 
     if not enable_o11y and not enable_logs and not enable_enterprise and not non_interactive:
@@ -5133,10 +5143,28 @@ def _setup_logs(
     ):
         return False
 
-    ok = _preflight_docker()
+    ok, reason = _preflight_docker()
     if not ok:
         if non_interactive:
-            click.echo("  error: Docker is required for --logs", err=True)
+            # Map the pre-flight reason code to a one-line, accurate
+            # error so the operator does not have to re-read the
+            # checklist above. Historically this branch always said
+            # "Docker is required for --logs", which was misleading
+            # when the actual failure was a busy port.
+            detail = {
+                "docker_not_installed": "Docker is not installed",
+                "docker_daemon_not_running": "Docker daemon is not running",
+            }.get(reason)
+            if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
+                # reason looks like "port_8000_in_use"
+                port = reason.split("_", 2)[1]
+                detail = (
+                    f"port {port} is already in use — free it (or stop the "
+                    f"existing Splunk instance) and re-run"
+                )
+            if detail is None:
+                detail = "pre-flight checks failed (see messages above)"
+            click.echo(f"  error: {detail}", err=True)
             raise SystemExit(1)
         return False
 
@@ -5572,6 +5600,12 @@ def _bootstrap_bridge(
             env["S3_PREFIX"] = s3_prefix
         if aws_region:
             env["AWS_REGION"] = aws_region
+    # Hoist `result` out of the try so the exception handlers below can
+    # surface the bridge's stdout/stderr tails. Without this, a malformed
+    # or empty JSON contract was reported only as the bare json module
+    # exception ("Expecting value: line 1 column 1 (char 0)"), forcing
+    # operators to re-run the bridge by hand to see what actually failed.
+    result: subprocess.CompletedProcess[str] | None = None
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": 300}
         if env is not None:
@@ -5582,12 +5616,19 @@ def _bootstrap_bridge(
         )
         if result.returncode != 0:
             click.echo(f"  Bridge startup failed (exit {result.returncode})")
-            err = (result.stderr or result.stdout or "").strip()
-            for line in err.splitlines()[:5]:
-                click.echo(f"    {line}")
+            _echo_bridge_output_tail(result)
             return None
 
-        contract = _json.loads(result.stdout.strip())
+        stdout = (result.stdout or "").strip()
+        if not stdout:
+            click.echo(
+                "  Bridge startup error: bridge exited 0 but produced no JSON "
+                "contract on stdout (expected from `splunk-claw-bridge up "
+                "--output json`)"
+            )
+            _echo_bridge_output_tail(result)
+            return None
+        contract = _json.loads(stdout)
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
@@ -5603,23 +5644,64 @@ def _bootstrap_bridge(
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 5 minutes")
         return None
-    except (_json.JSONDecodeError, OSError) as exc:
-        click.echo(f"  Bridge startup error: {exc}")
+    except _json.JSONDecodeError as exc:
+        click.echo(f"  Bridge startup error: malformed JSON contract ({exc})")
+        if result is not None:
+            _echo_bridge_output_tail(result)
         return None
+    except OSError as exc:
+        click.echo(f"  Bridge startup error: {exc}")
+        if result is not None:
+            _echo_bridge_output_tail(result)
+        return None
+
+
+def _echo_bridge_output_tail(
+    result: subprocess.CompletedProcess[str],
+    *,
+    max_lines: int = 10,
+) -> None:
+    """Print the last ``max_lines`` of the bridge's stdout / stderr.
+
+    Used by the failure paths in :func:`_bootstrap_bridge` so an
+    operator can tell *why* the bridge failed without re-running it by
+    hand. Both streams are emitted under labelled headers when present;
+    streams that are empty (or whitespace-only) are skipped silently.
+    """
+    for label, raw in (
+        ("Last bridge stdout", result.stdout),
+        ("Last bridge stderr", result.stderr),
+    ):
+        text = (raw or "").strip()
+        if not text:
+            continue
+        lines = text.splitlines()[-max_lines:]
+        click.echo(f"  {label}:")
+        for line in lines:
+            click.echo(f"    {line}")
 
 
 # ---------------------------------------------------------------------------
 # Docker pre-flight
 # ---------------------------------------------------------------------------
 
-def _preflight_docker() -> bool:
-    """Check Docker is installed and running. Return True if OK."""
+def _preflight_docker() -> tuple[bool, str]:
+    """Check Docker prerequisites for the local Splunk stack.
+
+    Returns ``(ok, reason)``. ``reason`` is an empty string on success
+    and a short, machine-readable failure code on failure
+    (``"docker_not_installed"``, ``"docker_daemon_not_running"``,
+    ``"port_<n>_in_use"``). Callers surface ``reason`` verbatim in
+    non-interactive error output so operators can tell *which* check
+    failed without having to re-read the human-readable lines printed
+    above (those lines remain the primary signal in interactive mode).
+    """
     click.echo("  Pre-flight checks:")
     docker = shutil.which("docker")
     if not docker:
         click.echo("    Docker installed... NOT FOUND")
         click.echo("    Install Docker: https://docs.docker.com/get-docker/")
-        return False
+        return False, "docker_not_installed"
     click.echo("    Docker installed... ok")
 
     try:
@@ -5629,20 +5711,20 @@ def _preflight_docker() -> bool:
         if result.returncode != 0:
             click.echo("    Docker daemon running... NOT RUNNING")
             click.echo("    Start Docker and try again.")
-            return False
+            return False, "docker_daemon_not_running"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         click.echo("    Docker daemon running... NOT RUNNING")
-        return False
+        return False, "docker_daemon_not_running"
     click.echo("    Docker daemon running... ok")
 
     for port, label in [(8000, "Splunk Web"), (8088, "HEC")]:
         if _port_in_use(port):
             click.echo(f"    Port {port} ({label})... IN USE")
             click.echo(f"    Free port {port} or stop the existing Splunk instance.")
-            return False
+            return False, f"port_{port}_in_use"
         click.echo(f"    Port {port} ({label})... available")
 
-    return True
+    return True, ""
 
 
 def _port_in_use(port: int) -> bool:

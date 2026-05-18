@@ -365,6 +365,18 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attribute.String("defenseclaw.http.server", serverName)),
 		)
+		// Deferred span.End so a panic deeper in the handler stack
+		// (e.g. an evaluator that did not yet pick up the
+		// safeEvaluateHook recover) still finalises the server
+		// span. Without this defer, a panic between Start and End
+		// would leak an unfinalised span at the trace backend and
+		// hide the failure from tracing dashboards. Status
+		// attributes that depend on the response (status code,
+		// query) are recorded BEFORE the panic could re-trigger,
+		// so the only thing that may be missing on the panic path
+		// is the response-status attribute set — which is the
+		// correct signal that the request did not complete cleanly.
+		defer span.End()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r.WithContext(ctx))
 		status := sw.status
@@ -393,7 +405,6 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 		if q != "" {
 			span.SetAttributes(semconv.URLQuery(sanitizeQueryForSpan(q)))
 		}
-		span.End()
 	})
 }
 

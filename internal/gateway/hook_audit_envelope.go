@@ -19,9 +19,12 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // HookAuditEnvelopeSchema identifies the audit-envelope shape. Bumped
@@ -113,12 +116,25 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	env.RawAction = stripLogInjectionRunes(env.RawAction)
 	env.Severity = stripLogInjectionRunes(env.Severity)
 	env.Mode = stripLogInjectionRunes(env.Mode)
-	env.Reason = stripLogInjectionRunes(env.Reason)
+	// M2 fix: Reason is the only envelope field that routinely
+	// carries user-influenced free-form text (policy reasons, AID
+	// findings, scanner messages). The downstream audit choke point
+	// runs the assembled `details` string through
+	// redaction.ForSinkReason, which splits on raw ", " / "; "
+	// byte sequences and per-chunk redacts. Without pre-redaction
+	// here, a Reason like "X, Y" would split details_json across
+	// that boundary and each half would be independently redacted,
+	// corrupting the JSON value. By redacting Reason FIRST and
+	// marking the envelope as already-redacted-equivalent (the
+	// resulting JSON contains no further "free-form" surfaces),
+	// the downstream pass becomes a no-op via isAlreadyRedacted
+	// for any envelope whose Reason actually contained PII.
+	env.Reason = preRedactEnvelopeFreeForm(env.Reason)
 	env.RawOrigin = stripLogInjectionRunes(env.RawOrigin)
 	for i, id := range env.RawEventIDs {
 		env.RawEventIDs[i] = stripLogInjectionRunes(id)
 	}
-	env.RawPayload = stripLogInjectionRunes(env.RawPayload)
+	env.RawPayload = preRedactEnvelopeFreeForm(env.RawPayload)
 	if env.Extra != nil {
 		clean := make(map[string]string, len(env.Extra))
 		for k, v := range env.Extra {
@@ -139,6 +155,38 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 			HookAuditEnvelopeSchema, env.Connector, env.Event)
 	}
 	return string(b)
+}
+
+// preRedactEnvelopeFreeForm runs free-form, user-influenced fields
+// through the same redaction pipeline the downstream audit sink would
+// apply, BEFORE the field is folded into the envelope JSON. This is
+// the M2 fix.
+//
+// Background: internal/audit/logger.go's sanitizeEvent runs the
+// assembled audit details string through redaction.ForSinkReason,
+// which tokenises on raw ", " / "; " byte sequences and per-chunk
+// redacts. The hook envelope places JSON next to free-form text in a
+// single `details` blob; without pre-redaction, a Reason carrying
+// "blocked, see logs" creates a split point INSIDE the strconv.Quote'd
+// JSON value, and PII patterns elsewhere in the JSON are then
+// inline-redacted, breaking jq / SIEM parsers that expect well-formed
+// details_json.
+//
+// The fix is to pre-redact the free-form fields. ForSinkReason is
+// idempotent (its isAlreadyRedacted fast-path skips strings whose
+// chunks are already `<redacted...>` placeholders or safe glue
+// tokens), so the downstream pass is a no-op for already-redacted
+// material — meaning the envelope JSON we emit here is identical to
+// what the audit row contains, regardless of what
+// redaction.ForSinkReason does later.
+//
+// stripLogInjectionRunes still runs on top so CR/LF/ANSI cannot
+// survive even within already-redacted markers.
+func preRedactEnvelopeFreeForm(s string) string {
+	if s == "" {
+		return s
+	}
+	return stripLogInjectionRunes(string(redaction.ForSinkReason(s)))
 }
 
 // stripLogInjectionRunes removes characters an attacker could use to
@@ -217,8 +265,19 @@ func renderHookAuditLegacyDetails(env HookAuditEnvelope) string {
 	if env.RawPayload != "" {
 		writeKV("raw_payload", strconv.Quote(env.RawPayload))
 	}
-	for k, v := range env.Extra {
-		writeKV(stripLogInjectionRunes(k), v)
+	// Extra keys are emitted in sorted order so snapshot tests and
+	// log greps stay deterministic across runs. Go's map-iteration
+	// order is intentionally randomized; the audit row should not
+	// inherit that randomness.
+	if len(env.Extra) > 0 {
+		keys := make([]string, 0, len(env.Extra))
+		for k := range env.Extra {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			writeKV(stripLogInjectionRunes(k), env.Extra[k])
+		}
 	}
 	return b.String()
 }

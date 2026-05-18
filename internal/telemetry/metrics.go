@@ -1438,7 +1438,8 @@ func (p *Provider) RecordConnectorHookInvocation(ctx context.Context, connector,
 // Counts that are <= 0 are silently ignored so a connector that
 // reports only one of the three fields does not record bogus zero-
 // valued time series. Callers should pass the parsed token counts
-// directly; the gateway runs no further normalization.
+// directly; the gateway runs no further normalization beyond the
+// model-label normalization documented on NormalizeModelLabel.
 func (p *Provider) RecordHookTokenUsage(ctx context.Context, connector, model string, promptTokens, completionTokens, totalTokens int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
@@ -1447,23 +1448,98 @@ func (p *Provider) RecordHookTokenUsage(ctx context.Context, connector, model st
 	if connector == "" {
 		connector = "unknown"
 	}
-	model = strings.TrimSpace(model)
-	if model == "" {
-		model = "unknown"
-	}
+	modelLabel := NormalizeModelLabel(model)
 	record := func(kind string, value int64) {
 		if value <= 0 {
 			return
 		}
 		p.metrics.hookTokens.Add(ctx, value, metric.WithAttributes(
 			attribute.String("connector", connector),
-			attribute.String("model", model),
+			attribute.String("model", modelLabel),
 			attribute.String("kind", kind),
 		))
 	}
 	record("prompt", promptTokens)
 	record("completion", completionTokens)
 	record("total", totalTokens)
+}
+
+// modelLabelMaxLen caps the model attribute string length. Even with
+// the family-collapse path below, defence in depth: any model
+// identifier longer than this is replaced with a fixed prefix so a
+// hostile agent (or sloppy SDK) cannot push multi-kB strings into
+// TSDB labels.
+const modelLabelMaxLen = 64
+
+// modelFamilyPrefixes groups raw model identifiers (e.g.
+// "gpt-5-mini-2026-04-18") into a small set of stable families
+// ("gpt-5"). The metric carries the FAMILY, so a noisy or hostile
+// agent that emits arbitrary version suffixes cannot inflate
+// Prometheus / OTLP series cardinality. Operators who want the
+// fully-qualified model ID still have it as a span attribute on the
+// associated gen_ai.* trace — the metric just doesn't carry it.
+//
+// Adding a new family is a one-line append here; ordering does not
+// matter — NormalizeModelLabel uses the first matching prefix and
+// the families are designed not to overlap (gpt-4 vs gpt-5 are
+// disjoint prefixes by construction).
+var modelFamilyPrefixes = []string{
+	"gpt-5",
+	"gpt-4o",
+	"gpt-4",
+	"gpt-3.5",
+	"o1",
+	"o3",
+	"claude-3.5",
+	"claude-3-7",
+	"claude-3",
+	"claude-4",
+	"claude-opus",
+	"claude-sonnet",
+	"claude-haiku",
+	"gemini-1.5",
+	"gemini-2",
+	"gemini",
+	"llama-3",
+	"llama-4",
+	"mistral",
+	"deepseek",
+	"qwen",
+	"grok",
+	"command-r",
+	"phi-3",
+	"phi-4",
+}
+
+// NormalizeModelLabel projects an arbitrary, caller-supplied model
+// string onto the bounded family allowlist above. Cardinality
+// guarantees:
+//
+//   - Empty / whitespace → "unknown" (single bucket).
+//   - Unknown family → "other" (single bucket). Anything not in the
+//     allowlist collapses here so adding a brand-new model family
+//     without registering it cannot expand the label cardinality.
+//   - Recognised family → that family's prefix (e.g. all "gpt-5*"
+//     variants → "gpt-5").
+//   - Anything longer than modelLabelMaxLen → "other".
+//
+// Exported so tests + audit pipelines can apply the same normalization
+// when correlating metrics with the rich gen_ai.request.model span
+// attribute.
+func NormalizeModelLabel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return "unknown"
+	}
+	if len(m) > modelLabelMaxLen {
+		return "other"
+	}
+	for _, prefix := range modelFamilyPrefixes {
+		if m == prefix || strings.HasPrefix(m, prefix+"-") || strings.HasPrefix(m, prefix+".") || strings.HasPrefix(m, prefix+":") {
+			return prefix
+		}
+	}
+	return "other"
 }
 
 // RecordHookOutcome records a single hook decision split by the

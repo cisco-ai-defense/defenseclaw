@@ -90,10 +90,11 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 // escapes cannot forge fake audit rows or corrupt the operator's
 // terminal.
 //
-// Optional action override: when env.Action carries a non-default
-// audit action (today: ActionConnectorHookSynthetic for synthetic
-// codex-notify-derived events), the override is used instead of the
-// canonical ActionConnectorHook. Sinks that want to keep "1 row per
+// Optional action override: when env.AuditActionOverride is set
+// (today: ActionConnectorHookSynthetic for synthetic
+// codex-notify-derived events), the override is used as the audit
+// row's action column instead of the canonical
+// ActionConnectorHook. Sinks that want to keep "1 row per
 // codex.notify in" should filter on action=connector-hook only.
 func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) {
 	if a.logger == nil {

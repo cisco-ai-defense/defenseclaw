@@ -33,9 +33,15 @@ const (
 // hookReq builds an *http.Request whose URL.Path matches a hook
 // route so extractIncomingTraceContext considers it in-scope. Any
 // other path returns ctx unchanged (route-scope security guard).
+//
+// RemoteAddr defaults to 127.0.0.1 so the H1 loopback gate
+// (shouldExtractHookTrace) admits the request. Tests that probe
+// the loopback gate should set RemoteAddr explicitly to a non-
+// loopback address.
 func hookReq(t *testing.T, path string, h http.Header) *http.Request {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, path, nil)
+	r.RemoteAddr = "127.0.0.1:54321"
 	for k, vv := range h {
 		for _, v := range vv {
 			r.Header.Add(k, v)
@@ -106,6 +112,51 @@ func TestExtractIncomingTraceContext_OutOfScopeRoute(t *testing.T) {
 				t.Errorf("route %q accepted traceparent (security regression)", p)
 			}
 		})
+	}
+}
+
+// TestExtractIncomingTraceContext_NonLoopbackRejected is the
+// security regression test for the H1 loopback gate. The OTel HTTP
+// middleware wraps OUTSIDE tokenAuth, so a non-loopback caller can
+// reach extractIncomingTraceContext before the auth check runs.
+// Hook scripts only POST from loopback, so any non-loopback caller
+// hitting a hook route MUST NOT splice their attacker-supplied
+// traceparent into the gateway's trace tree — the parent context
+// is dropped and the server span is born as a fresh root.
+func TestExtractIncomingTraceContext_NonLoopbackRejected(t *testing.T) {
+	hostileRemotes := []string{
+		"203.0.113.5:443",   // TEST-NET-3
+		"198.51.100.10:80",  // TEST-NET-2
+		"192.0.2.99:65000",  // TEST-NET-1 (httptest default)
+		"[2001:db8::1]:443", // documentation IPv6 (non-loopback)
+	}
+	for _, remote := range hostileRemotes {
+		remote := remote
+		t.Run(remote, func(t *testing.T) {
+			h := http.Header{}
+			h.Set("traceparent", wellFormedTraceparent)
+			r := hookReq(t, "/api/v1/codex/hook", h)
+			r.RemoteAddr = remote
+			got := extractIncomingTraceContext(context.Background(), r)
+			if trace.SpanFromContext(got).SpanContext().IsValid() {
+				t.Errorf("non-loopback caller %q was allowed to splice traceparent (security regression)", remote)
+			}
+		})
+	}
+}
+
+// TestExtractIncomingTraceContext_NotifyNonLoopbackRejected covers
+// the same loopback gate for the codex notify-bridge endpoint. The
+// notify-bridge always shells curl against 127.0.0.1, so a non-
+// loopback POST is by definition not from a notify-bridge.
+func TestExtractIncomingTraceContext_NotifyNonLoopbackRejected(t *testing.T) {
+	h := http.Header{}
+	h.Set("traceparent", wellFormedTraceparent)
+	r := hookReq(t, "/api/v1/codex/notify", h)
+	r.RemoteAddr = "203.0.113.5:443"
+	got := extractIncomingTraceContext(context.Background(), r)
+	if trace.SpanFromContext(got).SpanContext().IsValid() {
+		t.Error("non-loopback caller was allowed to splice traceparent into /api/v1/codex/notify")
 	}
 }
 

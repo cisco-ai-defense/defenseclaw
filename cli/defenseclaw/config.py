@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import platform
 import subprocess
 import sys
@@ -1382,11 +1383,93 @@ class Config:
             existing, dataclass_data, owned_keys,
         )
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        # Atomic write that ALSO preserves owner-only file mode.
+        #
+        # Why this is security-critical: config.yaml is allowed to
+        # carry tokens (gateway.token), OTLP `Authorization`
+        # headers, audit-sink `hec_token` values, and other secrets.
+        # The defenseclaw setup wizards historically chmod the
+        # file to 0600. The original ``open(tmp, "w")`` honoured
+        # the process umask, so under the typical 0o022 umask the
+        # tmp file landed at 0o644 — and ``os.replace`` then
+        # renamed those wider permissions onto the live path,
+        # silently downgrading 0600 → 0644 on every save.
+        #
+        # The fix has three layers of defence:
+        #
+        #   1. The temp file is created with O_EXCL and an
+        #      explicit 0o600 mode via os.open(), so the umask
+        #      cannot widen it. O_EXCL prevents an attacker who
+        #      can write to data_dir from pre-creating the temp
+        #      with a symlink to /etc/shadow (TOCTOU on the
+        #      replace).
+        #   2. After write, if the live path already exists and
+        #      has stricter bits (e.g. 0o400 because an operator
+        #      hardened beyond the wizard default), we mirror
+        #      those bits onto the tmp before replace. This means
+        #      a save NEVER widens the existing mode — it can
+        #      only narrow it.
+        #   3. os.replace is atomic on POSIX (rename(2)
+        #      guarantees), so the live config either contains
+        #      the previous bytes or the new bytes — never a
+        #      half-written file. The mode of the new file is the
+        #      mode of the tmp at rename time (mode is a property
+        #      of the inode, not the path).
         tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            yaml.safe_dump(
-                merged, f, default_flow_style=False, sort_keys=False,
-            )
+        existing_mode: int | None = None
+        try:
+            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # First-save path or unreadable parent — fall back to
+            # the explicit 0o600 default below. Never widen.
+            existing_mode = None
+        # If a stale tmp from a crashed save lingers, drop it so
+        # O_EXCL doesn't fail on a phantom file we own.
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # If we can't remove a stale tmp, the open below
+            # will fail loud rather than silently overwrite.
+            pass
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w") as f:
+                yaml.safe_dump(
+                    merged, f, default_flow_style=False, sort_keys=False,
+                )
+        except BaseException:
+            # If yaml.safe_dump or fdopen blows up, drop the tmp so
+            # the next save starts from a clean slate (otherwise the
+            # O_EXCL + best-effort unlink dance would intermittently
+            # double-fail).
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        # Mirror the existing file's stricter bits onto the tmp so
+        # the replace can only narrow, never widen. We deliberately
+        # do NOT widen 0o400 → 0o600 here because some operators
+        # ship 0o400 by policy.
+        if existing_mode is not None and existing_mode != 0o600:
+            target_mode = existing_mode & 0o600
+            if target_mode == 0:
+                # Operator removed even owner-read — falling back
+                # to the dataclass owner-only default is the only
+                # safe choice; warn so the operator notices.
+                target_mode = 0o600
+            try:
+                os.chmod(tmp, target_mode)
+            except OSError as exc:
+                _log.warning(
+                    "config.save: cannot mirror %o mode onto %s (%s); "
+                    "writing as 0600", existing_mode, tmp, exc,
+                )
         os.replace(tmp, path)
 
 
@@ -1543,6 +1626,38 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
     return raw
 
 
+# Dotted YAML paths whose VALUE is a dict[str, str]-style modeled
+# collection — i.e. the dataclass is the SINGLE SOURCE OF TRUTH for
+# the contents of the dict. When the caller clears one of these
+# (sets it to ``{}``), the on-disk file MUST be cleared too;
+# preserving the previous keys would leak stale secrets like an
+# ``otel.headers.Authorization`` token across an OTLP endpoint
+# rotation.
+#
+# The list is intentionally explicit (not auto-derived from
+# dataclass introspection) because not every nested dataclass field
+# typed as ``dict[str, str]`` is dataclass-authoritative — some
+# carry user-supplied free-form keys we want to preserve. Any new
+# secret-bearing modeled dict added to ``OTelConfig`` (or
+# elsewhere) MUST be added here so a clear-on-save honours the
+# operator's intent.
+#
+# Format: dotted YAML path from the top-level config dict.
+_AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
+    # Outbound OTLP credentials (Authorization, x-honeycomb-team,
+    # vendor-specific bearer headers). Letting a stale
+    # Authorization survive a clear is a credential-leak class
+    # regression.
+    "otel.headers",
+    # OpenTelemetry resource attributes (service.name,
+    # deployment.environment, custom operator labels). Some
+    # operators use this for tenant identifiers, so leftover keys
+    # after a clear leak prior tenant identity into the new
+    # session.
+    "otel.resource.attributes",
+})
+
+
 def _merge_preserving_unmodeled(
     existing: dict[str, Any],
     new: dict[str, Any],
@@ -1553,8 +1668,8 @@ def _merge_preserving_unmodeled(
     Top-level rules (the layer where ``audit_sinks:`` lives):
 
     * Key in ``new``: dataclass wins (with a recursive deep-merge when
-      both sides are dicts so nested unmodelled keys like
-      ``otel.resource.attributes`` survive).
+      both sides are dicts so nested unmodelled keys like operator
+      additions survive).
     * Key only in ``existing``:
         - If the key IS owned by the dataclass (``owned_top_level``) →
           the dataclass intentionally chose to omit it (e.g.
@@ -1568,13 +1683,17 @@ def _merge_preserving_unmodeled(
 
     Nested rules (any depth below top level):
 
-    * Both dicts → recurse with the simpler "present in new wins,
-      absent in new preserved" heuristic. We don't have a per-nested
-      "owned" set so we err on the side of preservation; the only
-      nested optimization-strip in ``_config_to_dict`` today is empty
-      ``llm:`` blocks, and re-emitting an empty llm block from the
-      file is semantically equivalent to a fresh empty
-      :class:`LLMConfig`.
+    * Both dicts → recurse via :func:`_deep_merge_nested`. The
+      recursion preserves unmodelled subkeys by default (so an
+      operator-added ``otel.custom_extension.foo`` survives a save
+      that doesn't touch it) BUT atomically replaces dicts whose
+      dotted path appears in
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`. The latter
+      includes ``otel.headers`` and ``otel.resource.attributes``,
+      both of which are dataclass-authoritative collections — a
+      caller that clears ``cfg.otel.headers = {}`` to rotate OTLP
+      credentials gets the on-disk block cleared, which is the
+      whole point of clearing it.
     * Lists → atomic replacement (the dataclass list is authoritative;
       partial list merges would mis-handle operator deletions of list
       elements modelled by the dataclass).
@@ -1589,7 +1708,7 @@ def _merge_preserving_unmodeled(
         if k in new:
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
-                out[k] = _deep_merge_nested(ev, nv)
+                out[k] = _deep_merge_nested(ev, nv, path=k)
             else:
                 out[k] = nv
         elif k in owned_top_level:
@@ -1608,20 +1727,39 @@ def _merge_preserving_unmodeled(
 
 
 def _deep_merge_nested(
-    existing: dict[str, Any], new: dict[str, Any],
+    existing: dict[str, Any],
+    new: dict[str, Any],
+    path: str = "",
 ) -> dict[str, Any]:
-    """Recursive deep-merge for nested dicts (see :func:`_merge_preserving_unmodeled`).
+    """Recursive deep-merge for nested dicts.
 
-    Used below the top level where we don't track an "owned keys" set
-    per nesting level. Keys only in ``existing`` are preserved (the
-    ``otel.resource.attributes`` rescue path); keys in ``new`` win.
+    Behaviour:
+
+    * If the dotted path of the recursing dict is in
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS` (e.g. ``otel.headers``,
+      ``otel.resource.attributes``), the dataclass dict is the
+      single source of truth. ``new`` wins atomically — no per-key
+      rescue from ``existing``. Setting the modeled map to ``{}``
+      therefore CLEARS the on-disk block, which is what callers
+      expect when they rotate OTLP credentials or change tenant
+      identifiers.
+
+    * Otherwise, keys only in ``existing`` are preserved (the
+      operator-added free-form rescue path) and keys in ``new``
+      win on overlap.
     """
+    if path in _AUTHORITATIVE_MODELED_DICT_PATHS:
+        # Atomic replace: dataclass dict wins. We deliberately keep
+        # the path in the recursion signature so future authoritative
+        # paths nested deeper still match without a separate flag.
+        return dict(new)
     out: dict[str, Any] = {}
     for k, ev in existing.items():
         if k in new:
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
-                out[k] = _deep_merge_nested(ev, nv)
+                child = f"{path}.{k}" if path else k
+                out[k] = _deep_merge_nested(ev, nv, path=child)
             else:
                 out[k] = nv
         else:
