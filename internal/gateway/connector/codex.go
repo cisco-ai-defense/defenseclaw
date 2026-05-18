@@ -373,11 +373,18 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 			Headers:        headers,
 			LogUserPrompts: redaction.DisableAll(),
 		},
-		// Profile-driven callbacks consumed by the unified hook
-		// collector for decode / verdict mapping / response shaping.
-		// The bespoke handleCodexHook still uses inlined logic for
-		// historic reasons; a follow-up PR will retire it in favour
-		// of the callbacks below.
+		// Profile-driven callbacks the unified hook collector
+		// publishes to downstream consumers (out-of-tree gateways,
+		// future plugin-host clients) as the canonical shape for
+		// codex hook decode / verdict mapping / response. The
+		// gateway-internal handleAgentHook("codex") dispatch path
+		// invokes the bespoke evaluateCodexHook via
+		// bespoke_hook_adapter.go because that evaluator carries
+		// scanner / asset-policy / notifier wiring tied to the
+		// *APIServer; the connector-side callbacks below are the
+		// pure-function equivalent suitable for declarative
+		// consumers. golden tests (native_otlp_golden_test.go,
+		// hook_profile_dispatch_test.go) keep the two in lockstep.
 		Decode:     codexProfileDecode,
 		MapVerdict: codexProfileMapVerdict,
 		Respond:    codexProfileRespond,

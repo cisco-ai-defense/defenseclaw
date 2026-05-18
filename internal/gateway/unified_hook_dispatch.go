@@ -30,47 +30,33 @@ import (
 //     metric (per-connector) so operators can confirm traffic is
 //     flowing through the unified pipeline (vs. an out-of-tree
 //     registration that bypasses audit/metrics emission).
-//  2. Delegate the actual evaluation to the connector-specific
-//     handler. codex and claudecode keep dedicated handlers because
-//     they shape PluginInput-v1 / Codex-notify-quirk responses that
-//     the generic handler doesn't model; every other connector flows
-//     through handleAgentHook(name).
+//  2. Delegate to handleAgentHook(name). EVERY connector — codex,
+//     claudecode, hermes, cursor, windsurf, geminicli, copilot —
+//     flows through the same handler now. Bespoke evaluators /
+//     LLM-event emitters / raw-event dedupers for codex and
+//     claudecode are invoked from inside handleAgentHook via the
+//     bespoke_hook_adapter.go dispatch shim; see that file for
+//     the rationale on what stays connector-specific (decision
+//     logic) vs what is now shared (audit envelope, metrics,
+//     trace propagation, W3C headers, OTel emissions).
 //
-// The shared concerns — structured audit envelope writes
-// (logConnectorHookAuditEnvelope), native OTel metrics
-// (RecordHookOutcome / RecordHookTokenUsage), raw-event
-// deduplication, W3C trace propagation — all sit inside the
-// delegated handlers; this wrapper is the "is this hook traffic?"
-// gate that guarantees they ran.
+// Why this matters: prior to this PR, codex and claudecode each
+// owned a full bespoke HTTP handler that re-implemented the entire
+// pipeline. Adding a cross-cutting concern (audit envelope
+// refresh, dispatch metric, dedup, trace propagation) meant
+// touching three handlers and risking the F2-class drift hazard
+// that bit live Splunk verification when claudecode skipped the
+// audit envelope refresh. The unified pipeline owns those concerns
+// in exactly one place now.
 func (a *APIServer) handleUnifiedConnectorHook(name string) http.HandlerFunc {
-	// Resolve the bespoke handler once at registration time so the
-	// closure does not pay the switch cost per request.
-	bespoke := a.bespokeHookHandlerForUnifiedCollector(name)
+	// Resolve the unified handler once at registration time so the
+	// closure does not pay the lookup cost per request.
+	unified := a.handleAgentHook(name)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if a.otel != nil {
 			a.otel.RecordUnifiedHookDispatch(r.Context(), name)
 		}
-		bespoke(w, r)
-	}
-}
-
-// bespokeHookHandlerForUnifiedCollector returns the per-connector
-// handler that handleUnifiedConnectorHook delegates to. codex /
-// claudecode have dedicated handlers (legacy PluginInput-v1
-// response shaping + Codex notify-bridge quirks); every other
-// connector flows through handleAgentHook(name).
-//
-// Kept as a method (not a switch inside handleUnifiedConnectorHook)
-// so the lookup happens once per registration instead of once per
-// request.
-func (a *APIServer) bespokeHookHandlerForUnifiedCollector(name string) http.HandlerFunc {
-	switch name {
-	case "codex":
-		return a.handleCodexHook
-	case "claudecode":
-		return a.handleClaudeCodeHook
-	default:
-		return a.handleAgentHook(name)
+		unified(w, r)
 	}
 }
 

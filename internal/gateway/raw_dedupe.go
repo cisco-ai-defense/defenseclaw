@@ -200,11 +200,13 @@ func (a *APIServer) rememberClaudeCodeRawHookEvents(req claudeCodeHookRequest) [
 // without forcing the unified handler to know about every vendor
 // schema.
 //
-// Both bespoke handlers (handleCodexHook / handleClaudeCodeHook)
-// delegate to this helper today via the unified collector wrapper;
-// a follow-up PR will retire them in favour of profile-driven
-// dispatch once the inlined evaluator logic moves into
-// HookProfile.MapVerdict / Respond.
+// Post PR #284 this helper handles the 5 hookOnly connectors
+// (hermes/cursor/windsurf/geminicli/copilot); codex and claudecode
+// have their own dedupers (rememberCodexRawHookEvents /
+// rememberClaudeCodeRawHookEvents) that probe connector-specific
+// fields like ToolUseID / PermissionRequestID. The unified
+// handleAgentHook routes to either via
+// rememberBespokeOrGenericRawEvents in bespoke_hook_adapter.go.
 func (a *APIServer) rememberHookRawEvents(req agentHookRequest) []string {
 	canon := canonicalEvent(req.HookEventName)
 	toolID := firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")

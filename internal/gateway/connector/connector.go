@@ -220,13 +220,17 @@ type HookCapabilityProvider interface {
 	HookCapabilities(opts SetupOpts) HookCapability
 }
 
-// HookProfile is the declarative description a connector returns to the
-// unified hook collector. Phase A foundation for unifying handleCodexHook,
-// handleClaudeCodeHook, and handleAgentHook behind a single dispatcher.
-//
-// Today the profile is descriptive only — the existing hook handlers still
-// run unchanged. Future PRs (Phase C in unify-hook-collector_*.plan.md) will
-// migrate dispatch into handleAgentHook driven by these fields.
+// HookProfile is the declarative description a connector returns to
+// the unified hook collector. Post PR #284, handleAgentHook is the
+// sole entry point for every connector hook route; the bespoke
+// handlers (handleCodexHook, handleClaudeCodeHook) were deleted and
+// their evaluators are invoked from the unified pipeline via
+// bespoke_hook_adapter.go's dispatch shims. The HookProfile fields
+// drive route registration (HookAPIPath), trace-propagation
+// (SupportsTraceparent), native OTLP shape (NativeOTLP), and the
+// declarative Decode / MapVerdict / Respond callbacks the
+// connector-side tooling can read without depending on the
+// gateway-side bespoke types.
 //
 // Fields:
 //

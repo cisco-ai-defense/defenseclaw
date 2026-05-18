@@ -333,12 +333,19 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			ExtraEnv:           extra,
 			LogUserPrompts:     redaction.DisableAll(),
 		},
-		// Profile-driven dispatch callbacks consumed by the unified
-		// hook collector (Decode -> MapVerdict -> Respond). The
-		// bespoke handleClaudeCodeHook still owns evaluation
-		// today; a follow-up PR will retire it in favour of these
-		// callbacks once they cover the PluginInput v1 / sticky
-		// shape edge cases.
+		// Profile-driven callbacks the unified hook collector
+		// publishes to downstream consumers (out-of-tree gateways,
+		// future plugin-host clients) as the canonical shape for
+		// claudecode hook decode / verdict mapping / response. The
+		// gateway-internal handleAgentHook("claudecode") dispatch
+		// path invokes the bespoke evaluateClaudeCodeHook via
+		// bespoke_hook_adapter.go because that evaluator carries
+		// scanner / asset-policy / notifier wiring tied to the
+		// *APIServer; the connector-side callbacks below are the
+		// pure-function equivalent suitable for declarative
+		// consumers. golden tests
+		// (claudecode_hook_profile_golden_test.go,
+		// hook_profile_dispatch_test.go) keep the two in lockstep.
 		Decode:     claudeCodeProfileDecode,
 		MapVerdict: claudeCodeProfileMapVerdict,
 		Respond:    claudeCodeProfileRespond,

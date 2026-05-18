@@ -22,14 +22,17 @@ import (
 )
 
 // codexProfileDecode implements HookProfile.Decode for codex. It
-// pulls the typed fields out of the raw payload (matching the
-// json.Unmarshal path in handleCodexHook) and stashes them on a
-// HookProfileRequest the unified collector can consume.
+// pulls the typed fields out of the raw payload and stashes them on
+// a HookProfileRequest the unified collector can consume.
 //
-// PR 5 / Phase C: declarative only — the bespoke handleCodexHook
-// path still runs the json.Unmarshal-into-codexHookRequest pass
-// itself. Phase D (PR 6) will switch handleAgentHook to call this
-// decoder when the connector advertises one.
+// Today (post PR #284) the unified gateway handler decodes the raw
+// bytes into both an agentHookRequest (for the shared pipeline) and
+// a codexHookRequest (for the bespoke evaluator, via
+// bespoke_hook_adapter.go); this decoder is kept as the
+// connector-side declarative shape so downstream consumers
+// (out-of-tree gateways, future plugin-host clients) can read the
+// canonical field map without depending on the gateway-side bespoke
+// types.
 func codexProfileDecode(payload map[string]interface{}) HookProfileRequest {
 	req := HookProfileRequest{
 		ConnectorName: "codex",

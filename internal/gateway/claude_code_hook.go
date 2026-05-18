@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,100 +81,15 @@ type claudeCodeHookResponse struct {
 	ClaudeCodeOutput  map[string]interface{} `json:"claude_code_output,omitempty"`
 }
 
-func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "method", 0)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var payload map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "invalid_json", 0)
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	b, _ := json.Marshal(payload)
-	var req claudeCodeHookRequest
-	if err := json.Unmarshal(b, &req); err != nil {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "invalid_payload", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Claude Code hook payload"})
-		return
-	}
-	req.Payload = payload
-	if req.HookEventName == "" {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "missing_event", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
-		return
-	}
-	req.CWD = sanitizeHookCWD(req.CWD)
-	req.NewCWD = sanitizeHookCWD(req.NewCWD)
-	req.OldCWD = sanitizeHookCWD(req.OldCWD)
-	ctx := r.Context()
-	rawEventIDs := a.rememberClaudeCodeRawHookEvents(req)
-	a.emitClaudeCodeHookLLMEvent(ctx, req, rawEventIDs, b)
-
-	t0 := time.Now()
-	resp := a.evaluateClaudeCodeHook(ctx, req)
-	elapsed := time.Since(t0)
-
-	if a.health != nil {
-		a.health.RecordConnectorRequest()
-		if resp.Action == "block" {
-			a.health.RecordToolBlock()
-		}
-		if isToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspection()
-		}
-	}
-
-	if a.otel != nil {
-		reason := resp.Action
-		if resp.WouldBlock {
-			reason = "would_block"
-		}
-		enrichConnectorHookTelemetrySpan(ctx, "claudecode", req.HookEventName, "ok", reason, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed)
-		a.otel.RecordConnectorHookInvocation(ctx, "claudecode", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(ctx, "claudecode:"+req.HookEventName, resp.Action, resp.Severity)
-		a.otel.RecordInspectLatency(ctx, "claudecode:"+req.HookEventName, float64(elapsed.Milliseconds()))
-		// PR 3 / Phase B.2 — parity emission. PostToolUse payloads
-		// frequently include claude_code.token.usage; we forward
-		// those into the hook surface so a single PromQL query
-		// covers cost-per-event without joining the native OTLP
-		// channel.
-		a.otel.RecordHookOutcome(ctx, "claudecode", req.HookEventName, resp.Action, resp.Severity, resp.WouldBlock)
-		if usage := extractHookPayloadTokenUsage(req.Payload); usage != (hookTokenUsage{}) {
-			a.otel.RecordHookTokenUsage(ctx, "claudecode", usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
-		}
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", "claudecode", "ok", 1, int64(len(b)),
-			fmt.Sprintf("source=hook connector=claudecode event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
-				req.HookEventName, claudeCodeToolName(req), resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
-	}
-
-	// PR 2 / Phase B.1: structured audit envelope (see codex
-	// equivalent for the rollout contract).
-	env := HookAuditEnvelope{
-		Connector:   "claudecode",
-		Event:       req.HookEventName,
-		Result:      "ok",
-		Action:      resp.Action,
-		RawAction:   resp.RawAction,
-		Severity:    resp.Severity,
-		Mode:        resp.Mode,
-		Reason:      resp.Reason,
-		WouldBlock:  resp.WouldBlock,
-		ElapsedMs:   elapsed.Milliseconds(),
-		BodyBytes:   int64(len(b)),
-		RawOrigin:   "hook",
-		RawEventIDs: rawEventIDs,
-	}
-	if redaction.DisableAll() && len(b) > 0 {
-		env.RawPayload = string(b)
-	}
-	a.logConnectorHookAuditEnvelope(ctx, env)
-
-	a.writeJSON(w, http.StatusOK, resp)
-}
+// handleClaudeCodeHook + enrichClaudeCodeHookContext were deleted in
+// PR #284. Claude Code hook traffic now flows through the unified
+// pipeline at handleAgentHook("claudecode"); the bespoke evaluator
+// (evaluateClaudeCodeHook, kept below) is invoked from
+// bespoke_hook_adapter.go via evaluateBespokeOrGenericHook. The
+// pipeline's shared concerns — audit envelope refresh, dispatch
+// metric, dedup, trace propagation, OTel emissions — now live in
+// exactly one place (handleAgentHook) so the F2-class drift
+// hazard that bit live Splunk verification is gone for good.
 
 func isToolInspectionEvent(event string) bool {
 	switch event {

@@ -26,40 +26,38 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// TestUnifiedHookDispatch_BespokeFallback proves the wrapper's
-// bespoke fallback table: codex and claudecode resolve to their
-// dedicated handlers (so wire responses are byte-identical to today),
-// while the rest fall through to handleAgentHook. Without this test a
-// future rename of a bespoke handler could silently route through the
-// generic agent path and ship a behavior regression for codex /
-// claudecode operators.
-func TestUnifiedHookDispatch_BespokeFallback(t *testing.T) {
+// TestUnifiedHookDispatch_SingleEntryPoint proves every connector
+// flows through the same unified pipeline (handleAgentHook). Prior
+// to PR #284, codex and claudecode each had a separate bespoke HTTP
+// handler that re-implemented audit / metrics / dedup wiring — the
+// F2 audit-correlation regression bit live Splunk verification
+// because the bespoke claudecode handler had drifted. PR #284
+// deleted both bespoke handlers and routed everyone through
+// handleAgentHook; this test pins that contract so a future
+// "let's reintroduce a bespoke handler for X" change immediately
+// fails CI.
+//
+// The contract we assert: an empty POST body produces the unified
+// handler's "hook event name is required" error (lowercase
+// _event_). The pre-PR-#284 bespoke handlers emitted
+// "hook_event_name is required" (with underscore), so if a future
+// regression reintroduces a bespoke handler we'd see the
+// underscored variant and this test fails.
+func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 	api := &APIServer{}
-	cases := []struct {
-		name        string
-		connector   string
-		wantBespoke bool
-	}{
-		{"codex_uses_bespoke", "codex", true},
-		{"claudecode_uses_bespoke", "claudecode", true},
-		{"hermes_uses_generic", "hermes", false},
-		{"cursor_uses_generic", "cursor", false},
-		{"windsurf_uses_generic", "windsurf", false},
-		{"geminicli_uses_generic", "geminicli", false},
-		{"copilot_uses_generic", "copilot", false},
-		{"unknown_falls_back_generic", "made-up", false},
+	connectors := []string{
+		"codex",
+		"claudecode",
+		"hermes",
+		"cursor",
+		"windsurf",
+		"geminicli",
+		"copilot",
+		"made-up",
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			// We cannot directly compare function pointers in Go,
-			// so we exercise each handler's contract: the bespoke
-			// codex/claudecode handlers reject an empty POST body
-			// via the "hook_event_name is required" branch (because
-			// json.Unmarshal into codexHookRequest succeeds on
-			// `{}`); the generic handleAgentHook emits "hook event
-			// name is required" (lowercase _event_). The exact
-			// message lets us disambiguate which handler ran.
-			h := api.bespokeHookHandlerForUnifiedCollector(tc.connector)
+	for _, name := range connectors {
+		t.Run(name, func(t *testing.T) {
+			h := api.handleUnifiedConnectorHook(name)
 			w := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/x/hook", bytes.NewReader([]byte(`{}`)))
 			h(w, req)
@@ -68,14 +66,13 @@ func TestUnifiedHookDispatch_BespokeFallback(t *testing.T) {
 				t.Fatalf("expected 400 for empty body, got %d: %s", w.Code, w.Body.String())
 			}
 			body := w.Body.String()
-			if tc.wantBespoke {
-				if !contains(body, "hook_event_name is required") {
-					t.Errorf("%s should run bespoke handler, got body=%q", tc.connector, body)
-				}
-			} else {
-				if !contains(body, "hook event name is required") {
-					t.Errorf("connector %s should run generic handler, got body=%q", tc.connector, body)
-				}
+			// "hook event name is required" is handleAgentHook's
+			// error message (lowercase _event_). The deleted
+			// bespoke handlers used "hook_event_name is required"
+			// (underscored). Asserting the lowercase form pins
+			// the unified-handler routing for every connector.
+			if !contains(body, "hook event name is required") {
+				t.Errorf("connector %s did not flow through unified pipeline; body=%q", name, body)
 			}
 		})
 	}
@@ -123,68 +120,70 @@ func TestHookProfileForConnector(t *testing.T) {
 	}
 }
 
-// TestUnifiedDispatchParity_Codex asserts the unified dispatch
-// wrapper produces a JSONEq response body to the bespoke handler for
-// codex when both run against the same payload. Since the wrapper
-// delegates directly to the bespoke handler, this guards against a
-// future refactor that breaks the contract.
-func TestUnifiedDispatchParity_Codex(t *testing.T) {
-	api := &APIServer{}
-
-	payload, _ := json.Marshal(map[string]interface{}{
-		"hook_event_name": "PreToolUse",
-		"session_id":      "sess-codex-parity",
-		"turn_id":         "turn-1",
-		"model":           "gpt-5",
-		"tool_name":       "Bash",
-		"agent_id":        "openai_codex",
-		"agent_type":      "codex",
-		"tool_input":      map[string]interface{}{"command": "ls /"},
-	})
-
-	bespokeBody := runHookHandler(t, api.handleCodexHook, payload)
-	unifiedBody := runHookHandler(t, api.handleUnifiedConnectorHook("codex"), payload)
-
-	var bespokeJSON, unifiedJSON map[string]interface{}
-	if err := json.Unmarshal(bespokeBody, &bespokeJSON); err != nil {
-		t.Fatalf("bespoke body not JSON: %v body=%s", err, bespokeBody)
+// TestUnifiedDispatch_PreservesConnectorWireShape asserts that
+// after the bespoke-handler deletion, the unified pipeline still
+// emits the connector-specific top-level JSON field (codex_output
+// for codex, claude_code_output for claudecode, hook_output for
+// everything else). This is the regression guard for the contract
+// each agent CLI expects when reading hook responses — Claude Code
+// rejects responses without "claude_code_output", Codex rejects
+// without "codex_output".
+//
+// Pre-PR-#284 the wire shape came from the bespoke handler's
+// connector-specific response struct (claudeCodeHookResponse with
+// `json:"claude_code_output"` tag, etc.). Post-PR-#284 it comes
+// from renderAgentHookResponse + hookOutputFieldName(connectorName).
+// The two paths must stay byte-identical for live agents to keep
+// working — this test pins the field-name mapping so a future
+// refactor of renderAgentHookResponse cannot silently rename a key
+// and break Claude Code / Codex hook traffic.
+func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
+	resp := agentHookResponse{
+		Action:     "block",
+		Severity:   "HIGH",
+		Mode:       "action",
+		WouldBlock: false,
+		HookOutput: map[string]interface{}{"decision": "block", "reason": "test"},
 	}
-	if err := json.Unmarshal(unifiedBody, &unifiedJSON); err != nil {
-		t.Fatalf("unified body not JSON: %v body=%s", err, unifiedBody)
+	cases := []struct {
+		connector     string
+		wantFieldName string
+	}{
+		{"codex", "codex_output"},
+		{"claudecode", "claude_code_output"},
+		{"hermes", "hook_output"},
+		{"cursor", "hook_output"},
+		{"windsurf", "hook_output"},
+		{"geminicli", "hook_output"},
+		{"copilot", "hook_output"},
+		{"made-up", "hook_output"},
 	}
-	if !jsonEq(bespokeJSON, unifiedJSON) {
-		t.Errorf("dispatch parity broken for codex.\nbespoke=%s\nunified=%s", bespokeBody, unifiedBody)
+	for _, tc := range cases {
+		t.Run(tc.connector, func(t *testing.T) {
+			out := renderAgentHookResponse(tc.connector, resp)
+			if _, ok := out[tc.wantFieldName]; !ok {
+				t.Errorf("connector %s: expected output map under key %q, got keys=%v", tc.connector, tc.wantFieldName, jsonKeys(out))
+			}
+			// Negative: the OTHER connectors' keys must not appear.
+			for _, other := range cases {
+				if other.wantFieldName == tc.wantFieldName {
+					continue
+				}
+				if _, ok := out[other.wantFieldName]; ok {
+					t.Errorf("connector %s: must not emit key %q (would confuse %s agent CLI)", tc.connector, other.wantFieldName, other.connector)
+				}
+			}
+		})
 	}
 }
 
-// TestUnifiedDispatchParity_ClaudeCode is the claudecode-side mirror
-// of TestUnifiedDispatchParity_Codex.
-func TestUnifiedDispatchParity_ClaudeCode(t *testing.T) {
-	api := &APIServer{}
-
-	payload, _ := json.Marshal(map[string]interface{}{
-		"hook_event_name": "PreToolUse",
-		"session_id":      "sess-claude-parity",
-		"model":           "claude-3-7-sonnet",
-		"tool_name":       "Read",
-		"agent_id":        "anthropic_claudecode",
-		"agent_type":      "claudecode",
-		"tool_input":      map[string]interface{}{"file_path": "/etc/passwd"},
-	})
-
-	bespokeBody := runHookHandler(t, api.handleClaudeCodeHook, payload)
-	unifiedBody := runHookHandler(t, api.handleUnifiedConnectorHook("claudecode"), payload)
-
-	var bespokeJSON, unifiedJSON map[string]interface{}
-	if err := json.Unmarshal(bespokeBody, &bespokeJSON); err != nil {
-		t.Fatalf("bespoke body not JSON: %v body=%s", err, bespokeBody)
+// jsonKeys returns the sorted keys of a map for error messages.
+func jsonKeys(m map[string]interface{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
-	if err := json.Unmarshal(unifiedBody, &unifiedJSON); err != nil {
-		t.Fatalf("unified body not JSON: %v body=%s", err, unifiedBody)
-	}
-	if !jsonEq(bespokeJSON, unifiedJSON) {
-		t.Errorf("dispatch parity broken for claudecode.\nbespoke=%s\nunified=%s", bespokeBody, unifiedBody)
-	}
+	return out
 }
 
 // runHookHandler invokes a hook handler with the supplied JSON body

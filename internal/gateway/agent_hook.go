@@ -98,19 +98,38 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// hookOnly connectors (hermes/cursor/etc.) previously had
 		// no dedup coverage; this addition is additive — empty IDs
 		// are dropped by the envelope omitempty rule.
-		rawEventIDs := a.rememberHookRawEvents(req)
+		//
+		// The "BespokeOrGeneric" dispatcher routes claudecode/codex
+		// through their connector-specific dedupers (which probe
+		// fields like req.ToolUseID / req.PermissionRequestID that
+		// the generic agentHookRequest does not model) and every
+		// other connector through the generic path. See
+		// bespoke_hook_adapter.go for the rationale on why these
+		// three pieces (eval / emit / dedupe) stay bespoke even
+		// after we deleted the bespoke HTTP handlers.
+		rawEventIDs := a.rememberBespokeOrGenericRawEvents(connectorName, req, b, payload)
 
 		// Emit the LLM event (prompt/tool/response) BEFORE the
-		// evaluator runs. Mirrors handleClaudeCodeHook /
-		// handleCodexHook ordering: the audit/event log captures
-		// what the agent attempted regardless of whether the
-		// evaluation later blocks it. This is what brings
-		// hermes/cursor/windsurf/geminicli/copilot to LLM-event
-		// parity with claudecode/codex.
-		a.emitAgentHookLLMEvent(ctx, req, b)
+		// evaluator runs. Capturing what the agent attempted
+		// regardless of whether the evaluation later blocks it
+		// keeps the audit trail honest. Bespoke emitters apply
+		// to claudecode/codex so existing PromptID/ToolID
+		// correlation chains remain identical to the pre-PR-#284
+		// wire format; every other connector uses the generic
+		// agentHookRequest-driven emitter.
+		a.emitBespokeOrGenericLLMEvent(ctx, connectorName, req, b, payload, rawEventIDs)
 
+		// Dispatch evaluation. claudecode/codex route through
+		// their bespoke evaluators (different event-name switches,
+		// connector-specific scans, asset-policy probes); every
+		// other connector flows through evaluateAgentHook. The
+		// returned agentHookResponse carries the connector's
+		// output map in HookOutput — handleAgentHook below renders
+		// that map under the right top-level JSON key
+		// (claude_code_output / codex_output / hook_output) so the
+		// wire shape stays byte-identical for each agent CLI.
 		t0 := time.Now()
-		resp := a.evaluateAgentHook(ctx, req)
+		resp := a.evaluateBespokeOrGenericHook(ctx, connectorName, req, b, payload)
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
 
@@ -174,7 +193,89 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 		a.logConnectorHookAuditEnvelope(ctx, env)
 
-		a.writeJSON(w, http.StatusOK, resp)
+		// Render the wire response with the connector-specific
+		// top-level field name for the output map (e.g.
+		// "claude_code_output", "codex_output", "hook_output").
+		// Without this projection, agentHookResponse always
+		// renders the output under "hook_output", which Claude
+		// Code and Codex agent CLIs reject. See
+		// renderAgentHookResponse() for the canonical
+		// connector → field-name mapping.
+		a.writeJSON(w, http.StatusOK, renderAgentHookResponse(connectorName, resp))
+	}
+}
+
+// renderAgentHookResponse projects the unified agentHookResponse
+// shape onto the wire JSON shape each connector's agent CLI
+// expects. The fixed agentHookResponse JSON tag for HookOutput
+// ("hook_output") works for generic hookOnly connectors
+// (hermes/cursor/windsurf/geminicli/copilot) but Claude Code and
+// Codex agents expect "claude_code_output" and "codex_output"
+// respectively. Rendering as a map[string]interface{} lets us pick
+// the right top-level key per connector while keeping
+// agentHookResponse a single struct for all internal callers.
+//
+// Field name choice is driven by hookOutputFieldName(connectorName)
+// — a single function so adding a new connector with a different
+// output key (e.g. a future zeptoclaw_output) is a one-line change.
+// HookProfile.Respond.FieldName would be the obvious source of
+// truth here, but consulting it requires loading the registry and
+// constructing a profile per request; this hot-path helper inlines
+// the mapping for sub-microsecond cost. The connector_hook_profile
+// tests still assert FieldName parity so the two cannot drift.
+func renderAgentHookResponse(connectorName string, resp agentHookResponse) map[string]interface{} {
+	severity := resp.Severity
+	if severity == "" {
+		severity = "NONE"
+	}
+	action := resp.Action
+	if action == "" {
+		action = "allow"
+	}
+	out := map[string]interface{}{
+		"action":      action,
+		"severity":    severity,
+		"mode":        resp.Mode,
+		"would_block": resp.WouldBlock,
+	}
+	if resp.RawAction != "" {
+		out["raw_action"] = resp.RawAction
+	}
+	if resp.Reason != "" {
+		out["reason"] = resp.Reason
+	}
+	if len(resp.Findings) > 0 {
+		out["findings"] = resp.Findings
+	}
+	if resp.AdditionalContext != "" {
+		out["additional_context"] = resp.AdditionalContext
+	}
+	if len(resp.HookOutput) > 0 {
+		out[hookOutputFieldName(connectorName)] = resp.HookOutput
+	}
+	return out
+}
+
+// hookOutputFieldName returns the top-level JSON key under which a
+// connector expects its hook-output map to be rendered. Defaults to
+// "hook_output" for any connector that has not declared a custom
+// key; claudecode and codex are the only two custom mappings today.
+//
+// This MUST stay in sync with HookProfile.Respond.FieldName for
+// each connector — the connector_hook_profile_test golden-shape
+// tests assert that on the connector-side, and
+// TestRenderAgentHookResponse_FieldNames asserts the gateway-side
+// projection here matches. Adding a new connector with a custom
+// key is a one-line change to both this switch and the connector's
+// HookProfile.Respond callback.
+func hookOutputFieldName(connectorName string) string {
+	switch connectorName {
+	case "claudecode":
+		return "claude_code_output"
+	case "codex":
+		return "codex_output"
+	default:
+		return "hook_output"
 	}
 }
 
@@ -327,9 +428,30 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 // rows that DO have a session id (because the operator stuck a
 // loadbalancer that injects the header) keep it.
 func refreshAuditEnvelopeFromHook(ctx context.Context, req agentHookRequest, identity AgentIdentity) context.Context {
+	return refreshAuditEnvelopeFromIdentity(ctx, req.SessionID, identity)
+}
+
+// refreshAuditEnvelopeFromIdentity is the type-agnostic core of the
+// F2 fix. Post PR #284 every connector hook flows through
+// handleAgentHook → enrichAgentHookContext → refreshAuditEnvelopeFromHook
+// → this helper, so there is exactly one place where the audit
+// correlation envelope gets payload-derived session_id / agent_id
+// stitched on. The function is kept exported-by-package (lower-case
+// first letter is fine; it's gateway-internal) so other unified
+// paths (handleAgentHookSynthetic for codex notify) can call it
+// directly with an already-resolved AgentIdentity.
+//
+// History: the original F2 patch wired only the unified path; live
+// Splunk verification then proved claudecode + codex hook rows
+// landed with session_id=NULL because each owned a separate
+// bespoke HTTP handler that never invoked the unified
+// enrichAgentHookContext. PR #284 deleted those bespoke handlers
+// outright so the regression class is impossible going forward —
+// see CHANGELOG and bespoke_hook_adapter.go for the rationale.
+func refreshAuditEnvelopeFromIdentity(ctx context.Context, sessionID string, identity AgentIdentity) context.Context {
 	env := audit.EnvelopeFromContext(ctx)
 	changed := false
-	if sid := strings.TrimSpace(req.SessionID); sid != "" && env.SessionID != sid {
+	if sid := strings.TrimSpace(sessionID); sid != "" && env.SessionID != sid {
 		env.SessionID = sid
 		changed = true
 	}
