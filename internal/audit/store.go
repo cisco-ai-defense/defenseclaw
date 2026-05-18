@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -147,59 +148,192 @@ type Store struct {
 	db *sql.DB
 }
 
-func NewStore(dbPath string) (*Store, error) {
-	db, err := sql.Open("sqlite", dbPath)
+// auditPragmas is the pragma set applied to every connection in the
+// audit store's pool via the DSN query string. Putting them in the
+// DSN (as opposed to db.Exec at startup) is critical: PRAGMA
+// statements run via db.Exec only mutate the *connection* that
+// happened to serve them, but Go's database/sql pool can open new
+// connections at any time. With the DSN form, modernc.org/sqlite
+// replays the pragmas on every fresh connection so busy_timeout and
+// synchronous stay consistent across the pool.
+//
+// Settings explained:
+//   - journal_mode=WAL          enables write-ahead logging so readers
+//     and writers do not block each other.
+//   - busy_timeout=5000         SQLite waits up to 5 seconds before
+//     returning SQLITE_BUSY, absorbing the
+//     vast majority of write contention.
+//   - synchronous=NORMAL        the sweet spot for WAL: durable
+//     across crashes (loses only the last
+//     transaction on power loss) while ~3x
+//     faster than the FULL default.
+//   - cache_size=-20000         negative => kilobytes; ~20 MB of
+//     in-memory page cache per connection.
+//   - temp_store=MEMORY         spill temp tables to RAM instead of
+//     disk; eliminates a common contention
+//     source on writes that allocate temp.
+//   - mmap_size=268435456       map up to 256 MB of the DB into the
+//     process address space for read-heavy
+//     queries (audit views, exports).
+//   - foreign_keys=ON           defenseclaw relies on the FK between
+//     findings and scan_results; turning
+//     this off at the DSN level would be a
+//     silent correctness regression.
+const auditPragmas = "?_pragma=journal_mode(WAL)" +
+	"&_pragma=busy_timeout(5000)" +
+	"&_pragma=synchronous(NORMAL)" +
+	"&_pragma=cache_size(-20000)" +
+	"&_pragma=temp_store(MEMORY)" +
+	"&_pragma=mmap_size(268435456)" +
+	"&_pragma=foreign_keys(ON)"
+
+// openSQLite opens a SQLite connection with the audit-tier hardening
+// applied (DSN pragmas + a single-connection pool). Sharing this
+// helper between NewStore and the upcoming judge_body_store keeps
+// the contention guarantees in lockstep.
+//
+// Pool sizing: SQLite serializes writers internally, so opening
+// multiple connections for the same DB just races them for the same
+// write lock and surfaces as SQLITE_BUSY. We cap MaxOpenConns at 1
+// and let Go's database/sql mutex serialize callers — this is the
+// canonical pattern recommended by modernc.org/sqlite. Reads share
+// the same connection, which is fine in practice because every
+// audit write completes in microseconds; if read latency ever
+// becomes a problem, we can introduce a separate read-only pool
+// without touching this hot path.
+func openSQLite(dbPath string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", dbPath+auditPragmas)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open db %s: %w", dbPath, err)
 	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	return db, nil
+}
 
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("audit: %s: %w", pragma, err)
-		}
+func NewStore(dbPath string) (*Store, error) {
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		return nil, err
 	}
-
 	st := &Store{db: db}
 	telemetry.RegisterAuditDB(db)
 	return st, nil
 }
 
+// sqliteCoded is the structural interface implemented by the
+// modernc.org/sqlite *Error type (Code() int returns the underlying
+// SQLite result code). We match on it via errors.As so the
+// detection survives error-wrapping (fmt.Errorf("...: %w", err))
+// and stays decoupled from the concrete driver type.
+type sqliteCoded interface {
+	Code() int
+}
+
+// SQLite result codes we treat as "transient contention; safe to
+// retry". Values mirror modernc.org/sqlite/lib (SQLITE_BUSY = 5,
+// SQLITE_LOCKED = 6). Hard-coded here to avoid pulling the driver
+// into a typed import that the rest of the package doesn't need.
+const (
+	sqliteCodeBusy   = 5
+	sqliteCodeLocked = 6
+)
+
+// isSQLiteBusy reports whether err signals transient SQLite write
+// contention. We check the driver's result code first (the
+// authoritative source) and fall back to a substring match so the
+// detection stays robust against driver versions that surface BUSY
+// only in the rendered message (older modernc releases, or third-
+// party drivers that wrap errors before returning them).
 func isSQLiteBusy(err error) bool {
 	if err == nil {
 		return false
 	}
+	var coded sqliteCoded
+	if errors.As(err, &coded) {
+		switch coded.Code() {
+		case sqliteCodeBusy, sqliteCodeLocked:
+			return true
+		}
+	}
 	s := err.Error()
-	return strings.Contains(s, "database is locked") || strings.Contains(s, "SQLITE_BUSY")
+	return strings.Contains(s, "database is locked") ||
+		strings.Contains(s, "SQLITE_BUSY") ||
+		strings.Contains(s, "SQLITE_LOCKED")
 }
 
-func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
-	res, err := s.db.ExecContext(ctx, query, args...)
-	if isSQLiteBusy(err) {
-		telemetry.RecordSQLiteBusy(ctx, op)
-	}
-	return res, err
-}
+// SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
+// outpace SQLite's internal waiter — we layer an application-level
+// retry with exponential backoff on top so transient contention
+// never bubbles up as a dropped write. The schedule
+// (10ms, 20ms, 40ms, 80ms, 160ms; ~310ms worst case) is short
+// enough not to push end-to-end latency past the proxy SLO and long
+// enough to outlast a single fsync window.
+const (
+	sqliteRetryAttempts = 5
+	sqliteRetryBaseMs   = 10
+)
 
-func (s *Store) queryDB(ctx context.Context, op string, query string, args ...any) (*sql.Rows, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if isSQLiteBusy(err) {
+// retryBusy runs fn up to sqliteRetryAttempts times, backing off
+// exponentially on BUSY errors. Each retry records a telemetry event
+// so operators can correlate contention spikes; the final error
+// (whether BUSY-related or not) is returned verbatim. ctx
+// cancellation aborts the loop immediately, preserving cancellation
+// semantics for request-scoped writes.
+func retryBusy(ctx context.Context, op string, fn func() error) error {
+	delay := time.Duration(sqliteRetryBaseMs) * time.Millisecond
+	var err error
+	for attempt := 0; attempt < sqliteRetryAttempts; attempt++ {
+		err = fn()
+		if !isSQLiteBusy(err) {
+			return err
+		}
 		telemetry.RecordSQLiteBusy(ctx, op)
-	}
-	return rows, err
-}
-
-func (s *Store) scanRow(ctx context.Context, op string, row *sql.Row, dest ...any) error {
-	err := row.Scan(dest...)
-	if isSQLiteBusy(err) {
-		telemetry.RecordSQLiteBusy(ctx, op)
+		if attempt == sqliteRetryAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
 	}
 	return err
 }
 
+func (s *Store) execDB(ctx context.Context, op string, query string, args ...any) (sql.Result, error) {
+	var res sql.Result
+	err := retryBusy(ctx, op, func() error {
+		var execErr error
+		res, execErr = s.db.ExecContext(ctx, query, args...)
+		return execErr
+	})
+	return res, err
+}
+
+func (s *Store) queryDB(ctx context.Context, op string, query string, args ...any) (*sql.Rows, error) {
+	var rows *sql.Rows
+	err := retryBusy(ctx, op, func() error {
+		var qErr error
+		rows, qErr = s.db.QueryContext(ctx, query, args...)
+		return qErr
+	})
+	return rows, err
+}
+
+func (s *Store) scanRow(ctx context.Context, op string, row *sql.Row, dest ...any) error {
+	return retryBusy(ctx, op, func() error {
+		return row.Scan(dest...)
+	})
+}
+
+// txExec is the in-transaction equivalent. We deliberately do NOT
+// retry transactions here — once a tx has been opened the BUSY error
+// usually means the whole tx must be rolled back and reattempted by
+// the caller (otherwise we'd corrupt invariants halfway through). We
+// still record the metric so contention shows up in dashboards.
 func txExec(tx *sql.Tx, op string, query string, args ...any) (sql.Result, error) {
 	res, err := tx.Exec(query, args...)
 	if isSQLiteBusy(err) {
@@ -1314,6 +1448,149 @@ type JudgeResponse struct {
 // degrade query performance. 64KiB keeps every realistic
 // detection trace intact while preventing pathological blowup.
 const MaxJudgeRawBytes = 64 * 1024
+
+// JudgeBatch is the *sql.Tx-backed batch handle returned from
+// Store.BeginJudgeBatch. Exported so the gateway worker can declare
+// its dependency on the concrete type without an internal-only
+// import path. We deliberately do NOT expose the *sql.Tx itself —
+// the interface stays tight (Insert / Commit / Rollback) so future
+// callers cannot accidentally mix in random queries that defeat
+// the per-batch fsync-amortization guarantee.
+type JudgeBatch struct {
+	tx        *sql.Tx
+	committed bool
+}
+
+// InsertJudgeResponse writes one row inside the transaction. The
+// statement is identical to the single-row path above so any future
+// column additions only need updating in one place. We keep this
+// method intentionally close to InsertJudgeResponse so reviewers can
+// see the parity at a glance.
+func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
+	if b == nil || b.tx == nil {
+		return fmt.Errorf("audit: judge batch handle is nil")
+	}
+	if e.Raw == "" {
+		return nil
+	}
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
+	raw := truncateJudgeRaw(e.Raw, MaxJudgeRawBytes)
+	failClosed := 0
+	if e.FailClosedApplied {
+		failClosed = 1
+	}
+	if _, err := txExec(b.tx, "audit_batch_insert",
+		`INSERT INTO judge_responses
+			(id, timestamp, kind, direction, model, action, severity, latency_ms,
+			 parse_error, raw_response, request_id, trace_id, run_id, session_id, input_hash,
+			 confidence, fail_closed_applied, inspected_model, prompt_template_id,
+			 schema_version, content_hash, generation, binary_version,
+			 agent_id, agent_instance_id, sidecar_instance_id,
+			 policy_id, destination_app, tool_name, tool_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID,
+		e.Timestamp.Format(time.RFC3339Nano),
+		e.Kind,
+		nullStr(e.Direction),
+		nullStr(e.Model),
+		nullStr(e.Action),
+		nullStr(e.Severity),
+		e.LatencyMs,
+		nullStr(e.ParseError),
+		raw,
+		nullStr(e.RequestID),
+		nullStr(e.TraceID),
+		nullStr(e.RunID),
+		nullStr(e.SessionID),
+		nullStr(e.InputHash),
+		e.Confidence,
+		failClosed,
+		nullStr(e.InspectedModel),
+		nullStr(e.PromptTemplateID),
+		nullInt(e.SchemaVersion),
+		nullStr(e.ContentHash),
+		int64(e.Generation),
+		nullStr(e.BinaryVersion),
+		nullStr(e.AgentID),
+		nullStr(e.AgentInstanceID),
+		nullStr(e.SidecarInstanceID),
+		nullStr(e.PolicyID),
+		nullStr(e.DestinationApp),
+		nullStr(e.ToolName),
+		nullStr(e.ToolID),
+	); err != nil {
+		return fmt.Errorf("audit: judge batch insert: %w", err)
+	}
+	return nil
+}
+
+// Commit closes the transaction. We only flip b.committed=true on
+// SUCCESS; a failed Commit leaves the handle in a state where the
+// caller's Rollback() will still drive tx.Rollback() to release the
+// connection. Without that order the connection can stay pinned in
+// "transaction-in-progress" mode until the *sql.DB pool closes the
+// underlying connection, blocking subsequent writes.
+//
+// After a successful Commit, every subsequent Commit/Rollback call
+// on this handle is a no-op so a buggy caller cannot accidentally
+// double-commit.
+func (b *JudgeBatch) Commit() error {
+	if b == nil || b.tx == nil {
+		return fmt.Errorf("audit: judge batch handle is nil")
+	}
+	if b.committed {
+		return nil
+	}
+	if err := b.tx.Commit(); err != nil {
+		return err
+	}
+	b.committed = true
+	return nil
+}
+
+// Rollback is the cleanup path on commit failure or per-row error.
+// Idempotent so the worker can call it without tracking whether
+// Commit already ran successfully (in which case Rollback is a
+// no-op). When Commit FAILED, b.committed stays false and we
+// genuinely drive tx.Rollback() — which is the bug-fix that keeps
+// the SQLite connection from being pinned mid-tx.
+func (b *JudgeBatch) Rollback() error {
+	if b == nil || b.tx == nil {
+		return nil
+	}
+	if b.committed {
+		return nil
+	}
+	// Mark committed BEFORE calling tx.Rollback so a concurrent
+	// retry (or a buggy double-call) doesn't fire two rollbacks
+	// on the same handle, which would surface as
+	// "sql: transaction has already been committed or rolled back".
+	b.committed = true
+	return b.tx.Rollback()
+}
+
+// BeginJudgeBatch opens a transaction dedicated to a single batch of
+// judge_responses inserts. The gateway's async writer goroutine uses
+// this to amortize SQLite's per-tx fsync over up to 32 rows.
+//
+// We return a typed handle so the worker can keep its loop tight:
+// InsertJudgeResponse + Commit/Rollback are the only operations
+// needed.
+func (s *Store) BeginJudgeBatch(ctx context.Context) (*JudgeBatch, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("audit: begin judge batch: %w", err)
+	}
+	return &JudgeBatch{tx: tx}, nil
+}
 
 // InsertJudgeResponse persists a single judge body. The caller is
 // expected to supply a non-empty Raw; an empty body is treated as a
