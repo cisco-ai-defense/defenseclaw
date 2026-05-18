@@ -2087,6 +2087,132 @@ env_key = "OPENROUTER_API_KEY"
 	}
 }
 
+// TestCodex_Setup_HealsStaleProxyRedirect covers the migration path for
+// operators upgrading from a pre-PR-#265 install. The legacy setup
+// rewrote ~/.codex/config.toml's top-level openai_base_url to point at
+// the gateway's :4000/c/codex proxy mount; PR #265 deleted that mount
+// but left the operator's config.toml carrying a now-broken value, so
+// every Codex turn fails with "stream disconnected before completion"
+// against the closed loopback port.
+//
+// PR #265's "Open question #1" predicted this and the call was to let
+// the next `defenseclaw setup codex` overwrite — but the new Setup is
+// intentionally non-destructive toward openai_base_url (see
+// TestCodex_Setup_DefaultObservability_NoProxyRewrite), so without
+// this heal the stale value survives forever. This test pins the
+// narrow strip: only the loopback /c/codex shape DefenseClaw itself
+// wrote gets removed, and the heal is independent of port number
+// because the pre-#265 default of :4000 was operator-configurable.
+func TestCodex_Setup_HealsStaleProxyRedirect(t *testing.T) {
+	cases := []struct {
+		name      string
+		staleURL  string
+		wantStrip bool
+	}{
+		{name: "ipv4_default_port_4000", staleURL: "http://127.0.0.1:4000/c/codex", wantStrip: true},
+		{name: "ipv4_custom_port", staleURL: "http://127.0.0.1:18971/c/codex", wantStrip: true},
+		{name: "localhost_alias", staleURL: "http://localhost:4000/c/codex", wantStrip: true},
+		{name: "ipv6_loopback", staleURL: "http://[::1]:4000/c/codex", wantStrip: true},
+		{name: "https_loopback", staleURL: "https://127.0.0.1:4000/c/codex", wantStrip: true},
+		{name: "trailing_slash", staleURL: "http://127.0.0.1:4000/c/codex/", wantStrip: true},
+		{name: "deeper_path", staleURL: "http://127.0.0.1:4000/c/codex/responses", wantStrip: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "config.toml")
+			original := `model = "gpt-5"
+openai_base_url = "` + tc.staleURL + `"
+`
+			if err := os.WriteFile(configPath, []byte(original), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			CodexConfigPathOverride = configPath
+			defer func() { CodexConfigPathOverride = "" }()
+
+			c := NewCodexConnector()
+			opts := SetupOpts{
+				DataDir:   dir,
+				ProxyAddr: "127.0.0.1:4000",
+				APIAddr:   "127.0.0.1:18970",
+			}
+			if err := c.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+
+			raw, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatalf("read patched config: %v", err)
+			}
+			var parsed map[string]interface{}
+			if err := toml.Unmarshal(raw, &parsed); err != nil {
+				t.Fatalf("invalid TOML after Setup: %v", err)
+			}
+			if _, present := parsed["openai_base_url"]; present {
+				t.Errorf("openai_base_url=%q survived Setup — heal did not strip stale proxy redirect\nfile:\n%s",
+					parsed["openai_base_url"], raw)
+			}
+			// The /c/codex prefix must be entirely gone — there is no
+			// legitimate Codex config value pointing there.
+			if strings.Contains(string(raw), "/c/codex") {
+				t.Errorf("config.toml still contains /c/codex after Setup:\n%s", raw)
+			}
+			// Hooks must still be installed — the heal only removes the
+			// proxy redirect, not the telemetry wiring this Setup adds.
+			if _, ok := parsed["hooks"].(map[string]interface{}); !ok {
+				t.Errorf("[hooks] table missing after heal (got=%T)", parsed["hooks"])
+			}
+		})
+	}
+}
+
+// TestIsDefenseClawCodexProxyRedirect locks the strip-detector's blast
+// radius. The heal in patchCodexConfig must never delete a value that
+// wasn't written by DefenseClaw itself, so this table-driven test
+// asserts the full reject set for shapes an operator might legitimately
+// hand-write (enterprise gateways, public LLM hosts, non-HTTP schemes,
+// non-loopback IPs, /c/codex paths on non-loopback hosts).
+func TestIsDefenseClawCodexProxyRedirect(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		// Healed: the exact loopback /c/codex shape DefenseClaw wrote.
+		{name: "ipv4_default", url: "http://127.0.0.1:4000/c/codex", want: true},
+		{name: "ipv4_alt_port", url: "http://127.0.0.1:18971/c/codex", want: true},
+		{name: "ipv4_no_port", url: "http://127.0.0.1/c/codex", want: true},
+		{name: "localhost", url: "http://localhost:4000/c/codex", want: true},
+		{name: "ipv6", url: "http://[::1]:4000/c/codex", want: true},
+		{name: "https", url: "https://127.0.0.1:4000/c/codex", want: true},
+		{name: "trailing_slash", url: "http://127.0.0.1:4000/c/codex/", want: true},
+		{name: "responses_subpath", url: "http://127.0.0.1:4000/c/codex/responses", want: true},
+		{name: "uppercase_scheme", url: "HTTP://127.0.0.1:4000/c/codex", want: true},
+		{name: "whitespace_padded", url: "  http://127.0.0.1:4000/c/codex  ", want: true},
+
+		// Preserved: shapes an operator may legitimately write.
+		{name: "enterprise_https", url: "https://gateway.corp.example/openai", want: false},
+		{name: "openai_public", url: "https://api.openai.com/v1", want: false},
+		{name: "azure_openai", url: "https://my-aoai.openai.azure.com/", want: false},
+		{name: "loopback_non_codex_path", url: "http://127.0.0.1:8080/v1", want: false},
+		{name: "loopback_root", url: "http://127.0.0.1:4000/", want: false},
+		{name: "non_loopback_codex_path", url: "https://example.com/c/codex", want: false},
+		{name: "rfc1918_codex_path", url: "http://10.0.0.1:4000/c/codex", want: false},
+		{name: "file_scheme", url: "file:///c/codex", want: false},
+		{name: "ws_scheme", url: "ws://127.0.0.1:4000/c/codex", want: false},
+		{name: "empty", url: "", want: false},
+		{name: "garbage", url: "not a url at all", want: false},
+		{name: "fragment_match_attempt", url: "http://attacker.example/#http://127.0.0.1:4000/c/codex", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isDefenseClawCodexProxyRedirect(tc.url); got != tc.want {
+				t.Errorf("isDefenseClawCodexProxyRedirect(%q) = %v, want %v", tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestCodex_Setup_WritesOtelBlock pins the [otel] block contract: in
 // observability mode the codex connector must register codex's
 // native OTel exporter pointing at the gateway's OTLP-HTTP receiver.
