@@ -156,8 +156,8 @@ type Config struct {
 	DefaultLLMAPIKeyEnv string `mapstructure:"default_llm_api_key_env" yaml:"default_llm_api_key_env,omitempty"`
 	DefaultLLMModel     string `mapstructure:"default_llm_model"     yaml:"default_llm_model,omitempty"`
 
-	DataDir         string                     `mapstructure:"data_dir"              yaml:"data_dir"`
-	AuditDB         string                     `mapstructure:"audit_db"         yaml:"audit_db"`
+	DataDir string `mapstructure:"data_dir"              yaml:"data_dir"`
+	AuditDB string `mapstructure:"audit_db"         yaml:"audit_db"`
 	// JudgeBodiesDB is the standalone SQLite file that holds
 	// retained LLM-judge bodies (judge_responses table). Splitting
 	// it out from audit.db isolates the highest-volume write path

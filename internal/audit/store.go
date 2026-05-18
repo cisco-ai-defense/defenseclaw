@@ -159,26 +159,26 @@ type Store struct {
 //
 // Settings explained:
 //   - journal_mode=WAL          enables write-ahead logging so readers
-//                               and writers do not block each other.
+//     and writers do not block each other.
 //   - busy_timeout=5000         SQLite waits up to 5 seconds before
-//                               returning SQLITE_BUSY, absorbing the
-//                               vast majority of write contention.
+//     returning SQLITE_BUSY, absorbing the
+//     vast majority of write contention.
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
-//                               across crashes (loses only the last
-//                               transaction on power loss) while ~3x
-//                               faster than the FULL default.
+//     across crashes (loses only the last
+//     transaction on power loss) while ~3x
+//     faster than the FULL default.
 //   - cache_size=-20000         negative => kilobytes; ~20 MB of
-//                               in-memory page cache per connection.
+//     in-memory page cache per connection.
 //   - temp_store=MEMORY         spill temp tables to RAM instead of
-//                               disk; eliminates a common contention
-//                               source on writes that allocate temp.
+//     disk; eliminates a common contention
+//     source on writes that allocate temp.
 //   - mmap_size=268435456       map up to 256 MB of the DB into the
-//                               process address space for read-heavy
-//                               queries (audit views, exports).
+//     process address space for read-heavy
+//     queries (audit views, exports).
 //   - foreign_keys=ON           defenseclaw relies on the FK between
-//                               findings and scan_results; turning
-//                               this off at the DSN level would be a
-//                               silent correctness regression.
+//     findings and scan_results; turning
+//     this off at the DSN level would be a
+//     silent correctness regression.
 const auditPragmas = "?_pragma=journal_mode(WAL)" +
 	"&_pragma=busy_timeout(5000)" +
 	"&_pragma=synchronous(NORMAL)" +

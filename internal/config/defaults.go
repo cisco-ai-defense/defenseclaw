@@ -109,10 +109,10 @@ func DefaultConfig() *Config {
 	dataDir := DefaultDataPath()
 	clawMode := ClawOpenClaw
 	return &Config{
-		DataDir:        dataDir,
-		AuditDB:        filepath.Join(dataDir, DefaultAuditDBName),
-		JudgeBodiesDB:  filepath.Join(dataDir, DefaultJudgeBodiesDBName),
-		QuarantineDir:  filepath.Join(dataDir, "quarantine"),
+		DataDir:       dataDir,
+		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
+		JudgeBodiesDB: filepath.Join(dataDir, DefaultJudgeBodiesDBName),
+		QuarantineDir: filepath.Join(dataDir, "quarantine"),
 		PluginDir:     "",
 		PolicyDir:     filepath.Join(dataDir, "policies"),
 		Environment:   string(DetectEnvironment()),
