@@ -1340,11 +1340,54 @@ class Config:
         return llm
 
     def save(self) -> None:
+        """Persist this :class:`Config` to ``~/.defenseclaw/config.yaml``.
+
+        Round-trips through the existing file so that YAML keys the
+        Python dataclass does NOT model survive the save. The two known
+        callers that depend on this contract today are:
+
+        * ``audit_sinks:`` — written by ``defenseclaw setup splunk``
+          (see ``cli/defenseclaw/observability/writer.py``). Operators
+          configure local-Splunk HEC, remote Splunk Enterprise, OTLP
+          logs, and webhook forwarding here.
+        * ``otel.resource.attributes:`` — stamped by the same writer
+          to attribute exporters back to the preset that configured
+          them.
+
+        Before this round-trip, every connector-setup call site that
+        invoked ``cfg.save()`` (``setup codex``, ``setup claude-code``,
+        ``execute_guardrail_setup``, etc.) would silently strip those
+        blocks because ``dataclasses.asdict(self)`` only emits the
+        fields the dataclass declares — turning Splunk dashboards dark
+        without any warning. The two workaround "no cfg.save() here"
+        comments in ``cmd_setup.py`` documented this foot-gun; this
+        method removes the need for them.
+
+        Modeled keys still win — including the v4-migration strip of
+        the legacy ``splunk:`` top-level key and the byte-stability
+        strips of empty ``notifications``/``privacy``/``asset_policy``
+        blocks — so that operators who programmatically reset a value
+        through the dataclass still see the file updated.
+
+        Write is atomic via ``tmp + os.replace`` (matches the
+        observability writer pattern) so a crash mid-write cannot
+        leave a half-written ``config.yaml`` that the Go gateway
+        refuses to reload.
+        """
         path = os.path.join(self.data_dir, CONFIG_FILE_NAME)
-        data = _config_to_dict(self)
+        dataclass_data = _config_to_dict(self)
+        owned_keys = _owned_top_level_keys(self)
+        existing = _load_existing_config_yaml(path)
+        merged = _merge_preserving_unmodeled(
+            existing, dataclass_data, owned_keys,
+        )
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            yaml.safe_dump(
+                merged, f, default_flow_style=False, sort_keys=False,
+            )
+        os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -1438,6 +1481,155 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         if not sources:
             d.pop("registries", None)
     return d
+
+
+def _owned_top_level_keys(cfg: Config) -> frozenset[str]:
+    """Return the set of TOP-LEVEL YAML keys the dataclass declares.
+
+    Used by :meth:`Config.save` to distinguish "dataclass intentionally
+    omitted this key" (e.g. ``notifications:`` was at full defaults so
+    ``_config_to_dict`` stripped it) from "the dataclass doesn't model
+    this key at all" (e.g. ``audit_sinks:``, written by
+    :mod:`defenseclaw.observability.writer`). The first case should drop
+    the key from the on-disk file; the second case should preserve it.
+
+    Implementation note: we read the field names off ``Config`` itself
+    via ``dataclasses.fields`` rather than calling ``asdict(cfg)`` so
+    this stays O(fields) instead of O(full config tree) and so it is
+    safe to call from inside ``save()`` without triggering side effects
+    on lazily-populated nested dataclasses.
+    """
+    from dataclasses import fields
+    return frozenset(f.name for f in fields(cfg))
+
+
+def _load_existing_config_yaml(path: str) -> dict[str, Any]:
+    """Best-effort read of an existing ``config.yaml`` for round-trip save.
+
+    Returns ``{}`` when the file is missing (first save), unreadable, or
+    malformed. On parse failure we log a warning but do NOT raise — the
+    operator's previous file may be partially corrupt and we still want
+    ``cfg.save()`` to succeed so the next setup wizard can rewrite it
+    cleanly. Worst-case the on-disk file is replaced with the
+    dataclass-only view, which is exactly the pre-fix behaviour, so we
+    cannot regress relative to the old serializer.
+    """
+    try:
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        _log.warning(
+            "config.save: cannot read existing %s (%s); "
+            "writing dataclass-only view (any unmodelled keys will be lost)",
+            path, exc,
+        )
+        return {}
+    except yaml.YAMLError as exc:
+        _log.warning(
+            "config.save: existing %s failed to parse (%s); "
+            "writing dataclass-only view (any unmodelled keys will be lost)",
+            path, exc,
+        )
+        return {}
+    if not isinstance(raw, dict):
+        _log.warning(
+            "config.save: existing %s is not a YAML mapping (got %s); "
+            "writing dataclass-only view",
+            path, type(raw).__name__,
+        )
+        return {}
+    return raw
+
+
+def _merge_preserving_unmodeled(
+    existing: dict[str, Any],
+    new: dict[str, Any],
+    owned_top_level: frozenset[str],
+) -> dict[str, Any]:
+    """Deep-merge ``new`` over ``existing`` while preserving unmodelled keys.
+
+    Top-level rules (the layer where ``audit_sinks:`` lives):
+
+    * Key in ``new``: dataclass wins (with a recursive deep-merge when
+      both sides are dicts so nested unmodelled keys like
+      ``otel.resource.attributes`` survive).
+    * Key only in ``existing``:
+        - If the key IS owned by the dataclass (``owned_top_level``) →
+          the dataclass intentionally chose to omit it (e.g.
+          ``_config_to_dict`` stripped ``notifications:`` because it
+          was at full defaults, or stripped the legacy ``splunk:``
+          v4-migration block). Drop it.
+        - Otherwise → unmodelled extension key (``audit_sinks:``,
+          operator-added comments-as-keys, future Go-side additions).
+          Preserve it unchanged.
+    * Key only in ``new`` → emit it.
+
+    Nested rules (any depth below top level):
+
+    * Both dicts → recurse with the simpler "present in new wins,
+      absent in new preserved" heuristic. We don't have a per-nested
+      "owned" set so we err on the side of preservation; the only
+      nested optimization-strip in ``_config_to_dict`` today is empty
+      ``llm:`` blocks, and re-emitting an empty llm block from the
+      file is semantically equivalent to a fresh empty
+      :class:`LLMConfig`.
+    * Lists → atomic replacement (the dataclass list is authoritative;
+      partial list merges would mis-handle operator deletions of list
+      elements modelled by the dataclass).
+    * Scalars / type mismatch → new wins.
+    """
+    out: dict[str, Any] = {}
+    # Pass 1: walk existing keys so file order is preserved when the
+    # dataclass output omits a key. yaml.safe_dump with sort_keys=False
+    # honours dict iteration order on CPython 3.7+, which keeps
+    # operator-edited files visually stable across saves.
+    for k, ev in existing.items():
+        if k in new:
+            nv = new[k]
+            if isinstance(ev, dict) and isinstance(nv, dict):
+                out[k] = _deep_merge_nested(ev, nv)
+            else:
+                out[k] = nv
+        elif k in owned_top_level:
+            # Dataclass owns this key and chose to omit it (default-strip
+            # or legacy-drop). Honour that decision.
+            continue
+        else:
+            # Unmodelled key — rescue it from the file. This is the
+            # whole point of the round-trip save.
+            out[k] = ev
+    # Pass 2: append keys present only in the dataclass output.
+    for k, nv in new.items():
+        if k not in existing:
+            out[k] = nv
+    return out
+
+
+def _deep_merge_nested(
+    existing: dict[str, Any], new: dict[str, Any],
+) -> dict[str, Any]:
+    """Recursive deep-merge for nested dicts (see :func:`_merge_preserving_unmodeled`).
+
+    Used below the top level where we don't track an "owned keys" set
+    per nesting level. Keys only in ``existing`` are preserved (the
+    ``otel.resource.attributes`` rescue path); keys in ``new`` win.
+    """
+    out: dict[str, Any] = {}
+    for k, ev in existing.items():
+        if k in new:
+            nv = new[k]
+            if isinstance(ev, dict) and isinstance(nv, dict):
+                out[k] = _deep_merge_nested(ev, nv)
+            else:
+                out[k] = nv
+        else:
+            out[k] = ev
+    for k, nv in new.items():
+        if k not in existing:
+            out[k] = nv
+    return out
 
 
 def _default_notifications_dict() -> dict[str, Any]:

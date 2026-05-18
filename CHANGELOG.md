@@ -42,11 +42,35 @@ deleted.
   `audit.ActionConnectorHookSynthetic` so SIEM rules pinned on
   `codex.notify%` keep their row counts and new dashboards can
   reason about the synthesized Stop separately.
-- **codex / claudecode dispatch through `handleUnifiedConnectorHook`**
-  (which delegates evaluation to the existing bespoke handlers for
-  PluginInput-v1 / notify-bridge response shaping). The wrapper is
-  the single gate that guarantees the audit / metrics / dedup /
-  trace-propagation code paths ran.
+- **codex / claudecode flow through the unified `handleAgentHook`
+  pipeline (full handler fold)**. Pre-PR-#284, `handleCodexHook` and
+  `handleClaudeCodeHook` each re-implemented the entire pipeline
+  (parse → enrich context → remember raw events → emit LLM event →
+  evaluate → metrics → audit envelope → render). Adding a new
+  cross-cutting concern (audit envelope refresh, dispatch metric,
+  dedup, trace propagation) meant touching three handlers, and the
+  F2 audit-correlation regression bit live Splunk verification when
+  `handleClaudeCodeHook` skipped the envelope refresh. The bespoke
+  handlers (`handleClaudeCodeHook`, `handleCodexHook`,
+  `enrichClaudeCodeHookContext`, `enrichCodexHookContext`) are
+  **deleted**; every connector hook route now flows through
+  `handleAgentHook(name)`. The connector-specific evaluator,
+  LLM-event emitter, and raw-event deduper (which probe fields like
+  `req.ToolUseID`, `req.LastAssistantMessage`, `req.MCPServerName`
+  that the generic `agentHookRequest` doesn't model) are kept and
+  invoked via `bespoke_hook_adapter.go`'s
+  `evaluateBespokeOrGenericHook` / `emitBespokeOrGenericLLMEvent` /
+  `rememberBespokeOrGenericRawEvents` dispatch shims. The wire JSON
+  field name (`claude_code_output` / `codex_output` / `hook_output`)
+  is selected by `hookOutputFieldName(connectorName)` so the agent
+  CLIs receive byte-identical responses. Net delta: ~250 lines
+  deleted, one place where shared concerns live. New tests
+  (`TestUnifiedHookDispatch_SingleEntryPoint`,
+  `TestUnifiedDispatch_PreservesConnectorWireShape`,
+  `TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope`,
+  `TestEnrichAgentHookContext_CodexRefreshesEnvelope`) pin the
+  contract so a future "let's reintroduce a bespoke handler for X"
+  change immediately fails CI.
 
 ### Observability parity
 
@@ -94,7 +118,7 @@ deleted.
   panics on `nil` `warned` argument so a misuse cannot silently
   re-enable silent trust of loopback callers.
 
-### Follow-ups from live E2E testing (F1, F2)
+### Follow-ups from live E2E testing (F1, F2, F3, F4, F5)
 
 - **Codex `[otel]` block no longer carries `service_name` /
   `resource_attributes` (F1).** Earlier review iterations of this PR
@@ -138,6 +162,87 @@ deleted.
   Operators upgrading from a prior build will see
   `session_id`/`agent_id` populate immediately on the next hook
   event; pre-existing audit rows are not back-filled.
+- **`defenseclaw audit export` no longer rewrites valid actions to
+  `"action"` with `legacy_action=…` (F3).** The exporter kept a
+  hand-maintained copy of the audit action enum in
+  `internal/cli/audit_export.go`; every action added to
+  `internal/audit/actions.go` since v7 (the entire `otel.ingest.*`
+  family, `connector-hook`, `connector-hook-synthetic`,
+  `asset-policy`, `codex.notify` plus the dynamic
+  `codex.notify.<sanitized-type>` family) was silently downgraded
+  on export, so Splunk dashboards that keyed on the *real* action
+  saw nothing.
+
+  `audit_export.go` now delegates to
+  `audit.IsKnownAction` + `audit.IsKnownActionPrefix`, so future
+  registry additions flow through automatically with no second list
+  to maintain. New test coverage in
+  `internal/cli/audit_export_test.go` walks `audit.AllActions()` so a
+  regression that re-introduces a local map fails CI.
+- **Gemini CLI loopback OTLP exports no longer 401 after `setup
+  geminicli` (F4).** The sidecar populated its in-memory
+  `otlpPathTokens` map only at boot; an operator who started the
+  gateway before running `defenseclaw setup geminicli` would mint a
+  fresh on-disk token (written into `~/.gemini/settings.json`) that
+  the running gateway never observed, so every loopback OTLP request
+  returned 401 until the next restart. Documented as
+  `.deepsec/findings/BUG/defenseclaw-other-race-condition-feab2ccaa4.md`.
+
+  `APIServer.lookupOTLPPathToken` now performs a lazy disk reload on
+  cache miss for KNOWN scopes (closed allow-list via the new
+  exported `connector.IsValidOTLPScope`), bounded by a 500 ms
+  per-scope rate limit so a hostile or noisy caller probing
+  `/otlp/geminicli/<random>/v1/*` cannot turn the auth path into a
+  disk-stampede primitive. The reload is gated on
+  `scannerCfg.DataDir` being set, so tests and out-of-tree wiring
+  remain panic-safe.   Five tests in
+  `internal/gateway/otlp_path_token_test.go` cover the happy reload,
+  unknown-scope rejection, per-scope refractory window, post-window
+  retry (operator rotate flow), and empty-DataDir guard.
+- **`Config.save()` no longer silently strips operator-configured
+  `audit_sinks` / `otel.resource.attributes` (F5).** Surfaced while
+  driving live Splunk verification for F2: switching the active
+  connector with `defenseclaw setup codex` after a prior
+  `defenseclaw setup splunk --logs` made the operator's HEC
+  forwarding disappear without any warning, taking Splunk dashboards
+  dark on every connector switch.
+
+  Root cause: `Config.save()` was `yaml.dump(dataclasses.asdict(self))`,
+  which only emits the fields the Python `Config` dataclass declares.
+  `audit_sinks:` (written by the observability writer) and the nested
+  `otel.resource.attributes:` map are intentionally unmodelled in the
+  Python dataclass, so every `cfg.save()` call site —
+  `execute_guardrail_setup`, `setup codex`, `setup claude-code`,
+  `setup geminicli`, the migration helpers, ~14 sites in total —
+  silently overwrote the file. The team had already detected this on
+  the `setup splunk` path itself and worked around it with two
+  "don't call cfg.save() here" comments in `cmd_setup.py:4870` and
+  `cmd_setup.py:4946`; every other code path was still vulnerable.
+
+  `Config.save()` now reads the existing `config.yaml`, deep-merges
+  the dataclass output over it (dataclass-owned top-level keys win;
+  unmodelled keys are rescued from the file; nested dicts recurse so
+  `otel.resource.attributes` survives even though `otel` itself is
+  modelled), and replaces the file atomically via `tmp + os.replace`
+  matching the observability writer pattern. The dataclass still
+  owns its keys — including the v4-migration drop of the legacy
+  `splunk:` block and the byte-stability strips of empty
+  `notifications` / `privacy` / `asset_policy` blocks — so
+  programmatic resets through the dataclass still update the file.
+  Corrupt-YAML input logs a warning and falls back to dataclass-only
+  write so the operator can recover via the next setup wizard.
+
+  20 new regression tests in `cli/tests/test_config_save_roundtrip.py`
+  cover: single-/multi-sink preservation, nested
+  `otel.resource.attributes` preservation, legacy `splunk:` drop,
+  default-`notifications:` strip honouring an operator reset,
+  modeled-field overrides, first-save with no existing file,
+  corrupt-YAML fallback, non-mapping-YAML fallback, atomic-write
+  inode change, merge helper unit tests, and the end-to-end
+  `setup splunk → setup codex` operator workflow. The two existing
+  "no cfg.save() here" comments in `cmd_setup.py` are kept as
+  single-writer hygiene (no longer correctness) and updated to
+  reflect the new contract.
 
 ## [Previous-Unreleased] — Codex / Claude Code hook-only enforcement (no proxy data path)
 

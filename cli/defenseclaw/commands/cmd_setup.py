@@ -4866,9 +4866,11 @@ def setup_splunk(
 
     # Note: no app.cfg.save() here — the observability writer invoked
     # from _apply_o11y_config / _apply_logs_config already persists to
-    # config.yaml atomically while preserving unmodeled sections
-    # (audit_sinks, otel.resource.attributes). Calling cfg.save() again
-    # would serialize the dataclass only and drop those sections.
+    # config.yaml atomically. A second cfg.save() would be a no-op
+    # round-trip now (Config.save deep-merges over the existing file
+    # and preserves unmodelled keys like audit_sinks /
+    # otel.resource.attributes since the F5 fix), but it's still
+    # wasteful so we skip it to keep this path single-writer.
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
@@ -4943,8 +4945,9 @@ def _interactive_splunk_setup(
         return
 
     # observability.apply_preset() already persisted to config.yaml;
-    # calling cfg.save() here would drop audit_sinks (see note in
-    # setup_splunk()).
+    # see the matching note in setup_splunk() for why we deliberately
+    # skip a second cfg.save() here (single-writer hygiene, not
+    # correctness — Config.save is round-trip-safe since F5).
     click.echo()
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
