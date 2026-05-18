@@ -48,7 +48,7 @@ Pins `guardrail.connector` and `claw.mode` to the chosen connector so downstream
 </Step>
 
 <Step>
-Disables the matching enforcement flag (`codex_enforcement_enabled` / `claudecode_enforcement_enabled`) so the proxy listener never binds and `openai_base_url` / `ANTHROPIC_BASE_URL` are not rewritten.
+Wires the hook scripts under `~/.defenseclaw/hooks/` and patches `~/.codex/config.toml` / `~/.claude/settings.json` with the hook references and native OTel env block. No proxy listener binds; the agent talks directly to its native upstream.
 </Step>
 
 <Step>

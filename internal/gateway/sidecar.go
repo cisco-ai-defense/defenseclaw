@@ -1239,16 +1239,6 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// middleware stay in lockstep.
 		APIToken:     apiToken,
 		WorkspaceDir: workspaceDir,
-		// Per-connector enforcement gates: when false (the default),
-		// the connector's Setup() installs hooks + native OTel
-		// exporters but skips the proxy-redirect path. See
-		// GuardrailConfig.CodexEnforcementEnabled /
-		// ClaudeCodeEnforcementEnabled in internal/config/config.go
-		// for the rationale. Plumbed through SetupOpts so the codex
-		// and claudecode connectors can branch on a single source of
-		// truth without re-reading config from disk.
-		CodexEnforcement:      s.cfg.Guardrail.CodexEnforcementEnabled,
-		ClaudeCodeEnforcement: s.cfg.Guardrail.ClaudeCodeEnforcementEnabled,
 		// HookFailMode is the operator-chosen response-layer fail mode
 		// for every generated hook (see GuardrailConfig.HookFailMode
 		// for the contract). Routed via EffectiveHookFailMode so the
@@ -1279,36 +1269,36 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
 		}
+		// Both branches below treat any failure to reach a verified
+		// post-Setup state as fail-loud: rollback, surface
+		// Guardrail=Error, and return so the operator sees the failure
+		// rather than booting into a connector that will exit-127 on
+		// every hook invocation. A Setup() error is strictly more
+		// severe than "Setup succeeded but a hook script went missing"
+		// — handling them asymmetrically (one fatal, one warning)
+		// inverted operator expectations, so both paths now exit the
+		// guardrail goroutine with the wrapped error via the shared
+		// failGuardrailWithRollback helper.
 		if err := conn.Setup(ctx, setupOpts); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector setup %s failed: %v — connector may not be fully initialized\n", conn.Name(), err)
-			recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
-		} else {
-			// Post-Setup verification: every owned hook script the
-			// connector said it would write MUST exist on disk before
-			// we mark the connector active. Without this check, a
-			// silent partial install (Setup returns nil but
-			// writeHookScriptsCommonWithFailMode never reached its
-			// for-loop, or another goroutine deleted the freshly
-			// written script) ships a connector whose every hook
-			// invocation will exit 127 ("command not found") — the
-			// exact symptom we hit during the claudecode → codex
-			// switch. Fail loud here and try one re-Setup so the
-			// operator either sees the error or gets a self-healing
-			// install.
-			if missing := verifyHookScriptsOnDisk(setupOpts.DataDir, conn); len(missing) > 0 {
-				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying Setup\n", conn.Name(), missing)
-				if err := conn.Setup(ctx, setupOpts); err != nil {
-					fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup after missing-hook detection failed: %v\n", conn.Name(), err)
-					recordAndRollbackFailedConnectorSetup(conn, setupOpts, ctx)
-				} else if missing := verifyHookScriptsOnDisk(setupOpts.DataDir, conn); len(missing) > 0 {
-					fmt.Fprintf(os.Stderr, "[guardrail] connector %s STILL missing hook scripts after re-Setup: %v — connector marked active but hooks WILL fail with exit 127\n", conn.Name(), missing)
-				} else {
-					fmt.Fprintf(os.Stderr, "[guardrail] connector %s re-Setup restored missing hook scripts\n", conn.Name())
-				}
-			}
-			if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
-			}
+			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "setup", fmt.Errorf("connector %s setup failed: %w", conn.Name(), err))
+		}
+		// Post-Setup verification: every owned hook script the
+		// connector said it would write MUST exist on disk before
+		// we mark the connector active. Without this check, a
+		// silent partial install (Setup returns nil but
+		// writeHookScriptsCommonWithFailMode never reached its
+		// for-loop, or another goroutine deleted the freshly
+		// written script) ships a connector whose every hook
+		// invocation will exit 127 ("command not found") — the
+		// exact symptom we hit during the claudecode → codex
+		// switch. Fail loud here and try one targeted hook-writer
+		// retry so the operator either sees the error or gets a
+		// self-healing install.
+		if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
+			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "hook verification", err)
+		}
+		if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 		}
 
 		// Plan A4 / S0.12: refuse to start when the connector advertises
@@ -1404,7 +1394,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			"connector":           conn.Name(),
 			"enforcement_enabled": false,
 			"proxy_port":          "closed",
-			"hint":                fmt.Sprintf("flip on with guardrail.%s_enforcement_enabled: true in config.yaml", conn.Name()),
+			"hint":                "connector uses hooks/native telemetry; local guardrail proxy is not in the LLM data path",
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] observability mode: %s talks directly to its native upstream — proxy port intentionally not bound\n", conn.Name())
 		<-ctx.Done()
@@ -1415,12 +1405,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 
 // proxyShouldBindForConnector returns true when the active connector
 // requires the proxy listener to be bound — i.e. the agent's data
-// path goes through DefenseClaw. For the observability-default
-// connectors this returns false in observability mode, so the proxy
-// port stays unbound and the agent talks directly to its native upstream.
-// OpenClaw and ZeptoClaw always return true: those connectors were
-// designed around the fetch-interceptor / api_base redirect from day one
-// and have no observability-only path.
+// path goes through DefenseClaw. Codex, Claude Code, and other
+// hook-native connectors return false: their LLM traffic stays
+// direct-to-vendor while telemetry uses hooks/OTel.
+// OpenClaw and ZeptoClaw always return true.
 //
 // Adding a new connector? Default-on (return true) is the
 // conservative choice for guardrail-style adapters; only return
@@ -1431,10 +1419,8 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 		return true
 	}
 	switch conn.Name() {
-	case "codex":
-		return gc.CodexEnforcementEnabled
-	case "claudecode":
-		return gc.ClaudeCodeEnforcementEnabled
+	case "codex", "claudecode":
+		return false
 	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
 		return false
 	default:
@@ -1467,10 +1453,8 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	}
 	switch configuredConnectorName(cfg) {
-	case "codex":
-		return cfg.Guardrail.CodexEnforcementEnabled
-	case "claudecode":
-		return cfg.Guardrail.ClaudeCodeEnforcementEnabled
+	case "codex", "claudecode":
+		return false
 	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
 		return false
 	default:
@@ -1492,12 +1476,9 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             skipping it would break every
 //	                             existing OpenClaw install.
 //	codex / claudecode + loopback host
-//	                           → SKIP. Codex/Claude Code in either
-//	                             observe or action mode emit telemetry
+//	                           → SKIP. These connectors emit telemetry
 //	                             through hooks/native telemetry +
-//	                             local API/audit; action mode can
-//	                             additionally bind the proxy when
-//	                             enforcement is enabled. The loopback
+//	                             local API/audit only. The loopback
 //	                             default (127.0.0.1:18789) means the
 //	                             operator never wired in an OpenClaw
 //	                             daemon — nothing is listening there
@@ -1610,6 +1591,37 @@ func verifyHookScriptsOnDisk(dataDir string, conn connector.Connector) []string 
 	return missing
 }
 
+// verifyHookScriptsOrRetry checks that every connector-owned hook
+// script is on disk and, if any are missing, runs a targeted retry of
+// JUST the hook writer (not the full Setup). The documented failure
+// mode is "hook writer raced / silently missed a write"; re-running
+// Setup in full would needlessly re-patch the agent config, re-capture
+// managed backups, re-install subprocess enforcement, etc. The narrow
+// retry is also safe to invoke unconditionally on a freshly-completed
+// install because writeHookScriptsCommonWithFailMode is idempotent
+// (MkdirAll + WriteFile, no destructive side-effects).
+//
+// The ctx argument is reserved for connectors whose hook writer ever
+// gains a cancellable code path; the current implementation does not
+// require it.
+func verifyHookScriptsOrRetry(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
+	_ = ctx
+	missing := verifyHookScriptsOnDisk(opts.DataDir, conn)
+	if len(missing) == 0 {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup completed but hook scripts missing on disk: %v — retrying hook writer\n", conn.Name(), missing)
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := connector.WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
+		return fmt.Errorf("connector %s hook-writer retry after missing-hook detection failed: %w", conn.Name(), err)
+	}
+	if missing = verifyHookScriptsOnDisk(opts.DataDir, conn); len(missing) > 0 {
+		return fmt.Errorf("connector %s still missing hook scripts after hook-writer retry: %v", conn.Name(), missing)
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s hook-writer retry restored missing hook scripts\n", conn.Name())
+	return nil
+}
+
 // teardownPreviousConnector checks if a different connector was previously
 // active (persisted in active_connector.json) and runs its Teardown so
 // hooks, env overrides, and config patches from the old connector are
@@ -1637,6 +1649,29 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
 	return nil
+}
+
+// failGuardrailWithRollback is the shared fail-loud path for connector
+// boot errors. It logs the failure with a stable surface label so
+// operators can grep for the originating phase, rolls the partial
+// setup back via recordAndRollbackFailedConnectorSetup, surfaces
+// Guardrail=Error in the health snapshot, and returns the wrapped
+// error so the caller can propagate it to the sidecar errCh.
+//
+// Centralising the sequence here keeps the two failure paths in
+// runGuardrail (Setup error / hook verification error) in lockstep —
+// any change to logging, rollback ordering, or health-state shape
+// happens once and is covered by a single integration test.
+func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, surface string, err error) error {
+	if conn == nil || err == nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
+	recordAndRollbackFailedConnectorSetup(conn, opts, ctx)
+	if s != nil && s.health != nil {
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+	}
+	return err
 }
 
 func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {
@@ -1720,6 +1755,16 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 	api := NewAPIServer(addr, s.health, s.client, s.store, s.logger, s.cfg)
 	api.SetOTelProvider(s.otel)
 	api.SetHILTApprovalManager(s.hilt)
+	// Wire the Cisco AI Defense inspector onto the API server so the
+	// hook lane (inspectToolPolicy / inspectMessageContent) can forward
+	// tool calls + tool results to AID for operators who configured
+	// cisco_ai_defense.api_key_env. NewCiscoInspectClient returns nil
+	// when no key resolves; the hook lane silently skips AID in that
+	// case and falls back to the regex + CodeGuard verdict.
+	if cisco := NewCiscoInspectClient(&s.cfg.CiscoAIDefense, filepath.Join(s.cfg.DataDir, ".env")); cisco != nil {
+		cisco.SetTelemetry(s.otel)
+		api.SetCiscoInspector(cisco)
+	}
 	api.SetAIDiscoveryService(s.aiDiscovery)
 	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {

@@ -126,7 +126,6 @@ func TestOverview_ZeroRequestNotice_CodexObservabilityUsesHookGuidance(t *testin
 	p := newOverviewForTest()
 	p.cfg.Claw.Mode = config.ClawMode("codex")
 	p.cfg.Guardrail.Connector = "codex"
-	p.cfg.Guardrail.CodexEnforcementEnabled = false
 	p.SetHealth(&HealthSnapshot{
 		UptimeMS: int64(3 * time.Minute / time.Millisecond),
 		Connector: &ConnectorHealth{

@@ -540,19 +540,27 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """Return a detail string when the proxy port is expected to be closed.
 
-    Observability-only connectors feed DefenseClaw through hooks/native
-    telemetry while the agent talks directly to its upstream provider. In
-    that mode port 4000 is deliberately unbound, so doctor must not report
-    a hard proxy failure.
+    Hook-enforced connectors feed DefenseClaw through the agent's
+    native hook bus (PreToolUse / UserPromptSubmit / PostToolUse)
+    while the agent talks directly to its upstream provider. Port
+    4000 is deliberately unbound in that topology, so doctor must
+    not report a hard proxy failure. Action mode IS supported on
+    this surface — enforcement happens via the PreToolUse deny
+    verdict, not the proxy.
     """
     connector = _active_connector(cfg)
     gc = cfg.guardrail
-    if connector == "codex" and not getattr(gc, "codex_enforcement_enabled", False):
-        return "observability-only for Codex — proxy port intentionally closed"
-    if connector == "claudecode" and not getattr(gc, "claudecode_enforcement_enabled", False):
-        return "observability-only for Claude Code — proxy port intentionally closed"
-    if connector in {"hermes", "cursor", "windsurf", "geminicli", "copilot"}:
-        return f"observability-only for {connector} — proxy port intentionally closed"
+    if connector in {"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}:
+        mode = (getattr(gc, "mode", "") or "observe").strip().lower()
+        if mode == "action":
+            return (
+                f"hook-enforced for {connector} (mode=action via PreToolUse deny) — "
+                "proxy port intentionally closed"
+            )
+        return (
+            f"hook-driven for {connector} (mode=observe) — proxy port "
+            "intentionally closed"
+        )
     return ""
 
 
@@ -833,10 +841,36 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Cisco AI Defense", f"{display} not set", r=r)
         return
 
-    health_url = endpoint.rstrip("/") + "/health"
+    # Probe the actual inspect route the runtime scanner hits rather
+    # than /health. Two reasons:
+    #
+    # 1. Cisco AI Defense authenticates with the
+    #    ``X-Cisco-AI-Defense-API-Key`` header, not ``Authorization:
+    #    Bearer`` — the gateway-side scanner already sets this (see
+    #    internal/gateway/cisco_inspect.go::Inspect). A doctor probe
+    #    using the wrong header got 403 on preview deployments even
+    #    when the same key worked end-to-end at runtime, which made
+    #    the diagnostic actively misleading ("authentication failed"
+    #    reported against a perfectly good key).
+    #
+    # 2. Some AID deployments (notably preview) don't expose an
+    #    unauthenticated ``/health`` route at all, so even with the
+    #    right header the probe would come back with a 404 / 5xx and
+    #    be hard to interpret. The ``/api/v1/inspect/chat`` route is
+    #    load-bearing on every deployment because the runtime uses
+    #    it, so probing it here exercises the same code path an
+    #    operator's real traffic will hit.
+    probe_url = endpoint.rstrip("/") + "/api/v1/inspect/chat"
+    probe_body = b'{"messages":[{"role":"user","content":"defenseclaw-doctor-probe"}],"metadata":{},"config":{}}'
     code, body = _http_probe(
-        health_url,
-        headers={"Authorization": f"Bearer {api_key}"},
+        probe_url,
+        method="POST",
+        headers={
+            "X-Cisco-AI-Defense-API-Key": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        body=probe_body,
         timeout=float(cfg.cisco_ai_defense.timeout_ms) / 1000.0,
     )
 
@@ -847,7 +881,7 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
     elif code == 0:
         _emit("warn", "Cisco AI Defense", f"endpoint unreachable: {body[:100]}", r=r)
     else:
-        _emit("warn", "Cisco AI Defense", f"HTTP {code} (endpoint may not support /health)", r=r)
+        _emit("warn", "Cisco AI Defense", f"HTTP {code} (unexpected — endpoint responded but not 200)", r=r)
 
 
 def _check_observability(cfg, r: _DoctorResult) -> None:

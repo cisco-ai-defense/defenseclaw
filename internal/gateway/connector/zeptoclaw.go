@@ -155,7 +155,11 @@ func (c *ZeptoClawConnector) Teardown(ctx context.Context, opts SetupOpts) error
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
-	removeOwnedHookScripts(opts, c)
+	// ZeptoClaw does not implement HookScriptOwner and operates through
+	// a proxy api_base in config.json, not a *-hook.sh script that
+	// a host agent process keeps cached. The shared inspect-*.sh
+	// scripts are intentionally left in place — they're owned by the
+	// hookwriter, not by any single connector.
 
 	if len(errs) > 0 {
 		return fmt.Errorf("zeptoclaw teardown errors: %s", strings.Join(errs, "; "))
@@ -415,18 +419,13 @@ func (c *ZeptoClawConnector) Route(r *http.Request, body []byte) (*ConnectorSign
 // backed up via managed + legacy backup files. The connector also writes
 // the inspect-* hook scripts into <DataDir>/hooks/ for proxy-side tool inspection.
 func (c *ZeptoClawConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{zeptoClawConfigPath()},
 		BackupFiles: []string{
 			managedFileBackupPath(opts.DataDir, c.Name(), "config.json"),
 			filepath.Join(opts.DataDir, "zeptoclaw_backup.json"),
 		},
-		HookScripts: hooks,
+		HookScripts: hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }

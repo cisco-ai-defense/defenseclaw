@@ -886,27 +886,18 @@ Provisioned in `bundles/local_observability_stack/`:
     inbound OTLP-HTTP bodies fail to parse for 10m, indicating
     schema drift or a misconfigured exporter.
 
-### 9.4 Toggling enforcement
+### 9.4 Hook-only enforcement
 
-Observability mode keeps connector enforcement code intact but inactive
-unless explicitly requested. For Codex and Claude Code, the proxy
-simply doesn't bind until the connector-specific enforcement switch is
-enabled:
+The Codex and Claude Code connectors are hook-only. There is no
+LLM-proxy data path — those agents talk directly to their native
+upstreams (`api.openai.com`, `api.anthropic.com`, the ChatGPT
+backend) and DefenseClaw observes / enforces via the `PreToolUse`
+and `UserPromptSubmit` hooks. There is no proxy listener to enable
+for Codex or Claude Code; tool-call decisions are surfaced through
+the hook's deny verdict.
 
-```yaml
-# ~/.defenseclaw/config.yaml
-guardrail:
-  codex_enforcement_enabled: true        # codex
-  claude_code_enforcement_enabled: true  # claude code
-```
-
-Restart the gateway. The connector setup logic re-patches
-`~/.codex/config.toml` / `~/.claude/settings.json` to point traffic
-through the proxy and persists snapshots in
-`~/.defenseclaw/state/{codex,claudecode}-config.json` so a future
-mode flip cleanly reverts both the guardrail wiring AND the OTel /
-notify glue. See `internal/gateway/connector/{codex,claudecode}.go`
-for the full backup/restore contract.
+For connectors that still bind the proxy (OpenClaw, ZeptoClaw), set
+`guardrail.mode=action` and restart the gateway.
 
 ### 9.5 One-shot setup aliases
 
@@ -941,10 +932,8 @@ Both aliases persist:
 |-----------------------------------------------|-------------------|------------------------------------------------------------------------|
 | `claw.mode`                                   | selected connector | TUI / scanners read from the connector's documented local surfaces instead of the OpenClaw layout. |
 | `guardrail.connector`                         | selected connector | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
-| `guardrail.codex_enforcement_enabled`         | `false`           | Keeps the proxy out of the data path even though `guardrail.enabled=true`. |
-| `guardrail.claudecode_enforcement_enabled`    | `false`           | Same as above for Claude Code.                                         |
 | `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
-| `guardrail.mode`                              | `observe`         | Sensible if-flipped-on-later default.                                  |
+| `guardrail.mode`                              | `observe`         | Default mode for hook-only connectors.                                 |
 | `<data_dir>/picked_connector`                 | selected connector | So `defenseclaw setup guardrail`, `init`, and quickstart default to the same connector on subsequent runs. |
 
 After both aliases run, the gateway is restarted (unless `--no-restart`

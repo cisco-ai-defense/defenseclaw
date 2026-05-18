@@ -1855,26 +1855,6 @@ def _apply_guardrail_extra_options(
         app.cfg.privacy.disable_redaction = bool(disable_redaction)
 
 
-def _connector_enforcement_flag(connector: str) -> str | None:
-    """Return the per-connector proxy/enforcement flag for native-hook connectors."""
-    if connector == "codex":
-        return "codex_enforcement_enabled"
-    if connector == "claudecode":
-        return "claudecode_enforcement_enabled"
-    return None
-
-
-def _set_connector_enforcement(gc, connector: str, enabled: bool) -> None:
-    flag = _connector_enforcement_flag(connector)
-    if flag:
-        setattr(gc, flag, bool(enabled))
-
-
-def _connector_enforcement_enabled(gc, connector: str) -> bool:
-    flag = _connector_enforcement_flag(connector)
-    return bool(getattr(gc, flag, False)) if flag else True
-
-
 # ---------------------------------------------------------------------------
 # setup guardrail
 # ---------------------------------------------------------------------------
@@ -1996,10 +1976,6 @@ def setup_guardrail(
             if picked:
                 gc.connector = picked
         gc.mode = guard_mode or gc.mode or "observe"
-        if gc.connector in ("codex", "claudecode") and (
-            guard_mode is not None or gc.mode == "action"
-        ):
-            _set_connector_enforcement(gc, gc.connector, True)
         gc.scanner_mode = scanner_mode or gc.scanner_mode or "local"
         if cisco_endpoint is not None:
             aid.endpoint = cisco_endpoint
@@ -2189,11 +2165,10 @@ def setup_guardrail(
 # would scan ``~/.openclaw/skills`` and miss every Codex skill — a
 # foot-gun we explicitly want to close.
 #
-# Enforcement (proxy data path, blocking) stays disabled. Operators who
-# later want to engage enforcement edit
-# ``guardrail.codex_enforcement_enabled`` /
-# ``guardrail.claudecode_enforcement_enabled`` in ~/.defenseclaw/config.yaml
-# and restart the gateway — see docs/OBSERVABILITY.md §9.
+# Codex and Claude Code are hook-only as of PR #265: there is no
+# proxy data path to engage, so the alias commands no longer flip
+# any enforcement flag. Observability runs unconditionally via the
+# native hook + OTel channels.
 
 # Stable hint filename used by ``defenseclaw setup guardrail`` and
 # ``defenseclaw quickstart`` to default the connector picker after a
@@ -2234,32 +2209,32 @@ def _write_picked_connector_hint(data_dir: str | None, connector: str) -> None:
         )
 
 
-def _apply_connector_observability_only(
+def _apply_hook_connector_setup(
     app: AppContext,
     *,
     connector: str,
+    mode: str = "observe",
     restart: bool,
 ) -> bool:
-    """Pin DefenseClaw to *connector* in observability-only mode.
+    """Pin DefenseClaw to *connector* in hook-driven mode.
 
-    Idempotent: running twice yields the same on-disk state. The
-    function:
+    Idempotent: running twice with the same arguments yields the same
+    on-disk state. The function:
 
       1. Sets ``guardrail.connector`` and ``claw.mode`` to *connector*
          so the active-connector resolver
          (``Config.active_connector``) returns *connector* even if a
          future ``guardrail.enabled = false`` toggle is applied.
-      2. Disables the matching enforcement flag
-         (``gc.codex_enforcement_enabled`` / ``gc.claudecode_enforcement_enabled``)
-         so the Go gateway's ``Connector.Setup()`` skips proxy
-         binding, openai_base_url / ANTHROPIC_BASE_URL rewriting, and
-         the subprocess-policy enforcement that come bundled with
-         "guardrail" mode for these connectors.
-      3. Sets ``gc.enabled=True``, ``gc.mode='observe'``,
-         ``gc.scanner_mode='local'``, ``gc.detection_strategy='regex_only'``
-         — sensible defaults so the YAML stays loadable if the
-         operator later flips enforcement on. The Go gateway never
-         reads these in observability mode.
+      2. Sets ``gc.enabled=True`` and ``gc.mode`` to the operator's
+         choice (``observe`` or ``action``). Both modes are supported
+         end-to-end via the hook surface: ``observe`` only records,
+         ``action`` returns a deny verdict from PreToolUse so the
+         agent blocks the tool call inside its own permission flow.
+         The LLM data path is direct-to-upstream in both cases — no
+         proxy listener binds for hook-enforced connectors.
+      3. Defaults scanner mode, detection strategy, AI-discovery
+         flags, etc., to sensible-for-hook-only values that keep the
+         YAML loadable.
       4. Persists config.yaml and writes the
          ``<data_dir>/picked_connector`` hint.
       5. When ``restart`` is true, bounces the gateway so its
@@ -2268,13 +2243,20 @@ def _apply_connector_observability_only(
 
     Returns True on success, False on any persistence error.
     """
-    if connector not in _OBSERVABILITY_ONLY_CONNECTORS:
+    if connector not in _HOOK_ENFORCED_CONNECTORS:
         click.echo(
-            f"  ✗ observability-only mode is only supported for "
-            f"{sorted(_OBSERVABILITY_ONLY_CONNECTORS)} (got {connector!r})",
+            f"  ✗ hook-driven setup is only supported for "
+            f"{sorted(_HOOK_ENFORCED_CONNECTORS)} (got {connector!r})",
             err=True,
         )
         return False
+
+    # Normalize mode at the boundary. Anything other than the literal
+    # ``action`` sentinel is downgraded to ``observe`` because failing-
+    # safe on a typo is strictly less surprising than enforcing on one.
+    desired_mode = (mode or "").strip().lower()
+    if desired_mode not in ("observe", "action"):
+        desired_mode = "observe"
 
     cfg = app.cfg
     gc = cfg.guardrail
@@ -2282,7 +2264,7 @@ def _apply_connector_observability_only(
     cfg.claw.mode = connector
     gc.connector = connector
     gc.enabled = True
-    gc.mode = "observe"
+    gc.mode = desired_mode
     gc.scanner_mode = "local"
     gc.port = gc.port or 4000
     gc.detection_strategy = "regex_only"
@@ -2295,8 +2277,6 @@ def _apply_connector_observability_only(
     cfg.ai_discovery.include_env_var_names = True
     cfg.ai_discovery.include_network_domains = True
 
-    _set_connector_enforcement(gc, connector, False)
-
     try:
         cfg.save()
         click.echo("  ✓ Config saved to ~/.defenseclaw/config.yaml")
@@ -2306,6 +2286,7 @@ def _apply_connector_observability_only(
 
     _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
     click.echo(f"  ✓ Active connector set to {connector!r} (claw.mode={connector})")
+    click.echo(f"  ✓ guardrail.mode={desired_mode}")
 
     _write_guardrail_runtime(cfg.data_dir, gc)
 
@@ -2322,24 +2303,41 @@ def _apply_connector_observability_only(
 
     if app.logger:
         app.logger.log_action(
-            "setup-connector-observability",
+            "setup-hook-connector",
             "config",
-            f"connector={connector} mode=observability_only enforcement=disabled",
+            f"connector={connector} mode={desired_mode} surface=hook",
         )
 
     return True
 
 
-def _print_connector_observability_banner(connector: str) -> None:
+# Backwards-compat alias for any out-of-tree callers; new code must
+# use ``_apply_hook_connector_setup`` directly. Forces observe mode
+# so the legacy contract is preserved bit-for-bit.
+def _apply_connector_observability_only(
+    app: AppContext,
+    *,
+    connector: str,
+    restart: bool,
+) -> bool:
+    return _apply_hook_connector_setup(
+        app, connector=connector, mode="observe", restart=restart,
+    )
+
+
+def _print_connector_observability_banner(connector: str, *, mode: str = "observe") -> None:
     label = _CONNECTOR_META[connector]["label"]
-    enforcement_flag = _connector_enforcement_flag(connector)
     click.echo()
-    click.echo(f"  DefenseClaw — {label} observability setup")
+    click.echo(f"  DefenseClaw — {label} {mode} setup")
     click.echo("  ─────────────────────────────────────────────────────────")
     click.echo()
-    click.echo(f"  This wires {label} telemetry into DefenseClaw WITHOUT")
-    click.echo("  inserting a proxy in the data path. No traffic is")
-    click.echo("  intercepted, no requests are blocked.")
+    click.echo(f"  This wires {label} into DefenseClaw via the agent's")
+    click.echo("  native hook bus. No proxy is inserted in the LLM data")
+    if mode == "action":
+        click.echo("  path; tool calls flagged by policy are blocked by the")
+        click.echo("  PreToolUse hook returning a deny verdict.")
+    else:
+        click.echo("  path; activity is recorded but never blocked.")
     click.echo()
     click.echo("  Telemetry channels:")
     click.echo(
@@ -2358,29 +2356,30 @@ def _print_connector_observability_banner(connector: str) -> None:
             "→ /api/v1/codex/notify"
         )
     click.echo()
-    if enforcement_flag:
-        click.echo(f"  To later turn proxy interception on, set guardrail.{enforcement_flag}=true")
+    if mode == "observe":
+        click.echo("  To later turn enforcement on, set guardrail.mode=action")
         click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
     else:
-        click.echo("  To later enforce supported hook events, set connector_hooks.<name>.mode=action")
-        click.echo("  (or guardrail.mode=action) and restart the gateway.")
+        click.echo("  To revert to observe-only, set guardrail.mode=observe")
+        click.echo("  in ~/.defenseclaw/config.yaml and restart the gateway.")
     click.echo()
     _print_connector_mutation_notice(connector)
     click.echo()
 
 
-def _print_observability_summary(connector: str, cfg=None) -> None:
+def _print_observability_summary(connector: str, cfg=None, *, mode: str = "observe") -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
+    enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
     click.echo()
     click.echo("  Summary")
     click.echo("  ───────")
     rows = [
         ("connector", f"{label} ({connector})"),
         ("claw.mode", connector),
-        ("guardrail.enabled", "true (observability-only)"),
-        ("guardrail.mode", "observe"),
-        ("enforcement", "disabled"),
+        ("guardrail.enabled", "true"),
+        ("guardrail.mode", mode),
+        ("enforcement", enforcement_label),
         ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
     for k, v in rows:
@@ -2492,39 +2491,49 @@ def _setup_observability_alias(
     yes: bool,
     restart: bool,
     with_local_stack: bool,
+    mode: str = "observe",
 ) -> None:
-    """Shared body for observability-only connector setup aliases.
+    """Shared body for hook-based connector setup aliases.
 
     Splitting this out (rather than calling each Click command from
     the other) keeps the wiring linear: each Click command parses its
     own flags, then defers to this helper for the actual work.
+
+    *mode* defaults to ``observe`` (the safe one-line setup the alias
+    was designed for). Pass ``action`` to provision hook-driven
+    enforcement: PreToolUse returns a deny verdict on policy hits
+    and the agent blocks inside its own permission flow. The LLM
+    data path is direct-to-upstream in either mode.
     """
-    if connector not in _OBSERVABILITY_ONLY_CONNECTORS:
+    if connector not in _HOOK_ENFORCED_CONNECTORS:
         raise click.ClickException(
-            f"unsupported connector for observability alias: {connector!r}"
+            f"unsupported connector for hook alias: {connector!r}"
         )
 
-    _print_connector_observability_banner(connector)
+    normalized_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
+    _print_connector_observability_banner(connector, mode=normalized_mode)
 
     if not yes:
+        verb = "enforcement" if normalized_mode == "action" else "observability"
         if not click.confirm(
             f"  Configure DefenseClaw for {_CONNECTOR_META[connector]['label']} "
-            "observability now?",
+            f"{verb} now?",
             default=True,
         ):
             click.echo("  Aborted — no changes made.")
             return
 
-    ok = _apply_connector_observability_only(
-        app, connector=connector, restart=restart,
+    ok = _apply_hook_connector_setup(
+        app, connector=connector, mode=normalized_mode, restart=restart,
     )
     if not ok:
         raise click.ClickException(
-            f"failed to configure {connector} observability — see errors above"
+            f"failed to configure {connector} (mode={normalized_mode}) — "
+            "see errors above"
         )
 
     _maybe_bring_up_local_stack(app, auto=with_local_stack)
-    _print_observability_summary(connector, app.cfg)
+    _print_observability_summary(connector, app.cfg, mode=normalized_mode)
 
 
 @setup.command("codex")
@@ -2546,11 +2555,28 @@ def _setup_observability_alias(
         "`defenseclaw setup local-observability up` once config is saved."
     ),
 )
+@click.option(
+    "--mode",
+    type=click.Choice(["observe", "action"], case_sensitive=False),
+    default="observe", show_default=True,
+    help=(
+        "Hook policy mode. observe records only; action returns a deny "
+        "verdict from PreToolUse on policy hits so Codex blocks the "
+        "tool call inside its own permission flow. No proxy is involved "
+        "in either mode."
+    ),
+)
 @pass_ctx
-def setup_codex(app: AppContext, yes: bool, restart: bool, with_local_stack: bool) -> None:
-    """Configure DefenseClaw for Codex observability (no enforcement).
+def setup_codex(
+    app: AppContext,
+    yes: bool,
+    restart: bool,
+    with_local_stack: bool,
+    mode: str,
+) -> None:
+    """Configure DefenseClaw for Codex via the hook bus.
 
-    Alias for the observability-only path of ``setup guardrail`` with
+    Alias for the hook-driven path of ``setup guardrail`` with
     ``--connector codex``. Pins ``claw.mode=codex`` so the TUI, skill
     scanner, MCP scanner, and plugin scanner read from ``~/.codex/``
     instead of the OpenClaw default layout.
@@ -2565,10 +2591,11 @@ def setup_codex(app: AppContext, yes: bool, restart: bool, with_local_stack: boo
       • Notify  — agent-turn-complete webhooks via the bundled
                   notify-bridge.sh shim
 
-    No proxy listener binds; Codex talks directly to its native
-    upstream. Enforcement code stays in place behind
-    ``guardrail.codex_enforcement_enabled`` — flip to ``true`` and
-    restart the gateway to re-engage the proxy.
+    Default mode is ``observe`` (record only). Pass ``--mode action``
+    to provision hook-driven enforcement: the PreToolUse hook returns
+    a deny verdict on policy hits and Codex blocks via its permission
+    flow. No proxy listener binds in either mode — Codex talks
+    directly to its native upstream.
     """
     _setup_observability_alias(
         app,
@@ -2576,6 +2603,7 @@ def setup_codex(app: AppContext, yes: bool, restart: bool, with_local_stack: boo
         yes=yes,
         restart=restart,
         with_local_stack=with_local_stack,
+        mode=mode,
     )
 
 
@@ -2598,13 +2626,28 @@ def setup_codex(app: AppContext, yes: bool, restart: bool, with_local_stack: boo
         "`defenseclaw setup local-observability up` once config is saved."
     ),
 )
+@click.option(
+    "--mode",
+    type=click.Choice(["observe", "action"], case_sensitive=False),
+    default="observe", show_default=True,
+    help=(
+        "Hook policy mode. observe records only; action returns a deny "
+        "verdict from PreToolUse on policy hits so Claude Code blocks "
+        "the tool call inside its own permission flow. No proxy is "
+        "involved in either mode."
+    ),
+)
 @pass_ctx
 def setup_claude_code(
-    app: AppContext, yes: bool, restart: bool, with_local_stack: bool,
+    app: AppContext,
+    yes: bool,
+    restart: bool,
+    with_local_stack: bool,
+    mode: str,
 ) -> None:
-    """Configure DefenseClaw for Claude Code observability (no enforcement).
+    """Configure DefenseClaw for Claude Code via the hook bus.
 
-    Alias for the observability-only path of ``setup guardrail`` with
+    Alias for the hook-driven path of ``setup guardrail`` with
     ``--connector claudecode``. Pins ``claw.mode=claudecode`` so the
     TUI, skill scanner, MCP scanner, and plugin scanner read from
     ``~/.claude/`` instead of the OpenClaw default layout.
@@ -2617,10 +2660,12 @@ def setup_claude_code(
       • OTel  — native Claude Code OTel exporter (env-driven) pointing
                 at the gateway's /v1/logs and /v1/metrics
 
-    No proxy listener binds; Claude Code talks directly to its native
-    upstream. Enforcement code stays in place behind
-    ``guardrail.claudecode_enforcement_enabled`` — flip to ``true`` and
-    restart the gateway to re-engage the proxy.
+    Default mode is ``observe`` (record only). Pass ``--mode action``
+    to provision hook-driven enforcement: the PreToolUse hook returns
+    a deny verdict on policy hits and Claude Code blocks via its
+    native permission flow (including HITL when ``--human-approval``
+    is on). No proxy listener binds in either mode — Claude Code
+    talks directly to its native upstream.
     """
     _setup_observability_alias(
         app,
@@ -2628,22 +2673,24 @@ def setup_claude_code(
         yes=yes,
         restart=restart,
         with_local_stack=with_local_stack,
+        mode=mode,
     )
 
 
 def _make_observability_setup_command(connector: str) -> click.Command:
-    """Create a ``defenseclaw setup <connector>`` observability alias."""
+    """Create a ``defenseclaw setup <connector>`` hook-driven alias."""
     label = _CONNECTOR_META[connector]["label"]
 
     @click.command(
         connector,
         help=(
-            f"Configure DefenseClaw for {label} observability (no enforcement).\n\n"
+            f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
             "Pins the active connector so CLI/TUI scanners read that agent's "
-            "documented local surfaces. Enforcement remains opt-in through "
-            "`defenseclaw setup guardrail` or connector hook action mode."
+            "documented local surfaces. Default mode is observe; pass "
+            "--mode action to enable hook-driven blocking on policy hits "
+            "(PreToolUse deny verdict). No proxy is involved in either mode."
         ),
-        short_help=f"Configure DefenseClaw for {label} observability.",
+        short_help=f"Configure DefenseClaw for {label}.",
     )
     @click.option(
         "--yes", "-y", "yes",
@@ -2668,22 +2715,39 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             "`defenseclaw setup local-observability up` once config is saved."
         ),
     )
+    @click.option(
+        "--mode",
+        type=click.Choice(["observe", "action"], case_sensitive=False),
+        default="observe", show_default=True,
+        help=(
+            "Hook policy mode. observe records only; action returns a "
+            "deny verdict from PreToolUse on policy hits so the agent "
+            "blocks the tool call inside its own permission flow."
+        ),
+    )
     @pass_ctx
-    def _cmd(app: AppContext, yes: bool, restart: bool, with_local_stack: bool) -> None:
+    def _cmd(
+        app: AppContext,
+        yes: bool,
+        restart: bool,
+        with_local_stack: bool,
+        mode: str,
+    ) -> None:
         _setup_observability_alias(
             app,
             connector=connector,
             yes=yes,
             restart=restart,
             with_local_stack=with_local_stack,
+            mode=mode,
         )
 
     _cmd.__name__ = f"setup_{connector}"
     _cmd.__doc__ = (
-        f"Configure DefenseClaw for {label} observability (no enforcement).\n\n"
+        f"Configure DefenseClaw for {label} via the agent's hook bus.\n\n"
         "Pins the active connector so CLI/TUI scanners read that agent's "
-        "documented local surfaces. Enforcement remains opt-in through "
-        "`defenseclaw setup guardrail` or connector hook action mode."
+        "documented local surfaces. Default mode is observe; pass "
+        "--mode action to enable hook-driven blocking on policy hits."
     )
     return _cmd
 
@@ -2692,14 +2756,28 @@ for _observability_connector in ("hermes", "cursor", "windsurf", "geminicli", "c
     setup.add_command(_make_observability_setup_command(_observability_connector))
 
 
-# Connectors that go through the DefenseClaw proxy (port 4000) and
-# therefore support the full guardrail enforcement surface (block,
-# observe, scanner_mode, judge, etc.). The complement set
-# _OBSERVABILITY_ONLY_CONNECTORS talks directly to its native upstream
-# and DefenseClaw collects telemetry via hook scripts and, where the
-# vendor documents it, native OTLP without sitting in the LLM data path.
-_GUARDRAIL_SUPPORTING_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
-_OBSERVABILITY_ONLY_CONNECTORS = frozenset({
+# Two orthogonal facts about a connector — split deliberately so the
+# wizard, doctor, and TUI can talk about each independently:
+#
+#   * _PROXY_BACKED_CONNECTORS — connectors whose enforcement path
+#     interposes a local HTTP proxy on the LLM data path (port 4000).
+#     openclaw and zeptoclaw bind the proxy listener at gateway boot
+#     and route requests through Bifrost.
+#
+#   * _HOOK_ENFORCED_CONNECTORS — connectors whose enforcement path is
+#     the agent's own hook bus (PreToolUse / UserPromptSubmit /
+#     PostToolUse). The agent talks directly to its native upstream;
+#     DefenseClaw observes via hooks + (where the vendor documents it)
+#     native OTLP, and BLOCKS by returning a deny verdict from the
+#     PreToolUse hook. ``mode=action`` IS supported on this surface —
+#     it's hook-driven blocking, not proxy-driven.
+#
+# Action mode is supported on both surfaces; the difference is only
+# the data-path topology and the proxy listener binding decision. The
+# observability-only label is reserved for installs where the operator
+# explicitly picks mode=observe.
+_PROXY_BACKED_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+_HOOK_ENFORCED_CONNECTORS = frozenset({
     "codex",
     "claudecode",
     "hermes",
@@ -2708,6 +2786,15 @@ _OBSERVABILITY_ONLY_CONNECTORS = frozenset({
     "geminicli",
     "copilot",
 })
+
+# Legacy alias retained as a backstop for any out-of-tree code that
+# imported the old name. New call sites must use one of the two named
+# sets above. Slated for deletion once internal docs catch up.
+_OBSERVABILITY_ONLY_CONNECTORS = _HOOK_ENFORCED_CONNECTORS
+
+# Kept as separate name for legibility at call sites that mean
+# "supports the proxy enforcement surface".
+_GUARDRAIL_SUPPORTING_CONNECTORS = _PROXY_BACKED_CONNECTORS
 
 
 def _setup_guardrail_connector_alias(
@@ -2914,30 +3001,28 @@ def _apply_connector_mode_switch(
             stays set. Only ``claw.mode`` and ``guardrail.connector``
             change.
 
-      • {openclaw|zeptoclaw} → {codex|claudecode}
-            Switch to observability-only template via
-            ``_apply_connector_observability_only``: the proxy stops
-            binding, the Go gateway wires hook scripts + OTel
-            exporter, and the matching ``*_enforcement_enabled`` flag
-            is forced to false. Existing ``mode`` / scanner /  judge
-            settings stay on disk so flipping back later restores the
-            previous posture.
+      • {openclaw|zeptoclaw} → hook-enforced connector
+            Switch to the hook-based template via
+            ``_apply_hook_connector_setup``: the proxy stops binding
+            and the Go gateway wires hook scripts + (where the vendor
+            documents it) native OTel. ``guardrail.mode`` is preserved
+            verbatim so an operator running on ``action`` keeps
+            enforcement — via the destination's PreToolUse deny verdict
+            rather than the proxy. Use ``--observe`` to force
+            observe-only.
 
-      • {codex|claudecode} → {openclaw|zeptoclaw}
+      • hook-enforced → {openclaw|zeptoclaw}
             Treat as a "guardrail-supporting but don't auto-block"
             switch: enable guardrail in observe mode so the proxy
             binds and we collect telemetry, but never turn enforcement
             on without an explicit ``defenseclaw setup guardrail`` run.
-            This matches the user's stated intent ("only observability
-            and no guardrails when switching between
-            zeptoclaw/openclaw and codex/claude code") while keeping
-            the proxy listener live, since openclaw/zeptoclaw require
-            it to function.
+            This avoids silently re-enabling proxy-driven blocking
+            against an upstream that may now reject the proxy URL.
 
-      • {codex|claudecode} ↔ {codex|claudecode}
-            Both observability-only — apply the destination's
-            template so the right enforcement flag is cleared and the
-            ``connector`` field is realigned.
+      • hook-enforced ↔ hook-enforced
+            Apply the destination's hook template so ``claw.mode``,
+            ``guardrail.connector``, and the hook-script footprint are
+            realigned. ``guardrail.mode`` is preserved.
 
     Returns True on success, False on persistence error.
     """
@@ -2965,17 +3050,31 @@ def _apply_connector_mode_switch(
         return True
 
     # Branch on the destination kind. Source kind only matters for
-    # the third bullet above (recover guardrail state when leaving
-    # observability-only).
-    if new_connector in _OBSERVABILITY_ONLY_CONNECTORS:
+    # the third bullet above (recover guardrail state when leaving a
+    # hook-enforced connector).
+    if new_connector in _HOOK_ENFORCED_CONNECTORS:
+        # Preserve the operator's existing enforcement posture across
+        # the switch. The hook-enforced surface honors both ``observe``
+        # and ``action``, so flipping connectors should not silently
+        # downgrade enforcement; an operator who was on action stays
+        # on action and the destination's PreToolUse hook picks up
+        # the policy load.
+        carry_mode = (gc.mode or "").strip().lower()
+        if carry_mode not in ("observe", "action"):
+            carry_mode = "observe"
+        suffix = (
+            "hook-enforced — PreToolUse blocks on policy hits"
+            if carry_mode == "action"
+            else "hook-driven observe (no proxy listener)"
+        )
         click.echo(
             f"  Switching {_CONNECTOR_META[prev]['label']} → "
             f"{_CONNECTOR_META[new_connector]['label']} "
-            f"(observability-only — proxy disabled)"
+            f"({suffix})"
         )
         _print_connector_mutation_notice(new_connector, switching_from=prev)
-        return _apply_connector_observability_only(
-            app, connector=new_connector, restart=restart,
+        return _apply_hook_connector_setup(
+            app, connector=new_connector, mode=carry_mode, restart=restart,
         )
 
     # Destination is openclaw or zeptoclaw.
@@ -3716,89 +3815,29 @@ def _interactive_guardrail_setup(
     _print_connector_info(gc.connector)
     click.echo()
 
-    # Codex and Claude Code have two valid setup modes. Their default
-    # aliases (`setup codex`, `setup claude-code`) stay observability-only,
-    # but the guardrail wizard must also expose the full guardrail path so
-    # operators can choose action mode and HILT without hand-editing YAML.
-    if gc.connector in ("codex", "claudecode"):
-        proxy_port = gc.port or 4000
-        label = _CONNECTOR_META.get(gc.connector, {}).get("label", gc.connector)
-        click.echo("  ┌──────────────────────────────────────────────────────────────┐")
-        click.echo("  │  Connector integration mode                                  │")
-        click.echo("  └──────────────────────────────────────────────────────────────┘")
-        click.echo()
-        click.echo(f"  {label} can run in either mode:")
-        click.echo()
-        click.echo("    [1] observability-only — hooks + OTel, direct native upstream, no blocking")
-        click.echo("    [2] guardrail setup    — hooks + OTel + proxy path; choose observe/action next")
-        click.echo()
-        default_choice = "2" if (
-            _connector_enforcement_enabled(gc, gc.connector) or gc.mode == "action"
-        ) else "1"
-        integration_choice = click.prompt(
-            "  Select integration mode",
-            type=click.Choice(["1", "2"]),
-            default=default_choice,
-        )
-        if integration_choice == "1":
-            click.echo()
-            click.echo("  Observability-only mode")
-            click.echo("  ───────────────────────")
-            click.echo(f"  {label} talks DIRECTLY to its native upstream;")
-            click.echo("  DefenseClaw is NOT in the data path. Telemetry runs end-to-end via:")
-            click.echo()
-            click.echo("    • Hooks: tool-call events (PreToolUse, PostToolUse,")
-            click.echo("      UserPromptSubmit, Stop, PermissionRequest) → /api/v1/<connector>/hook")
-            click.echo("    • OTel: native exporter writes structured logs + metrics")
-            click.echo("      (raw API bodies, model + token counts) to /v1/logs and /v1/metrics")
-            click.echo("    • Notify: agent-turn-complete events (codex only) → /api/v1/codex/notify")
-            click.echo()
-            if not click.confirm("  Enable observability for " + gc.connector + "?", default=True):
-                gc.enabled = False
-                return
-
-            # Sensible "if-you-ever-flip-enforcement-on" defaults so the
-            # config.yaml stays loadable. The Go gateway never reads these
-            # fields when enforcement is off — they live as forward-looking
-            # state for the operator who later wants to switch modes.
-            gc.enabled = True
-            gc.mode = "observe"
-            gc.scanner_mode = "local"
-            gc.port = proxy_port
-            gc.judge.enabled = False
-            gc.detection_strategy = "regex_only"
-            gc.detection_strategy_completion = "regex_only"
-            _set_connector_enforcement(gc, gc.connector, False)
-
-            # Observability-only generates the same hook scripts as the
-            # full guardrail flow (codex-hook.sh / claude-code-hook.sh
-            # both render ``FAIL_MODE`` from this field), so we must
-            # surface the choice on first-time setup. Skipping it here
-            # would leave operators with no opportunity to set
-            # ``hook_fail_mode`` until they discover
-            # ``defenseclaw guardrail fail-mode``.
-            if was_initial_setup:
-                _prompt_hook_fail_mode(gc)
-
-            click.echo()
-            click.echo("  ✓ Observability mode enabled (no traffic interception)")
-            click.echo("  ✓ Hooks + OTel + notify telemetry will be wired automatically at gateway boot")
-            click.echo()
-            return
-
-        _set_connector_enforcement(gc, gc.connector, True)
-        click.echo()
-        click.echo("  ✓ Guardrail setup selected; hooks + OTel stay enabled.")
+    # Codex and Claude Code are hook-enforced — they go through the
+    # same mode-prompt flow as the other hook connectors below. The
+    # earlier "observability-only vs. guardrail proxy" fork has been
+    # retired with the proxy data path; the only remaining question
+    # is observe vs. action, which the standard mode prompt asks.
 
     model_name = gc.model_name or gc.model or ""
     if model_name:
         click.echo(f"  Detected LLM:  {model_name}")
     proxy_port = gc.port or 4000
-    if gc.connector in ("codex", "claudecode"):
-        click.echo(f"  Proxy port:    {proxy_port} (enabled for this connector setup)")
-    elif gc.connector in _OBSERVABILITY_ONLY_CONNECTORS:
-        api_port = getattr(app.cfg.gateway, "api_port", 18970)
-        click.echo(f"  API port:      {api_port} (hook endpoint only; no LLM proxy binding)")
+    if gc.connector in _HOOK_ENFORCED_CONNECTORS:
+        # Reach into ``cfg.gateway`` defensively — the wizard is also
+        # exercised by tests against a SimpleNamespace cfg that may
+        # not carry the gateway sub-config. Falling back to the
+        # canonical default (18970) keeps the message accurate
+        # everywhere it is rendered.
+        gateway_cfg = getattr(app.cfg, "gateway", None)
+        api_port = getattr(gateway_cfg, "api_port", 18970) if gateway_cfg else 18970
+        click.echo(
+            f"  API port:      {api_port} "
+            "(hook endpoint — PreToolUse deny is the enforcement surface; "
+            "no LLM proxy binding)"
+        )
     else:
         click.echo(f"  Proxy port:    {proxy_port} (traffic rerouted automatically)")
     click.echo()
@@ -3907,6 +3946,15 @@ def _interactive_guardrail_setup(
     gc.port = proxy_port
 
     # --- LLM Judge section ---
+    #
+    # The judge is a gateway-side verification layer that runs on
+    # any inspectable payload — proxy responses for the proxy data
+    # path, AND hook events (UserPromptSubmit, PreToolUse) for the
+    # hook-enforced connectors. So we offer it for every connector
+    # type. The hook surface stamps the verdict on the deny verdict
+    # exactly the same way the proxy surface stamps it on the
+    # response body, which is why the operator's judge config is
+    # connector-agnostic.
     ux.section("LLM Judge (reduces false positives)")
     ux.subhead("Uses an LLM to verify detections and catch novel attacks.")
     ux.subhead("Works with any OpenAI-compatible API (Bifrost, OpenAI, Anthropic, etc.)")
@@ -4351,9 +4399,20 @@ def _restart_services(
     if connector == "openclaw":
         _restart_openclaw_gateway()
         _check_openclaw_gateway(oc_host, oc_port)
-    else:
+    elif connector in _PROXY_BACKED_CONNECTORS:
+        # OpenClaw is the only proxy-backed connector that owns its own
+        # gateway process; others (ZeptoClaw today) get the proxy
+        # message without the separate openclaw-gateway restart step.
         ux.subhead(
             f"{connector} connector: traffic will route through defenseclaw-gateway proxy."
+        )
+    elif connector in _HOOK_ENFORCED_CONNECTORS:
+        # No proxy listener binds for hook-only connectors — the agent
+        # talks directly to its native upstream and DefenseClaw
+        # observes/enforces via the hook bus on the sidecar API port.
+        ux.subhead(
+            f"{connector} connector: enforcement via hook bus on the sidecar API port. "
+            f"No proxy listener — {connector} talks directly to its native upstream."
         )
 
     click.echo()

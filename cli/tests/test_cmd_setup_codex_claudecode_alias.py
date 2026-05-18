@@ -11,24 +11,21 @@
 
 """Regression tests for the ``setup codex`` / ``setup claude-code`` aliases.
 
-These aliases configure DefenseClaw for observability-only operation
-against a single connector (Codex / Claude Code) and flip ``claw.mode``
-so the rest of the CLI/TUI surfaces the matching connector's source-of-
-truth files (``~/.codex`` / ``~/.claude``) instead of the OpenClaw
-default layout.
+These aliases configure DefenseClaw for hook-only operation against a
+single connector (Codex / Claude Code) and flip ``claw.mode`` so the
+rest of the CLI/TUI surfaces the matching connector's source-of-truth
+files (``~/.codex`` / ``~/.claude``) instead of the OpenClaw default
+layout.
 
-The tests pin three architectural invariants:
+The tests pin two architectural invariants:
 
-1. **No proxy data path.** The matching ``*_enforcement_enabled`` flag
-   must come back from the alias as ``False`` no matter what its
-   previous value was.
-2. **Connector identity flows everywhere.** Both
+1. **Connector identity flows everywhere.** Both
    ``cfg.guardrail.connector`` and ``cfg.claw.mode`` must be set so
    downstream consumers (Go ``activeConnector()``, Python
    ``Config.active_connector``, the TUI's
    ``ActiveConnectorName``, plus skill / MCP / plugin readers) all
    agree on which framework is active.
-3. **Persistence + hint.** Running an alias must persist
+2. **Persistence + hint.** Running an alias must persist
    ``config.yaml`` and update ``<data_dir>/picked_connector`` so a
    subsequent ``defenseclaw setup guardrail`` defaults to the same
    connector.
@@ -76,8 +73,6 @@ class TestSetupCodexAlias(unittest.TestCase):
         # silently leaves these alone is caught.
         self.app.cfg.claw.mode = "openclaw"
         self.app.cfg.guardrail.connector = "openclaw"
-        self.app.cfg.guardrail.codex_enforcement_enabled = True
-        self.app.cfg.guardrail.claudecode_enforcement_enabled = True
         # Make ``cfg.save()`` a fast no-op disk write to a temp file
         # so the alias's persistence step actually runs and we can
         # assert on the post-write state.
@@ -113,26 +108,6 @@ class TestSetupCodexAlias(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "codex")
         # ``Config.active_connector`` must agree.
         self.assertEqual(self.app.cfg.active_connector(), "codex")
-
-    def test_disables_codex_enforcement(self):
-        """Even when the previous flag was True, the alias must zero it."""
-        # Pre-seed claudecode enforcement to False so we can prove the
-        # codex alias doesn't accidentally toggle the sibling flag in
-        # either direction.
-        self.app.cfg.guardrail.claudecode_enforcement_enabled = False
-
-        result = self._run()
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertFalse(
-            self.app.cfg.guardrail.codex_enforcement_enabled,
-            "setup codex must disable enforcement (no proxy data path)",
-        )
-        # Sibling flag stayed False — codex alias never touches
-        # claudecode enforcement.
-        self.assertFalse(
-            self.app.cfg.guardrail.claudecode_enforcement_enabled,
-            "setup codex must not enable claudecode enforcement",
-        )
 
     def test_observability_defaults_are_loadable(self):
         """The persisted observability defaults must be sensible.
@@ -195,8 +170,6 @@ class TestSetupClaudeCodeAlias(unittest.TestCase):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.app.cfg.claw.mode = "openclaw"
         self.app.cfg.guardrail.connector = "openclaw"
-        self.app.cfg.guardrail.codex_enforcement_enabled = True
-        self.app.cfg.guardrail.claudecode_enforcement_enabled = True
         self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
 
         def _save():
@@ -224,20 +197,6 @@ class TestSetupClaudeCodeAlias(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
         self.assertEqual(self.app.cfg.active_connector(), "claudecode")
-
-    def test_disables_claudecode_enforcement(self):
-        result = self._run()
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertFalse(
-            self.app.cfg.guardrail.claudecode_enforcement_enabled,
-            "setup claude-code must disable enforcement (no proxy data path)",
-        )
-        # Codex enforcement is unrelated and must not be touched in
-        # the direction it was previously set.
-        self.assertTrue(
-            self.app.cfg.guardrail.codex_enforcement_enabled,
-            "setup claude-code must not clear codex enforcement",
-        )
 
     def test_writes_picked_connector_hint(self):
         result = self._run()
@@ -330,7 +289,6 @@ class TestSetupCodexAliasInteractiveDecline(unittest.TestCase):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.app.cfg.claw.mode = "openclaw"
         self.app.cfg.guardrail.connector = "openclaw"
-        self.app.cfg.guardrail.codex_enforcement_enabled = True
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -348,11 +306,9 @@ class TestSetupCodexAliasInteractiveDecline(unittest.TestCase):
         ):
             result = _invoke(["codex"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # No mutation: connector/claw mode untouched, enforcement
-        # flag preserved.
+        # No mutation: connector / claw mode untouched.
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
-        self.assertTrue(self.app.cfg.guardrail.codex_enforcement_enabled)
         # Hint file must not be written when the operator aborted.
         hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
         self.assertFalse(
@@ -415,7 +371,6 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
             snapshot_first = (
                 self.app.cfg.claw.mode,
                 self.app.cfg.guardrail.connector,
-                self.app.cfg.guardrail.codex_enforcement_enabled,
                 self.app.cfg.guardrail.mode,
             )
 
@@ -426,7 +381,6 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
             snapshot_second = (
                 self.app.cfg.claw.mode,
                 self.app.cfg.guardrail.connector,
-                self.app.cfg.guardrail.codex_enforcement_enabled,
                 self.app.cfg.guardrail.mode,
             )
 

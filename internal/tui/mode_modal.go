@@ -179,9 +179,9 @@ func (p *ModePickerModal) previewForSwitch(dest string) string {
 	}
 	destGuard := isGuardrailSupporting(dest)
 	if destGuard {
-		return "Runs full guardrail-capable connector setup and pins claw.mode plus guardrail.connector."
+		return "Runs proxy-backed connector setup and pins claw.mode plus guardrail.connector; preserves the existing guardrail.mode."
 	}
-	return "Runs observability-only connector setup — wires hooks, native OTel where supported, and CodeGuard surfaces."
+	return "Runs hook-driven connector setup — wires hooks, native OTel where supported, and CodeGuard surfaces. Honors guardrail.mode (action blocks via PreToolUse deny verdict)."
 }
 
 func isGuardrailSupporting(wire string) bool {

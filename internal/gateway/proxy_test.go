@@ -3301,21 +3301,9 @@ func TestHydrateConnectorSignals_NoSnapshotIsNoOp(t *testing.T) {
 
 // TestHydrateConnectorSignals_PerConnector — plan E1 / item 2.
 //
-// Closes the four-cell hydration matrix the plan called for:
-//
-//   - openclaw   — fetch-interceptor; Route() does not emit RawUpstream.
-//   - claudecode — fetch-interceptor; Route() does not emit RawUpstream.
-//   - zeptoclaw  — native binary; Route() resolves upstream from the
-//     provider snapshot captured at Setup.
-//   - codex      — native binary; Route() resolves upstream from the
-//     provider snapshot captured at Setup.
-//
-// The snapshot-vs-fetch-interceptor split is a per-connector contract,
-// not a runtime negotiation, so this test pins the four cells in one
-// place to keep regressions loud (e.g. someone removing
-// resolveUpstream() from a connector that used to need it would
-// silently fall through to "let the OpenAI-compat default fire" and
-// hit the wrong upstream).
+// OpenClaw uses fetch-interceptor headers; Codex and Claude Code are
+// hook-only (Route does not emit RawUpstream). ZeptoClaw resolves
+// upstream from its provider snapshot.
 func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -3332,7 +3320,7 @@ func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
 			bodyJSON: `{"model":"gpt-4"}`,
 		},
 		{
-			name:     "claudecode_fetch_interceptor_no_snapshot",
+			name:     "claudecode_hook_only_no_snapshot",
 			build:    func() connector.Connector { return connector.NewClaudeCodeConnector() },
 			wantHas:  false,
 			bodyJSON: `{"model":"claude-3-5-sonnet-20241022"}`,
@@ -3352,20 +3340,9 @@ func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
 			bodyJSON: `{"model":"anthropic/claude-sonnet-4.5"}`,
 		},
 		{
-			name: "codex_snapshot_drives_upstream",
-			build: func() connector.Connector {
-				c := connector.NewCodexConnector()
-				c.SetProviderSnapshot(map[string]connector.CodexProviderEntry{
-					"openai": {
-						BaseURL: "https://api.openai.com/v1",
-						APIKey:  "sk-codex-snap",
-					},
-				})
-				return c
-			},
-			wantURL:  "https://api.openai.com/v1",
-			wantKey:  "sk-codex-snap",
-			wantHas:  true,
+			name:     "codex_hook_only_no_snapshot",
+			build:    func() connector.Connector { return connector.NewCodexConnector() },
+			wantHas:  false,
 			bodyJSON: `{"model":"gpt-5"}`,
 		},
 	}
@@ -3385,7 +3362,7 @@ func TestHydrateConnectorSignals_PerConnector(t *testing.T) {
 				}
 			} else {
 				if upstream != "" || key != "" {
-					t.Errorf("fetch-interceptor connector %q should emit no upstream, got upstream=%q key=%q",
+					t.Errorf("connector %q should emit no upstream hydration, got upstream=%q key=%q",
 						conn.Name(), upstream, key)
 				}
 			}

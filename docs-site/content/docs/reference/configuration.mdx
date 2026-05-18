@@ -91,10 +91,6 @@ guardrail:
     enabled: false
     min_severity: HIGH         # stored uppercase; CLI accepts high|medium|low|critical
 
-  # Per-connector enforcement gates. setup aliases manage these for you.
-  claudecode_enforcement_enabled: false
-  codex_enforcement_enabled: false
-
 # Top-level redaction switches; persistent kill-switches are deliberately
 # top-level so multi-tenant operators can audit them without grepping the
 # guardrail block.

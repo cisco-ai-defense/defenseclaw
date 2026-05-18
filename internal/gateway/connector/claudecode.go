@@ -19,7 +19,6 @@ package connector
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -29,10 +28,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
-// ClaudeCodeConnector handles all security surfaces for Claude Code.
-// LLM traffic: sets ANTHROPIC_BASE_URL to route through proxy.
-// Tool inspection: registers hooks in ~/.claude/settings.json pointing to
-// claude-code-hook.sh which calls /api/v1/claude-code/hook.
+// ClaudeCodeConnector is the hook-only security surface for Claude
+// Code. It does not interpose on chat traffic; the CLI talks directly
+// to api.anthropic.com. The connector wires two telemetry/inspection
+// channels into ~/.claude/settings.json:
+//   - claude-code-hook.sh under hooks for tool-call inspection
+//   - OTel env block for native OTLP telemetry to the gateway
+//
 // Implements ComponentScanner, StopScanner.
 type ClaudeCodeConnector struct {
 	gatewayToken string
@@ -61,42 +63,7 @@ func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy {
 	return ResolveSubprocessPolicy(SubprocessSandbox)
 }
 
-// AllowedHosts returns the Anthropic CDN hostnames Claude Code
-// touches outside the LLM endpoint itself — skill manifests,
-// plugin registry, telemetry. api.anthropic.com is already in the
-// firewall's static defaults; this list adds the auxiliary hosts.
-// See S3.3 / F26.
-func (c *ClaudeCodeConnector) AllowedHosts() []string {
-	return []string{
-		// Skill/plugin registry CDN.
-		"claude.ai",
-		// Marketplace + docs CDN.
-		"docs.anthropic.com",
-		"console.anthropic.com",
-		// Project CodeGuard native plugin installation.
-		"github.com",
-		"api.github.com",
-		"objects.githubusercontent.com",
-	}
-}
-
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	// writeEnvOverride installs the ANTHROPIC_BASE_URL redirect that
-	// puts the DefenseClaw proxy in Claude Code's data path. Gated
-	// on opts.ClaudeCodeEnforcement so the default install runs in
-	// observability-only mode: claude code talks DIRECTLY to
-	// api.anthropic.com, no env-override file is written, and no
-	// proxy interception happens. Hooks (next block) and OTel env
-	// (the new patchClaudeCodeOtelEnv block — added in a follow-up
-	// commit) still run, giving complete telemetry without traffic
-	// interception. Operator can flip enforcement back on with
-	// guardrail.claudecode_enforcement_enabled: true in config.yaml.
-	if opts.ClaudeCodeEnforcement {
-		if err := c.writeEnvOverride(opts); err != nil {
-			return fmt.Errorf("claudecode env override: %w", err)
-		}
-	}
-
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: hand the connector itself so HookScriptOwner is the
 	// single source of truth for which vendor templates land here.
@@ -107,10 +74,9 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	hookScript := filepath.Join(hookDir, "claude-code-hook.sh")
 	// Hooks register unconditionally — they post to
 	// /api/v1/claudecode/hook (or the equivalent route) and are the
-	// entry point for tool-call telemetry on every install. In
-	// observability mode the hook returns "allow" because the
-	// subprocess sandbox JSON is absent; in enforcement mode the
-	// sandbox decision can also block.
+	// entry point for tool-call telemetry on every install. The hook
+	// can return "allow" (observability) or "deny" based on the policy
+	// decision returned by the gateway.
 	if err := c.patchClaudeCodeHooks(opts, hookScript); err != nil {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
@@ -122,8 +88,6 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// second independent observability channel after hooks: hooks
 	// give us per-tool-call structured events, OTel gives us raw
 	// model/token/timing telemetry that doesn't fit the hook bus.
-	// Runs unconditionally — telemetry is on by default in both
-	// observability and enforcement modes.
 	if err := c.patchClaudeCodeOtelEnv(opts); err != nil {
 		return fmt.Errorf("claudecode otel env: %w", err)
 	}
@@ -131,17 +95,6 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if opts.InstallCodeGuard {
 		if err := ensureClaudeCodeCodeGuardPlugin(ctx); err != nil {
 			return fmt.Errorf("claude CodeGuard plugin install: %w", err)
-		}
-	}
-
-	// Subprocess sandbox is part of enforcement: it's consulted by
-	// claude-code-hook.sh's PreToolUse handler to decide whether to
-	// BLOCK a tool call. Skipped in observability mode — the hook
-	// still runs but always allows.
-	if opts.ClaudeCodeEnforcement {
-		policy := ResolveSubprocessPolicy(SubprocessSandbox)
-		if err := SetupSubprocessEnforcement(policy, opts); err != nil {
-			return fmt.Errorf("claudecode subprocess enforcement: %w", err)
 		}
 	}
 
@@ -155,18 +108,18 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		errs = append(errs, fmt.Sprintf("restore hooks: %v", err))
 	}
 
-	c.removeEnvOverride(opts)
-
 	if err := TeardownSubprocessEnforcement(opts); err != nil {
 		errs = append(errs, fmt.Sprintf("subprocess enforcement: %v", err))
 	}
 
-	// Scoped per-connector hook removal: only delete claude-code-hook.sh
-	// (the script we own). The previous behavior — deleting every
-	// connector's hook script via the global hookScripts list — caused
-	// the exit-127 bug during connector switches. See
-	// TeardownSubprocessEnforcement for the full rationale.
-	removeOwnedHookScripts(opts, c)
+	// Cached-PID safety: long-lived Claude Code processes cache the
+	// absolute hook path at startup. We replace claude-code-hook.sh in
+	// place with the shared v0 tombstone (atomic rename, no ENOENT
+	// window) instead of deleting it — see writeDisabledHookTombstone
+	// for the full contract.
+	if err := writeDisabledHookTombstone(opts, "claude-code-hook.sh", "Claude Code"); err != nil {
+		errs = append(errs, fmt.Sprintf("disabled hook: %v", err))
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("claudecode teardown errors: %s", strings.Join(errs, "; "))
@@ -176,13 +129,6 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 
 func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 	var residual []string
-
-	// Check env override files
-	for _, name := range []string{claudeCodeEnvFileName, "claudecode.env"} {
-		if _, err := os.Stat(filepath.Join(opts.DataDir, name)); err == nil {
-			residual = append(residual, name)
-		}
-	}
 
 	// Check for owned hooks still present in settings.json
 	settingsPath := claudeCodeSettingsPath()
@@ -258,92 +204,37 @@ func (c *ClaudeCodeConnector) SetCredentials(gatewayToken, masterKey string) {
 }
 
 func (c *ClaudeCodeConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
-	cs := &ConnectorSignals{
-		ConnectorName: "claudecode",
-		RawBody:       body,
-		RawModel:      ParseModelFromBody(body),
-		Stream:        ParseStreamFromBody(body),
-	}
-
-	cs.RawAPIKey = r.Header.Get("x-api-key")
-	if cs.RawAPIKey == "" {
-		cs.RawAPIKey = ExtractAPIKey(r)
-	}
-
-	cs.ExtraHeaders = map[string]string{}
-	if v := r.Header.Get("anthropic-version"); v != "" {
-		cs.ExtraHeaders["anthropic-version"] = v
-	}
-
-	if !isChatPath(r.URL.Path) {
-		cs.PassthroughMode = true
-	}
-
-	return cs, nil
+	return &ConnectorSignals{
+		ConnectorName:   "claudecode",
+		RawBody:         body,
+		RawModel:        ParseModelFromBody(body),
+		Stream:          ParseStreamFromBody(body),
+		PassthroughMode: !isChatPath(r.URL.Path),
+	}, nil
 }
 
 // --- AgentPathProvider / EnvRequirementsProvider / HookScriptProvider ---
 
 // AgentPaths reports the on-disk footprint Claude Code's connector
-// touches. The connector patches ~/.claude/settings.json (hooks
-// table), backs it up via managed + legacy backup files, and writes the
-// inspect-* + claude-code-hook.sh scripts under <DataDir>/hooks/.
-// Legacy env files (claudecode_env.sh / claudecode.env) are
-// surfaced for audit completeness even though they are scoped to
-// <DataDir> and never sourced into the user's shell.
+// touches. The connector patches ~/.claude/settings.json (hooks +
+// OTel env block) and writes the inspect-* + claude-code-hook.sh
+// scripts under <DataDir>/hooks/. The shims directory under
+// <DataDir>/shims/ is created by SetupSubprocessEnforcement and is
+// listed in CreatedDirs so VerifyClean and the audit surface treat
+// it as connector-owned.
 func (c *ClaudeCodeConnector) AgentPaths(opts SetupOpts) AgentPaths {
-	hookDir := filepath.Join(opts.DataDir, "hooks")
-	hooks := make([]string, 0, len(HookScripts()))
-	for _, name := range HookScripts() {
-		hooks = append(hooks, filepath.Join(hookDir, name))
-	}
 	return AgentPaths{
 		PatchedFiles: []string{claudeCodeSettingsPath()},
 		BackupFiles: []string{
 			managedFileBackupPath(opts.DataDir, c.Name(), "settings.json"),
-			filepath.Join(opts.DataDir, "claudecode_backup.json"),
 		},
-		HookScripts: hooks,
+		HookScripts: hookScriptPathsForConnector(opts, c),
 		CreatedDirs: []string{filepath.Join(opts.DataDir, "shims")},
 	}
 }
 
 func (c *ClaudeCodeConnector) HookScripts(opts SetupOpts) []string {
 	return c.AgentPaths(opts).HookScripts
-}
-
-// RequiredEnv reports Claude Code's env requirements. The CLI honors
-// ANTHROPIC_BASE_URL at startup; setting it points the agent at the
-// DefenseClaw proxy. The connector currently writes a scoped env
-// file the operator can `source` before launching Claude Code, but
-// it is not strictly required because the connector also patches
-// settings.json. Mark Required=false so `defenseclaw doctor` shows
-// it as recommended-but-not-blocking.
-func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
-	return []EnvRequirement{
-		{
-			Name:        "ANTHROPIC_BASE_URL",
-			Scope:       EnvScopeProcess,
-			Required:    false,
-			Description: "Recommended. When set in Claude Code's process env it pins LLM traffic to the DefenseClaw proxy. The connector also patches ~/.claude/settings.json hooks so guardrail enforcement runs even when this var is unset.",
-		},
-	}
-}
-
-// HasUsableProviders implements ProviderProbe (plan A4). Claude Code is
-// fully configured by patched settings.json + env-resolved
-// ANTHROPIC_API_KEY; the connector itself does not maintain a snapshot.
-// We return (1, nil) when the conventional Anthropic key var is set
-// (or when the operator has provided a master key), and (0, error)
-// otherwise so the gateway refuses to start with no usable upstream.
-func (c *ClaudeCodeConnector) HasUsableProviders() (int, error) {
-	if strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")) != "" {
-		return 1, nil
-	}
-	if strings.TrimSpace(c.masterKey) != "" {
-		return 1, nil
-	}
-	return 0, errors.New("claudecode: no upstream API key (ANTHROPIC_API_KEY) configured")
 }
 
 // --- ComponentScanner interface ---
@@ -377,10 +268,14 @@ func (c *ClaudeCodeConnector) SupportsStopScan() bool { return true }
 
 // --- Settings.json patching ---
 
+// claudeCodeBackup captures the pre-DefenseClaw shape of the two
+// settings.json subtrees Setup() touches — [hooks] and [env] — so
+// Teardown can restore them verbatim or remove keys we added. The
+// byte-for-byte managed-file backup is the primary restore path;
+// this JSON-encoded shape covers the drifted-config fallback (when
+// the operator hand-edited settings.json after Setup).
 type claudeCodeBackup struct {
 	OriginalHooks json.RawMessage `json:"original_hooks"`
-	HadBaseURL    bool            `json:"had_base_url"`
-	OldBaseURL    string          `json:"old_base_url"`
 	HadHooksKey   bool            `json:"had_hooks_key"`
 
 	// OTel env block backup (set on the very first patch only — see
@@ -506,10 +401,6 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 		backupPath := filepath.Join(opts.DataDir, "claudecode_backup.json")
 		if _, statErr := os.Stat(backupPath); os.IsNotExist(statErr) {
 			backup := claudeCodeBackup{}
-			if v := os.Getenv("ANTHROPIC_BASE_URL"); v != "" {
-				backup.HadBaseURL = true
-				backup.OldBaseURL = v
-			}
 			if hooks, ok := settings["hooks"]; ok {
 				raw, _ := json.Marshal(hooks)
 				backup.OriginalHooks = raw
@@ -593,7 +484,7 @@ var claudeCodeOtelEnvKeys = []string{
 // Privacy note: Claude Code redacts prompt content by default. When
 // DefenseClaw redaction is explicitly disabled, we set
 // OTEL_LOG_USER_PROMPTS=1 so Claude's native OTel follows the same raw
-// prompt contract as DefenseClaw's own hook/proxy telemetry. Teardown
+// prompt contract as DefenseClaw's own hook telemetry. Teardown
 // restores the operator's pristine env block.
 func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	endpoint := "http://" + opts.APIAddr
@@ -620,8 +511,8 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	// https://code.claude.com/docs/en/monitoring-usage and keeps setup
 	// deterministic across upgrades.
 	failMode := "open"
-	if opts.ClaudeCodeEnforcement {
-		failMode = "closed"
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		failMode = normalizeHookFailMode(opts.HookFailMode)
 	}
 	env := map[string]string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
@@ -898,35 +789,4 @@ func removeOwnedHooks(hookEventValue interface{}, hooksDir string) []interface{}
 		}
 	}
 	return list[:n]
-}
-
-// --- Env override ---
-
-const claudeCodeEnvFileName = "claudecode_env.sh"
-
-func (c *ClaudeCodeConnector) writeEnvOverride(opts SetupOpts) error {
-	proxyURL := "http://" + opts.ProxyAddr + "/c/claudecode"
-	content := fmt.Sprintf(
-		"# Generated by defenseclaw setup — source this file before running claude.\n"+
-			"export ANTHROPIC_BASE_URL=%q\n",
-		proxyURL,
-	)
-
-	envPath := filepath.Join(opts.DataDir, claudeCodeEnvFileName)
-	if err := os.WriteFile(envPath, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("write claudecode env file: %w", err)
-	}
-
-	dotenvPath := filepath.Join(opts.DataDir, "claudecode.env")
-	dotenvContent := fmt.Sprintf("ANTHROPIC_BASE_URL=%s\n", proxyURL)
-	if err := os.WriteFile(dotenvPath, []byte(dotenvContent), 0o644); err != nil {
-		return fmt.Errorf("write claudecode .env: %w", err)
-	}
-
-	return nil
-}
-
-func (c *ClaudeCodeConnector) removeEnvOverride(opts SetupOpts) {
-	os.Remove(filepath.Join(opts.DataDir, claudeCodeEnvFileName))
-	os.Remove(filepath.Join(opts.DataDir, "claudecode.env"))
 }

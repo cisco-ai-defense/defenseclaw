@@ -143,11 +143,11 @@ func TestModePickerModal_PreviewMatchesSetupAliases(t *testing.T) {
 		from, to string
 		wantSub  string
 	}{
-		{"openclaw", "zeptoclaw", "full guardrail-capable connector setup"},
-		{"codex", "openclaw", "full guardrail-capable connector setup"},
-		{"openclaw", "codex", "observability-only connector setup"},
-		{"zeptoclaw", "claudecode", "observability-only connector setup"},
-		{"hermes", "copilot", "observability-only connector setup"},
+		{"openclaw", "zeptoclaw", "proxy-backed connector setup"},
+		{"codex", "openclaw", "proxy-backed connector setup"},
+		{"openclaw", "codex", "hook-driven connector setup"},
+		{"zeptoclaw", "claudecode", "hook-driven connector setup"},
+		{"hermes", "copilot", "hook-driven connector setup"},
 		{"openclaw", "openclaw", "setup will be re-run"},
 	}
 	for _, tc := range cases {

@@ -917,6 +917,36 @@ type CiscoAIDefenseConfig struct {
 	APIKeyEnv    string   `mapstructure:"api_key_env"    yaml:"api_key_env"`
 	TimeoutMs    int      `mapstructure:"timeout_ms"     yaml:"timeout_ms"`
 	EnabledRules []string `mapstructure:"enabled_rules"  yaml:"enabled_rules"`
+
+	// ScanHookSurface controls whether the hook lane (PreToolUse +
+	// PostToolUse + UserPromptSubmit on hook-only connectors like
+	// Codex / Claude Code / Cursor / Windsurf / Hermes / Gemini /
+	// Copilot) forwards payloads to Cisco AI Defense.
+	//
+	// Pre-existing AID integration only fires on the proxy lane
+	// (chat prompts + completions) for OpenClaw / ZeptoClaw, so
+	// without this flag tool calls and tool results on hook-only
+	// connectors never reach AID.
+	//
+	// When the API key is unset this flag is a no-op (the AID lane
+	// is silently skipped). Default is true so an operator who
+	// configures the AID key gets coverage on every surface; flip
+	// to false to scope AID to the proxy lane only (e.g. when
+	// pricing per-call matters and the operator already gets
+	// per-tool coverage from the bundled regex rule pack).
+	ScanHookSurface *bool `mapstructure:"scan_hook_surface" yaml:"scan_hook_surface,omitempty"`
+}
+
+// HookSurfaceEnabled reports whether the AID lane should fire on the
+// hook-side surfaces. Defaults to true (opt-out) so an operator who
+// sets `cisco_ai_defense.api_key_env` gets coverage on every surface
+// without having to flip a second flag. Returns false when the
+// pointer is explicitly set to false.
+func (c *CiscoAIDefenseConfig) HookSurfaceEnabled() bool {
+	if c == nil || c.ScanHookSurface == nil {
+		return true
+	}
+	return *c.ScanHookSurface
 }
 
 // ResolvedAPIKey returns the API key from the env var (if set) or the direct value.
@@ -1008,45 +1038,6 @@ type GuardrailConfig struct {
 	// proxy never fails open. The request is still inspected, audited,
 	// and emitted as an EventEgress with branch="shape".
 	AllowUnknownLLMDomains bool `mapstructure:"allow_unknown_llm_domains" yaml:"allow_unknown_llm_domains,omitempty"`
-
-	// CodexEnforcementEnabled gates the proxy-redirect / blocking
-	// path for the Codex connector. When false (the default),
-	// codex talks DIRECTLY to its native upstream
-	// (api.openai.com/v1/responses for OPENAI_API_KEY mode,
-	// chatgpt.com/backend-api/codex/responses for chatgpt mode);
-	// the DefenseClaw proxy is NOT in the data path and no
-	// reserved-id strip / openai_base_url rewrite is performed.
-	// Observability still runs end-to-end via three independent
-	// channels: hooks (UserPromptSubmit / PreToolUse / PostToolUse /
-	// Stop) post to /api/v1/codex/hook, the [otel] block in
-	// config.toml exports OTLP-HTTP to /v1/logs and /v1/metrics,
-	// and the notify bridge POSTs agent-turn-complete to
-	// /api/v1/codex/notify.
-	//
-	// When true, the existing guardrail enforcement code in
-	// patchCodexConfig() runs (openai_base_url rewrite, reserved-id
-	// strip, model_providers rewrite, subprocess sandbox) and the
-	// proxy port binds. Designed to be flipped on later by an
-	// operator who wants the proxy in path; the enforcement code
-	// stays intact behind this flag rather than being removed, so
-	// re-enabling is a single-line config change with no rebuild.
-	CodexEnforcementEnabled bool `mapstructure:"codex_enforcement_enabled" yaml:"codex_enforcement_enabled,omitempty"`
-
-	// ClaudeCodeEnforcementEnabled is the parallel flag for the
-	// Claude Code connector. When false (the default), claude code
-	// talks DIRECTLY to api.anthropic.com; no
-	// ANTHROPIC_BASE_URL/claudecode_env.sh override is written and
-	// the proxy port does NOT bind. Observability runs via hooks
-	// (settings.json hook entries) and Claude Code's native OTel
-	// stack — including OTEL_LOG_RAW_API_BODIES=file: which writes
-	// the full Anthropic Messages API request/response JSON to disk
-	// alongside a body_ref pointer in each event, the closest thing
-	// to proxy-level body capture without sitting in the data path.
-	//
-	// When true, writeEnvOverride and SetupSubprocessEnforcement
-	// run as before. Designed for the same flip-on-later workflow
-	// as CodexEnforcementEnabled.
-	ClaudeCodeEnforcementEnabled bool `mapstructure:"claudecode_enforcement_enabled" yaml:"claudecode_enforcement_enabled,omitempty"`
 
 	// HookFailMode is the operator-chosen response-layer fail mode
 	// for every generated hook script (codex-hook, claude-code-hook,

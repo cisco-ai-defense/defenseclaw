@@ -257,10 +257,10 @@ def _migrate_0_3_0_surgical(oc_json: str) -> None:
 # the upgrade itself MUST NOT abort. Each step logs a click warning
 # and the migration moves on.
 
-# Legacy Codex env override files retired in S8.1 / F31. Mirrors the
-# constants in internal/gateway/connector/codex.go (codexEnvFileName,
-# codexDotenvFileName) — drift here would silently leave the file on
-# disk, which is exactly the failure mode we are migrating away from.
+# Legacy Codex env override files retired in S8.1 / F31 and finally
+# the surrounding proxy surface was removed in PR #265. We still scrub
+# these files on upgrade because they may exist on disk for users
+# coming from a release that did write them.
 _LEGACY_CODEX_ENV_FILES = ("codex_env.sh", "codex.env")
 
 # Legacy OTel claw.mode enum values that no longer round-trip through
@@ -960,6 +960,37 @@ _LEGACY_FLAT_REGO_FILENAMES = (
 
 
 def _migrate_0_5_0(ctx: MigrationContext) -> None:
+    """0.5.0 upgrade — two independent sub-steps.
+
+    Step 1: ``_migrate_0_5_0_purge_flat_policy_bundle``
+            Deletes the legacy flat-layout policy bundle now that the
+            Go loader prefers ``<data_dir>/policies/rego/``. Closes
+            the HILT prompt-stage confirm-verdict regression.
+
+    Step 2: ``_migrate_0_5_0_strip_codex_enforcement_keys``
+            Removes the retired ``codex_enforcement_enabled`` and
+            ``claudecode_enforcement_enabled`` guardrail keys from
+            config.yaml. The LLM proxy data path for Codex / Claude
+            Code is removed in 0.5.0; enforcement is now selected by
+            the existing ``guardrail.mode`` field via the agent's
+            native hook bus (PreToolUse deny verdict on policy hits).
+
+    Each sub-step is independent and isolated by its own try/except
+    so a failure in one does not block the other. The migration as a
+    whole is permissive on errors — the upgrade itself NEVER aborts;
+    failures are logged and surfaced via ``defenseclaw doctor --fix``.
+    """
+    try:
+        _migrate_0_5_0_purge_flat_policy_bundle(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"policy-bundle cleanup step failed: {exc}", indent="    ")
+    try:
+        _migrate_0_5_0_strip_codex_enforcement_keys(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"legacy enforcement-key strip step failed: {exc}", indent="    ")
+
+
+def _migrate_0_5_0_purge_flat_policy_bundle(ctx: MigrationContext) -> None:
     """Delete the legacy flat-layout policy bundle if a nested one exists.
 
     Why this is safe:
@@ -1113,6 +1144,135 @@ def _migrate_0_5_0(ctx: MigrationContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration: 0.5.0 — sub-step: strip legacy guardrail.*_enforcement_enabled
+# ---------------------------------------------------------------------------
+#
+# 0.5.0 also retires the LLM proxy data path for Codex and Claude
+# Code. Pre-0.5.0 guardrail config exposed two boolean fields that
+# selected between the (now-removed) LLM proxy data path and the
+# hook-only data path for those connectors:
+#
+#   guardrail.codex_enforcement_enabled: bool
+#   guardrail.claudecode_enforcement_enabled: bool
+#
+# Both fields are gone from the schema. The only supported enforcement
+# surface for those connectors is now the agent's native hook bus
+# (PreToolUse / UserPromptSubmit / PostToolUse). Enforcement vs
+# observation is selected via the existing ``guardrail.mode`` field —
+# ``action`` causes the PreToolUse hook to return a deny verdict on
+# policy hits, ``observe`` records only.
+#
+# Pre-0.5.0 config.yaml files on disk carry the legacy fields. The Go
+# loader (which uses viper's UnmarshalExact) and the Python config
+# loader (Pydantic with strict=False) both quietly ignore unknown
+# keys today, so leaving them in place would not break boot. But:
+#
+#   * The TUI's "configedit" panel would surface stale fields the
+#     operator can no longer edit usefully.
+#   * ``defenseclaw doctor`` may complain about config drift.
+#   * Operators reading config.yaml would have no way of knowing
+#     whether the fields still matter; the file is the source of
+#     truth for "what is this gateway doing" and dead fields make
+#     that diagnostic noisy.
+#
+# The cleanup is byte-level (no YAML round-trip) so operator
+# comments, blank lines, and key ordering inside the ``guardrail:``
+# block are preserved exactly. The substitution is anchored to the
+# guardrail block — a stray top-level ``codex_enforcement_enabled``
+# elsewhere in config.yaml is intentionally NOT touched.
+
+# Legacy keys to strip from the ``guardrail:`` block. The two
+# enforcement booleans are mutually independent — an operator who
+# explicitly opted into one but not the other will have only one key
+# on disk; the migration handles either combination.
+_LEGACY_GUARDRAIL_ENFORCEMENT_KEYS: tuple[str, ...] = (
+    "codex_enforcement_enabled",
+    "claudecode_enforcement_enabled",
+)
+
+
+def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
+    """Drop legacy guardrail.*_enforcement_enabled keys from config.yaml.
+
+    Idempotent: a config.yaml that has already been migrated (no
+    matching keys present) is a no-op. Failures on read or write are
+    logged via ux.warn and the migration continues — leaving stale
+    keys in place is strictly less bad than aborting the upgrade.
+
+    Comment-preservation contract: each match is deleted line-by-line
+    inside the ``guardrail:`` block, including any trailing inline
+    comment on the same line (``codex_enforcement_enabled: true  #
+    legacy``). Surrounding lines — comments above/below, blank
+    separator lines, and unrelated keys — are untouched. The
+    indentation of the deleted line is also preserved structurally
+    by virtue of the regex never touching neighbouring lines.
+
+    Action-mode preservation: this migration only DELETES keys. It
+    does NOT mutate ``guardrail.mode``. An operator who had set
+    ``codex_enforcement_enabled: true`` AND ``guardrail.mode: action``
+    keeps action mode (it now routes through the hook surface
+    automatically). An operator who had set ``true`` but left mode at
+    ``observe`` is left at observe — the same posture they had before
+    the upgrade, just expressed through the surviving knob.
+    """
+    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(cfg_path):
+        return
+
+    try:
+        with open(cfg_path) as f:
+            text = f.read()
+    except OSError as exc:
+        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+        return
+
+    block_match = re.search(
+        r"^guardrail:[ \t]*\n(?P<body>(?:[ \t]+[^\n]*\n|\n)*)",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not block_match:
+        return
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    body = block_match.group("body")
+
+    removed: list[str] = []
+    new_body = body
+    for key in _LEGACY_GUARDRAIL_ENFORCEMENT_KEYS:
+        # Match the full line carrying the legacy key (with its
+        # trailing newline). The pattern accepts any value form
+        # (quoted/unquoted bool, optional inline comment) and any
+        # leading indentation the operator chose.
+        pattern = re.compile(
+            r"^[ \t]+" + re.escape(key) + r"\s*:[^\n]*\n",
+            flags=re.MULTILINE,
+        )
+        new_body, count = pattern.subn("", new_body)
+        if count:
+            removed.append(key)
+
+    if not removed:
+        return
+
+    new_text = text[:body_start] + new_body + text[body_end:]
+    if new_text == text:
+        return
+
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    ctx.changes.append(
+        "stripped legacy guardrail enforcement key(s) "
+        f"({', '.join(removed)}) from config.yaml — Codex/Claude Code "
+        "now enforce via the agent's native hook bus selected by "
+        "guardrail.mode (action returns a PreToolUse deny verdict)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -1131,7 +1291,10 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
     (
         "0.5.0",
         "Purge stale flat-layout policy bundle that blocked HILT prompt-stage "
-        "confirmations (see _migrate_0_5_0 docstring)",
+        "confirmations; strip retired guardrail.{codex,claudecode}_enforcement_enabled "
+        "keys (LLM proxy data path for Codex / Claude Code removed; enforcement "
+        "now routed through the agent's native hook bus via guardrail.mode=action) "
+        "— see _migrate_0_5_0 docstring",
         _migrate_0_5_0,
     ),
 ]
