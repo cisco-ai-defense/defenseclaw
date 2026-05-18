@@ -410,6 +410,18 @@ export function isKnownSafeDomain(urlStr: string): boolean {
   return KNOWN_SAFE_DOMAINS.some(d => host === d || host.endsWith("." + d));
 }
 
+/** Endpoint-specific non-LLM APIs whose path names overlap with LLM routes. */
+export function isKnownNonLLMEndpoint(urlStr: string): boolean {
+  try {
+    const u = new URL(urlStr);
+    const host = u.hostname.toLowerCase();
+    if (host !== "discord.com") return false;
+    return /^\/api(?:\/v\d+)?\/channels\/\d+\/messages(?:\/\d+)?$/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Request-shape test: does this look like an LLM call even though the
  * hostname is not in providers.json? We require either an LLM-looking
@@ -430,6 +442,7 @@ export function isLLMShapedRequest(
   if (isAlreadyProxied(urlStr, guardrailPort)) return false;
   const m = (method || "GET").toUpperCase();
   if (m === "GET" || m === "HEAD" || m === "OPTIONS") return false;
+  if (isKnownNonLLMEndpoint(urlStr)) return false;
   if (isKnownSafeDomain(urlStr)) return false;
   if (hasLLMPathSuffix(urlStr)) return true;
   if (bodyShape !== "none") return true;
@@ -812,7 +825,9 @@ export function createFetchInterceptor(
           targetHost: hp.host,
           targetPath: hp.path,
           bodyShape,
-          looksLikeLLM: bodyShape !== "none" || hasLLMPathSuffix(urlStr),
+          looksLikeLLM:
+            !isKnownNonLLMEndpoint(urlStr) &&
+            (bodyShape !== "none" || hasLLMPathSuffix(urlStr)),
           branch: "passthrough",
           decision: "allow",
           reason: "no-match",
@@ -961,6 +976,7 @@ export function createFetchInterceptor(
       // Anthropic /messages, Gemini :generateContent, ollama /api/chat).
       const shapedForHTTPS = Boolean(
         urlStr &&
+          !isKnownNonLLMEndpoint(urlStr) &&
           !isKnownSafeDomain(urlStr) &&
           !isAlreadyProxied(urlStr, guardrailPort) &&
           hasLLMPathSuffix(urlStr),
@@ -1083,7 +1099,10 @@ export function createFetchInterceptor(
             reason: !knownForHTTPS && shapedForHTTPS ? "shape-match" : "known-provider",
           });
         }
-        return http.request(newOpts as unknown as Parameters<typeof http.request>[0], cb as Parameters<typeof http.request>[1]);
+        return http.request(
+          newOpts as unknown as Parameters<typeof http.request>[0],
+          cb as Parameters<typeof http.request>[1],
+        );
       }
 
       // Non-intercepted https.request — report silent passthrough so
@@ -1096,7 +1115,8 @@ export function createFetchInterceptor(
           targetHost: hp.host,
           targetPath: hp.path,
           bodyShape: "none",
-          looksLikeLLM: hasLLMPathSuffix(urlStr),
+          looksLikeLLM:
+            !isKnownNonLLMEndpoint(urlStr) && hasLLMPathSuffix(urlStr),
           branch: "passthrough",
           decision: "allow",
           reason: "no-match",

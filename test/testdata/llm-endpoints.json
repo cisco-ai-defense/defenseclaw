@@ -136,6 +136,22 @@
       "expected_branch": "passthrough"
     },
     {
+      "name": "discord_channel_message",
+      "url": "https://discord.com/api/channels/1496358523230093373/messages",
+      "method": "POST",
+      "body": { "content": "hello from the bot" },
+      "expected_branch": "passthrough",
+      "notes": "Discord bot message sends overlap with Anthropic's /messages path but are not LLM calls."
+    },
+    {
+      "name": "discord_channel_message_versioned",
+      "url": "https://discord.com/api/v10/channels/1496358523230093373/messages/1234567890",
+      "method": "POST",
+      "body": null,
+      "expected_branch": "passthrough",
+      "notes": "Path-only detection must not catch versioned Discord channel message endpoints."
+    },
+    {
       "name": "safe_domain_with_llm_path",
       "url": "https://github.com/v1/messages",
       "method": "POST",

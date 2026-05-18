@@ -149,6 +149,10 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 A hash-checked backup of `openclaw.json` is stored before edits; teardown restores or surgically removes only DefenseClaw-owned entries.
 
+<Callout>
+The `~/.openclaw/extensions/defenseclaw/` directory is a DefenseClaw-managed runtime bundle. Setup writes it from the gateway's embedded plugin and records a bundle hash; same-version restarts leave the directory alone, while upgrades may redeploy it. Put durable endpoint or policy changes in DefenseClaw config/source, not by hot-patching files under this generated extension directory.
+</Callout>
+
 ## What the plugin does
 
 <Sequence

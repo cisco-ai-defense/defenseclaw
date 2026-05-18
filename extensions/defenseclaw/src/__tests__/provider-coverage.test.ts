@@ -23,6 +23,7 @@ import providersConfig from "../providers.json" with { type: "json" };
 import {
   classifyBodyShape,
   hasLLMPathSuffix,
+  isKnownNonLLMEndpoint,
   isKnownSafeDomain,
   LLMBodyShape,
 } from "../fetch-interceptor.js";
@@ -84,6 +85,7 @@ function classifyRow(row: Row): "known" | "shape" | "passthrough" {
   if (isKnownProvider(row.url)) return "known";
   const m = (row.method || "GET").toUpperCase();
   if (m === "GET" || m === "HEAD" || m === "OPTIONS") return "passthrough";
+  if (isKnownNonLLMEndpoint(row.url)) return "passthrough";
   if (isKnownSafeDomain(row.url)) return "passthrough";
   if (hasLLMPathSuffix(row.url)) return "shape";
   const shape: LLMBodyShape = classifyBodyShape(row.body);

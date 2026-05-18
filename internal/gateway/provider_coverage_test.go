@@ -80,6 +80,9 @@ func classifyURL(t *testing.T, urlStr, method string, body json.RawMessage) stri
 	if m == "GET" || m == "HEAD" || m == "OPTIONS" {
 		return "passthrough"
 	}
+	if isKnownNonLLMEndpoint(urlStr) {
+		return "passthrough"
+	}
 	// Known-safe allowlist beats both path and body shape.
 	if isKnownSafeDomain(urlStr) {
 		return "passthrough"

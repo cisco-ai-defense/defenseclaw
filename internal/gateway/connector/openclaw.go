@@ -17,12 +17,16 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -52,6 +56,14 @@ const openClawPluginRoot = "openclaw_extension"
 // Other connectors (zeptoclaw, codex, claudecode) don't touch this
 // embed at all and remain fully usable.
 const openClawPlaceholderName = ".placeholder"
+
+const openClawManagedManifestName = ".defenseclaw-managed.json"
+const openClawManagedManifestVersion = 1
+
+type openClawManagedManifest struct {
+	Version      int    `json:"version"`
+	BundleSHA256 string `json:"bundle_sha256"`
+}
 
 // openClawExtensionAvailable returns true when the embedded OpenClaw
 // extension contains the runtime files (package.json, dist/, etc.) and
@@ -200,11 +212,23 @@ func installOpenClawExtension(ocHome string, enablePluginApprovals bool) error {
 	extDir := filepath.Join(ocHome, "extensions", "defenseclaw")
 	parentDir := filepath.Join(ocHome, "extensions")
 
-	if err := safeRemoveAll(extDir, parentDir); err != nil {
-		return fmt.Errorf("remove prior extension: %w", err)
+	bundleHash, err := hashEmbeddedTree(openClawExtensionFS, openClawPluginRoot)
+	if err != nil {
+		return fmt.Errorf("hash bundled plugin files: %w", err)
 	}
-	if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
-		return fmt.Errorf("write plugin files: %w", err)
+	if installedOpenClawExtensionCurrent(extDir, bundleHash) {
+		log.Printf("[connector] openclaw extension current target=%q changed=false bundle_sha256=%s", extDir, shortSHA256(bundleHash))
+	} else {
+		if err := safeRemoveAll(extDir, parentDir); err != nil {
+			return fmt.Errorf("remove prior extension: %w", err)
+		}
+		if err := writeEmbeddedTree(openClawExtensionFS, openClawPluginRoot, extDir, 0o644, 0o755); err != nil {
+			return fmt.Errorf("write plugin files: %w", err)
+		}
+		if err := writeOpenClawManagedManifest(extDir, bundleHash); err != nil {
+			return fmt.Errorf("write managed manifest: %w", err)
+		}
+		log.Printf("[connector] openclaw extension redeployed target=%q changed=true bundle_sha256=%s", extDir, shortSHA256(bundleHash))
 	}
 
 	configPath := filepath.Join(ocHome, "openclaw.json")
@@ -212,6 +236,90 @@ func installOpenClawExtension(ocHome string, enablePluginApprovals bool) error {
 		return fmt.Errorf("patch openclaw.json: %w", err)
 	}
 	return nil
+}
+
+func installedOpenClawExtensionCurrent(extDir, bundleHash string) bool {
+	info, err := os.Lstat(extDir)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(extDir, openClawManagedManifestName))
+	if err != nil {
+		return false
+	}
+	var manifest openClawManagedManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return false
+	}
+	if manifest.Version != openClawManagedManifestVersion || manifest.BundleSHA256 != bundleHash {
+		return false
+	}
+	for _, rel := range []string{
+		"package.json",
+		"openclaw.plugin.json",
+		filepath.Join("dist", "index.js"),
+		filepath.Join("dist", "fetch-interceptor.js"),
+	} {
+		if _, err := os.Stat(filepath.Join(extDir, rel)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func writeOpenClawManagedManifest(extDir, bundleHash string) error {
+	manifest := openClawManagedManifest{
+		Version:      openClawManagedManifestVersion,
+		BundleSHA256: bundleHash,
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(extDir, openClawManagedManifestName), append(data, '\n'), 0o644)
+}
+
+func hashEmbeddedTree(fsys fs.FS, srcRoot string) (string, error) {
+	h := sha256.New()
+	err := fs.WalkDir(fsys, srcRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(srcRoot, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		_, _ = h.Write([]byte(rel))
+		_, _ = h.Write([]byte{0})
+		if d.IsDir() {
+			_, _ = h.Write([]byte("dir"))
+			_, _ = h.Write([]byte{0})
+			return nil
+		}
+		data, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return err
+		}
+		_, _ = h.Write([]byte("file"))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(data)
+		_, _ = h.Write([]byte{0})
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func shortSHA256(hash string) string {
+	if len(hash) <= 12 {
+		return hash
+	}
+	return hash[:12]
 }
 
 // safeRemoveAll removes target only if it resolves to a path under parent.
@@ -247,7 +355,7 @@ func safeRemoveAll(target, parent string) error {
 // Each target path is checked for path traversal to prevent zip-slip style
 // attacks from crafted embed paths. fileMode and dirMode control the
 // permissions of written files and directories respectively.
-func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode os.FileMode) error {
+func writeEmbeddedTree(fsys fs.FS, srcRoot, dstRoot string, fileMode, dirMode os.FileMode) error {
 	absDstRoot, err := filepath.Abs(dstRoot)
 	if err != nil {
 		return fmt.Errorf("resolve dstRoot: %w", err)
@@ -267,7 +375,7 @@ func writeEmbeddedTree(fsys embed.FS, srcRoot, dstRoot string, fileMode, dirMode
 		if d.IsDir() {
 			return os.MkdirAll(target, dirMode)
 		}
-		data, err := fsys.ReadFile(path)
+		data, err := fs.ReadFile(fsys, path)
 		if err != nil {
 			return err
 		}
@@ -335,7 +443,11 @@ func patchOpenClawConfig(configPath, extDir string, enablePluginApprovals bool) 
 		if err != nil {
 			return fmt.Errorf("marshal %s: %w", configPath, err)
 		}
-		return atomicWriteFile(configPath, append(out, '\n'), 0o644)
+		out = append(out, '\n')
+		if current, err := os.ReadFile(configPath); err == nil && bytes.Equal(current, out) {
+			return nil
+		}
+		return atomicWriteFile(configPath, out, 0o644)
 	})
 }
 

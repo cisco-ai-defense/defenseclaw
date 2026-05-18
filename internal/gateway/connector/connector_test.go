@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -5847,6 +5848,62 @@ func TestInstallOpenClaw_SymlinkedExtDir(t *testing.T) {
 	data, err2 := os.ReadFile(filepath.Join(target, "precious.txt"))
 	if err2 != nil || string(data) != "don't delete me" {
 		t.Error("symlink attack: files in target directory were deleted")
+	}
+}
+
+func TestOpenClawExtensionCurrent_PreservesLocalEditsWhenBundleUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	extDir := filepath.Join(dir, "extensions", "defenseclaw")
+	if err := os.MkdirAll(filepath.Join(extDir, "dist"), 0o755); err != nil {
+		t.Fatalf("mkdir extension: %v", err)
+	}
+	files := map[string]string{
+		"package.json":              `{"name":"defenseclaw"}`,
+		"openclaw.plugin.json":      `{"id":"defenseclaw"}`,
+		"dist/index.js":             "export {};",
+		"dist/fetch-interceptor.js": "local Discord hotfix",
+	}
+	for rel, body := range files {
+		if err := os.WriteFile(filepath.Join(extDir, rel), []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+
+	hash, err := hashEmbeddedTree(fstest.MapFS{
+		"bundle/package.json":              {Data: []byte(`{"name":"defenseclaw"}`)},
+		"bundle/openclaw.plugin.json":      {Data: []byte(`{"id":"defenseclaw"}`)},
+		"bundle/dist/index.js":             {Data: []byte("export {};")},
+		"bundle/dist/fetch-interceptor.js": {Data: []byte("bundled source")},
+	}, "bundle")
+	if err != nil {
+		t.Fatalf("hashEmbeddedTree: %v", err)
+	}
+	if err := writeOpenClawManagedManifest(extDir, hash); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	if !installedOpenClawExtensionCurrent(extDir, hash) {
+		t.Fatal("expected matching managed marker to skip redeploy")
+	}
+}
+
+func TestOpenClawExtensionCurrent_MissingRequiredFileRedeploys(t *testing.T) {
+	dir := t.TempDir()
+	extDir := filepath.Join(dir, "extensions", "defenseclaw")
+	if err := os.MkdirAll(filepath.Join(extDir, "dist"), 0o755); err != nil {
+		t.Fatalf("mkdir extension: %v", err)
+	}
+	for _, rel := range []string{"package.json", "openclaw.plugin.json", filepath.Join("dist", "index.js")} {
+		if err := os.WriteFile(filepath.Join(extDir, rel), []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	if err := writeOpenClawManagedManifest(extDir, strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+
+	if installedOpenClawExtensionCurrent(extDir, strings.Repeat("a", 64)) {
+		t.Fatal("expected missing fetch-interceptor.js to force redeploy")
 	}
 }
 

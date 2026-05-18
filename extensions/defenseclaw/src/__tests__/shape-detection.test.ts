@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 import {
   classifyBodyShape,
   hasLLMPathSuffix,
+  isKnownNonLLMEndpoint,
   isKnownSafeDomain,
   isLLMShapedRequest,
   peekBodyForShape,
@@ -125,6 +126,23 @@ describe("isKnownSafeDomain", () => {
   });
 });
 
+describe("isKnownNonLLMEndpoint", () => {
+  it("matches Discord channel message endpoints only", () => {
+    expect(
+      isKnownNonLLMEndpoint(
+        "https://discord.com/api/channels/1496358523230093373/messages",
+      ),
+    ).toBe(true);
+    expect(
+      isKnownNonLLMEndpoint(
+        "https://discord.com/api/v10/channels/1496358523230093373/messages/1234567890",
+      ),
+    ).toBe(true);
+    expect(isKnownNonLLMEndpoint("https://api.anthropic.com/v1/messages")).toBe(false);
+    expect(isKnownNonLLMEndpoint("https://discord.com/api/webhooks/1/token")).toBe(false);
+  });
+});
+
 describe("isLLMShapedRequest", () => {
   const guardrailPort = 14010;
 
@@ -227,6 +245,33 @@ describe("isLLMShapedRequest", () => {
         guardrailPort,
       ),
     ).toBe(false);
+  });
+
+  it("does not treat Discord channel messages as Anthropic-style LLM calls", () => {
+    expect(
+      isLLMShapedRequest(
+        "https://discord.com/api/channels/1496358523230093373/messages",
+        "POST",
+        "none",
+        guardrailPort,
+      ),
+    ).toBe(false);
+    expect(
+      isLLMShapedRequest(
+        "https://discord.com/api/v10/channels/1496358523230093373/messages/1234567890",
+        "POST",
+        "none",
+        guardrailPort,
+      ),
+    ).toBe(false);
+    expect(
+      isLLMShapedRequest(
+        "https://api.anthropic.com/v1/messages",
+        "POST",
+        "none",
+        guardrailPort,
+      ),
+    ).toBe(true);
   });
 });
 

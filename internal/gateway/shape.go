@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -64,6 +65,8 @@ var KnownSafeDomains = []string{
 	"segment.io",
 	"segment.com",
 }
+
+var knownDiscordChannelMessagesPath = regexp.MustCompile(`^/api(?:/v[0-9]+)?/channels/[0-9]+/messages(?:/[0-9]+)?$`)
 
 // BodyShape enumerates the LLM body shapes Layer 1 can recognize.
 // Keep identical to the TS LLMBodyShape union.
@@ -174,6 +177,19 @@ func isLLMPathSuffix(rawURL string) bool {
 		}
 	}
 	return false
+}
+
+// isKnownNonLLMEndpoint reports endpoint-specific APIs whose path names
+// overlap with LLM routes but should not be treated as model traffic.
+func isKnownNonLLMEndpoint(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(u.Hostname()) != "discord.com" {
+		return false
+	}
+	return knownDiscordChannelMessagesPath.MatchString(u.Path)
 }
 
 // isKnownSafeDomain returns true when the hostname is in KnownSafeDomains.

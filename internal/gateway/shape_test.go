@@ -81,6 +81,7 @@ func TestIsLLMPathSuffix(t *testing.T) {
 	cases := map[string]bool{
 		"https://api.openai.com/v1/chat/completions":                                     true,
 		"https://api.anthropic.com/v1/messages":                                          true,
+		"https://discord.com/api/channels/1496358523230093373/messages":                  true,
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini:generateContent": true,
 		"https://bedrock-runtime.us-east-1.amazonaws.com/model/foo/converse":             true,
 		"http://localhost:11434/api/chat":                                                true,
@@ -93,6 +94,24 @@ func TestIsLLMPathSuffix(t *testing.T) {
 	for u, want := range cases {
 		if got := isLLMPathSuffix(u); got != want {
 			t.Errorf("isLLMPathSuffix(%q) = %v, want %v", u, got, want)
+		}
+	}
+}
+
+func TestIsKnownNonLLMEndpoint(t *testing.T) {
+	cases := map[string]bool{
+		"https://discord.com/api/channels/1496358523230093373/messages":                true,
+		"https://discord.com/api/v10/channels/1496358523230093373/messages":            true,
+		"https://discord.com/api/v10/channels/1496358523230093373/messages/1234567890": true,
+		"https://discord.com/api/webhooks/123456789/abcdef":                            false,
+		"https://discord.com/api/v10/channels/not-a-channel/messages":                  false,
+		"https://api.anthropic.com/v1/messages":                                        false,
+		"https://canary.discord.com/api/channels/1496358523230093373/messages":         false,
+		"": false,
+	}
+	for u, want := range cases {
+		if got := isKnownNonLLMEndpoint(u); got != want {
+			t.Errorf("isKnownNonLLMEndpoint(%q) = %v, want %v", u, got, want)
 		}
 	}
 }
