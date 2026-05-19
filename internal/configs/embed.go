@@ -27,10 +27,11 @@ var providersJSON []byte
 // substrings used to identify outbound requests, and the OpenClaw
 // auth-profiles.json profile ID used to look up the API key.
 type Provider struct {
-	Name      string   `json:"name"`
-	Domains   []string `json:"domains"`
-	ProfileID *string  `json:"profile_id"` // nil when no auth-profile exists (e.g. bedrock)
-	EnvKeys   []string `json:"env_keys"`   // env var names for the API key, checked in order
+	Name             string                 `json:"name"`
+	Domains          []string               `json:"domains"`
+	ProfileID        *string                `json:"profile_id"` // nil when no auth-profile exists (e.g. bedrock)
+	EnvKeys          []string               `json:"env_keys"`   // env var names for the API key, checked in order
+	RequestOverrides map[string]interface{} `json:"request_overrides,omitempty"`
 }
 
 // ProvidersConfig is the top-level structure of providers.json.
@@ -152,6 +153,10 @@ func applyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 			base.Providers[idx].EnvKeys = unionStrings(
 				base.Providers[idx].EnvKeys, op.EnvKeys,
 			)
+			base.Providers[idx].RequestOverrides = mergeJSONObjects(
+				base.Providers[idx].RequestOverrides,
+				op.RequestOverrides,
+			)
 			// ProfileID: overlay wins if set.
 			if op.ProfileID != nil {
 				base.Providers[idx].ProfileID = op.ProfileID
@@ -243,5 +248,28 @@ func unionInts(a, b []int) []int {
 		seen[v] = struct{}{}
 		out = append(out, v)
 	}
+	return out
+}
+
+func mergeJSONObjects(base, overlay map[string]interface{}) map[string]interface{} {
+	if len(base) == 0 && len(overlay) == 0 {
+		return nil
+	}
+
+	out := make(map[string]interface{}, len(base)+len(overlay))
+	for k, v := range base {
+		out[k] = v
+	}
+
+	for k, v := range overlay {
+		if ov, ok := v.(map[string]interface{}); ok {
+			if bv, ok := out[k].(map[string]interface{}); ok {
+				out[k] = mergeJSONObjects(bv, ov)
+				continue
+			}
+		}
+		out[k] = v
+	}
+
 	return out
 }
