@@ -54,7 +54,15 @@ from defenseclaw.audit_actions import (
     ACTION_SETUP_SPLUNK,
 )
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
+from defenseclaw.connector_contracts import (
+    STATUS_KNOWN,
+    STATUS_NOT_GATED,
+    STATUS_UNKNOWN,
+    STATUS_UNVERSIONED,
+    resolve_connector_contract,
+)
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
@@ -1760,6 +1768,83 @@ def _print_connector_info(name: str) -> None:
         click.echo(
             "      tool execution if the response has already been delivered."
         )
+
+
+def _check_connector_version_supported_for_setup(
+    connector: str,
+    *,
+    mode: str = "observe",
+    emit: bool = True,
+) -> bool:
+    """Verify the selected connector's installed version before setup.
+
+    Runtime enforcement happens in the Go gateway too, but setup should tell
+    the operator before it writes config and restarts services. Unknown hook
+    contracts are fatal in action mode unless the explicit exploratory
+    override used by the gateway is set.
+    """
+    connector = (connector or "").strip().lower()
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
+    try:
+        disc = agent_discovery.discover_agents(use_cache=False, refresh=True)
+        signal = disc.agents.get(connector)
+    except Exception as exc:
+        if emit:
+            ux.warn(f"{label}: could not refresh local version discovery ({exc}); setup will continue.")
+        return True
+
+    raw_version = ""
+    installed = False
+    probe_error = ""
+    if signal is not None:
+        raw_version = signal.version or ""
+        installed = bool(signal.installed)
+        probe_error = signal.error or ""
+
+    compatibility = resolve_connector_contract(connector, raw_version)
+    version_display = raw_version or "(not probed)"
+    contract = compatibility.contract.contract_id if compatibility.contract else "none"
+
+    if not installed:
+        if emit:
+            ux.warn(f"{label}: connector was not detected locally; setup will write DefenseClaw config anyway.")
+        return True
+
+    if compatibility.status == STATUS_KNOWN:
+        if emit:
+            ux.ok(f"{label}: version {version_display} is supported by {contract}.")
+        return True
+
+    if compatibility.status == STATUS_NOT_GATED:
+        if emit:
+            ux.ok(f"{label}: version {version_display}; proxy/chat connector has no hook contract gate.")
+        return True
+
+    if compatibility.status == STATUS_UNVERSIONED:
+        detail = f"{label}: version not available"
+        if probe_error:
+            detail += f" ({probe_error})"
+        detail += f"; using default hook contract {contract}."
+        if emit:
+            ux.warn(detail)
+        return True
+
+    detail = (
+        f"{label}: installed version {version_display} is not covered by a "
+        f"DefenseClaw hook contract ({compatibility.reason})."
+    )
+    if probe_error:
+        detail += f" Probe detail: {probe_error}."
+    action_mode = (mode or "").strip().lower() == "action"
+    allow_drift = os.environ.get("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
+    if action_mode and not allow_drift:
+        if emit:
+            ux.err(detail)
+            ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+        return False
+    if emit:
+        ux.warn(detail + " Continuing because setup is not in action mode or drift override is set.")
+    return True
 
 
 def _hilt_support_note(connector: str) -> str:
