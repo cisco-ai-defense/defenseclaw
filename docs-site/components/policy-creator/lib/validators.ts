@@ -349,6 +349,78 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
     }
   }
 
+  // Session correlator: catch patterns that can never match (no
+  // clauses on any of the three match modes), and reject impossible
+  // window sizes. Disabled patterns are skipped so an operator
+  // parking a draft doesn't drown in errors.
+  const seenPatternIds = new Set<string>();
+  for (const p of policy.correlator) {
+    if (!p.enabled) continue;
+    if (seenPatternIds.has(p.id)) {
+      findings.push({
+        level: 'error',
+        code: 'ID_DUPLICATE',
+        message: `Correlator pattern id "${p.id}" appears more than once. IDs are the join key for promoted CORR-* findings; duplicates collide in audit logs.`,
+        location: `correlator.${p.id}`,
+      });
+    } else {
+      seenPatternIds.add(p.id);
+    }
+    const allOf = p.all_of?.length ?? 0;
+    const seq = p.sequence?.length ?? 0;
+    const fp = p.fingerprint_chain?.length ?? 0;
+    if (allOf + seq + fp === 0) {
+      findings.push({
+        level: 'error',
+        code: 'CORRELATOR_PATTERN_EMPTY',
+        message: `Correlator pattern "${p.id}" has no clauses on any match mode. It will never fire.`,
+        location: `correlator.${p.id}`,
+        fix: 'Add at least one clause under all_of, sequence, or fingerprint_chain — or disable the pattern.',
+      });
+    }
+    if (!Number.isInteger(p.window_events) || p.window_events <= 0) {
+      findings.push({
+        level: 'error',
+        code: 'CORRELATOR_WINDOW_INVALID',
+        message: `Correlator pattern "${p.id}" has window_events=${p.window_events}. Must be a positive integer.`,
+        location: `correlator.${p.id}.window_events`,
+      });
+    } else if (p.window_events > 1000) {
+      findings.push({
+        level: 'warning',
+        code: 'CORRELATOR_WINDOW_INVALID',
+        message: `Correlator pattern "${p.id}" window_events=${p.window_events} is very large. The session buffer caps at a few hundred findings; values above that effectively mean "the whole session".`,
+        location: `correlator.${p.id}.window_events`,
+      });
+    }
+  }
+
+  // Cisco AI Defense: when the operator enables the lane, demand an
+  // env-var-shaped reference (UPPER_SNAKE) — not a literal key value.
+  // The wizard never accepts inline secrets, but a paste-in-haste can
+  // smuggle one through if we don't lint here.
+  const aid = policy.cisco_ai_defense;
+  if (aid.enabled || aid.api_key_env || aid.endpoint) {
+    if (!aid.api_key_env) {
+      findings.push({
+        level: 'warning',
+        code: 'CISCO_AID_KEY_ENV_MISSING',
+        message:
+          'Cisco AI Defense block is populated but api_key_env is empty. The gateway will skip the AID lane silently until an env-var name is supplied.',
+        location: 'cisco_ai_defense.api_key_env',
+        fix: 'Set api_key_env to the env var the gateway should read (e.g. CISCO_AI_DEFENSE_API_KEY).',
+      });
+    } else if (!/^[A-Z_][A-Z0-9_]{2,63}$/.test(aid.api_key_env)) {
+      findings.push({
+        level: 'error',
+        code: 'CISCO_AID_KEY_ENV_MISSING',
+        message: `Cisco AI Defense api_key_env "${aid.api_key_env}" is not a valid env-var name. The wizard expects the NAME of the env var (e.g. CISCO_AI_DEFENSE_API_KEY), not the key value.`,
+        location: 'cisco_ai_defense.api_key_env',
+        fix: 'Use UPPER_SNAKE_CASE matching [A-Z_][A-Z0-9_]+ — the gateway looks up the actual secret via os.Getenv() at boot.',
+      });
+    }
+  }
+
   return findings;
 }
 

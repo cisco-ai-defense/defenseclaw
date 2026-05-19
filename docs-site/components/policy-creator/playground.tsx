@@ -32,6 +32,8 @@ import { SuppressionsSection } from './sections/suppressions';
 import { SensitiveToolsSection } from './sections/sensitive-tools';
 import { JudgesSection } from './sections/judges';
 import { CustomRegoSection } from './sections/custom-rego';
+import { CorrelatorSection } from './sections/correlator';
+import { CiscoAIDefenseSection } from './sections/cisco-ai-defense';
 import { FirewallSection } from './sections/firewall';
 import {
   AuditSection,
@@ -152,6 +154,27 @@ const SECTION_DEFS: SectionDef[] = [
     render: (p, set) => <JudgesSection policy={p} onPolicyChange={set} />,
   },
   {
+    id: 'correlator',
+    title: 'Session correlator (Layer 5)',
+    subtitle: (p) => {
+      const enabled = p.correlator.filter((c) => c.enabled).length;
+      if (p.correlator.length === 0) return 'not loaded — pick a preset to seed defaults';
+      return enabled === p.correlator.length
+        ? `${enabled} pattern${enabled === 1 ? '' : 's'} enabled`
+        : `${enabled} of ${p.correlator.length} patterns enabled`;
+    },
+    // Highlight as "warning" when the operator has disabled bundled
+    // patterns — that's an intentional choice but the wizard should
+    // make it visible so a teammate reviewing the share link spots it.
+    status: (p) => {
+      if (p.correlator.length === 0) return 'untouched';
+      const disabled = p.correlator.filter((c) => !c.enabled).length;
+      if (disabled > 0) return 'warning';
+      return 'customized';
+    },
+    render: (p, set) => <CorrelatorSection policy={p} onPolicyChange={set} />,
+  },
+  {
     id: 'firewall',
     title: 'Firewall',
     subtitle: (p) =>
@@ -209,6 +232,26 @@ const SECTION_DEFS: SectionDef[] = [
     status: (p) =>
       Object.values(p.scanners).some(Boolean) ? 'customized' : 'untouched',
     render: (p, set) => <ScannersSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'cisco-ai-defense',
+    title: 'Cisco AI Defense (optional lane)',
+    subtitle: (p) => {
+      const aid = p.cisco_ai_defense;
+      if (!aid.enabled && !aid.api_key_env && !aid.endpoint) return 'off';
+      return [
+        aid.enabled ? 'enabled' : 'disabled',
+        aid.api_key_env ? `key=${aid.api_key_env}` : 'no key',
+        `hook surface ${aid.scan_hook_surface ? 'on' : 'off'}`,
+      ].join(' · ');
+    },
+    status: (p) => {
+      const aid = p.cisco_ai_defense;
+      if (aid.enabled && !aid.api_key_env) return 'warning'; // toggled on without a key
+      if (aid.enabled || aid.api_key_env) return 'customized';
+      return 'untouched';
+    },
+    render: (p, set) => <CiscoAIDefenseSection policy={p} onPolicyChange={set} />,
   },
   {
     id: 'custom-rego',

@@ -11,6 +11,11 @@ import presetsData from '@/data/policy-presets.json';
 import type {
   AdmissionConfig,
   AuditConfig,
+  CiscoAIDefenseConfig,
+  CorrelationClause,
+  CorrelationPattern,
+  CorrelationSequenceStep,
+  DataAxis,
   EnforcementConfig,
   FirewallConfig,
   FirstPartyEntry,
@@ -27,9 +32,16 @@ import type {
   SeverityActionTriple,
   SeverityUpper,
   SuppressionsBundle,
+  ToolCapabilityClass,
   WatchConfig,
 } from '../types';
-import { SCANNER_TYPES, SEVERITIES } from '../types';
+import {
+  DATA_AXES,
+  SCANNER_TYPES,
+  SEVERITIES,
+  SEVERITIES_UPPER,
+  TOOL_CAPABILITY_CLASSES,
+} from '../types';
 
 const TYPED_PRESETS: PresetsFile = presetsData as unknown as PresetsFile;
 
@@ -213,6 +225,111 @@ function readJudges(raw: unknown): JudgeConfig[] {
   return out;
 }
 
+function readSeverityUpper(value: unknown, fallback: SeverityUpper): SeverityUpper {
+  if (typeof value !== 'string') return fallback;
+  const upper = value.toUpperCase() as SeverityUpper;
+  return (SEVERITIES_UPPER as readonly string[]).includes(upper) ? upper : fallback;
+}
+
+function readDataAxis(value: unknown): DataAxis | undefined {
+  if (typeof value !== 'string') return undefined;
+  return (DATA_AXES as readonly string[]).includes(value) ? (value as DataAxis) : undefined;
+}
+
+function readCapabilityClass(value: unknown): ToolCapabilityClass | undefined {
+  if (typeof value !== 'string') return undefined;
+  return (TOOL_CAPABILITY_CLASSES as readonly string[]).includes(value)
+    ? (value as ToolCapabilityClass)
+    : undefined;
+}
+
+function readCorrelationClause(raw: unknown): CorrelationClause {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const clause: CorrelationClause = {};
+  const axis = readDataAxis(o.axis);
+  if (axis) clause.axis = axis;
+  const cap = readCapabilityClass(o.tool_capability_class);
+  if (cap) clause.tool_capability_class = cap;
+  if (Array.isArray(o.with_rule_match)) {
+    const ids = o.with_rule_match.filter((v): v is string => typeof v === 'string' && v.length > 0);
+    if (ids.length > 0) clause.with_rule_match = ids;
+  }
+  // Only honor min_severity when it parses to a real severity level.
+  // Garbage strings ("medium-ish", null, 7) fall through to the
+  // gateway's default ("any severity") instead of being silently
+  // clamped to LOW, which would over-tighten the clause.
+  if (typeof o.min_severity === 'string') {
+    const upper = o.min_severity.toUpperCase();
+    if ((SEVERITIES_UPPER as readonly string[]).includes(upper)) {
+      clause.min_severity = upper as SeverityUpper;
+    }
+  }
+  return clause;
+}
+
+function readCorrelationPatterns(raw: unknown): CorrelationPattern[] {
+  if (!raw || typeof raw !== 'object') return [];
+  const o = raw as { patterns?: unknown };
+  if (!Array.isArray(o.patterns)) return [];
+
+  const out: CorrelationPattern[] = [];
+  for (const entry of o.patterns) {
+    if (!entry || typeof entry !== 'object') continue;
+    const p = entry as Record<string, unknown>;
+    if (typeof p.id !== 'string' || p.id.length === 0) continue;
+    const allOf = Array.isArray(p.all_of) ? p.all_of.map(readCorrelationClause) : undefined;
+    const fingerprintChain = Array.isArray(p.fingerprint_chain)
+      ? p.fingerprint_chain.map(readCorrelationClause)
+      : undefined;
+    const sequence = Array.isArray(p.sequence)
+      ? p.sequence
+          .filter((s): s is Record<string, unknown> => !!s && typeof s === 'object')
+          .map<CorrelationSequenceStep>((s) => ({
+            severity: readSeverityUpper(s.severity, 'MEDIUM'),
+          }))
+      : undefined;
+
+    out.push({
+      id: p.id,
+      description: typeof p.description === 'string' ? p.description : '',
+      window_events: typeof p.window_events === 'number' && p.window_events > 0
+        ? Math.floor(p.window_events)
+        : 30,
+      severity_on_match: readSeverityUpper(p.severity_on_match, 'CRITICAL'),
+      ...(allOf && allOf.length > 0 ? { all_of: allOf } : {}),
+      ...(sequence && sequence.length > 0 ? { sequence } : {}),
+      ...(fingerprintChain && fingerprintChain.length > 0
+        ? { fingerprint_chain: fingerprintChain }
+        : {}),
+      enabled: p.enabled !== false, // default-on; the bundled YAML doesn't carry this flag today
+    });
+  }
+  return out;
+}
+
+function readCiscoAIDefense(raw: unknown): CiscoAIDefenseConfig {
+  const o = (raw ?? {}) as Partial<{
+    enabled: boolean;
+    endpoint: string;
+    api_key_env: string;
+    scan_hook_surface: boolean;
+  }>;
+  return {
+    // Wizard exposes an explicit on/off knob even though gateway-side
+    // the lane no-ops silently when api_key_env is empty. Cleaner UX
+    // than "set api_key_env='' to disable".
+    enabled: !!o.enabled,
+    endpoint: typeof o.endpoint === 'string' ? o.endpoint : '',
+    api_key_env: typeof o.api_key_env === 'string' ? o.api_key_env : '',
+    // Mirrors CiscoAIDefenseConfig.HookSurfaceEnabled() — default true.
+    scan_hook_surface: o.scan_hook_surface !== false,
+  };
+}
+
+function defaultCiscoAIDefense(): CiscoAIDefenseConfig {
+  return { enabled: false, endpoint: '', api_key_env: '', scan_hook_surface: true };
+}
+
 function readRulesFiles(raw: unknown): RulesFile[] {
   if (!raw || typeof raw !== 'object') return [];
   const out: RulesFile[] = [];
@@ -256,6 +373,10 @@ export function policyFromPreset(name: 'default' | 'strict' | 'permissive'): Pol
     audit: readAudit(policyRaw.audit),
     scanners: {},
     custom_rego: [],
+    correlator: readCorrelationPatterns(guardrailPack.correlator),
+    cisco_ai_defense: readCiscoAIDefense(
+      (policyRaw.cisco_ai_defense as unknown) ?? undefined,
+    ),
   };
 }
 
@@ -298,5 +419,7 @@ function blankPolicy(name: 'default' | 'strict' | 'permissive'): Policy {
     audit: { log_all_actions: true, log_scan_results: true, retention_days: 90 },
     scanners: {},
     custom_rego: [],
+    correlator: [],
+    cisco_ai_defense: defaultCiscoAIDefense(),
   };
 }

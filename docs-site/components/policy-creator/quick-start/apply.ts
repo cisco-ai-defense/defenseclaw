@@ -42,6 +42,7 @@ export function applyAnswers(answers: Answers): Policy {
 
   const enabledRuleIds = new Set<string>();
   const newDestinations = new Set<string>();
+  const forcedCorrelatorIds = new Set<string>();
   for (const cardId of answers.block) {
     const card = BLOCK_CARDS.find((c) => c.id === cardId);
     if (!card) continue;
@@ -50,13 +51,21 @@ export function applyAnswers(answers: Answers): Policy {
     if (card.guardrailPatterns) {
       for (const gp of card.guardrailPatterns) {
         const existing = policy.guardrail.patterns[gp.category] ?? [];
-        // Append new patterns, dedup.
         policy.guardrail.patterns[gp.category] = Array.from(
           new Set([...existing, ...gp.patterns]),
         );
         policy.guardrail.severity_mappings[gp.category] = gp.severity;
       }
     }
+    for (const cid of card.correlatorPatternIds ?? []) forcedCorrelatorIds.add(cid);
+  }
+  // Layer-5 cards force the named correlator patterns to enabled even if
+  // they were disabled in the playground. Patterns not referenced by any
+  // card retain whatever state the preset shipped (almost always enabled).
+  if (forcedCorrelatorIds.size > 0) {
+    policy.correlator = policy.correlator.map((p) =>
+      forcedCorrelatorIds.has(p.id) ? { ...p, enabled: true } : p,
+    );
   }
   // Walk every rule in every loaded pack file and force `enabled=true`
   // for those whose id appears in the user's selected cards. Rules

@@ -87,6 +87,18 @@ export const INDEX: IndexEntry[] = [
   // scanners
   { sectionId: 'scanners', group: 'Scanners', label: 'Scanner profiles', keywords: ['profile', 'enable scanner', 'disable scanner'] },
 
+  // session correlator (Layer 5)
+  { sectionId: 'correlator', group: 'Correlator', label: 'Session correlator (Layer 5)', keywords: ['layer 5', 'session', 'cross-event', 'multi-step'] },
+  { sectionId: 'correlator', group: 'Correlator', label: 'Lethal trifecta', keywords: ['willison', 'trifecta', 'ingress untrusted', 'sensitive access', 'egress external'] },
+  { sectionId: 'correlator', group: 'Correlator', label: 'Escalation chain', keywords: ['escalation', 'sequence', 'medium high high'] },
+  { sectionId: 'correlator', group: 'Correlator', label: 'Destructive flow', keywords: ['rm -rf', 'destructive', 'exec_shell', 'capability'] },
+  { sectionId: 'correlator', group: 'Correlator', label: 'Fingerprint chain', keywords: ['fingerprint', 'exfil', 'same value across turns'] },
+
+  // cisco AI Defense
+  { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'Cisco AI Defense lane', keywords: ['cisco', 'ai defense', 'aid', 'second opinion', 'remote scanner'] },
+  { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'AID api key env var', keywords: ['api_key_env', 'CISCO_AI_DEFENSE_API_KEY', 'token'] },
+  { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'AID scan_hook_surface', keywords: ['hook surface', 'pretooluse', 'posttooluse', 'tool call coverage'] },
+
   // custom rego
   { sectionId: 'custom-rego', group: 'Custom Rego', label: 'Custom Rego snippet', keywords: ['rego', 'opa', 'advanced', 'custom rule'] },
 

@@ -111,9 +111,27 @@ interface PresetBundle {
     judge: Record<string, unknown>;
     suppressions: Record<string, unknown> | null;
     sensitiveTools: Record<string, unknown> | null;
+    // Session-correlator patterns. The defaults file lives outside
+    // policies/guardrail/<pack>/ (it's a single source-of-truth under
+    // internal/guardrail/defaults/correlation-patterns.yaml), but we
+    // attach it per-preset so the wizard's presets-bundle plumbing
+    // can stay symmetric.
+    correlator: Record<string, unknown> | null;
   };
   scanners: Record<string, Record<string, Record<string, unknown>>>;
 }
+
+// Path to the upstream correlation-patterns.yaml. The file is a single
+// source of truth shared across packs today; we lift it once and copy
+// it onto every preset bundle. If a future per-pack override drops in
+// at policies/guardrail/<pack>/correlation-patterns.yaml we prefer it.
+const CORRELATION_PATTERNS_DEFAULT = resolve(
+  REPO_ROOT,
+  'internal',
+  'guardrail',
+  'defaults',
+  'correlation-patterns.yaml',
+);
 
 function readYaml(path: string): Record<string, unknown> | null {
   if (!existsSync(path)) return null;
@@ -156,6 +174,13 @@ function loadPreset(name: PresetName): PresetBundle | null {
   const suppressions = readYaml(join(packDir, 'suppressions.yaml'));
   const sensitiveTools = readYaml(join(packDir, 'sensitive-tools.yaml'));
 
+  // Layer 5 patterns. Prefer per-pack override if it exists, otherwise
+  // fall back to the upstream defaults file. Either way the wizard
+  // ends up with the same shape on .guardrail.correlator.
+  const correlator =
+    readYaml(join(packDir, 'correlation-patterns.yaml')) ??
+    readYaml(CORRELATION_PATTERNS_DEFAULT);
+
   // Per-scanner profiles. Each scanner has its own subdirectory under
   // policies/scanners/<scanner>/<profile>.yaml. We surface them all so
   // the wizard can let the operator pick a profile (or write inline
@@ -177,7 +202,7 @@ function loadPreset(name: PresetName): PresetBundle | null {
     name,
     description: String((policy as Record<string, unknown>).description ?? name),
     policy,
-    guardrail: { rules, judge, suppressions, sensitiveTools },
+    guardrail: { rules, judge, suppressions, sensitiveTools, correlator },
     scanners,
   };
 }
@@ -204,6 +229,32 @@ interface Recipe {
   counterexamples: string[];
   source: string;
   tags: string[];
+  data_axis?: Array<'ingress_untrusted' | 'sensitive_access' | 'egress_external'>;
+  tool_capability_class?: Array<
+    'read_fs' | 'write_fs' | 'exec_shell' | 'network_fetch' | 'send_message'
+  >;
+}
+
+// Mirrors internal/guardrail/axes.go AxesForRuleID's prefix-based fallback
+// so the docs-site recipe catalog labels match what the gateway actually
+// attaches at evaluation time. Kept in sync by reviewers — there is no
+// build-time linkage between the two files.
+function axesForRuleId(id: string): Recipe['data_axis'] {
+  const has = (...prefixes: string[]) => prefixes.some((p) => id.startsWith(p));
+  if (has('SEC-', 'PATH-', 'ENT-', 'CRED-', 'PII-')) return ['sensitive_access'];
+  if (has('C2-', 'DNS-TUNNEL')) return ['egress_external'];
+  if (has('INJ-', 'TRUST-', 'JAIL-')) return ['ingress_untrusted'];
+  if (has('SSRF-')) return ['sensitive_access', 'egress_external'];
+  // CMD-DESTRUCTIVE / SHELL-DESTRUCTIVE: engine returns nil; rendered as
+  // "(no axis — destructive flow tracked via tool_capability_class)".
+  return undefined;
+}
+
+function capabilityForRuleId(id: string): Recipe['tool_capability_class'] {
+  if (id.startsWith('CMD-DESTRUCTIVE') || id.startsWith('SHELL-DESTRUCTIVE')) {
+    return ['exec_shell'];
+  }
+  return undefined;
 }
 
 function buildRecipes(strict: PresetBundle): Recipe[] {
@@ -263,6 +314,8 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
         counterexamples: hints.counterexamples,
         source: `policies/guardrail/strict/rules/${filename}.yaml`,
         tags: Array.isArray(rule.tags) ? (rule.tags as string[]) : [],
+        data_axis: axesForRuleId(id),
+        tool_capability_class: capabilityForRuleId(id),
       });
     }
   }
@@ -324,6 +377,7 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
     counterexamples: ['shell.write', 'fs.unlink'],
     source: 'docs-site/scripts/build-policy-assets.ts (illustrative)',
     tags: ['tool', 'shell', 'noise-reduction'],
+    tool_capability_class: ['exec_shell'],
   });
 
   return recipes;
@@ -520,6 +574,84 @@ function buildScenarios(): Scenario[] {
       input: {
         severity: 'HIGH',
         target_type: 'skill',
+      },
+    },
+    // ----- Layer 5: session correlator promotions ---------------------------
+    // The correlator itself runs in Go (not Rego). These scenarios show
+    // what the gateway emits *after* a correlator pattern fires: a
+    // synthetic guardrail finding carrying the pattern's severity_on_match.
+    // Run them through the guardrail domain to verify your policy's
+    // response posture promotes correlator-CRITICAL all the way to block.
+    {
+      id: 'correlator-lethal-trifecta',
+      title: 'Lethal trifecta promotion (Willison)',
+      domain: 'guardrail',
+      description:
+        'Session combined ingress_untrusted + sensitive_access + egress_external findings. The correlator emits a CRITICAL synthetic finding. Default and strict: block.',
+      expectedVerdict: 'block',
+      input: {
+        direction: 'completion',
+        model: 'gpt-4o-mini',
+        mode: 'action',
+        scanner_mode: 'local',
+        local_result: {
+          action: 'block',
+          severity: 'CRITICAL',
+          findings: ['Session matched LETHAL-TRIFECTA correlator pattern'],
+          reason: 'CORR-LETHAL-TRIFECTA: ingress_untrusted + sensitive_access + egress_external in last 5 events',
+          signal_strength: 'high',
+          correlator_pattern_id: 'LETHAL-TRIFECTA',
+        },
+        cisco_result: null,
+        content_length: 0,
+      },
+    },
+    {
+      id: 'correlator-escalation-chain',
+      title: 'Escalation chain promotion',
+      domain: 'guardrail',
+      description:
+        'Session ran MEDIUM → HIGH → HIGH severity findings in order. The correlator emits a CRITICAL on chain completion.',
+      expectedVerdict: 'block',
+      input: {
+        direction: 'prompt',
+        model: 'gpt-4o-mini',
+        mode: 'action',
+        scanner_mode: 'local',
+        local_result: {
+          action: 'block',
+          severity: 'CRITICAL',
+          findings: ['Session matched ESCALATION-CHAIN correlator pattern'],
+          reason: 'CORR-ESCALATION-CHAIN: MEDIUM→HIGH→HIGH sequence in 6 events',
+          signal_strength: 'high',
+          correlator_pattern_id: 'ESCALATION-CHAIN',
+        },
+        cisco_result: null,
+        content_length: 0,
+      },
+    },
+    {
+      id: 'correlator-destructive-flow',
+      title: 'Destructive shell after sensitive read',
+      domain: 'guardrail',
+      description:
+        'rm -rf invoked in the same session as a prior ~/.ssh read. Correlator emits CRITICAL.',
+      expectedVerdict: 'block',
+      input: {
+        direction: 'tool_call',
+        model: 'gpt-4o-mini',
+        mode: 'action',
+        scanner_mode: 'local',
+        local_result: {
+          action: 'block',
+          severity: 'CRITICAL',
+          findings: ['Session matched DESTRUCTIVE-FLOW correlator pattern'],
+          reason: 'CORR-DESTRUCTIVE-FLOW: exec_shell capability after sensitive_access finding',
+          signal_strength: 'high',
+          correlator_pattern_id: 'DESTRUCTIVE-FLOW',
+        },
+        cisco_result: null,
+        content_length: 0,
       },
     },
   ];

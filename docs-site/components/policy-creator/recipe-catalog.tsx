@@ -9,10 +9,17 @@
 
 import { useMemo, useState } from 'react';
 import recipesData from '@/data/policy-recipes.json';
-import type { Recipe, RecipesFile } from './types';
+import type { DataAxis, Recipe, RecipesFile } from './types';
 import { CopyButton } from './ui/copy-button';
 
 const ALL: Recipe[] = (recipesData as unknown as RecipesFile).recipes;
+
+const AXIS_LABELS: Array<{ value: DataAxis | 'all'; label: string }> = [
+  { value: 'all', label: 'any axis' },
+  { value: 'ingress_untrusted', label: 'ingress_untrusted' },
+  { value: 'sensitive_access', label: 'sensitive_access' },
+  { value: 'egress_external', label: 'egress_external' },
+];
 
 const KIND_LABELS: Array<{ value: Recipe['kind'] | 'all'; label: string }> = [
   { value: 'all', label: 'all' },
@@ -33,19 +40,25 @@ const KIND_LABELS: Array<{ value: Recipe['kind'] | 'all'; label: string }> = [
 export function RecipeCatalog() {
   const [query, setQuery] = useState('');
   const [kind, setKind] = useState<Recipe['kind'] | 'all'>('all');
+  const [axis, setAxis] = useState<DataAxis | 'all'>('all');
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return ALL.filter((r) => kind === 'all' || r.kind === kind).filter((r) => {
-      if (!q) return true;
-      return (
-        r.title.toLowerCase().includes(q) ||
-        r.id.toLowerCase().includes(q) ||
-        r.tags.some((t) => t.toLowerCase().includes(q)) ||
-        JSON.stringify(r.body).toLowerCase().includes(q)
-      );
-    });
-  }, [query, kind]);
+    return ALL.filter((r) => kind === 'all' || r.kind === kind)
+      .filter((r) => {
+        if (axis === 'all') return true;
+        return Array.isArray(r.data_axis) && r.data_axis.includes(axis);
+      })
+      .filter((r) => {
+        if (!q) return true;
+        return (
+          r.title.toLowerCase().includes(q) ||
+          r.id.toLowerCase().includes(q) ||
+          r.tags.some((t) => t.toLowerCase().includes(q)) ||
+          JSON.stringify(r.body).toLowerCase().includes(q)
+        );
+      });
+  }, [query, kind, axis]);
 
   return (
     <div className="my-6 rounded-2xl border border-fd-border bg-fd-card/30 p-4">
@@ -68,6 +81,19 @@ export function RecipeCatalog() {
             </option>
           ))}
         </select>
+        <select
+          value={axis}
+          onChange={(e) => setAxis(e.target.value as DataAxis | 'all')}
+          className="rounded-md border border-fd-border bg-fd-background px-2 py-1.5 text-xs text-fd-foreground"
+          aria-label="Filter by data axis"
+          title="Filter by the lethal-trifecta data axis the recipe contributes to"
+        >
+          {AXIS_LABELS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
       </div>
       <div className="text-[11px] text-fd-muted-foreground">
         Showing {filtered.length} of {ALL.length} recipes.
@@ -85,6 +111,28 @@ export function RecipeCatalog() {
               </span>
             </div>
             <div className="font-mono text-[10px] text-fd-muted-foreground">{r.id}</div>
+            {(r.data_axis?.length ?? 0) + (r.tool_capability_class?.length ?? 0) > 0 && (
+              <div className="flex flex-wrap items-center gap-1 text-[9px]">
+                {r.data_axis?.map((a) => (
+                  <span
+                    key={`ax-${a}`}
+                    className="rounded-sm bg-fd-muted px-1.5 py-0.5 font-mono uppercase tracking-wide text-fd-muted-foreground"
+                    title="data_axis — what part of the lethal trifecta this contributes to"
+                  >
+                    {a}
+                  </span>
+                ))}
+                {r.tool_capability_class?.map((c) => (
+                  <span
+                    key={`cc-${c}`}
+                    className="rounded-sm border border-fd-border px-1.5 py-0.5 font-mono uppercase tracking-wide text-fd-muted-foreground"
+                    title="tool_capability_class — capability bucket the targeted tool falls into"
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            )}
             <p className="text-[11px] leading-snug text-fd-muted-foreground">{r.why}</p>
             {r.examples.length > 0 && (
               <details className="rounded border border-fd-border bg-fd-card/60">

@@ -71,6 +71,35 @@ judge for confirmation — the regex is the cheap pre-filter.
   severity: CRITICAL
 ```
 
+### Unicode obfuscation (ZWSP / RTL / homoglyph)
+
+Attackers slip zero-width characters and bidi controls inside otherwise-benign strings to defeat
+keyword matchers (`i​gnore previous` reads identically to the eye but `i\u200Bgnore` slips past
+`(?i)ignore`). Two layers cover this:
+
+```yaml
+- id: OBFUSC-UNICODE-ZWSP
+  title: Zero-width whitespace inside text
+  pattern: '[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{FEFF}]'
+  severity: MEDIUM
+  signal_strength: high
+  tags: [obfuscation, unicode]
+- id: OBFUSC-CYRILLIC-LATIN-MIX
+  title: Cyrillic letter inside an otherwise-ASCII word
+  pattern: '\b[a-zA-Z]*[\x{0430}-\x{044F}][a-zA-Z]+\b'
+  severity: MEDIUM
+  signal_strength: medium
+  tags: [obfuscation, homoglyph]
+```
+
+<Callout type="warn" title="Why MEDIUM and not HIGH">
+A single ZWSP isn't proof of malice — copy-pasting from Word or PDF leaks them all the time.
+But the same finding inside the same session as a sensitive-access or injection finding is what the
+Layer-5 correlator promotes to CRITICAL via the <code>signal_strength: high</code> axis. Keep the
+base severity at MEDIUM so you don't drown in false positives, and let the correlator do the
+work. See [Layer 5 — Session correlator](./#layer-5--session-correlator).
+</Callout>
+
 ### Exfiltration markers
 
 When a model surfaces a base64 blob, an out-of-band webhook URL, or a tar pipe, you usually want

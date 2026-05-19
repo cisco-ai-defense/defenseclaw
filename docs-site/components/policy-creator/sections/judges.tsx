@@ -82,6 +82,7 @@ export function JudgesSection({
 
   return (
     <div className="space-y-4">
+      <SeverityRubricCallout />
       {missing.length > 0 && (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-fd-border bg-fd-background p-2">
           <span className="text-[11px] font-medium text-fd-muted-foreground">
@@ -245,6 +246,54 @@ export function JudgesSection({
         </div>
       )}
     </div>
+  );
+}
+
+function SeverityRubricCallout() {
+  return (
+    <details className="rounded-md border border-fd-border bg-fd-card/60 p-3 text-[12px] leading-5 text-fd-muted-foreground">
+      <summary className="cursor-pointer font-semibold text-fd-foreground">
+        Severity rubric &amp; signal_strength coupling
+      </summary>
+      <div className="mt-2 space-y-2">
+        <p>
+          Severities are operational, not editorial. Pick the one whose response
+          posture you actually want — the rest follows from the policy.
+        </p>
+        <ul className="ml-4 list-disc space-y-1">
+          <li>
+            <span className="font-mono">LOW</span> — log, no user friction.
+          </li>
+          <li>
+            <span className="font-mono">MEDIUM</span> — alert; HILT prompt depending on
+            install column.
+          </li>
+          <li>
+            <span className="font-mono">HIGH</span> — block by default in the runtime
+            column.
+          </li>
+          <li>
+            <span className="font-mono">CRITICAL</span> — block + page on-call. Reserve
+            for confirmed RCE / data-loss paths.
+          </li>
+        </ul>
+        <p>
+          Findings carry a <span className="font-mono">signal_strength</span> ∈
+          &#123; low, medium, high &#125; that captures detector confidence. The
+          gateway promotes severity when multiple high-strength signals stack in the
+          same event; the correlator promotes again when they stack across events.
+        </p>
+        <p>
+          <strong>Injection judge note (Layer 3):</strong> a single matching
+          injection category now maps to <span className="font-mono">HIGH</span> by
+          default (was previously gated behind{' '}
+          <span className="font-mono">min_categories_for_high</span>). If you need
+          the old &ldquo;require 2 categories&rdquo; behavior, raise{' '}
+          <span className="font-mono">min_categories_for_high</span> on the{' '}
+          <span className="font-mono">injection</span> judge.
+        </p>
+      </div>
+    </details>
   );
 }
 

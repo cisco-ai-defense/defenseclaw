@@ -6,8 +6,9 @@
 // can paste the output directly under ~/.defenseclaw/policies/.
 
 import yaml from 'js-yaml';
-import type { Policy } from '../types';
+import type { CorrelationPattern, Policy } from '../types';
 import { projectPolicyToData } from './data-projection';
+import { policyFromPreset } from './presets';
 
 export interface EmittedFile {
   path: string;
@@ -31,6 +32,19 @@ export function emit(policy: Policy): EmittedFile[] {
   const packName = policy.rule_pack.name || policy.name;
 
   // 1) Top-level admission policy YAML.
+  const aid = policy.cisco_ai_defense;
+  const aidBlock =
+    aid.enabled || aid.api_key_env || aid.endpoint
+      ? {
+          cisco_ai_defense: {
+            ...(aid.endpoint ? { endpoint: aid.endpoint } : {}),
+            ...(aid.api_key_env ? { api_key_env: aid.api_key_env } : {}),
+            // Only emit scan_hook_surface when the operator changed it
+            // from the default true; HookSurfaceEnabled() handles unset.
+            ...(aid.scan_hook_surface === false ? { scan_hook_surface: false } : {}),
+          },
+        }
+      : {};
   const policyYaml = {
     name: policy.name,
     description: policy.description,
@@ -52,6 +66,7 @@ export function emit(policy: Policy): EmittedFile[] {
     audit: policy.audit,
     webhooks: policy.webhooks,
     scanners: policy.scanners,
+    ...aidBlock,
   };
   files.push({
     path: `~/.defenseclaw/policies/${policy.name}.yaml`,
@@ -147,5 +162,92 @@ export function emit(policy: Policy): EmittedFile[] {
     });
   }
 
+  // 8) Session correlator patterns (Layer 5). Only emit when the
+  // operator changed something — if the wizard's set matches the
+  // bundled defaults verbatim, the gateway will pick those up
+  // automatically and the override file just adds noise. We skip
+  // disabled patterns; an empty result still emits the file so the
+  // gateway-side defaults are overridden with "no patterns".
+  const enabledPatterns = policy.correlator.filter((p) => p.enabled);
+  const hasCustomCorrelator = correlatorDiffersFromDefault(policy);
+  if (hasCustomCorrelator) {
+    files.push({
+      path: `~/.defenseclaw/policies/guardrail/${packName}/correlation-patterns.yaml`,
+      contents:
+        `# Sliding-window correlation patterns for pack ${packName}.\n` +
+        `# Overrides the bundled defaults in internal/guardrail/defaults/.\n` +
+        `# See https://defenseclaw.dev/docs/policies#layer-5--session-correlator\n` +
+        dump({
+          patterns: enabledPatterns.map((p) => ({
+            id: p.id,
+            ...(p.description ? { description: p.description } : {}),
+            window_events: p.window_events,
+            severity_on_match: p.severity_on_match,
+            ...(p.all_of && p.all_of.length > 0 ? { all_of: p.all_of } : {}),
+            ...(p.sequence && p.sequence.length > 0 ? { sequence: p.sequence } : {}),
+            ...(p.fingerprint_chain && p.fingerprint_chain.length > 0
+              ? { fingerprint_chain: p.fingerprint_chain }
+              : {}),
+          })),
+        }),
+      description: `Session correlator patterns (${enabledPatterns.length} enabled)`,
+    });
+  }
+
   return files;
 }
+
+// Compare the wizard's correlator state to the bundled defaults for
+// the preset the operator started from. We only emit a YAML override
+// when the operator has actually changed something — disabled a
+// pattern, edited a window, added a clause — to avoid shadowing
+// future upstream pattern updates with stale copies.
+//
+// Compares canonical signatures (id-keyed JSON, missing fields
+// normalized) so reordering, key insertion order, and the presence
+// of optional empty arrays don't trip a false "edited".
+function correlatorDiffersFromDefault(policy: Policy): boolean {
+  const current = canonicalCorrelator(policy.correlator);
+  const baseline = canonicalCorrelator(policyFromPreset(policy.basedOn).correlator);
+  return current !== baseline;
+}
+
+// Canonical signature of a correlator state. Used by the emit-or-not
+// heuristic and exposed for tests. The signature is deterministic
+// across re-renders so identical states hash to the same string.
+function canonicalCorrelator(patterns: CorrelationPattern[]): string {
+  const sorted = [...patterns]
+    .map((p) => ({
+      id: p.id,
+      enabled: p.enabled !== false,
+      description: p.description ?? '',
+      window_events: p.window_events,
+      severity_on_match: p.severity_on_match,
+      all_of: (p.all_of ?? []).map(canonicalClause),
+      sequence: (p.sequence ?? []).map((s) => ({ severity: s.severity })),
+      fingerprint_chain: (p.fingerprint_chain ?? []).map(canonicalClause),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id));
+  return JSON.stringify(sorted);
+}
+
+function canonicalClause(c: {
+  axis?: string;
+  tool_capability_class?: string;
+  with_rule_match?: string[];
+  min_severity?: string;
+}): Record<string, unknown> {
+  return {
+    axis: c.axis ?? '',
+    tool_capability_class: c.tool_capability_class ?? '',
+    with_rule_match: [...(c.with_rule_match ?? [])].sort(),
+    min_severity: c.min_severity ?? '',
+  };
+}
+
+// Exposed for tests so we can assert "edit to a bundled pattern is
+// detected as different from the baseline preset".
+export const __TEST_INTERNALS = {
+  correlatorDiffersFromDefault,
+  canonicalCorrelator,
+};

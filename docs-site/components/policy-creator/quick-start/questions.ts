@@ -40,7 +40,7 @@ export type PostureId = (typeof POSTURES)[number]['id'];
 
 /** Logical bucket for the block-card grid in the wizard's "Block" step.
  *  Purely a UX grouping — the apply.ts mapper doesn't read it. */
-export type BlockCategory = 'data' | 'network' | 'code' | 'llm';
+export type BlockCategory = 'data' | 'network' | 'code' | 'llm' | 'multi_step';
 
 export const BLOCK_CATEGORIES: ReadonlyArray<{
   id: BlockCategory;
@@ -67,6 +67,11 @@ export const BLOCK_CATEGORIES: ReadonlyArray<{
     title: 'LLM-layer attacks',
     blurb: 'Prompt-shape patterns aimed at the model itself.',
   },
+  {
+    id: 'multi_step',
+    title: 'Multi-step attack patterns',
+    blurb: 'Session-level patterns where each step looks benign but the sequence does not. Powered by the Layer-5 correlator.',
+  },
 ];
 
 export interface BlockCard {
@@ -83,6 +88,10 @@ export interface BlockCard {
    *  guardrail.patterns map so the existing engine catches them
    *  without needing a brand-new rule pack file. */
   guardrailPatterns?: Array<{ category: string; patterns: string[]; severity: SeverityUpper }>;
+  /** Correlator pattern IDs that this card forces to enabled. Lets a
+   *  card opt the operator into Layer-5 detection without requiring
+   *  them to crack open the Playground's Correlator section. */
+  correlatorPatternIds?: string[];
   /** Open this docs page when the user clicks "see cookbook". */
   cookbookHref?: string;
 }
@@ -205,6 +214,36 @@ export const BLOCK_CARDS: BlockCard[] = [
       'Authority-claim, urgency, fake citations, false consensus. Lower-confidence patterns that flag suspicious narrative shape rather than concrete payloads.',
     ruleIds: ['COG-AUTHORITY', 'COG-URGENCY', 'COG-FAKE-CITE'],
     cookbookHref: '/docs/policies/regex-cookbook',
+  },
+  {
+    id: 'lethal_trifecta',
+    category: 'multi_step',
+    title: 'Lethal trifecta (Willison)',
+    description:
+      'Session combines untrusted ingress + sensitive data access + external egress. The three ingredients of indirect-prompt-injection exfil. Catches sessions where each step looked HIGH/MEDIUM individually but the combination is CRITICAL.',
+    ruleIds: [],
+    correlatorPatternIds: ['LETHAL-TRIFECTA', 'TRIFECTA-WITH-FINGERPRINT-MATCH'],
+    cookbookHref: '/docs/policies#layer-5--session-correlator',
+  },
+  {
+    id: 'escalation_chain',
+    category: 'multi_step',
+    title: 'Escalation chain across turns',
+    description:
+      'MEDIUM → HIGH → HIGH severity progression inside the same session — attacker iterating on a prompt to get past a guardrail. Promoted to CRITICAL when the chain completes.',
+    ruleIds: [],
+    correlatorPatternIds: ['ESCALATION-CHAIN'],
+    cookbookHref: '/docs/policies#layer-5--session-correlator',
+  },
+  {
+    id: 'destructive_flow',
+    category: 'multi_step',
+    title: 'Destructive shell after sensitive read',
+    description:
+      'rm -rf / mkfs / dd-if invoked in the same session as a prior sensitive-access finding (~/.ssh, ~/.aws, /etc/shadow). Indicates active exploitation rather than reconnaissance.',
+    ruleIds: [],
+    correlatorPatternIds: ['DESTRUCTIVE-FLOW'],
+    cookbookHref: '/docs/policies#layer-5--session-correlator',
   },
 ];
 

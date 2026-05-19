@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-11T18:28:58.506Z",
+  "generated_at": "2026-05-19T18:01:48.327Z",
   "recipes": [
     {
       "id": "RECIPE-C2-WEBHOOK-SITE",
@@ -23,6 +23,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -47,6 +50,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -71,6 +77,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -95,6 +104,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -119,6 +131,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -143,6 +158,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -167,6 +185,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -191,6 +212,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -215,6 +239,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -239,6 +266,9 @@
       "tags": [
         "exfiltration",
         "c2"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -263,6 +293,9 @@
       "tags": [
         "ssrf",
         "credential"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -287,6 +320,9 @@
       "tags": [
         "ssrf",
         "credential"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -311,6 +347,9 @@
       "tags": [
         "ssrf",
         "credential"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -335,6 +374,9 @@
       "tags": [
         "ssrf",
         "credential"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -359,6 +401,9 @@
       "tags": [
         "ssrf",
         "credential"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -383,6 +428,9 @@
       "tags": [
         "ssrf",
         "credential"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -407,6 +455,9 @@
       "tags": [
         "exfiltration",
         "dns-tunnel"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -431,6 +482,9 @@
       "tags": [
         "exfiltration",
         "dns-tunnel"
+      ],
+      "data_axis": [
+        "egress_external"
       ]
     },
     {
@@ -1225,6 +1279,9 @@
       "tags": [
         "pii",
         "regulated"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1249,6 +1306,9 @@
       "tags": [
         "pii",
         "regulated"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1273,6 +1333,9 @@
       "tags": [
         "pii",
         "pci"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1297,6 +1360,9 @@
       "tags": [
         "pii",
         "pci"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1321,6 +1387,9 @@
       "tags": [
         "pii",
         "pci"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1345,6 +1414,9 @@
       "tags": [
         "pii",
         "pci"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1369,6 +1441,9 @@
       "tags": [
         "pii",
         "financial"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1391,6 +1466,9 @@
       "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
       "tags": [
         "pii"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1413,6 +1491,9 @@
       "source": "policies/guardrail/strict/rules/enterprise-data.yaml",
       "tags": [
         "pii"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1437,6 +1518,9 @@
       "tags": [
         "pii",
         "regulated"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1461,6 +1545,9 @@
       "tags": [
         "pii",
         "regulated"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1485,6 +1572,9 @@
       "tags": [
         "pii",
         "hipaa"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1509,6 +1599,9 @@
       "tags": [
         "pii",
         "hipaa"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1533,6 +1626,9 @@
       "tags": [
         "pii",
         "regulated"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1557,6 +1653,9 @@
       "tags": [
         "pii",
         "bulk-data"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1581,6 +1680,9 @@
       "tags": [
         "pii",
         "bulk-data"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1610,6 +1712,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1632,6 +1737,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1654,6 +1762,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1676,6 +1787,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1703,6 +1817,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1725,6 +1842,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1753,6 +1873,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1775,6 +1898,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1797,6 +1923,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1819,6 +1948,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1841,6 +1973,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1868,6 +2003,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1890,6 +2028,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1918,6 +2059,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1945,6 +2089,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1967,6 +2114,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -1989,6 +2139,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2011,6 +2164,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2033,6 +2189,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2055,6 +2214,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2077,6 +2239,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2099,6 +2264,9 @@
       "source": "policies/guardrail/strict/rules/secrets.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2123,6 +2291,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2147,6 +2318,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2171,6 +2345,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2195,6 +2372,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2219,6 +2399,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2243,6 +2426,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2267,6 +2453,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2291,6 +2480,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2315,6 +2507,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2339,6 +2534,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2363,6 +2561,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2387,6 +2588,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2409,6 +2613,9 @@
       "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
       "tags": [
         "system-file"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2433,6 +2640,9 @@
       "tags": [
         "system-file",
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2457,6 +2667,9 @@
       "tags": [
         "system-file",
         "privilege"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2479,6 +2692,9 @@
       "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
       "tags": [
         "credential"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2503,6 +2719,9 @@
       "tags": [
         "credential",
         "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
       ]
     },
     {
@@ -2525,6 +2744,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2547,6 +2769,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2569,6 +2794,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2591,6 +2819,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2613,6 +2844,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2635,6 +2869,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2657,6 +2894,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2679,6 +2919,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2701,6 +2944,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2723,6 +2969,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2745,6 +2994,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2767,6 +3019,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2789,6 +3044,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2811,6 +3069,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2833,6 +3094,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2855,6 +3119,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2877,6 +3144,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2899,6 +3169,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2921,6 +3194,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2945,6 +3221,9 @@
       "tags": [
         "prompt-injection",
         "obfuscation"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -2967,6 +3246,9 @@
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
       ]
     },
     {
@@ -3072,6 +3354,9 @@
         "tool",
         "shell",
         "noise-reduction"
+      ],
+      "tool_capability_class": [
+        "exec_shell"
       ]
     }
   ]

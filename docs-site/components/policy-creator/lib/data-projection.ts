@@ -8,6 +8,8 @@
 // severity keys, same "enable → allow / disable → block" mapping.
 
 import type {
+  CorrelationClause,
+  CorrelationPattern,
   Policy,
   ScannerType,
   SeverityActionTriple,
@@ -64,6 +66,66 @@ export interface OpaData {
     allowed_domains: string[];
     allowed_ports: number[];
   };
+  /** Session correlator (Layer 5). Mirrors the YAML schema in
+   *  internal/guardrail/defaults/correlation-patterns.yaml so custom
+   *  Rego snippets can reason against the same data the live engine
+   *  evaluates. */
+  correlator: {
+    patterns: Array<{
+      id: string;
+      window_events: number;
+      severity_on_match: string;
+      all_of?: OpaCorrelationClause[];
+      sequence?: Array<{ severity: string }>;
+      fingerprint_chain?: OpaCorrelationClause[];
+    }>;
+  };
+  /** Cisco AI Defense lane visibility for Rego policies that want to
+   *  branch on whether the hook surface is being scanned. */
+  cisco_ai_defense: {
+    enabled: boolean;
+    api_key_env: string;
+    scan_hook_surface: boolean;
+  };
+}
+
+interface OpaCorrelationClause {
+  axis?: string;
+  tool_capability_class?: string;
+  with_rule_match?: string[];
+  min_severity?: string;
+}
+
+function projectClause(c: CorrelationClause): OpaCorrelationClause {
+  const out: OpaCorrelationClause = {};
+  if (c.axis) out.axis = c.axis;
+  if (c.tool_capability_class) out.tool_capability_class = c.tool_capability_class;
+  if (c.with_rule_match && c.with_rule_match.length > 0) {
+    out.with_rule_match = [...c.with_rule_match];
+  }
+  if (c.min_severity) out.min_severity = c.min_severity;
+  return out;
+}
+
+function projectCorrelator(patterns: CorrelationPattern[]) {
+  return {
+    patterns: patterns
+      .filter((p) => p.enabled)
+      .map((p) => ({
+        id: p.id,
+        window_events: p.window_events,
+        severity_on_match: p.severity_on_match,
+        ...(p.all_of && p.all_of.length > 0
+          ? { all_of: p.all_of.map(projectClause) }
+          : {}),
+        ...(p.sequence && p.sequence.length > 0
+          ? { sequence: p.sequence.map((s) => ({ severity: s.severity })) }
+          : {}),
+        ...(p.fingerprint_chain && p.fingerprint_chain.length > 0
+          ? { fingerprint_chain: p.fingerprint_chain.map(projectClause) }
+          : {}),
+      })),
+  };
 }
 
 export function projectPolicyToData(policy: Policy): OpaData {
@@ -118,6 +180,12 @@ export function projectPolicyToData(policy: Policy): OpaData {
       blocked_destinations: [...policy.firewall.blocked_destinations],
       allowed_domains: [...policy.firewall.allowed_domains],
       allowed_ports: [...policy.firewall.allowed_ports],
+    },
+    correlator: projectCorrelator(policy.correlator),
+    cisco_ai_defense: {
+      enabled: policy.cisco_ai_defense.enabled,
+      api_key_env: policy.cisco_ai_defense.api_key_env,
+      scan_hook_surface: policy.cisco_ai_defense.scan_hook_surface,
     },
   };
 }

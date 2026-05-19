@@ -182,6 +182,68 @@ export interface CustomRegoSnippet {
   description: string;
 }
 
+// --- Session correlator (Layer 5) ------------------------------------------
+//
+// The cross-event layer that fires when a sequence of findings in the same
+// session matches a known attack pattern (lethal trifecta, escalation chain,
+// destructive flow). Mirrors internal/guardrail/correlator.go.
+
+export const DATA_AXES = [
+  'ingress_untrusted',
+  'sensitive_access',
+  'egress_external',
+] as const;
+export type DataAxis = (typeof DATA_AXES)[number];
+
+export const TOOL_CAPABILITY_CLASSES = [
+  'read_fs',
+  'write_fs',
+  'exec_shell',
+  'network_fetch',
+  'send_message',
+] as const;
+export type ToolCapabilityClass = (typeof TOOL_CAPABILITY_CLASSES)[number];
+
+// A single predicate inside a correlation pattern. Empty fields are
+// "don't care"; the clause fires when ALL set predicates hold on the
+// finding under inspection.
+export interface CorrelationClause {
+  axis?: DataAxis;
+  tool_capability_class?: ToolCapabilityClass;
+  with_rule_match?: string[];
+  min_severity?: SeverityUpper;
+}
+
+export interface CorrelationSequenceStep {
+  severity: SeverityUpper;
+}
+
+export interface CorrelationPattern {
+  id: string;
+  description: string;
+  window_events: number;
+  severity_on_match: SeverityUpper;
+  all_of?: CorrelationClause[];
+  sequence?: CorrelationSequenceStep[];
+  fingerprint_chain?: CorrelationClause[];
+  enabled: boolean;
+}
+
+// --- Cisco AI Defense (gateway-level config knob) --------------------------
+//
+// Top-level config.yaml block — read by internal/config/config.go and
+// consumed by both the proxy lane (chat prompts) and the hook lane (tool
+// calls + tool results + hook prompts) since #281. ScanHookSurface
+// defaults to true via CiscoAIDefenseConfig.HookSurfaceEnabled().
+
+export interface CiscoAIDefenseConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_key_env: string;
+  /** Defaults to true (hook lane enabled when an API key resolves). */
+  scan_hook_surface: boolean;
+}
+
 export interface Policy {
   name: string;
   description: string;
@@ -205,6 +267,10 @@ export interface Policy {
   audit: AuditConfig;
   scanners: ScannerProfileSelection;
   custom_rego: CustomRegoSnippet[];
+  /** Sliding-window correlation patterns (Layer 5). */
+  correlator: CorrelationPattern[];
+  /** Optional Cisco AI Defense lane configuration. */
+  cisco_ai_defense: CiscoAIDefenseConfig;
 }
 
 // --- Validation findings ----------------------------------------------------
@@ -237,7 +303,10 @@ export type ValidationCode =
   | 'SCANNER_OVERRIDE_LOOSER'
   | 'OPA_VERDICT_UNEXPECTED'
   | 'NAME_INVALID'
-  | 'CUSTOM_REGO_MISSING_PACKAGE';
+  | 'CUSTOM_REGO_MISSING_PACKAGE'
+  | 'CORRELATOR_PATTERN_EMPTY'
+  | 'CORRELATOR_WINDOW_INVALID'
+  | 'CISCO_AID_KEY_ENV_MISSING';
 
 // --- Generated build-time types ---------------------------------------------
 
@@ -253,6 +322,9 @@ export interface PresetBundle {
       judge: Record<string, unknown>;
       suppressions: Record<string, unknown> | null;
       sensitiveTools: Record<string, unknown> | null;
+      /** Layer-5 patterns; identical across packs today, lifted from
+       *  internal/guardrail/defaults/correlation-patterns.yaml. */
+      correlator: Record<string, unknown> | null;
     };
     scanners: Record<string, Record<string, Record<string, unknown>>>;
   };
@@ -290,6 +362,19 @@ export interface Recipe {
   counterexamples: string[];
   source: string;
   tags: string[];
+  /**
+   * Data axes this recipe labels findings with at evaluation time.
+   * Mirrors internal/guardrail/axes.go AxesForRuleID so the catalog
+   * surfaces the same lethal-trifecta signal the correlator sees.
+   * Optional: not every recipe maps cleanly (e.g. cosmetic-shell
+   * suppression has no axis since it suppresses rather than detects).
+   */
+  data_axis?: DataAxis[];
+  /**
+   * Tool capability classes this recipe targets (for tool-suppression
+   * and pre-judge-strip recipes that scope by tool pattern).
+   */
+  tool_capability_class?: ToolCapabilityClass[];
 }
 
 export interface RecipesFile {
