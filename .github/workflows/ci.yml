@@ -142,7 +142,7 @@ jobs:
       # archives. Medium severity; impacts only attacker-supplied package
       # archives. We install exclusively from PyPI via uv with locked hashes
       # (uv.lock), so this attack surface is not exposed in CI or runtime.
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219
+      - run: uv run pip-audit --skip-editable --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-28684 --ignore-vuln CVE-2026-3219
 
   ts-build-test:
     name: TypeScript Build & Test
