@@ -236,7 +236,12 @@ const SECTION_DEFS: SectionDef[] = [
   },
   {
     id: 'cisco-ai-defense',
-    title: 'Cisco AI Defense (optional lane)',
+    // Wording: "Optional · Enterprise" makes it clear this lane is
+    // (a) not required for DefenseClaw to function and (b) backed by
+    // the enterprise Cisco AI Defense product. The body of the
+    // section links to https://www.cisco.com/site/us/en/products/security/ai-defense/
+    // so operators can learn more without leaving the wizard.
+    title: 'Cisco AI Defense (Optional · Enterprise)',
     subtitle: (p) => {
       const aid = p.cisco_ai_defense;
       if (!aid.enabled && !aid.api_key_env && !aid.endpoint) return 'off';

@@ -16,9 +16,13 @@ import type { SeverityUpper } from '../types';
 export const POSTURES = [
   {
     id: 'permissive',
-    title: 'Observe',
+    // Renamed from "Observe" — the underlying `permissive` preset still
+    // blocks CRITICAL findings at install time and quarantines CRITICAL
+    // files, so "Observe" (which implies *never* block) was misleading.
+    // "Permissive" matches both the preset ID and the actual behaviour.
+    title: 'Permissive',
     description:
-      'Log everything, block almost nothing. Best for the first week of a pilot or a SOC team that wants visibility without operational risk.',
+      'Log everything; only CRITICAL findings block installs. Best for the first week of a pilot or a SOC team that wants visibility without operational risk.',
   },
   {
     id: 'default',

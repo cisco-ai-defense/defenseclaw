@@ -25,7 +25,7 @@ Most operators want the persistent path: `defenseclaw keys set <ENV>` writes to 
 | --- | --- | --- | --- |
 | `DEFENSECLAW_LLM_KEY` | unset | The single canonical LLM key. Used by the gateway upstream, judge, and scanners. | `cli/defenseclaw/credentials.py` |
 | `OPENCLAW_GATEWAY_TOKEN` | auto-detected | Auth token the gateway uses to talk to OpenClaw. Auto-detected from `~/.openclaw/openclaw.json` when present. | `cli/defenseclaw/credentials.py` |
-| `CISCO_AI_DEFENSE_API_KEY` | unset | API key for the Cisco AI Defense remote scanner (`scanner_mode=remote\|both`). | `cli/defenseclaw/credentials.py` |
+| `CISCO_AI_DEFENSE_API_KEY` | unset | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner (`scanner_mode=remote\|both`). | `cli/defenseclaw/credentials.py` |
 | `JUDGE_API_KEY` | unset | Custom LLM judge key — only consulted when `guardrail.judge.llm.api_key_env` overrides the default. | `cli/defenseclaw/credentials.py` |
 | `VIRUSTOTAL_API_KEY` | unset | VirusTotal API key for the skill scanner (`use_virustotal=true`). | `cli/defenseclaw/credentials.py` |
 | `SPLUNK_ACCESS_TOKEN` | unset | Splunk HEC token for audit forwarding. | `cli/defenseclaw/credentials.py` |

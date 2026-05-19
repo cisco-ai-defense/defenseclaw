@@ -41,9 +41,17 @@ export function CiscoAIDefenseSection({
     <div className="space-y-3">
       <div className="rounded-md border border-fd-border bg-fd-card p-3 text-[12px] leading-5 text-fd-muted-foreground">
         <p>
-          Optional second-opinion lane. When the gateway resolves a non-empty
+          Optional · Enterprise second-opinion lane. When the gateway resolves a non-empty
           <code className="mx-1">api_key_env</code>, it forwards prompts and (if{' '}
-          <strong>scan_hook_surface</strong> is on) hook-surface tool calls to Cisco AI Defense
+          <strong>scan_hook_surface</strong> is on) hook-surface tool calls to{' '}
+          <a
+            href="https://www.cisco.com/site/us/en/products/security/ai-defense/index.html"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium text-[var(--brand-cisco)] underline-offset-2 hover:underline"
+          >
+            Cisco AI Defense ↗
+          </a>{' '}
           and merges the verdict using strictest-wins semantics. The wizard never accepts a
           literal API key; only the env var name is written to YAML.
         </p>

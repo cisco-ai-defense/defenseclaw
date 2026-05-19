@@ -78,7 +78,7 @@ Every credential the gateway and CLI know about is registered in `cli/defensecla
 | `DEFENSECLAW_LLM_KEY` | `llm.default` | Any LLM-using component (guardrail upstream, judge, skill / MCP scanners) is enabled and falls back to the default key. | The single canonical key. Provider-specific keys (`OPENAI_API_KEY`, etc.) are derived from this + the model prefix at routing time. |
 | `OPENCLAW_GATEWAY_TOKEN` | `gateway` | Always (the gateway needs an auth token to talk to OpenClaw). | Auto-detected from `~/.openclaw/openclaw.json` when the file exists. Marked REQUIRED but auto-detected. |
 | `JUDGE_API_KEY` | `guardrail.judge` | The judge is enabled and `guardrail.judge.llm.api_key_env` overrides the default. | Only tracked when there's a custom override. Otherwise the judge falls through to `DEFENSECLAW_LLM_KEY`. |
-| `CISCO_AI_DEFENSE_API_KEY` | `guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the Cisco AI Defense remote scanner. |
+| `CISCO_AI_DEFENSE_API_KEY` | `guardrail.remote` | `guardrail.scanner_mode` is `remote` or `both`. | API key for the [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) remote scanner. |
 | `VIRUSTOTAL_API_KEY` | `skill-scanner.virustotal` | `scanners.skill_scanner.use_virustotal=true`. | Required when the skill scanner is wired up to ask VirusTotal. |
 | `SPLUNK_ACCESS_TOKEN` | `observability.splunk` | A Splunk audit sink is enabled. | The HEC token. |
 | `DEFENSECLAW_SKILL_SCANNER_LLM_KEY` | `skill-scanner.llm` | The skill scanner uses LLM and has a custom `llm.api_key_env` override. | Only tracked when there's a custom override; otherwise falls through to `DEFENSECLAW_LLM_KEY`. |
