@@ -1240,8 +1240,8 @@ func (s *Store) InsertSinkHealth(h SinkHealthInput) error {
 		h.SinkName, h.SinkKind, h.Outcome,
 		status, h.LatencyMs, h.BatchSize, anyString(h.Error),
 		nullInt(h.QueueDepth), nullInt(h.DroppedCount),
-		nullInt(h.SchemaVersion), nullStr(h.ContentHash).String, nullUint64(h.Generation),
-		nullStr(h.BinaryVersion).String, nullStr(h.SidecarInstanceID).String,
+		nullInt(h.SchemaVersion), nullStr(h.ContentHash), nullUint64(h.Generation),
+		nullStr(h.BinaryVersion), nullStr(h.SidecarInstanceID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert sink health: %w", err)
@@ -1407,7 +1407,7 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		nullStr(e.PromptTemplateID),
 		nullInt(e.SchemaVersion),
 		nullStr(e.ContentHash),
-		int64(e.Generation),
+		nullUint64(e.Generation),
 		nullStr(e.BinaryVersion),
 		nullStr(e.AgentID),
 		nullStr(e.AgentInstanceID),
