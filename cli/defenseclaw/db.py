@@ -343,8 +343,10 @@ class Store:
             event.run_id = _current_run_id()
         structured_json = json.dumps(event.structured, separators=(",", ":")) if event.structured else None
         self.db.execute(
-            """INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json, severity, run_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO audit_events (
+                id, timestamp, action, target, actor, details,
+                structured_json, severity, run_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event.id, event.timestamp.isoformat(), event.action,
              event.target or None, event.actor, event.details or None,
              structured_json, event.severity or None, event.run_id or None),
