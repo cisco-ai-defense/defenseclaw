@@ -16,11 +16,12 @@ deleted.
 
 ### Behaviour changes (no flag)
 
-- **W3C trace propagation is always on** for hook routes
-  (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`). The gateway
-  consumes `traceparent` / `tracestate` so hook spans root on the
-  agent's parent trace; `_hardening.sh` v6 emits the headers from
-  every hook script. Extraction is route-scoped via
+- **W3C trace propagation is enabled for trusted hook routes**
+  (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`) when the
+  caller is loopback and the connector route is registered. The
+  gateway consumes `traceparent` / `tracestate` so hook spans root
+  on the agent's parent trace; `_hardening.sh` v6 emits the headers
+  from every hook script. Extraction is route-scoped via
   `shouldExtractHookTrace`; all other routes (health, REST, OTLP
   ingest) continue to mint a fresh root span regardless of what
   the caller sent.
@@ -58,13 +59,12 @@ deleted.
   LLM-event emitter, and raw-event deduper (which probe fields like
   `req.ToolUseID`, `req.LastAssistantMessage`, `req.MCPServerName`
   that the generic `agentHookRequest` doesn't model) are kept and
-  invoked via `bespoke_hook_adapter.go`'s
-  `evaluateBespokeOrGenericHook` / `emitBespokeOrGenericLLMEvent` /
-  `rememberBespokeOrGenericRawEvents` dispatch shims. The wire JSON
-  field name (`claude_code_output` / `codex_output` / `hook_output`)
-  is selected by `hookOutputFieldName(connectorName)` so the agent
-  CLIs receive byte-identical responses. Net delta: ~250 lines
-  deleted, one place where shared concerns live. New tests
+  invoked via the `hookProfileRuntime` dispatch in
+  `internal/gateway/hook_profile_runtime.go`. The wire JSON field
+  name (`claude_code_output` / `codex_output` / `hook_output`) is
+  selected by `hookOutputFieldName(connectorName)` so the agent CLIs
+  keep their connector-specific response shape. Net delta: one place
+  where shared concerns live. New tests
   (`TestUnifiedHookDispatch_SingleEntryPoint`,
   `TestUnifiedDispatch_PreservesConnectorWireShape`,
   `TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope`,
@@ -74,19 +74,32 @@ deleted.
 
 ### Observability parity
 
-- `defenseclaw_connector_hook_outcome_total` and
-  `defenseclaw_connector_hook_tokens_total` counters added to
+- `defenseclaw.connector.hook.outcome` and
+  `defenseclaw.connector.hook.tokens` counters added to
   `internal/telemetry/metrics.go`; emitted by every hook handler
   including the synthetic path. Dashboards can compute block rate
   and cost per connector via PromQL without joining the native
   OTLP channel.
-- `defenseclaw_connector_hook_unified_dispatch_total` added so
+- `defenseclaw.connector.hook.unified_dispatch` added so
   operators can confirm traffic is flowing through the unified
   pipeline (vs. an out-of-tree handler registration that bypasses
   audit/metrics).
 - New audit action `connector-hook-synthetic` (Go +
   `cli/defenseclaw/audit_actions.py` + `OBSERVABILITY-CONTRACT.md`)
   for the synthetic Stop visibility row.
+
+### F6 audit-action parity
+
+- Registered the production audit actions discovered across sidecar,
+  watcher, gateway router, guardrail, inspect, setup, doctor, API,
+  sink, and operator command paths. Go, Python, the public schema, and
+  the embedded gateway schema now agree on the expanded enum.
+- Added `scripts/discover_unregistered_audit_actions.py` plus the
+  review artifact `scripts/discovered_unregistered_audit_actions.txt`
+  so future broad-parity work can reproduce the exact discovered set.
+- Added `scripts/check_audit_no_raw_literals.py` to `make check-v7`
+  and a Go completeness test for the discovered actions. New raw
+  `audit.Event{Action: "..."}` literals now fail the parity gate.
 
 ### Connector profile surface
 
@@ -99,8 +112,7 @@ deleted.
   `warned == nil` so a future caller cannot silently disable the
   `[SECURITY] loopback bypass` log via a typo; operators continue
   to see one warning per process when a gateway token is configured
-  but loopback is exercised. See the expanded paragraph in
-  `.deepsec/data/defenseclaw/INFO.md`.
+  but loopback is exercised.
 
 ### Security fixes folded in
 
@@ -207,8 +219,7 @@ deleted.
   gateway before running `defenseclaw setup geminicli` would mint a
   fresh on-disk token (written into `~/.gemini/settings.json`) that
   the running gateway never observed, so every loopback OTLP request
-  returned 401 until the next restart. Documented as
-  `.deepsec/findings/BUG/defenseclaw-other-race-condition-feab2ccaa4.md`.
+  returned 401 until the next restart.
 
   `APIServer.lookupOTLPPathToken` now performs a lazy disk reload on
   cache miss for KNOWN scopes (closed allow-list via the new
@@ -245,22 +256,25 @@ deleted.
   the dataclass output over it (dataclass-owned top-level keys win;
   unmodelled keys are rescued from the file; nested dicts recurse so
   `otel.resource.attributes` survives even though `otel` itself is
-  modelled), and replaces the file atomically via `tmp + os.replace`
-  matching the observability writer pattern. The dataclass still
+  modelled), and replaces the file atomically with a lock, 0600
+  temp files, `O_NOFOLLOW`, `fsync`, and directory sync. The
+  observability writer uses the same secure write helper. The dataclass still
   owns its keys — including the v4-migration drop of the legacy
   `splunk:` block and the byte-stability strips of empty
   `notifications` / `privacy` / `asset_policy` blocks — so
   programmatic resets through the dataclass still update the file.
-  Corrupt-YAML input logs a warning and falls back to dataclass-only
-  write so the operator can recover via the next setup wizard.
+  Corrupt-YAML input logs a warning, writes a 0600 `.bak`, and then
+  falls back to dataclass-only write so the operator can recover via
+  the next setup wizard.
 
-  20 new regression tests in `cli/tests/test_config_save_roundtrip.py`
+  Regression tests in `cli/tests/test_config_save_roundtrip.py`
   cover: single-/multi-sink preservation, nested
   `otel.resource.attributes` preservation, legacy `splunk:` drop,
   default-`notifications:` strip honouring an operator reset,
   modeled-field overrides, first-save with no existing file,
-  corrupt-YAML fallback, non-mapping-YAML fallback, atomic-write
-  inode change, merge helper unit tests, and the end-to-end
+  corrupt-YAML backup/fallback, non-mapping-YAML fallback,
+  atomic-write inode change, merge helper unit tests, concurrent
+  authoritative OTel dict preservation, and the end-to-end
   `setup splunk → setup codex` operator workflow. The two existing
   "no cfg.save() here" comments in `cmd_setup.py` are kept as
   single-writer hygiene (no longer correctness) and updated to
@@ -274,15 +288,17 @@ are addressed in this rollup.
 
 - **H1 — gofmt drift in `internal/gateway/api.go`** (CI gate). The
   reformatted file is in.
-- **H2 — Panic recovery around the unified evaluator
+- **H2 — Panic recovery around the unified hook hot path
   (`internal/gateway/agent_hook.go`).** Pre-fold, each connector
   owned its own bespoke HTTP handler so a panic blast-radius was one
   connector. Post-fold (this PR), `handleAgentHook` is the SOLE hot
   path for every connector; an unrecovered panic in any
-  evaluator branch (asset-policy probe, scanner invocation, codex
-  notify-bridge fan-out, …) would take the whole agent estate down
-  at once. The new `safeEvaluateHook` / `safeEvaluateSyntheticHook`
-  helpers wrap the evaluator call in a deferred `recover`:
+  raw-event deduper, LLM-event emitter, evaluator branch
+  (asset-policy probe, scanner invocation, codex notify-bridge
+  fan-out, …), or final audit/metrics section would take the whole
+  agent estate down at once. `handleAgentHook` now has a top-level
+  deferred `recover`, while `safeEvaluateHook` /
+  `safeEvaluateSyntheticHook` keep the evaluator-specific contract:
 
   - increments `defenseclaw.panics.total{subsystem="gateway"}` so
     existing SRE alerts fire without a new metric,
@@ -302,9 +318,10 @@ are addressed in this rollup.
   `result=panic` so SIEM queries can separate them from policy
   decisions. `TestSafeEvaluateHook_RecoversAndReturnsFailOpen` +
   `TestHandleAgentHook_PanicReturnsSafeResponse` +
+  `TestHandleAgentHook_EmitPanicReturnsSafeResponse` +
   `TestHandleAgentHook_FullChain_PanicFailsOpen` cover the unit
-  helper, the HTTP-level integration, and the per-connector
-  contract.
+  helper, the HTTP-level integration, pre-evaluator emit failures,
+  and the per-connector contract.
 
 - **M1 — OTLP token cache misses rotation.** F4's lazy reload
   closed the boot-vs-setup race but left an open gap: an operator
@@ -367,10 +384,12 @@ are addressed in this rollup.
   `"other"` regardless of family. The fully-qualified model name
   remains on the `gen_ai.request.model` span attribute (no
   cardinality limit at the trace backend); only the metric label
-  is bounded. Total cardinality budget asserted at ≤ 30 distinct
-  values across all callers. Test:
-  `TestNormalizeModelLabel_BoundsCardinality` (29 input shapes,
-  exercises the budget assertion).
+  is bounded. The OTLP ingest path also bounds promoted
+  `gen_ai.provider.name` and `gen_ai.operation.name` labels before
+  recording GenAI histograms. Total cardinality budget asserted at
+  ≤ 30 distinct values across all callers. Test:
+  `TestNormalizeModelLabel_BoundsCardinality` (input-shape table
+  plus budget assertion).
 
 - **M5 — Server span leak on panic paths.** `otelHTTPServerMiddleware`
   called `span.End()` un-deferred, so any panic between
@@ -434,7 +453,7 @@ are addressed in this rollup.
 - **L5 — `hook_register.go` comment drift.** The comment block
   still described the pre-full-fold "wrapper delegates to bespoke
   handler" design. Rewritten to match the current
-  `bespoke_hook_adapter.go` shim model.
+  declarative hook-profile runtime model.
 
 - **L6 — `subtle.ConstantTimeCompare` length-leak hardening.** All
   three gateway auth comparisons (master gateway token,

@@ -301,7 +301,7 @@ func (l *Logger) LogScanWithCorrelation(
 	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
-		Action:    "scan",
+		Action:    string(ActionScan),
 		Target:    result.Target,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",

@@ -41,6 +41,18 @@ from defenseclaw.bundle_refresh import (
     refresh_splunk_bridge,
 )
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
+from defenseclaw.audit_actions import (
+    ACTION_SETUP_CONNECTOR_MODE,
+    ACTION_SETUP_GATEWAY,
+    ACTION_SETUP_GUARDRAIL,
+    ACTION_SETUP_HOOK_CONNECTOR,
+    ACTION_SETUP_MCP_SCANNER,
+    ACTION_SETUP_NOTIFICATIONS_SET,
+    ACTION_SETUP_NOTIFICATIONS_TOGGLE,
+    ACTION_SETUP_REDACTION_TOGGLE,
+    ACTION_SETUP_SKILL_SCANNER,
+    ACTION_SETUP_SPLUNK,
+)
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
@@ -538,7 +550,7 @@ def setup_skill_scanner(
             parts.append(f"llm_provider={llm.provider}")
         if sc.policy:
             parts.append(f"policy={sc.policy}")
-        app.logger.log_action("setup-skill-scanner", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SKILL_SCANNER, "config", " ".join(parts))
 
 
 def _interactive_setup(sc, llm, aid, cfg) -> None:
@@ -1008,7 +1020,7 @@ def setup_mcp_scanner(
         if llm.model:
             parts.append(f"llm_model={llm.model}")
         parts.append("mcp_managed_via=openclaw_config")
-        app.logger.log_action("setup-mcp-scanner", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_MCP_SCANNER, "config", " ".join(parts))
 
 
 def _interactive_mcp_setup(mc, cfg) -> None:
@@ -1337,7 +1349,7 @@ def setup_gateway(
 
     if app.logger:
         mode = "remote" if (remote or gw.resolved_token()) else "local"
-        app.logger.log_action("setup-gateway", "config", f"mode={mode} host={gw.host} port={gw.port}")
+        app.logger.log_action(ACTION_SETUP_GATEWAY, "config", f"mode={mode} host={gw.host} port={gw.port}")
 
 
 def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> None:
@@ -2131,7 +2143,7 @@ def setup_guardrail(
 
     if app.logger:
         app.logger.log_action(
-            "setup-guardrail", "config",
+            ACTION_SETUP_GUARDRAIL, "config",
             f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
             f"model={gc.model} hilt={bool(gc.hilt.enabled)!s} "
             f"disable_redaction={bool(app.cfg.privacy.disable_redaction)!s}",
@@ -2303,7 +2315,7 @@ def _apply_hook_connector_setup(
 
     if app.logger:
         app.logger.log_action(
-            "setup-hook-connector",
+            ACTION_SETUP_HOOK_CONNECTOR,
             "config",
             f"connector={connector} mode={desired_mode} surface=hook",
         )
@@ -3152,7 +3164,7 @@ def _apply_connector_mode_switch(
 
     if app.logger:
         app.logger.log_action(
-            "setup-connector-mode",
+            ACTION_SETUP_CONNECTOR_MODE,
             "config",
             f"from={prev} to={new_connector}",
         )
@@ -3338,7 +3350,7 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
 
     if app.logger:
         app.logger.log_action(
-            "setup-redaction-toggle",
+            ACTION_SETUP_REDACTION_TOGGLE,
             "config",
             f"disable_redaction={desired!s}",
         )
@@ -3506,7 +3518,7 @@ def setup_notifications(
 
     if app.logger:
         app.logger.log_action(
-            "setup-notifications-toggle",
+            ACTION_SETUP_NOTIFICATIONS_TOGGLE,
             "config",
             f"enabled={desired!s}",
         )
@@ -3639,7 +3651,7 @@ def setup_notifications_set(
 
     if app.logger:
         app.logger.log_action(
-            "setup-notifications-set",
+            ACTION_SETUP_NOTIFICATIONS_SET,
             "config",
             f"slot={slot} value={value.lower()}",
         )
@@ -4197,7 +4209,7 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
     click.echo()
 
     if app.logger:
-        app.logger.log_action("setup-guardrail", "config", f"disabled connector={connector_name}")
+        app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")
 
 
 def _write_guardrail_runtime(data_dir: str, gc) -> None:
@@ -4879,7 +4891,7 @@ def setup_splunk(
     # config.yaml atomically. A second cfg.save() would be a no-op
     # round-trip now (Config.save deep-merges over the existing file
     # and preserves unmodelled keys like audit_sinks /
-    # otel.resource.attributes since the F5 fix), but it's still
+    # otel.resource.attributes), but it's still
     # wasteful so we skip it to keep this path single-writer.
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -4898,7 +4910,7 @@ def setup_splunk(
                 parts.append("s3_export=enabled")
         if did_enterprise:
             parts.append("enterprise=enabled")
-        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
 # ---------------------------------------------------------------------------
@@ -4957,7 +4969,7 @@ def _interactive_splunk_setup(
     # observability.apply_preset() already persisted to config.yaml;
     # see the matching note in setup_splunk() for why we deliberately
     # skip a second cfg.save() here (single-writer hygiene, not
-    # correctness — Config.save is round-trip-safe since F5).
+    # correctness — Config.save is round-trip-safe).
     click.echo()
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -4974,7 +4986,7 @@ def _interactive_splunk_setup(
             parts.append("logs=enabled")
         if did_enterprise:
             parts.append("enterprise=enabled")
-        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
 def _interactive_o11y(
@@ -5046,7 +5058,7 @@ def _interactive_logs(app: AppContext) -> bool:
         click.echo("  Local Splunk enablement cancelled.")
         return False
 
-    ok = _preflight_docker()
+    ok, _reason = _preflight_docker()
     if not ok:
         return False
 
@@ -5819,7 +5831,7 @@ def _disable_splunk(
             parts.append("logs=disabled")
         if disable_both or enterprise_only:
             parts.append("enterprise=disabled")
-        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
 def _stop_bridge(data_dir: str) -> None:

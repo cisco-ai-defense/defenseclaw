@@ -190,9 +190,8 @@ func isChatPath(path string) bool {
 //
 //  1. document the reason that connector cannot inject X-DC-Auth in the
 //     connector's Authenticate() godoc, AND
-//  2. update .deepsec/data/defenseclaw/INFO.md to list the new caller, AND
-//  3. add a test asserting the [SECURITY] line is emitted exactly once
-//     per process.
+//  2. add a test asserting the [SECURITY] line is emitted exactly once
+//     per process for that new caller.
 func AcceptLoopbackWithWarning(r *http.Request, gatewayToken, connectorName, reason string, warned *sync.Once) bool {
 	if !IsLoopback(r) {
 		return false

@@ -498,6 +498,8 @@ func isRetryable(status int) bool {
 // URL validation (SSRF prevention)
 // ---------------------------------------------------------------------------
 
+var lookupWebhookIPs = net.LookupIP
+
 // validateWebhookURL ensures the URL is safe for outbound webhook delivery.
 // Blocks non-HTTP schemes, localhost, private/link-local IP ranges, and
 // cloud metadata endpoints.
@@ -525,7 +527,7 @@ func validateWebhookURL(rawURL string) error {
 	}
 	ip := net.ParseIP(host)
 	if ip == nil {
-		ips, resolveErr := net.LookupIP(host)
+		ips, resolveErr := lookupWebhookIPs(host)
 		if resolveErr != nil {
 			return nil // allow DNS names that can't be resolved at config time
 		}

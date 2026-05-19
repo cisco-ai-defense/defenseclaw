@@ -318,7 +318,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 	if redaction.DisableAll() {
 		extra["OTEL_LOG_USER_PROMPTS"] = "1"
 	}
-	return HookProfile{
+	profile := HookProfile{
 		Name:                "claudecode",
 		Capabilities:        c.HookCapabilities(opts),
 		SupportsTraceparent: true,
@@ -333,23 +333,17 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			ExtraEnv:           extra,
 			LogUserPrompts:     redaction.DisableAll(),
 		},
-		// Profile-driven callbacks the unified hook collector
-		// publishes to downstream consumers (out-of-tree gateways,
-		// future plugin-host clients) as the canonical shape for
+		// Profile-driven callbacks are the canonical shape for
 		// claudecode hook decode / verdict mapping / response. The
-		// gateway-internal handleAgentHook("claudecode") dispatch
-		// path invokes the bespoke evaluateClaudeCodeHook via
-		// bespoke_hook_adapter.go because that evaluator carries
-		// scanner / asset-policy / notifier wiring tied to the
-		// *APIServer; the connector-side callbacks below are the
-		// pure-function equivalent suitable for declarative
-		// consumers. golden tests
-		// (claudecode_hook_profile_golden_test.go,
-		// hook_profile_dispatch_test.go) keep the two in lockstep.
+		// gateway profile-runtime registry uses these pure callbacks
+		// for response/mode behavior and keeps APIServer-owned
+		// scanner / asset-policy / notifier work in the unified
+		// collector. Golden tests keep those layers in lockstep.
 		Decode:     claudeCodeProfileDecode,
 		MapVerdict: claudeCodeProfileMapVerdict,
 		Respond:    claudeCodeProfileRespond,
 	}
+	return ApplyHookContract(profile, opts)
 }
 
 // --- ComponentScanner interface ---

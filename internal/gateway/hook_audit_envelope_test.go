@@ -106,6 +106,29 @@ func TestRenderHookAuditEnvelope_PreRedactsReason(t *testing.T) {
 	}
 }
 
+func TestRenderHookAuditEnvelope_PreRedactsExtra(t *testing.T) {
+	env := HookAuditEnvelope{
+		Connector: "codex",
+		Event:     "PreToolUse",
+		Extra: map[string]string{
+			"operator_note": "user admin@example.com, token AKIAABCDEFGHIJKLMNOP",
+		},
+	}
+	rendered := renderHookAuditEnvelope(env)
+	var decoded struct {
+		Extra map[string]string `json:"extra"`
+	}
+	if err := json.Unmarshal([]byte(rendered), &decoded); err != nil {
+		t.Fatalf("envelope JSON not parseable after Extra pre-redaction: %v\nraw=%s", err, rendered)
+	}
+	got := decoded.Extra["operator_note"]
+	for _, leaked := range []string{"admin@example.com", "AKIAABCDEFGHIJKLMNOP"} {
+		if strings.Contains(got, leaked) {
+			t.Errorf("extra field leaked raw PII %q\n  got=%q", leaked, got)
+		}
+	}
+}
+
 // TestRenderHookAuditEnvelope_LogInjection covers the codeguard-0-logging
 // requirement: a hostile prompt that smuggles CR/LF/ANSI escapes into
 // any string field must not be able to forge an extra log line or

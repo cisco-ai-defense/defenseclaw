@@ -116,7 +116,7 @@ type APIServer struct {
 	claudeCodeLastComponentScan  time.Time
 	codexMu                      sync.Mutex
 	codexLastComponentScan       time.Time
-	rawTelemetryMu               sync.Mutex
+	rawTelemetryMu               sync.RWMutex
 	rawTelemetryDedupe           *rawTelemetryDeduper
 	llmPromptMu                  sync.Mutex
 	llmPromptBySourceSession     map[string]string
@@ -337,11 +337,9 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	info, statErr := os.Stat(tokenPath)
 	if statErr != nil {
 		if !os.IsNotExist(statErr) {
-			// Transient error (permission flip, FS hiccup). Don't
-			// invalidate; return the cached value if any.
-			if haveCached {
-				return cached.token
-			}
+			// Permission flips and other stat failures are treated as
+			// fail-closed. Returning a cached token here would keep a
+			// revoked/hidden token valid until restart.
 			return ""
 		}
 		// File is gone — drop any stale cached entry and fail
@@ -867,7 +865,7 @@ func (a *APIServer) handleSkillDisable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-skill-disable", req.SkillKey, "disabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillDisable), req.SkillKey, "disabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "skillKey": req.SkillKey})
 }
@@ -902,7 +900,7 @@ func (a *APIServer) handleSkillEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-skill-enable", req.SkillKey, "enabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillEnable), req.SkillKey, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "skillKey": req.SkillKey})
 }
@@ -943,7 +941,7 @@ func (a *APIServer) handlePluginDisable(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-disable", req.PluginName, "disabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginDisable), req.PluginName, "disabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "disabled", "pluginName": req.PluginName})
 }
@@ -980,7 +978,7 @@ func (a *APIServer) handlePluginEnable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-enable", req.PluginName, "enabled via REST API")
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginEnable), req.PluginName, "enabled via REST API")
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "enabled", "pluginName": req.PluginName})
 }
@@ -1097,7 +1095,7 @@ func (a *APIServer) handleConfigPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-config-patch", req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIConfigPatch), req.Path, fmt.Sprintf("patched via REST API value_type=%T", req.Value))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "patched", "path": req.Path})
 }
@@ -1170,7 +1168,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), "api-enforce-block", req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceBlock), req.TargetName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 		}
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "blocked"})
 	case http.MethodDelete:
@@ -1179,7 +1177,7 @@ func (a *APIServer) handleEnforceBlock(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), "api-enforce-unblock", req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
+			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceUnblock), req.TargetName, fmt.Sprintf("type=%s", req.TargetType))
 		}
 		a.writeJSON(w, http.StatusOK, map[string]string{"status": "unblocked"})
 	}
@@ -1258,7 +1256,7 @@ func (a *APIServer) handleEnforceAllow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-enforce-allow", policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIEnforceAllow), policyName, fmt.Sprintf("type=%s reason=%s", req.TargetType, truncate(reason, 120)))
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "allowed"})
 }
@@ -1613,7 +1611,7 @@ func (a *APIServer) handleSkillScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-skill-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
@@ -1660,7 +1658,7 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-plugin-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIPluginScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
@@ -1716,7 +1714,7 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-mcp-scan", req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPIMCPScan), req.Target, fmt.Sprintf("findings=%d max=%s", len(result.Findings), result.MaxSeverity()))
 		_ = a.logger.LogScanWithCorrelation(r.Context(), result, "", ScanCorrelationFromContext(r.Context()))
 	}
 
@@ -1756,7 +1754,7 @@ func (a *APIServer) handleSkillFetch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "api-skill-fetch", req.Target, "streaming skill tar.gz")
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionAPISkillFetch), req.Target, "streaming skill tar.gz")
 	}
 
 	w.Header().Set("Content-Type", "application/gzip")
@@ -1919,11 +1917,11 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		// SQLite/sinks/OTel. LogActionCtx routes through the same
 		// ctx envelope the middleware already stamped for this
 		// request so all five surfaces agree.
-		_ = a.logger.LogActionCtx(r.Context(), "guardrail-verdict", req.Model, details)
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailVerdict), req.Model, details)
 	}
 	if a.store != nil {
 		evt := audit.Event{
-			Action:    "guardrail-inspection",
+			Action:    string(audit.ActionGuardrailInspection),
 			Target:    req.Model,
 			Severity:  req.Severity,
 			Details:   details,
@@ -1936,7 +1934,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		_ = a.store.LogEvent(evt)
 	}
 	_ = persistAuditEvent(a.logger, a.store, audit.Event{
-		Action:    "guardrail-inspection",
+		Action:    string(audit.ActionGuardrailInspection),
 		Target:    req.Model,
 		Severity:  req.Severity,
 		Details:   details,
@@ -2056,11 +2054,11 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "guardrail-opa-verdict", req.Model, details)
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailOPAVerdict), req.Model, details)
 	}
 	if a.store != nil {
 		evt := audit.Event{
-			Action:    "guardrail-opa-inspection",
+			Action:    string(audit.ActionGuardrailOPAInspection),
 			Target:    req.Model,
 			Severity:  out.Severity,
 			Details:   details,
@@ -2071,7 +2069,7 @@ func (a *APIServer) handleGuardrailEvaluate(w http.ResponseWriter, r *http.Reque
 		_ = a.store.LogEvent(evt)
 	}
 	_ = persistAuditEvent(a.logger, a.store, audit.Event{
-		Action:    "guardrail-opa-inspection",
+		Action:    string(audit.ActionGuardrailOPAInspection),
 		Target:    req.Model,
 		Severity:  out.Severity,
 		Details:   details,
@@ -2181,7 +2179,7 @@ func (a *APIServer) handleGuardrailConfig(w http.ResponseWriter, r *http.Request
 		a.cfgMu.Unlock()
 
 		if a.logger != nil {
-			_ = a.logger.LogActionCtx(r.Context(), "guardrail-config-reload", "", strings.Join(changed, " "))
+			_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailConfigReload), "", strings.Join(changed, " "))
 		}
 
 		a.writeJSON(w, http.StatusOK, resp)
@@ -2298,8 +2296,8 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		}
 		route := r.Pattern
 		if route == "" {
-			// SECURITY (Plan B5): sanitize so the OTLP path-token is never
-			// recorded as a route attribute on auth-failure telemetry.
+			// Sanitize so the OTLP path-token is never recorded as a
+			// route attribute on auth-failure telemetry.
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
@@ -2317,8 +2315,8 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			expected = a.scannerCfg.Gateway.Token
 		}
 		if expected == "" {
-			// Plan B2 / S0.2: fail-closed when no token is configured.
-			// EnsureGatewayToken synthesizes one at boot, so this branch
+			// Fail closed when no token is configured. EnsureGatewayToken
+			// synthesizes one at boot, so this branch
 			// is unreachable in production. Treat it as a misconfiguration
 			// (503) rather than silently allowing loopback — the previous
 			// "no token, trust loopback" path was a local-IDOR risk.
@@ -2326,25 +2324,31 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			http.Error(w, `{"error":"sidecar misconfigured: no gateway token"}`, http.StatusServiceUnavailable)
 			return
 		}
-		if token == "" {
-			if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
-				// Accept either the master gateway bearer (legacy
-				// path; still allowed for backwards compatibility
-				// with deployments that have not regenerated their
-				// connector OTLP tokens) or the per-source scoped
-				// token. The per-source token is preferred because
-				// it cannot be replayed against /api/v1/* routes
-				// and is bound to a single connector's OTLP
-				// namespace. See connector/otlp_token.go.
-				if constantTimeStringMatch(pathToken, expected) {
+		if pathToken, source, ok := parseOTLPPathToken(r.URL.Path); ok && connector.IsLoopback(r) {
+			scoped := a.lookupOTLPPathToken(source)
+			if scoped != "" {
+				if token != "" {
+					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "scoped_otlp_rejects_header_token")
+					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					return
+				}
+				if constantTimeStringMatch(pathToken, scoped) {
 					next.ServeHTTP(w, r)
 					return
 				}
-				if scoped := a.lookupOTLPPathToken(source); scoped != "" &&
-					constantTimeStringMatch(pathToken, scoped) {
-					next.ServeHTTP(w, r)
-					return
-				}
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_path_token")
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			// Legacy compatibility only for deployments that have not
+			// minted a scoped token for this source yet. Once a scoped
+			// token exists, the master gateway bearer must not
+			// authenticate /otlp/<source>/<token> paths because that
+			// would turn a single connector settings-file leak into
+			// full gateway authority.
+			if token == "" && constantTimeStringMatch(pathToken, expected) {
+				next.ServeHTTP(w, r)
+				return
 			}
 		}
 		if token == "" {
@@ -2897,7 +2901,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(r.Context(), "policy-reload", a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionPolicyReload), a.scannerCfg.PolicyDir, "OPA policy reloaded via API")
 	}
 	emitLifecycle(r.Context(), "policy", "reload", map[string]string{
 		"policy_dir": a.scannerCfg.PolicyDir,

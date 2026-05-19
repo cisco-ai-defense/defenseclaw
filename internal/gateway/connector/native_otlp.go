@@ -26,7 +26,7 @@ import (
 // NativeOTLPKind enumerates the shapes a vendor CLI accepts for telling
 // it where to ship OTLP. It exists so a single installer can drive every
 // connector's native-OTLP wiring without per-connector branching in the
-// gateway core. See unify-hook-collector_*.plan.md (Phase A.3).
+// gateway core.
 //
 //   - NativeOTLPEnvBlock — env vars baked into the agent's config file
 //     (claudecode's settings.json `env`, copilot's process env).
@@ -358,7 +358,7 @@ func serializeOTLPHeaders(h map[string]string) string {
 		// for the value; only the key is canonicalized to lower-case.
 		for origKey, v := range h {
 			if strings.ToLower(origKey) == k {
-				parts = append(parts, k+"="+v)
+				parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(v))
 				break
 			}
 		}
@@ -382,7 +382,7 @@ func serializeOTLPAttributes(a map[string]string) string {
 	sort.Strings(keys)
 	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
-		parts = append(parts, k+"="+a[k])
+		parts = append(parts, url.QueryEscape(k)+"="+url.QueryEscape(a[k]))
 	}
 	return strings.Join(parts, ",")
 }

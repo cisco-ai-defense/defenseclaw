@@ -1,16 +1,16 @@
 #!/bin/bash
-# defenseclaw-managed-hook v4
+# defenseclaw-managed-hook v6
 # DefenseClaw Codex hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/codex/hook endpoint. Codex pipes the
 # structured JSON event to stdin and reads the response from stdout.
 #
-# v4 (Phase B.3 / PR 4): forwards W3C trace context. If the agent has
-# already exported DEFENSECLAW_TRACEPARENT / OTEL_TRACEPARENT (etc.)
-# the validated values are sent to the gateway as traceparent /
-# tracestate headers so the hook span links back to the agent's
-# parent span. Validation happens in _hardening.sh — a malformed
-# value is silently dropped (the hook still posts to the gateway, it
-# just starts a new root span).
+# W3C trace propagation: if the agent has already exported
+# DEFENSECLAW_TRACEPARENT / OTEL_TRACEPARENT (etc.), the validated
+# values are sent to the gateway as traceparent / tracestate headers
+# so the hook span links back to the agent's parent span. Validation
+# happens in _hardening.sh — a malformed value is silently dropped
+# (the hook still posts to the gateway, it just starts a new root
+# span).
 set -euo pipefail
 
 # Fail-open guard. See inspect-request.sh for rationale.
@@ -56,9 +56,13 @@ fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
+    exit 2
+  fi
   exit 0
 }
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
 # into this script). The env var takes precedence if already set.
@@ -98,7 +102,7 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
-# PR 4 / Phase B.3 — W3C trace propagation. mapfile fills
+# W3C trace propagation: mapfile fills
 # TRACE_HEADER_ARGS with a sequence of `-H "traceparent: …"` /
 # `-H "tracestate: …"` arguments; invalid env values are dropped
 # by defenseclaw_extract_trace_context. On bash<4 the array stays

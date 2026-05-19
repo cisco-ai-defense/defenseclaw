@@ -69,7 +69,7 @@ func (w *InstallWatcher) rescanLoop(ctx context.Context) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] periodic re-scan enabled (interval=%s)\n", interval)
-	_ = w.logger.LogAction("rescan-start", "", fmt.Sprintf("interval=%s", interval))
+	_ = w.logger.LogAction(string(audit.ActionRescanStart), "", fmt.Sprintf("interval=%s", interval))
 
 	// Bootstrap a baseline immediately so already-installed targets are not
 	// blind for the first full interval after startup.
@@ -97,7 +97,7 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[rescan] starting periodic re-scan of %d targets\n", len(targets))
-	_ = w.logger.LogAction("rescan", "", fmt.Sprintf("targets=%d", len(targets)))
+	_ = w.logger.LogAction(string(audit.ActionRescan), "", fmt.Sprintf("targets=%d", len(targets)))
 
 	for _, evt := range targets {
 		if ctx.Err() != nil {
@@ -517,7 +517,7 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 
 	event := audit.Event{
 		Timestamp: time.Now().UTC(),
-		Action:    "drift",
+		Action:    string(audit.ActionDrift),
 		Target:    evt.Path,
 		Actor:     "defenseclaw-rescan",
 		Details:   string(detailsJSON),

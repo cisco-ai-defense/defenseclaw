@@ -10,9 +10,7 @@
 
 package gateway
 
-// Track 0 foundations — stub owned by Track 1 (Agent Identity).
-//
-// Three-tier agent identity (v7):
+// Three-tier agent identity (v7 correlation).
 //
 //   - AgentID: logical agent name/id. Stable across restarts and
 //     across sidecar processes. Configured via agent.id in
@@ -29,12 +27,10 @@ package gateway
 // The registry is the single owner of these three identifiers.
 // Every observability emission (audit, gatewaylog, OTel) reads
 // them through this type; no other package mints or mutates them.
-//
-// Track 0 lands the type shell + constructor + getter signatures so
-// downstream Tracks (1: agent identity, 7: gateway correlation, 9:
-// scanner identity) can call against the API without merge
-// conflicts. The real implementation (session eviction, LRU,
-// persistence across reloads) ships in Track 1.
+// Downstream subsystems (gateway correlation middleware, scanner
+// identity propagation, agent-scoped policy lookups) call against
+// this API so they all see the same three-tier identity for a
+// given request.
 
 import (
 	"context"

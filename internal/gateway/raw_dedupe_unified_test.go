@@ -99,6 +99,60 @@ func TestRememberHookRawEvents_GenericConnector(t *testing.T) {
 	}
 }
 
+func TestRememberHookRawEvents_BespokeParity(t *testing.T) {
+	toolInput := map[string]interface{}{"command": "echo parity"}
+	toolArgs, err := json.Marshal(toolInput)
+	if err != nil {
+		t.Fatalf("marshal tool input: %v", err)
+	}
+
+	t.Run("codex", func(t *testing.T) {
+		api := &APIServer{}
+		generic := agentHookRequest{
+			ConnectorName: "codex",
+			HookEventName: "PreToolUse",
+			SessionID:     "sess-codex",
+			TurnID:        "turn-codex",
+			ToolArgs:      toolArgs,
+			Payload:       map[string]interface{}{"tool_use_id": "tool-codex"},
+		}
+		bespoke := codexHookRequest{
+			HookEventName: "PreToolUse",
+			SessionID:     "sess-codex",
+			TurnID:        "turn-codex",
+			ToolUseID:     "tool-codex",
+			ToolInput:     toolInput,
+		}
+		genericIDs := api.rememberHookRawEvents(generic)
+		bespokeIDs := api.rememberCodexRawHookEvents(bespoke)
+		if len(genericIDs) != 1 || len(bespokeIDs) != 1 || genericIDs[0] != bespokeIDs[0] {
+			t.Fatalf("generic/bespoke codex IDs differ: generic=%v bespoke=%v", genericIDs, bespokeIDs)
+		}
+	})
+
+	t.Run("claudecode", func(t *testing.T) {
+		api := &APIServer{}
+		generic := agentHookRequest{
+			ConnectorName: "claudecode",
+			HookEventName: "PreToolUse",
+			SessionID:     "sess-claude",
+			ToolArgs:      toolArgs,
+			Payload:       map[string]interface{}{"tool_use_id": "tool-claude"},
+		}
+		bespoke := claudeCodeHookRequest{
+			HookEventName: "PreToolUse",
+			SessionID:     "sess-claude",
+			ToolUseID:     "tool-claude",
+			ToolInput:     toolInput,
+		}
+		genericIDs := api.rememberHookRawEvents(generic)
+		bespokeIDs := api.rememberClaudeCodeRawHookEvents(bespoke)
+		if len(genericIDs) != 1 || len(bespokeIDs) != 1 || genericIDs[0] != bespokeIDs[0] {
+			t.Fatalf("generic/bespoke claudecode IDs differ: generic=%v bespoke=%v", genericIDs, bespokeIDs)
+		}
+	})
+}
+
 // TestRawOriginIfHook validates the small "set raw_origin only when
 // we have IDs" helper that drives the audit envelope's RawOrigin
 // field. Empty slices must produce an empty string (so the JSON
@@ -116,10 +170,11 @@ func TestRawOriginIfHook(t *testing.T) {
 }
 
 // TestCodexNotifyToAgentHookRequest pins the synthetic Stop
-// translation. PR 6 / Phase D folds codex notify into the unified
-// collector by constructing this agentHookRequest, so any drift
-// would silently break the "unified collector sees turn-complete"
-// promise.
+// translation. The codex notify path folds turn-complete events into
+// the unified hook collector by constructing this agentHookRequest,
+// so any drift in the field mapping would silently break the
+// "unified collector sees turn-complete" invariant that downstream
+// hook metrics rely on.
 func TestCodexNotifyToAgentHookRequest(t *testing.T) {
 	p := codexNotifyPayload{
 		Type:     "agent-turn-complete",

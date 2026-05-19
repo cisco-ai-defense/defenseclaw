@@ -126,6 +126,159 @@ const (
 	ActionCodexNotify                  Action = "codex.notify"
 	ActionCodexNotifyAgentTurnComplete Action = "codex.notify.agent-turn-complete"
 	ActionCodexNotifyMalformed         Action = "codex.notify.malformed"
+
+	// Sidecar lifecycle and bootstrap instrumentation. These actions
+	// describe gateway-side startup, shutdown, WebSocket connectivity,
+	// and watcher decisions that are proxied through the sidecar.
+	ActionSidecarStart                Action = "sidecar-start"
+	ActionSidecarStop                 Action = "sidecar-stop"
+	ActionSidecarConnected            Action = "sidecar-connected"
+	ActionSidecarDisconnected         Action = "sidecar-disconnected"
+	ActionSidecarWatcherVerdict       Action = "sidecar-watcher-verdict"
+	ActionSidecarWatcherDisable       Action = "sidecar-watcher-disable"
+	ActionSidecarWatcherDisablePlugin Action = "sidecar-watcher-disable-plugin"
+	ActionSidecarWatcherBlockMCP      Action = "sidecar-watcher-block-mcp"
+	ActionBootstrap                   Action = "bootstrap"
+
+	// Watcher lifecycle instrumentation. These actions describe the
+	// filesystem watcher and the install gate outcomes for skills,
+	// plugins, and MCP servers.
+	ActionWatchStart                Action = "watch-start"
+	ActionWatchStop                 Action = "watch-stop"
+	ActionWatcherBlock              Action = "watcher-block"
+	ActionInstallDetected           Action = "install-detected"
+	ActionInstallRejected           Action = "install-rejected"
+	ActionInstallAllowed            Action = "install-allowed"
+	ActionInstallAllowedSkipEnforce Action = "install-allowed-skip-enforce"
+	ActionInstallClean              Action = "install-clean"
+	ActionInstallWarning            Action = "install-warning"
+	ActionInstallScanError          Action = "install-scan-error"
+	ActionInstallEnforced           Action = "install-enforced"
+	ActionInstallBlocked            Action = "install-blocked"
+	ActionInstallDep                Action = "install-dep"
+
+	// Gateway session router instrumentation. These actions track
+	// stream/session/router health, tool calls/results, approval flow,
+	// and runtime prompt or tool alerts observed by the gateway.
+	ActionGatewayReady                Action = "gateway-ready"
+	ActionGatewaySessionMessage       Action = "gateway-session-message"
+	ActionGatewaySessionPromptAlert   Action = "gateway-session-prompt-alert"
+	ActionGatewaySessionError         Action = "gateway-session-error"
+	ActionGatewayChatError            Action = "gateway-chat-error"
+	ActionGatewayAgentStart           Action = "gateway-agent-start"
+	ActionGatewayAgentEnd             Action = "gateway-agent-end"
+	ActionGatewayAgentError           Action = "gateway-agent-error"
+	ActionGatewayToolCall             Action = "gateway-tool-call"
+	ActionGatewayToolCallBlocked      Action = "gateway-tool-call-blocked"
+	ActionGatewayToolCallFlagged      Action = "gateway-tool-call-flagged"
+	ActionGatewayToolCallJudgeFlagged Action = "gateway-tool-call-judge-flagged"
+	ActionGatewayToolResult           Action = "gateway-tool-result"
+	ActionGatewayApprovalRequested    Action = "gateway-approval-requested"
+	ActionGatewayApprovalDenied       Action = "gateway-approval-denied"
+	ActionGatewayApprovalGranted      Action = "gateway-approval-granted"
+	ActionGatewayApprovalPending      Action = "gateway-approval-pending"
+	ActionGatewayMultiTurnInjection   Action = "gateway-multi-turn-injection"
+	ActionGatewayDown                 Action = "gateway-down"
+	ActionGatewayRecovered            Action = "gateway-recovered"
+	ActionGatewayDegraded             Action = "gateway-degraded"
+	ActionToolResultPIIAlert          Action = "tool-result-pii-alert"
+
+	// Guardrail and inspect instrumentation. These actions describe
+	// proxy health, verdict/inspection rows, OPA evaluation, guardrail
+	// config changes, inspect-tool decisions, and judge summaries.
+	ActionGuardrailStart              Action = "guardrail-start"
+	ActionGuardrailHealthy            Action = "guardrail-healthy"
+	ActionGuardrailVerdict            Action = "guardrail-verdict"
+	ActionGuardrailInspection         Action = "guardrail-inspection"
+	ActionGuardrailOPAInspection      Action = "guardrail-opa-inspection"
+	ActionGuardrailOPAVerdict         Action = "guardrail-opa-verdict"
+	ActionGuardrailConfigReload       Action = "guardrail-config-reload"
+	ActionGuardrailDegraded           Action = "guardrail-degraded"
+	ActionGuardrailLaunder            Action = "guardrail-launder"
+	ActionGuardrailNotifyInject       Action = "guardrail-notify-inject"
+	ActionGuardrailToolCallParseError Action = "guardrail-tool-call-parse-error"
+	ActionGuardrailToolCallInspect    Action = "guardrail-tool-call-inspect"
+	ActionGuardrailDisable            Action = "guardrail-disable"
+	ActionGuardrailEnable             Action = "guardrail-enable"
+	ActionGuardrailFailMode           Action = "guardrail-fail-mode"
+	ActionLLMJudgeResponse            Action = "llm-judge-response"
+	ActionInspectToolConfirm          Action = "inspect-tool-confirm"
+	ActionInspectToolBlock            Action = "inspect-tool-block"
+	ActionInspectToolAlert            Action = "inspect-tool-alert"
+	ActionInspectToolAllow            Action = "inspect-tool-allow"
+	ActionInspectReveal               Action = "inspect-reveal"
+
+	// Setup, operator, API, and sink instrumentation. These actions
+	// describe CLI setup/doctor/init/upgrade flows, REST API mutations,
+	// sink/auth failures, and operator mutations for skills, plugins,
+	// MCP servers, tools, policies, and registries.
+	ActionAPIAuthFailure           Action = "api-auth-failure"
+	ActionAPIConfigPatch           Action = "api-config-patch"
+	ActionAPIEnforceAllow          Action = "api-enforce-allow"
+	ActionAPIEnforceBlock          Action = "api-enforce-block"
+	ActionAPIEnforceUnblock        Action = "api-enforce-unblock"
+	ActionAPIMCPScan               Action = "api-mcp-scan"
+	ActionAPIPluginDisable         Action = "api-plugin-disable"
+	ActionAPIPluginEnable          Action = "api-plugin-enable"
+	ActionAPIPluginScan            Action = "api-plugin-scan"
+	ActionAPISkillDisable          Action = "api-skill-disable"
+	ActionAPISkillEnable           Action = "api-skill-enable"
+	ActionAPISkillFetch            Action = "api-skill-fetch"
+	ActionAPISkillScan             Action = "api-skill-scan"
+	ActionSinkFlushError           Action = "sink-flush-error"
+	ActionSetupSkillScanner        Action = "setup-skill-scanner"
+	ActionSetupMCPScanner          Action = "setup-mcp-scanner"
+	ActionSetupGateway             Action = "setup-gateway"
+	ActionSetupGuardrail           Action = "setup-guardrail"
+	ActionSetupHookConnector       Action = "setup-hook-connector"
+	ActionSetupConnectorMode       Action = "setup-connector-mode"
+	ActionSetupRedactionToggle     Action = "setup-redaction-toggle"
+	ActionSetupNotificationsToggle Action = "setup-notifications-toggle"
+	ActionSetupNotificationsSet    Action = "setup-notifications-set"
+	ActionSetupSplunk              Action = "setup-splunk"
+	ActionSetupObservability       Action = "setup-observability"
+	ActionSetupLocalObservability  Action = "setup-local-observability"
+	ActionSetupWebhook             Action = "setup-webhook"
+	ActionDoctor                   Action = "doctor"
+	ActionUpgrade                  Action = "upgrade"
+	ActionInitGateway              Action = "init-gateway"
+	ActionInitGuardrail            Action = "init-guardrail"
+	ActionInitNotificationsToggle  Action = "init-notifications-toggle"
+	ActionInitSandbox              Action = "init-sandbox"
+	ActionInitSidecar              Action = "init-sidecar"
+	ActionPolicyCreate             Action = "policy-create"
+	ActionPolicyActivate           Action = "policy-activate"
+	ActionPolicyDelete             Action = "policy-delete"
+	ActionRegistryAdd              Action = "registry-add"
+	ActionRegistryEdit             Action = "registry-edit"
+	ActionRegistryRemove           Action = "registry-remove"
+	ActionScanEnforced             Action = "scan-enforced"
+	ActionScanFinding              Action = "scan-finding"
+	ActionDismissAlert             Action = "dismiss-alert"
+	ActionSkillBlock               Action = "skill-block"
+	ActionSkillUnblock             Action = "skill-unblock"
+	ActionSkillAllow               Action = "skill-allow"
+	ActionSkillDisable             Action = "skill-disable"
+	ActionSkillEnable              Action = "skill-enable"
+	ActionSkillQuarantine          Action = "skill-quarantine"
+	ActionSkillRestore             Action = "skill-restore"
+	ActionPluginInstall            Action = "plugin-install"
+	ActionPluginRemove             Action = "plugin-remove"
+	ActionPluginBlock              Action = "plugin-block"
+	ActionPluginAllow              Action = "plugin-allow"
+	ActionPluginDisable            Action = "plugin-disable"
+	ActionPluginEnable             Action = "plugin-enable"
+	ActionPluginQuarantine         Action = "plugin-quarantine"
+	ActionPluginRestore            Action = "plugin-restore"
+	ActionBlockMCP                 Action = "block-mcp"
+	ActionAllowMCP                 Action = "allow-mcp"
+	ActionMCPUnblock               Action = "mcp-unblock"
+	ActionMCPSet                   Action = "mcp-set"
+	ActionMCPSetBlocked            Action = "mcp-set-blocked"
+	ActionMCPUnset                 Action = "mcp-unset"
+	ActionToolBlock                Action = "tool-block"
+	ActionToolAllow                Action = "tool-allow"
+	ActionToolUnblock              Action = "tool-unblock"
 )
 
 // AllActions returns every registered audit action. Used by
@@ -180,6 +333,138 @@ func AllActions() []Action {
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,
+		ActionSidecarStart,
+		ActionSidecarStop,
+		ActionSidecarConnected,
+		ActionSidecarDisconnected,
+		ActionSidecarWatcherVerdict,
+		ActionSidecarWatcherDisable,
+		ActionSidecarWatcherDisablePlugin,
+		ActionSidecarWatcherBlockMCP,
+		ActionBootstrap,
+		ActionWatchStart,
+		ActionWatchStop,
+		ActionWatcherBlock,
+		ActionInstallDetected,
+		ActionInstallRejected,
+		ActionInstallAllowed,
+		ActionInstallAllowedSkipEnforce,
+		ActionInstallClean,
+		ActionInstallWarning,
+		ActionInstallScanError,
+		ActionInstallEnforced,
+		ActionInstallBlocked,
+		ActionInstallDep,
+		ActionGatewayReady,
+		ActionGatewaySessionMessage,
+		ActionGatewaySessionPromptAlert,
+		ActionGatewaySessionError,
+		ActionGatewayChatError,
+		ActionGatewayAgentStart,
+		ActionGatewayAgentEnd,
+		ActionGatewayAgentError,
+		ActionGatewayToolCall,
+		ActionGatewayToolCallBlocked,
+		ActionGatewayToolCallFlagged,
+		ActionGatewayToolCallJudgeFlagged,
+		ActionGatewayToolResult,
+		ActionGatewayApprovalRequested,
+		ActionGatewayApprovalDenied,
+		ActionGatewayApprovalGranted,
+		ActionGatewayApprovalPending,
+		ActionGatewayMultiTurnInjection,
+		ActionGatewayDown,
+		ActionGatewayRecovered,
+		ActionGatewayDegraded,
+		ActionToolResultPIIAlert,
+		ActionGuardrailStart,
+		ActionGuardrailHealthy,
+		ActionGuardrailVerdict,
+		ActionGuardrailInspection,
+		ActionGuardrailOPAInspection,
+		ActionGuardrailOPAVerdict,
+		ActionGuardrailConfigReload,
+		ActionGuardrailDegraded,
+		ActionGuardrailLaunder,
+		ActionGuardrailNotifyInject,
+		ActionGuardrailToolCallParseError,
+		ActionGuardrailToolCallInspect,
+		ActionGuardrailDisable,
+		ActionGuardrailEnable,
+		ActionGuardrailFailMode,
+		ActionLLMJudgeResponse,
+		ActionInspectToolConfirm,
+		ActionInspectToolBlock,
+		ActionInspectToolAlert,
+		ActionInspectToolAllow,
+		ActionInspectReveal,
+		ActionAPIAuthFailure,
+		ActionAPIConfigPatch,
+		ActionAPIEnforceAllow,
+		ActionAPIEnforceBlock,
+		ActionAPIEnforceUnblock,
+		ActionAPIMCPScan,
+		ActionAPIPluginDisable,
+		ActionAPIPluginEnable,
+		ActionAPIPluginScan,
+		ActionAPISkillDisable,
+		ActionAPISkillEnable,
+		ActionAPISkillFetch,
+		ActionAPISkillScan,
+		ActionSinkFlushError,
+		ActionSetupSkillScanner,
+		ActionSetupMCPScanner,
+		ActionSetupGateway,
+		ActionSetupGuardrail,
+		ActionSetupHookConnector,
+		ActionSetupConnectorMode,
+		ActionSetupRedactionToggle,
+		ActionSetupNotificationsToggle,
+		ActionSetupNotificationsSet,
+		ActionSetupSplunk,
+		ActionSetupObservability,
+		ActionSetupLocalObservability,
+		ActionSetupWebhook,
+		ActionDoctor,
+		ActionUpgrade,
+		ActionInitGateway,
+		ActionInitGuardrail,
+		ActionInitNotificationsToggle,
+		ActionInitSandbox,
+		ActionInitSidecar,
+		ActionPolicyCreate,
+		ActionPolicyActivate,
+		ActionPolicyDelete,
+		ActionRegistryAdd,
+		ActionRegistryEdit,
+		ActionRegistryRemove,
+		ActionScanEnforced,
+		ActionScanFinding,
+		ActionDismissAlert,
+		ActionSkillBlock,
+		ActionSkillUnblock,
+		ActionSkillAllow,
+		ActionSkillDisable,
+		ActionSkillEnable,
+		ActionSkillQuarantine,
+		ActionSkillRestore,
+		ActionPluginInstall,
+		ActionPluginRemove,
+		ActionPluginBlock,
+		ActionPluginAllow,
+		ActionPluginDisable,
+		ActionPluginEnable,
+		ActionPluginQuarantine,
+		ActionPluginRestore,
+		ActionBlockMCP,
+		ActionAllowMCP,
+		ActionMCPUnblock,
+		ActionMCPSet,
+		ActionMCPSetBlocked,
+		ActionMCPUnset,
+		ActionToolBlock,
+		ActionToolAllow,
+		ActionToolUnblock,
 	}
 }
 

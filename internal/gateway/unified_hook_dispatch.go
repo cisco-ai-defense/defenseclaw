@@ -32,13 +32,10 @@ import (
 //     registration that bypasses audit/metrics emission).
 //  2. Delegate to handleAgentHook(name). EVERY connector — codex,
 //     claudecode, hermes, cursor, windsurf, geminicli, copilot —
-//     flows through the same handler now. Bespoke evaluators /
-//     LLM-event emitters / raw-event dedupers for codex and
-//     claudecode are invoked from inside handleAgentHook via the
-//     bespoke_hook_adapter.go dispatch shim; see that file for
-//     the rationale on what stays connector-specific (decision
-//     logic) vs what is now shared (audit envelope, metrics,
-//     trace propagation, W3C headers, OTel emissions).
+//     flows through the same handler now. Connector-specific event
+//     emission, dedupe, and evaluation live behind HookProfile runtime
+//     callbacks; shared audit, metrics, trace propagation, W3C
+//     headers, and OTel emissions stay in handleAgentHook.
 //
 // Why this matters: prior to this PR, codex and claudecode each
 // owned a full bespoke HTTP handler that re-implemented the entire
@@ -97,9 +94,17 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 	if !ok {
 		return connector.HookProfile{Name: name}
 	}
+	agentVersion := connector.LoadCachedAgentVersion(a.configDataDir(), name)
+	lock := connector.LoadHookContractLockEntry(a.configDataDir(), name)
+	contractID := lock.ContractID
+	if contractID == "" {
+		contractID = connector.ResolveHookContract(name, agentVersion).Contract.ContractID
+	}
 	return provider.HookProfile(connector.SetupOpts{
-		DataDir:      a.configDataDir(),
-		APIAddr:      a.apiAddrForCapabilities(),
-		WorkspaceDir: currentWorkingDir(),
+		DataDir:        a.configDataDir(),
+		APIAddr:        a.apiAddrForCapabilities(),
+		WorkspaceDir:   currentWorkingDir(),
+		AgentVersion:   agentVersion,
+		HookContractID: contractID,
 	})
 }

@@ -1,6 +1,7 @@
 #!/bin/bash
 # defenseclaw-managed-hook v6
-# Plan B4 / S0.4: shell-side hook hardening helpers.
+# Shell-side hook hardening helpers.
+DEFENSECLAW_BAKED_HOOK_PATH=""
 #
 # Schema versions:
 #   v2 — initial hardening helpers (rlimit, env sanitization,
@@ -110,14 +111,14 @@ defenseclaw_harden_env() {
         GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_PACK_ACCESS \
         GIT_SSH GIT_SSH_COMMAND
 
-  # Lock down PATH — keep only the standard system bins where curl /
-  # jq / sed / tail / cat / mktemp must live. Operators (and tests)
-  # that need a custom path must set DEFENSECLAW_HOOK_PATH explicitly;
-  # the variable is sticky across the script so any subsequent
-  # subprocess inherits it. Setting it to an empty string disables
-  # the override and falls back to the locked-down default.
-  if [ -n "${DEFENSECLAW_HOOK_PATH:-}" ]; then
-    export PATH="$DEFENSECLAW_HOOK_PATH"
+  # Lock down PATH — keep only standard system bins unless setup baked
+  # a literal DEFENSECLAW_BAKED_HOOK_PATH into this helper file. Hooks
+  # inherit the agent environment, so runtime DEFENSECLAW_HOOK_PATH (or
+  # a companion "trusted" flag) is intentionally ignored; otherwise a
+  # compromised agent could prepend trojan curl/jq/head.
+  unset DEFENSECLAW_HOOK_PATH DEFENSECLAW_HOOK_PATH_TRUSTED
+  if [ -n "$DEFENSECLAW_BAKED_HOOK_PATH" ]; then
+    export PATH="$DEFENSECLAW_BAKED_HOOK_PATH"
   else
     export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   fi
@@ -188,6 +189,9 @@ defenseclaw_validate_path() {
   # shell metacharacters into a downstream command.
   case "$val" in
     *[!A-Za-z0-9_./-]*) return 1 ;;
+  esac
+  case "$val" in
+    *..*) return 1 ;;
   esac
   return 0
 }
@@ -416,9 +420,10 @@ defenseclaw_validate_traceparent() {
     ??-????????????????????????????????-????????????????-??) : ;;
     *) return 1 ;;
   esac
-  # Strict-hex check: any non-hex char rejects.
+  # Strict-hex check: any non-hex char rejects. Uppercase hex is valid
+  # W3C trace-context and accepted by Go's OTel propagator.
   case "$v" in
-    *[!0-9a-f-]*) return 1 ;;
+    *[!0-9a-fA-F-]*) return 1 ;;
   esac
   # Trace-id and parent-id must not be all-zero.
   local trace_id parent_id

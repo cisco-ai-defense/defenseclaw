@@ -47,11 +47,11 @@ type CodexConnector struct {
 	gatewayToken string
 	masterKey    string
 
-	// PR #141 audit H1: emit a single `[SECURITY]` warning per
-	// process when loopback bypass is exercised while a gateway
-	// token is configured. The native-binary loopback carve-out
-	// is intentional (see Authenticate), but operators must see
-	// it surfaced at least once.
+	// Emit a single `[SECURITY]` warning per process the first time
+	// the loopback bypass is exercised while a gateway token is
+	// configured. The native-binary loopback carve-out is intentional
+	// (see Authenticate), but operators must see it surfaced at least
+	// once so they know a non-token-authed path is live.
 	loopbackWarn sync.Once
 }
 
@@ -81,10 +81,10 @@ func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy {
 
 func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	// Hook-only connector: patchCodexConfig wires hooks, OTel, and the
-	// notify bridge without rewriting provider URLs or exporting a global
-	// OPENAI_BASE_URL. The LLM proxy surface was removed in PR #265 —
-	// Codex talks directly to its native upstream and DefenseClaw only
-	// observes via hooks + OTel.
+	// notify bridge without rewriting provider URLs or exporting a
+	// global OPENAI_BASE_URL. The legacy LLM-proxy surface has been
+	// removed — Codex talks directly to its native upstream and
+	// DefenseClaw only observes via hooks + OTel.
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	// Plan C2: HookScriptOwner-driven. codex_hook.sh ships from the
@@ -180,8 +180,9 @@ func (c *CodexConnector) VerifyClean(opts SetupOpts) error {
 // AcceptLoopbackWithWarning so the [SECURITY] log line stays
 // consistent across the (currently single) set of connectors that need
 // the exception, and so any future caller has to opt in explicitly
-// rather than slip the same pattern in via copy-paste. See
-// .deepsec/data/defenseclaw/INFO.md for the audit trail.
+// rather than slip the same pattern in via copy-paste. Audit any new
+// loopback consumer against the threat model documented on
+// AcceptLoopbackWithWarning itself.
 func (c *CodexConnector) Authenticate(r *http.Request) bool {
 	if AcceptLoopbackWithWarning(r, c.gatewayToken, "codex",
 		"codex-cli sends Authorization: Bearer <provider-key> directly to /c/codex/responses and has no shell-script seam to inject the gateway token",
@@ -362,7 +363,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	// connectors that already self-identify (codex, geminicli),
 	// the upstream tags are richer than anything we could
 	// synthesize from the outside.
-	return HookProfile{
+	profile := HookProfile{
 		Name:                "codex",
 		Capabilities:        c.HookCapabilities(opts),
 		SupportsTraceparent: true,
@@ -373,22 +374,17 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 			Headers:        headers,
 			LogUserPrompts: redaction.DisableAll(),
 		},
-		// Profile-driven callbacks the unified hook collector
-		// publishes to downstream consumers (out-of-tree gateways,
-		// future plugin-host clients) as the canonical shape for
+		// Profile-driven callbacks are the canonical shape for
 		// codex hook decode / verdict mapping / response. The
-		// gateway-internal handleAgentHook("codex") dispatch path
-		// invokes the bespoke evaluateCodexHook via
-		// bespoke_hook_adapter.go because that evaluator carries
-		// scanner / asset-policy / notifier wiring tied to the
-		// *APIServer; the connector-side callbacks below are the
-		// pure-function equivalent suitable for declarative
-		// consumers. golden tests (native_otlp_golden_test.go,
-		// hook_profile_dispatch_test.go) keep the two in lockstep.
+		// gateway profile-runtime registry uses these pure callbacks
+		// for response/mode behavior and keeps APIServer-owned
+		// scanner / asset-policy / notifier work in the unified
+		// collector. Golden tests keep those layers in lockstep.
 		Decode:     codexProfileDecode,
 		MapVerdict: codexProfileMapVerdict,
 		Respond:    codexProfileRespond,
 	}
+	return ApplyHookContract(profile, opts)
 }
 
 // --- ComponentScanner interface ---
@@ -491,9 +487,10 @@ var codexHookGroups = []struct {
 }
 
 // isDefenseClawCodexProxyRedirect reports whether v is the loopback
-// LLM-proxy URL DefenseClaw itself wrote into ~/.codex/config.toml on
-// pre-PR-#265 installs. Matching is strict on three axes so an
-// operator's enterprise gateway URL is never mistaken for ours:
+// LLM-proxy URL DefenseClaw itself wrote into ~/.codex/config.toml
+// during the LLM-proxy era (before codex became hook-only). Matching
+// is strict on three axes so an operator's enterprise gateway URL is
+// never mistaken for ours:
 //
 //   - scheme must be http or https (rejects file://, ws://, etc.)
 //   - host must be loopback (127.0.0.1, ::1, or the literal "localhost")
@@ -537,7 +534,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 		}
 	}
 
-	// Heal pre-PR-#265 installs that injected a DefenseClaw LLM-proxy
+	// Heal legacy installs that injected a DefenseClaw LLM-proxy
 	// redirect at the top-level `openai_base_url`. The proxy listener
 	// no longer binds (the value points at a closed loopback port), so
 	// leaving the key in place causes every Codex turn to fail with
@@ -872,6 +869,7 @@ func buildCodexOtelBlock(opts SetupOpts) map[string]interface{} {
 func writeCodexNotifyBridge(opts SetupOpts) error {
 	scriptPath := filepath.Join(opts.DataDir, "notify-bridge.sh")
 	endpoint := "http://" + opts.APIAddr + "/api/v1/codex/notify"
+	authHeader := shellSingleQuote("Authorization: Bearer " + opts.APIToken)
 	body := "#!/usr/bin/env bash\n" +
 		"# Auto-generated by defenseclaw setup guardrail. DO NOT EDIT.\n" +
 		"# Codex invokes this bridge on agent-turn-complete with a single\n" +
@@ -882,6 +880,13 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"if [ -z \"${JSON}\" ]; then\n" +
 		"  exit 0\n" +
 		"fi\n" +
+		"TRACE_HEADERS=()\n" +
+		"TP=\"${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-}}\"\n" +
+		"TS=\"${DEFENSECLAW_TRACESTATE:-${TRACESTATE:-}}\"\n" +
+		"case \"${TP}\" in *$'\\n'*|*$'\\r'*) TP=\"\" ;; esac\n" +
+		"case \"${TS}\" in *$'\\n'*|*$'\\r'*) TS=\"\" ;; esac\n" +
+		"if [ -n \"${TP}\" ]; then TRACE_HEADERS+=(--header \"traceparent: ${TP}\"); fi\n" +
+		"if [ -n \"${TS}\" ]; then TRACE_HEADERS+=(--header \"tracestate: ${TS}\"); fi\n" +
 		"curl --silent --show-error --max-time 5 \\\n" +
 		"  --header 'Content-Type: application/json' \\\n" +
 		// Authorization: Bearer is the canonical credential the
@@ -890,15 +895,16 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		// header keeps the bridge interoperable with curl/proxy
 		// debugging and matches the python CLI / inspect-hook
 		// auth contract.
-		"  --header 'Authorization: Bearer " + opts.APIToken + "' \\\n" +
+		"  --header " + authHeader + " \\\n" +
 		// X-DefenseClaw-Client is required by the gateway's CSRF gate;
 		// without it apiCSRFProtect 403s the POST. inspect-tool-response
 		// and the python CLI set the same header; the value is purely
 		// observational (logged in audit).
 		"  --header 'X-DefenseClaw-Client: codex-notify/1.0' \\\n" +
 		"  --header 'x-defenseclaw-source: codex-notify' \\\n" +
+		"  \"${TRACE_HEADERS[@]}\" \\\n" +
 		"  --data \"${JSON}\" \\\n" +
-		"  '" + endpoint + "' >/dev/null 2>&1 || true\n"
+		"  " + shellSingleQuote(endpoint) + " >/dev/null 2>&1 || true\n"
 	if err := os.MkdirAll(opts.DataDir, 0o755); err != nil {
 		return fmt.Errorf("ensure data dir: %w", err)
 	}
@@ -906,6 +912,10 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		return fmt.Errorf("write notify bridge: %w", err)
 	}
 	return nil
+}
+
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
 }
 
 func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {

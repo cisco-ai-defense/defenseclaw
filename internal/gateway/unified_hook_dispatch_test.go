@@ -27,19 +27,20 @@ import (
 )
 
 // TestUnifiedHookDispatch_SingleEntryPoint proves every connector
-// flows through the same unified pipeline (handleAgentHook). Prior
-// to PR #284, codex and claudecode each had a separate bespoke HTTP
-// handler that re-implemented audit / metrics / dedup wiring — the
-// F2 audit-correlation regression bit live Splunk verification
-// because the bespoke claudecode handler had drifted. PR #284
-// deleted both bespoke handlers and routed everyone through
+// flows through the same unified pipeline (handleAgentHook). Before
+// the unified collector landed, codex and claudecode each had a
+// separate bespoke HTTP handler that re-implemented audit / metrics
+// / dedup wiring, and the bespoke claudecode handler had drifted
+// far enough to silently drop session_id from the audit envelope —
+// only caught when Splunk verification spotted the gap. The bespoke
+// handlers were deleted and every connector now routes through
 // handleAgentHook; this test pins that contract so a future
 // "let's reintroduce a bespoke handler for X" change immediately
 // fails CI.
 //
 // The contract we assert: an empty POST body produces the unified
 // handler's "hook event name is required" error (lowercase
-// _event_). The pre-PR-#284 bespoke handlers emitted
+// _event_). The legacy bespoke handlers emitted
 // "hook_event_name is required" (with underscore), so if a future
 // regression reintroduces a bespoke handler we'd see the
 // underscored variant and this test fails.
@@ -81,7 +82,7 @@ func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 // TestHookProfileForConnector validates that the gateway's
 // HookProfile lookup returns the right declarative profile for each
 // connector, with the Decode/MapVerdict/Respond callbacks wired up
-// where expected. This is the gateway-side mirror of
+// through the connector registry. This is the gateway-side mirror of
 // TestHookProfile_HasDispatchCallbacks in the connector package and
 // guards against a registration drift where the connector ships
 // callbacks but the gateway's lookup never sees them.
@@ -97,8 +98,8 @@ func TestHookProfileForConnector(t *testing.T) {
 	}{
 		{"codex", "codex", "codex", true, true, true},
 		{"claudecode", "claudecode", "claudecode", true, true, true},
-		{"hermes", "hermes", "hermes", false, false, false},
-		{"cursor", "cursor", "cursor", false, false, false},
+		{"hermes", "hermes", "hermes", false, true, true},
+		{"cursor", "cursor", "cursor", false, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
 	for _, tc := range cases {
@@ -129,14 +130,15 @@ func TestHookProfileForConnector(t *testing.T) {
 // rejects responses without "claude_code_output", Codex rejects
 // without "codex_output".
 //
-// Pre-PR-#284 the wire shape came from the bespoke handler's
-// connector-specific response struct (claudeCodeHookResponse with
-// `json:"claude_code_output"` tag, etc.). Post-PR-#284 it comes
-// from renderAgentHookResponse + hookOutputFieldName(connectorName).
-// The two paths must stay byte-identical for live agents to keep
-// working — this test pins the field-name mapping so a future
-// refactor of renderAgentHookResponse cannot silently rename a key
-// and break Claude Code / Codex hook traffic.
+// Before the unified collector, the wire shape came from the
+// bespoke handler's connector-specific response struct
+// (claudeCodeHookResponse with `json:"claude_code_output"` tag, etc.).
+// It now comes from renderAgentHookResponse +
+// hookOutputFieldName(connectorName). The two paths must stay
+// byte-identical for live agents to keep working — this test pins
+// the field-name mapping so a future refactor of
+// renderAgentHookResponse cannot silently rename a key and break
+// Claude Code / Codex hook traffic.
 func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 	resp := agentHookResponse{
 		Action:     "block",

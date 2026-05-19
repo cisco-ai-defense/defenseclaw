@@ -116,11 +116,15 @@ func DefaultSourceTypeOverrides() map[string]string {
 		// Judge events go to their own sourcetype so the Splunk
 		// dashboards can pivot on model + verdict + confidence
 		// without colliding with regular audit lines.
+		// Key mirrors audit.ActionLLMJudgeResponse; this package
+		// cannot import internal/audit without creating a cycle.
 		"llm-judge-response": "defenseclaw:judge",
 		// Guardrail verdicts are the single highest-value audit
 		// signal for SOC teams; giving them a dedicated
 		// sourcetype lets search-head admins pin retention
 		// independently of the generic audit stream.
+		// Key mirrors audit.ActionGuardrailVerdict; this package
+		// cannot import internal/audit without creating a cycle.
 		"guardrail-verdict": "defenseclaw:verdict",
 	}
 }

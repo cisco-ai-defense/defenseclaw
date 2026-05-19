@@ -1,12 +1,13 @@
 #!/bin/bash
-# defenseclaw-managed-hook v4
+# defenseclaw-managed-hook v6
 # DefenseClaw Claude Code hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/claude-code/hook endpoint. Claude Code pipes
 # the structured JSON event to stdin and reads the response from stdout.
 #
-# v4 (Phase B.3 / PR 4): forwards W3C trace context (traceparent /
-# tracestate) when the agent has exported it via DEFENSECLAW_TRACEPARENT
-# or OTEL_TRACEPARENT. See codex-hook.sh for the full rollout note.
+# Forwards W3C trace context (traceparent / tracestate) when the agent
+# has exported it via DEFENSECLAW_TRACEPARENT or OTEL_TRACEPARENT, so
+# the hook span links back to the agent's parent span. See
+# codex-hook.sh for the validation contract.
 set -euo pipefail
 
 # Fail-open guard. See inspect-request.sh for rationale.
@@ -44,9 +45,13 @@ fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: claudecode hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
+    exit 2
+  fi
   exit 0
 }
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
 # into this script). The env var takes precedence if already set.
@@ -84,7 +89,7 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
-# PR 4 / Phase B.3 — W3C trace propagation.
+# W3C trace propagation: forward validated traceparent / tracestate.
 TRACE_HEADER_ARGS=()
 if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)

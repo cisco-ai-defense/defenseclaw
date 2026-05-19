@@ -106,7 +106,7 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 		env.Result = "ok"
 	}
 	auditAction := string(audit.ActionConnectorHook)
-	if env.AuditActionOverride != "" {
+	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
 		auditAction = env.AuditActionOverride
 	}
 	jsonDetails := renderHookAuditEnvelope(env)

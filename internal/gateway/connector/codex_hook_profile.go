@@ -27,12 +27,11 @@ import (
 //
 // Today (post PR #284) the unified gateway handler decodes the raw
 // bytes into both an agentHookRequest (for the shared pipeline) and
-// a codexHookRequest (for the bespoke evaluator, via
-// bespoke_hook_adapter.go); this decoder is kept as the
-// connector-side declarative shape so downstream consumers
-// (out-of-tree gateways, future plugin-host clients) can read the
-// canonical field map without depending on the gateway-side bespoke
-// types.
+// a codexHookRequest (for the profile-runtime evaluator); this
+// decoder is kept as the connector-side declarative shape so
+// downstream consumers (out-of-tree gateways, future plugin-host
+// clients) can read the canonical field map without depending on the
+// gateway-side typed request.
 func codexProfileDecode(payload map[string]interface{}) HookProfileRequest {
 	req := HookProfileRequest{
 		ConnectorName: "codex",
@@ -134,9 +133,9 @@ func codexProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 // returned FieldName is "codex_output" so the wire format matches
 // codexHookResponse exactly (omitempty kicks in when Output is nil).
 //
-// The body shape is sourced from the same set of cases the bespoke
-// codexOutput() helper in gateway/codex_hook.go produces. Keeping
-// the two helpers byte-identical is asserted by
+// The body shape is sourced from the same set of cases the typed
+// codexOutput() helper in gateway/codex_hook.go produces. Keeping the
+// two helpers byte-identical is asserted by
 // TestUnifiedHookProfileRespond_CodexParity in PR 5's test suite.
 func codexProfileRespond(in HookRespondInput) HookRespondOutput {
 	output := codexOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, in.Reason, in.AdditionalContext)
@@ -232,7 +231,7 @@ func codexReasonOrDefault(reason string) string {
 // of the gateway's codexAdditionalContext() helper, exposed so the
 // unified collector can construct the additional-context string
 // before calling profile.Respond. Kept format-compatible with the
-// bespoke handler so JSONEq fixtures pass under both flag states.
+// typed gateway helper so JSONEq fixtures pass under both flag states.
 func codexAdditionalContextForProfile(rawAction, severity, reason string, wouldBlock bool) string {
 	if rawAction == "allow" || rawAction == "" {
 		return ""

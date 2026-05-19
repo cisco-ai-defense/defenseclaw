@@ -158,9 +158,9 @@
               "type": "string",
               "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
             },
-            "event_type": { "type": "string" },
-            "result": { "type": "string", "enum": ["ok", "rejected", "unknown"] },
-            "reason": { "type": "string" }
+            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
+            "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
+            "reason": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] }
           }
         },
         {
@@ -173,9 +173,51 @@
               "type": "string",
               "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
             },
-            "event_type": { "type": "string" },
-            "result": { "type": "string", "enum": ["ok", "rejected", "unknown"] },
-            "reason": { "type": "string" }
+            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
+            "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
+            "reason": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] }
+          }
+        },
+        {
+          "name": "defenseclaw.connector.hook.tokens",
+          "type": "counter",
+          "unit": "{token}",
+          "description": "Token usage attributable to connector hook invocations.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            },
+            "model": { "type": "string" },
+            "kind": { "type": "string", "enum": ["prompt", "completion", "total"] }
+          }
+        },
+        {
+          "name": "defenseclaw.connector.hook.outcome",
+          "type": "counter",
+          "unit": "{decision}",
+          "description": "Connector hook outcomes labelled by bounded event/action/severity dimensions.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            },
+            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
+            "action": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] },
+            "severity": { "type": "string" },
+            "would_block": { "type": "boolean" }
+          }
+        },
+        {
+          "name": "defenseclaw.connector.hook.unified_dispatch",
+          "type": "counter",
+          "unit": "{invocation}",
+          "description": "Connector hook invocations routed through the unified hook collector.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+            }
           }
         },
         {
@@ -353,6 +395,22 @@
               "enum": ["success", "failed"],
               "description": "Outcome of the reload operation."
             }
+          }
+        }
+      ]
+    },
+    "process_metrics": {
+      "type": "array",
+      "description": "Metrics related to gateway process health and recovered failure paths.",
+      "items": { "$ref": "#/$defs/metricDef" },
+      "default": [
+        {
+          "name": "defenseclaw.panics.total",
+          "type": "counter",
+          "unit": "{panic}",
+          "description": "Recovered panics by subsystem.",
+          "attributes": {
+            "subsystem": { "type": "string" }
           }
         }
       ]

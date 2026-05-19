@@ -51,7 +51,7 @@ func TestHookProfileMatrix(t *testing.T) {
 		{"codex", true, NativeOTLPTOMLBlock, true, false, true, true},
 		{"claudecode", true, NativeOTLPEnvBlock, true, true, true, true},
 		{"geminicli", true, NativeOTLPJSONBlock, true, false, true, true},
-		{"copilot", true, "", true, true, false, true},
+		{"copilot", true, NativeOTLPEnvBlock, true, true, false, true},
 		{"cursor", true, "", true, true, true, true},
 		{"windsurf", true, "", true, false, false, true},
 		{"hermes", true, "", true, false, false, true},

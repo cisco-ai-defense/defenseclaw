@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Regression tests for the F5 fix: ``Config.save()`` must round-trip
+"""Regression tests for ``Config.save()`` round-trip persistence.
 through the existing on-disk YAML so that operator-configured but
 Python-dataclass-UNmodelled keys (``audit_sinks:``,
 ``otel.resource.attributes:``) survive every ``defenseclaw setup
@@ -73,7 +73,7 @@ def _make_cfg(tmpdir: str, **overrides) -> Config:
 
 
 class TestConfigSaveRoundtripPreservesAuditSinks(unittest.TestCase):
-    """The core F5 regression: ``audit_sinks:`` must survive ``cfg.save()``.
+    """``audit_sinks:`` must survive ``cfg.save()``.
 
     Reproduces the operator workflow that previously caused silent
     data loss on every connector switch.
@@ -120,7 +120,7 @@ class TestConfigSaveRoundtripPreservesAuditSinks(unittest.TestCase):
             "audit_sinks", after,
             msg=(
                 "audit_sinks block was stripped by Config.save() — this is "
-                "the F5 regression that broke Splunk forwarding on every "
+                "the regression that broke Splunk forwarding on every "
                 "connector switch."
             ),
         )
@@ -689,6 +689,24 @@ class TestMergeHelpers(unittest.TestCase):
         self.assertEqual(out["b"]["y"], 20)  # preserved nested
         self.assertTrue(out["preserved"])    # preserved top-of-recurse
 
+    def test_authoritative_otel_dict_preserves_concurrent_disk_update_when_unchanged(self):
+        merged = _merge_preserving_unmodeled(
+            existing={"otel": {"headers": {"Authorization": "Bearer new"}}},
+            new={"otel": {"headers": {}}},
+            owned_top_level=frozenset({"otel"}),
+            authoritative_base={"otel.headers": {}},
+        )
+        self.assertEqual(merged["otel"]["headers"], {"Authorization": "Bearer new"})
+
+    def test_authoritative_otel_dict_can_still_be_cleared_when_changed(self):
+        merged = _merge_preserving_unmodeled(
+            existing={"otel": {"headers": {"Authorization": "Bearer old"}}},
+            new={"otel": {"headers": {}}},
+            owned_top_level=frozenset({"otel"}),
+            authoritative_base={"otel.headers": {"Authorization": "Bearer old"}},
+        )
+        self.assertEqual(merged["otel"]["headers"], {})
+
     def test_load_existing_returns_empty_on_missing_file(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.assertEqual(
@@ -707,8 +725,8 @@ class TestMergeHelpers(unittest.TestCase):
 
 
 class TestRealWorldOperatorWorkflow(unittest.TestCase):
-    """End-to-end repro of the operator workflow the F5 fix unblocks:
-    ``setup splunk`` → ``setup codex`` → audit_sinks must survive."""
+    """End-to-end repro of the operator workflow where setup commands
+    must preserve audit_sinks across separate writes."""
 
     def test_setup_splunk_then_setup_codex_keeps_audit_sinks(self):
         with tempfile.TemporaryDirectory() as tmpdir:

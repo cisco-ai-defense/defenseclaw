@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"github.com/google/uuid"
 )
@@ -359,7 +360,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 					DestinationApp: opts.DestinationApp,
 				})
 				evt := audit.Event{
-					Action:   "llm-judge-response",
+					Action:   string(audit.ActionLLMJudgeResponse),
 					Target:   p.Model,
 					Actor:    "defenseclaw-gateway",
 					Severity: string(p.Severity),
@@ -423,7 +424,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		"api_port":     fmt.Sprintf("%d", s.cfg.Gateway.APIPort),
 		"guardrail":    fmt.Sprintf("%v", s.cfg.Guardrail.Enabled),
 	})
-	_ = s.logger.LogAction("sidecar-start", "", "starting all subsystems")
+	_ = s.logger.LogAction(string(audit.ActionSidecarStart), "", "starting all subsystems")
 
 	if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.Model == "" &&
 		proxyShouldBindForConfiguredConnector(s.cfg) {
@@ -535,7 +536,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 
 	// Shutdown — ctx is already Done, but still carries correlation values.
 	emitLifecycle(ctx, "gateway", "stop", nil)
-	_ = s.logger.LogAction("sidecar-stop", "", "all subsystems stopped")
+	_ = s.logger.LogAction(string(audit.ActionSidecarStop), "", "all subsystems stopped")
 	if s.webhooks != nil {
 		s.webhooks.Close()
 	}
@@ -640,7 +641,7 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 		emitLifecycle(ctx, "gateway", "ready", map[string]string{
 			"protocol": fmt.Sprintf("%d", hello.Protocol),
 		})
-		if err := s.logger.LogAction("sidecar-connected", "",
+		if err := s.logger.LogAction(string(audit.ActionSidecarConnected), "",
 			fmt.Sprintf("protocol=%d", hello.Protocol)); err != nil {
 			// Never silent: surface both on stderr (so operators see
 			// it in gateway.log) and as a structured error event
@@ -664,7 +665,7 @@ func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 			return nil
 		case <-s.client.Disconnected():
 			fmt.Fprintf(os.Stderr, "[sidecar] gateway connection lost, reconnecting ...\n")
-			_ = s.logger.LogAction("sidecar-disconnected", "", "connection lost, reconnecting")
+			_ = s.logger.LogAction(string(audit.ActionSidecarDisconnected), "", "connection lost, reconnecting")
 			s.health.SetGateway(StateReconnecting, "connection lost", nil)
 		}
 	}
@@ -847,7 +848,7 @@ func (s *Sidecar) handleAdmissionResult(r watcher.AdmissionResult) {
 		s.handleMCPAdmission(r)
 	default:
 		if s.logger != nil {
-			_ = s.logger.LogAction("sidecar-watcher-verdict", r.Event.Name,
+			_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
 				fmt.Sprintf("type=%s verdict=%s (no handler)", r.Event.Type, r.Verdict))
 		}
 	}
@@ -857,7 +858,7 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 	if !s.cfg.Gateway.Watcher.Skill.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: skill %s verdict=%s (take_action=false, logging only)\n",
 			r.Event.Name, r.Verdict)
-		_ = s.logger.LogAction("sidecar-watcher-verdict", r.Event.Name,
+		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
 			fmt.Sprintf("verdict=%s (take_action disabled, no gateway action)", r.Verdict))
 		return
 	}
@@ -881,7 +882,7 @@ func (s *Sidecar) handleSkillAdmission(r watcher.AdmissionResult) {
 		} else {
 			actions = append(actions, "disabled")
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled skill %s\n", r.Event.Name)
-			_ = s.logger.LogAction("sidecar-watcher-disable", r.Event.Name,
+			_ = s.logger.LogAction(string(audit.ActionSidecarWatcherDisable), r.Event.Name,
 				fmt.Sprintf("auto-disabled skill via gateway after verdict=%s", r.Verdict))
 		}
 	}
@@ -934,7 +935,7 @@ func (s *Sidecar) sendEnforcementAlert(subjectType, subjectName, severity string
 		event := audit.Event{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now().UTC(),
-			Action:    "block",
+			Action:    string(audit.ActionBlock),
 			Target:    subjectName,
 			Actor:     "defenseclaw-watcher",
 			Details:   fmt.Sprintf("type=%s severity=%s findings=%d actions=%s reason=%s", subjectType, severity, findings, strings.Join(actions, ","), safeReason),
@@ -996,7 +997,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 	if !s.cfg.Gateway.Watcher.Plugin.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: plugin %s verdict=%s (take_action=false, logging only)\n",
 			r.Event.Name, r.Verdict)
-		_ = s.logger.LogAction("sidecar-watcher-verdict", r.Event.Name,
+		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
 			fmt.Sprintf("verdict=%s (plugin take_action disabled, no gateway action)", r.Verdict))
 		return
 	}
@@ -1020,7 +1021,7 @@ func (s *Sidecar) handlePluginAdmission(r watcher.AdmissionResult) {
 		} else {
 			actions = append(actions, "disabled")
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway disabled plugin %s\n", r.Event.Name)
-			_ = s.logger.LogAction("sidecar-watcher-disable-plugin", r.Event.Name,
+			_ = s.logger.LogAction(string(audit.ActionSidecarWatcherDisablePlugin), r.Event.Name,
 				fmt.Sprintf("auto-disabled plugin via gateway after verdict=%s", r.Verdict))
 		}
 	}
@@ -1036,7 +1037,7 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 	if !s.cfg.Gateway.Watcher.MCP.TakeAction {
 		fmt.Fprintf(os.Stderr, "[sidecar] watcher: mcp %s verdict=%s (take_action=false, logging only)\n",
 			r.Event.Name, r.Verdict)
-		_ = s.logger.LogAction("sidecar-watcher-verdict", r.Event.Name,
+		_ = s.logger.LogAction(string(audit.ActionSidecarWatcherVerdict), r.Event.Name,
 			fmt.Sprintf("verdict=%s (mcp take_action disabled, no gateway action)", r.Verdict))
 		return
 	}
@@ -1060,7 +1061,7 @@ func (s *Sidecar) handleMCPAdmission(r watcher.AdmissionResult) {
 		} else {
 			actions = append(actions, "disabled")
 			fmt.Fprintf(os.Stderr, "[sidecar] watcher→gateway blocked MCP %s\n", r.Event.Name)
-			_ = s.logger.LogAction("sidecar-watcher-block-mcp", r.Event.Name,
+			_ = s.logger.LogAction(string(audit.ActionSidecarWatcherBlockMCP), r.Event.Name,
 				fmt.Sprintf("auto-blocked MCP server via gateway after verdict=%s", r.Verdict))
 		}
 	}
@@ -1227,6 +1228,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	conn.SetCredentials(apiToken, masterKey)
 
 	workspaceDir, _ := os.Getwd()
+	agentVersion := connector.LoadCachedAgentVersion(s.cfg.DataDir, conn.Name())
+	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupOpts := connector.SetupOpts{
 		DataDir:   s.cfg.DataDir,
 		ProxyAddr: proxyAddr,
@@ -1248,6 +1251,17 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailMode(),
 		HILTEnabled:      s.cfg.Guardrail.HILT.Enabled,
 		InstallCodeGuard: false,
+		AgentVersion:     agentVersion,
+		HookContractID:   contractResolution.Contract.ContractID,
+	}
+	if contractResolution.Status == connector.HookCompatibilityUnknown && strings.EqualFold(s.cfg.Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return fmt.Errorf("connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
+	}
+	if previous := connector.LoadHookContractLockEntry(s.cfg.DataDir, conn.Name()); previous.Connector != "" {
+		current := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
+		if connector.HookContractLockDrifted(previous, current) && strings.EqualFold(s.cfg.Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+		}
 	}
 
 	// resolveActiveConnector guarantees a non-nil connector — either the
@@ -1299,6 +1313,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		}
 		if err := connector.SaveActiveConnector(s.cfg.DataDir, conn.Name()); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+		}
+		lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
+		if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, lockEntry); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock: %v\n", err)
 		}
 
 		// Plan A4 / S0.12: refuse to start when the connector advertises

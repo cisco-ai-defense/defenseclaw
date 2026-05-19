@@ -10,15 +10,13 @@
 
 package gateway
 
-// Track 0 foundations — stub owned by Track 7 (Gateway Correlation).
+// Request correlation plumbing. Every gatewaylog / audit / OTel
+// emission carries the full correlation quartet:
 //
-// v7 extends request correlation from a single request_id to the
-// full correlation quartet that every gatewaylog / audit / OTel
-// emission is expected to carry:
-//
-//   - request_id     : per-HTTP request (already exists — see
-//                      requestctx.go)
-//   - run_id         : per-sidecar-run (env: DEFENSECLAW_RUN_ID)
+//   - request_id     : per-HTTP request (assigned by
+//                      requestIDMiddleware in requestctx.go)
+//   - run_id         : per-sidecar-run (env: DEFENSECLAW_RUN_ID,
+//                      mirrored via gatewaylog.ProcessRunID())
 //   - session_id     : client-scoped session (header:
 //                      X-DefenseClaw-Session-Id)
 //   - trace_id       : OTel trace id — propagated via W3C
@@ -26,12 +24,12 @@ package gateway
 //                      Event envelope for cross-sink joins
 //
 // Plus the three-tier agent identity (AgentID / AgentInstanceID /
-// SidecarInstanceID) resolved from AgentRegistry.
+// SidecarInstanceID) resolved from AgentRegistry on the request
+// path.
 //
-// Track 0 lands the context-key plumbing + middleware stub so every
-// downstream track that reads correlation can depend on a stable
-// API. Track 7 wires the middleware into the HTTP chain and starts
-// populating fields from inbound headers + OTel context.
+// The context-key plumbing + middleware live here so every emission
+// site (audit logger, OTel exporter, structured log writer) reads
+// from a single stable API instead of re-parsing headers per call.
 
 import (
 	"context"
@@ -123,8 +121,10 @@ func ContextWithTraceID(ctx context.Context, id string) context.Context {
 }
 
 // TraceIDFromContext returns the OTel trace id attached to ctx, or "".
-// Track 0 stub: Track 7 extends this to auto-populate from the
-// active OTel span when the explicit context value is missing.
+// Callers that want fallback to the active OTel span should use
+// SpanContextFromContext + .TraceID().String() — this helper only
+// returns the explicitly-set value to keep the read path allocation-
+// free for the hot audit emission path.
 func TraceIDFromContext(ctx context.Context) string {
 	if ctx == nil {
 		return ""
@@ -210,10 +210,11 @@ func destinationAppFromHeaders(h http.Header) string {
 // after the middleware runs.
 //
 // The W3C spec is traceparent: version-traceid-spanid-flags where
-// traceid is 32 lowercase hex characters. We do not validate the
-// full shape here — Track 7 lands proper traceparent parsing when
-// wiring OTel context propagation; Track 0 only needs the happy-
-// path shape so downstream schemas have something to match against.
+// traceid is 32 lowercase hex characters. This helper performs the
+// minimum shape check needed to extract the trace id for audit
+// envelope use; proper end-to-end traceparent parsing happens in
+// the OTel HTTP middleware (otelhttp.NewHandler) which wraps this
+// chain.
 func traceIDFromHeaders(h http.Header) string {
 	v := strings.TrimSpace(h.Get("traceparent"))
 	if v == "" {
@@ -230,14 +231,13 @@ func traceIDFromHeaders(h http.Header) string {
 	return tid
 }
 
-// CorrelationMiddleware [Track 0 stub] wraps next with session_id +
-// trace_id + agent identity extraction. Must be installed AFTER
+// CorrelationMiddleware wraps next with session_id + trace_id +
+// agent identity extraction. Must be installed AFTER
 // requestIDMiddleware so request_id is already on the context.
 //
-// Track 7 is the owner that wires this into NewGuardrailProxy and
-// NewAPIServer; Track 0 only lands the stub so parallel tracks (9:
-// scanner identity, 5: scan results observability) can read from
-// AgentIdentityFromContext without stubbing it locally.
+// Wired into NewGuardrailProxy and NewAPIServer so every emission
+// site (audit logger, OTel exporter, scanner pipeline) can read
+// from AgentIdentityFromContext without re-parsing headers per call.
 //
 // NOTE: registry may be nil in tests / local dev — the middleware
 // treats nil as "no agent identity" and skips the resolve.

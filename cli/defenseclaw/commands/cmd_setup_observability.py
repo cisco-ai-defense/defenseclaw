@@ -50,6 +50,7 @@ from urllib.parse import urlparse
 import click
 
 from defenseclaw import ux
+from defenseclaw.audit_actions import ACTION_SETUP_OBSERVABILITY
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.observability import (
@@ -208,7 +209,7 @@ def add_destination(  # noqa: PLR0912, PLR0913 — many flags to mirror preset p
 
     if app.logger and not dry_run:
         app.logger.log_action(
-            "setup-observability",
+            ACTION_SETUP_OBSERVABILITY,
             "config",
             f"action=add preset={preset.id} name={result.name} target={result.target}",
         )
@@ -432,7 +433,7 @@ def migrate_splunk_cmd(app: AppContext, do_apply: bool) -> None:
     click.echo(f"  Migrated splunk: block to audit_sinks[{name}].")
     if app.logger:
         app.logger.log_action(
-            "setup-observability", "config",
+            ACTION_SETUP_OBSERVABILITY, "config",
             f"action=migrate-splunk name={name}",
         )
 

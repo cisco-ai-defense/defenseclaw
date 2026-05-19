@@ -181,7 +181,7 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 	alert := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: e.Timestamp,
-		Action:    "network-egress-blocked",
+		Action:    string(ActionNetworkEgressBlocked),
 		Target:    e.Hostname,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("url=%s method=%s decision=%s outcome=%s",

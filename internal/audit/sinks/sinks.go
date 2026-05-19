@@ -473,6 +473,9 @@ func (m *Manager) shouldFlushImmediatelyLocked(action string) bool {
 }
 
 func defaultImmediateFlushActions() map[string]struct{} {
+	// These keys mirror internal/audit Action* constants. The sinks
+	// package sits below audit in the dependency graph, so importing
+	// audit here would create a cycle.
 	return map[string]struct{}{
 		"watch-start":          {},
 		"watch-stop":           {},

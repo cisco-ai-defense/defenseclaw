@@ -24,12 +24,11 @@ import (
 // claudeCodeProfileDecode implements HookProfile.Decode for Claude
 // Code. Today (post PR #284) the unified gateway handler decodes
 // the raw bytes into both an agentHookRequest (for the shared
-// pipeline) and a claudeCodeHookRequest (for the bespoke evaluator,
-// via bespoke_hook_adapter.go); this decoder is kept as the
-// connector-side declarative shape so downstream consumers
-// (out-of-tree gateways, future plugin-host clients) can read the
-// canonical field map without depending on the gateway-side bespoke
-// types.
+// pipeline) and a claudeCodeHookRequest (for the profile-runtime
+// evaluator); this decoder is kept as the connector-side declarative
+// shape so downstream consumers (out-of-tree gateways, future
+// plugin-host clients) can read the canonical field map without
+// depending on the gateway-side typed request.
 func claudeCodeProfileDecode(payload map[string]interface{}) HookProfileRequest {
 	req := HookProfileRequest{
 		ConnectorName: "claudecode",

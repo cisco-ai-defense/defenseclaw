@@ -81,23 +81,13 @@ type claudeCodeHookResponse struct {
 	ClaudeCodeOutput  map[string]interface{} `json:"claude_code_output,omitempty"`
 }
 
-// handleClaudeCodeHook + enrichClaudeCodeHookContext were deleted in
-// PR #284. Claude Code hook traffic now flows through the unified
-// pipeline at handleAgentHook("claudecode"); the bespoke evaluator
-// (evaluateClaudeCodeHook, kept below) is invoked from
-// bespoke_hook_adapter.go via evaluateBespokeOrGenericHook. The
-// pipeline's shared concerns — audit envelope refresh, dispatch
-// metric, dedup, trace propagation, OTel emissions — now live in
-// exactly one place (handleAgentHook) so the F2-class drift
-// hazard that bit live Splunk verification is gone for good.
-
-func isToolInspectionEvent(event string) bool {
-	switch event {
-	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch", "PermissionRequest":
-		return true
-	}
-	return false
-}
+// Claude Code hook traffic flows through the unified pipeline at
+// handleAgentHook("claudecode"); the profile-runtime registry invokes
+// the connector-specific evaluator kept below. The pipeline's shared
+// concerns — audit envelope refresh, dispatch metric, dedup, trace
+// propagation, OTel emissions — live in exactly one place
+// (handleAgentHook) so per-connector handlers cannot drift apart on
+// any of those signals.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
 	mode := a.claudeCodeMode()

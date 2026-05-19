@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -371,6 +372,12 @@ func TestNewWebhookDispatcherSkipsDisabled(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestValidateWebhookURL(t *testing.T) {
+	prevLookup := lookupWebhookIPs
+	lookupWebhookIPs = func(string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
+	t.Cleanup(func() { lookupWebhookIPs = prevLookup })
+
 	tests := []struct {
 		name    string
 		url     string

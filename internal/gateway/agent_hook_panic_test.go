@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
@@ -40,6 +41,19 @@ func (s *stubPanicLogger) entries() []map[string]interface{} {
 // can find it.
 func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 	api := &APIServer{}
+
+	req := agentHookRequest{HookEventName: "PreToolUse"}
+	evalResp, panicked := api.safeEvaluateHook(context.Background(), "codex", req, nil, nil, hookProfileRuntime{
+		Evaluate: func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+			panic("safeEvaluateHook test panic")
+		},
+	})
+	if !panicked {
+		t.Fatal("safeEvaluateHook panicked=false, want true")
+	}
+	if evalResp.Action != "allow" || !evalResp.WouldBlock {
+		t.Fatalf("safeEvaluateHook panic response = %+v, want fail-open allow + would_block", evalResp)
+	}
 
 	resp := safeHookPanicResponse("codex", "PreToolUse", "stack trace would go here")
 	if resp.Action != "allow" {
@@ -70,11 +84,10 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 // CLI continues; downstream audit/metric pipelines must label the
 // row as result="panic".
 //
-// The test forces a panic by stubbing the connector-name dispatch in
-// bespoke_hook_adapter.go via a panic in evaluateAgentHook. Since
-// evaluateAgentHook is the generic path used for connectors other
-// than claudecode/codex, we use a registered-but-generic connector
-// name and inject a panic via a custom test hook on APIServer.
+// The test forces a panic through the profile-runtime dispatch by
+// triggering the generic evaluateAgentHook path. Since evaluateAgentHook
+// is used for profile-only connectors, we use a registered generic
+// connector name and inject a panic via a custom test hook on APIServer.
 func TestHandleAgentHook_PanicReturnsSafeResponse(t *testing.T) {
 	prev := hookEvaluatorPanicHook
 	hookEvaluatorPanicHook = func() { panic("synthetic evaluator panic for test") }
@@ -113,6 +126,46 @@ func TestHandleAgentHook_PanicReturnsSafeResponse(t *testing.T) {
 	}
 	if reason, _ := parsed["reason"].(string); !strings.Contains(reason, "internal evaluator error") {
 		t.Errorf("response reason = %q, want 'internal evaluator error' substring", reason)
+	}
+}
+
+func TestHandleAgentHook_EmitPanicReturnsSafeResponse(t *testing.T) {
+	prev, had := hookProfileRuntimes["hermes"]
+	hookProfileRuntimes["hermes"] = func(profile connector.HookProfile) hookProfileRuntime {
+		runtime := defaultHookProfileRuntime(profile)
+		runtime.EmitLLMEvent = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}, []string) {
+			panic("synthetic emit panic for test")
+		}
+		return runtime
+	}
+	defer func() {
+		if had {
+			hookProfileRuntimes["hermes"] = prev
+		} else {
+			delete(hookProfileRuntimes, "hermes")
+		}
+	}()
+
+	api := &APIServer{}
+	handler := http.HandlerFunc(api.handleAgentHook("hermes"))
+	body := `{"hook_event_name":"pre_tool_call","session_id":"session-emit-panic","tool_name":"shell"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("response body is not valid JSON after emit panic: %v body=%s", err, w.Body.String())
+	}
+	if got, _ := parsed["action"].(string); got != "allow" {
+		t.Errorf("response action = %q, want allow", got)
+	}
+	if got, _ := parsed["would_block"].(bool); !got {
+		t.Errorf("response would_block = false, want true")
 	}
 }
 
@@ -208,6 +261,27 @@ func TestNormalizeHookReasonLabel_BoundsCardinality(t *testing.T) {
 	}
 }
 
+func TestNormalizeHookEventLabel_BoundsCardinality(t *testing.T) {
+	cases := []struct {
+		event string
+		want  string
+	}{
+		{"PreToolUse", "tool_call"},
+		{"beforeShellExecution", "tool_call"},
+		{"UserPromptSubmit", "prompt"},
+		{"PostToolUse", "tool_result"},
+		{"Stop", "stop"},
+		{"Notification", "notification"},
+		{"attacker-event-2026-05-18-with-freeform-suffix", "other"},
+		{"", "unknown"},
+	}
+	for _, tc := range cases {
+		if got := normalizeHookEventLabel(tc.event); got != tc.want {
+			t.Errorf("normalizeHookEventLabel(%q) = %q, want %q", tc.event, got, tc.want)
+		}
+	}
+}
+
 // TestAttachRawPayload_TruncatesAndAnnotates is the M3 regression
 // test: when redaction is disabled (operator override) and the body
 // exceeds hookPanicRawPayloadCap, RawPayload must be truncated to
@@ -264,6 +338,71 @@ func TestAttachRawPayload_NoOpWhenRedactionEnabled(t *testing.T) {
 // of TestHandleAgentHook_PanicReturnsSafeResponse and restores nil
 // afterwards. See the godoc at the declaration site for the
 // rationale.
+
+// panicOnWriteResponseWriter implements http.ResponseWriter and
+// panics from Write to simulate a failure inside writeJSON AFTER
+// the main handleAgentHook flow has already called finalizeAgentHook
+// successfully. The recovery defer in handleAgentHook must then NOT
+// re-run finalizeAgentHook a second time — otherwise a transient
+// io.Writer failure (or a malformed response value, or a panicking
+// custom Marshaler embedded in an extra map) would double every
+// audit row, hook-outcome metric, and connector telemetry log for
+// the affected request.
+type panicOnWriteResponseWriter struct {
+	header http.Header
+	status int
+}
+
+func (w *panicOnWriteResponseWriter) Header() http.Header {
+	if w.header == nil {
+		w.header = http.Header{}
+	}
+	return w.header
+}
+
+func (w *panicOnWriteResponseWriter) WriteHeader(code int) { w.status = code }
+
+func (w *panicOnWriteResponseWriter) Write([]byte) (int, error) {
+	panic("synthetic writeJSON panic after finalizeAgentHook completed")
+}
+
+// TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit pins the
+// post-finalize defer guard. If the recovery defer in handleAgentHook
+// re-runs finalizeAgentHook after the main flow has already finalized,
+// the audit store would carry TWO connector-hook rows for a single
+// hook request — corrupting compliance reporting and metric counts.
+//
+// The test triggers a panic from writeJSON (via a custom
+// http.ResponseWriter that panics on Write) and asserts the audit
+// store has exactly one connector-hook entry.
+func TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{
+		store:  store,
+		logger: logger,
+	}
+
+	handler := http.HandlerFunc(api.handleAgentHook("hermes"))
+	body := `{"hook_event_name":"pre_tool_call","session_id":"sess-post-finalize","tool_name":"shell"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := &panicOnWriteResponseWriter{}
+	handler.ServeHTTP(w, req)
+
+	events, err := store.ListEvents(100)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	connectorHookRows := 0
+	for _, ev := range events {
+		if ev.Action == "connector-hook" {
+			connectorHookRows++
+		}
+	}
+	if connectorHookRows != 1 {
+		t.Fatalf("connector-hook audit row count = %d, want exactly 1 (post-finalize panic must not re-run finalizeAgentHook)", connectorHookRows)
+	}
+}
 
 // itoa is a tiny helper that avoids strconv import for the single
 // truncation-count comparison.

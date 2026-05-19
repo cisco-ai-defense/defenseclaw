@@ -74,6 +74,20 @@ func TestExtractIncomingTraceContext_HookRoute(t *testing.T) {
 	}
 }
 
+func TestExtractIncomingTraceContext_ClaudeCodeHookRoute(t *testing.T) {
+	h := http.Header{}
+	h.Set("traceparent", wellFormedTraceparent)
+	r := hookReq(t, "/api/v1/claude-code/hook", h)
+	got := extractIncomingTraceContext(context.Background(), r)
+	sc := trace.SpanFromContext(got).SpanContext()
+	if !sc.IsValid() {
+		t.Fatalf("expected a valid SpanContext for claude-code route alias")
+	}
+	if got, want := sc.TraceID().String(), "0af7651916cd43dd8448eb211c80319c"; got != want {
+		t.Errorf("TraceID = %q, want %q", got, want)
+	}
+}
+
 // TestExtractIncomingTraceContext_CodexNotifyRoute verifies the
 // codex notify-bridge endpoint is also in scope. That route doesn't
 // end in /hook so it needs its own allow-list entry.

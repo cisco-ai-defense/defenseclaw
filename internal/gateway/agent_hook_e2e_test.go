@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -28,15 +29,15 @@ import (
 //   - JSON decode → agentHookRequest
 //   - context enrichment (session_id / agent_id propagation, F2)
 //   - safeEvaluateHook (panic recovery, H2)
-//   - evaluateBespokeOrGenericHook (bespoke vs generic dispatch)
+//   - hook profile-runtime dispatch
 //   - renderAgentHookResponse (wire-shape per connector)
 //   - HTTP response (200 OK + valid JSON envelope)
 //
 // We do NOT mock the evaluator: this is the canonical test that
 // catches any drift between the unified handler and what a real
 // connector hook script would receive. Each connector that registers
-// a route MUST appear here, by name — including the bespoke
-// claudecode/codex connectors and every generic-pipeline connector.
+// a route MUST appear here, by name — including the typed
+// claudecode/codex profile runtimes and every profile-only connector.
 //
 // Per-connector wire-shape assertions:
 //
@@ -52,15 +53,14 @@ import (
 // connector estate grows.
 func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 	// Each connector has a distinct preferred event-name; we use
-	// the most common PreToolUse-equivalent so the bespoke
-	// evaluators take a recognised codepath, not the dispatch
-	// fallback.
+	// the most common PreToolUse-equivalent so profile runtimes take
+	// a recognised codepath, not the dispatch fallback.
 	type wireShape struct {
 		connector       string
 		event           string
 		toolName        string
 		topLevelOutput  string // expected top-level JSON output key
-		expectAllow     bool   // permissive shells expect allow
+		expectAction    string
 		additionalAttrs map[string]string
 	}
 
@@ -70,49 +70,49 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			event:          "PreToolUse",
 			toolName:       "Bash",
 			topLevelOutput: "claude_code_output",
-			expectAllow:    true,
+			expectAction:   "block",
 		},
 		{
 			connector:      "codex",
 			event:          "PreToolUse",
 			toolName:       "shell",
 			topLevelOutput: "codex_output",
-			expectAllow:    true,
+			expectAction:   "block",
 		},
 		{
 			connector:      "hermes",
 			event:          "pre_tool_call",
 			toolName:       "execute_command",
 			topLevelOutput: "hook_output",
-			expectAllow:    true,
+			expectAction:   "block",
 		},
 		{
 			connector:      "cursor",
 			event:          "preToolUse",
 			toolName:       "run_terminal_cmd",
 			topLevelOutput: "hook_output",
-			expectAllow:    true,
+			expectAction:   "block",
 		},
 		{
 			connector:      "windsurf",
 			event:          "pre_run_command",
 			toolName:       "run_command",
 			topLevelOutput: "hook_output",
-			expectAllow:    true,
+			expectAction:   "block",
 		},
 		{
 			connector:      "geminicli",
-			event:          "preToolUse",
+			event:          "BeforeTool",
 			toolName:       "RunShellCommand",
 			topLevelOutput: "hook_output",
-			expectAllow:    true,
+			expectAction:   "block",
 		},
 		{
 			connector:      "copilot",
 			event:          "PreToolUse",
 			toolName:       "shell",
 			topLevelOutput: "hook_output",
-			expectAllow:    true,
+			expectAction:   "block",
 		},
 	}
 
@@ -129,12 +129,14 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 	defer otel.SetTracerProvider(prev)
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
-	api := &APIServer{}
-
 	for _, sh := range shapes {
 		sh := sh
 		t.Run(sh.connector, func(t *testing.T) {
 			exp.Reset()
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = sh.connector
+			api := &APIServer{scannerCfg: cfg}
 			handler := otelHTTPServerMiddleware(
 				"sidecar-api",
 				http.HandlerFunc(api.handleAgentHook(sh.connector)),
@@ -148,7 +150,7 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				"agent_type":      sh.connector + "-cli",
 				"tool_name":       sh.toolName,
 				"tool_input": map[string]interface{}{
-					"command": "echo unified",
+					"command": "rm -rf /",
 				},
 			})
 			if err != nil {
@@ -177,16 +179,20 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 					t.Errorf("response missing canonical field %q\nbody=%s", field, w.Body.String())
 				}
 			}
-
-			// Allow path: action must be "allow" since we sent a
-			// benign echo command. (If a connector's bespoke
-			// evaluator decides otherwise — e.g. an upstream
-			// scanner shadowed a regression — this assertion
-			// catches it loud.)
-			if sh.expectAllow {
-				if action, _ := parsed["action"].(string); action != "allow" {
-					t.Errorf("benign request action=%q, want allow\nbody=%s", action, w.Body.String())
+			if _, ok := parsed[sh.topLevelOutput]; !ok {
+				t.Errorf("response missing connector output field %q\nbody=%s", sh.topLevelOutput, w.Body.String())
+			}
+			for _, forbidden := range []string{"claude_code_output", "codex_output", "hook_output"} {
+				if forbidden == sh.topLevelOutput {
+					continue
 				}
+				if _, ok := parsed[forbidden]; ok {
+					t.Errorf("response included wrong connector output field %q; expected only %q\nbody=%s", forbidden, sh.topLevelOutput, w.Body.String())
+				}
+			}
+
+			if action, _ := parsed["action"].(string); action != sh.expectAction {
+				t.Errorf("dangerous request action=%q, want %q\nbody=%s", action, sh.expectAction, w.Body.String())
 			}
 
 			// Span attribute parity: every connector must emit a

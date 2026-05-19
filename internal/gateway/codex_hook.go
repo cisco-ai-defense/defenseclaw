@@ -79,17 +79,16 @@ type codexHookResponse struct {
 
 // handleCodexHook + enrichCodexHookContext were deleted in PR #284.
 // Codex hook traffic now flows through the unified pipeline at
-// handleAgentHook("codex"); the bespoke evaluator (evaluateCodexHook,
-// kept below) is invoked from bespoke_hook_adapter.go via
-// evaluateBespokeOrGenericHook. Codex-specific span enrichment
-// (turn_id, gen_ai.tool.call.id, model) is preserved by calling
-// enrichCodexHookSpan from the bespoke adapter immediately before
+// handleAgentHook("codex"); the typed evaluator (evaluateCodexHook,
+// kept below) is invoked through the HookProfile runtime registry.
+// Codex-specific span enrichment (turn_id, gen_ai.tool.call.id, model)
+// is preserved by the runtime callback immediately before
 // evaluateCodexHook runs.
 //
 // The unified pipeline owns shared concerns (audit envelope refresh,
 // dispatch metric, dedup, trace propagation, OTel emissions) in
-// exactly one place now. See agent_hook.go and bespoke_hook_adapter.go
-// for the dispatch shim and shared-pipeline rationale.
+// exactly one place now. See agent_hook.go and hook_profile_runtime.go
+// for the registry and shared-pipeline rationale.
 
 func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 	span := trace.SpanFromContext(ctx)

@@ -122,7 +122,7 @@ func TestHandleAgentHook_EnrichesHTTPSpanWithAgentIdentity(t *testing.T) {
 		"gen_ai.agent.type":      "copilot-cli",
 		"gen_ai.agent.id":        "github-copilot-cli",
 		"defenseclaw.connector":  "copilot",
-		"defenseclaw.hook.event": "PreToolUse",
+		"defenseclaw.hook.event": "tool_call",
 	} {
 		got, ok := attrByKey(spans[0].Attributes, key)
 		if !ok || got.AsString() != want {
@@ -652,20 +652,21 @@ func TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity(t *testing.T) {
 }
 
 // TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope replaces
-// the pre-PR-#284 TestEnrichClaudeCodeHookContext_RefreshesEnvelope.
-// After deleting handleClaudeCodeHook + enrichClaudeCodeHookContext
-// the F2 envelope refresh for Claude Code traffic now happens
-// inside enrichAgentHookContext (the unified pipeline). This test
-// pins that behaviour for the connector name "claudecode" so we
-// notice immediately if a future refactor drops claudecode's
-// correlation again.
+// the legacy TestEnrichClaudeCodeHookContext_RefreshesEnvelope from
+// the bespoke per-connector pipeline. After deleting
+// handleClaudeCodeHook + enrichClaudeCodeHookContext, the audit
+// envelope refresh for Claude Code traffic now happens inside
+// enrichAgentHookContext (the unified pipeline). This test pins
+// that behaviour for the connector name "claudecode" so we notice
+// immediately if a future refactor drops claudecode's correlation
+// again.
 //
-// The Splunk verification in PR #284's E2E caught the original gap
-// when 4 PreToolUse/PostToolUse/UserPromptSubmit rows arrived with
-// session_id=NULL while the synthetic codex.notify row in the same
-// test run carried session_id correctly — proving the F2 patch
-// only covered the unified path. We now verify the unified path
-// IS that "covering" path for every connector.
+// Splunk verification of an earlier iteration caught the original
+// gap when 4 PreToolUse/PostToolUse/UserPromptSubmit rows arrived
+// with session_id=NULL while the synthetic codex.notify row in the
+// same test run carried session_id correctly — proving the envelope
+// refresh only covered the unified path. We now verify the unified
+// path IS that "covering" path for every connector.
 func TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope(t *testing.T) {
 	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
 		RunID: "run-keep",
@@ -693,8 +694,9 @@ func TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope(t *testing.T) {
 }
 
 // TestEnrichAgentHookContext_CodexRefreshesEnvelope guards the codex
-// side of the same fix. Replaces the pre-PR-#284
-// TestEnrichCodexHookContext_RefreshesEnvelope.
+// side of the same fix. Replaces the legacy
+// TestEnrichCodexHookContext_RefreshesEnvelope from the bespoke
+// per-connector pipeline.
 func TestEnrichAgentHookContext_CodexRefreshesEnvelope(t *testing.T) {
 	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{})
 	req := agentHookRequest{

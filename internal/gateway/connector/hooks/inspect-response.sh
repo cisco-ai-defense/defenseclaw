@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v6
 # DefenseClaw PostResponse hook — inspects LLM response content after it is returned.
 # Reads the LLM response from stdin (JSON with "content" field).
 set -euo pipefail
@@ -15,9 +15,16 @@ fi
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-CONTENT=$(cat)
+DEFENSECLAW_HOOK_CONNECTOR="inspect"
+DEFENSECLAW_HOOK_NAME="inspect-response"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+CONTENT="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: inspect response refusing oversized payload" >&2
+  exit 2
+}
+
+API_ADDR="{{.APIAddr}}"
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 # Transport failures (gateway down / 5xx) always allow unless

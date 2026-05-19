@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v4
+# defenseclaw-managed-hook v6
 # DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
@@ -34,10 +34,11 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: cursor hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
     printf '{"continue":true,"permission":"deny","user_message":"DefenseClaw hook payload too large","agent_message":"DefenseClaw hook payload too large"}\n'
+    exit 2
   fi
   exit 0
 }
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_ADDR="{{.APIAddr}}"
 if [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}" ] && [ -f "${HOOK_DIR}/.token" ]; then
   # shellcheck source=/dev/null
   . "${HOOK_DIR}/.token"
@@ -69,7 +70,7 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
-# PR 4 / Phase B.3 — W3C trace propagation.
+# W3C trace propagation: forward validated traceparent / tracestate.
 TRACE_HEADER_ARGS=()
 if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)

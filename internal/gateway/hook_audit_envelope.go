@@ -142,7 +142,7 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 			if cleanKey == "" {
 				continue
 			}
-			clean[cleanKey] = stripLogInjectionRunes(v)
+			clean[cleanKey] = preRedactEnvelopeFreeForm(v)
 		}
 		env.Extra = clean
 	}
@@ -248,6 +248,7 @@ func renderHookAuditLegacyDetails(env HookAuditEnvelope) string {
 	writeKV("raw_action", env.RawAction)
 	writeKV("severity", env.Severity)
 	writeKV("mode", env.Mode)
+	writeKV("reason", env.Reason)
 	if env.WouldBlock {
 		writeKV("would_block", "true")
 	} else {

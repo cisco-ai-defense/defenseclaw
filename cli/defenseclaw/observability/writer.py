@@ -44,6 +44,7 @@ from typing import Any
 
 import yaml
 
+from defenseclaw.config import locked_config_yaml, write_config_yaml_secure
 from defenseclaw.observability.presets import Preset, Signal, resolve_preset
 
 # ---------------------------------------------------------------------------
@@ -184,37 +185,38 @@ def apply_preset(
         )
 
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
-    raw = _load_yaml(cfg_path)
-    before = copy.deepcopy(raw)
+    with locked_config_yaml(cfg_path):
+        raw = _load_yaml(cfg_path)
+        before = copy.deepcopy(raw)
 
-    warnings: list[str] = []
-    if effective_target == "otel":
-        _apply_otel_preset(
-            raw,
-            preset,
-            resolved_inputs,
-            enabled=enabled,
-            signals=signals or preset.default_signals,
-            dest_name=dest_name,
-            warnings=warnings,
+        warnings: list[str] = []
+        if effective_target == "otel":
+            _apply_otel_preset(
+                raw,
+                preset,
+                resolved_inputs,
+                enabled=enabled,
+                signals=signals or preset.default_signals,
+                dest_name=dest_name,
+                warnings=warnings,
+            )
+        else:
+            _apply_audit_sink_preset(
+                raw,
+                preset,
+                resolved_inputs,
+                name=dest_name,
+                enabled=enabled,
+                warnings=warnings,
+            )
+
+        yaml_changes = _summarize_diff(before, raw, effective_target, dest_name)
+        dotenv_changes = _apply_secret(
+            data_dir, preset, secret_value, dry_run=dry_run,
         )
-    else:
-        _apply_audit_sink_preset(
-            raw,
-            preset,
-            resolved_inputs,
-            name=dest_name,
-            enabled=enabled,
-            warnings=warnings,
-        )
 
-    yaml_changes = _summarize_diff(before, raw, effective_target, dest_name)
-    dotenv_changes = _apply_secret(
-        data_dir, preset, secret_value, dry_run=dry_run,
-    )
-
-    if not dry_run:
-        _write_yaml(cfg_path, raw)
+        if not dry_run:
+            _write_yaml(cfg_path, raw)
 
     return WriteResult(
         name=dest_name,
@@ -294,22 +296,23 @@ def set_destination_enabled(
     name must match an existing ``audit_sinks[].name``.
     """
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
-    raw = _load_yaml(cfg_path)
-    changes: list[str] = []
-    target = "otel" if name == "otel" else "audit_sinks"
+    with locked_config_yaml(cfg_path):
+        raw = _load_yaml(cfg_path)
+        changes: list[str] = []
+        target = "otel" if name == "otel" else "audit_sinks"
 
-    if target == "otel":
-        otel = raw.setdefault("otel", {})
-        otel["enabled"] = bool(enabled)
-        changes.append(f"otel.enabled = {bool(enabled)}")
-    else:
-        sink = _find_sink(raw, name)
-        if sink is None:
-            raise ValueError(f"no audit sink named {name!r}")
-        sink["enabled"] = bool(enabled)
-        changes.append(f"audit_sinks[{name}].enabled = {bool(enabled)}")
+        if target == "otel":
+            otel = raw.setdefault("otel", {})
+            otel["enabled"] = bool(enabled)
+            changes.append(f"otel.enabled = {bool(enabled)}")
+        else:
+            sink = _find_sink(raw, name)
+            if sink is None:
+                raise ValueError(f"no audit sink named {name!r}")
+            sink["enabled"] = bool(enabled)
+            changes.append(f"audit_sinks[{name}].enabled = {bool(enabled)}")
 
-    _write_yaml(cfg_path, raw)
+        _write_yaml(cfg_path, raw)
     return WriteResult(
         name=name,
         target=target,
@@ -330,35 +333,36 @@ def remove_destination(name: str, data_dir: str) -> WriteResult:
     ``disable otel`` explicitly to keep the config stable.
     """
     cfg_path = os.path.join(data_dir, CONFIG_FILE_NAME)
-    raw = _load_yaml(cfg_path)
-    changes: list[str] = []
+    with locked_config_yaml(cfg_path):
+        raw = _load_yaml(cfg_path)
+        changes: list[str] = []
 
-    if name == "otel":
-        otel = raw.get("otel")
-        if isinstance(otel, dict):
-            otel["enabled"] = False
-            changes.append("otel.enabled = False (use `remove` only to disable)")
+        if name == "otel":
+            otel = raw.get("otel")
+            if isinstance(otel, dict):
+                otel["enabled"] = False
+                changes.append("otel.enabled = False (use `remove` only to disable)")
+            else:
+                changes.append("otel block absent — nothing to do")
+            _write_yaml(cfg_path, raw)
+            return WriteResult(
+                name=name, target="otel", preset_id="",
+                yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
+            )
+
+        sinks = raw.get("audit_sinks")
+        if not isinstance(sinks, list):
+            raise ValueError(f"no audit sink named {name!r}")
+        new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
+        if len(new) == len(sinks):
+            raise ValueError(f"no audit sink named {name!r}")
+        if new:
+            raw["audit_sinks"] = new
         else:
-            changes.append("otel block absent — nothing to do")
+            raw.pop("audit_sinks", None)
+        changes.append(f"audit_sinks[{name}] removed")
+
         _write_yaml(cfg_path, raw)
-        return WriteResult(
-            name=name, target="otel", preset_id="",
-            yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
-        )
-
-    sinks = raw.get("audit_sinks")
-    if not isinstance(sinks, list):
-        raise ValueError(f"no audit sink named {name!r}")
-    new = [s for s in sinks if isinstance(s, dict) and s.get("name") != name]
-    if len(new) == len(sinks):
-        raise ValueError(f"no audit sink named {name!r}")
-    if new:
-        raw["audit_sinks"] = new
-    else:
-        raw.pop("audit_sinks", None)
-    changes.append(f"audit_sinks[{name}] removed")
-
-    _write_yaml(cfg_path, raw)
     return WriteResult(
         name=name, target="audit_sinks", preset_id="",
         yaml_changes=changes, dotenv_changes=[], warnings=[], dry_run=False,
@@ -384,14 +388,7 @@ def _load_yaml(path: str) -> dict[str, Any]:
 
 
 def _write_yaml(path: str, data: dict[str, Any]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    # Write to a temp file and rename so a crash mid-write cannot leave
-    # a half-written config.yaml (which would brick the Go gateway on
-    # next reload).
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
-    os.replace(tmp, path)
+    write_config_yaml_secure(path, data)
 
 
 # ---------------------------------------------------------------------------

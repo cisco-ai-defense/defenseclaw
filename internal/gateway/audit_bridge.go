@@ -115,12 +115,12 @@ func (b *auditBridge) EmitAudit(e audit.Event) {
 // native emitter means auditing this switch too.
 func skipBridgeAction(action string) bool {
 	switch action {
-	case "guardrail-verdict",
+	case string(audit.ActionGuardrailVerdict),
 		// emitJudge already writes an EventJudge row; the matching
 		// "llm-judge-response" audit event exists for SQLite/Splunk
 		// fan-out (see sidecar.go judgePersistor) and must not be
 		// re-translated into a Lifecycle JSONL row.
-		"llm-judge-response",
+		string(audit.ActionLLMJudgeResponse),
 		// LogScan already emits a native EventScan (and EventScanFinding
 		// per finding) via scanner.EmitScanResult; the "scan" audit twin
 		// exists for SQLite/Splunk fan-out and must not be re-translated
@@ -141,11 +141,13 @@ func skipBridgeAction(action string) bool {
 // the field is never empty — sinks index on it.
 func subsystemForAction(action string) string {
 	switch {
-	case action == "scan":
+	case action == string(audit.ActionScan):
 		return "scanner"
-	case strings.HasPrefix(action, "watcher-") || action == "watch-start" || action == "watch-stop":
+	case strings.HasPrefix(action, "watcher-") ||
+		action == string(audit.ActionWatchStart) ||
+		action == string(audit.ActionWatchStop):
 		return "watcher"
-	case strings.HasPrefix(action, "sidecar-") || action == "gateway-ready":
+	case strings.HasPrefix(action, "sidecar-") || action == string(audit.ActionGatewayReady):
 		return "gateway"
 	case strings.HasPrefix(action, "api-"):
 		return "api"
@@ -175,13 +177,13 @@ func subsystemForAction(action string) string {
 // audit action verb.
 func transitionForAction(action string) string {
 	switch action {
-	case "sidecar-start", "watch-start":
+	case string(audit.ActionSidecarStart), string(audit.ActionWatchStart):
 		return "start"
-	case "sidecar-stop", "watch-stop":
+	case string(audit.ActionSidecarStop), string(audit.ActionWatchStop):
 		return "stop"
-	case "sidecar-connected", "gateway-ready":
+	case string(audit.ActionSidecarConnected), string(audit.ActionGatewayReady):
 		return "ready"
-	case "sidecar-disconnected", string(audit.ActionSinkFailure):
+	case string(audit.ActionSidecarDisconnected), string(audit.ActionSinkFailure):
 		return "degraded"
 	case string(audit.ActionSinkRestored):
 		return "restored"

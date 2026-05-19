@@ -814,17 +814,30 @@ type otlpAttribute struct {
 }
 
 func otlpAttributesToMap(attrs []otlpAttribute) map[string]interface{} {
+	return otlpAttributesToMapDepth(attrs, 0)
+}
+
+const maxOTLPAnyValueDepth = 16
+
+func otlpAttributesToMapDepth(attrs []otlpAttribute, depth int) map[string]interface{} {
 	out := make(map[string]interface{}, len(attrs))
 	for _, attr := range attrs {
 		if attr.Key == "" {
 			continue
 		}
-		out[attr.Key] = decodeOTLPAnyValue(attr.Value)
+		out[attr.Key] = decodeOTLPAnyValueDepth(attr.Value, depth+1)
 	}
 	return out
 }
 
 func decodeOTLPAnyValue(raw json.RawMessage) interface{} {
+	return decodeOTLPAnyValueDepth(raw, 0)
+}
+
+func decodeOTLPAnyValueDepth(raw json.RawMessage, depth int) interface{} {
+	if depth > maxOTLPAnyValueDepth {
+		return nil
+	}
 	var v struct {
 		StringValue *string      `json:"stringValue"`
 		IntValue    *json.Number `json:"intValue"`
@@ -855,11 +868,11 @@ func decodeOTLPAnyValue(raw json.RawMessage) interface{} {
 	case v.BoolValue != nil:
 		return *v.BoolValue
 	case v.KvListValue != nil:
-		return otlpAttributesToMap(v.KvListValue.Values)
+		return otlpAttributesToMapDepth(v.KvListValue.Values, depth+1)
 	case v.ArrayValue != nil:
 		out := make([]interface{}, 0, len(v.ArrayValue.Values))
 		for _, item := range v.ArrayValue.Values {
-			out = append(out, decodeOTLPAnyValue(item))
+			out = append(out, decodeOTLPAnyValueDepth(item, depth+1))
 		}
 		return out
 	default:
@@ -1491,7 +1504,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 		AgentName: "codex",
 		SessionID: sessionID,
 	}
-	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
+	if err := persistAuditEventCtx(r.Context(), a.logger, a.store, ev); err != nil {
 		fmt.Fprintf(otelIngestLogSink(), "[codex-notify] persist failed: %v\n", err)
 	}
 
@@ -1510,13 +1523,14 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	a.otel.RecordCodexNotify(ctx, kind, statusLabel, result)
 	a.otel.EmitCodexNotifyLog(ctx, kind, statusLabel, result, p.TurnID, p.Model)
 
-	// PR 6 / Phase D — fold the notify event into the unified hook
-	// collector as a synthetic Stop event. The native codex CLI
-	// emits "agent-turn-complete" notifications outside the
-	// PreToolUse / PostToolUse stream; before this fold the unified
-	// collector had no visibility into them, breaking the "every
-	// connector emits the same metric set" promise that PR 3
-	// established for hook metrics.
+	// Fold the notify event into the unified hook collector as a
+	// synthetic Stop event. The native codex CLI emits
+	// "agent-turn-complete" notifications outside the PreToolUse /
+	// PostToolUse stream, so without this fold the unified hook
+	// collector would have no visibility into them — breaking the
+	// "every connector emits the same hook metric set" invariant
+	// that downstream dashboards (defenseclaw.connector.hook.*) rely
+	// on for codex.
 	//
 	// The synthetic translation runs only when the parse succeeded
 	// (parseErr == nil) — a malformed payload should not invent a
@@ -1609,12 +1623,55 @@ func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, resu
 			attribute.String("defenseclaw.codex.notify.result", result),
 		)
 	}
-	if p.Status != "" {
-		span.SetAttributes(attribute.String("defenseclaw.codex.notify.status", p.Status))
+	// p.Status and p.Model come straight off the wire from the codex
+	// CLI and a hostile / malformed payload can plant CRLF (log
+	// injection into operator terminals via span exporters), ANSI
+	// escapes (terminal hijack), or arbitrarily long strings (span
+	// storage DoS). Sanitize before stamping them on the span.
+	//
+	// `defenseclaw.codex.notify.status` mirrors the metric label
+	// produced upstream by sanitizeNotifyType, so the span attribute
+	// uses the same projection and stays correlatable.
+	//
+	// `gen_ai.response.model` is treated as identifying free-form text
+	// (capped + control-char-stripped) instead of being collapsed to
+	// the bounded NormalizeModelLabel family; spans are per-request so
+	// preserving the full model name has no TSDB-cardinality cost.
+	if statusAttr := sanitizeNotifyType(p.Status); p.Status != "" && statusAttr != "" {
+		span.SetAttributes(attribute.String("defenseclaw.codex.notify.status", statusAttr))
 	}
-	if p.Model != "" {
-		span.SetAttributes(attribute.String("gen_ai.response.model", p.Model))
+	if modelAttr := sanitizeCodexNotifySpanString(p.Model, 128); modelAttr != "" {
+		span.SetAttributes(attribute.String("gen_ai.response.model", modelAttr))
 	}
+}
+
+// sanitizeCodexNotifySpanString returns value with control / CR / LF /
+// ANSI runes stripped and length capped at maxLen bytes, truncated on
+// a UTF-8 rune boundary. Used for per-request span attributes (not
+// metric labels) where preserving identifying detail matters more
+// than collapsing to a bounded enum.
+//
+// Rune-boundary truncation is required because the OTLP wire format
+// rejects span attributes that are not valid UTF-8; a naive
+// byte-slice on a maxLen byte boundary can split a multi-byte rune
+// mid-sequence and silently drop the entire span when the exporter
+// validates. Walking back to the previous rune-start byte preserves
+// the prefix that fits inside the cap.
+//
+// Empty input returns empty so callers can keep their `if x != ""`
+// gating on whether to stamp the attribute at all.
+func sanitizeCodexNotifySpanString(value string, maxLen int) string {
+	if value == "" {
+		return ""
+	}
+	cleaned := stripLogInjectionRunes(strings.TrimSpace(value))
+	if cleaned == "" {
+		return ""
+	}
+	if maxLen > 0 && len(cleaned) > maxLen {
+		cleaned = truncateToRuneBoundary(cleaned, maxLen)
+	}
+	return cleaned
 }
 
 func codexNotifyAuditDetails(p codexNotifyPayload, body []byte, kind, result string, parseErr error) string {

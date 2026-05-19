@@ -21,12 +21,10 @@ import (
 	"testing"
 )
 
-// TestHookProfile_HasDispatchCallbacks asserts the PR 5 dispatch
-// surface is populated on the connectors that need it
-// (codex, claudecode) and intentionally absent on the rest. This is
-// a structural test: PR 6 will start consuming these callbacks from
-// handleAgentHook, and a regression that silently drops one of them
-// would break the unified path without producing a build error.
+// TestHookProfile_HasDispatchCallbacks asserts the profile runtime
+// surface is populated for every hook-capable connector. Connector
+// differences must live behind HookProfile callbacks instead of the
+// gateway growing per-connector response/mode branches.
 func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -37,11 +35,11 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 	}{
 		{"codex", func() Connector { return NewCodexConnector() }, true, true, true},
 		{"claudecode", func() Connector { return NewClaudeCodeConnector() }, true, true, true},
-		{"hermes", func() Connector { return NewHermesConnector() }, false, false, false},
-		{"cursor", func() Connector { return NewCursorConnector() }, false, false, false},
-		{"windsurf", func() Connector { return NewWindsurfConnector() }, false, false, false},
-		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, false, false},
-		{"copilot", func() Connector { return NewCopilotConnector() }, false, false, false},
+		{"hermes", func() Connector { return NewHermesConnector() }, false, true, true},
+		{"cursor", func() Connector { return NewCursorConnector() }, false, true, true},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, false, true, true},
+		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
+		{"copilot", func() Connector { return NewCopilotConnector() }, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -203,7 +201,7 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 
 // TestCodexProfileRespond_Parity asserts the codex profile's Respond
 // produces a payload whose top-level field name is "codex_output"
-// and whose shape matches the bespoke codexOutput() helper for the
+// and whose shape matches the typed codexOutput() helper for the
 // canonical block / confirm / allow paths.
 //
 // Byte-for-byte parity with codexOutput() is enforced by the

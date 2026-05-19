@@ -94,6 +94,18 @@ type SetupOpts struct {
 	// implicitly. Server-side CodeGuard scanning remains independent from
 	// native skill/rule/plugin installation.
 	InstallCodeGuard bool
+
+	// AgentVersion is the raw local agent CLI version observed by trusted
+	// discovery (`<agent> --version`). HookProfile resolution treats this as
+	// audit/debug input, normalizes it locally, and maps it to a deterministic
+	// HookContract. Empty means "not probed"; it never implies latest.
+	AgentVersion string
+
+	// HookContractID optionally pins setup/profile resolution to a specific
+	// known contract. A non-empty value that does not match the resolved
+	// contract marks the profile incompatible instead of silently using a
+	// different hook surface.
+	HookContractID string
 }
 
 // Connector is the contract every agent framework adapter implements.
@@ -221,16 +233,14 @@ type HookCapabilityProvider interface {
 }
 
 // HookProfile is the declarative description a connector returns to
-// the unified hook collector. Post PR #284, handleAgentHook is the
-// sole entry point for every connector hook route; the bespoke
-// handlers (handleCodexHook, handleClaudeCodeHook) were deleted and
-// their evaluators are invoked from the unified pipeline via
-// bespoke_hook_adapter.go's dispatch shims. The HookProfile fields
-// drive route registration (HookAPIPath), trace-propagation
-// (SupportsTraceparent), native OTLP shape (NativeOTLP), and the
-// declarative Decode / MapVerdict / Respond callbacks the
-// connector-side tooling can read without depending on the
-// gateway-side bespoke types.
+// the unified hook collector. handleAgentHook is the sole entry point
+// for every connector hook route; connector-specific differences live
+// behind HookProfile callbacks and the gateway-side profile-runtime
+// registry. The HookProfile fields drive route registration
+// (HookAPIPath), trace-propagation (SupportsTraceparent), native OTLP
+// shape (NativeOTLP), versioned hook contracts, and the declarative
+// Decode / MapVerdict / Respond callbacks the connector-side tooling
+// can read without depending on gateway-private request types.
 //
 // Fields:
 //
@@ -245,10 +255,10 @@ type HookCapabilityProvider interface {
 //     windsurf, hermes today). Non-nil for codex (TOML), claudecode (env),
 //     geminicli (JSON + path-token), copilot (env).
 //   - Decode: optional decoder that translates a connector-specific raw
-//     payload into the shared HookProfileRequest shape. PR 5 / Phase C
-//     foundation — codex and claudecode set this so PR 6 can fold their
-//     evaluators into the unified handler. nil = caller uses the generic
-//     normalizeAgentHookRequest path.
+//     payload into the shared HookProfileRequest shape. codex and
+//     claudecode set this so their bespoke per-connector evaluators
+//     can run from the unified handler with no extra HTTP surface.
+//     nil = caller uses the generic normalizeAgentHookRequest path.
 //   - MapVerdict: optional verdict mapper for connectors whose mode →
 //     action translation deviates from the generic mapHookAction (codex
 //     never enforces alert; claudecode's "can enforce" gate covers
@@ -259,10 +269,19 @@ type HookCapabilityProvider interface {
 //     ("hook_output", "codex_output", "claude_code_output"). nil =
 //     caller uses hookOutputFor and the "hook_output" field.
 type HookProfile struct {
-	Name                string
-	Capabilities        HookCapability
-	SupportsTraceparent bool
-	NativeOTLP          *NativeOTLPSpec
+	Name                   string
+	Capabilities           HookCapability
+	SupportsTraceparent    bool
+	NativeOTLP             *NativeOTLPSpec
+	ContractID             string
+	HookScriptVersion      string
+	ResponseFieldName      string
+	SupportedEvents        []string
+	AIDSurfaces            []string
+	AgentVersion           string
+	NormalizedAgentVersion string
+	CompatibilityStatus    string
+	CompatibilityReason    string
 
 	// Profile-driven dispatch callbacks. All optional — the
 	// unified dispatch helper consults these fields when present

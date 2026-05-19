@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -522,13 +523,13 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	var auditAction string
 	switch verdict.Action {
 	case "block":
-		auditAction = "inspect-tool-block"
+		auditAction = string(audit.ActionInspectToolBlock)
 	case "confirm":
-		auditAction = "inspect-tool-confirm"
+		auditAction = string(audit.ActionInspectToolConfirm)
 	case "alert":
-		auditAction = "inspect-tool-alert"
+		auditAction = string(audit.ActionInspectToolAlert)
 	default:
-		auditAction = "inspect-tool-allow"
+		auditAction = string(audit.ActionInspectToolAllow)
 	}
 	if a.otel != nil {
 		elapsedMs := float64(elapsed.Milliseconds())
@@ -574,7 +575,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		// when the caller opts in to raw response PII, the
 		// audit-store row must still flow through the sink
 		// barrier so SQLite/Splunk never see the raw literal.
-		_ = a.logger.LogActionCtx(r.Context(), "inspect-reveal", req.Tool,
+		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionInspectReveal), req.Tool,
 			fmt.Sprintf("severity=%s remote=%s reason=%s",
 				verdict.Severity, r.RemoteAddr,
 				redaction.ForSinkReason(verdict.Reason)))

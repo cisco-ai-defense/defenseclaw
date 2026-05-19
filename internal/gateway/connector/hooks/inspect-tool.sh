@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v2
+# defenseclaw-managed-hook v6
 # DefenseClaw PreToolUse hook — calls DefenseClaw inspect API before tool execution.
 # Used by Claude Code (PreToolUse) and OpenCode (hook command).
 # The agent sets CLAUDE_TOOL_NAME (Claude Code) or TOOL_NAME and pipes input to stdin.
@@ -18,10 +18,17 @@ fi
 defenseclaw_harden_resources
 defenseclaw_harden_env
 
-TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
-TOOL_INPUT=$(cat)
+DEFENSECLAW_HOOK_CONNECTOR="inspect"
+DEFENSECLAW_HOOK_NAME="inspect-tool"
+export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+TOOL_NAME="${CLAUDE_TOOL_NAME:-${TOOL_NAME:-unknown}}"
+TOOL_INPUT="$(defenseclaw_read_stdin_capped)" || {
+  echo "defenseclaw: inspect tool refusing oversized payload" >&2
+  exit 2
+}
+
+API_ADDR="{{.APIAddr}}"
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
 # Transport failures (gateway down / 5xx) always allow unless

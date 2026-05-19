@@ -1307,6 +1307,26 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertFalse(self.app.cfg.splunk.enabled)
         mock_preflight.assert_not_called()
 
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(False, "docker_not_installed"))
+    def test_setup_splunk_logs_interactive_preflight_failure_stops_logs(self, mock_preflight):
+        from defenseclaw.commands.cmd_setup import setup
+
+        user_input = "\n".join([
+            "n",           # Enable O11y?
+            "y",           # Enable local logs?
+            "y",           # Accept Splunk license?
+            "n",           # Enable Enterprise?
+        ]) + "\n"
+
+        result = self.runner.invoke(
+            setup, ["splunk"], obj=self.app,
+            input=user_input, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.splunk.enabled)
+        self.assertNotIn("Local Splunk configured", result.output)
+        mock_preflight.assert_called_once()
+
     @patch("defenseclaw.commands.cmd_setup._preflight_docker")
     def test_setup_splunk_o11y_and_logs_interactive_decline_logs_preserves_o11y(
         self, mock_preflight,

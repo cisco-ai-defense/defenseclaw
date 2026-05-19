@@ -52,6 +52,12 @@ func newRawTelemetryDeduper() *rawTelemetryDeduper {
 }
 
 func (a *APIServer) rawDeduper() *rawTelemetryDeduper {
+	a.rawTelemetryMu.RLock()
+	d := a.rawTelemetryDedupe
+	a.rawTelemetryMu.RUnlock()
+	if d != nil {
+		return d
+	}
 	a.rawTelemetryMu.Lock()
 	defer a.rawTelemetryMu.Unlock()
 	if a.rawTelemetryDedupe == nil {
@@ -177,8 +183,8 @@ func (a *APIServer) rememberClaudeCodeRawHookEvents(req claudeCodeHookRequest) [
 	return uniqueNonEmpty(ids)
 }
 
-// rememberHookRawEvents is the PR 6 / Phase D profile-driven raw
-// event deduper. It folds rememberCodexRawHookEvents and
+// rememberHookRawEvents is the profile-driven raw event deduper.
+// It folds rememberCodexRawHookEvents and
 // rememberClaudeCodeRawHookEvents into a single helper keyed on the
 // generic agentHookRequest, so any connector — codex, claudecode, and
 // every future generic connector with a non-nil NativeOTLPSpec — gets
@@ -206,7 +212,7 @@ func (a *APIServer) rememberClaudeCodeRawHookEvents(req claudeCodeHookRequest) [
 // rememberClaudeCodeRawHookEvents) that probe connector-specific
 // fields like ToolUseID / PermissionRequestID. The unified
 // handleAgentHook routes to either via
-// rememberBespokeOrGenericRawEvents in bespoke_hook_adapter.go.
+// hook_profile_runtime.go's profile-runtime registry.
 func (a *APIServer) rememberHookRawEvents(req agentHookRequest) []string {
 	canon := canonicalEvent(req.HookEventName)
 	toolID := firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")

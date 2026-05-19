@@ -4,7 +4,12 @@
 
 package connector
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // TestIsValidOTLPScope_NegativeCases protects the lazy-reload path
 // in api.go's lookupOTLPPathToken: every disk-touching code path is
@@ -61,4 +66,96 @@ func repeat(b byte, n int) string {
 		buf[i] = b
 	}
 	return string(buf)
+}
+
+func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
+	t.Parallel()
+	token := strings.Repeat("a", 64) + "\n"
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{
+			name: "wide_mode",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(token), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symlink",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				target := filepath.Join(filepath.Dir(path), "target.token")
+				if err := os.WriteFile(target, []byte(token), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "non_hex",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(strings.Repeat("z", 64)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "oversized",
+			setup: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte(strings.Repeat("a", otlpPathTokenMaxReadBytes+1)), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			hooks := filepath.Join(dir, "hooks")
+			if err := os.MkdirAll(hooks, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path, err := OTLPPathTokenFilePath(dir, OTLPScopeGeminiCLI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, path)
+			if got, err := LoadOTLPPathToken(dir, OTLPScopeGeminiCLI); err == nil {
+				t.Fatalf("LoadOTLPPathToken succeeded with token %q, want error", got)
+			}
+		})
+	}
+}
+
+func TestLoadOTLPPathToken_AcceptsStrictTokenFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path, err := OTLPPathTokenFilePath(dir, OTLPScopeGeminiCLI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("b", 64)
+	if err := os.WriteFile(path, []byte(want+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadOTLPPathToken(dir, OTLPScopeGeminiCLI)
+	if err != nil {
+		t.Fatalf("LoadOTLPPathToken: %v", err)
+	}
+	if got != want {
+		t.Fatalf("token = %q, want %q", got, want)
+	}
 }

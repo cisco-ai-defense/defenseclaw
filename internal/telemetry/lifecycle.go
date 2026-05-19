@@ -25,31 +25,37 @@ import (
 )
 
 // actionMapping maps audit.Event.Action strings to OTel lifecycle attributes.
+// Keys mirror internal/audit Action* constants; telemetry cannot import audit
+// because audit.Logger already depends on telemetry.Provider.
 type actionMapping struct {
 	LifecycleAction string
 	Actor           string
 }
 
 var actionMap = map[string]actionMapping{
-	"install-detected":   {LifecycleAction: "install", Actor: "watcher"},
-	"install-rejected":   {LifecycleAction: "block", Actor: "watcher"},
-	"install-allowed":    {LifecycleAction: "allow", Actor: "watcher"},
-	"install-clean":      {LifecycleAction: "install", Actor: "watcher"},
-	"install-warning":    {LifecycleAction: "install", Actor: "watcher"},
-	"install-scan-error": {LifecycleAction: "scan-error", Actor: "watcher"},
-	"watch-start":        {LifecycleAction: "watch-start", Actor: "watcher"},
-	"watch-stop":         {LifecycleAction: "watch-stop", Actor: "watcher"},
-	"block":              {LifecycleAction: "block", Actor: "user"},
-	"watcher-block":      {LifecycleAction: "block", Actor: "watcher"},
-	"allow":              {LifecycleAction: "allow", Actor: "user"},
-	"quarantine":         {LifecycleAction: "quarantine", Actor: "defenseclaw"},
-	"restore":            {LifecycleAction: "restore", Actor: "user"},
-	"deploy":             {LifecycleAction: "install", Actor: "user"},
-	"stop":               {LifecycleAction: "uninstall", Actor: "user"},
-	"disable":            {LifecycleAction: "disable", Actor: "defenseclaw"},
-	"enable":             {LifecycleAction: "enable", Actor: "user"},
-	"api-skill-disable":  {LifecycleAction: "disable", Actor: "user"},
-	"api-skill-enable":   {LifecycleAction: "enable", Actor: "user"},
+	"install-detected":             {LifecycleAction: "install", Actor: "watcher"},
+	"install-rejected":             {LifecycleAction: "block", Actor: "watcher"},
+	"install-allowed":              {LifecycleAction: "allow", Actor: "watcher"},
+	"install-allowed-skip-enforce": {LifecycleAction: "allow", Actor: "watcher"},
+	"install-clean":                {LifecycleAction: "install", Actor: "watcher"},
+	"install-warning":              {LifecycleAction: "install", Actor: "watcher"},
+	"install-scan-error":           {LifecycleAction: "scan-error", Actor: "watcher"},
+	"install-enforced":             {LifecycleAction: "block", Actor: "watcher"},
+	"watch-start":                  {LifecycleAction: "watch-start", Actor: "watcher"},
+	"watch-stop":                   {LifecycleAction: "watch-stop", Actor: "watcher"},
+	"block":                        {LifecycleAction: "block", Actor: "user"},
+	"watcher-block":                {LifecycleAction: "block", Actor: "watcher"},
+	"allow":                        {LifecycleAction: "allow", Actor: "user"},
+	"quarantine":                   {LifecycleAction: "quarantine", Actor: "defenseclaw"},
+	"restore":                      {LifecycleAction: "restore", Actor: "user"},
+	"deploy":                       {LifecycleAction: "install", Actor: "user"},
+	"stop":                         {LifecycleAction: "uninstall", Actor: "user"},
+	"disable":                      {LifecycleAction: "disable", Actor: "defenseclaw"},
+	"enable":                       {LifecycleAction: "enable", Actor: "user"},
+	"api-skill-disable":            {LifecycleAction: "disable", Actor: "user"},
+	"api-skill-enable":             {LifecycleAction: "enable", Actor: "user"},
+	"api-plugin-disable":           {LifecycleAction: "disable", Actor: "user"},
+	"api-plugin-enable":            {LifecycleAction: "enable", Actor: "user"},
 }
 
 // severityToOTel maps string severity to OTel severity number.

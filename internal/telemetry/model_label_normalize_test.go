@@ -91,3 +91,52 @@ func TestNormalizeModelLabel_BoundsCardinality(t *testing.T) {
 		t.Errorf("normalize emitted %d distinct labels; want ≤ %d (cardinality budget exceeded)", len(seen), maxAllowedLabels)
 	}
 }
+
+func TestNormalizeGenAILabels_BoundCardinality(t *testing.T) {
+	t.Parallel()
+	providerCases := map[string]string{
+		"":                                  "unknown",
+		"Anthropic":                         "anthropic",
+		"gemini-cli":                        "google",
+		"openai-with-random-suffix":         "openai",
+		strings.Repeat("provider-", 20):     "other",
+		"attacker-provider-2026-05-18-uuid": "other",
+	}
+	for in, want := range providerCases {
+		if got := NormalizeGenAIProviderLabel(in); got != want {
+			t.Errorf("NormalizeGenAIProviderLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+	operationCases := map[string]string{
+		"":                        "unknown",
+		"chat":                    "chat",
+		"responses":               "chat",
+		"embeddings":              "embedding",
+		"guardrail":               "judge",
+		"op-with-freeform-suffix": "other",
+	}
+	for in, want := range operationCases {
+		if got := NormalizeGenAIOperationLabel(in); got != want {
+			t.Errorf("NormalizeGenAIOperationLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeHookEventTypeLabel_BoundsCardinality(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"":                         "unknown",
+		"PreToolUse":               "tool_call",
+		"beforeShellExecution":     "tool_call",
+		"UserPromptSubmit":         "prompt",
+		"PostToolUse":              "tool_result",
+		"Stop":                     "stop",
+		"Notification":             "notification",
+		"freeform-event-id-123456": "other",
+	}
+	for in, want := range cases {
+		if got := NormalizeHookEventTypeLabel(in); got != want {
+			t.Errorf("NormalizeHookEventTypeLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

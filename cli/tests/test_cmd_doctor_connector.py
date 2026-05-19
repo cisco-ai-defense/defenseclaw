@@ -37,8 +37,10 @@ Coverage:
 
 from __future__ import annotations
 
+import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock
 
@@ -48,6 +50,7 @@ from defenseclaw.commands.cmd_doctor import (
     _DoctorResult,
     _active_connector,
     _check_connector_inventory,
+    _check_hook_contract_lock,
     _check_scan_coverage,
 )
 
@@ -181,6 +184,71 @@ class TestCheckConnectorInventory(unittest.TestCase):
         skill_check = next(c for c in r.checks if c["label"] == "Skill paths")
         self.assertEqual(skill_check["status"], "warn")
         self.assertIn("kaboom", skill_check["detail"])
+
+
+class TestCheckHookContractLock(unittest.TestCase):
+    """Doctor surfaces the deterministic hook contract selected at setup."""
+
+    def _cfg(self, data_dir: str) -> MagicMock:
+        cfg = MagicMock()
+        cfg.data_dir = data_dir
+        return cfg
+
+    def test_proxy_connector_skips(self) -> None:
+        r = _DoctorResult()
+        _check_hook_contract_lock(self._cfg("/tmp/unused"), "openclaw", r)
+        check = r.checks[-1]
+        self.assertEqual(check["status"], "skip")
+        self.assertEqual(check["label"], "Hook contract")
+
+    def test_known_contract_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "codex": {
+                                "contract_id": "codex-hooks-v1",
+                                "compatibility_status": "known",
+                                "raw_agent_version": "0.30.0",
+                                "normalized_agent_version": "0.30.0",
+                                "hook_script_version": "codex-hook.sh:1",
+                            }
+                        }
+                    },
+                    fh,
+                )
+
+            r = _DoctorResult()
+            _check_hook_contract_lock(self._cfg(tmp), "codex", r)
+            check = r.checks[-1]
+            self.assertEqual(check["status"], "pass")
+            self.assertIn("codex-hooks-v1", check["detail"])
+            self.assertIn("0.30.0", check["detail"])
+
+    def test_discovered_version_drift_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "claudecode": {
+                                "contract_id": "claudecode-hooks-v1",
+                                "compatibility_status": "known",
+                                "raw_agent_version": "1.2.3",
+                            }
+                        }
+                    },
+                    fh,
+                )
+            with open(os.path.join(tmp, "agent_discovery.json"), "w", encoding="utf-8") as fh:
+                json.dump({"agents": {"claudecode": {"version": "1.2.4"}}}, fh)
+
+            r = _DoctorResult()
+            _check_hook_contract_lock(self._cfg(tmp), "claudecode", r)
+            check = r.checks[-1]
+            self.assertEqual(check["status"], "fail")
+            self.assertIn("drift", check["detail"])
 
 
 class TestCheckScanCoverage(unittest.TestCase):

@@ -625,9 +625,9 @@ func TestHandleCodexHook_EnrichesHTTPSpan(t *testing.T) {
 	api := &APIServer{}
 	// PR #284: handleCodexHook was deleted; the unified pipeline
 	// now serves /api/v1/codex/hook via handleAgentHook("codex").
-	// The bespoke evaluator + span enricher
-	// (evaluateCodexHook / enrichCodexHookSpan) are invoked from
-	// bespoke_hook_adapter.go so the gen_ai.* and
+	// The typed evaluator + span enricher (evaluateCodexHook /
+	// enrichCodexHookSpan) are invoked by the profile-runtime
+	// registry so the gen_ai.* and
 	// defenseclaw.codex.hook.* span attributes asserted below
 	// remain present.
 	handler := otelHTTPServerMiddleware("sidecar-api", api.handleAgentHook("codex"))

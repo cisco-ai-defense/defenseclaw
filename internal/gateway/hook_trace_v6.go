@@ -86,6 +86,9 @@ func shouldExtractHookTrace(r *http.Request) bool {
 	if connectorName == "" || strings.Contains(connectorName, "/") {
 		return false
 	}
+	if connectorName == "claude-code" {
+		connectorName = "claudecode"
+	}
 	_, ok := connectorHookHandlerByName[connectorName]
 	return ok
 }

@@ -22,6 +22,8 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
 import logging
 import os
 import stat
@@ -1166,6 +1168,7 @@ class Config:
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
+    _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
 
@@ -1378,104 +1381,96 @@ class Config:
         path = os.path.join(self.data_dir, CONFIG_FILE_NAME)
         dataclass_data = _config_to_dict(self)
         owned_keys = _owned_top_level_keys(self)
-        existing = _load_existing_config_yaml(path)
-        merged = _merge_preserving_unmodeled(
-            existing, dataclass_data, owned_keys,
-        )
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Atomic write that ALSO preserves owner-only file mode.
-        #
-        # Why this is security-critical: config.yaml is allowed to
-        # carry tokens (gateway.token), OTLP `Authorization`
-        # headers, audit-sink `hec_token` values, and other secrets.
-        # The defenseclaw setup wizards historically chmod the
-        # file to 0600. The original ``open(tmp, "w")`` honoured
-        # the process umask, so under the typical 0o022 umask the
-        # tmp file landed at 0o644 — and ``os.replace`` then
-        # renamed those wider permissions onto the live path,
-        # silently downgrading 0600 → 0644 on every save.
-        #
-        # The fix has three layers of defence:
-        #
-        #   1. The temp file is created with O_EXCL and an
-        #      explicit 0o600 mode via os.open(), so the umask
-        #      cannot widen it. O_EXCL prevents an attacker who
-        #      can write to data_dir from pre-creating the temp
-        #      with a symlink to /etc/shadow (TOCTOU on the
-        #      replace).
-        #   2. After write, if the live path already exists and
-        #      has stricter bits (e.g. 0o400 because an operator
-        #      hardened beyond the wizard default), we mirror
-        #      those bits onto the tmp before replace. This means
-        #      a save NEVER widens the existing mode — it can
-        #      only narrow it.
-        #   3. os.replace is atomic on POSIX (rename(2)
-        #      guarantees), so the live config either contains
-        #      the previous bytes or the new bytes — never a
-        #      half-written file. The mode of the new file is the
-        #      mode of the tmp at rename time (mode is a property
-        #      of the inode, not the path).
-        tmp = path + ".tmp"
-        existing_mode: int | None = None
-        try:
-            existing_mode = stat.S_IMODE(os.stat(path).st_mode)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            # First-save path or unreadable parent — fall back to
-            # the explicit 0o600 default below. Never widen.
-            existing_mode = None
-        # If a stale tmp from a crashed save lingers, drop it so
-        # O_EXCL doesn't fail on a phantom file we own.
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        except OSError:
-            # If we can't remove a stale tmp, the open below
-            # will fail loud rather than silently overwrite.
-            pass
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(tmp, flags, 0o600)
-        try:
-            with os.fdopen(fd, "w") as f:
-                yaml.safe_dump(
-                    merged, f, default_flow_style=False, sort_keys=False,
-                )
-        except BaseException:
-            # If yaml.safe_dump or fdopen blows up, drop the tmp so
-            # the next save starts from a clean slate (otherwise the
-            # O_EXCL + best-effort unlink dance would intermittently
-            # double-fail).
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
-            raise
-        # Mirror the existing file's stricter bits onto the tmp so
-        # the replace can only narrow, never widen. We deliberately
-        # do NOT widen 0o400 → 0o600 here because some operators
-        # ship 0o400 by policy.
-        if existing_mode is not None and existing_mode != 0o600:
-            target_mode = existing_mode & 0o600
-            if target_mode == 0:
-                # Operator removed even owner-read — falling back
-                # to the dataclass owner-only default is the only
-                # safe choice; warn so the operator notices.
-                target_mode = 0o600
-            try:
-                os.chmod(tmp, target_mode)
-            except OSError as exc:
-                _log.warning(
-                    "config.save: cannot mirror %o mode onto %s (%s); "
-                    "writing as 0600", existing_mode, tmp, exc,
-                )
-        os.replace(tmp, path)
+        with locked_config_yaml(path):
+            existing = _load_existing_config_yaml(path)
+            merged = _merge_preserving_unmodeled(
+                existing, dataclass_data, owned_keys,
+                authoritative_base=self._loaded_authoritative_dicts,
+            )
+            write_config_yaml_secure(path, merged)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+@contextmanager
+def locked_config_yaml(path: str):
+    """Hold an exclusive per-config lock for a read/merge/write cycle."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    lock_path = path + ".lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        lock = os.fdopen(fd, "w")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock.close()
+
+
+def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
+    """Atomically write YAML without widening config.yaml permissions."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        existing_mode = None
+
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    if existing_mode is not None and existing_mode != 0o600:
+        target_mode = existing_mode & 0o600
+        if target_mode == 0:
+            target_mode = 0o600
+        try:
+            os.chmod(tmp, target_mode)
+        except OSError as exc:
+            _log.warning(
+                "config.save: cannot mirror %o mode onto %s (%s); writing as 0600",
+                existing_mode, tmp, exc,
+            )
+    os.replace(tmp, path)
+    try:
+        dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
 
 def _llm_is_empty(d: dict[str, Any] | None) -> bool:
     if not d:
@@ -1500,6 +1495,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     """Serialize Config to a dict suitable for YAML."""
     from dataclasses import asdict
     d = asdict(cfg)
+    d.pop("_loaded_authoritative_dicts", None)
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -1583,7 +1579,7 @@ def _owned_top_level_keys(cfg: Config) -> frozenset[str]:
     on lazily-populated nested dataclasses.
     """
     from dataclasses import fields
-    return frozenset(f.name for f in fields(cfg))
+    return frozenset(f.name for f in fields(cfg) if not f.name.startswith("_"))
 
 
 def _load_existing_config_yaml(path: str) -> dict[str, Any]:
@@ -1610,10 +1606,11 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
         )
         return {}
     except yaml.YAMLError as exc:
+        backup = _backup_unparseable_config(path)
         _log.warning(
             "config.save: existing %s failed to parse (%s); "
-            "writing dataclass-only view (any unmodelled keys will be lost)",
-            path, exc,
+            "writing dataclass-only view (backup=%s)",
+            path, exc, backup or "unavailable",
         )
         return {}
     if not isinstance(raw, dict):
@@ -1624,6 +1621,34 @@ def _load_existing_config_yaml(path: str) -> dict[str, Any]:
         )
         return {}
     return raw
+
+
+def _backup_unparseable_config(path: str) -> str:
+    try:
+        with open(path, "rb") as src:
+            data = src.read()
+    except OSError:
+        return ""
+    backup = f"{path}.bak"
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(backup, flags, 0o600)
+    except FileExistsError:
+        backup = f"{path}.bak.{os.getpid()}"
+        try:
+            fd = os.open(backup, flags, 0o600)
+        except OSError:
+            return ""
+    except OSError:
+        return ""
+    try:
+        with os.fdopen(fd, "wb") as dst:
+            dst.write(data)
+            dst.flush()
+            os.fsync(dst.fileno())
+    except OSError:
+        return ""
+    return backup
 
 
 # Dotted YAML paths whose VALUE is a dict[str, str]-style modeled
@@ -1662,6 +1687,7 @@ def _merge_preserving_unmodeled(
     existing: dict[str, Any],
     new: dict[str, Any],
     owned_top_level: frozenset[str],
+    authoritative_base: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Deep-merge ``new`` over ``existing`` while preserving unmodelled keys.
 
@@ -1708,7 +1734,7 @@ def _merge_preserving_unmodeled(
         if k in new:
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
-                out[k] = _deep_merge_nested(ev, nv, path=k)
+                out[k] = _deep_merge_nested(ev, nv, path=k, authoritative_base=authoritative_base)
             else:
                 out[k] = nv
         elif k in owned_top_level:
@@ -1730,6 +1756,7 @@ def _deep_merge_nested(
     existing: dict[str, Any],
     new: dict[str, Any],
     path: str = "",
+    authoritative_base: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Recursive deep-merge for nested dicts.
 
@@ -1749,6 +1776,9 @@ def _deep_merge_nested(
       win on overlap.
     """
     if path in _AUTHORITATIVE_MODELED_DICT_PATHS:
+        base = (authoritative_base or {}).get(path)
+        if base is not None and dict(new) == dict(base) and dict(existing) != dict(base):
+            return dict(existing)
         # Atomic replace: dataclass dict wins. We deliberately keep
         # the path in the recursion signature so future authoritative
         # paths nested deeper still match without a separate flag.
@@ -1759,7 +1789,7 @@ def _deep_merge_nested(
             nv = new[k]
             if isinstance(ev, dict) and isinstance(nv, dict):
                 child = f"{path}.{k}" if path else k
-                out[k] = _deep_merge_nested(ev, nv, path=child)
+                out[k] = _deep_merge_nested(ev, nv, path=child, authoritative_base=authoritative_base)
             else:
                 out[k] = nv
         else:
@@ -2197,19 +2227,19 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
 
 
 def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
-    if not raw:
+    if not isinstance(raw, dict) or not raw:
         return OTelConfig()
-    traces_raw = raw.get("traces", {})
-    logs_raw = raw.get("logs", {})
-    metrics_raw = raw.get("metrics", {})
-    batch_raw = raw.get("batch", {})
-    tls_raw = raw.get("tls", {})
-    resource_raw = raw.get("resource", {})
+    traces_raw = _as_mapping(raw.get("traces"))
+    logs_raw = _as_mapping(raw.get("logs"))
+    metrics_raw = _as_mapping(raw.get("metrics"))
+    batch_raw = _as_mapping(raw.get("batch"))
+    tls_raw = _as_mapping(raw.get("tls"))
+    resource_raw = _as_mapping(raw.get("resource"))
     return OTelConfig(
         enabled=raw.get("enabled", False),
         protocol=raw.get("protocol", "grpc"),
         endpoint=raw.get("endpoint", ""),
-        headers=raw.get("headers", {}),
+        headers=_as_mapping(raw.get("headers")),
         tls=OTelTLSConfig(
             insecure=tls_raw.get("insecure", False),
             ca_cert=tls_raw.get("ca_cert", ""),
@@ -2242,9 +2272,28 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
             max_queue_size=batch_raw.get("max_queue_size", 2048),
         ),
         resource=OTelResourceConfig(
-            attributes=resource_raw.get("attributes", {}),
+            attributes=_as_mapping(resource_raw.get("attributes")),
         ),
     )
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _snapshot_authoritative_dicts(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for path in _AUTHORITATIVE_MODELED_DICT_PATHS:
+        cur: Any = raw
+        for part in path.split("."):
+            if not isinstance(cur, dict):
+                cur = {}
+                break
+            cur = cur.get(part, {})
+        out[path] = dict(cur) if isinstance(cur, dict) else {}
+    return out
 
 
 def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
@@ -2554,6 +2603,7 @@ def load() -> Config:
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         notifications=_merge_notifications(raw.get("notifications")),
     )
+    cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     _migrate_llm_fields(cfg)
     _warn_disable_redaction_config(cfg)
     _warn_plaintext_secrets(cfg)
