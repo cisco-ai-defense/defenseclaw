@@ -1159,15 +1159,15 @@ func (p *Provider) RecordApproval(ctx context.Context, result string, auto, dang
 // metric attributes when empty so pre-v7 callers do not inflate the
 // series count — see docs/OTEL-IMPLEMENTATION-STATUS.md for the
 // cardinality contract.
-func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model, agentName, agentID string, prompt, completion int64) {
+func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerName, model, agentName, agentID, sessionID string, prompt, completion int64) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
 	if prompt > 0 {
-		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, "input", prompt)
+		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, sessionID, "input", prompt)
 	}
 	if completion > 0 {
-		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, "output", completion)
+		p.RecordLLMTokenUsage(ctx, operationName, providerName, model, agentName, agentID, sessionID, "output", completion)
 	}
 }
 
@@ -1175,7 +1175,7 @@ func (p *Provider) RecordLLMTokens(ctx context.Context, operationName, providerN
 // token type. It is used for connector-native counters such as Claude Code's
 // cacheRead/cacheCreation token categories, while RecordLLMTokens preserves
 // the common input/output call-site contract.
-func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, providerName, model, agentName, agentID, tokenType string, tokens int64) {
+func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, providerName, model, agentName, agentID, sessionID, tokenType string, tokens int64) {
 	if !p.Enabled() || p.metrics == nil || tokens <= 0 {
 		return
 	}
@@ -1193,6 +1193,9 @@ func (p *Provider) RecordLLMTokenUsage(ctx context.Context, operationName, provi
 	}
 	if agentID != "" {
 		commonAttrs = append(commonAttrs, attribute.String("gen_ai.agent.id", agentID))
+	}
+	if sessionID != "" {
+		commonAttrs = append(commonAttrs, attribute.String("gen_ai.conversation.id", sessionID))
 	}
 	attrs := append([]attribute.KeyValue{attribute.String("gen_ai.token.type", tokenType)}, commonAttrs...)
 	p.metrics.genAITokenUsage.Record(ctx, float64(tokens), metric.WithAttributes(attrs...))

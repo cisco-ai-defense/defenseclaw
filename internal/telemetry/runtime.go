@@ -606,6 +606,7 @@ func (p *Provider) StartLLMSpan(
 // Metrics are always recorded when OTel is enabled, even if the span is nil
 // (traces disabled).
 func (p *Provider) EndLLMSpan(
+	ctx context.Context,
 	span trace.Span,
 	responseModel string,
 	promptTokens, completionTokens int,
@@ -617,15 +618,15 @@ func (p *Provider) EndLLMSpan(
 	agentName string,
 	agentType string,
 	agentID string,
+	sessionID string,
 ) {
 	// Use the span's context so the SDK attaches exemplars (trace ID + span ID)
 	// to the histogram data points, linking metrics to traces.
-	ctx := context.Background()
 	if span != nil {
 		ctx = trace.ContextWithSpan(ctx, span)
 	}
 	durationSec := time.Since(startTime).Seconds()
-	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, agentID, int64(promptTokens), int64(completionTokens))
+	p.RecordLLMTokens(ctx, "chat", providerName, responseModel, agentName, agentID, sessionID, int64(promptTokens), int64(completionTokens))
 	p.RecordLLMDuration(ctx, "chat", providerName, responseModel, agentName, agentID, durationSec)
 
 	if span == nil {
