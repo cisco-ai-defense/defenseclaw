@@ -95,6 +95,7 @@ output/playwright/
 # between personal workflow notes and the project's canonical docs.
 AGENTS.md
 CLAUDE.md
+agent-out/
 
 # Local security-tooling working directories — each contributor's
 # Avarice / DeepSec runs drop campaign data, findings, and node_modules
