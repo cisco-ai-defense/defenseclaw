@@ -58,7 +58,11 @@ export function ScenarioJsonPreview({ scenario, expanded }: { scenario: Scenario
         <span aria-hidden="true">{open ? '▼' : '▶'}</span>
       </button>
       {open && (
-        <pre className="overflow-x-auto border-t border-fd-border bg-fd-background px-2.5 py-2 text-[11px] leading-snug text-fd-foreground">
+        // Cap to ~18rem and scroll inside so a tall scenario can't
+        // push the verdict pane below the viewport. Both axes scroll
+        // because some scenarios have long string fields (skill paths,
+        // base64 payloads) that don't wrap.
+        <pre className="max-h-72 overflow-auto border-t border-fd-border bg-fd-background px-2.5 py-2 font-mono text-[11px] leading-snug text-fd-foreground">
           {JSON.stringify(scenario.input, null, 2)}
         </pre>
       )}

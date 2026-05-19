@@ -357,7 +357,16 @@ export function Playground({
           totalFindings={findings.length}
         />
       </div>
-      <aside className="lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]">
+      {/*
+        min-h-0 is required for the inner flex column inside
+        LiveTestPane to honour overflow-y-auto under a fixed-height
+        sticky container. Without it the inner pane grows past the
+        aside and the Input JSON / verdict reason / corpus table get
+        clipped at the bottom of the viewport (issue reported on the
+        merged Pages deploy: "Input JSON in full playground is
+        getting cut off").
+      */}
+      <aside className="flex min-h-0 flex-col lg:sticky lg:top-20 lg:h-[calc(100vh-6rem)]">
         <LiveTestPane policy={policy} />
       </aside>
     </div>

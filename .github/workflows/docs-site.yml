@@ -49,7 +49,26 @@ jobs:
           cache: 'npm'
           cache-dependency-path: docs-site/package-lock.json
 
+      - name: Setup OPA
+        # build-policy-assets.ts runs `opa build` to compile each Rego
+        # domain to WASM under docs-site/public/opa/. Without `opa` on
+        # PATH the script logs a warning and skips, which silently
+        # ships a Pages deploy where the Live Test pane shows
+        # "WASM modules aren't available" and the wizard cannot
+        # evaluate policies in-browser. Pin the action version so
+        # supply-chain drift on the third-party action is explicit.
+        uses: open-policy-agent/setup-opa@v2
+        with:
+          version: latest
+
       - name: Install dependencies
+        # CI_REQUIRE_OPA promotes the missing-opa warning in
+        # build-policy-assets.ts from a soft skip to a hard error, so
+        # a future change that drops the setup-opa step above (or that
+        # bumps OPA past a breaking CLI change) fails the build
+        # instead of silently shipping a broken Live Test pane.
+        env:
+          CI_REQUIRE_OPA: '1'
         run: npm ci --no-audit --no-fund
 
       - name: Unit tests (policy creator)
@@ -74,6 +93,21 @@ jobs:
             echo "::error::Built index.html does not reference /defenseclaw/_next/ — basePath may be misapplied."
             exit 1
           fi
+
+      - name: Verify OPA assets in output
+        # Pages ships everything under out/ verbatim. Missing WASM
+        # files manifest as a "WASM modules aren't available" warning
+        # in the wizard's Live Test pane — the symptom users actually
+        # report. Fail the deploy at build time instead.
+        run: |
+          missing=0
+          for f in manifest.json admission.wasm guardrail.wasm firewall.wasm audit.wasm skill_actions.wasm; do
+            if [ ! -f "out/opa/$f" ]; then
+              echo "::error::out/opa/$f is missing — policy creator Live Test pane will 404."
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
 
       - name: Add .nojekyll
         # GitHub Pages defaults to running Jekyll, which strips files

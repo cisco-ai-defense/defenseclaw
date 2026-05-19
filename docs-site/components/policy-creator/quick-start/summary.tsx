@@ -24,6 +24,10 @@ export function PolicySummaryCard({
     (acc, f) => acc + f.rules.filter((r) => r.enabled !== false).length,
     0,
   );
+  // Suppressed rules are surfaced separately so the operator can tell
+  // "I haven't touched anything" (suppressed=0) apart from "I'm running
+  // a near-full pack but trimmed a few" (suppressed>0).
+  const suppressedInPack = totalRules - enabledRules;
   const suppressionTotal =
     policy.suppressions.tool_suppressions.length +
     policy.suppressions.finding_suppressions.length +
@@ -40,7 +44,17 @@ export function PolicySummaryCard({
       </h3>
       <ul className="space-y-1.5 text-[12px] text-fd-foreground">
         <Row label="Posture" value={postureLabel} />
-        <Row label="Rules enabled" value={`${enabledRules} of ${totalRules}`} />
+        <Row
+          label="Rule pack"
+          value={`${enabledRules} of ${totalRules} active`}
+          // Suppressed=0 ⇒ "this is just the preset baseline"; >0 ⇒
+          // "you (or the posture) trimmed N from the preset".
+          hint={
+            suppressedInPack === 0
+              ? `Preset baseline — disable individual rules in the Playground → Rule Pack section.`
+              : `${suppressedInPack} rule${suppressedInPack === 1 ? '' : 's'} disabled vs. preset full pack.`
+          }
+        />
         <Row label="Suppressions" value={String(suppressionTotal)} />
         <Row
           label="Firewall"
@@ -58,11 +72,16 @@ export function PolicySummaryCard({
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <li className="flex items-baseline justify-between gap-2">
-      <span className="text-fd-muted-foreground">{label}</span>
-      <span className="text-right font-medium tabular-nums">{value}</span>
+    <li className="flex flex-col gap-0.5">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-fd-muted-foreground">{label}</span>
+        <span className="text-right font-medium tabular-nums">{value}</span>
+      </div>
+      {hint && (
+        <span className="text-[10px] leading-tight text-fd-muted-foreground/80">{hint}</span>
+      )}
     </li>
   );
 }

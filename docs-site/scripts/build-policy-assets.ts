@@ -812,7 +812,13 @@ function compileWasm(opts: { skipMissingOpa: boolean }): { compiled: string[]; s
 
 function main() {
   const args = process.argv.slice(2);
-  const skipMissingOpa = !args.includes('--require-opa');
+  // CI_REQUIRE_OPA is the env-driven equivalent of --require-opa.
+  // The docs-site GitHub Pages workflow sets it before `npm ci` so
+  // the postinstall pass fails loudly if `opa` was not installed on
+  // the runner. Local `npm install` keeps the soft-skip semantics so
+  // contributors without OPA can still build the rest of the site.
+  const skipMissingOpa =
+    !args.includes('--require-opa') && process.env.CI_REQUIRE_OPA !== '1';
 
   ensureDir(DATA_OUT);
 
