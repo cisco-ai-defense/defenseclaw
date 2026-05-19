@@ -31,6 +31,8 @@ import { defaultAnswers, deserializeAnswers, serializeAnswers } from './quick-st
 import {
   clearHashPayload,
   decodePolicyFromHash,
+  looksLikePolicy,
+  normalizeImportedPolicy,
   readHashPayload,
   type DecodeFailure,
 } from './lib/share';
@@ -68,8 +70,18 @@ export default function PolicyCreator() {
       if (rawTab === 'playground' || rawTab === 'quick-start') setTab(rawTab);
       const rawPolicy = window.localStorage.getItem(LS_POLICY);
       if (rawPolicy) {
-        setPolicy(JSON.parse(rawPolicy) as Policy);
-        restoredFromLs = true;
+        // Drafts persisted by older builds (pre-correlator, pre-Cisco
+        // AI Defense) are missing fields that every downstream consumer
+        // (emit, validators, sections, data-projection) reads
+        // unconditionally. Run the same normalize pass we use for
+        // share-link imports so a stale draft doesn't crash the tab.
+        // Shape-check first; on failure we fall back to the default
+        // preset rather than smuggling garbage into setPolicy().
+        const parsed: unknown = JSON.parse(rawPolicy);
+        if (looksLikePolicy(parsed)) {
+          setPolicy(normalizeImportedPolicy(parsed));
+          restoredFromLs = true;
+        }
       }
       const rawAnswers = window.localStorage.getItem(LS_ANSWERS);
       if (rawAnswers) setAnswers(deserializeAnswers(JSON.parse(rawAnswers)));

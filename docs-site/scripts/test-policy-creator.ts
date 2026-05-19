@@ -26,9 +26,11 @@ import assert from 'node:assert/strict';
 import {
   decodePolicyFromHash,
   encodePolicyForHash,
+  looksLikePolicy,
+  normalizeImportedPolicy,
   __TEST_INTERNALS,
 } from '../components/policy-creator/lib/share.js';
-import { __TEST_INTERNALS as EMIT_INTERNALS } from '../components/policy-creator/lib/emit.js';
+import { emit, __TEST_INTERNALS as EMIT_INTERNALS } from '../components/policy-creator/lib/emit.js';
 import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/lib/rego-highlight.js';
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
@@ -311,6 +313,46 @@ test('emit: correlatorDiffersFromDefault detects edits to a bundled pattern', ()
     EMIT_INTERNALS.correlatorDiffersFromDefault(edited),
     true,
     'editing a bundled pattern must trigger a correlation-patterns.yaml emit',
+  );
+});
+
+// Regression for the Quick Start "Cannot read properties of undefined
+// (reading 'enabled')" crash. A stale localStorage draft from an older
+// build is missing `cisco_ai_defense` and `correlator`. PolicyCreator
+// now runs the same normalize-on-import pass as share-link decode, so
+// downstream consumers (emit, validators, sections, data-projection)
+// see fully-populated objects. We also keep a defensive default at the
+// emit() entrypoint so any future skipped-normalize path can't crash
+// the whole tab — assert both layers here.
+test('emit + normalize: stale policy without correlator/cisco_ai_defense survives the pipeline', () => {
+  const stale = { ...makePolicy() } as Record<string, unknown>;
+  delete stale.correlator;
+  delete stale.cisco_ai_defense;
+
+  // Layer 1 — looksLikePolicy gates the localStorage hydrate; the
+  // header (`name` + `skill_actions`) is still intact so it must pass.
+  assert.equal(looksLikePolicy(stale), true);
+
+  // Layer 2 — normalizeImportedPolicy fills in safe defaults.
+  const normalized = normalizeImportedPolicy(stale as unknown as Policy);
+  assert.deepEqual(normalized.correlator, []);
+  assert.equal(normalized.cisco_ai_defense?.enabled, false);
+  assert.equal(normalized.cisco_ai_defense?.scan_hook_surface, true);
+
+  // Layer 3 — even if a caller forgets to normalize (e.g. a future
+  // code path imports a Policy from somewhere new), emit() must not
+  // crash on the missing fields. We feed in the raw stale object.
+  const files = emit(stale as unknown as Policy);
+  // Sanity: emit returned a useful file list (policy YAML + opa data
+  // at minimum), and none of the entries reference a Cisco AI Defense
+  // block when AID is disabled / absent.
+  assert.ok(files.length >= 2, 'emit must return at least the policy YAML + data.json');
+  const policyYaml = files.find((f) => f.path.endsWith(`${stale.name}.yaml`));
+  assert.ok(policyYaml, 'top-level policy YAML must be emitted');
+  assert.equal(
+    policyYaml!.contents.includes('cisco_ai_defense'),
+    false,
+    'AID block must be omitted when the lane is off / missing',
   );
 });
 

@@ -181,11 +181,15 @@ export function projectPolicyToData(policy: Policy): OpaData {
       allowed_domains: [...policy.firewall.allowed_domains],
       allowed_ports: [...policy.firewall.allowed_ports],
     },
-    correlator: projectCorrelator(policy.correlator),
+    correlator: projectCorrelator(policy.correlator ?? []),
     cisco_ai_defense: {
-      enabled: policy.cisco_ai_defense.enabled,
-      api_key_env: policy.cisco_ai_defense.api_key_env,
-      scan_hook_surface: policy.cisco_ai_defense.scan_hook_surface,
+      // Defensive defaults match CiscoAIDefenseConfig defaults in
+      // presets.ts. Hydration boundaries (PolicyCreator, share decode)
+      // run normalizeImportedPolicy and SHOULD have backfilled these;
+      // belt-and-suspenders so stale state can't crash data projection.
+      enabled: policy.cisco_ai_defense?.enabled ?? false,
+      api_key_env: policy.cisco_ai_defense?.api_key_env ?? '',
+      scan_hook_surface: policy.cisco_ai_defense?.scan_hook_surface ?? true,
     },
   };
 }

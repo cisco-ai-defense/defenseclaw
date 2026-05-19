@@ -6,7 +6,7 @@
 // can paste the output directly under ~/.defenseclaw/policies/.
 
 import yaml from 'js-yaml';
-import type { CorrelationPattern, Policy } from '../types';
+import type { CiscoAIDefenseConfig, CorrelationPattern, Policy } from '../types';
 import { projectPolicyToData } from './data-projection';
 import { policyFromPreset } from './presets';
 
@@ -23,6 +23,18 @@ const YAML_OPTS: yaml.DumpOptions = {
   sortKeys: false,
 };
 
+// Defaults applied only when emit() receives a Policy with these fields
+// missing. The hydration boundary (PolicyCreator + decodePolicyFromHash)
+// runs normalizeImportedPolicy and SHOULD have backfilled these already;
+// this is belt-and-suspenders so a stale draft from any future path
+// can't crash the export panel.
+const DEFAULT_AID: CiscoAIDefenseConfig = {
+  enabled: false,
+  endpoint: '',
+  api_key_env: '',
+  scan_hook_surface: true,
+};
+
 function dump(value: unknown): string {
   return yaml.dump(value, YAML_OPTS);
 }
@@ -30,9 +42,10 @@ function dump(value: unknown): string {
 export function emit(policy: Policy): EmittedFile[] {
   const files: EmittedFile[] = [];
   const packName = policy.rule_pack.name || policy.name;
+  const correlator: CorrelationPattern[] = policy.correlator ?? [];
 
   // 1) Top-level admission policy YAML.
-  const aid = policy.cisco_ai_defense;
+  const aid: CiscoAIDefenseConfig = policy.cisco_ai_defense ?? DEFAULT_AID;
   const aidBlock =
     aid.enabled || aid.api_key_env || aid.endpoint
       ? {
@@ -168,7 +181,7 @@ export function emit(policy: Policy): EmittedFile[] {
   // automatically and the override file just adds noise. We skip
   // disabled patterns; an empty result still emits the file so the
   // gateway-side defaults are overridden with "no patterns".
-  const enabledPatterns = policy.correlator.filter((p) => p.enabled);
+  const enabledPatterns = correlator.filter((p) => p.enabled);
   const hasCustomCorrelator = correlatorDiffersFromDefault(policy);
   if (hasCustomCorrelator) {
     files.push({
@@ -207,7 +220,7 @@ export function emit(policy: Policy): EmittedFile[] {
 // normalized) so reordering, key insertion order, and the presence
 // of optional empty arrays don't trip a false "edited".
 function correlatorDiffersFromDefault(policy: Policy): boolean {
-  const current = canonicalCorrelator(policy.correlator);
+  const current = canonicalCorrelator(policy.correlator ?? []);
   const baseline = canonicalCorrelator(policyFromPreset(policy.basedOn).correlator);
   return current !== baseline;
 }
