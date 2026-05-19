@@ -49,8 +49,13 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 				connectorName, eventType, reason, bodyBytes))
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(ctx, string(audit.ActionConnectorHook), eventType,
-			fmt.Sprintf("connector=%s result=rejected reason=%s bytes=%d", connectorName, reason, bodyBytes))
+		a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
+			Connector: connectorName,
+			Event:     eventType,
+			Result:    "rejected",
+			Reason:    reason,
+			BodyBytes: bodyBytes,
+		})
 	}
 }
 
@@ -71,19 +76,16 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 // every connector hook handler should use once it has a fully-built
 // HookAuditEnvelope.
 //
-// The audit `details` column always carries BOTH forms:
+// The audit row carries two representations of the same hook outcome:
 //
-//   - the legacy "connector=… action=… raw_action=…" key=value tail
-//     for backwards-compatible operator log greps (Splunk SPL,
-//     `grep "raw_action=block"`, etc.); and
-//   - the JSON envelope under the literal key `details_json=` for
-//     structured log pipelines (Loki, Datadog, jq scripts).
+//   - Event.Structured is the canonical machine-readable
+//     defenseclaw.hook.v1 envelope for SQLite export and audit sinks.
+//   - Details keeps the legacy "connector=… action=… raw_action=…"
+//     key=value tail plus details_json= for backwards-compatible
+//     operator greps and downstream parsers during migration.
 //
-// The dual format is intentional: it gives operators the freedom to
-// migrate at their own pace and never makes the audit row less
-// information-rich than the prior release. The JSON value is
-// strconv.Quote'd so it can carry embedded commas and quotes without
-// breaking the surrounding tail.
+// The Details JSON value is strconv.Quote'd so it can carry embedded
+// commas and quotes without breaking the surrounding tail.
 //
 // stripLogInjectionRunes runs on every string field in both forms,
 // per codeguard-0-logging: a hostile prompt that smuggles CR/LF/ANSI
@@ -109,11 +111,18 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
 		auditAction = env.AuditActionOverride
 	}
-	jsonDetails := renderHookAuditEnvelope(env)
+	jsonDetails, structured := renderHookAuditEnvelopePayload(env)
 	legacy := renderHookAuditLegacyDetails(env)
 	combined := fmt.Sprintf("connector=%s %s details_json=%s",
 		env.Connector, legacy, strconv.Quote(jsonDetails))
-	_ = a.logger.LogActionCtx(ctx, auditAction, env.Event, combined)
+	_ = a.logger.LogEventCtx(ctx, audit.Event{
+		Action:     auditAction,
+		Target:     env.Event,
+		Actor:      "defenseclaw",
+		Details:    combined,
+		Severity:   "INFO",
+		Structured: structured,
+	})
 }
 
 func (a *APIServer) logAssetPolicyAudit(ctx context.Context, target, details string) {

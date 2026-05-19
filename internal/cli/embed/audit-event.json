@@ -212,7 +212,11 @@
     },
     "details": {
       "type": ["string", "null"],
-      "description": "Redacted free-form detail blob. JSON-encoded payload after sanitizer. Treat as opaque."
+      "description": "Redacted legacy free-form detail blob. Treat as opaque. Connector-hook rows keep a transitional details_json= token here for older parsers; new consumers should prefer structured."
+    },
+    "structured": {
+      "type": ["object", "null"],
+      "description": "Optional first-class machine-readable payload stored in audit_events.structured_json and forwarded to audit sinks. Connector-hook rows use hook-audit-envelope.json (schema=defenseclaw.hook.v1)."
     },
     "severity": {
       "type": "string",

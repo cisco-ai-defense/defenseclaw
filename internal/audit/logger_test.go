@@ -228,6 +228,44 @@ func TestLoggerSinkForwardingIncludesDefaultedFields(t *testing.T) {
 	}
 }
 
+func TestLoggerSinkForwardingIncludesStructuredPayload(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+	if err := logger.LogEvent(Event{
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Structured: map[string]any{
+			"schema":    "defenseclaw.hook.v1",
+			"connector": "codex",
+			"result":    "ok",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+	logger.Close()
+
+	got := cs.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 forwarded event, got %d", len(got))
+	}
+	if got[0].Structured["schema"] != "defenseclaw.hook.v1" {
+		t.Fatalf("sink structured payload = %#v", got[0].Structured)
+	}
+	if got[0].Structured["connector"] != "codex" {
+		t.Fatalf("sink structured connector = %#v", got[0].Structured["connector"])
+	}
+}
+
 // TestLoggerForwardsWhenStoreWriteFails locks in the v7 contract that
 // non-critical audit actions (lifecycle signals like sidecar-connected,
 // gateway-ready, watch-start) are still fanned out to sinks and the

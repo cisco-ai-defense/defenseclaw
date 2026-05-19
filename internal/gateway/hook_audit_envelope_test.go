@@ -17,9 +17,13 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 // TestRenderHookAuditEnvelope_RoundTrip locks the v1 schema field
@@ -185,6 +189,7 @@ func TestRenderHookAuditEnvelope_LogInjection(t *testing.T) {
 // warning.
 func TestRenderHookAuditLegacyDetails_FormatStable(t *testing.T) {
 	env := HookAuditEnvelope{
+		Result:     "ok",
 		Action:     "block",
 		RawAction:  "block",
 		Severity:   "HIGH",
@@ -194,9 +199,61 @@ func TestRenderHookAuditLegacyDetails_FormatStable(t *testing.T) {
 		RawOrigin:  "hook",
 	}
 	got := renderHookAuditLegacyDetails(env)
-	want := "action=block raw_action=block severity=HIGH mode=action would_block=true elapsed_ms=42 raw_origin=hook"
+	want := "result=ok action=block raw_action=block severity=HIGH mode=action would_block=true elapsed_ms=42 raw_origin=hook"
 	if got != want {
 		t.Errorf("legacy details mismatch:\n  got = %q\n  want = %q", got, want)
+	}
+}
+
+func TestLogConnectorHookAuditEnvelope_PersistsStructuredPayload(t *testing.T) {
+	store, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	api := &APIServer{logger: audit.NewLogger(store)}
+	api.logConnectorHookAuditEnvelope(context.Background(), HookAuditEnvelope{
+		Connector:  "codex",
+		Event:      "PreToolUse",
+		Result:     "ok",
+		Action:     "block",
+		RawAction:  "block",
+		Severity:   "HIGH",
+		Mode:       "action",
+		Reason:     "matched policy",
+		WouldBlock: true,
+		ElapsedMs:  42,
+	})
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	got := events[0]
+	if got.Action != string(audit.ActionConnectorHook) {
+		t.Fatalf("Action = %q, want %q", got.Action, audit.ActionConnectorHook)
+	}
+	if !strings.Contains(got.Details, "details_json=") {
+		t.Fatalf("details missing details_json payload: %q", got.Details)
+	}
+	if !strings.Contains(got.Details, "result=ok action=block raw_action=block") {
+		t.Fatalf("details missing legacy hook tail: %q", got.Details)
+	}
+	if got.Structured["schema"] != HookAuditEnvelopeSchema {
+		t.Fatalf("structured schema = %#v, want %q", got.Structured["schema"], HookAuditEnvelopeSchema)
+	}
+	if got.Structured["connector"] != "codex" || got.Structured["event"] != "PreToolUse" {
+		t.Fatalf("structured hook identity did not round-trip: %#v", got.Structured)
+	}
+	if got.Structured["would_block"] != true {
+		t.Fatalf("structured would_block = %#v, want true", got.Structured["would_block"])
 	}
 }
 

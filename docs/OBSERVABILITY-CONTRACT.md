@@ -158,6 +158,14 @@ Complete enumeration (must match `AllActions()`):
 
 ---
 
+## Structured audit payloads
+
+`audit_events.details` is the legacy redacted text column. It remains opaque for compatibility. New machine-readable payloads live in `audit_events.structured_json`, flow through `audit.Event.Structured`, and are included by `defenseclaw-gateway audit export` as `structured`.
+
+Connector hook rows (`action=connector-hook` and `connector-hook-synthetic`) use `schemas/hook-audit-envelope.json` with `schema="defenseclaw.hook.v1"`. During migration the same hook envelope is also present as `details_json=...` inside `details`, next to the legacy key/value tail. Consumers should prefer `structured` and treat `details_json` as a backward-compatibility bridge.
+
+---
+
 ## Surface matrix (five observability tiers)
 
 | Tier | Mechanism |

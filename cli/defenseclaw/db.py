@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     target TEXT,
     actor TEXT NOT NULL DEFAULT 'defenseclaw',
     details TEXT,
+    structured_json TEXT,
     severity TEXT,
     run_id TEXT
 );
@@ -247,6 +248,12 @@ class Store:
             if "run_id" in columns:
                 continue
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
+        audit_columns = {
+            row[1]
+            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+        }
+        if "structured_json" not in audit_columns:
+            self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_scan_run_id ON scan_results(run_id)")
         self.db.commit()
@@ -334,18 +341,19 @@ class Store:
             event.actor = "defenseclaw"
         if not event.run_id:
             event.run_id = _current_run_id()
+        structured_json = json.dumps(event.structured, separators=(",", ":")) if event.structured else None
         self.db.execute(
-            """INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity, run_id)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json, severity, run_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (event.id, event.timestamp.isoformat(), event.action,
              event.target or None, event.actor, event.details or None,
-             event.severity or None, event.run_id or None),
+             structured_json, event.severity or None, event.run_id or None),
         )
         self.db.commit()
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
                FROM audit_events ORDER BY timestamp DESC LIMIT ?""",
             (max(limit, 1),),
         )
@@ -353,7 +361,7 @@ class Store:
 
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id
+            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
                  AND action NOT LIKE 'dismiss%'
@@ -640,6 +648,14 @@ class Store:
 
     @staticmethod
     def _row_to_event(row: tuple[Any, ...]) -> Event:
+        structured: dict[str, Any] = {}
+        if len(row) > 8 and row[8]:
+            try:
+                decoded = json.loads(row[8])
+                if isinstance(decoded, dict):
+                    structured = decoded
+            except (json.JSONDecodeError, TypeError):
+                structured = {}
         return Event(
             id=row[0],
             timestamp=_parse_ts(row[1]),
@@ -649,6 +665,7 @@ class Store:
             details=row[5] or "",
             severity=row[6] or "",
             run_id=row[7] or "",
+            structured=structured,
         )
 
     def get_target_snapshot(
@@ -669,7 +686,7 @@ class Store:
     def list_drift_events(self, limit: int = 50) -> list[Event]:
         rows = self.db.execute(
             "SELECT id, timestamp, action, target, actor,"
-            " details, severity, run_id"
+            " details, severity, run_id, structured_json"
             " FROM audit_events WHERE action = 'drift'"
             " ORDER BY timestamp DESC LIMIT ?",
             (limit,),

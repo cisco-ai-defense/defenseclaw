@@ -53,6 +53,24 @@ func sanitizeEvent(e Event) Event {
 	return e
 }
 
+func cloneStructuredPayload(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	buf, err := json.Marshal(in)
+	if err == nil {
+		var out map[string]any
+		if err := json.Unmarshal(buf, &out); err == nil {
+			return out
+		}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 // StructuredEmitter receives every audit Event that flows through the
 // Logger *after* it has been sanitized and persisted. It is intended for
 // translating audit events into the structured gateway.jsonl envelope
@@ -593,6 +611,7 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		DestinationApp:    e.DestinationApp,
 		ToolName:          e.ToolName,
 		ToolID:            e.ToolID,
+		Structured:        cloneStructuredPayload(e.Structured),
 	})
 }
 

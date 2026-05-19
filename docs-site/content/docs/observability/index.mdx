@@ -87,6 +87,12 @@ The `kind` field is your top-level taxonomy:
 
 You don't pick the schema in `setup` — you pick the *destinations*. Sinks are configured in `audit_sinks:` of `~/.defenseclaw/config.yaml` and the bundled commands maintain that block for you.
 
+## Audit contracts
+
+`gateway.jsonl` is still the live structured runtime log. `audit_events` is the SQLite audit store used by the TUI, exports, and audit sinks. The `details` column is intentionally backward-compatible text; new machine-readable audit payloads live in `structured_json` and export as `structured`.
+
+Connector hook audit rows use `schemas/hook-audit-envelope.json` (`schema: "defenseclaw.hook.v1"`). During migration, the same hook envelope is also embedded in `details_json=` inside `details` so existing Splunk SPL and grep workflows keep working. New consumers should read `structured`.
+
 ## Pick a starting point
 
 <Tabs items={['Local first', 'Production SIEM', 'Both']}>

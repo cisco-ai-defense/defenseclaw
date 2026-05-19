@@ -50,11 +50,12 @@ const HookAuditEnvelopeSchema = "defenseclaw.hook.v1"
 //     every connector-specific dispatch would re-invent the details
 //     string and silently drift.
 //
-// The audit `details` column always carries BOTH the JSON envelope
-// (under the literal key `details_json=`) AND the legacy
-// "action=… raw_action=… severity=…" tail, so operators with
-// existing grep recipes are not regressed; new tooling can `jq`
-// directly off the details_json value. See
+// Audit rows now carry this envelope directly on audit.Event.Structured
+// and persist it as audit_events.structured_json. The legacy `details`
+// column still carries BOTH the JSON envelope (under the literal key
+// `details_json=`) AND the historical "action=… raw_action=…
+// severity=…" tail, so operators with existing grep recipes are not
+// regressed while new tooling can read structured_json. See
 // logConnectorHookAuditEnvelope in hook_telemetry.go.
 //
 // All string fields are run through stripLogInjectionRunes before
@@ -157,6 +158,18 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	return string(b)
 }
 
+func renderHookAuditEnvelopePayload(env HookAuditEnvelope) (string, map[string]any) {
+	rendered := renderHookAuditEnvelope(env)
+	if rendered == "" {
+		return "", nil
+	}
+	var structured map[string]any
+	if err := json.Unmarshal([]byte(rendered), &structured); err != nil {
+		return rendered, nil
+	}
+	return rendered, structured
+}
+
 // preRedactEnvelopeFreeForm runs free-form, user-influenced fields
 // through the same redaction pipeline the downstream audit sink would
 // apply, BEFORE the field is folded into the envelope JSON. This is
@@ -244,6 +257,7 @@ func renderHookAuditLegacyDetails(env HookAuditEnvelope) string {
 		b.WriteByte('=')
 		b.WriteString(stripLogInjectionRunes(value))
 	}
+	writeKV("result", env.Result)
 	writeKV("action", env.Action)
 	writeKV("raw_action", env.RawAction)
 	writeKV("severity", env.Severity)
@@ -256,6 +270,9 @@ func renderHookAuditLegacyDetails(env HookAuditEnvelope) string {
 	}
 	if env.ElapsedMs > 0 {
 		writeKV("elapsed_ms", strconv.FormatInt(env.ElapsedMs, 10))
+	}
+	if env.BodyBytes > 0 {
+		writeKV("body_bytes", strconv.FormatInt(env.BodyBytes, 10))
 	}
 	if env.RawOrigin != "" {
 		writeKV("raw_origin", env.RawOrigin)

@@ -5,10 +5,13 @@
 package cli
 
 import (
+	"database/sql"
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // TestNormalizeAuditAction_PassesThroughKnownActions guards the F3 fix:
@@ -101,5 +104,49 @@ func TestIsKnownAuditAction_DelegatesToAuditPackage(t *testing.T) {
 	}
 	if isKnownAuditAction("not-a-real-action") {
 		t.Errorf("isKnownAuditAction accepted unknown action; want false")
+	}
+}
+
+func TestBuildAuditEventLineIncludesStructuredPayload(t *testing.T) {
+	line, err := buildAuditEventLine(
+		"00000000-0000-0000-0000-000000000001",
+		"2026-05-19T12:00:00Z",
+		string(audit.ActionConnectorHook),
+		"PreToolUse",
+		`connector=codex result=ok details_json="{\"schema\":\"defenseclaw.hook.v1\"}"`,
+		"INFO",
+		"run-1",
+		`{"schema":"defenseclaw.hook.v1","connector":"codex","event":"PreToolUse","result":"ok","would_block":false}`,
+		"session-1",
+		"trace-1",
+		"defenseclaw",
+		"agent-1",
+		"codex",
+		"instance-1",
+		"sidecar-1",
+		sql.NullInt64{Int64: 7, Valid: true},
+		"hash-1",
+		sql.NullInt64{Int64: 2, Valid: true},
+		"0.0.0-test",
+		"codex",
+		"shell",
+		"tool-1",
+		"policy-1",
+		version.Provenance{SchemaVersion: 7, ContentHash: "hash-1", Generation: 2, BinaryVersion: "0.0.0-test"},
+	)
+	if err != nil {
+		t.Fatalf("buildAuditEventLine: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(line, &got); err != nil {
+		t.Fatalf("export line is not JSON: %v\n%s", err, string(line))
+	}
+	structured, ok := got["structured"].(map[string]any)
+	if !ok {
+		t.Fatalf("structured missing or wrong type: %#v", got["structured"])
+	}
+	if structured["schema"] != "defenseclaw.hook.v1" || structured["connector"] != "codex" {
+		t.Fatalf("structured payload mismatch: %#v", structured)
 	}
 }

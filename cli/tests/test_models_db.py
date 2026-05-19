@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.logger import Logger
-from defenseclaw.models import ActionState, Finding, ScanResult, compare_severity
+from defenseclaw.models import ActionState, Event, Finding, ScanResult, compare_severity
 
 
 class ModelsDbTests(unittest.TestCase):
@@ -189,7 +189,26 @@ class ModelsDbTests(unittest.TestCase):
         }
 
         self.assertIn("run_id", audit_cols)
+        self.assertIn("structured_json", audit_cols)
         self.assertIn("run_id", scan_cols)
+
+    def test_log_event_round_trips_structured_payload(self):
+        evt = Event(
+            action="connector-hook",
+            target="PreToolUse",
+            severity="INFO",
+            structured={
+                "schema": "defenseclaw.hook.v1",
+                "connector": "codex",
+                "event": "PreToolUse",
+                "result": "ok",
+            },
+        )
+        self.store.log_event(evt)
+
+        events = self.store.list_events(1)
+        self.assertEqual(events[0].structured["schema"], "defenseclaw.hook.v1")
+        self.assertEqual(events[0].structured["connector"], "codex")
 
     def test_logger_uses_run_id_from_env(self):
         old = os.environ.get("DEFENSECLAW_RUN_ID")

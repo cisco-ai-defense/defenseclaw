@@ -66,6 +66,7 @@ EXPECTED_CLAW_MODE_ENUM = {
 }
 
 METRICS_GO = ROOT / "internal" / "telemetry" / "metrics.go"
+HOOK_AUDIT_GO = ROOT / "internal" / "gateway" / "hook_audit_envelope.go"
 OTEL_METRIC_INSTRUMENT_TYPES = {
     "Int64Counter": "counter",
     "Float64Histogram": "histogram",
@@ -122,6 +123,7 @@ def ensure_valid_meta(doc: dict, path: Path) -> bool:
 
 
 def check_audit_event(doc: dict) -> bool:
+    ok = True
     props = doc.get("properties", {})
     sv = props.get("schema_version")
     if not isinstance(sv, dict):
@@ -136,8 +138,57 @@ def check_audit_event(doc: dict) -> bool:
     required = set(doc.get("required", []))
     if "schema_version" not in required:
         print("check_schemas: audit-event.json: 'schema_version' must be in required[]", file=sys.stderr)
-        return False
-    return True
+        ok = False
+    structured = props.get("structured")
+    if not isinstance(structured, dict):
+        print("check_schemas: audit-event.json: missing structured property", file=sys.stderr)
+        ok = False
+    elif "object" not in structured.get("type", []):
+        print("check_schemas: audit-event.json: structured must allow object", file=sys.stderr)
+        ok = False
+    return ok
+
+
+def discover_hook_audit_schema_const() -> str:
+    text = HOOK_AUDIT_GO.read_text(encoding="utf-8")
+    match = re.search(r'HookAuditEnvelopeSchema\s*=\s*"([^"]+)"', text)
+    if not match:
+        raise RuntimeError("HookAuditEnvelopeSchema constant not found")
+    return match.group(1)
+
+
+def check_hook_audit_envelope(doc: dict) -> bool:
+    ok = True
+    props = doc.get("properties", {})
+    schema = props.get("schema", {})
+    expected = discover_hook_audit_schema_const()
+    if schema.get("const") != expected:
+        print(
+            "check_schemas: hook-audit-envelope.json: "
+            f"schema.const={schema.get('const')!r}, want {expected!r}",
+            file=sys.stderr,
+        )
+        ok = False
+    required = set(doc.get("required", []))
+    expected_required = {"schema", "timestamp", "connector", "event", "result", "would_block"}
+    missing = expected_required - required
+    if missing:
+        print(
+            "check_schemas: hook-audit-envelope.json: missing required fields "
+            f"{sorted(missing)}",
+            file=sys.stderr,
+        )
+        ok = False
+    result = set((props.get("result") or {}).get("enum") or [])
+    expected_results = {"ok", "panic", "rejected", "encode_error"}
+    if result != expected_results:
+        print(
+            "check_schemas: hook-audit-envelope.json: result enum drift "
+            f"got={sorted(result)} want={sorted(expected_results)}",
+            file=sys.stderr,
+        )
+        ok = False
+    return ok
 
 
 def check_envelope(doc: dict) -> bool:
@@ -370,6 +421,14 @@ def main() -> int:
             ok = False
     else:
         print("check_schemas: gateway-event-envelope.json missing", file=sys.stderr)
+        ok = False
+
+    hook_path = SCHEMA_DIR / "hook-audit-envelope.json"
+    if hook_path.exists():
+        if not check_hook_audit_envelope(load_json(hook_path)):
+            ok = False
+    else:
+        print("check_schemas: hook-audit-envelope.json missing", file=sys.stderr)
         ok = False
 
     resource_path = SCHEMA_DIR / "otel" / "resource.schema.json"

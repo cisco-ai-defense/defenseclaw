@@ -100,7 +100,7 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 		out = f
 	}
 
-	q := `SELECT id, timestamp, action, target, actor, details, severity, run_id,
+	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
 destination_app, tool_name, tool_id, policy_id
@@ -126,17 +126,17 @@ FROM audit_events ORDER BY timestamp ASC`
 
 	for rows.Next() {
 		var (
-			id, ts, action, actor                      string
-			target, details, severity, runID           sql.NullString
-			sessionID, traceID                         sql.NullString
-			agentID, agentName, agentInst, sidecarInst sql.NullString
-			schemaVer                                  sql.NullInt64
-			contentHash, binVer                        sql.NullString
-			gen                                        sql.NullInt64
-			destApp, toolName, toolID, policyID        sql.NullString
+			id, ts, action, actor                           string
+			target, details, structuredRaw, severity, runID sql.NullString
+			sessionID, traceID                              sql.NullString
+			agentID, agentName, agentInst, sidecarInst      sql.NullString
+			schemaVer                                       sql.NullInt64
+			contentHash, binVer                             sql.NullString
+			gen                                             sql.NullInt64
+			destApp, toolName, toolID, policyID             sql.NullString
 		)
 		if err := rows.Scan(
-			&id, &ts, &action, &target, &actor, &details, &severity, &runID,
+			&id, &ts, &action, &target, &actor, &details, &structuredRaw, &severity, &runID,
 			&sessionID, &traceID,
 			&agentID, &agentName, &agentInst, &sidecarInst,
 			&schemaVer, &contentHash, &gen, &binVer,
@@ -147,6 +147,7 @@ FROM audit_events ORDER BY timestamp ASC`
 
 		line, err := buildAuditEventLine(id, ts, action,
 			ns(target), ns(details), ns(severity), ns(runID),
+			ns(structuredRaw),
 			ns(sessionID), ns(traceID),
 			actor,
 			ns(agentID), ns(agentName), ns(agentInst), ns(sidecarInst),
@@ -187,6 +188,7 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 		}
 		line, err := buildAuditEventLine(id, ts, action,
 			ns(target), ns(details), ns(severity), ns(runID),
+			"",
 			"", "",
 			actor,
 			"", "", "", "",
@@ -213,6 +215,7 @@ func ns(s sql.NullString) string {
 
 func buildAuditEventLine(
 	id, ts, action, target, details, severity, runID string,
+	structuredRaw string,
 	sessionID, traceID string,
 	actor string,
 	agentID, agentName, agentInst, sidecarInst string,
@@ -242,6 +245,10 @@ func buildAuditEventLine(
 	if strings.TrimSpace(bver) == "" {
 		bver = prov.BinaryVersion
 	}
+	structured, err := parseStructuredPayload(structuredRaw)
+	if err != nil {
+		return nil, err
+	}
 
 	ev := map[string]any{
 		"id":                  id,
@@ -259,6 +266,7 @@ func buildAuditEventLine(
 		"span_id":             nil,
 		"target":              strPtr(target),
 		"details":             strPtr(detailsOut),
+		"structured":          structured,
 		"agent_id":            strPtr(agentID),
 		"agent_name":          strPtr(agentName),
 		"agent_instance_id":   strPtr(agentInst),
@@ -272,6 +280,17 @@ func buildAuditEventLine(
 		return nil, fmt.Errorf("audit export: %w", err)
 	}
 	return json.Marshal(ev)
+}
+
+func parseStructuredPayload(raw string) (any, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		return nil, fmt.Errorf("invalid structured_json: %w", err)
+	}
+	return payload, nil
 }
 
 func nilIfEmptyStr(s string) any {
