@@ -27,6 +27,15 @@ jobs:
       # install.sh / `defenseclaw upgrade` will look up at the next tag.
       - run: make check-version-sync
 
+  upgrade-manifest:
+    name: Upgrade Manifest Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Ensures future releases carry a release-owned migration contract
+      # before the release workflow publishes upgrade-manifest.json.
+      - run: make check-upgrade-manifest
+
   go-lint:
     name: Go Lint
     runs-on: ubuntu-latest

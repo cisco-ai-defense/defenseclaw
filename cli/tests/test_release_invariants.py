@@ -41,6 +41,7 @@ Run on every ``pytest`` invocation (no ``@unittest.skip`` markers).
 from __future__ import annotations
 
 import re
+import runpy
 import unittest
 from pathlib import Path
 
@@ -143,6 +144,17 @@ class TestReleaseInvariants(unittest.TestCase):
             len(set(versions)),
             f"duplicate migration version in registry: {versions}",
         )
+
+    def test_upgrade_manifest_generator_requires_known_migrations(self):
+        """Future releases ship an upgrade-manifest.json so old local
+        upgrade scripts can enforce mandatory migrations. The generated
+        manifest must include every migration version at or below the
+        package version."""
+        generator = runpy.run_path(str(_REPO_ROOT / "scripts" / "generate-upgrade-manifest.py"))
+        manifest = generator["build_manifest"]()
+        expected = [version for version, _desc, _fn in MIGRATIONS if _ver_tuple(version) <= _ver_tuple(__version__)]
+        self.assertEqual(manifest["release_version"], __version__)
+        self.assertEqual(manifest["required_cli_migrations"], expected)
 
 
 if __name__ == "__main__":  # pragma: no cover
