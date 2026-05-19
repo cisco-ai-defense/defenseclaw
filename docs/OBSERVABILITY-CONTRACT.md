@@ -174,7 +174,7 @@ Connector hook rows (`action=connector-hook` and `connector-hook-synthetic`) use
 | 2 — Gateway JSONL | `gatewaylog.Writer` → file + fanout |
 | 3 — OTel traces | `sdktrace` spans (proxy, tools, approvals, …) |
 | 4 — OTel metrics | `sdkmetric` instruments (`defenseclaw.*`, `gen_ai.*`, …) |
-| 5 — Audit sinks | `audit_sinks` → Splunk HEC, OTLP logs, HTTP JSONL (`sinks.Event`; wire shape mirrors `audit.Event` with optional `structured`) |
+| 5 — Audit sinks | `audit_sinks` → Splunk HEC, OTLP logs, HTTP JSONL (`sinks.Event`; wire shape mirrors `audit.Event` with v7 provenance and optional `structured`) |
 
 Not every `event_type` duplicates into all five tiers; gateway-native emissions may skip SQLite until a mirror row exists.
 
@@ -207,7 +207,6 @@ Recovered hook panics are fail-open at the HTTP boundary, but metrics and audit 
 - TODO: Reject or quarantine events with `schema_version` < 7 once fleet is migrated.
 - TODO: Dashboards: bucket by `content_hash` + `generation` after policy reloads.
 - TODO: Join `scan.scan_id` → `scan_findings` → `audit_events` via `run_id` / `trace_id`.
-- TODO: `sinks.Event` forward path may omit zero `schema_version` in JSON — validate against persisted `audit_events` when strict schema compliance is required (see `TODO(v7-followup)` in `test/e2e/v7_observability_test.go`).
 
 ---
 

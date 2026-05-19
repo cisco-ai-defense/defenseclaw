@@ -51,6 +51,26 @@ func TestHookContractResolution(t *testing.T) {
 	}
 }
 
+func TestHookContractNeedsActionOverride(t *testing.T) {
+	cases := []struct {
+		status string
+		want   bool
+	}{
+		{HookCompatibilityKnown, false},
+		{HookCompatibilityNotGated, false},
+		{HookCompatibilityUnversioned, true},
+		{HookCompatibilityUnknown, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.status, func(t *testing.T) {
+			got := HookContractNeedsActionOverride(HookContractResolution{Status: tc.status})
+			if got != tc.want {
+				t.Fatalf("HookContractNeedsActionOverride(%q)=%v want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
 	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"} {

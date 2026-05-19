@@ -58,6 +58,7 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 	_ = sink.Forward(context.Background(),
 		Event{ID: "verdict-1", Action: "skill-scan",
 			Severity: "HIGH", Timestamp: time.Unix(1700000000, 0).UTC(),
+			SchemaVersion: 7, BinaryVersion: "unit-test",
 			Structured: map[string]any{"stage": "guardrail", "action": "block"}})
 
 	mu.Lock()
@@ -80,10 +81,12 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 		Source     string  `json:"source"`
 		SourceType string  `json:"sourcetype"`
 		Event      struct {
-			ID         string         `json:"id"`
-			Action     string         `json:"action"`
-			Severity   string         `json:"severity"`
-			Structured map[string]any `json:"structured"`
+			ID            string         `json:"id"`
+			Action        string         `json:"action"`
+			Severity      string         `json:"severity"`
+			SchemaVersion int            `json:"schema_version"`
+			BinaryVersion string         `json:"binary_version"`
+			Structured    map[string]any `json:"structured"`
 		} `json:"event"`
 	}
 	if err := json.Unmarshal(r.body, &envelope); err != nil {
@@ -97,6 +100,12 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 	}
 	if envelope.Event.ID != "verdict-1" || envelope.Event.Action != "skill-scan" {
 		t.Fatalf("inner event wrong: %+v", envelope.Event)
+	}
+	if envelope.Event.SchemaVersion != 7 {
+		t.Fatalf("schema_version = %d, want 7", envelope.Event.SchemaVersion)
+	}
+	if envelope.Event.BinaryVersion != "unit-test" {
+		t.Fatalf("binary_version = %q, want unit-test", envelope.Event.BinaryVersion)
 	}
 	if envelope.Event.Structured["stage"] != "guardrail" {
 		t.Fatalf("structured dropped: %+v", envelope.Event.Structured)

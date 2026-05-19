@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // captureSink is an in-memory sinks.Sink that records every event
@@ -229,6 +230,10 @@ func TestLoggerSinkForwardingIncludesDefaultedFields(t *testing.T) {
 }
 
 func TestLoggerSinkForwardingIncludesStructuredPayload(t *testing.T) {
+	prevProcessID := ProcessAgentInstanceID()
+	t.Cleanup(func() { SetProcessAgentInstanceID(prevProcessID) })
+	SetProcessAgentInstanceID("logger-sink-process-id")
+
 	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
@@ -263,6 +268,15 @@ func TestLoggerSinkForwardingIncludesStructuredPayload(t *testing.T) {
 	}
 	if got[0].Structured["connector"] != "codex" {
 		t.Fatalf("sink structured connector = %#v", got[0].Structured["connector"])
+	}
+	if got[0].SchemaVersion != version.SchemaVersion {
+		t.Fatalf("sink schema_version = %d, want %d", got[0].SchemaVersion, version.SchemaVersion)
+	}
+	if got[0].BinaryVersion == "" {
+		t.Fatalf("sink binary_version must be stamped: %+v", got[0])
+	}
+	if got[0].SidecarInstanceID == "" {
+		t.Fatalf("sink sidecar_instance_id must be stamped: %+v", got[0])
 	}
 }
 

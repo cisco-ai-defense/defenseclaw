@@ -1254,8 +1254,8 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		AgentVersion:     agentVersion,
 		HookContractID:   contractResolution.Contract.ContractID,
 	}
-	if contractResolution.Status == connector.HookCompatibilityUnknown && strings.EqualFold(s.cfg.Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
+	if connector.HookContractNeedsActionOverride(contractResolution) && strings.EqualFold(s.cfg.Guardrail.Mode, "action") && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
 	}
 	if previous := connector.LoadHookContractLockEntry(s.cfg.DataDir, conn.Name()); previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)

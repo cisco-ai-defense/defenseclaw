@@ -30,6 +30,19 @@ const (
 	HookCompatibilityNotGated    = "not-gated"
 )
 
+// HookContractNeedsActionOverride reports whether an action-mode setup must
+// stop unless the operator explicitly accepts hook-contract drift. Unknown
+// means unsupported; unversioned means DefenseClaw can choose a default
+// contract but cannot prove the installed connector matches it.
+func HookContractNeedsActionOverride(resolution HookContractResolution) bool {
+	switch resolution.Status {
+	case HookCompatibilityUnknown, HookCompatibilityUnversioned:
+		return true
+	default:
+		return false
+	}
+}
+
 // HookContract is the versioned, reproducible hook surface DefenseClaw
 // knows how to install, decode, evaluate, and respond to for one connector.
 //

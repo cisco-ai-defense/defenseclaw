@@ -74,6 +74,14 @@ type Event struct {
 	ToolName          string `json:"tool_name,omitempty"`
 	ToolID            string `json:"tool_id,omitempty"`
 
+	// v7 provenance fields. Logger stamps these before forwarding so
+	// every sink carries the same contract fields as the SQLite
+	// audit_events row.
+	SchemaVersion int    `json:"schema_version,omitempty"`
+	ContentHash   string `json:"content_hash,omitempty"`
+	Generation    uint64 `json:"generation,omitempty"`
+	BinaryVersion string `json:"binary_version,omitempty"`
+
 	// Structured payload — when set, this is the canonical machine-readable
 	// representation of the event (e.g. a guardrail verdict). Sinks should
 	// prefer Structured over Details when emitting.

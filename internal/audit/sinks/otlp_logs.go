@@ -171,8 +171,14 @@ func (s *OTLPLogsSink) Forward(ctx context.Context, e Event) error {
 	if e.AgentName != "" {
 		record.AddAttributes(otellog.String("audit.agent_name", e.AgentName))
 	}
+	if e.AgentID != "" {
+		record.AddAttributes(otellog.String("audit.agent_id", e.AgentID))
+	}
 	if e.AgentInstanceID != "" {
 		record.AddAttributes(otellog.String("audit.agent_instance_id", e.AgentInstanceID))
+	}
+	if e.SidecarInstanceID != "" {
+		record.AddAttributes(otellog.String("audit.sidecar_instance_id", e.SidecarInstanceID))
 	}
 	if e.PolicyID != "" {
 		record.AddAttributes(otellog.String("audit.policy_id", e.PolicyID))
@@ -185,6 +191,18 @@ func (s *OTLPLogsSink) Forward(ctx context.Context, e Event) error {
 	}
 	if e.ToolID != "" {
 		record.AddAttributes(otellog.String("audit.tool_id", e.ToolID))
+	}
+	if e.SchemaVersion != 0 {
+		record.AddAttributes(otellog.Int64("audit.schema_version", int64(e.SchemaVersion)))
+	}
+	if e.ContentHash != "" {
+		record.AddAttributes(otellog.String("audit.content_hash", e.ContentHash))
+	}
+	if e.Generation != 0 {
+		record.AddAttributes(otellog.Int64("audit.generation", int64(e.Generation)))
+	}
+	if e.BinaryVersion != "" {
+		record.AddAttributes(otellog.String("audit.binary_version", e.BinaryVersion))
 	}
 
 	s.logger.Emit(ctx, record)

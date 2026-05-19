@@ -107,11 +107,13 @@ The health endpoint now reports connector state: name, tool inspection mode, sub
 
 ## Remaining Work
 
-Six findings from the code review require design decisions before implementation. These are tracked in `docs/CONNECTOR-REMAINING-FIXES.md`:
+This historical summary predates the hook collector unification in PR #284.
+Open findings are tracked in `docs/CONNECTOR-REMAINING-FIXES.md`; the hook
+event coverage and fail-closed capability gaps listed here were addressed by
+the versioned hook contract/profile registry.
 
-- **Missing hook events**: Only 8 of 22+ techspec events are registered. Needs a decision on which events to add and at what inspection depth.
-- **HandleHookEvent stub**: Connector-level `HandleHookEvent` always returns "allow". Needs an architecture decision on whether inspection stays at the gateway level or moves into connectors.
-- **InstallScope + FailClosed**: Config fields specified in the techspec but not yet implemented.
+- **HandleHookEvent stub**: Connector-level inspection stayed at the gateway/profile dispatcher; the connector-level stub finding was resolved by deleting the bespoke interface path.
+- **InstallScope**: Still connector-specific where the host supports user/workspace placement.
 - **Auth header inconsistency**: `X-DC-Auth` accepts both raw tokens and `Bearer`-prefixed tokens ambiguously.
-- **No file locking**: Settings.json read-modify-write has no concurrency protection.
+- **No file locking**: Settings/config read-modify-write hardening is tracked separately where not already converted to lock + atomic rename helpers.
 - **Exported test globals**: Package-level test overrides are fragile under concurrent test runs.

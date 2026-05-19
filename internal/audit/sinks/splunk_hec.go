@@ -198,6 +198,10 @@ type splunkAuditEvent struct {
 	DestinationApp    string         `json:"destination_app,omitempty"`
 	ToolName          string         `json:"tool_name,omitempty"`
 	ToolID            string         `json:"tool_id,omitempty"`
+	SchemaVersion     int            `json:"schema_version,omitempty"`
+	ContentHash       string         `json:"content_hash,omitempty"`
+	Generation        uint64         `json:"generation,omitempty"`
+	BinaryVersion     string         `json:"binary_version,omitempty"`
 	Structured        map[string]any `json:"structured,omitempty"`
 }
 
@@ -422,6 +426,10 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			DestinationApp:    e.DestinationApp,
 			ToolName:          e.ToolName,
 			ToolID:            e.ToolID,
+			SchemaVersion:     e.SchemaVersion,
+			ContentHash:       e.ContentHash,
+			Generation:        e.Generation,
+			BinaryVersion:     e.BinaryVersion,
 			Structured:        e.Structured,
 		},
 	}

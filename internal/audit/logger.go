@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // sanitizeEvent rewrites free-form, PII-bearing fields on a copy of the
@@ -69,6 +70,45 @@ func cloneStructuredPayload(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// stampAuditEventEnvelope fills the envelope fields that must be identical
+// across SQLite, audit sinks, OTel, and the structured gateway bridge.
+// Store.LogEvent also stamps these fields before INSERT, but it receives
+// events by value; stamping here keeps the fan-out copy in lockstep with the
+// persisted row.
+func stampAuditEventEnvelope(e *Event) {
+	if e == nil {
+		return
+	}
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if e.Actor == "" {
+		e.Actor = "defenseclaw"
+	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
+	if e.SidecarInstanceID == "" {
+		e.SidecarInstanceID = ProcessAgentInstanceID()
+	}
+	prov := version.Current()
+	if e.SchemaVersion == 0 {
+		e.SchemaVersion = prov.SchemaVersion
+	}
+	if e.ContentHash == "" {
+		e.ContentHash = prov.ContentHash
+	}
+	if e.Generation == 0 {
+		e.Generation = prov.Generation
+	}
+	if e.BinaryVersion == "" {
+		e.BinaryVersion = prov.BinaryVersion
+	}
 }
 
 // StructuredEmitter receives every audit Event that flows through the
@@ -334,6 +374,7 @@ func (l *Logger) LogScanWithCorrelation(
 		AgentInstanceID:   corr.AgentInstanceID,
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	})
+	stampAuditEventEnvelope(&event)
 
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -421,6 +462,7 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	applyEnvelope(&event, env)
+	stampAuditEventEnvelope(&event)
 	event = sanitizeEvent(event)
 	storeErr := l.store.LogEvent(event)
 	if storeErr != nil {
@@ -487,7 +529,7 @@ func mustPersistAction(action string) bool {
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
 	sinksMgr, otel, structured := l.snapshot()
-	event := sanitizeEvent(Event{
+	event := Event{
 		ID:                uuid.New().String(),
 		Timestamp:         time.Now().UTC(),
 		Action:            action,
@@ -497,7 +539,9 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		Severity:          "INFO",
 		RunID:             currentRunID(),
 		SidecarInstanceID: ProcessAgentInstanceID(),
-	})
+	}
+	stampAuditEventEnvelope(&event)
+	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
 			otel.RecordAuditDBError(context.Background(), "insert_event")
@@ -541,15 +585,6 @@ func (l *Logger) LogEventCtx(ctx context.Context, event Event) error {
 // control severity or other fields that LogAction hardcodes.
 func (l *Logger) LogEvent(event Event) error {
 	sinksMgr, otel, structured := l.snapshot()
-	if event.ID == "" {
-		event.ID = uuid.New().String()
-	}
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now().UTC()
-	}
-	if event.RunID == "" {
-		event.RunID = currentRunID()
-	}
 	// v7 clean break: AgentInstanceID is per-SESSION. Callers that
 	// carry a session context (the router, proxy session resolver)
 	// stamp it explicitly. Absence is meaningful — "no session
@@ -557,9 +592,7 @@ func (l *Logger) LogEvent(event Event) error {
 	// The process-scoped identifier lives on SidecarInstanceID;
 	// we auto-fill that one so every row has a stable sidecar
 	// identity without burdening callers.
-	if event.SidecarInstanceID == "" {
-		event.SidecarInstanceID = ProcessAgentInstanceID()
-	}
+	stampAuditEventEnvelope(&event)
 	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -611,6 +644,10 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		DestinationApp:    e.DestinationApp,
 		ToolName:          e.ToolName,
 		ToolID:            e.ToolID,
+		SchemaVersion:     e.SchemaVersion,
+		ContentHash:       e.ContentHash,
+		Generation:        e.Generation,
+		BinaryVersion:     e.BinaryVersion,
 		Structured:        cloneStructuredPayload(e.Structured),
 	})
 }
