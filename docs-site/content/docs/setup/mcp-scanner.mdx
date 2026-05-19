@@ -172,7 +172,7 @@ Behavioural intent analysis depends on the LLM judge being able to reason about 
 defenseclaw keys set DEFENSECLAW_LLM_KEY
 ```
 
-DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any Cisco AI Defense API key for content classification. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
+DefenseClaw injects it into the scanner subprocess via `inject_llm_env`, alongside any [Cisco AI Defense](https://www.cisco.com/site/us/en/products/security/ai-defense/index.html) API key for content classification. See [Setup → Unified LLM key](/docs/setup/unified-llm-key) for the resolution order and Bifrost provider catalog.
 
 <Callout type="info">
 The MCP scanner runs each stdio server inside a subprocess sandbox with a wall-clock timeout. Servers that hang are killed; servers that try to spawn networked side processes are flagged as findings, not just terminated silently.

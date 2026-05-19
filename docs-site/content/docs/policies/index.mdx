@@ -128,7 +128,7 @@ Every decision carries the matching `reasons[]` so the audit event can name the 
 The guardrail rule pack is the *content* the gateway evaluates against — the actual regex patterns, judge prompts, and category taxonomies. Three packs ship out of the box:
 
 <Cards>
-  <Card title="permissive" href="/docs/defaults#permissive" description="Observe-only baseline. Patterns log but don't block. Good for first-week pilots." />
+  <Card title="permissive" href="/docs/defaults#permissive" description="Permissive baseline. Patterns log; only CRITICAL findings block installs. Good for first-week pilots." />
   <Card title="default" href="/docs/defaults#default" description="Sensible production defaults. Blocks high-severity secrets, prompts for medium." />
   <Card title="strict" href="/docs/defaults#strict" description="Belt-and-suspenders. Blocks medium+ on most categories. Choose this for regulated workloads." />
 </Cards>

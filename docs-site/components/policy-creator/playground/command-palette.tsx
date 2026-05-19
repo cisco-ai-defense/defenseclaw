@@ -95,7 +95,7 @@ export const INDEX: IndexEntry[] = [
   { sectionId: 'correlator', group: 'Correlator', label: 'Fingerprint chain', keywords: ['fingerprint', 'exfil', 'same value across turns'] },
 
   // cisco AI Defense
-  { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'Cisco AI Defense lane', keywords: ['cisco', 'ai defense', 'aid', 'second opinion', 'remote scanner'] },
+  { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'Cisco AI Defense (Optional · Enterprise)', keywords: ['cisco', 'ai defense', 'aid', 'second opinion', 'remote scanner', 'enterprise', 'optional'] },
   { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'AID api key env var', keywords: ['api_key_env', 'CISCO_AI_DEFENSE_API_KEY', 'token'] },
   { sectionId: 'cisco-ai-defense', group: 'Cisco AI Defense', label: 'AID scan_hook_surface', keywords: ['hook surface', 'pretooluse', 'posttooluse', 'tool call coverage'] },
 
