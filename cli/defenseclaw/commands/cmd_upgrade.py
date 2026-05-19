@@ -26,10 +26,14 @@ This matches the upgrade path used by scripts/upgrade.sh.
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
 import os
 import platform
+import re
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import time
 
@@ -42,6 +46,10 @@ from defenseclaw.context import AppContext, pass_ctx
 GITHUB_REPO = "cisco-ai-defense/defenseclaw"
 GITHUB_API = f"https://api.github.com/repos/{GITHUB_REPO}"
 GITHUB_DL = f"https://github.com/{GITHUB_REPO}/releases/download"
+_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+_SHA256_HEX = set("0123456789abcdefABCDEF")
+_UPGRADE_PROTOCOL_VERSION = 1
+_UPGRADE_MANIFEST_FILENAME = "upgrade-manifest.json"
 
 
 @click.command("upgrade")
@@ -78,7 +86,7 @@ def upgrade(
             ux.err("Could not determine latest release. Use --version to specify.", indent="  ")
             raise SystemExit(1)
 
-    target_version = target_version.lstrip("v")
+    target_version = _normalize_target_version(target_version)
     ux.kv("Installed version", current_version, indent="  ", key_width=22)
     ux.kv("Target version", target_version, indent="  ", key_width=22)
 
@@ -108,8 +116,38 @@ def upgrade(
 
     staging_dir = tempfile.mkdtemp(prefix="defenseclaw-upgrade-")
     try:
-        gw_binary_path = _download_gateway(target_version, os_name, arch, staging_dir)
-        whl_path = _download_wheel(target_version, staging_dir)
+        # Resolve checksums.txt FIRST so any download we accept is verified
+        # against a published manifest. Returns None for old releases that
+        # predate goreleaser's checksum publication; in that case we proceed
+        # with a clear warning rather than hard-failing operators on a
+        # version they could otherwise install.
+        artifact_names = [
+            f"defenseclaw_{target_version}_{os_name}_{arch}.tar.gz",
+            f"defenseclaw-{target_version}-py3-none-any.whl",
+            _UPGRADE_MANIFEST_FILENAME,
+        ]
+        checksums = _download_checksums(target_version, staging_dir)
+        if checksums is None:
+            checksums = _fetch_release_asset_digests(target_version)
+            if checksums is None:
+                ux.warn(
+                    "checksums.txt unavailable — release artifacts will be "
+                    "downloaded WITHOUT integrity verification.",
+                    indent="  ",
+                )
+            else:
+                ux.ok("Release artifact digests resolved (GitHub asset metadata)")
+        else:
+            ux.ok("Checksum manifest verified (checksums.txt)")
+            _fill_missing_checksums_from_release_assets(target_version, checksums, artifact_names)
+
+        upgrade_manifest = _download_upgrade_manifest(target_version, staging_dir, checksums)
+        gw_binary_path, _gw_tarball_name = _download_gateway(
+            target_version, os_name, arch, staging_dir, checksums,
+        )
+        whl_path, _whl_name = _download_wheel(
+            target_version, staging_dir, checksums,
+        )
     except SystemExit:
         shutil.rmtree(staging_dir, ignore_errors=True)
         raise
@@ -149,7 +187,12 @@ def upgrade(
     try:
         ux.banner("Installing Artifacts")
 
-        _install_gateway(gw_binary_path, os_name)
+        # Pass backup_dir so the previous gateway binary is snapshotted
+        # before being overwritten — turns a failed health check into a
+        # documented `cp` rollback instead of a "rebuild from source"
+        # incident.
+        installed_gateway_path = _install_gateway(gw_binary_path, os_name, backup_dir=backup_dir)
+        _verify_installed_gateway_version(installed_gateway_path, target_version)
         _install_wheel(whl_path)
 
         ux.banner("Running Migrations")
@@ -176,6 +219,14 @@ def upgrade(
         else:
             ux.ok(f"Applied {count} migration(s)")
 
+        # Surface the migration cursor so a partial-failure host (where
+        # the cursor differs from what the registry says we just ran)
+        # is visible in the upgrade log, not buried in
+        # ``<data_dir>/.migration_state.json``. Best-effort: a missing
+        # cursor module simply skips the summary.
+        _print_migration_cursor_summary(data_dir)
+        _assert_required_cli_migrations(upgrade_manifest, data_dir)
+
     finally:
         # Always clean up staging dir first, even if restart fails.
         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -184,14 +235,15 @@ def upgrade(
 
         _run_silent(["defenseclaw-gateway", "start"], "Gateway started", "Could not start gateway")
 
-        result = subprocess.run(
+        # Reuse _run_silent so the restart degrades gracefully when the
+        # `openclaw` CLI isn't installed. A bare subprocess.run() raises
+        # FileNotFoundError before check=False can take effect, which used
+        # to crash the upgrade command after services had already restarted.
+        if not _run_silent(
             ["openclaw", "gateway", "restart"],
-            capture_output=True, text=True, timeout=30, check=False,
-        )
-        if result.returncode == 0:
-            ux.ok("OpenClaw gateway restarted — DefenseClaw plugin loaded")
-        else:
-            ux.warn("Could not restart OpenClaw gateway automatically")
+            "OpenClaw gateway restarted — DefenseClaw plugin loaded",
+            "Could not restart OpenClaw gateway automatically",
+        ):
             ux.subhead("Run manually: openclaw gateway restart")
 
         # Health verification
@@ -203,6 +255,12 @@ def upgrade(
     ux.banner("Upgrade Complete")
     ux.ok(f"DefenseClaw upgraded: {current_version} → {target_version}")
     click.echo(f"  {ux.bold('Backup:')} {backup_dir}")
+    # Surface component drift now (rather than waiting for the operator to
+    # discover it next time they run `defenseclaw version`). The plugin
+    # ships separately from `defenseclaw upgrade` — when guardrail flows
+    # through OpenClaw, a stale plugin against a fresh gateway is the #1
+    # source of "guardrail not enforcing" reports.
+    _check_post_upgrade_drift(target_version)
     click.echo()
 
     if app.logger:
@@ -216,6 +274,21 @@ def upgrade(
 # GitHub release helpers
 # ---------------------------------------------------------------------------
 
+def _normalize_target_version(version: str) -> str:
+    """Return a canonical release version or abort on unsafe input."""
+    normalized = version.strip()
+    if normalized.startswith("v"):
+        normalized = normalized[1:]
+    if _VERSION_RE.fullmatch(normalized):
+        return normalized
+
+    ux.err(
+        f"Invalid release version: {version!r}. Expected MAJOR.MINOR.PATCH.",
+        indent="  ",
+    )
+    raise SystemExit(1)
+
+
 def _fetch_latest_version() -> str | None:
     """Fetch the latest release version from GitHub.
 
@@ -223,16 +296,23 @@ def _fetch_latest_version() -> str | None:
     avoid hitting the unauthenticated rate limit (60 req/h).
     """
     try:
-        headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
-        token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        resp = requests.get(f"{GITHUB_API}/releases/latest", headers=headers, timeout=15)
+        resp = requests.get(f"{GITHUB_API}/releases/latest", headers=_github_headers(), timeout=15)
         resp.raise_for_status()
         tag = resp.json().get("tag_name", "")
-        return tag.lstrip("v") if tag else None
+        if not isinstance(tag, str) or not tag:
+            return None
+        return tag[1:] if tag.startswith("v") else tag
     except (requests.RequestException, KeyError, ValueError):
         return None
+
+
+def _github_headers() -> dict[str, str]:
+    """Headers for GitHub API calls, with optional token auth."""
+    headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _detect_platform() -> tuple[str, str]:
@@ -279,42 +359,712 @@ def _preflight_check(version: str, os_name: str, arch: str) -> None:
     ux.ok("Release artifacts verified")
 
 
-def _download_gateway(version: str, os_name: str, arch: str, staging_dir: str) -> str:
-    """Download the gateway tarball to staging_dir and extract. Returns path to binary."""
+def _download_gateway(
+    version: str,
+    os_name: str,
+    arch: str,
+    staging_dir: str,
+    checksums: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Download the gateway tarball, verify its checksum, and extract.
+
+    Returns ``(binary_path, tarball_name)``. The tarball name is returned
+    so the caller can correlate this artifact with the published
+    ``checksums.txt`` entry; we keep the binary path stable so existing
+    callers don't break when checksum verification is opted into.
+    """
     tarball = f"defenseclaw_{version}_{os_name}_{arch}.tar.gz"
     url = f"{GITHUB_DL}/{version}/{tarball}"
 
     click.echo(f"  {ux.dim('→')} Downloading gateway binary ({os_name}/{arch}) ...")
     dest = os.path.join(staging_dir, tarball)
     _download_file(url, dest)
-    subprocess.run(["tar", "-xzf", dest, "-C", staging_dir], check=True, capture_output=True)
+    if checksums is not None:
+        _verify_sha256(dest, tarball, checksums)
+    _extract_gateway_tarball(dest, staging_dir)
     binary = os.path.join(staging_dir, "defenseclaw")
+    if not os.path.isfile(binary):
+        ux.err(
+            "Gateway tarball did not contain the expected defenseclaw binary.",
+            indent="  ",
+        )
+        raise SystemExit(1)
     ux.ok("Gateway binary downloaded")
-    return binary
+    return binary, tarball
 
 
-def _download_wheel(version: str, staging_dir: str) -> str:
-    """Download the Python CLI wheel to staging_dir. Returns path to wheel."""
+def _download_wheel(
+    version: str,
+    staging_dir: str,
+    checksums: dict[str, str] | None = None,
+) -> tuple[str, str]:
+    """Download the Python CLI wheel and verify its checksum."""
     whl_name = f"defenseclaw-{version}-py3-none-any.whl"
     url = f"{GITHUB_DL}/{version}/{whl_name}"
 
     click.echo(f"  {ux.dim('→')} Downloading Python CLI wheel ...")
     dest = os.path.join(staging_dir, whl_name)
     _download_file(url, dest)
+    if checksums is not None:
+        _verify_sha256(dest, whl_name, checksums)
     ux.ok("Python CLI wheel downloaded")
+    return dest, whl_name
+
+
+# Filename the GitHub release exposes for the SHA-256 manifest. Mirrors
+# .goreleaser.yaml ``checksum.name_template``.
+_CHECKSUMS_FILENAME = "checksums.txt"
+
+
+def _download_checksums(
+    version: str,
+    staging_dir: str,
+) -> dict[str, str] | None:
+    """Download ``checksums.txt`` for the target release and parse it.
+
+    Returns a mapping of ``filename → lowercase_sha256_hex`` or ``None``
+    when the manifest is unavailable. Old releases predate goreleaser's
+    checksum publication, so a missing file must not block the upgrade
+    — the caller decides whether to warn or hard-fail. We deliberately
+    parse, not just download, because a 200 with garbage body would
+    otherwise look "verified" to the caller.
+    """
+    dest = _download_optional_release_asset(version, _CHECKSUMS_FILENAME, staging_dir)
+    if not dest:
+        return None
+
+    _verify_checksums_sigstore(version, staging_dir, dest)
+
+    out: dict[str, str] = {}
+    try:
+        with open(dest, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                # goreleaser emits "<sha256>  <filename>" (two spaces).
+                # We split on whitespace to tolerate single-space variants
+                # from sha256sum / shasum output styles.
+                parts = line.split()
+                if len(parts) != 2:
+                    continue
+                sha, name = parts
+                # Defense in depth: only accept hex strings of expected length.
+                if not _is_sha256_hex(sha):
+                    continue
+                name = name.removeprefix("./")
+                out[name] = sha.lower()
+    except OSError as exc:
+        ux.warn(f"Could not parse checksums.txt: {exc}", indent="  ")
+        return None
+
+    if out:
+        return out
+
+    ux.err("checksums.txt did not contain any valid SHA-256 entries.", indent="  ")
+    raise SystemExit(1)
+
+
+def _verify_checksums_sigstore(version: str, staging_dir: str, checksums_path: str) -> None:
+    """Verify checksums.txt with its Sigstore cert/signature when available."""
+    sig_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.sig", staging_dir)
+    cert_path = _download_optional_release_asset(version, f"{_CHECKSUMS_FILENAME}.pem", staging_dir)
+
+    if not sig_path and not cert_path:
+        return
+    if not sig_path or not cert_path:
+        ux.warn(
+            "checksums.txt Sigstore signature assets are incomplete; "
+            "continuing without signature verification.",
+            indent="  ",
+        )
+        return
+
+    cosign = shutil.which("cosign")
+    if not cosign:
+        ux.warn(
+            "checksums.txt Sigstore signature is present, but cosign was "
+            "not found on PATH; continuing without signature verification.",
+            indent="  ",
+        )
+        return
+
+    cmd = [
+        cosign,
+        "verify-blob",
+        "--certificate",
+        cert_path,
+        "--signature",
+        sig_path,
+        "--certificate-identity-regexp",
+        f"^https://github.com/{GITHUB_REPO}/.+",
+        "--certificate-oidc-issuer",
+        "https://token.actions.githubusercontent.com",
+        checksums_path,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.err(f"Could not verify checksums.txt Sigstore signature: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+
+    if result.returncode != 0:
+        ux.err("checksums.txt Sigstore signature verification failed.", indent="  ")
+        detail = (result.stderr or result.stdout or "").strip()
+        for line in detail.splitlines()[:5]:
+            ux.subhead(line[:200], indent="    ")
+        raise SystemExit(1)
+
+    ux.ok("Checksum signature verified (Sigstore)")
+
+
+def _download_optional_release_asset(
+    version: str,
+    filename: str,
+    staging_dir: str,
+) -> str | None:
+    """Download an optional release-side file, returning its path if present."""
+    url = f"{GITHUB_DL}/{version}/{filename}"
+    dest = os.path.join(staging_dir, filename)
+    resp = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, timeout=15, allow_redirects=True)
+        except requests.RequestException:
+            if attempt < 3:
+                time.sleep(2 ** (attempt - 1))
+                continue
+            return None
+        if resp.status_code == 200:
+            break
+        if attempt < 3 and resp.status_code in {429, 500, 502, 503, 504}:
+            time.sleep(2 ** (attempt - 1))
+            continue
+        return None
+    if resp is None or resp.status_code != 200:
+        return None
+    try:
+        with open(dest, "wb") as f:
+            f.write(resp.content)
+    except OSError as exc:
+        ux.warn(f"Could not save optional release asset {filename}: {exc}", indent="  ")
+        return None
     return dest
 
 
-def _install_gateway(binary_path: str, os_name: str) -> None:
-    """Install a pre-downloaded gateway binary."""
+def _download_upgrade_manifest(
+    version: str,
+    staging_dir: str,
+    checksums: dict[str, str] | None = None,
+) -> dict[str, object] | None:
+    """Download and validate the release's upgrade contract, when present.
+
+    ``defenseclaw upgrade`` itself is installed on the operator's machine,
+    so future releases cannot assume the local upgrader learned new rules.
+    The release-owned manifest is the forward-compatibility handoff: it can
+    require a newer upgrade protocol, name migrations that must be recorded
+    in the cursor, and make breaking releases fail before old code guesses.
+    """
+    url = f"{GITHUB_DL}/{version}/{_UPGRADE_MANIFEST_FILENAME}"
+    dest = os.path.join(staging_dir, _UPGRADE_MANIFEST_FILENAME)
+    try:
+        resp = requests.get(url, timeout=15, allow_redirects=True)
+    except requests.RequestException as exc:
+        ux.warn(f"Could not reach {_UPGRADE_MANIFEST_FILENAME}: {exc}", indent="  ")
+        return None
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        ux.warn(
+            f"Could not fetch {_UPGRADE_MANIFEST_FILENAME} ({resp.status_code}); "
+            "continuing without release-specific upgrade policy.",
+            indent="  ",
+        )
+        return None
+
+    try:
+        with open(dest, "wb") as f:
+            f.write(resp.content)
+    except OSError as exc:
+        ux.err(f"Could not save {_UPGRADE_MANIFEST_FILENAME}: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+
+    if checksums is not None:
+        _verify_sha256(dest, _UPGRADE_MANIFEST_FILENAME, checksums)
+
+    try:
+        payload = json.loads(resp.content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        ux.err(f"Invalid {_UPGRADE_MANIFEST_FILENAME}: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+
+    manifest = _validate_upgrade_manifest(payload, version)
+    required = manifest["required_cli_migrations"]
+    if required:
+        ux.ok(
+            "Upgrade manifest loaded "
+            f"(required migrations: {', '.join(required)})"
+        )
+    else:
+        ux.ok("Upgrade manifest loaded")
+    return manifest
+
+
+def _validate_upgrade_manifest(payload: object, version: str) -> dict[str, object]:
+    """Validate a parsed ``upgrade-manifest.json`` payload."""
+    if not isinstance(payload, dict):
+        ux.err(f"{_UPGRADE_MANIFEST_FILENAME} must be a JSON object.", indent="  ")
+        raise SystemExit(1)
+
+    schema_version = payload.get("schema_version")
+    if not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        ux.err(f"{_UPGRADE_MANIFEST_FILENAME} missing integer schema_version.", indent="  ")
+        raise SystemExit(1)
+    if schema_version > 1:
+        ux.err(
+            f"Release {version} uses upgrade manifest schema {schema_version}, "
+            "which this upgrader does not understand.",
+            indent="  ",
+        )
+        _print_new_upgrade_script_hint(version)
+        raise SystemExit(1)
+
+    release_version = payload.get("release_version")
+    if release_version != version:
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} release_version mismatch: "
+            f"expected {version}, got {release_version!r}.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+
+    min_protocol = payload.get("min_upgrade_protocol", 1)
+    if not isinstance(min_protocol, int) or isinstance(min_protocol, bool) or min_protocol < 1:
+        ux.err(f"{_UPGRADE_MANIFEST_FILENAME} has invalid min_upgrade_protocol.", indent="  ")
+        raise SystemExit(1)
+    if min_protocol > _UPGRADE_PROTOCOL_VERSION:
+        ux.err(
+            f"Release {version} requires upgrade protocol {min_protocol}, "
+            f"but this upgrader supports {_UPGRADE_PROTOCOL_VERSION}.",
+            indent="  ",
+        )
+        _print_new_upgrade_script_hint(version)
+        raise SystemExit(1)
+
+    policy = payload.get("migration_failure_policy", "warn")
+    if policy not in ("warn", "fail"):
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} has invalid migration_failure_policy: "
+            f"{policy!r}.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+
+    required_raw = payload.get("required_cli_migrations", [])
+    if not isinstance(required_raw, list) or not all(isinstance(v, str) for v in required_raw):
+        ux.err(
+            f"{_UPGRADE_MANIFEST_FILENAME} required_cli_migrations must be "
+            "a list of version strings.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+    required = []
+    seen: set[str] = set()
+    for migration_version in required_raw:
+        if not _VERSION_RE.fullmatch(migration_version):
+            ux.err(
+                f"{_UPGRADE_MANIFEST_FILENAME} contains invalid migration "
+                f"version {migration_version!r}.",
+                indent="  ",
+            )
+            raise SystemExit(1)
+        if migration_version not in seen:
+            required.append(migration_version)
+            seen.add(migration_version)
+
+    return {
+        "schema_version": schema_version,
+        "release_version": release_version,
+        "min_upgrade_protocol": min_protocol,
+        "migration_failure_policy": policy,
+        "required_cli_migrations": required,
+    }
+
+
+def _print_new_upgrade_script_hint(version: str) -> None:
+    url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/{version}/scripts/upgrade.sh"
+    ux.subhead(
+        "Use the upgrade script shipped with that release:",
+        indent="    ",
+    )
+    ux.subhead(
+        f"curl -fsSL {url} | bash -s -- --version {version}",
+        indent="    ",
+    )
+
+
+def _assert_required_cli_migrations(
+    manifest: dict[str, object] | None,
+    data_dir: str,
+) -> None:
+    """Warn or fail if the release manifest named migrations that did not apply."""
+    if not manifest:
+        return
+    required = manifest.get("required_cli_migrations", [])
+    policy = manifest.get("migration_failure_policy", "warn")
+    if not isinstance(required, list) or not required:
+        return
+
+    from defenseclaw import migration_state
+
+    state = migration_state.load(data_dir)
+    missing = [
+        version
+        for version in required
+        if isinstance(version, str) and not migration_state.is_applied(state, version)
+    ]
+    if not missing:
+        return
+
+    label = "Required" if policy == "fail" else "Expected"
+    ux.warn(
+        f"{label} migration(s) were not recorded in the migration cursor: "
+        + ", ".join(missing),
+        indent="  ",
+    )
+    if policy == "fail":
+        ux.subhead(
+            "The release manifest marks these migrations as mandatory. "
+            "Re-run the upgrade after fixing the migration error, or run "
+            "`defenseclaw migrations status` for cursor details.",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
+
+def _fetch_release_asset_digests(version: str) -> dict[str, str] | None:
+    """Read GitHub's per-asset SHA-256 digests for ``version``.
+
+    GitHub release assets expose a ``digest`` field (`sha256:<hex>`).
+    We use it as a fallback for releases where ``checksums.txt`` was
+    generated by GoReleaser before the Python wheel/plugin assets were
+    attached. A missing API digest does not make the release unverifiable
+    by itself; callers decide whether to warn or fail for required files.
+    """
+    try:
+        resp = requests.get(
+            f"{GITHUB_API}/releases/tags/{version}",
+            headers=_github_headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        ux.warn(f"Could not fetch GitHub asset digests: {exc}", indent="  ")
+        return None
+
+    assets = payload.get("assets", []) if isinstance(payload, dict) else []
+    if not isinstance(assets, list):
+        return None
+
+    out: dict[str, str] = {}
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = asset.get("name")
+        digest = asset.get("digest")
+        if not isinstance(name, str) or not isinstance(digest, str):
+            continue
+        prefix = "sha256:"
+        if not digest.startswith(prefix):
+            continue
+        sha = digest[len(prefix):]
+        if _is_sha256_hex(sha):
+            out[name] = sha.lower()
+    return out if out else None
+
+
+def _fill_missing_checksums_from_release_assets(
+    version: str,
+    checksums: dict[str, str],
+    artifact_names: list[str],
+) -> None:
+    """Fill required checksum gaps from GitHub release asset metadata."""
+    missing = [name for name in artifact_names if name not in checksums]
+    if not missing:
+        return
+
+    asset_digests = _fetch_release_asset_digests(version)
+    if not asset_digests:
+        return
+
+    filled: list[str] = []
+    for name in missing:
+        digest = asset_digests.get(name)
+        if digest:
+            checksums[name] = digest
+            filled.append(name)
+
+    for name in filled:
+        ux.warn(
+            f"checksums.txt missing {name}; using GitHub release asset digest.",
+            indent="  ",
+        )
+
+
+def _is_sha256_hex(value: str) -> bool:
+    return len(value) == 64 and all(c in _SHA256_HEX for c in value)
+
+
+def _extract_gateway_tarball(tarball_path: str, staging_dir: str) -> None:
+    """Safely extract the gateway tarball into ``staging_dir``.
+
+    The release artifact is expected to be trusted once its checksum
+    matches, but validating members is still cheap defense in depth: an
+    archive that tries path traversal, absolute paths, or symlink/hardlink
+    tricks is never allowed to write outside the staging directory.
+    """
+    root = os.path.realpath(staging_dir)
+    try:
+        with tarfile.open(tarball_path, mode="r:gz") as tar:
+            members = tar.getmembers()
+            for member in members:
+                target = os.path.realpath(os.path.join(staging_dir, member.name))
+                if not member.name or os.path.isabs(member.name):
+                    ux.err(f"Unsafe tarball entry: {member.name!r}", indent="  ")
+                    raise SystemExit(1)
+                if target != root and not target.startswith(root + os.sep):
+                    ux.err(f"Unsafe tarball entry escapes staging dir: {member.name}", indent="  ")
+                    raise SystemExit(1)
+                if member.issym() or member.islnk():
+                    ux.err(f"Unsafe tarball link entry: {member.name}", indent="  ")
+                    raise SystemExit(1)
+                if not (member.isfile() or member.isdir()):
+                    ux.err(f"Unsupported tarball entry type: {member.name}", indent="  ")
+                    raise SystemExit(1)
+            try:
+                tar.extractall(staging_dir, members=members, filter="data")
+            except TypeError:
+                # Python < 3.12 does not support extraction filters; the
+                # explicit member validation above covers the same hazards.
+                tar.extractall(staging_dir, members=members)
+    except tarfile.TarError as exc:
+        ux.err(f"Could not extract gateway tarball: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    except OSError as exc:
+        ux.err(f"Could not write gateway files from tarball: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+
+
+def _verify_sha256(
+    path: str,
+    filename: str,
+    checksums: dict[str, str],
+) -> None:
+    """Verify ``path``'s SHA-256 against ``checksums[filename]``.
+
+    Raises ``SystemExit(1)`` on mismatch — a tampered or corrupted
+    artifact must never reach ``_install_gateway`` / ``_install_wheel``.
+    A missing entry in the manifest is also fatal: it would otherwise
+    let an attacker who can drop a file with a novel name into the
+    release tree slip past verification.
+    """
+    expected = checksums.get(filename)
+    if not expected:
+        ux.err(
+            f"No checksum entry for {filename} in checksums.txt or GitHub asset metadata — "
+            "refusing to install an unrecognized artifact.",
+            indent="  ",
+        )
+        raise SystemExit(1)
+
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(65536), b""):
+                h.update(chunk)
+    except OSError as exc:
+        ux.err(f"Could not hash {path}: {exc}", indent="  ")
+        raise SystemExit(1) from exc
+    actual = h.hexdigest().lower()
+    if actual != expected.lower():
+        ux.err(
+            f"Checksum mismatch for {filename}: "
+            f"expected {expected}, got {actual}",
+            indent="  ",
+        )
+        ux.err(
+            "Refusing to install — possible tampering or corrupted download.",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
+
+def _install_gateway(
+    binary_path: str,
+    os_name: str,
+    backup_dir: str | None = None,
+) -> str:
+    """Install a pre-downloaded gateway binary.
+
+    When ``backup_dir`` is supplied AND a previous gateway binary exists,
+    it's snapshotted to ``<backup_dir>/defenseclaw-gateway.previous``
+    before being overwritten. Operators can roll back manually with::
+
+        cp <backup_dir>/defenseclaw-gateway.previous ~/.local/bin/defenseclaw-gateway
+        defenseclaw-gateway restart
+
+    The snapshot is best-effort — a failure to copy the previous binary
+    must not block a fresh install where there's nothing to snapshot.
+    """
     install_dir = os.path.expanduser("~/.local/bin")
     os.makedirs(install_dir, exist_ok=True)
     target = os.path.join(install_dir, "defenseclaw-gateway")
+
+    if backup_dir and os.path.isfile(target):
+        snapshot = os.path.join(backup_dir, "defenseclaw-gateway.previous")
+        try:
+            shutil.copy2(target, snapshot)
+            os.chmod(snapshot, 0o755)
+            ux.ok(f"Snapshotted previous gateway → {snapshot}")
+        except OSError as exc:
+            ux.warn(
+                f"Could not snapshot previous gateway: {exc}",
+                indent="  ",
+            )
+
     shutil.copy2(binary_path, target)
     os.chmod(target, 0o755)
     if os_name == "darwin":
         subprocess.run(["codesign", "-f", "-s", "-", target], capture_output=True, check=False)
     ux.ok("Gateway binary installed")
+    return target
+
+
+def _verify_installed_gateway_version(binary_path: str, expected: str) -> None:
+    """Confirm the freshly-installed gateway reports ``expected``.
+
+    A version mismatch indicates either a corrupted tarball that
+    extracted but produced an unexpected binary, or a failed copy into
+    ``~/.local/bin/defenseclaw-gateway``. We invoke the exact installed
+    path returned by ``_install_gateway`` so PATH ordering cannot turn
+    this check into a false positive or false negative.
+
+    This is a soft check — we warn but don't abort. A binary that fails
+    to report ``--version`` may still start cleanly under the right
+    flags, and the subsequent health probe will catch a genuinely broken
+    install. The point is to surface the discrepancy, not to gate the
+    rest of the upgrade.
+    """
+    if not os.path.isfile(binary_path):
+        ux.warn(
+            f"Installed gateway binary is missing: {binary_path}",
+            indent="  ",
+        )
+        return
+    try:
+        result = subprocess.run(
+            [binary_path, "--version"],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        ux.warn(f"Could not invoke {binary_path} --version: {exc}", indent="  ")
+        return
+
+    output = ((result.stdout or "") + (result.stderr or "")).strip()
+    if expected in output:
+        ux.ok(f"Gateway binary verified ({expected})")
+        return
+
+    ux.warn(
+        f"Gateway version verification failed: expected {expected}",
+        indent="  ",
+    )
+    if output:
+        first_line = output.splitlines()[0][:200]
+        ux.subhead(f"binary reported: {first_line}", indent="    ")
+    ux.subhead(
+        "Continuing — health probe below will catch a genuinely broken install.",
+        indent="    ",
+    )
+
+
+def _print_migration_cursor_summary(data_dir: str) -> None:
+    """Print a one-line summary of which migrations the cursor recorded.
+
+    The cursor at ``<data_dir>/.migration_state.json`` is the source of
+    truth for "which migrations have observably executed on this host."
+    Printing it after every upgrade gives operators a stable artifact
+    to grep when triaging "did the 0.4.0 token bootstrap actually run?"
+    questions. Falls silent on missing/corrupt cursors — the surrounding
+    upgrade flow already surfaces those via ``defenseclaw doctor``.
+    """
+    try:
+        from defenseclaw import migration_state
+    except ImportError:
+        return
+    state = migration_state.load(data_dir)
+    if state is None:
+        return
+    if state.applied:
+        applied_repr = ", ".join(state.applied)
+        ux.subhead(f"cursor: applied=[{applied_repr}]", indent="    ")
+    else:
+        ux.subhead("cursor: applied=[] (no migrations recorded)", indent="    ")
+
+
+def _check_post_upgrade_drift(target_version: str) -> None:
+    """Surface component drift at the end of the upgrade flow.
+
+    The upgrade only refreshes the CLI and gateway. The OpenClaw plugin
+    ships separately (via the release tarball, installed by install.sh),
+    so a successful upgrade can still leave the operator running a
+    target-version gateway against a stale-version plugin — silently
+    breaking guardrail enforcement until the operator notices via
+    ``defenseclaw version``. Surfacing drift here gives them an
+    actionable warning at the moment the upgrade completes, not days
+    later when a runtime error fires.
+
+    Imports are deferred so this module's import time is unaffected
+    when ``defenseclaw.commands.cmd_version`` is unavailable (e.g.,
+    inside test rigs that patch the upgrade module's dependencies).
+    """
+    try:
+        from defenseclaw.commands.cmd_version import (
+            _cli_component,
+            _compute_drift,
+            _gateway_component,
+            _plugin_component,
+        )
+    except ImportError as exc:
+        ux.warn(f"Could not run drift check: {exc}", indent="  ")
+        return
+
+    try:
+        components = [_cli_component(), _gateway_component(), _plugin_component()]
+        drift = _compute_drift(components)
+    except Exception as exc:
+        ux.warn(f"Could not run drift check: {exc}", indent="  ")
+        return
+    if not drift:
+        return
+
+    click.echo()
+    ux.warn("Component drift detected after upgrade:", indent="  ")
+    for issue in drift:
+        ux.subhead(issue, indent="    ")
+    ux.subhead(
+        "Run `defenseclaw version` for the full report. "
+        "If the plugin is out of sync, reinstall it from the "
+        f"{target_version} release tarball.",
+        indent="    ",
+    )
 
 
 def _install_wheel(whl_path: str) -> None:
@@ -433,13 +1183,37 @@ def _api_bind_host(cfg) -> str:
 
 def _download_file(url: str, dest: str) -> None:
     """Download a file from url to dest, raising on failure."""
-    resp = requests.get(url, stream=True, timeout=60, allow_redirects=True)
-    if resp.status_code != 200:
-        ux.err(f"Download failed ({resp.status_code}): {url}", indent="  ")
-        raise SystemExit(1)
-    with open(dest, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
-            f.write(chunk)
+    last_exc: requests.RequestException | None = None
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(url, stream=True, timeout=60, allow_redirects=True)
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < 3:
+                time.sleep(2 ** (attempt - 1))
+                continue
+            ux.err(f"Download failed: {exc}", indent="  ")
+            raise SystemExit(1) from exc
+
+        if resp.status_code != 200:
+            if attempt < 3 and resp.status_code in {429, 500, 502, 503, 504}:
+                time.sleep(2 ** (attempt - 1))
+                continue
+            ux.err(f"Download failed ({resp.status_code}): {url}", indent="  ")
+            raise SystemExit(1)
+
+        try:
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            return
+        except OSError as exc:
+            ux.err(f"Could not save download to {dest}: {exc}", indent="  ")
+            raise SystemExit(1) from exc
+
+    if last_exc is not None:
+        raise SystemExit(1) from last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -498,14 +1272,26 @@ def _create_backup(cfg) -> str:
 
 
 def _run_silent(cmd: list[str], ok_msg: str, fail_msg: str) -> bool:
-    """Run a command, printing ok_msg on success and fail_msg on failure."""
+    """Run a command, printing ok_msg on success and fail_msg on failure.
+
+    On non-zero exit, surface the first few stderr/stdout lines so an
+    operator can correlate with logs immediately instead of needing a
+    second debug pass with the same command. Exceptions (missing
+    binary, timeout) are caught and reported similarly so the upgrade
+    flow never raises mid-restart.
+    """
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
         if result.returncode == 0:
             ux.ok(ok_msg)
             return True
         ux.warn(fail_msg)
+        err = (result.stderr or result.stdout or "").strip()
+        if err:
+            for line in err.splitlines()[:5]:
+                ux.subhead(line, indent="    ")
         return False
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         ux.warn(fail_msg)
+        ux.subhead(str(exc), indent="    ")
         return False
