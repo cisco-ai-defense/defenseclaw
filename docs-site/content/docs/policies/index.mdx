@@ -11,7 +11,33 @@ keywords:
   - first-party allow list
 ---
 
-DefenseClaw makes one decision per event: **allow, ask, or deny**. The plumbing that turns a prompt or a tool call into that decision lives in five layers:
+DefenseClaw makes one decision per event: **allow, ask, or deny**. The plumbing that turns a prompt or a tool call into that decision lives in five layers.
+
+<Cards>
+  <Card
+    title="Policy creator"
+    href="/docs/policies/creator"
+    description="Build a complete policy from a preset, see live OPA-WASM verdicts in your browser, and export every YAML / data.json / Rego file ready to paste into ~/.defenseclaw/policies/."
+  />
+  <Card
+    title="Recipes"
+    href="/docs/policies/recipes"
+    description="133 pre-cooked rules, suppressions, and judge categories. Search, filter, and copy the YAML directly."
+  />
+  <Card
+    title="Suppression cookbook"
+    href="/docs/policies/suppression-cookbook"
+    description="Tune the four suppression layers (pre-judge / finding / tool / correlator) without losing real signals."
+  />
+  <Card
+    title="Regex cookbook"
+    href="/docs/policies/regex-cookbook"
+    description="RE2-compatible patterns for secrets, prompt injection, and exfiltration markers, with counterexamples and traps to avoid."
+  />
+</Cards>
+
+## How the layers fit together
+
 
 <Flow
   direction="TB"
@@ -133,24 +159,47 @@ Rules are YAML for portability and review:
 
 ```yaml title="policies/guardrail/default/rules/local-patterns.yaml (excerpt)"
 version: 1
+
+# Literal substring matches (case-folded against the normalized
+# triage view, so "/ etc / passwd" still matches "/etc/passwd").
 injection:
-  description: "Prompt injection / jailbreak signatures"
-  injection_regexes:
-    - id: ignore_previous
-      pattern: "(?i)ignore (all )?previous (instructions|messages)"
-      severity: high
+  - "ignore previous"
+  - "ignore all instructions"
+  - "jailbreak"
+
+# Regex matches. Compiled at load time; bad regexes are logged and
+# dropped (the rest of the file still applies).
+injection_regexes:
+  - 'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
+
+# Per-family pattern sets the gateway scans on every request.
+# Omitting any key keeps the compiled-in default for that family.
+# Setting `field: []` explicitly clears it (rare, used in testbed
+# profiles that want a family disabled).
 secrets:
-  - id: aws_access_key
-    pattern: "AKIA[0-9A-Z]{16}"
-    severity: high
-    suppress_signature: "{{ matched | sha256 }}"
+  - "sk-"
+  - "ghp_"
+  - "-----begin rsa"
+
 pii_requests:
-  - id: ssn_format
-    pattern: "\\b\\d{3}-\\d{2}-\\d{4}\\b"
-    severity: medium
+  - "social security number"
+  - "credit card number"
+
+pii_data_regexes:
+  - '\b\d{3}-\d{2}-\d{4}\b'
+
+exfiltration:
+  - "/etc/passwd"
+  - "exfiltrate"
 ```
 
-Anything `severity: high` triggers `deny` by default, `medium` triggers `ask` (HITL). The thresholds are configurable per rule pack.
+Three-state semantics for each top-level key:
+
+- **Omit the key entirely** — keep the compiled-in default for that family. Useful when you only want to tweak one thing without copying the whole baseline.
+- **`field: [...]`** — operator override; replaces the default wholesale.
+- **`field: []`** — operator explicitly cleared the family. Mostly used in testbed profiles; rarely useful in production.
+
+The bundled `default`, `strict`, and `permissive` `local-patterns.yaml` files each carry the full baseline 1:1 with what the gateway ships compiled-in. The Go test `TestLocalPatternsDefaultsParity` fails CI if the bundled YAML drifts from the Go source, so editing one without the other can't silently downgrade posture.
 
 ## Layer 3 — LLM judge
 

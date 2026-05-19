@@ -441,6 +441,57 @@ def activate(app: AppContext, name: str) -> None:
         app.cfg.watch.rescan_enabled = bool(watch_raw["rescan_enabled"])
     if "rescan_interval_min" in watch_raw:
         app.cfg.watch.rescan_interval_min = int(watch_raw["rescan_interval_min"])
+
+    # Apply Cisco AI Defense settings into config.yaml. The gateway reads
+    # the AID lane from Config.CiscoAIDefense, not from data.json, so we
+    # have to mutate ``app.cfg.cisco_ai_defense`` here. We deliberately
+    # only touch the fields the policy YAML carries — if a field is
+    # absent we keep whatever the operator set via ``defenseclaw setup``.
+    aid_raw = data.get("cisco_ai_defense", {})
+    if isinstance(aid_raw, dict) and aid_raw:
+        if "endpoint" in aid_raw and isinstance(aid_raw["endpoint"], str):
+            app.cfg.cisco_ai_defense.endpoint = aid_raw["endpoint"]
+        if "api_key_env" in aid_raw and isinstance(aid_raw["api_key_env"], str):
+            # We never accept a literal `api_key` from a policy YAML —
+            # that would mean someone pasted a secret into a file the
+            # docs site emits; force the operator through `api_key_env`.
+            app.cfg.cisco_ai_defense.api_key_env = aid_raw["api_key_env"]
+
+    # Apply webhook destinations into config.yaml. Webhooks are gateway
+    # config (sink destinations), not policy data, but the playground
+    # carries them through the policy YAML so the wizard's output is a
+    # single self-describing artifact. We replace the list wholesale on
+    # activate so the policy can drop a webhook the operator no longer
+    # wants. If the policy YAML omits the key entirely we leave the
+    # config alone — that's the "don't touch what you don't own" case.
+    if "webhooks" in data:
+        wh_raw = data.get("webhooks")
+        if isinstance(wh_raw, list):
+            from defenseclaw.config import WebhookConfig
+
+            new_webhooks: list[WebhookConfig] = []
+            for entry in wh_raw:
+                if not isinstance(entry, dict):
+                    continue
+                # Construct via known fields only — anything else gets
+                # dropped rather than silently passed through, which is
+                # the right call for a structure that maps to a Go
+                # struct on the gateway side.
+                kwargs: dict = {}
+                for fld in ("name", "url", "secret_env", "enabled"):
+                    if fld in entry:
+                        kwargs[fld] = entry[fld]
+                try:
+                    new_webhooks.append(WebhookConfig(**kwargs))
+                except TypeError:
+                    # If WebhookConfig grew new required fields and the
+                    # YAML doesn't carry them, fall back to per-attribute
+                    # set so the policy still activates.
+                    wh = WebhookConfig()
+                    for k, v in kwargs.items():
+                        setattr(wh, k, v)
+                    new_webhooks.append(wh)
+            app.cfg.webhooks = new_webhooks
     app.cfg.save()
     click.echo(f"Config updated with policy '{name}'.")
 

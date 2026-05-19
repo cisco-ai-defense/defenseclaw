@@ -52,6 +52,11 @@ jobs:
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
 
+      - name: Unit tests (policy creator)
+        # Gate the deploy on the share/highlighter/cmdk-filter tests so
+        # silent regressions in the policy creator can't ship to Pages.
+        run: npm run test:policy-creator
+
       - name: Build static export
         env:
           # Project-pages subpath. Override in repo Settings → Pages
