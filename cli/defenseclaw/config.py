@@ -22,14 +22,14 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 import fcntl
 import logging
 import os
-import stat
 import platform
+import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any

@@ -34,13 +34,6 @@ import click
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
 from defenseclaw import ux
-from defenseclaw.bundle_refresh import (
-    SPLUNK_COMPOSE_PROJECT,
-    RefreshResult,
-    is_compose_project_running,
-    refresh_splunk_bridge,
-)
-from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.audit_actions import (
     ACTION_SETUP_CONNECTOR_MODE,
     ACTION_SETUP_GATEWAY,
@@ -53,6 +46,13 @@ from defenseclaw.audit_actions import (
     ACTION_SETUP_SKILL_SCANNER,
     ACTION_SETUP_SPLUNK,
 )
+from defenseclaw.bundle_refresh import (
+    SPLUNK_COMPOSE_PROJECT,
+    RefreshResult,
+    is_compose_project_running,
+    refresh_splunk_bridge,
+)
+from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.connector_contracts import (
     STATUS_KNOWN,

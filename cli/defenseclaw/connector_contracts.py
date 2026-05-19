@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
 
-
 STATUS_KNOWN = "known"
 STATUS_UNVERSIONED = "unversioned"
 STATUS_UNKNOWN = "unknown"
