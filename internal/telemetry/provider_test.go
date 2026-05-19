@@ -220,7 +220,7 @@ func TestStartLLMSpan_MirrorsResourceJoinKeysOntoSpan(t *testing.T) {
 	attachTraceTestResourceContext(t, p)
 
 	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 2048, 0.1)
-	p.EndLLMSpan(span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex")
+	p.EndLLMSpan(context.Background(), span, "gpt-5.5", 100, 50, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex", "")
 
 	spans := exp.GetSpans()
 	if len(spans) != 1 {
@@ -296,7 +296,7 @@ func TestStartLLMSpan_EmitsRunID(t *testing.T) {
 
 	p, exp := newTracingProvider(t)
 	_, span := p.StartLLMSpan(context.Background(), "openai", "gpt-5.5", "openai", 1024, 0.2)
-	p.EndLLMSpan(span, "gpt-5.5", 12, 34, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex")
+	p.EndLLMSpan(context.Background(), span, "gpt-5.5", 12, 34, []string{"stop"}, 0, "", "", "openai", time.Now(), "codex", "codex", "openai_codex", "")
 
 	spans := exp.GetSpans()
 	if len(spans) != 1 {
@@ -316,7 +316,7 @@ func TestDisabledProvider_Metrics_NoPanic(t *testing.T) {
 	p.RecordToolDuration(ctx, "shell", "builtin", 50)
 	p.RecordToolError(ctx, "shell", 1)
 	p.RecordApproval(ctx, "approved", true, false)
-	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "", "", 100, 200)
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "", "", "", 100, 200)
 	p.RecordLLMDuration(ctx, "chat", "openai", "gpt-4", "", "", 0.5)
 	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern")
 	p.RecordGuardrailEvaluation(ctx, "ai-defense", "block")
@@ -1114,8 +1114,8 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 	defer p.Shutdown(context.Background())
 
 	ctx := context.Background()
-	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "test-agent", "agent-id-1", 150, 75)
-	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "test-agent", "agent-id-1", 200, 0) // no completion tokens
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "test-agent", "agent-id-1", "sess-123", 150, 75)
+	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "test-agent", "agent-id-1", "sess-123", 200, 0) // no completion tokens
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {
@@ -1166,6 +1166,10 @@ func TestRecordLLMTokens_EmitsMetric(t *testing.T) {
 		hasAgentID := hasAttribute(dp.Attributes, "gen_ai.agent.id", "agent-id-1")
 		if !hasAgentID {
 			t.Error("histogram data point missing attribute gen_ai.agent.id=agent-id-1")
+		}
+		hasSessionID := hasAttribute(dp.Attributes, "gen_ai.conversation.id", "sess-123")
+		if !hasSessionID {
+			t.Error("histogram data point missing attribute gen_ai.conversation.id=sess-123")
 		}
 	}
 }
