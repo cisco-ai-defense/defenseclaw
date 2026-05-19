@@ -33,6 +33,51 @@ redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
 
+## Versioned Hook Contracts
+
+The machine-readable compatibility source lives at
+[`cli/defenseclaw/inventory/hook_contracts.json`](../cli/defenseclaw/inventory/hook_contracts.json).
+DefenseClaw setup refreshes `agent_discovery.json`, checks the installed
+connector version against this manifest, and refuses unsupported hook
+contracts in `mode=action` unless
+`DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
+
+After the gateway completes connector setup it writes
+`<data_dir>/hook_contract_lock.json`. That lock records the current
+installed connector version, normalized version, selected contract ID, hook
+script version, script digests, and DefenseClaw build version so a later
+doctor run can detect drift.
+
+Setup allows unsupported or unverified hook connector versions in observe mode
+with a warning. Action mode fails closed unless
+`DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
+
+| Connector | Current compatibility gate | Supported connector versions | Hook contract / script | AID surfaces |
+| --------- | -------------------------- | ---------------------------- | ---------------------- | ------------ |
+| OpenClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
+| ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response surfaces |
+| Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | tool_call |
+| Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+
+No hook contract currently has a `max_exclusive` ceiling. We only add an upper
+bound when an upstream release publishes a breaking hook change; otherwise,
+future connector versions remain reproducible through the lock file and drift
+checks instead of being blocked by a guessed major-version cap.
+
+Version floors are evidence-backed from upstream release notes or current
+vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0`
+enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes
+`0.11.0` added shell hooks for `pre_tool_call`, Windsurf `1.12.41` added user
+prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first
+release containing every event in the current DefenseClaw Copilot contract.
+Claude Code is pinned to the current documented hook surface captured at
+`2.1.144`; older Claude Code versions exposed smaller event sets.
+
 ## Hook Capability Matrix
 
 | Connector | can_block | can_ask_native | ask_events | block_events | supports_fail_closed | scope | config_path |

@@ -57,8 +57,8 @@ from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
 from defenseclaw.connector_contracts import (
     STATUS_KNOWN,
     STATUS_NOT_GATED,
-    STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
+    normalize_connector,
     resolve_connector_contract,
 )
 from defenseclaw.context import AppContext, pass_ctx
@@ -1775,6 +1775,7 @@ def _check_connector_version_supported_for_setup(
     *,
     mode: str = "observe",
     emit: bool = True,
+    data_dir: str | os.PathLike[str] | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -1783,14 +1784,35 @@ def _check_connector_version_supported_for_setup(
     contracts are fatal in action mode unless the explicit exploratory
     override used by the gateway is set.
     """
-    connector = (connector or "").strip().lower()
+    connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
+    action_mode = (mode or "").strip().lower() == "action"
+    allow_drift = os.environ.get("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
     try:
-        disc = agent_discovery.discover_agents(use_cache=False, refresh=True)
+        disc = agent_discovery.discover_agents(
+            use_cache=False,
+            refresh=True,
+            data_dir=data_dir,
+        )
         signal = disc.agents.get(connector)
     except Exception as exc:
+        compatibility = resolve_connector_contract(connector, "")
+        if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+            if emit:
+                ux.err(
+                    f"{label}: could not refresh local version discovery ({exc}); "
+                    "refusing action-mode hook setup."
+                )
+                ux.subhead(
+                    "Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for "
+                    "exploratory testing."
+                )
+            return False
         if emit:
-            ux.warn(f"{label}: could not refresh local version discovery ({exc}); setup will continue.")
+            ux.warn(
+                f"{label}: could not refresh local version discovery ({exc}); "
+                "setup will continue."
+            )
         return True
 
     raw_version = ""
@@ -1807,7 +1829,10 @@ def _check_connector_version_supported_for_setup(
 
     if not installed:
         if emit:
-            ux.warn(f"{label}: connector was not detected locally; setup will write DefenseClaw config anyway.")
+            ux.warn(
+                f"{label}: connector was not detected locally; "
+                "setup will write DefenseClaw config anyway."
+            )
         return True
 
     if compatibility.status == STATUS_KNOWN:
@@ -1817,7 +1842,10 @@ def _check_connector_version_supported_for_setup(
 
     if compatibility.status == STATUS_NOT_GATED:
         if emit:
-            ux.ok(f"{label}: version {version_display}; proxy/chat connector has no hook contract gate.")
+            ux.ok(
+                f"{label}: version {version_display}; "
+                "proxy/chat connector has no hook contract gate."
+            )
         return True
 
     if compatibility.status == STATUS_UNVERSIONED:
@@ -1825,6 +1853,18 @@ def _check_connector_version_supported_for_setup(
         if probe_error:
             detail += f" ({probe_error})"
         detail += f"; using default hook contract {contract}."
+        if action_mode and not allow_drift:
+            if emit:
+                ux.err(
+                    detail
+                    + " Refusing action-mode hook setup because the installed "
+                    "connector version could not be verified."
+                )
+                ux.subhead(
+                    "Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for "
+                    "exploratory testing."
+                )
+            return False
         if emit:
             ux.warn(detail)
         return True
@@ -1835,15 +1875,19 @@ def _check_connector_version_supported_for_setup(
     )
     if probe_error:
         detail += f" Probe detail: {probe_error}."
-    action_mode = (mode or "").strip().lower() == "action"
-    allow_drift = os.environ.get("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
     if action_mode and not allow_drift:
         if emit:
             ux.err(detail)
-            ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+            ux.subhead(
+                "Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for "
+                "exploratory testing."
+            )
         return False
     if emit:
-        ux.warn(detail + " Continuing because setup is not in action mode or drift override is set.")
+        ux.warn(
+            detail
+            + " Continuing because setup is not in action mode or drift override is set."
+        )
     return True
 
 
@@ -2152,6 +2196,13 @@ def setup_guardrail(
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
 
+    if not _check_connector_version_supported_for_setup(
+        gc.connector or "openclaw",
+        mode=gc.mode or "observe",
+        data_dir=getattr(app.cfg, "data_dir", None),
+    ):
+        return
+
     ok, warnings = execute_guardrail_setup(app, save_config=True)
     if not ok:
         return
@@ -2354,6 +2405,13 @@ def _apply_hook_connector_setup(
     desired_mode = (mode or "").strip().lower()
     if desired_mode not in ("observe", "action"):
         desired_mode = "observe"
+
+    if not _check_connector_version_supported_for_setup(
+        connector,
+        mode=desired_mode,
+        data_dir=getattr(app.cfg, "data_dir", None),
+    ):
+        return False
 
     cfg = app.cfg
     gc = cfg.guardrail
@@ -3137,6 +3195,12 @@ def _apply_connector_mode_switch(
         return False
 
     if prev == new_connector:
+        if not _check_connector_version_supported_for_setup(
+            new_connector,
+            mode=gc.mode or "observe",
+            data_dir=getattr(cfg, "data_dir", None),
+        ):
+            return False
         click.echo(
             f"  • Already on {_CONNECTOR_META[new_connector]['label']} "
             f"({new_connector}) — nothing to change."
@@ -3175,6 +3239,14 @@ def _apply_connector_mode_switch(
         )
 
     # Destination is openclaw or zeptoclaw.
+    proxy_mode = gc.mode if prev in _GUARDRAIL_SUPPORTING_CONNECTORS else "observe"
+    if not _check_connector_version_supported_for_setup(
+        new_connector,
+        mode=proxy_mode or "observe",
+        data_dir=getattr(cfg, "data_dir", None),
+    ):
+        return False
+
     cfg.claw.mode = new_connector
     gc.connector = new_connector
 

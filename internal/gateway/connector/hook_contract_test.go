@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -26,9 +27,9 @@ func TestHookContractResolution(t *testing.T) {
 		wantID     string
 		wantNorm   string
 	}{
-		{"codex_known", "codex", "codex 0.31.0", HookCompatibilityKnown, "codex-hooks-v1", "0.31.0"},
-		{"codex_unknown_future_major", "codex", "codex 1.2.0", HookCompatibilityUnknown, "", "1.2.0"},
-		{"claude_alias_known", "claude-code", "Claude Code v1.0.55", HookCompatibilityKnown, "claudecode-hooks-v1", "1.0.55"},
+		{"codex_known", "codex", "codex 0.124.0", HookCompatibilityKnown, "codex-hooks-v1", "0.124.0"},
+		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
+		{"claude_alias_known", "claude-code", "Claude Code v2.1.144", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.144"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"bad_version_unknown", "codex", "codex nightly", HookCompatibilityUnknown, "", ""},
 	}
@@ -79,10 +80,176 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	}
 }
 
+func TestHookContractsManifestMatchesRuntime(t *testing.T) {
+	type manifestContract struct {
+		ContractID   string `json:"contract_id"`
+		AgentVersion struct {
+			MinInclusive string `json:"min_inclusive"`
+			MaxExclusive string `json:"max_exclusive"`
+		} `json:"agent_version"`
+		DefaultForUnversioned bool     `json:"default_for_unversioned"`
+		HookScriptVersion     string   `json:"hook_script_version"`
+		ResponseField         string   `json:"response_field"`
+		Events                []string `json:"events"`
+		AIDSurfaces           []string `json:"aid_surfaces"`
+		SupportsTraceparent   bool     `json:"supports_traceparent"`
+		NativeOTLP            bool     `json:"native_otlp"`
+		Capabilities          struct {
+			CanBlock           bool     `json:"can_block"`
+			CanAskNative       bool     `json:"can_ask_native"`
+			AskEvents          []string `json:"ask_events"`
+			BlockEvents        []string `json:"block_events"`
+			SupportsFailClosed bool     `json:"supports_fail_closed"`
+			Scope              string   `json:"scope"`
+		} `json:"capabilities"`
+	}
+	type manifestConnector struct {
+		Kind              string             `json:"kind"`
+		CompatibilityGate string             `json:"compatibility_gate"`
+		Contracts         []manifestContract `json:"contracts"`
+	}
+	type manifest struct {
+		Connectors map[string]manifestConnector `json:"connectors"`
+	}
+
+	path := filepath.Join("..", "..", "..", "cli", "defenseclaw", "inventory", "hook_contracts.json")
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read hook contract manifest: %v", err)
+	}
+	var gotManifest manifest
+	if err := json.Unmarshal(payload, &gotManifest); err != nil {
+		t.Fatalf("unmarshal hook contract manifest: %v", err)
+	}
+
+	for _, proxy := range []string{"openclaw", "zeptoclaw"} {
+		spec, ok := gotManifest.Connectors[proxy]
+		if !ok {
+			t.Fatalf("manifest missing proxy connector %s", proxy)
+		}
+		if spec.CompatibilityGate != "not-gated" {
+			t.Fatalf("%s compatibility_gate=%q want not-gated", proxy, spec.CompatibilityGate)
+		}
+		if len(spec.Contracts) != 0 {
+			t.Fatalf("%s should not publish hook contracts in manifest", proxy)
+		}
+	}
+
+	for name, runtimeContracts := range builtinHookContracts {
+		spec, ok := gotManifest.Connectors[name]
+		if !ok {
+			t.Fatalf("manifest missing hook connector %s", name)
+		}
+		if spec.Kind != "hook" || spec.CompatibilityGate != "hook-contract" {
+			t.Fatalf("%s manifest kind/gate drifted: %+v", name, spec)
+		}
+		if len(spec.Contracts) != len(runtimeContracts) {
+			t.Fatalf("%s manifest contract count=%d want %d", name, len(spec.Contracts), len(runtimeContracts))
+		}
+		byID := make(map[string]manifestContract, len(spec.Contracts))
+		for _, contract := range spec.Contracts {
+			byID[contract.ContractID] = contract
+		}
+		for _, runtime := range runtimeContracts {
+			manifestContract, ok := byID[runtime.ContractID]
+			if !ok {
+				t.Fatalf("%s manifest missing contract %s", name, runtime.ContractID)
+			}
+			if manifestContract.AgentVersion.MinInclusive != runtime.MinAgentVersion {
+				t.Fatalf("%s min version=%q want %q", runtime.ContractID, manifestContract.AgentVersion.MinInclusive, runtime.MinAgentVersion)
+			}
+			if manifestContract.AgentVersion.MaxExclusive != runtime.MaxAgentVersion {
+				t.Fatalf("%s max version=%q want %q", runtime.ContractID, manifestContract.AgentVersion.MaxExclusive, runtime.MaxAgentVersion)
+			}
+			if manifestContract.DefaultForUnversioned != runtime.DefaultForUnversioned {
+				t.Fatalf("%s default_for_unversioned=%v want %v", runtime.ContractID, manifestContract.DefaultForUnversioned, runtime.DefaultForUnversioned)
+			}
+			if manifestContract.HookScriptVersion != runtime.HookScriptVersion {
+				t.Fatalf("%s hook script version=%q want %q", runtime.ContractID, manifestContract.HookScriptVersion, runtime.HookScriptVersion)
+			}
+			if manifestContract.ResponseField != runtime.ResponseFieldName {
+				t.Fatalf("%s response field=%q want %q", runtime.ContractID, manifestContract.ResponseField, runtime.ResponseFieldName)
+			}
+			if !sameStrings(manifestContract.Events, runtime.Events) {
+				t.Fatalf("%s events=%v want %v", runtime.ContractID, manifestContract.Events, runtime.Events)
+			}
+			if !sameStrings(manifestContract.AIDSurfaces, runtime.AIDSurfaces) {
+				t.Fatalf("%s aid_surfaces=%v want %v", runtime.ContractID, manifestContract.AIDSurfaces, runtime.AIDSurfaces)
+			}
+			if manifestContract.SupportsTraceparent != runtime.SupportsTraceparent {
+				t.Fatalf("%s traceparent=%v want %v", runtime.ContractID, manifestContract.SupportsTraceparent, runtime.SupportsTraceparent)
+			}
+			if manifestContract.NativeOTLP != runtime.NativeOTLP {
+				t.Fatalf("%s native_otlp=%v want %v", runtime.ContractID, manifestContract.NativeOTLP, runtime.NativeOTLP)
+			}
+			if manifestContract.Capabilities.CanBlock != runtime.Capabilities.CanBlock {
+				t.Fatalf("%s can_block=%v want %v", runtime.ContractID, manifestContract.Capabilities.CanBlock, runtime.Capabilities.CanBlock)
+			}
+			if manifestContract.Capabilities.CanAskNative != runtime.Capabilities.CanAskNative {
+				t.Fatalf("%s can_ask_native=%v want %v", runtime.ContractID, manifestContract.Capabilities.CanAskNative, runtime.Capabilities.CanAskNative)
+			}
+			if !sameStrings(manifestContract.Capabilities.AskEvents, runtime.Capabilities.AskEvents) {
+				t.Fatalf("%s ask_events=%v want %v", runtime.ContractID, manifestContract.Capabilities.AskEvents, runtime.Capabilities.AskEvents)
+			}
+			if !sameStrings(manifestContract.Capabilities.BlockEvents, runtime.Capabilities.BlockEvents) {
+				t.Fatalf("%s block_events=%v want %v", runtime.ContractID, manifestContract.Capabilities.BlockEvents, runtime.Capabilities.BlockEvents)
+			}
+			if manifestContract.Capabilities.SupportsFailClosed != runtime.Capabilities.SupportsFailClosed {
+				t.Fatalf("%s supports_fail_closed=%v want %v", runtime.ContractID, manifestContract.Capabilities.SupportsFailClosed, runtime.Capabilities.SupportsFailClosed)
+			}
+			if manifestContract.Capabilities.Scope != runtime.Capabilities.Scope {
+				t.Fatalf("%s scope=%q want %q", runtime.ContractID, manifestContract.Capabilities.Scope, runtime.Capabilities.Scope)
+			}
+		}
+	}
+}
+
+func TestUnversionedResolutionUsesDefaultMarker(t *testing.T) {
+	const connectorName = "testdefault"
+	previous, hadPrevious := builtinHookContracts[connectorName]
+	t.Cleanup(func() {
+		if hadPrevious {
+			builtinHookContracts[connectorName] = previous
+		} else {
+			delete(builtinHookContracts, connectorName)
+		}
+	})
+	builtinHookContracts[connectorName] = []HookContract{
+		{
+			Connector:         connectorName,
+			ContractID:        "test-hooks-v1",
+			MinAgentVersion:   "1.0.0",
+			HookScriptVersion: "v1",
+		},
+		{
+			Connector:             connectorName,
+			ContractID:            "test-hooks-v2",
+			MinAgentVersion:       "2.0.0",
+			DefaultForUnversioned: true,
+			HookScriptVersion:     "v2",
+		},
+	}
+
+	got := ResolveHookContract(connectorName, "")
+	if got.Status != HookCompatibilityUnversioned {
+		t.Fatalf("Status=%q want %q", got.Status, HookCompatibilityUnversioned)
+	}
+	if got.Contract.ContractID != "test-hooks-v2" {
+		t.Fatalf("ContractID=%q want test-hooks-v2", got.Contract.ContractID)
+	}
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
+}
+
 func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	profile := NewClaudeCodeConnector().HookProfile(SetupOpts{
 		APIAddr:      "127.0.0.1:18970",
-		AgentVersion: "Claude Code v1.0.55",
+		AgentVersion: "Claude Code v2.1.144",
 	})
 	if profile.ContractID != "claudecode-hooks-v1" {
 		t.Fatalf("ContractID=%q", profile.ContractID)

@@ -20,6 +20,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. DefenseClaw sits in the LLM data path — every request and response is intercepted, scored, and forwarded." />
   <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, Hermes. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
+  <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
 ## Pick yours
@@ -40,7 +41,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
 
 <CapabilityMatrix />
 
-For the full breakdown including HITL behaviour, head to the [Capability Matrix](/docs/capability-matrix).
+For the full breakdown including HITL behaviour, head to the [Capability Matrix](/docs/capability-matrix). For deterministic hook version pinning, see [Connector Compatibility](/docs/connectors/compatibility).
 
 ## How a connector is structured
 

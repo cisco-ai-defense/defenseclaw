@@ -37,18 +37,19 @@ const (
 // deciding whether a hook event is blockable/askable/AID-eligible; it should
 // never assume that "latest connector code" describes every installed agent.
 type HookContract struct {
-	Connector           string
-	ContractID          string
-	MinAgentVersion     string
-	MaxAgentVersion     string
-	HookScriptVersion   string
-	ResponseFieldName   string
-	Events              []string
-	AIDSurfaces         []string
-	Capabilities        HookCapability
-	SupportsTraceparent bool
-	NativeOTLP          bool
-	Notes               []string
+	Connector             string
+	ContractID            string
+	MinAgentVersion       string
+	MaxAgentVersion       string
+	DefaultForUnversioned bool
+	HookScriptVersion     string
+	ResponseFieldName     string
+	Events                []string
+	AIDSurfaces           []string
+	Capabilities          HookCapability
+	SupportsTraceparent   bool
+	NativeOTLP            bool
+	Notes                 []string
 }
 
 // HookContractResolution records how a raw agent --version string mapped to a
@@ -67,12 +68,12 @@ var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+
 
 var builtinHookContracts = map[string][]HookContract{
 	"codex": {{
-		Connector:         "codex",
-		ContractID:        "codex-hooks-v1",
-		MinAgentVersion:   "0.0.0",
-		MaxAgentVersion:   "1.0.0",
-		HookScriptVersion: "v6",
-		ResponseFieldName: "codex_output",
+		Connector:             "codex",
+		ContractID:            "codex-hooks-v1",
+		MinAgentVersion:       "0.124.0",
+		DefaultForUnversioned: true,
+		HookScriptVersion:     "v6",
+		ResponseFieldName:     "codex_output",
 		Events: []string{
 			"SessionStart",
 			"UserPromptSubmit",
@@ -98,16 +99,17 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
 		Notes: []string{
+			"Codex hooks were made stable in 0.124.0. DefenseClaw leaves the upper bound open until upstream publishes a breaking hook change.",
 			"Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage.",
 		},
 	}},
 	"claudecode": {{
-		Connector:         "claudecode",
-		ContractID:        "claudecode-hooks-v1",
-		MinAgentVersion:   "0.0.0",
-		MaxAgentVersion:   "2.0.0",
-		HookScriptVersion: "v6",
-		ResponseFieldName: "claude_code_output",
+		Connector:             "claudecode",
+		ContractID:            "claudecode-hooks-v1",
+		MinAgentVersion:       "2.1.144",
+		DefaultForUnversioned: true,
+		HookScriptVersion:     "v6",
+		ResponseFieldName:     "claude_code_output",
 		Events: []string{
 			"SessionStart",
 			"UserPromptSubmit",
@@ -160,16 +162,19 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
 		Notes: []string{
+			"Pinned to the current documented Claude Code hook surface as of 2.1.144; older Claude Code releases exposed smaller hook event sets.",
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
 		},
 	}},
 	"hermes": {{
-		Connector:         "hermes",
-		ContractID:        "hermes-hooks-v1",
-		HookScriptVersion: "v6",
-		ResponseFieldName: "hook_output",
-		Events:            []string{"pre_tool_call"},
-		AIDSurfaces:       []string{"tool_call"},
+		Connector:             "hermes",
+		ContractID:            "hermes-hooks-v1",
+		MinAgentVersion:       "0.11.0",
+		DefaultForUnversioned: true,
+		HookScriptVersion:     "v6",
+		ResponseFieldName:     "hook_output",
+		Events:                []string{"pre_tool_call"},
+		AIDSurfaces:           []string{"tool_call"},
 		Capabilities: HookCapability{
 			CanBlock:           true,
 			CanAskNative:       false,
@@ -178,12 +183,17 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
+		Notes: []string{
+			"Hermes Agent 0.11.0 introduced shell hooks for pre_tool_call and related lifecycle callbacks.",
+		},
 	}},
 	"cursor": {{
-		Connector:         "cursor",
-		ContractID:        "cursor-hooks-v1",
-		HookScriptVersion: "v6",
-		ResponseFieldName: "hook_output",
+		Connector:             "cursor",
+		ContractID:            "cursor-hooks-v1",
+		MinAgentVersion:       "1.7.0",
+		DefaultForUnversioned: true,
+		HookScriptVersion:     "v6",
+		ResponseFieldName:     "hook_output",
 		Events: []string{
 			"preToolUse",
 			"beforeShellExecution",
@@ -214,12 +224,18 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
+		Notes: []string{
+			"Cursor 1.7 introduced beta hooks for the agent loop.",
+			"Cursor native ask is limited to beforeShellExecution and beforeMCPExecution.",
+		},
 	}},
 	"windsurf": {{
-		Connector:         "windsurf",
-		ContractID:        "windsurf-hooks-v1",
-		HookScriptVersion: "v6",
-		ResponseFieldName: "hook_output",
+		Connector:             "windsurf",
+		ContractID:            "windsurf-hooks-v1",
+		MinAgentVersion:       "1.12.41",
+		DefaultForUnversioned: true,
+		HookScriptVersion:     "v6",
+		ResponseFieldName:     "hook_output",
 		Events: []string{
 			"pre_user_prompt",
 			"pre_read_code",
@@ -236,12 +252,17 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
+		Notes: []string{
+			"Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract.",
+		},
 	}},
 	"geminicli": {{
-		Connector:         "geminicli",
-		ContractID:        "geminicli-hooks-v1",
-		HookScriptVersion: "v6",
-		ResponseFieldName: "hook_output",
+		Connector:             "geminicli",
+		ContractID:            "geminicli-hooks-v1",
+		MinAgentVersion:       "0.26.0",
+		DefaultForUnversioned: true,
+		HookScriptVersion:     "v6",
+		ResponseFieldName:     "hook_output",
 		Events: []string{
 			"BeforeAgent",
 			"BeforeModel",
@@ -265,12 +286,17 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		Notes: []string{
+			"Gemini CLI 0.26.0 enabled hooks by default.",
+		},
 	}},
 	"copilot": {{
-		Connector:         "copilot",
-		ContractID:        "copilot-hooks-v1",
-		HookScriptVersion: "v6",
-		ResponseFieldName: "hook_output",
+		Connector:             "copilot",
+		ContractID:            "copilot-hooks-v1",
+		MinAgentVersion:       "1.0.18",
+		DefaultForUnversioned: true,
+		HookScriptVersion:     "v6",
+		ResponseFieldName:     "hook_output",
 		Events: []string{
 			"preToolUse",
 			"PreToolUse",
@@ -306,6 +332,10 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "workspace",
 		},
 		SupportsTraceparent: true,
+		Notes: []string{
+			"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
+			"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+		},
 	}},
 }
 
@@ -350,7 +380,7 @@ func ResolveHookContract(connectorName, rawVersion string) HookContractResolutio
 			NormalizedVersion: "",
 			Status:            HookCompatibilityUnversioned,
 			Reason:            "agent version not probed; using connector default hook contract",
-			Contract:          contracts[0],
+			Contract:          defaultHookContract(contracts),
 		}
 	}
 	if normalized == "" {
@@ -381,6 +411,15 @@ func ResolveHookContract(connectorName, rawVersion string) HookContractResolutio
 		Status:            HookCompatibilityUnknown,
 		Reason:            "no hook contract matches normalized agent version",
 	}
+}
+
+func defaultHookContract(contracts []HookContract) HookContract {
+	for _, contract := range contracts {
+		if contract.DefaultForUnversioned {
+			return contract
+		}
+	}
+	return contracts[0]
 }
 
 func NormalizeAgentVersion(_ string, raw string) string {
