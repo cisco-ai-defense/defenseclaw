@@ -44,13 +44,17 @@ const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
 ];
 
 const SOURCE_OPTIONS: Array<{ value: Source; label: string }> = [
-  { value: 'scenario', label: 'Canned scenario' },
-  { value: 'custom', label: 'Custom input' },
+  // Labels chosen so the three options are obviously distinct
+  // *actions*, not just three nouns. Operators reported that
+  // "Custom input" was easy to miss next to "Canned scenario" —
+  // "Paste JSON" is more obviously a CTA.
+  { value: 'scenario', label: 'Pick scenario' },
+  { value: 'custom', label: 'Paste JSON' },
   // G1 — replay every bundled scenario for the active domain at
   // once and surface a pass/fail table. Useful for "did my edit
   // regress any bundled fixture?" before downloading the install
   // script.
-  { value: 'corpus', label: 'Replay all' },
+  { value: 'corpus', label: 'Run all scenarios' },
 ];
 
 const LS_CUSTOM_PREFIX = 'dc-policy-creator/live-test/custom/v1/';
@@ -360,7 +364,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
       <div className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <span className="text-[11px] font-medium uppercase tracking-wide text-fd-muted-foreground">
-            Input source
+            Test with
           </span>
           {source === 'custom' && (
             <div className="flex items-center gap-2">
@@ -391,6 +395,25 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           onChange={setSource}
           size="sm"
         />
+        {/*
+          Inline discoverability hint. Without this, operators report
+          "I don't see a way to update the input JSON" because the
+          segmented control above is small and gets visually
+          eclipsed by the larger scenario picker below.
+        */}
+        {source === 'scenario' && (
+          <p className="text-[10px] text-fd-muted-foreground">
+            Want to test your own input?{' '}
+            <button
+              type="button"
+              onClick={() => setSource('custom')}
+              className="font-medium text-[var(--brand-cisco)] underline-offset-2 hover:underline"
+            >
+              Switch to Paste JSON
+            </button>{' '}
+            to paste a JSON document — it persists per-domain in localStorage.
+          </p>
+        )}
       </div>
 
       {source === 'corpus' ? (
