@@ -31,6 +31,8 @@ func TestHookContractResolution(t *testing.T) {
 		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
 		{"claude_alias_known", "claude-code", "Claude Code v2.1.144", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.144"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
+		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
+		{"zeptoclaw_proxy_not_gated", "zeptoclaw", "zeptoclaw 0.5.0", HookCompatibilityNotGated, "", "0.5.0"},
 		{"bad_version_unknown", "codex", "codex nightly", HookCompatibilityUnknown, "", ""},
 	}
 	for _, tc := range cases {
@@ -132,6 +134,13 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		}
 		if len(spec.Contracts) != 0 {
 			t.Fatalf("%s should not publish hook contracts in manifest", proxy)
+		}
+		resolution := ResolveHookContract(proxy, "")
+		if resolution.Status != HookCompatibilityNotGated {
+			t.Fatalf("%s runtime status=%q want %q", proxy, resolution.Status, HookCompatibilityNotGated)
+		}
+		if resolution.Contract.ContractID != "" {
+			t.Fatalf("%s should not resolve a runtime hook contract", proxy)
 		}
 	}
 

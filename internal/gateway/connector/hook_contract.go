@@ -27,6 +27,7 @@ const (
 	HookCompatibilityKnown       = "known"
 	HookCompatibilityUnversioned = "unversioned"
 	HookCompatibilityUnknown     = "unknown"
+	HookCompatibilityNotGated    = "not-gated"
 )
 
 // HookContract is the versioned, reproducible hook surface DefenseClaw
@@ -65,6 +66,11 @@ type HookContractResolution struct {
 }
 
 var versionNumberRE = regexp.MustCompile(`(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?`)
+
+var proxyConnectorsWithoutHookGate = map[string]bool{
+	"openclaw":  true,
+	"zeptoclaw": true,
+}
 
 var builtinHookContracts = map[string][]HookContract{
 	"codex": {{
@@ -362,6 +368,16 @@ func hookContractByID(connectorName, contractID string) (HookContract, bool) {
 
 func ResolveHookContract(connectorName, rawVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
+	if proxyConnectorsWithoutHookGate[name] {
+		raw := strings.TrimSpace(rawVersion)
+		return HookContractResolution{
+			Connector:         name,
+			RawVersion:        raw,
+			NormalizedVersion: NormalizeAgentVersion(name, raw),
+			Status:            HookCompatibilityNotGated,
+			Reason:            "proxy/chat connector; no hook contract gate",
+		}
+	}
 	contracts := KnownHookContracts(name)
 	if len(contracts) == 0 {
 		return HookContractResolution{
