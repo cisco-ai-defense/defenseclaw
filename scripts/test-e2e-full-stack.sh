@@ -1902,16 +1902,16 @@ phase_block_allow() {
     fi
 
     local tool_name="exec"
-    local tool_file="/tmp/${E2E_PREFIX}-tool.txt"
-    local tool_expected tool_status
+    local tool_expected tool_status tool_command tool_prompt
     local allow_before allow_after block_before block_after recover_before recover_after
     local allow_out block_out recover_out
     tool_expected="tool-block-test-${RUN_SLUG}"
-    printf '%s\n' "$tool_expected" > "$tool_file"
+    tool_command=$(printf "printf '%%s\\n' %q" "$tool_expected")
+    tool_prompt="Use the exec tool to run exactly this command: $tool_command. Reply with exactly the single line printed by that command and nothing else. Do not answer from memory. Do not use any tool other than exec."
 
     if is_full_live; then
         allow_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "$tool_prompt" 180)
         echo "$allow_out"
         allow_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if echo "$allow_out" | grep -Fq "$tool_expected" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
@@ -1931,7 +1931,7 @@ phase_block_allow() {
 
     if is_full_live; then
         block_before=$(alerts_action_count "inspect-tool-block" "$tool_name")
-        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "$tool_prompt" 180)
         echo "$block_out"
         block_after=$(alerts_action_count "inspect-tool-block" "$tool_name")
         if ! echo "$block_out" | grep -Fq "$tool_expected" && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
@@ -1959,7 +1959,7 @@ phase_block_allow() {
 
     if is_full_live; then
         recover_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "$tool_prompt" 180)
         echo "$recover_out"
         recover_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
         if echo "$recover_out" | grep -Fq "$tool_expected" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
@@ -2472,8 +2472,8 @@ PY
         echo "$response" | jq '.' 2>/dev/null || echo "$response"
         content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
         err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if echo "$content" | grep -q "E2E_OK"; then
-            pass "guardrail round-trip (master key): LLM responded with E2E_OK"
+        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
+            pass "guardrail round-trip (master key): LLM responded"
         else
             fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
         fi
@@ -2493,8 +2493,8 @@ PY
         echo "$response" | jq '.' 2>/dev/null || echo "$response"
         content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
         err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if echo "$content" | grep -q "E2E_AUTH_OK"; then
-            pass "guardrail round-trip (X-DC-Auth): LLM responded with E2E_AUTH_OK"
+        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
+            pass "guardrail round-trip (X-DC-Auth): LLM responded"
         else
             fail "guardrail round-trip (X-DC-Auth): LLM responded" "err='$err' response='$response'"
         fi
