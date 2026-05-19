@@ -86,6 +86,8 @@ defenseclaw = [
     "_data/local_observability_stack/grafana/dashboards/*.json",
     "_data/local_observability_stack/grafana/provisioning/dashboards/*.yml",
     "_data/local_observability_stack/grafana/provisioning/datasources/*.yml",
+    "_data/splunk_o11y_dashboards/*.md",
+    "_data/splunk_o11y_dashboards/terraform/*.tf",
 ]
 
 [tool.uv]
@@ -109,6 +111,7 @@ override-dependencies = [
     "jsonschema>=4.26.0",
     "python-multipart>=0.0.27", # CVE-2026-40347 and CVE-2026-42561 fixed by 0.0.27
     "urllib3>=2.7.0",           # CVE-2026-44431, CVE-2026-44432 fixed in 2.7.0
+    "idna>=3.15",               # CVE-2026-45409 fixed in 3.15
     # aiohttp 3.13.4 fixes a batch of HTTP-parser CVEs (CVE-2026-22815,
     # CVE-2026-34513..34520, CVE-2026-34525). litellm 1.83.10's
     # transitive pin floats aiohttp downward without this override.

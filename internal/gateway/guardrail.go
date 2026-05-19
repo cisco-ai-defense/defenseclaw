@@ -32,6 +32,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
@@ -886,8 +887,22 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 // ---------------------------------------------------------------------------
 // Local pattern scanning
 // ---------------------------------------------------------------------------
+//
+// The variables below define the compiled-in baselines used by
+// scanLocalPatterns. An operator can override any individual field by
+// shipping a `rules/local-patterns.yaml` in their rule pack — at
+// startup ApplyLocalPatternsOverride snapshots the YAML into these
+// globals under localPatternsMu. The default*** copies preserve the
+// compiled-in set so a reload from a partial YAML can restore any
+// fields the operator did not customize.
+//
+// Concurrency: scanLocalPatterns reads under localPatternsMu.RLock();
+// ApplyLocalPatternsOverride mutates under localPatternsMu.Lock(). The
+// mutex is package-scoped because the scan globals are too.
 
-var injectionPatterns = []string{
+var localPatternsMu sync.RWMutex
+
+var defaultInjectionPatterns = []string{
 	"ignore previous", "ignore all instructions", "ignore above",
 	"ignore all previous", "ignore your instructions", "ignore prior",
 	"disregard previous", "disregard all", "disregard your",
@@ -898,16 +913,20 @@ var injectionPatterns = []string{
 	"developer mode enabled",
 }
 
-var injectionRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
-	regexp.MustCompile(`disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
-	regexp.MustCompile(`(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)`),
-	regexp.MustCompile(`(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))`),
-	regexp.MustCompile(`act\s+as\b`),
-	regexp.MustCompile(`bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)`),
+var injectionPatterns = append([]string(nil), defaultInjectionPatterns...)
+
+var defaultInjectionRegexSources = []string{
+	`ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`,
+	`disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`,
+	`(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)`,
+	`(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))`,
+	`act\s+as\b`,
+	`bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)`,
 }
 
-var piiRequestPatterns = []string{
+var injectionRegexes = compileBaseline(defaultInjectionRegexSources)
+
+var defaultPIIRequestPatterns = []string{
 	"find their ssn", "find my ssn", "look up their ssn",
 	"retrieve their ssn", "get their ssn", "get my ssn",
 	"social security number", "mother's maiden name",
@@ -919,17 +938,107 @@ var piiRequestPatterns = []string{
 	"drivers license",
 }
 
-var piiDataRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
-	regexp.MustCompile(`\b\d{9}\b`),
-	regexp.MustCompile(`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`),
+var piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
+
+var defaultPIIDataRegexSources = []string{
+	`\b\d{3}-\d{2}-\d{4}\b`,
+	`\b\d{9}\b`,
+	`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`,
 }
 
-var secretPatterns = []string{
+var piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
+
+var defaultSecretPatterns = []string{
 	"sk-", "sk-ant-", "sk-proj-", "api_key=", "apikey=",
 	"-----begin rsa", "-----begin private", "-----begin openssh",
 	"aws_access_key", "aws_secret_access", "password=",
 	"bearer ", "ghp_", "gho_", "github_pat_",
+}
+
+var secretPatterns = append([]string(nil), defaultSecretPatterns...)
+
+// compileBaseline panics on a bad pattern. This is intentional: the
+// defaults are constants in source, not operator input, so a bad regex
+// here would be a build-time bug and we want to surface it loudly
+// rather than silently disabling a whole detection family.
+func compileBaseline(sources []string) []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0, len(sources))
+	for _, s := range sources {
+		out = append(out, regexp.MustCompile(s))
+	}
+	return out
+}
+
+// ApplyLocalPatternsOverride snapshots an operator-supplied
+// local-patterns.yaml into the running scanner state. nil restores
+// the compiled-in defaults wholesale (useful for tests that mutate
+// then need to revert).
+//
+// Field semantics, matching guardrail.LocalPatterns:
+//
+//   - nil-or-absent slice (lp.X == nil) → keep the compiled-in default
+//   - empty slice (lp.X != nil, len 0) → operator explicitly cleared the field
+//   - populated slice → wholesale replacement of the default
+//
+// Regex sources that fail to compile are logged and dropped from the
+// override; the default for that single regex slot is *not* retained
+// for the failed entry (the override is best-effort within the field).
+// A separate `compileRegexSafe`-style ReDoS guard would be sound but
+// is intentionally NOT applied here because the only producer of these
+// YAMLs today is human operators, not multi-tenant input — the rule
+// pack itself is a trust boundary upstream of the gateway. Callers
+// who need stricter compile guarantees should validate the YAML at
+// activation time (see cli/defenseclaw/commands/cmd_policy.py).
+func ApplyLocalPatternsOverride(lp *guardrail.LocalPatterns) {
+	localPatternsMu.Lock()
+	defer localPatternsMu.Unlock()
+
+	if lp == nil {
+		injectionPatterns = append([]string(nil), defaultInjectionPatterns...)
+		injectionRegexes = compileBaseline(defaultInjectionRegexSources)
+		piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
+		piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
+		secretPatterns = append([]string(nil), defaultSecretPatterns...)
+		exfilPatterns = append([]string(nil), defaultExfilPatterns...)
+		return
+	}
+
+	if lp.Injection != nil {
+		injectionPatterns = append([]string(nil), lp.Injection...)
+	}
+	if lp.InjectionRegexes != nil {
+		out := make([]*regexp.Regexp, 0, len(lp.InjectionRegexes))
+		for _, src := range lp.InjectionRegexes {
+			re, err := regexp.Compile(src)
+			if err != nil {
+				fmt.Fprintf(defaultLogWriter, "[guardrail] local-patterns: skip injection_regexes %q: %v\n", src, err)
+				continue
+			}
+			out = append(out, re)
+		}
+		injectionRegexes = out
+	}
+	if lp.PIIRequests != nil {
+		piiRequestPatterns = append([]string(nil), lp.PIIRequests...)
+	}
+	if lp.PIIDataRegexes != nil {
+		out := make([]*regexp.Regexp, 0, len(lp.PIIDataRegexes))
+		for _, src := range lp.PIIDataRegexes {
+			re, err := regexp.Compile(src)
+			if err != nil {
+				fmt.Fprintf(defaultLogWriter, "[guardrail] local-patterns: skip pii_data_regexes %q: %v\n", src, err)
+				continue
+			}
+			out = append(out, re)
+		}
+		piiDataRegexes = out
+	}
+	if lp.Secrets != nil {
+		secretPatterns = append([]string(nil), lp.Secrets...)
+	}
+	if lp.Exfiltration != nil {
+		exfilPatterns = append([]string(nil), lp.Exfiltration...)
+	}
 }
 
 // secretPatternRegexes tighten patterns that cause false positives as bare
@@ -939,10 +1048,12 @@ var secretPatternRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`),
 }
 
-var exfilPatterns = []string{
+var defaultExfilPatterns = []string{
 	"/etc/passwd", "/etc/shadow", "base64 -d", "base64 --decode",
 	"exfiltrate", "exfil", "send to my server", "curl http",
 }
+
+var exfilPatterns = append([]string(nil), defaultExfilPatterns...)
 
 // exfilRegexes is the deterministic regex FLOOR for credential-file
 // reads. It runs against the normalized triage view (lowercased,
@@ -991,6 +1102,20 @@ var bulkAccessRegex = regexp.MustCompile(
 	`(?i)\b(?:users_list|contacts_list|mail_search|delegated_email_list_principals)\b.*\btop\s+\d{2,}\b`)
 
 func scanLocalPatterns(direction, content string) *ScanVerdict {
+	// Snapshot the pattern set once per call under the read mutex so a
+	// concurrent ApplyLocalPatternsOverride from a config reload can't
+	// observe a torn slice mid-scan. The snapshots are slice aliases —
+	// safe because the override path always replaces the slice header
+	// rather than mutating elements in place.
+	localPatternsMu.RLock()
+	injPatterns := injectionPatterns
+	injRegexes := injectionRegexes
+	piiPatterns := piiRequestPatterns
+	piiDRegexes := piiDataRegexes
+	secPatterns := secretPatterns
+	exfPatterns := exfilPatterns
+	localPatternsMu.RUnlock()
+
 	// normalized defeats whitespace/slash-run evasions (Phase 7 of the
 	// multi-provider-adapters PR). Substring and regex matches use the
 	// normalized string so "/ etc / passwd" and "/etc//passwd" still
@@ -1001,26 +1126,26 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	isHigh := false
 
 	if direction == "prompt" {
-		for _, p := range injectionPatterns {
+		for _, p := range injPatterns {
 			if strings.Contains(lower, p) {
 				flags = append(flags, p)
 				isHigh = true
 			}
 		}
-		for _, re := range injectionRegexes {
+		for _, re := range injRegexes {
 			if re.MatchString(lower) {
 				match := re.FindString(lower)
 				flags = append(flags, match)
 				isHigh = true
 			}
 		}
-		for _, p := range piiRequestPatterns {
+		for _, p := range piiPatterns {
 			if strings.Contains(lower, p) {
 				flags = append(flags, "pii-request:"+p)
 				isHigh = true
 			}
 		}
-		for _, p := range exfilPatterns {
+		for _, p := range exfPatterns {
 			if strings.Contains(lower, p) {
 				flags = append(flags, p)
 				isHigh = true
@@ -1052,7 +1177,7 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	// here. Without the normalized fallback the docstring above would
 	// be a lie: PII/secret regexes are exactly the surfaces an attacker
 	// would target with invisible-character splicing.
-	for _, re := range piiDataRegexes {
+	for _, re := range piiDRegexes {
 		if match, norm, ok := findRegexMatch(content, lower, re); ok {
 			flag := "pii-data:" + match
 			if norm {
@@ -1063,7 +1188,7 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		}
 	}
 
-	for _, p := range secretPatterns {
+	for _, p := range secPatterns {
 		if strings.Contains(lower, p) {
 			flags = append(flags, p)
 		}
@@ -1166,6 +1291,16 @@ var bare9DigitRegex = regexp.MustCompile(`\b\d{9}\b`)
 var creditCardRegex = regexp.MustCompile(`\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`)
 
 func triagePatterns(direction, content string) []TriageSignal {
+	// Snapshot the overridable pattern sets once for the lifetime of
+	// the call, same reasoning as in scanLocalPatterns. The high/low
+	// signal injection splits are not (yet) operator-tunable so they
+	// are read directly from their compiled-in globals.
+	localPatternsMu.RLock()
+	piiPatterns := piiRequestPatterns
+	exfPatterns := exfilPatterns
+	secPatterns := secretPatterns
+	localPatternsMu.RUnlock()
+
 	// See scanLocalPatterns for why we normalize for regex matching
 	// only — the original `content` is preserved for evidence
 	// extraction and for anything downstream that feeds the judge.
@@ -1214,7 +1349,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 		}
 
 		// PII request patterns (asking for PII = HIGH_SIGNAL).
-		for _, p := range piiRequestPatterns {
+		for _, p := range piiPatterns {
 			if strings.Contains(lower, p) {
 				signals = append(signals, TriageSignal{
 					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-PII-REQUEST",
@@ -1225,7 +1360,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 		}
 
 		// Exfiltration patterns (HIGH_SIGNAL).
-		for _, p := range exfilPatterns {
+		for _, p := range exfPatterns {
 			if strings.Contains(lower, p) {
 				signals = append(signals, TriageSignal{
 					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-EXFIL",
@@ -1308,7 +1443,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 	if direction == "prompt" {
 		secretLevel = "HIGH_SIGNAL"
 	}
-	for _, p := range secretPatterns {
+	for _, p := range secPatterns {
 		if strings.Contains(lower, p) {
 			signals = append(signals, TriageSignal{
 				Level: secretLevel, FindingID: "TRIAGE-SECRET",

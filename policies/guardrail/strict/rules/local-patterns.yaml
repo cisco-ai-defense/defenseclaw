@@ -1,4 +1,21 @@
+# Local pattern set consumed by internal/gateway/guardrail.go via the
+# rule-pack loader. The bundled defaults below mirror the compiled-in
+# baseline 1:1 — see internal/gateway/guardrail.go::default* slices.
+# Editing this file overrides individual fields wholesale for this
+# profile (e.g. emptying `secrets:` clears secret triage entirely;
+# extending `injection:` adds operator-specific phrases).
+#
+# Three-state semantics:
+#   - omit a key entirely  → retain compiled-in default for that family
+#   - field: []            → operator explicitly cleared the field
+#   - field: [...]         → operator override; replaces the default
+#
+# An identity-test in internal/gateway TestLocalPatternsDefaultsParity
+# verifies this file produces the same in-memory set as the compiled-in
+# defaults, so drift between the YAML and the Go source is caught at
+# CI time rather than at incident-time.
 version: 1
+
 injection:
   - "ignore previous"
   - "ignore all instructions"
@@ -55,6 +72,7 @@ pii_data_regexes:
   - '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b'
 
 secrets:
+  - "sk-"
   - "sk-ant-"
   - "sk-proj-"
   - "api_key="
@@ -65,6 +83,7 @@ secrets:
   - "aws_access_key"
   - "aws_secret_access"
   - "password="
+  - "bearer "
   - "ghp_"
   - "gho_"
   - "github_pat_"
@@ -75,5 +94,6 @@ exfiltration:
   - "base64 -d"
   - "base64 --decode"
   - "exfiltrate"
+  - "exfil"
   - "send to my server"
   - "curl http"

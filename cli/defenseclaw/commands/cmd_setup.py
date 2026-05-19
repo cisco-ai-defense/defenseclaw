@@ -116,6 +116,14 @@ from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
 
 setup.add_command(local_observability)
 
+# Import the Terraform-backed Splunk O11y dashboard installer so the
+# interactive Splunk wizard can reuse the same idempotent apply path and
+# the command group can be registered below.
+from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E402
+    apply_dashboards,
+    splunk_o11y_dashboards,
+)
+
 # Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
 # notifiers). Distinct from `setup observability add webhook` (generic
 # HTTP JSONL audit-log forwarder) — see docs/OBSERVABILITY.md for the
@@ -4696,7 +4704,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 }
 
 
-@setup.command("splunk")
+@click.group("splunk", invoke_without_command=True)
+@click.pass_context
 @click.option("--o11y", "enable_o11y", is_flag=True, default=False,
               help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
 @click.option("--logs", "enable_logs", is_flag=True, default=False,
@@ -4753,9 +4762,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
     ),
 )
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
-@pass_ctx
 def setup_splunk(
-    app: AppContext,
+    ctx: click.Context,
     enable_o11y: bool,
     enable_logs: bool,
     s3_export: bool,
@@ -4800,6 +4808,13 @@ def setup_splunk(
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    app = ctx.find_object(AppContext)
+    if app is None:
+        raise click.ClickException("App context unavailable")
+
     if show_credentials:
         _show_splunk_credentials(app.cfg.data_dir)
         return
@@ -4889,6 +4904,12 @@ def setup_splunk(
         app.logger.log_action("setup-splunk", "config", " ".join(parts))
 
 
+# Register `defenseclaw setup splunk dashboards` (Terraform-backed dashboard
+# and detector provisioning for Splunk Observability Cloud).
+setup.add_command(setup_splunk)
+setup_splunk.add_command(splunk_o11y_dashboards)
+
+
 # ---------------------------------------------------------------------------
 # Interactive wizard
 # ---------------------------------------------------------------------------
@@ -4928,6 +4949,8 @@ def _interactive_splunk_setup(
     if click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False):
         _interactive_o11y(app, realm, access_token, app_name)
         did_o11y = True
+        click.echo()
+        _interactive_o11y_dashboards(app)
         click.echo()
 
     if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
@@ -4993,6 +5016,44 @@ def _interactive_o11y(
     )
 
 
+def _interactive_o11y_dashboards(app: AppContext) -> bool:
+    click.echo()
+    click.echo("  Splunk O11y Dashboards")
+    click.echo("  ──────────────────────")
+    click.echo()
+    if not click.confirm("  Install Splunk Observability Cloud dashboards now?", default=False):
+        return False
+
+    o11y_api_token = click.prompt(
+        "  O11y API token (not the ingest token)",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
+    if not o11y_api_token:
+        click.echo("  error: O11y API token is required to install dashboards", err=True)
+        raise SystemExit(1)
+
+    apply_dashboards(
+        app,
+        api_url=None,
+        o11y_api_token=o11y_api_token,
+        name_prefix="",
+        with_detectors=False,
+        enable_detectors=False,
+        detector_notifications=(),
+        work_dir=None,
+        state_path=None,
+        terraform_bin="terraform",
+        plugin_dir=None,
+        skip_init=False,
+        skip_validate=False,
+        timeout=900,
+        yes=True,
+    )
+    return True
+
+
 def _prompt_splunk_token(current: str | None) -> str:
     env_val = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
     if current:
@@ -5002,7 +5063,12 @@ def _prompt_splunk_token(current: str | None) -> str:
     else:
         hint = "(not set)"
 
-    val = click.prompt(f"  Access token [{hint}]", default="", show_default=False, hide_input=True)
+    val = click.prompt(
+        f"  O11y ingest access token [{hint}]",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
     if val:
         return val
     return current or env_val

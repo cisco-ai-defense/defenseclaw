@@ -1,0 +1,435 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+//
+// Strongly-typed schema for the docs-site policy creator. Every field
+// here maps 1:1 to a knob the live engine reads; field names match
+// what `defenseclaw policy activate` writes to ~/.defenseclaw/policies.
+// Keeping a single source of truth in TS lets every section, validator,
+// emitter, and Live-Test caller share the same shape.
+
+export const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
+export type Severity = (typeof SEVERITIES)[number];
+
+export const SEVERITIES_UPPER = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFO'] as const;
+export type SeverityUpper = (typeof SEVERITIES_UPPER)[number];
+
+export const SCANNER_TYPES = ['skill', 'mcp', 'plugin'] as const;
+export type ScannerType = (typeof SCANNER_TYPES)[number];
+
+export type RuntimeAction = 'enable' | 'disable';
+export type FileAction = 'none' | 'quarantine';
+export type InstallAction = 'none' | 'allow' | 'block';
+
+export interface SeverityActionTriple {
+  runtime: RuntimeAction;
+  file: FileAction;
+  install: InstallAction;
+}
+
+export type SeverityActionMatrix = Record<Severity, SeverityActionTriple>;
+
+export interface AdmissionConfig {
+  scan_on_install: boolean;
+  allow_list_bypass_scan: boolean;
+}
+
+export interface FirstPartyEntry {
+  target_type: ScannerType;
+  target_name: string;
+  reason: string;
+  source_path_contains: string[];
+}
+
+export type GuardrailCategory = string; // free-form; default catalog ships with injection / secrets / exfiltration
+
+export interface GuardrailHilt {
+  enabled: boolean;
+  min_severity: SeverityUpper;
+}
+
+export interface GuardrailConfig {
+  block_threshold: 1 | 2 | 3 | 4;
+  alert_threshold: 1 | 2 | 3 | 4;
+  cisco_trust_level: 'full' | 'advisory' | 'none';
+  hilt: GuardrailHilt;
+  patterns: Record<GuardrailCategory, string[]>;
+  severity_mappings: Record<GuardrailCategory, SeverityUpper>;
+}
+
+// A single regex rule inside a guardrail rule pack file.
+export interface RuleDef {
+  id: string;
+  enabled?: boolean;
+  pattern: string;
+  title: string;
+  severity: SeverityUpper;
+  confidence: number; // 0..1
+  tags: string[];
+}
+
+// One guardrail/<pack>/rules/<filename>.yaml file. Stored under the
+// pack name + the file's category (which is also the YAML's `category`
+// key today).
+export interface RulesFile {
+  filename: string; // e.g. "secrets" → emitted as secrets.yaml
+  category: string;
+  rules: RuleDef[];
+}
+
+// Suppression layers from internal/guardrail/rulepack.go.
+export interface PreJudgeStrip {
+  id: string;
+  pattern: string;
+  context: string;
+  applies_to: Array<'pii' | 'injection' | 'tool-injection' | 'exfil'>;
+}
+
+export interface FindingSuppressionDef {
+  id: string;
+  finding_pattern: string;
+  entity_pattern: string;
+  condition?: '' | 'is_epoch' | 'is_platform_id';
+  reason: string;
+}
+
+export interface ToolSuppressionDef {
+  tool_pattern: string;
+  suppress_findings: string[];
+  reason: string;
+}
+
+export interface SuppressionsBundle {
+  pre_judge_strips: PreJudgeStrip[];
+  finding_suppressions: FindingSuppressionDef[];
+  tool_suppressions: ToolSuppressionDef[];
+}
+
+export interface SensitiveTool {
+  name: string;
+  result_inspection: boolean;
+  judge_result: boolean;
+  min_entities_for_alert?: number;
+}
+
+export interface JudgeCategoryDef {
+  finding_id: string;
+  severity?: SeverityUpper;
+  severity_default?: SeverityUpper;
+  severity_prompt?: SeverityUpper;
+  severity_completion?: SeverityUpper;
+  enabled: boolean;
+}
+
+export interface JudgeConfig {
+  name: 'pii' | 'injection' | 'tool-injection' | 'exfil';
+  enabled: boolean;
+  system_prompt: string;
+  adjudication_prompt?: string;
+  /** Floor for HIGH severity — N distinct categories trigger HIGH.
+   *  Mirrors JudgeYAML.MinCategoriesForHigh in internal/guardrail. */
+  min_categories_for_high?: number;
+  /** Floor for CRITICAL severity — N distinct categories trigger CRITICAL.
+   *  The bundled injection judge ships with `min_categories_for_critical:
+   *  2` so two independent category hits escalate. Reading the bundled
+   *  preset without modelling this would silently drop the field on
+   *  emit, lowering the operator's effective severity ceiling. */
+  min_categories_for_critical?: number;
+  single_category_max_severity?: SeverityUpper;
+  categories: Record<string, JudgeCategoryDef>;
+}
+
+export interface FirewallConfig {
+  default_action: 'allow' | 'deny';
+  blocked_destinations: string[];
+  allowed_domains: string[];
+  allowed_ports: number[];
+}
+
+export interface WebhookEntry {
+  url: string;
+  type: 'slack' | 'webex' | 'pagerduty' | 'generic';
+  secret_env?: string;
+  room_id?: string;
+  min_severity: SeverityUpper;
+  events: Array<'block' | 'drift' | 'guardrail'>;
+  enabled: boolean;
+}
+
+export interface WatchConfig {
+  rescan_enabled: boolean;
+  rescan_interval_min: number;
+}
+
+export interface EnforcementConfig {
+  max_enforcement_delay_seconds: number;
+}
+
+export interface AuditConfig {
+  log_all_actions: boolean;
+  log_scan_results: boolean;
+  retention_days: number;
+}
+
+// Per-scanner overrides. Today each scanner ships its own pack format
+// (codeguard, plugin-scanner, skill-scanner). The wizard lets the
+// operator pick a profile by name; full inline overrides ship in a
+// later phase.
+export interface ScannerProfileSelection {
+  codeguard?: string; // profile name
+  'plugin-scanner'?: string;
+  'skill-scanner'?: string;
+}
+
+// A custom Rego snippet (Phase 5). Snippets append to the bundled Rego
+// at install time. They MUST declare `package defenseclaw.custom.<name>`
+// so the bundled modules can reference them via data.defenseclaw.custom.
+export interface CustomRegoSnippet {
+  name: string; // becomes the filename (custom-<name>.rego)
+  package: string; // e.g. "defenseclaw.custom.my_rule"
+  source: string;
+  description: string;
+}
+
+// --- Session correlator (Layer 5) ------------------------------------------
+//
+// The cross-event layer that fires when a sequence of findings in the same
+// session matches a known attack pattern (lethal trifecta, escalation chain,
+// destructive flow). Mirrors internal/guardrail/correlator.go.
+
+export const DATA_AXES = [
+  'ingress_untrusted',
+  'sensitive_access',
+  'egress_external',
+] as const;
+export type DataAxis = (typeof DATA_AXES)[number];
+
+export const TOOL_CAPABILITY_CLASSES = [
+  'read_fs',
+  'write_fs',
+  'exec_shell',
+  'network_fetch',
+  'send_message',
+] as const;
+export type ToolCapabilityClass = (typeof TOOL_CAPABILITY_CLASSES)[number];
+
+// A single predicate inside a correlation pattern. Empty fields are
+// "don't care"; the clause fires when ALL set predicates hold on the
+// finding under inspection.
+export interface CorrelationClause {
+  axis?: DataAxis;
+  tool_capability_class?: ToolCapabilityClass;
+  with_rule_match?: string[];
+  min_severity?: SeverityUpper;
+}
+
+export interface CorrelationSequenceStep {
+  severity: SeverityUpper;
+}
+
+export interface CorrelationPattern {
+  id: string;
+  description: string;
+  window_events: number;
+  severity_on_match: SeverityUpper;
+  all_of?: CorrelationClause[];
+  sequence?: CorrelationSequenceStep[];
+  fingerprint_chain?: CorrelationClause[];
+  enabled: boolean;
+}
+
+// --- Cisco AI Defense (gateway-level config knob) --------------------------
+//
+// Top-level config.yaml block — read by internal/config/config.go and
+// consumed by both the proxy lane (chat prompts) and the hook lane (tool
+// calls + tool results + hook prompts) since #281. ScanHookSurface
+// defaults to true via CiscoAIDefenseConfig.HookSurfaceEnabled().
+
+export interface CiscoAIDefenseConfig {
+  enabled: boolean;
+  endpoint: string;
+  api_key_env: string;
+  /** Defaults to true (hook lane enabled when an API key resolves). */
+  scan_hook_surface: boolean;
+}
+
+export interface Policy {
+  name: string;
+  description: string;
+  basedOn: 'default' | 'strict' | 'permissive';
+  admission: AdmissionConfig;
+  skill_actions: SeverityActionMatrix;
+  scanner_overrides: Partial<Record<ScannerType, Partial<Record<Severity, SeverityActionTriple>>>>;
+  first_party_allow_list: FirstPartyEntry[];
+  guardrail: GuardrailConfig;
+  rule_pack: {
+    name: string; // referenced from the policy.yaml (default: <policy.name>)
+    files: RulesFile[];
+  };
+  suppressions: SuppressionsBundle;
+  sensitive_tools: SensitiveTool[];
+  judges: JudgeConfig[];
+  firewall: FirewallConfig;
+  webhooks: WebhookEntry[];
+  watch: WatchConfig;
+  enforcement: EnforcementConfig;
+  audit: AuditConfig;
+  scanners: ScannerProfileSelection;
+  custom_rego: CustomRegoSnippet[];
+  /** Sliding-window correlation patterns (Layer 5). */
+  correlator: CorrelationPattern[];
+  /** Optional Cisco AI Defense lane configuration. */
+  cisco_ai_defense: CiscoAIDefenseConfig;
+}
+
+// --- Validation findings ----------------------------------------------------
+
+export type ValidationLevel = 'error' | 'warning' | 'info';
+
+export interface ValidationFinding {
+  level: ValidationLevel;
+  code: ValidationCode;
+  message: string;
+  // Dotted JSON path or section name where the issue lives. The
+  // wizard uses this to scroll the user to the right control.
+  location: string;
+  // Optional fix suggestion the wizard renders inline.
+  fix?: string;
+}
+
+export type ValidationCode =
+  | 'REGEX_INVALID'
+  | 'REGEX_RE2_INCOMPAT'
+  | 'REGEX_REDOS'
+  | 'REGEX_ANCHOR_MISSING'
+  | 'ID_DUPLICATE'
+  | 'ID_FORMAT'
+  | 'SEVERITY_OUT_OF_RANGE'
+  | 'SUPP_OVER_BROAD'
+  | 'RULE_OVERLAP'
+  | 'WEBHOOK_SECRET_MISSING'
+  | 'FIREWALL_DEFAULT_DENY_NO_ALLOW'
+  | 'SCANNER_OVERRIDE_LOOSER'
+  | 'OPA_VERDICT_UNEXPECTED'
+  | 'NAME_INVALID'
+  | 'CUSTOM_REGO_MISSING_PACKAGE'
+  | 'CORRELATOR_PATTERN_EMPTY'
+  | 'CORRELATOR_WINDOW_INVALID'
+  | 'CISCO_AID_KEY_ENV_MISSING'
+  | 'ENV_NAME_LIKELY_SECRET'
+  | 'CUSTOM_REGO_LIKELY_SECRET'
+  // "Risky configuration" warnings — surfaced in a pinned banner
+  // above the collapsed validator details so the operator can't
+  // miss them. The PR description calls these out as D5; the codes
+  // here track each individual risk so tests can pin behavior per
+  // rule.
+  | 'RISKY_FIREWALL_DEFAULT_ALLOW'
+  | 'RISKY_ALL_ACTIONS_ALLOW'
+  | 'RISKY_CUSTOM_REGO_IDENTITY_ALLOW'
+  | 'RISKY_JUDGE_THRESHOLD_MISMATCH'
+  | 'RISKY_CORRELATOR_ALL_DISABLED';
+
+// --- Generated build-time types ---------------------------------------------
+
+export interface PresetBundle {
+  name: 'default' | 'strict' | 'permissive';
+  description: string;
+  bundle: {
+    name: string;
+    description: string;
+    policy: Record<string, unknown>;
+    guardrail: {
+      rules: Record<string, unknown>;
+      judge: Record<string, unknown>;
+      suppressions: Record<string, unknown> | null;
+      sensitiveTools: Record<string, unknown> | null;
+      /** Layer-5 patterns; identical across packs today, lifted from
+       *  internal/guardrail/defaults/correlation-patterns.yaml. */
+      correlator: Record<string, unknown> | null;
+    };
+    scanners: Record<string, Record<string, Record<string, unknown>>>;
+  };
+}
+
+export interface PresetsFile {
+  /** Optional. The build pipeline no longer emits this — keeping it
+   *  optional means any old in-tree fixtures still typecheck. */
+  generated_at?: string;
+  presets: PresetBundle[];
+}
+
+export interface RecipeKindMap {
+  'rule:secrets': RuleDef;
+  'rule:injection': RuleDef;
+  'rule:exfiltration': RuleDef;
+  'rule:command': RuleDef;
+  'rule:path': RuleDef;
+  'rule:enterprise-data': RuleDef;
+  'rule:trust-exploit': RuleDef;
+  'rule:cognitive': RuleDef;
+  'rule:c2': RuleDef;
+  pre_judge_strip: PreJudgeStrip;
+  finding_suppression: FindingSuppressionDef;
+  tool_suppression: ToolSuppressionDef;
+}
+
+export type RecipeKind = keyof RecipeKindMap;
+
+export interface Recipe {
+  id: string;
+  title: string;
+  kind: RecipeKind;
+  body: Record<string, unknown>;
+  why: string;
+  examples: string[];
+  counterexamples: string[];
+  source: string;
+  tags: string[];
+  /**
+   * Data axes this recipe labels findings with at evaluation time.
+   * Mirrors internal/guardrail/axes.go AxesForRuleID so the catalog
+   * surfaces the same lethal-trifecta signal the correlator sees.
+   * Optional: not every recipe maps cleanly (e.g. cosmetic-shell
+   * suppression has no axis since it suppresses rather than detects).
+   */
+  data_axis?: DataAxis[];
+  /**
+   * Tool capability classes this recipe targets (for tool-suppression
+   * and pre-judge-strip recipes that scope by tool pattern).
+   */
+  tool_capability_class?: ToolCapabilityClass[];
+}
+
+export interface RecipesFile {
+  generated_at?: string;
+  recipes: Recipe[];
+}
+
+export interface Scenario {
+  id: string;
+  title: string;
+  domain: 'admission' | 'guardrail' | 'firewall' | 'audit' | 'skill_actions';
+  input: Record<string, unknown>;
+  description: string;
+  expectedVerdict: string;
+}
+
+export interface ScenariosFile {
+  generated_at?: string;
+  scenarios: Scenario[];
+}
+
+export interface OpaManifest {
+  generated_at?: string;
+  domains: Array<{
+    name: string;
+    wasm: string;
+    entrypoints: string[];
+  }>;
+  skipped: string[];
+}
+
+export interface OpaResult {
+  verdict: string;
+  reason?: string;
+  raw: unknown;
+}

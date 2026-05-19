@@ -191,6 +191,11 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
 	router.SetRulePack(rp)
 	ApplyRulePackOverrides(rp)
+	// local-patterns.yaml replaces the compiled-in local pattern set
+	// per-profile when present in the rule pack. Calling with nil
+	// LocalPatterns is a no-op (keeps the defaults), so this is safe
+	// even when an operator hasn't customized the file.
+	ApplyLocalPatternsOverride(rp.LocalPatterns)
 
 	// Wire LLM judge when enabled. The judge handles tool-call injection
 	// detection AND tool-result PII inspection (via inspectToolResult),

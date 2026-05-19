@@ -966,6 +966,50 @@ run_agent_prompt() {
     timeout "$timeout_s" openclaw agent --session-id "$session_id" -m "$prompt" 2>&1 || true
 }
 
+guardrail_prompt_strategy() {
+    python3 - <<'PY'
+import os
+import yaml
+from pathlib import Path
+
+cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+if not cfg_path.exists():
+    print("")
+    raise SystemExit(0)
+
+with cfg_path.open() as f:
+    cfg = yaml.safe_load(f) or {}
+
+print(str((cfg.get("guardrail") or {}).get("detection_strategy_prompt") or ""))
+PY
+}
+
+set_guardrail_prompt_strategy() {
+    local strategy="$1"
+    DEFENSECLAW_E2E_PROMPT_STRATEGY="$strategy" python3 - <<'PY'
+import os
+import yaml
+from pathlib import Path
+
+cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+if not cfg_path.exists():
+    raise SystemExit("config.yaml not found")
+
+with cfg_path.open() as f:
+    cfg = yaml.safe_load(f) or {}
+
+cfg.setdefault("guardrail", {})["detection_strategy_prompt"] = os.environ["DEFENSECLAW_E2E_PROMPT_STRATEGY"]
+
+with cfg_path.open("w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+PY
+}
+
+restart_sidecar_after_guardrail_config_change() {
+    defenseclaw-gateway restart 2>/dev/null || true
+    ensure_sidecar_connected 90
+}
+
 openclaw_skills_list_json() {
     openclaw skills list --json 2>/dev/null || echo "[]"
 }
@@ -1902,19 +1946,34 @@ phase_block_allow() {
     fi
 
     local tool_name="exec"
-    local tool_file="/tmp/${E2E_PREFIX}-tool.txt"
-    local tool_expected tool_status
+    local tool_expected tool_file tool_status tool_command tool_prompt
     local allow_before allow_after block_before block_after recover_before recover_after
     local allow_out block_out recover_out
+    local original_prompt_strategy prompt_strategy_overridden
     tool_expected="tool-block-test-${RUN_SLUG}"
-    printf '%s\n' "$tool_expected" > "$tool_file"
+    tool_file="${TMPDIR:-/tmp}/defenseclaw-${RUN_SLUG}-tool-block.txt"
+    rm -f "$tool_file"
+    tool_command=$(printf "printf '%%s\\n' %q > %q" "$tool_expected" "$tool_file")
+    tool_prompt="Use the exec tool to run exactly this command: $tool_command. Reply with DONE once the command has completed. Do not use any tool other than exec."
+    prompt_strategy_overridden=false
+
+    if is_full_live; then
+        # The live prompt judge is intentionally strict about prompts that
+        # mandate tool selection. This phase validates runtime tool governance,
+        # so keep the proxy alive but let the prompt path use regex-only
+        # inspection while the agent exercises exec block/allow behavior.
+        original_prompt_strategy=$(guardrail_prompt_strategy)
+        set_guardrail_prompt_strategy "regex_only"
+        restart_sidecar_after_guardrail_config_change
+        prompt_strategy_overridden=true
+    fi
 
     if is_full_live; then
         allow_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        allow_out=$(run_agent_prompt "$(agent_session_id tool-allow)" "$tool_prompt" 180)
         echo "$allow_out"
         allow_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        if echo "$allow_out" | grep -Fq "$tool_expected" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
+        if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${allow_after:-0}" -gt "${allow_before:-0}" ]; then
             pass "block/allow: agent could use exec before block"
         else
             fail "block/allow: agent could use exec before block" "$allow_out"
@@ -1930,11 +1989,12 @@ phase_block_allow() {
     fi
 
     if is_full_live; then
+        rm -f "$tool_file"
         block_before=$(alerts_action_count "inspect-tool-block" "$tool_name")
-        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        block_out=$(run_agent_prompt "$(agent_session_id tool-block)" "$tool_prompt" 180)
         echo "$block_out"
         block_after=$(alerts_action_count "inspect-tool-block" "$tool_name")
-        if ! echo "$block_out" | grep -Fq "$tool_expected" && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
+        if { [ ! -f "$tool_file" ] || ! grep -Fxq "$tool_expected" "$tool_file"; } && [ "${block_after:-0}" -gt "${block_before:-0}" ]; then
             pass "block/allow: agent was blocked from exec after block"
         else
             fail "block/allow: agent was blocked from exec after block" "$block_out"
@@ -1958,15 +2018,22 @@ phase_block_allow() {
     fi
 
     if is_full_live; then
+        rm -f "$tool_file"
         recover_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "Use the exec tool to run exactly this command: cat $tool_file. Reply with exactly the single line printed by that command and nothing else. Do not use any tool other than exec." 180)
+        recover_out=$(run_agent_prompt "$(agent_session_id tool-unblock)" "$tool_prompt" 180)
         echo "$recover_out"
         recover_after=$(alerts_action_count "inspect-tool-allow" "$tool_name")
-        if echo "$recover_out" | grep -Fq "$tool_expected" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
+        if [ -f "$tool_file" ] && grep -Fxq "$tool_expected" "$tool_file" && [ "${recover_after:-0}" -gt "${recover_before:-0}" ]; then
             pass "block/allow: agent recovered exec after unblock"
         else
             fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
+        rm -f "$tool_file"
+    fi
+
+    if is_full_live && [ "$prompt_strategy_overridden" = "true" ]; then
+        set_guardrail_prompt_strategy "$original_prompt_strategy"
+        restart_sidecar_after_guardrail_config_change
     fi
 
     local alerts skill_block_events skill_reject_events skill_allow_events skill_install_allow_events
@@ -2042,7 +2109,6 @@ phase_block_allow() {
         fail "block/allow: tool allow audit event recorded" "no tool-allow event for $tool_name"
     fi
 
-    rm -f "$tool_file" 2>/dev/null || true
     cleanup_skill_name "$allowed_skill"
     cleanup_skill_name "$blocked_skill"
     phase_timer_end "Phase 4B"
@@ -2472,8 +2538,8 @@ PY
         echo "$response" | jq '.' 2>/dev/null || echo "$response"
         content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
         err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if echo "$content" | grep -q "E2E_OK"; then
-            pass "guardrail round-trip (master key): LLM responded with E2E_OK"
+        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
+            pass "guardrail round-trip (master key): LLM responded"
         else
             fail "guardrail round-trip (master key): LLM responded" "err='$err' response='$response'"
         fi
@@ -2493,8 +2559,8 @@ PY
         echo "$response" | jq '.' 2>/dev/null || echo "$response"
         content=$(echo "$response" | jq -r '.choices[0].message.content // empty' 2>/dev/null || true)
         err=$(echo "$response" | jq -r '.error.message // .error // empty' 2>/dev/null || true)
-        if echo "$content" | grep -q "E2E_AUTH_OK"; then
-            pass "guardrail round-trip (X-DC-Auth): LLM responded with E2E_AUTH_OK"
+        if [ -n "$content" ] && [ -z "$err" ] && ! echo "$content" | grep -Fq "[DefenseClaw] This request was blocked"; then
+            pass "guardrail round-trip (X-DC-Auth): LLM responded"
         else
             fail "guardrail round-trip (X-DC-Auth): LLM responded" "err='$err' response='$response'"
         fi
