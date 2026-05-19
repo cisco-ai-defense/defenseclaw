@@ -2042,7 +2042,6 @@ phase_block_allow() {
         fail "block/allow: tool allow audit event recorded" "no tool-allow event for $tool_name"
     fi
 
-    rm -f "$tool_file" 2>/dev/null || true
     cleanup_skill_name "$allowed_skill"
     cleanup_skill_name "$blocked_skill"
     phase_timer_end "Phase 4B"
