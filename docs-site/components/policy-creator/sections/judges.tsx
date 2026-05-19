@@ -146,7 +146,7 @@ export function JudgesSection({
                 }
                 hint="Per-call prefix prepended to the judge prompt."
               />
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                 <TextField
                   label="min_categories_for_high"
                   inputMode="numeric"
@@ -155,6 +155,18 @@ export function JudgesSection({
                     const n = Number(v);
                     updateJudge(judgeIdx, {
                       min_categories_for_high: Number.isFinite(n) && v !== '' ? n : undefined,
+                    });
+                  }}
+                />
+                <TextField
+                  label="min_categories_for_critical"
+                  inputMode="numeric"
+                  value={String(judge.min_categories_for_critical ?? '')}
+                  onChange={(v) => {
+                    const n = Number(v);
+                    updateJudge(judgeIdx, {
+                      min_categories_for_critical:
+                        Number.isFinite(n) && v !== '' ? n : undefined,
                     });
                   }}
                 />

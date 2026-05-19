@@ -1,5 +1,4 @@
 {
-  "generated_at": "2026-05-19T18:01:48.324Z",
   "presets": [
     {
       "name": "default",
@@ -41,7 +40,32 @@
               "install": "none"
             }
           },
-          "scanner_overrides": {},
+          "scanner_overrides": {
+            "mcp": {
+              "MEDIUM": {
+                "runtime": "block",
+                "file": "quarantine",
+                "install": "block"
+              },
+              "LOW": {
+                "runtime": "block",
+                "file": "none",
+                "install": "none"
+              }
+            },
+            "plugin": {
+              "HIGH": {
+                "runtime": "block",
+                "file": "quarantine",
+                "install": "block"
+              },
+              "MEDIUM": {
+                "runtime": "allow",
+                "file": "none",
+                "install": "none"
+              }
+            }
+          },
           "first_party_allow_list": [
             {
               "target_type": "plugin",
@@ -49,6 +73,7 @@
               "reason": "first-party DefenseClaw plugin",
               "source_path_contains": [
                 ".defenseclaw",
+                "extensions/defenseclaw",
                 ".openclaw/extensions",
                 ".zeptoclaw/extensions",
                 ".claude/extensions",
@@ -62,6 +87,8 @@
               "reason": "first-party DefenseClaw skill",
               "source_path_contains": [
                 ".defenseclaw",
+                "workspace/skills/codeguard",
+                "skills/codeguard",
                 ".openclaw/workspace/skills",
                 ".openclaw/skills",
                 ".zeptoclaw/skills",
@@ -105,6 +132,7 @@
                 "aws_access_key",
                 "aws_secret_access",
                 "password=",
+                "token:",
                 "bearer ",
                 "ghp_",
                 "gho_",
@@ -975,6 +1003,7 @@
                 "\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"
               ],
               "secrets": [
+                "sk-",
                 "sk-ant-",
                 "sk-proj-",
                 "api_key=",
@@ -985,6 +1014,7 @@
                 "aws_access_key",
                 "aws_secret_access",
                 "password=",
+                "bearer ",
                 "ghp_",
                 "gho_",
                 "github_pat_"
@@ -995,6 +1025,7 @@
                 "base64 -d",
                 "base64 --decode",
                 "exfiltrate",
+                "exfil",
                 "send to my server",
                 "curl http"
               ]
@@ -3102,6 +3133,7 @@
                 "\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"
               ],
               "secrets": [
+                "sk-",
                 "sk-ant-",
                 "sk-proj-",
                 "api_key=",
@@ -3112,6 +3144,7 @@
                 "aws_access_key",
                 "aws_secret_access",
                 "password=",
+                "bearer ",
                 "ghp_",
                 "gho_",
                 "github_pat_"
@@ -3122,6 +3155,7 @@
                 "base64 -d",
                 "base64 --decode",
                 "exfiltrate",
+                "exfil",
                 "send to my server",
                 "curl http"
               ]
@@ -5141,6 +5175,7 @@
                 "\\b(?:4\\d{3}|5[1-5]\\d{2}|3[47]\\d{2}|6(?:011|5\\d{2}))[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b"
               ],
               "secrets": [
+                "sk-",
                 "sk-ant-",
                 "sk-proj-",
                 "api_key=",
@@ -5151,6 +5186,7 @@
                 "aws_access_key",
                 "aws_secret_access",
                 "password=",
+                "bearer ",
                 "ghp_",
                 "gho_",
                 "github_pat_"
@@ -5161,6 +5197,7 @@
                 "base64 -d",
                 "base64 --decode",
                 "exfiltrate",
+                "exfil",
                 "send to my server",
                 "curl http"
               ]

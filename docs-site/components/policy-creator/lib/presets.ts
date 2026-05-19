@@ -218,6 +218,7 @@ function readJudges(raw: unknown): JudgeConfig[] {
       system_prompt: b.system_prompt ?? '',
       adjudication_prompt: b.adjudication_prompt,
       min_categories_for_high: b.min_categories_for_high,
+      min_categories_for_critical: b.min_categories_for_critical,
       single_category_max_severity: b.single_category_max_severity,
       categories: { ...((b.categories as JudgeConfig['categories']) ?? {}) },
     });

@@ -152,6 +152,9 @@ export function emit(policy: Policy): EmittedFile[] {
         ...(judge.min_categories_for_high
           ? { min_categories_for_high: judge.min_categories_for_high }
           : {}),
+        ...(judge.min_categories_for_critical
+          ? { min_categories_for_critical: judge.min_categories_for_critical }
+          : {}),
         ...(judge.single_category_max_severity
           ? { single_category_max_severity: judge.single_category_max_severity }
           : {}),

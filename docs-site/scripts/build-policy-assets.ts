@@ -235,24 +235,52 @@ interface Recipe {
   >;
 }
 
-// Mirrors internal/guardrail/axes.go AxesForRuleID's prefix-based fallback
-// so the docs-site recipe catalog labels match what the gateway actually
-// attaches at evaluation time. Kept in sync by reviewers — there is no
-// build-time linkage between the two files.
+// Rule-axes mapping is sourced from the Go authority at
+// internal/guardrail/axes.go via the committed snapshot
+// docs-site/data/rule-axes.json. The Go test
+// TestRuleAxesSnapshotMatchesCommittedJSON re-emits this file from
+// the live axes.go data and fails CI if the committed copy is
+// stale — that's our single-source-of-truth guarantee. Re-run it
+// with UPDATE_RULE_AXES_JSON=1 after editing axes.go.
+type RuleAxesSnapshot = {
+  exact_rule_axes: Array<{ id: string; axes: string[] | null }>;
+  prefix_axes: Array<{ prefixes: string[]; axes: string[] | null }>;
+  prefix_capabilities: Array<{ prefixes: string[]; capability: string }>;
+};
+
+let _axesSnapshot: RuleAxesSnapshot | null = null;
+function ruleAxesSnapshot(): RuleAxesSnapshot {
+  if (_axesSnapshot !== null) return _axesSnapshot;
+  const p = join(process.cwd(), 'data', 'rule-axes.json');
+  const raw = JSON.parse(readFileSync(p, 'utf8')) as RuleAxesSnapshot;
+  if (!raw || !Array.isArray(raw.exact_rule_axes) || !Array.isArray(raw.prefix_axes)) {
+    throw new Error(
+      `rule-axes.json at ${p} is malformed. Re-run \`UPDATE_RULE_AXES_JSON=1 go test ./internal/guardrail -run TestRuleAxesSnapshotMatchesCommittedJSON\` to regenerate.`,
+    );
+  }
+  _axesSnapshot = raw;
+  return _axesSnapshot;
+}
+
 function axesForRuleId(id: string): Recipe['data_axis'] {
-  const has = (...prefixes: string[]) => prefixes.some((p) => id.startsWith(p));
-  if (has('SEC-', 'PATH-', 'ENT-', 'CRED-', 'PII-')) return ['sensitive_access'];
-  if (has('C2-', 'DNS-TUNNEL')) return ['egress_external'];
-  if (has('INJ-', 'TRUST-', 'JAIL-')) return ['ingress_untrusted'];
-  if (has('SSRF-')) return ['sensitive_access', 'egress_external'];
-  // CMD-DESTRUCTIVE / SHELL-DESTRUCTIVE: engine returns nil; rendered as
-  // "(no axis — destructive flow tracked via tool_capability_class)".
+  const snap = ruleAxesSnapshot();
+  for (const e of snap.exact_rule_axes) {
+    if (e.id === id) return (e.axes ?? undefined) as Recipe['data_axis'];
+  }
+  for (const rule of snap.prefix_axes) {
+    if (rule.prefixes.some((p) => id.startsWith(p))) {
+      return (rule.axes ?? undefined) as Recipe['data_axis'];
+    }
+  }
   return undefined;
 }
 
 function capabilityForRuleId(id: string): Recipe['tool_capability_class'] {
-  if (id.startsWith('CMD-DESTRUCTIVE') || id.startsWith('SHELL-DESTRUCTIVE')) {
-    return ['exec_shell'];
+  const snap = ruleAxesSnapshot();
+  for (const rule of snap.prefix_capabilities) {
+    if (rule.prefixes.some((p) => id.startsWith(p))) {
+      return [rule.capability] as Recipe['tool_capability_class'];
+    }
   }
   return undefined;
 }
@@ -763,8 +791,11 @@ function compileWasm(opts: { skipMissingOpa: boolean }): { compiled: string[]; s
   // OPA's WASM ABI uses numeric entrypoint IDs that are assigned in
   // the order passed to `opa build -e`. Recording them here keeps
   // opa-eval.ts honest.
+  // Note: intentionally no `generated_at` field. The manifest used to
+  // include a build timestamp, which churned the diff on every rebuild
+  // and made schema drift hard to spot in code review. The runtime
+  // never reads it.
   const manifest = {
-    generated_at: new Date().toISOString(),
     domains: REGO_DOMAINS.filter((d) => compiled.includes(d.name)).map((d) => ({
       name: d.name,
       wasm: `/opa/${d.name}.wasm`,
@@ -787,18 +818,13 @@ function main() {
 
   console.log('[policy-assets] building presets, recipes, scenarios…');
   const { presets, recipes, scenarios } = buildAll();
-  writeJson(join(DATA_OUT, 'policy-presets.json'), {
-    generated_at: new Date().toISOString(),
-    presets,
-  });
-  writeJson(join(DATA_OUT, 'policy-recipes.json'), {
-    generated_at: new Date().toISOString(),
-    recipes,
-  });
-  writeJson(join(DATA_OUT, 'policy-scenarios.json'), {
-    generated_at: new Date().toISOString(),
-    scenarios,
-  });
+  // Note: no `generated_at` timestamps in any of these JSON files.
+  // Dropping the timestamps means a clean PR diff only shows real
+  // schema/content changes, which is the whole point of bundling
+  // these files instead of regenerating at request time.
+  writeJson(join(DATA_OUT, 'policy-presets.json'), { presets });
+  writeJson(join(DATA_OUT, 'policy-recipes.json'), { recipes });
+  writeJson(join(DATA_OUT, 'policy-scenarios.json'), { scenarios });
   console.log(`[policy-assets]   presets=${presets.length}  recipes=${recipes.length}  scenarios=${scenarios.length}`);
 
   console.log('[policy-assets] compiling Rego → WASM…');

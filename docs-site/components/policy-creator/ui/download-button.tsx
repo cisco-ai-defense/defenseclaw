@@ -25,6 +25,42 @@ export interface DownloadButtonProps {
   size?: 'sm' | 'md';
   /** "primary" → brand-coloured filled; "ghost" → bordered. */
   variant?: 'primary' | 'ghost';
+  /** When set, disables the button. The string is the operator-facing
+   *  reason rendered as a `title` tooltip so they understand *why*
+   *  the action is unavailable. Used by D4 to block download when
+   *  the policy has unresolved validation errors. */
+  disabledReason?: string | null;
+}
+
+/** Headless implementation of the download handler. Extracted so
+ *  B5 can exercise the disabledReason gate + the blob lifecycle in
+ *  a node:test environment without booting React or a real browser.
+ *
+ *  Returns true when a download was triggered, false when blocked by
+ *  ``disabledReason``. Callers should not rely on the boolean in
+ *  production code — it's an internal signal for tests.
+ */
+export function triggerDownload(opts: {
+  filename: string;
+  contents: string;
+  mime: string;
+  disabledReason?: string | null;
+  doc?: Document;
+}): boolean {
+  if (opts.disabledReason) return false;
+  // URL.createObjectURL holds the blob in memory until revoked, so we
+  // pair every create with a revoke after the click handler runs.
+  const blob = new Blob([opts.contents], { type: opts.mime });
+  const url = URL.createObjectURL(blob);
+  const doc = opts.doc ?? document;
+  const a = doc.createElement('a');
+  a.href = url;
+  (a as HTMLAnchorElement).download = opts.filename;
+  doc.body.appendChild(a);
+  (a as HTMLAnchorElement).click();
+  doc.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  return true;
 }
 
 export function DownloadButton({
@@ -34,19 +70,10 @@ export function DownloadButton({
   label,
   size = 'sm',
   variant = 'ghost',
+  disabledReason,
 }: DownloadButtonProps) {
   const onClick = () => {
-    // URL.createObjectURL holds the blob in memory until revoked, so we
-    // pair every create with a revoke after the click handler runs.
-    const blob = new Blob([contents], { type: mime });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    triggerDownload({ filename, contents, mime, disabledReason });
   };
 
   const sizeCls = size === 'sm' ? 'px-2 py-1 text-xs' : 'px-3 py-1.5 text-sm';
@@ -54,12 +81,16 @@ export function DownloadButton({
     variant === 'primary'
       ? 'bg-[var(--brand-cisco)] text-white shadow-sm hover:opacity-95 font-semibold'
       : 'border border-fd-border bg-fd-background text-fd-foreground font-medium hover:border-[var(--brand-cisco)] hover:bg-[var(--brand-cisco)]/10';
+  const disabledCls = disabledReason ? 'cursor-not-allowed opacity-50' : '';
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-md ${sizeCls} ${variantCls}`}
+      disabled={!!disabledReason}
+      aria-disabled={!!disabledReason}
+      title={disabledReason ?? undefined}
+      className={`inline-flex items-center gap-1.5 rounded-md ${sizeCls} ${variantCls} ${disabledCls}`}
     >
       ↓ {label ?? filename}
     </button>

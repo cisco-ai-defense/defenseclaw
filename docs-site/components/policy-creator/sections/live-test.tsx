@@ -33,7 +33,7 @@ import { VerdictBadge } from '../ui/verdict-badge';
 import { CodeEditor } from '../ui/code-editor';
 
 type Domain = Scenario['domain'];
-type Source = 'scenario' | 'custom';
+type Source = 'scenario' | 'custom' | 'corpus';
 
 const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
   { value: 'admission', label: 'admission' },
@@ -46,6 +46,11 @@ const DOMAIN_OPTIONS: Array<{ value: Domain; label: string; hint?: string }> = [
 const SOURCE_OPTIONS: Array<{ value: Source; label: string }> = [
   { value: 'scenario', label: 'Canned scenario' },
   { value: 'custom', label: 'Custom input' },
+  // G1 — replay every bundled scenario for the active domain at
+  // once and surface a pass/fail table. Useful for "did my edit
+  // regress any bundled fixture?" before downloading the install
+  // script.
+  { value: 'corpus', label: 'Replay all' },
 ];
 
 const LS_CUSTOM_PREFIX = 'dc-policy-creator/live-test/custom/v1/';
@@ -65,6 +70,20 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
   const [error, setError] = useState<string | null>(null);
   const [evaluating, setEvaluating] = useState(false);
   const [available, setAvailable] = useState<boolean | null>(null);
+  // G1 — corpus replay state. ``corpusResults`` is keyed by scenario
+  // id so re-renders preserve order even while we accumulate results
+  // asynchronously. ``corpusRunning`` is a UI signal only.
+  type CorpusResult = {
+    id: string;
+    title: string;
+    expected: string | undefined;
+    got: string;
+    reason: string | null;
+    matches: boolean;
+    errored: boolean;
+  };
+  const [corpusResults, setCorpusResults] = useState<CorpusResult[]>([]);
+  const [corpusRunning, setCorpusRunning] = useState(false);
 
   // Initial scenario per domain.
   useEffect(() => {
@@ -145,6 +164,15 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
       return;
     }
 
+    // G1 — when the corpus tab is active, the single-verdict effect
+    // bows out; the corpus effect below drives the result table.
+    if (source === 'corpus') {
+      setVerdict('—');
+      setReason(null);
+      setError(null);
+      return;
+    }
+
     let activeInput: unknown;
     if (source === 'scenario') {
       if (!scenario) {
@@ -200,6 +228,79 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
       if (debounceRef.current) clearTimeout(debounceRef.current);
     };
   }, [source, scenario, customRaw, parsedCustom, data, available, domain]);
+
+  // G1 — corpus replay effect. Runs whenever the source flips to
+  // ``corpus`` or the policy / domain / WASM availability changes
+  // while corpus is active. Each evaluation is independent so a
+  // single bad scenario doesn't blank the whole table; errors land
+  // in the row's `errored` flag.
+  useEffect(() => {
+    if (source !== 'corpus') return;
+    if (available !== true) {
+      setCorpusResults([]);
+      return;
+    }
+    const scenarios = listScenariosForDomain(domain);
+    if (scenarios.length === 0) {
+      setCorpusResults([]);
+      return;
+    }
+    let cancelled = false;
+    setCorpusRunning(true);
+    setCorpusResults(
+      scenarios.map((s) => ({
+        id: s.id,
+        title: s.title,
+        expected: s.expectedVerdict,
+        got: '…',
+        reason: null,
+        matches: false,
+        errored: false,
+      })),
+    );
+    (async () => {
+      for (const s of scenarios) {
+        if (cancelled) return;
+        try {
+          const res = await evalDomain(domain, s.input, data);
+          if (cancelled) return;
+          setCorpusResults((prev) =>
+            prev.map((row) =>
+              row.id === s.id
+                ? {
+                    ...row,
+                    got: res.verdict,
+                    reason: res.reason ?? null,
+                    matches: s.expectedVerdict != null && res.verdict === s.expectedVerdict,
+                    errored: false,
+                  }
+                : row,
+            ),
+          );
+        } catch (err) {
+          if (cancelled) return;
+          const msg =
+            err instanceof OpaUnavailableError
+              ? err.message
+              : err instanceof Error
+                ? err.message
+                : String(err);
+          setCorpusResults((prev) =>
+            prev.map((row) =>
+              row.id === s.id
+                ? { ...row, got: 'error', reason: msg, matches: false, errored: true }
+                : row,
+            ),
+          );
+        }
+      }
+      if (!cancelled) setCorpusRunning(false);
+    })();
+    return () => {
+      cancelled = true;
+      setCorpusRunning(false);
+    };
+  }, [source, domain, data, available]);
 
   function seedFromScenario() {
     if (!scenario) return;
@@ -286,7 +387,13 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
         />
       </div>
 
-      {source === 'scenario' ? (
+      {source === 'corpus' ? (
+        <CorpusReplay
+          domain={domain}
+          results={corpusResults}
+          running={corpusRunning}
+        />
+      ) : source === 'scenario' ? (
         <div className="flex flex-col gap-2">
           <span className="text-[11px] font-medium uppercase tracking-wide text-fd-muted-foreground">
             Scenario
@@ -323,6 +430,7 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
         </div>
       )}
 
+      {source !== 'corpus' && (
       <div className="rounded-md border border-fd-border bg-fd-background p-3">
         <div className="flex items-center justify-between gap-2">
           <span className="text-[11px] font-medium uppercase tracking-wide text-fd-muted-foreground">
@@ -357,6 +465,101 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
           <p className="mt-2 break-words text-[11px] text-red-500">{error}</p>
         )}
       </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * G1 — Corpus replay table. Evaluates every bundled scenario for the
+ * active domain and shows pass/fail against the scenario's expected
+ * verdict. Rows update incrementally so the operator gets feedback
+ * as evaluations complete rather than waiting on the whole batch.
+ */
+function CorpusReplay({
+  domain,
+  results,
+  running,
+}: {
+  domain: Scenario['domain'];
+  results: Array<{
+    id: string;
+    title: string;
+    expected: string | undefined;
+    got: string;
+    reason: string | null;
+    matches: boolean;
+    errored: boolean;
+  }>;
+  running: boolean;
+}) {
+  if (results.length === 0) {
+    return (
+      <div className="rounded-md border border-fd-border bg-fd-background px-3 py-2 text-[11px] text-fd-muted-foreground">
+        No bundled scenarios for <code className="font-mono">{domain}</code>.
+      </div>
+    );
+  }
+  const passed = results.filter((r) => r.matches).length;
+  const failed = results.filter((r) => !r.matches && r.expected != null && !r.errored && r.got !== '…').length;
+  const errored = results.filter((r) => r.errored).length;
+  const pending = results.filter((r) => r.got === '…').length;
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-medium uppercase tracking-wide text-fd-muted-foreground">
+          Corpus replay {running && <span className="ml-1 animate-pulse">·</span>}
+        </span>
+        <span className="text-[11px] text-fd-muted-foreground">
+          {passed} pass · {failed} fail · {errored} error{pending > 0 && ` · ${pending} pending`}
+        </span>
+      </div>
+      <ul className="divide-y divide-fd-border overflow-hidden rounded-md border border-fd-border">
+        {results.map((r) => (
+          <li key={r.id} className="px-3 py-2 text-[11px]">
+            <div className="flex items-baseline justify-between gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-fd-foreground">{r.title}</div>
+                <div className="truncate text-[10px] text-fd-muted-foreground">
+                  <code className="font-mono">{r.id}</code>
+                </div>
+              </div>
+              <span
+                className={`shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                  r.errored
+                    ? 'bg-red-500/15 text-red-600 dark:text-red-400'
+                    : r.expected == null
+                      ? 'bg-fd-muted/40 text-fd-muted-foreground'
+                      : r.matches
+                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                        : r.got === '…'
+                          ? 'bg-fd-muted/40 text-fd-muted-foreground'
+                          : 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                }`}
+              >
+                {r.errored
+                  ? 'error'
+                  : r.expected == null
+                    ? `${r.got}`
+                    : r.matches
+                      ? '✓ pass'
+                      : r.got === '…'
+                        ? '…'
+                        : `✗ got ${r.got}`}
+              </span>
+            </div>
+            {!r.matches && r.expected != null && !r.errored && r.got !== '…' && (
+              <div className="mt-1 text-[10px] text-fd-muted-foreground">
+                expected <code className="font-mono">{r.expected}</code>
+                {r.reason && <> · {r.reason}</>}
+              </div>
+            )}
+            {r.errored && r.reason && (
+              <div className="mt-1 break-words text-[10px] text-red-500">{r.reason}</div>
+            )}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

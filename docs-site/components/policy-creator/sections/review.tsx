@@ -17,6 +17,7 @@ import type { Policy } from '../types';
 import { diffAgainstBase } from '../lib/diff';
 import { emit, type EmittedFile } from '../lib/emit';
 import { emitInstallScript } from '../lib/emit-script';
+import { validatePolicy } from '../lib/validators';
 import { CopyButton } from '../ui/copy-button';
 import { DownloadButton } from '../ui/download-button';
 import { SegmentedControl } from '../ui/segmented-control';
@@ -29,6 +30,21 @@ export function ReviewSection({ policy }: { policy: Policy }) {
   const files = useMemo(() => emit(policy), [policy]);
   const script = useMemo(() => emitInstallScript(policy), [policy]);
   const diff = useMemo(() => diffAgainstBase(policy), [policy]);
+  // Pre-flight gate: collect validator findings and refuse the
+  // Download Install Script affordance when there's any error-level
+  // finding. Warnings still let the operator proceed but a hard
+  // misconfiguration (CORRELATOR_PATTERN_EMPTY, ENV_NAME_LIKELY_SECRET,
+  // CUSTOM_REGO_MISSING_PACKAGE …) would produce a script that fails
+  // at `defenseclaw policy validate` time anyway. Better to surface
+  // it here than to hand the operator a foot-gun.
+  const findings = useMemo(() => validatePolicy(policy), [policy]);
+  const errorCount = useMemo(
+    () => findings.filter((f) => f.level === 'error').length,
+    [findings],
+  );
+  const downloadDisabledReason = errorCount > 0
+    ? `Resolve ${errorCount} validation error${errorCount === 1 ? '' : 's'} before downloading. See the Validation panel for details.`
+    : null;
 
   return (
     <div className="space-y-3">
@@ -53,15 +69,49 @@ export function ReviewSection({ policy }: { policy: Policy }) {
               filename={`install-${policy.name}.sh`}
               contents={script}
               mime="text/x-shellscript"
+              disabledReason={downloadDisabledReason}
             />
             <CopyButton value={script} label="Copy script" />
           </div>
         )}
       </div>
 
+      {tab === 'install' && errorCount > 0 && (
+        <PreflightFailingBanner findings={findings.filter((f) => f.level === 'error')} />
+      )}
+
       {tab === 'files' && <FilesView files={files} />}
       {tab === 'install' && <InstallView script={script} />}
       {tab === 'diff' && <DiffView diff={diff} basedOn={policy.basedOn} />}
+    </div>
+  );
+}
+
+function PreflightFailingBanner({
+  findings,
+}: {
+  findings: Array<{ code: string; message: string; location: string }>;
+}) {
+  return (
+    <div
+      role="alert"
+      className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12px] text-red-700 dark:text-red-300"
+    >
+      <strong className="block">
+        Pre-flight validation failed. Download is disabled until these are resolved:
+      </strong>
+      <ul className="mt-1 space-y-0.5">
+        {findings.slice(0, 5).map((f, i) => (
+          <li key={i}>
+            <code className="font-mono text-[11px]">{f.location}</code>
+            {' — '}
+            {f.message}
+          </li>
+        ))}
+        {findings.length > 5 && (
+          <li className="opacity-80">…and {findings.length - 5} more.</li>
+        )}
+      </ul>
     </div>
   );
 }

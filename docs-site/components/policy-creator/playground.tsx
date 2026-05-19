@@ -44,7 +44,8 @@ import {
 } from './sections/ops';
 import { ReviewSection } from './sections/review';
 import { LiveTestPane } from './sections/live-test';
-import { summarize, validatePolicy } from './lib/validators';
+import { diffAgainstBase } from './lib/diff';
+import { RISKY_CONFIG_CODES, summarize, validatePolicy } from './lib/validators';
 import { CommandPalette, CommandPaletteHint } from './playground/command-palette';
 
 interface SectionDef {
@@ -294,6 +295,21 @@ export function Playground({
 
   const findings = useMemo(() => validatePolicy(policy), [policy]);
   const counts = useMemo(() => summarize(findings), [findings]);
+  // Subset surfaced in the pinned "risky configuration" banner so
+  // operators can't miss high-impact warnings (firewall default-allow,
+  // identity-allow custom Rego, every action allow). The full set is
+  // still available in the collapsed details bar below.
+  const riskyFindings = useMemo(
+    () => findings.filter((f) => RISKY_CONFIG_CODES.has(f.code)),
+    [findings],
+  );
+  // D1 — diff-vs-preset pane. Surfaces what the operator has changed
+  // relative to the preset they started from, both as a section
+  // summary in the header and as a collapsed detail pane. Computed
+  // here so it stays in sync with every Policy edit without each
+  // section having to recompute its own slice.
+  const diff = useMemo(() => diffAgainstBase(policy), [policy]);
+  const [diffOpen, setDiffOpen] = useState(false);
 
   return (
     <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
@@ -313,6 +329,13 @@ export function Playground({
           <CommandPaletteHint />
         </div>
         {banner}
+        {riskyFindings.length > 0 && <RiskyConfigBanner findings={riskyFindings} />}
+        <DiffVsPresetBanner
+          basedOn={policy.basedOn}
+          diff={diff}
+          open={diffOpen}
+          onToggle={() => setDiffOpen((v) => !v)}
+        />
         <div className="divide-y divide-fd-border">
           {SECTION_DEFS.map((sec) => (
             <Section
@@ -365,6 +388,141 @@ function usePersistentState<T>(key: string, initial: T): [T, (next: T) => void] 
     }
   }, [key, value]);
   return [value, setValue];
+}
+
+/**
+ * Pinned warning banner for "risky configuration" findings.
+ *
+ * Unlike the collapsed `FindingsBar` at the bottom of the
+ * playground, this lives at the top so the operator sees these
+ * specific high-impact warnings (firewall default-allow,
+ * identity-allow custom Rego, every action allow, judges disabled
+ * with non-zero block_threshold, all correlator patterns disabled)
+ * even before they scroll. We intentionally don't show counts here
+ * — risky findings are short and few, so we just render them.
+ */
+function RiskyConfigBanner({
+  findings,
+}: {
+  findings: ReturnType<typeof validatePolicy>;
+}) {
+  return (
+    <div
+      role="alert"
+      aria-label="Risky policy configuration warnings"
+      className="border-t border-amber-400/50 bg-amber-100/50 px-4 py-2 text-[11px] text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200"
+    >
+      <div className="flex items-baseline gap-2">
+        <span aria-hidden="true">⚠</span>
+        <span className="font-semibold">Risky configuration</span>
+        <span className="text-amber-700/80 dark:text-amber-300/80">
+          ({findings.length} {findings.length === 1 ? 'item' : 'items'})
+        </span>
+      </div>
+      <ul className="mt-1 space-y-1">
+        {findings.map((f, i) => (
+          <li key={`${f.code}:${i}`}>
+            <div className="flex items-baseline gap-2">
+              <code className="font-mono text-[10px] text-amber-700/80 dark:text-amber-300/80">
+                {f.location}
+              </code>
+            </div>
+            <div>{f.message}</div>
+            {f.fix && (
+              <div className="text-[10px] text-amber-700/80 dark:text-amber-300/80">
+                Fix: {f.fix}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * D1 — Pinned banner showing how many fields diverge from the
+ * preset the policy was based on, with a click-to-expand listing.
+ *
+ * Why a separate banner rather than reusing the Review tab's diff
+ * panel: the Review tab is the *exit ramp* (operator is about to
+ * download an install script). Live editing needs the same
+ * affordance closer to the knobs so an operator can answer
+ * "how much have I drifted from the preset?" without leaving the
+ * panel they're tuning. Defaults to collapsed so the section list
+ * still dominates the layout; expand-on-click keeps the banner
+ * lightweight when the operator is heads-down on a single section.
+ */
+function DiffVsPresetBanner({
+  basedOn,
+  diff,
+  open,
+  onToggle,
+}: {
+  basedOn: string;
+  diff: ReturnType<typeof diffAgainstBase>;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  if (diff.length === 0) {
+    return (
+      <div className="flex items-center gap-2 border-t border-fd-border bg-fd-card px-4 py-2 text-[11px] text-fd-muted-foreground">
+        <span aria-hidden="true">≡</span>
+        <span>
+          Matches the <code className="font-mono">{basedOn}</code> preset verbatim — no
+          drift.
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="border-t border-fd-border bg-fd-card">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        aria-controls="dc-playground-diff-list"
+        className="flex w-full cursor-pointer items-center gap-3 px-4 py-2 text-left text-[11px] text-fd-foreground hover:bg-fd-accent/30"
+      >
+        <span aria-hidden="true">≢</span>
+        <span>
+          {diff.length} change{diff.length === 1 ? '' : 's'} from the{' '}
+          <code className="font-mono">{basedOn}</code> preset
+        </span>
+        <span className="ml-auto text-fd-muted-foreground">
+          {open ? 'collapse ▾' : 'expand ▸'}
+        </span>
+      </button>
+      {open && (
+        <ul
+          id="dc-playground-diff-list"
+          className="divide-y divide-fd-border border-t border-fd-border"
+        >
+          {diff.map((d, i) => (
+            <li key={`${d.path}:${i}`} className="px-4 py-2 text-[11px]">
+              <div className="flex items-baseline gap-2">
+                <span
+                  className={
+                    d.kind === 'added'
+                      ? 'text-emerald-600 dark:text-emerald-400'
+                      : d.kind === 'removed'
+                        ? 'text-red-500'
+                        : 'text-amber-600 dark:text-amber-400'
+                  }
+                >
+                  {d.kind === 'added' ? '+' : d.kind === 'removed' ? '−' : '~'}
+                </span>
+                <code className="font-mono text-[10px] text-fd-muted-foreground">
+                  {d.path}
+                </code>
+              </div>
+              <div className="text-fd-foreground">{d.description}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function FindingsBar({

@@ -51,7 +51,15 @@ export type DecodeFailure =
   | 'invalid-shape';
 
 export type DecodeResult =
-  | { ok: true; policy: Policy }
+  | {
+      ok: true;
+      policy: Policy;
+      /** Top-level keys the imported policy carried that this build
+       *  doesn't model. The wizard surfaces these in a non-blocking
+       *  banner so the operator knows what won't survive the next
+       *  emit/install round-trip. */
+      unknownKeys: string[];
+    }
   | { ok: false; reason: DecodeFailure };
 
 /** True if the runtime exposes the streaming compression APIs we use.
@@ -195,6 +203,65 @@ export function looksLikePolicy(value: unknown): value is Policy {
 // Only fills in fields with safe, behavior-preserving defaults — an
 // empty correlator list and a disabled AID lane are both "off",
 // matching what the old wizard implicitly meant.
+/**
+ * The set of top-level keys the current build models. Used by D2 to
+ * detect when an imported policy contains fields the wizard would
+ * silently drop on emit, so the operator can decide whether to:
+ *
+ *   1. Update DefenseClaw (their policy is from a newer build).
+ *   2. Accept the data loss (they pasted a one-off, or the field is
+ *      truly stale).
+ *
+ * Keep this list in sync with the `Policy` interface in types.ts.
+ * The TS structural type is too rich to introspect at runtime (no
+ * keyof support for type aliases), so we maintain the list by hand.
+ * A unit test (`scripts/test-policy-creator.ts ::
+ * KnownPolicyTopLevelKeys matches Policy interface`) asserts that
+ * every key in `policyFromPreset('default')` is in this set, which
+ * catches the easy case: someone adds a field to `Policy` and to the
+ * preset bundle but forgets to bump this constant.
+ */
+export const KNOWN_POLICY_TOP_LEVEL_KEYS = new Set<string>([
+  'name',
+  'description',
+  'basedOn',
+  'guardrail',
+  'admission',
+  'firewall',
+  'audit',
+  'enforcement',
+  'watch',
+  'severity_matrix',
+  'skill_actions',
+  'scanner_overrides',
+  'scanners',
+  'suppressions',
+  'sensitive_tools',
+  'judges',
+  'first_party_allow_list',
+  'webhooks',
+  'custom_rego',
+  'correlator',
+  'cisco_ai_defense',
+  'rule_pack',
+]);
+
+/**
+ * Returns the list of top-level keys in `value` that the current
+ * build doesn't model. Order is preserved from the input. Empty
+ * array means the imported shape is fully understood (extras may
+ * still hide one level down, but the wizard handles those by
+ * ignoring unknown sub-fields rather than carrying them through).
+ */
+export function unknownTopLevelKeys(value: unknown): string[] {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const k of Object.keys(value)) {
+    if (!KNOWN_POLICY_TOP_LEVEL_KEYS.has(k)) out.push(k);
+  }
+  return out;
+}
+
 export function normalizeImportedPolicy(parsed: Policy): Policy {
   const out = parsed as Policy & {
     correlator?: CorrelationPattern[];
@@ -293,7 +360,11 @@ export async function decodePolicyFromHash(payload: string): Promise<DecodeResul
     return { ok: false, reason: 'malformed' };
   }
   if (!looksLikePolicy(parsed)) return { ok: false, reason: 'invalid-shape' };
-  return { ok: true, policy: normalizeImportedPolicy(parsed) };
+  return {
+    ok: true,
+    policy: normalizeImportedPolicy(parsed),
+    unknownKeys: unknownTopLevelKeys(parsed),
+  };
 }
 
 /** Build the full shareable URL for the current page. The current
@@ -332,4 +403,6 @@ export const __TEST_INTERNALS = {
   MAX_DECOMPRESSED_BYTES,
   looksLikePolicy,
   normalizeImportedPolicy,
+  KNOWN_POLICY_TOP_LEVEL_KEYS,
+  unknownTopLevelKeys,
 };

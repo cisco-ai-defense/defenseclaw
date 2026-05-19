@@ -1,4 +1,4 @@
 {
   "title": "Policies",
-  "pages": ["index", "creator", "recipes", "suppression-cookbook", "regex-cookbook"]
+  "pages": ["index", "creator", "verify-locally", "recipes", "suppression-cookbook", "regex-cookbook"]
 }

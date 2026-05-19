@@ -191,3 +191,88 @@ func AxesToStrings(axes []DataAxis) []string {
 	}
 	return out
 }
+
+// PrefixAxisRule describes a single entry in the prefix-based axis
+// fallback table consumed by AxesForRuleID. Exposed so external tools
+// (docs-site policy creator build, regression tests, audits) can
+// derive a deterministic listing of every classification rule without
+// re-parsing axes.go by hand.
+type PrefixAxisRule struct {
+	// Prefixes is the set of rule-ID prefixes that share an axis label.
+	// Order is preserved from the source switch so deterministic JSON
+	// output round-trips byte-for-byte through this and back.
+	Prefixes []string `json:"prefixes"`
+	// Axes is the canonical label assigned to rule IDs matching any
+	// of the prefixes. nil means "explicitly no trifecta axis"
+	// (e.g. destructive commands, which the correlator tracks via
+	// tool_capability_class instead).
+	Axes []DataAxis `json:"axes"`
+}
+
+// PrefixCapabilityRule mirrors PrefixAxisRule for the tool-capability
+// classification of regex rules. Today only destructive command rules
+// carry a capability class; the structure exists so future additions
+// flow through the same generator path used by docs-site builds.
+type PrefixCapabilityRule struct {
+	Prefixes   []string            `json:"prefixes"`
+	Capability ToolCapabilityClass `json:"capability"`
+}
+
+// RuleAxesSnapshot captures every input that AxesForRuleID consults,
+// in a form that docs-site's build-policy-assets.ts can read at
+// build time. The intent is to keep ONE authoritative copy of the
+// rule-id → axis mapping (this file) and have downstream tooling
+// derive its labels from this snapshot rather than maintaining a
+// hand-edited duplicate.
+type RuleAxesSnapshot struct {
+	// Exact is the canonical rule-id → axes map (ruleAxes in this
+	// file). Keys are sorted alphabetically so the JSON is
+	// deterministic across builds.
+	Exact map[string][]DataAxis `json:"exact_rule_axes"`
+	// PrefixAxes is the ordered prefix-based fallback used when a
+	// rule isn't in Exact. The TS side scans this list in order and
+	// returns the first match, mirroring the switch in
+	// AxesForRuleID.
+	PrefixAxes []PrefixAxisRule `json:"prefix_axes"`
+	// PrefixCapabilities is the ordered prefix-based capability
+	// classification (today: destructive command families). Same
+	// "first match wins" semantics as PrefixAxes.
+	PrefixCapabilities []PrefixCapabilityRule `json:"prefix_capabilities"`
+}
+
+// DumpRuleAxesSnapshot returns a fully-populated snapshot suitable
+// for JSON encoding. The data is a copy so callers can mutate the
+// returned slices without affecting the package globals.
+//
+// Reviewers: every time you add an entry to ruleAxes or extend the
+// switch in AxesForRuleID, mirror it here so docs-site stays in
+// sync via the generator test in
+// internal/guardrail/axes_export_test.go.
+func DumpRuleAxesSnapshot() RuleAxesSnapshot {
+	exactCopy := make(map[string][]DataAxis, len(ruleAxes))
+	for k, v := range ruleAxes {
+		// Defensive copy so external mutation can't poison the global.
+		buf := make([]DataAxis, len(v))
+		copy(buf, v)
+		exactCopy[k] = buf
+	}
+	return RuleAxesSnapshot{
+		Exact: exactCopy,
+		PrefixAxes: []PrefixAxisRule{
+			{Prefixes: []string{"SEC-", "PATH-", "ENT-", "CRED-", "PII-"}, Axes: []DataAxis{AxisSensitiveAccess}},
+			{Prefixes: []string{"C2-", "DNS-TUNNEL"}, Axes: []DataAxis{AxisEgressExternal}},
+			{Prefixes: []string{"INJ-", "TRUST-", "JAIL-"}, Axes: []DataAxis{AxisIngressUntrusted}},
+			{Prefixes: []string{"SSRF-"}, Axes: []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
+			{Prefixes: []string{"META-REMOTE", "META-EXEC"}, Axes: []DataAxis{AxisIngressUntrusted}},
+			{Prefixes: []string{"META-ENV-EXFIL", "META-EXFIL"}, Axes: []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
+			{Prefixes: []string{"GW-ENV-WRITE", "GW-ENV-READ"}, Axes: []DataAxis{AxisSensitiveAccess}},
+			{Prefixes: []string{"GW-"}, Axes: []DataAxis{AxisIngressUntrusted}},
+			// nil axes — captured explicitly so the TS side knows to
+			// emit "no axis" rather than falling through to a default.
+			{Prefixes: []string{"CMD-DESTRUCTIVE", "SHELL-DESTRUCTIVE"}, Axes: nil},
+		},
+		PrefixCapabilities: []PrefixCapabilityRule{
+			{Prefixes: []string{"CMD-DESTRUCTIVE", "SHELL-DESTRUCTIVE"}, Capability: CapExecShell},
+		},
+	}
+}

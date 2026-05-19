@@ -21,6 +21,7 @@ import { emitInstallScript } from '../lib/emit-script';
 import { LiveTestPane } from '../sections/live-test';
 import { CopyButton } from '../ui/copy-button';
 import { DownloadButton } from '../ui/download-button';
+import { validatePolicy } from '../lib/validators';
 import { ShareLinkButton } from '../ui/share-link-button';
 import { applyAnswers } from './apply';
 import { PreviewDrawer } from './preview-drawer';
@@ -137,6 +138,17 @@ export function QuickStart({
   // the whole policy graph so it isn't free.
   const installScript = useMemo(() => emitInstallScript(policy), [policy]);
   const installFilename = `install-${policy.name}.sh`;
+  // Mirror Review.tsx: refuse to hand out an install script whose
+  // policy has unresolved validation errors. Quick Start operators
+  // are the most likely to hit this since they get a download CTA
+  // without ever seeing the validator pane.
+  const installErrorCount = useMemo(
+    () => validatePolicy(policy).filter((f) => f.level === 'error').length,
+    [policy],
+  );
+  const downloadDisabledReason = installErrorCount > 0
+    ? `Resolve ${installErrorCount} validation error${installErrorCount === 1 ? '' : 's'} before downloading. Open in Playground → Validation to see details.`
+    : null;
 
   return (
     <>
@@ -201,6 +213,7 @@ export function QuickStart({
                 label={`Download ${installFilename}`}
                 size="md"
                 variant="primary"
+                disabledReason={downloadDisabledReason}
               />
               <button
                 type="button"
@@ -481,6 +494,17 @@ function StepReview({
   // install-script string is computed once in the parent and lifted
   // down so the footer shares the cache.
   const files = useMemo(() => emit(policy), [policy]);
+  // Per-step pre-flight gate: refuse the download CTA when the
+  // policy has validator errors. Mirrors the gate in the footer so
+  // operators who scrolled past the footer to use the in-card CTA
+  // see the same protection.
+  const stepErrorCount = useMemo(
+    () => validatePolicy(policy).filter((f) => f.level === 'error').length,
+    [policy],
+  );
+  const stepDownloadDisabledReason = stepErrorCount > 0
+    ? `Resolve ${stepErrorCount} validation error${stepErrorCount === 1 ? '' : 's'} before downloading.`
+    : null;
 
   return (
     <>
@@ -512,11 +536,18 @@ function StepReview({
               label={installFilename}
               size="md"
               variant="primary"
+              disabledReason={stepDownloadDisabledReason}
             />
             <CopyButton value={installScript} label="Copy script" />
             <ShareLinkButton policy={policy} />
           </div>
         </div>
+        {stepDownloadDisabledReason && (
+          <p className="mt-2 text-[11px] text-red-700 dark:text-red-300" role="alert">
+            ⚠ {stepDownloadDisabledReason} Open the Playground &rarr; Validation tab
+            to fix.
+          </p>
+        )}
       </div>
 
       {/* Secondary: per-file downloads for operators who want to drop a

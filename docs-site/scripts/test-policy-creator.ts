@@ -243,6 +243,51 @@ test('share: normalizeImportedPolicy preserves cisco_ai_defense fields that ARE 
   });
 });
 
+// E1 invariant: every key the default preset emits must be in
+// KNOWN_POLICY_TOP_LEVEL_KEYS so unknownTopLevelKeys() never
+// false-positives the wizard's own bundled presets. This is the
+// "schema sentry": the day someone adds a field to Policy + the
+// preset bundle but forgets to bump KNOWN_POLICY_TOP_LEVEL_KEYS,
+// this test fails with a concrete list of the missing keys.
+test('share: KNOWN_POLICY_TOP_LEVEL_KEYS matches policyFromPreset("default")', () => {
+  const known = __TEST_INTERNALS.KNOWN_POLICY_TOP_LEVEL_KEYS as Set<string>;
+  const presetKeys = Object.keys(policyFromPreset('default')) as string[];
+  const missing = presetKeys.filter((k) => !known.has(k));
+  assert.deepEqual(
+    missing,
+    [],
+    `KNOWN_POLICY_TOP_LEVEL_KEYS is out of sync with Policy. Missing: ${missing.join(', ')}. Update KNOWN_POLICY_TOP_LEVEL_KEYS in lib/share.ts.`,
+  );
+});
+
+// E1 invariant: unknownTopLevelKeys() must surface keys that aren't
+// modeled by the current build but never false-positive on the
+// wizard's own preset output. This pins the import-warning UX so a
+// future refactor doesn't accidentally start flagging known fields
+// (which would cry-wolf the operator) or hide unknown fields
+// (which would silently lose data).
+test('share: unknownTopLevelKeys flags only unmodeled fields', () => {
+  const { unknownTopLevelKeys } = __TEST_INTERNALS as unknown as {
+    unknownTopLevelKeys: (v: unknown) => string[];
+  };
+  // Preset is fully modeled → empty list.
+  assert.deepEqual(unknownTopLevelKeys(policyFromPreset('default')), []);
+  // Add a hypothetical-future field → it MUST surface.
+  const withExtras = {
+    ...policyFromPreset('default'),
+    futureCapability: { enabled: true },
+    anotherExtra: 'string',
+  };
+  assert.deepEqual(
+    unknownTopLevelKeys(withExtras).sort(),
+    ['anotherExtra', 'futureCapability'],
+  );
+  // Non-objects must not crash; just yield empty.
+  assert.deepEqual(unknownTopLevelKeys(null), []);
+  assert.deepEqual(unknownTopLevelKeys('not an object'), []);
+  assert.deepEqual(unknownTopLevelKeys([1, 2, 3]), []);
+});
+
 test('share: end-to-end round trip of a legacy payload does not crash', async () => {
   // Build a payload that simulates an older wizard build by stripping
   // the new fields *before* encoding. We hand-roll the gzip body to
@@ -370,6 +415,408 @@ test('emit: correlatorDiffersFromDefault detects disabled bundled patterns', () 
     'disabling a bundled pattern must trigger an emit',
   );
 });
+
+// ── download-button smoke (B5) ─────────────────────────────────────
+// Exercise the headless download path the playground's Download
+// Install Script button takes. A full Playwright suite isn't in
+// docs-site's CI yet; this node:test smoke covers the two states
+// that actually matter for D4 — gated vs. fired — without the
+// browser-runner overhead.
+
+test('download-button (B5): disabledReason blocks the download', async () => {
+  const { triggerDownload } = await import('../components/policy-creator/ui/download-button.js');
+  // Inject a fake DOM minimal enough to satisfy triggerDownload.
+  // We only need createElement/appendChild/removeChild plus a
+  // body, since the function never reads from real DOM nodes.
+  let clicks = 0;
+  let revoked = 0;
+  const fakeDoc = {
+    body: {
+      appendChild: () => {},
+      removeChild: () => {},
+    },
+    createElement: () => ({
+      href: '',
+      download: '',
+      click: () => {
+        clicks += 1;
+      },
+    }),
+  } as unknown as Document;
+  // Stub URL methods on the global object for the duration of this
+  // test; restore them at the end so other tests aren't affected.
+  const originalCreate = (globalThis.URL as { createObjectURL?: unknown }).createObjectURL;
+  const originalRevoke = (globalThis.URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+  (globalThis.URL as unknown as { createObjectURL: (b: Blob) => string }).createObjectURL = () =>
+    'blob:fake';
+  (globalThis.URL as unknown as { revokeObjectURL: (u: string) => void }).revokeObjectURL = () => {
+    revoked += 1;
+  };
+  try {
+    const blocked = triggerDownload({
+      filename: 'policy.yaml',
+      contents: 'name: test\n',
+      mime: 'text/plain',
+      disabledReason: 'policy has 1 validation error',
+      doc: fakeDoc,
+    });
+    assert.equal(blocked, false, 'disabledReason must short-circuit the download');
+    assert.equal(clicks, 0, 'no anchor click expected when disabled');
+    const fired = triggerDownload({
+      filename: 'policy.yaml',
+      contents: 'name: test\n',
+      mime: 'text/plain',
+      doc: fakeDoc,
+    });
+    assert.equal(fired, true, 'with no disabledReason the download must fire');
+    assert.equal(clicks, 1, 'exactly one anchor click expected');
+    assert.equal(revoked, 1, 'createObjectURL must be paired with revokeObjectURL');
+  } finally {
+    if (originalCreate !== undefined) {
+      (globalThis.URL as unknown as { createObjectURL: unknown }).createObjectURL = originalCreate;
+    }
+    if (originalRevoke !== undefined) {
+      (globalThis.URL as unknown as { revokeObjectURL: unknown }).revokeObjectURL = originalRevoke;
+    }
+  }
+});
+
+// ── emit branches (B4) ─────────────────────────────────────────────
+// Each branch corresponds to one file emit() conditionally produces.
+// Without these tests a refactor of emit() could silently drop a
+// whole policy artifact and the operator would only notice at
+// activate-time. Keep each test focused on the *presence/absence*
+// invariant of that branch; full YAML content is checked elsewhere.
+
+test('emit: AID block omitted when lane is disabled', () => {
+  const policy = makePolicy({
+    cisco_ai_defense: { enabled: false, endpoint: '', api_key_env: '', scan_hook_surface: true },
+  });
+  const top = emit(policy).find((f) => f.path.endsWith(`${policy.name}.yaml`));
+  assert.ok(top);
+  assert.equal(top!.contents.includes('cisco_ai_defense'), false);
+});
+
+test('emit: AID block emitted when lane is enabled', () => {
+  const policy = makePolicy({
+    cisco_ai_defense: {
+      enabled: true,
+      endpoint: 'https://aid.example.com',
+      api_key_env: 'CISCO_AID_KEY',
+      scan_hook_surface: false,
+    },
+  });
+  const top = emit(policy).find((f) => f.path.endsWith(`${policy.name}.yaml`));
+  assert.ok(top);
+  assert.ok(top!.contents.includes('cisco_ai_defense:'));
+  assert.ok(top!.contents.includes('endpoint: https://aid.example.com'));
+  assert.ok(top!.contents.includes('api_key_env: CISCO_AID_KEY'));
+  // scan_hook_surface=false IS opted-out → must be emitted explicitly.
+  assert.ok(top!.contents.includes('scan_hook_surface: false'));
+});
+
+test('emit: scan_hook_surface omitted when value is the default (true)', () => {
+  const policy = makePolicy({
+    cisco_ai_defense: {
+      enabled: true,
+      endpoint: 'https://aid.example.com',
+      api_key_env: 'CISCO_AID_KEY',
+      scan_hook_surface: true,
+    },
+  });
+  const top = emit(policy).find((f) => f.path.endsWith(`${policy.name}.yaml`));
+  assert.ok(top);
+  // We DO emit the AID block (lane is enabled) but NOT the hook-surface
+  // override (default-on is implied by HookSurfaceEnabled()).
+  assert.ok(top!.contents.includes('cisco_ai_defense:'));
+  assert.equal(top!.contents.includes('scan_hook_surface'), false);
+});
+
+test('emit: custom Rego snippet → custom-<name>.rego file', () => {
+  const policy = makePolicy({
+    custom_rego: [
+      {
+        name: 'block-prod-models',
+        package: 'defenseclaw.custom.block_prod_models',
+        description: 'Disallow prod models for tier-1 skills',
+        source: 'package custom\n\ndeny[msg] {\n  input.model == "prod"\n}\n',
+      },
+    ],
+  });
+  const files = emit(policy);
+  const rego = files.find((f) => f.path.endsWith('custom-block-prod-models.rego'));
+  assert.ok(rego, 'expected custom-block-prod-models.rego in emit output');
+  assert.ok(rego!.contents.includes('package custom'));
+});
+
+test('emit: empty custom_rego source is skipped', () => {
+  const policy = makePolicy({
+    custom_rego: [{ name: 'no-op', package: 'defenseclaw.custom.no_op', description: 'placeholder', source: '   \n  \n' }],
+  });
+  const files = emit(policy);
+  assert.equal(
+    files.find((f) => f.path.endsWith('custom-no-op.rego')),
+    undefined,
+    'whitespace-only snippet must be dropped from emit output',
+  );
+});
+
+test('emit: suppressions emitted only when at least one list is non-empty', () => {
+  const empty = makePolicy();
+  assert.equal(
+    emit(empty).find((f) => f.path.endsWith('suppressions.yaml')),
+    undefined,
+    'all-empty suppressions must NOT emit a file',
+  );
+  const populated = makePolicy({
+    suppressions: {
+      pre_judge_strips: [],
+      finding_suppressions: [
+        {
+          id: 'pii-email-allowed-in-support',
+          finding_pattern: 'PII-EMAIL',
+          entity_pattern: '@support\\.example\\.com$',
+          reason: 'allowed in support tools',
+        },
+      ],
+      tool_suppressions: [],
+    },
+  });
+  const f = emit(populated).find((x) => x.path.endsWith('suppressions.yaml'));
+  assert.ok(f, 'populated suppressions must emit a file');
+  assert.ok(f!.contents.includes('PII-EMAIL'));
+});
+
+test('emit: sensitive_tools emitted only when populated', () => {
+  const empty = makePolicy();
+  assert.equal(
+    emit(empty).find((f) => f.path.endsWith('sensitive-tools.yaml')),
+    undefined,
+  );
+  const populated = makePolicy({
+    sensitive_tools: [
+      { name: 'shell', result_inspection: true, judge_result: true },
+    ],
+  });
+  const f = emit(populated).find((x) => x.path.endsWith('sensitive-tools.yaml'));
+  assert.ok(f);
+  assert.ok(f!.contents.includes('name: shell'));
+});
+
+test('emit: judge file emitted with min_categories_for_critical when set', () => {
+  const policy = makePolicy({
+    judges: [
+      {
+        name: 'injection',
+        enabled: true,
+        system_prompt: 'You are an injection judge.',
+        categories: {
+          jailbreak: { finding_id: 'jailbreak', enabled: true },
+          extraction: { finding_id: 'extraction', enabled: true },
+        },
+        min_categories_for_critical: 2,
+      },
+    ],
+  });
+  const f = emit(policy).find((x) => x.path.endsWith('judge/injection.yaml'));
+  assert.ok(f, 'judge file must be emitted when system_prompt is set');
+  assert.ok(
+    f!.contents.includes('min_categories_for_critical: 2'),
+    'A1 regression — JudgeConfig.min_categories_for_critical must round-trip into the judge YAML',
+  );
+});
+
+test('emit: judge file skipped when system_prompt is empty', () => {
+  const policy = makePolicy({
+    judges: [
+      {
+        name: 'pii',
+        enabled: true,
+        system_prompt: '',
+        categories: {},
+      },
+    ],
+  });
+  assert.equal(
+    emit(policy).find((x) => x.path.endsWith('judge/pii.yaml')),
+    undefined,
+    'judge without a system prompt must be skipped (gateway would reject it)',
+  );
+});
+
+test('emit: correlation-patterns.yaml NOT emitted for untouched default preset', () => {
+  const policy = policyFromPreset('default');
+  assert.equal(
+    emit(policy).find((f) => f.path.endsWith('correlation-patterns.yaml')),
+    undefined,
+    'untouched preset must NOT emit a correlation-patterns override',
+  );
+});
+
+test('emit: correlation-patterns.yaml emitted when the operator edits a pattern', () => {
+  const policy = policyFromPreset('default');
+  if (policy.correlator.length === 0) {
+    throw new Error('default preset has no correlator patterns — fixture drift');
+  }
+  const edited = {
+    ...policy,
+    correlator: policy.correlator.map((p, i): CorrelationPattern =>
+      i === 0 ? { ...p, window_events: p.window_events + 3 } : p,
+    ),
+  };
+  const f = emit(edited).find((x) => x.path.endsWith('correlation-patterns.yaml'));
+  assert.ok(f, 'edit to a bundled pattern must produce a correlation-patterns.yaml override');
+});
+
+// ── differential parity (B2) ────────────────────────────────────────
+// Emit the wizard's "default" preset and compare overlapping fields
+// against policies/default.yaml shipped by the gateway. If the wizard
+// ever ships a policy named "default" whose action matrix or
+// scanner_overrides drift from the gateway's bundled default, this
+// test fails CI before an operator sees the divergence.
+//
+// We compare a deliberate subset because the gateway YAML is a
+// hand-edited document with comments, ordering, and trailing fields
+// (severity_mappings, etc.) that the wizard doesn't model. The
+// playground IS authoritative for the fields it owns; the gateway is
+// authoritative for the ones it doesn't.
+test('parity (B2): default preset emits action matrix consistent with policies/default.yaml', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const yaml = await import('js-yaml');
+
+  const repoRoot = path.resolve(import.meta.dirname ?? __dirname, '../..');
+  const defaultYamlPath = path.join(repoRoot, 'policies', 'default.yaml');
+  const raw = fs.readFileSync(defaultYamlPath, 'utf8');
+  const bundled = yaml.load(raw) as Record<string, unknown>;
+
+  const wizard = policyFromPreset('default');
+  const wizardEmitted = emit(wizard).find((f) => f.path.endsWith(`${wizard.name}.yaml`));
+  assert.ok(wizardEmitted, 'wizard must emit a policy YAML for the default preset');
+  const wizardYaml = yaml.load(wizardEmitted!.contents) as Record<string, unknown>;
+
+  // 1) skill_actions matrix MUST round-trip verbatim — this is what
+  // operators see in the activate path and any silent drift here
+  // means the wizard is shipping a different default-behavior matrix
+  // than the gateway's own bundled policy.
+  assert.deepEqual(
+    wizardYaml.skill_actions,
+    bundled.skill_actions,
+    'skill_actions in wizard "default" preset diverges from policies/default.yaml. ' +
+      'Either fix the preset bundle in build-policy-assets.ts or update policies/default.yaml ' +
+      'to match — they MUST stay in sync.',
+  );
+
+  // 2) firewall.default_action MUST round-trip — operators rely on
+  // "the playground's default = the gateway's default" so they can
+  // download an unmodified preset and get behaviour equivalent to
+  // not installing a policy at all.
+  const wizardFw = wizardYaml.firewall as Record<string, unknown> | undefined;
+  const bundledFw = bundled.firewall as Record<string, unknown> | undefined;
+  assert.equal(
+    wizardFw?.default_action,
+    bundledFw?.default_action,
+    'firewall.default_action in wizard default preset diverges from policies/default.yaml',
+  );
+
+  // Note: name + description are intentionally NOT compared — the
+  // playground preset is a *starting point* the operator will rename
+  // (default name: "my-policy") before activating, whereas
+  // policies/default.yaml ships under the literal name "default".
+  // The structural fields above (action matrix, firewall default)
+  // are the ones that must agree.
+});
+
+// ── round-trip property (B1) ───────────────────────────────────────
+// Generate a sequence of small mutations to the bundled preset and
+// assert that each mutated Policy survives:
+//
+//   normalize(parse(stringify(policy))) ≡ policy (in shape)
+//   emit(policy)                        does not throw
+//   share-link decode (gzip → json)     produces a Policy whose
+//                                       top-level fields are still
+//                                       structurally equal.
+//
+// This is the cheap property test that would have caught the
+// "stale localStorage → emit() crash" regression we just shipped.
+// Property generators aren't fancy on purpose; we want the test
+// to be reproducible (seed-free) and to fail with a concrete diff
+// when something breaks.
+
+const MUTATIONS: Array<(p: Policy) => Policy> = [
+  (p) => ({ ...p, name: 'mutated-name' }),
+  (p) => ({ ...p, description: 'mutated description with quotes "and" newlines\n' }),
+  (p) => ({
+    ...p,
+    cisco_ai_defense: {
+      enabled: true,
+      endpoint: 'https://x.example/aid',
+      api_key_env: 'CISCO_AID_TEST_ENV',
+      scan_hook_surface: false,
+    },
+  }),
+  (p) => ({ ...p, correlator: [] }),
+  (p) => ({
+    ...p,
+    custom_rego: [
+      {
+        name: 'mutated-snippet',
+        package: 'defenseclaw.custom.mutated_snippet',
+        description: 'unicode \u{1F6E1} + RTL \u200Fhebrew',
+        source: 'package custom\n# comment\nallow := false\n',
+      },
+    ],
+  }),
+  (p) => ({
+    ...p,
+    judges: [
+      {
+        name: 'injection',
+        enabled: true,
+        system_prompt: 'judge prompt',
+        categories: {
+          a: { finding_id: 'a', enabled: true },
+          b: { finding_id: 'b', enabled: true },
+          c: { finding_id: 'c', enabled: true },
+        },
+        min_categories_for_critical: 3,
+        min_categories_for_high: 1,
+      },
+    ],
+  }),
+];
+
+for (const mutate of MUTATIONS) {
+  test(`round-trip (B1): mutated policy survives emit + share → decode`, async () => {
+    const base = policyFromPreset('default');
+    const mutated = mutate(base);
+    // 1) emit must not throw.
+    const files = emit(mutated);
+    assert.ok(files.length >= 2, 'emit must produce at least 2 files');
+    // 2) share-link round trip must reproduce the mutated policy.
+    const payload = await encodePolicyForHash(mutated);
+    const result = await decodePolicyFromHash(payload);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    // The decoded policy should structurally equal the mutated input
+    // for every field, after we canonicalize through JSON so the
+    // "key present but value undefined" cases (e.g. preset judges
+    // with optional fields) collapse the same way the gzip+JSON
+    // wire format does. We also re-normalize the mutated input on
+    // its way in so the comparison happens on idempotent shapes.
+    const canonicalize = (p: Policy): Policy => JSON.parse(JSON.stringify(p)) as Policy;
+    const expected = canonicalize(normalizeImportedPolicy(mutated));
+    const actual = canonicalize(result.policy);
+    assert.deepEqual(actual, expected);
+    // 3) Decoded policy must also re-emit identical files.
+    const filesAgain = emit(result.policy);
+    assert.deepEqual(
+      filesAgain.map((f) => f.path),
+      files.map((f) => f.path),
+      'second emit must produce the same file set',
+    );
+  });
+}
 
 // ── validators: new codes ──────────────────────────────────────────
 

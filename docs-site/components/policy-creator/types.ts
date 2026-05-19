@@ -125,7 +125,15 @@ export interface JudgeConfig {
   enabled: boolean;
   system_prompt: string;
   adjudication_prompt?: string;
+  /** Floor for HIGH severity — N distinct categories trigger HIGH.
+   *  Mirrors JudgeYAML.MinCategoriesForHigh in internal/guardrail. */
   min_categories_for_high?: number;
+  /** Floor for CRITICAL severity — N distinct categories trigger CRITICAL.
+   *  The bundled injection judge ships with `min_categories_for_critical:
+   *  2` so two independent category hits escalate. Reading the bundled
+   *  preset without modelling this would silently drop the field on
+   *  emit, lowering the operator's effective severity ceiling. */
+  min_categories_for_critical?: number;
   single_category_max_severity?: SeverityUpper;
   categories: Record<string, JudgeCategoryDef>;
 }
@@ -306,7 +314,19 @@ export type ValidationCode =
   | 'CUSTOM_REGO_MISSING_PACKAGE'
   | 'CORRELATOR_PATTERN_EMPTY'
   | 'CORRELATOR_WINDOW_INVALID'
-  | 'CISCO_AID_KEY_ENV_MISSING';
+  | 'CISCO_AID_KEY_ENV_MISSING'
+  | 'ENV_NAME_LIKELY_SECRET'
+  | 'CUSTOM_REGO_LIKELY_SECRET'
+  // "Risky configuration" warnings — surfaced in a pinned banner
+  // above the collapsed validator details so the operator can't
+  // miss them. The PR description calls these out as D5; the codes
+  // here track each individual risk so tests can pin behavior per
+  // rule.
+  | 'RISKY_FIREWALL_DEFAULT_ALLOW'
+  | 'RISKY_ALL_ACTIONS_ALLOW'
+  | 'RISKY_CUSTOM_REGO_IDENTITY_ALLOW'
+  | 'RISKY_JUDGE_THRESHOLD_MISMATCH'
+  | 'RISKY_CORRELATOR_ALL_DISABLED';
 
 // --- Generated build-time types ---------------------------------------------
 
@@ -331,7 +351,9 @@ export interface PresetBundle {
 }
 
 export interface PresetsFile {
-  generated_at: string;
+  /** Optional. The build pipeline no longer emits this — keeping it
+   *  optional means any old in-tree fixtures still typecheck. */
+  generated_at?: string;
   presets: PresetBundle[];
 }
 
@@ -378,7 +400,7 @@ export interface Recipe {
 }
 
 export interface RecipesFile {
-  generated_at: string;
+  generated_at?: string;
   recipes: Recipe[];
 }
 
@@ -392,12 +414,12 @@ export interface Scenario {
 }
 
 export interface ScenariosFile {
-  generated_at: string;
+  generated_at?: string;
   scenarios: Scenario[];
 }
 
 export interface OpaManifest {
-  generated_at: string;
+  generated_at?: string;
   domains: Array<{
     name: string;
     wasm: string;

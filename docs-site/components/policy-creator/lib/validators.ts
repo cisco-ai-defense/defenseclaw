@@ -17,6 +17,69 @@
 
 import type { Policy, RuleDef, ValidationCode, ValidationFinding } from '../types';
 
+// --- Anti-secret-paste heuristics ------------------------------------------
+//
+// Operators routinely paste literal secrets into env-name fields like
+// `secret_env` or `api_key_env` because the form labels them
+// generically. The heuristics below catch the most common shapes:
+// API key prefixes we recognize, JWTs, and PEM blocks. They're
+// intentionally conservative (false-negative-biased over false-
+// positive-biased) because a warning on a real env-var name is more
+// annoying than a missed warning on a paste.
+
+/**
+ * Returns true iff `s` matches the conventional UPPER_SNAKE env-var
+ * shape `[A-Z_][A-Z0-9_]{2,63}`. Used by the wizard to flag fields
+ * that should be NAMES of env vars, not the values held inside them.
+ */
+export function looksLikeEnvVarName(s: string): boolean {
+  return /^[A-Z_][A-Z0-9_]{2,63}$/.test(s);
+}
+
+/**
+ * Scans free-form text for inline-secret-shaped tokens. Returns the
+ * first match (or null) so the caller can attribute the warning to a
+ * specific shape rather than a generic "you have a secret in here"
+ * message.
+ *
+ * Recognized shapes (mirrors gateway's SecretPatterns set):
+ *   - "sk-…"  (OpenAI / Anthropic API key prefix)
+ *   - "ghp_…" (GitHub PAT)
+ *   - "AKIA…" (AWS access key id)
+ *   - JWT-shaped three-segment base64 strings
+ *   - PEM blocks ("-----BEGIN ... PRIVATE KEY-----")
+ *
+ * Cross-reference: codeguard-1-hardcoded-credentials. Operators should
+ * never store secrets in policy YAML; the gateway reads them from
+ * env vars via os.Getenv() so they never reach disk in the rule pack.
+ */
+export function scanForInlineSecret(text: string): { kind: string } | null {
+  // Cheap prefix scans first.
+  if (/\bsk-[A-Za-z0-9]{20,}/.test(text)) return { kind: 'OpenAI/Anthropic-style API key' };
+  if (/\bghp_[A-Za-z0-9]{36}\b/.test(text)) return { kind: 'GitHub PAT' };
+  if (/\bgho_[A-Za-z0-9]{36}\b/.test(text)) return { kind: 'GitHub OAuth token' };
+  if (/\bghs_[A-Za-z0-9]{36}\b/.test(text)) return { kind: 'GitHub server token' };
+  if (/\bAKIA[0-9A-Z]{16}\b/.test(text)) return { kind: 'AWS access key id' };
+  if (/-----BEGIN[A-Z ]*PRIVATE KEY-----/.test(text)) return { kind: 'PEM-encoded private key' };
+  if (/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/.test(text)) {
+    return { kind: 'JWT-shaped token' };
+  }
+  return null;
+}
+
+/**
+ * Mask sensitive content for UI display: keep the first 3 / last 2
+ * characters, replace the middle with bullets. Long enough strings
+ * still produce a recognizable shape (e.g. "ghp•••••XY") so the
+ * operator can confirm we caught the right field without the wizard
+ * echoing the whole secret back into the DOM (where it could land
+ * in a console screenshot or screen-share).
+ */
+export function redactForUI(s: string): string {
+  if (s.length <= 6) return '••••';
+  return `${s.slice(0, 3)}${'•'.repeat(Math.min(8, s.length - 5))}${s.slice(-2)}`;
+}
+
 export interface RegexLintResult {
   compiled: boolean;
   error: string | null;
@@ -324,7 +387,11 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
     }
   }
 
-  // Webhook secrets should reference an env var.
+  // Webhook secrets should reference an env var, not be an inline
+  // secret pasted into the form. We apply the same UPPER_SNAKE
+  // anti-secret-paste lint as for cisco_ai_defense.api_key_env so a
+  // paste-in-haste of "ghp_xxx…" into the secret_env field surfaces
+  // an error before the operator downloads + installs the policy.
   for (const wh of policy.webhooks) {
     if (wh.enabled && !wh.secret_env) {
       findings.push({
@@ -335,9 +402,22 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
         fix: 'Add the env-var name (e.g. SLACK_WEBHOOK_SECRET) so the dispatcher can sign requests.',
       });
     }
+    if (wh.secret_env && !looksLikeEnvVarName(wh.secret_env)) {
+      findings.push({
+        level: 'error',
+        code: 'ENV_NAME_LIKELY_SECRET',
+        message: `Webhook ${wh.url}: secret_env value "${redactForUI(wh.secret_env)}" doesn't look like an env-var name. It looks like a literal secret pasted into the wrong field.`,
+        location: 'webhooks',
+        fix: 'Use UPPER_SNAKE_CASE matching [A-Z_][A-Z0-9_]+ — the dispatcher reads the actual secret from os.Getenv() at gateway boot.',
+      });
+    }
   }
 
-  // Custom Rego must declare a package.
+  // Custom Rego must declare a package. We also scan the source for
+  // tokens that look like inline secrets (API keys, bearer tokens,
+  // PEM blocks); custom Rego is the most common place to accidentally
+  // bake one in because operators paste sample test inputs into the
+  // rule body during iteration and forget to redact before exporting.
   for (const snippet of policy.custom_rego) {
     if (!snippet.source.includes('package ')) {
       findings.push({
@@ -345,6 +425,16 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
         code: 'CUSTOM_REGO_MISSING_PACKAGE',
         message: `Custom Rego snippet "${snippet.name}" must declare a "package defenseclaw.custom.<name>" line.`,
         location: `custom_rego.${snippet.name}`,
+      });
+    }
+    const secretHit = scanForInlineSecret(snippet.source);
+    if (secretHit) {
+      findings.push({
+        level: 'warning',
+        code: 'CUSTOM_REGO_LIKELY_SECRET',
+        message: `Custom Rego snippet "${snippet.name}" contains text that looks like an inline secret (${secretHit.kind}). Inline secrets land in YAML and get printed by "defenseclaw policy show".`,
+        location: `custom_rego.${snippet.name}`,
+        fix: 'Replace the literal with a data-driven check (e.g. compare input.token_prefix against a server-side allowlist) and never store the secret in the policy itself.',
       });
     }
   }
@@ -410,19 +500,144 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
         location: 'cisco_ai_defense.api_key_env',
         fix: 'Set api_key_env to the env var the gateway should read (e.g. CISCO_AI_DEFENSE_API_KEY).',
       });
-    } else if (!/^[A-Z_][A-Z0-9_]{2,63}$/.test(aid.api_key_env)) {
+    } else if (!looksLikeEnvVarName(aid.api_key_env)) {
+      // Prefer the secret-shape detector's message when it fires —
+      // it's strictly more informative ("this looks like a real
+      // OpenAI key" vs "this isn't UPPER_SNAKE").
+      const secretHit = scanForInlineSecret(aid.api_key_env);
+      if (secretHit) {
+        findings.push({
+          level: 'error',
+          code: 'ENV_NAME_LIKELY_SECRET',
+          message: `Cisco AI Defense api_key_env looks like an inline secret (${secretHit.kind}, masked as "${redactForUI(aid.api_key_env)}"). The wizard expects the NAME of the env var, not the value.`,
+          location: 'cisco_ai_defense.api_key_env',
+          fix: 'Use UPPER_SNAKE_CASE matching [A-Z_][A-Z0-9_]+ — the gateway reads the actual secret via os.Getenv() at boot.',
+        });
+      } else {
+        findings.push({
+          level: 'error',
+          code: 'CISCO_AID_KEY_ENV_MISSING',
+          message: `Cisco AI Defense api_key_env "${aid.api_key_env}" is not a valid env-var name. The wizard expects the NAME of the env var (e.g. CISCO_AI_DEFENSE_API_KEY), not the key value.`,
+          location: 'cisco_ai_defense.api_key_env',
+          fix: 'Use UPPER_SNAKE_CASE matching [A-Z_][A-Z0-9_]+ — the gateway looks up the actual secret via os.Getenv() at boot.',
+        });
+      }
+    }
+  }
+
+  // --- "Risky configuration" warnings (D5) -------------------------------
+  // These are operator-visible mistakes that pass schema validation
+  // (everything's a legal value) but produce a policy that does
+  // less than the operator expects. We tag them with RISKY_* codes
+  // so the playground UI can pin them above the collapsed details
+  // bar; they're warnings, not errors, so the operator can still
+  // download the install script if they really mean it.
+
+  if (
+    policy.firewall.default_action === 'allow' &&
+    Array.isArray(policy.firewall.blocked_destinations) &&
+    policy.firewall.blocked_destinations.length === 0
+  ) {
+    findings.push({
+      level: 'warning',
+      code: 'RISKY_FIREWALL_DEFAULT_ALLOW',
+      message:
+        'Firewall is in default-allow mode with no explicit blocked_destinations. This means the firewall layer enforces nothing — every outbound destination is allowed. Most production deployments want default-deny with an explicit allow_list.',
+      location: 'firewall.default_action',
+      fix: "Switch to default_action: 'deny' and list the destinations you actually want to allow under allowed_domains, or document why default-allow is intended.",
+    });
+  }
+
+  {
+    const sa = policy.skill_actions ?? {};
+    const sevs = ['critical', 'high', 'medium', 'low', 'info'] as const;
+    const allRuntimeEnable = sevs.every(
+      (s) => (sa[s]?.runtime ?? 'enable') === 'enable',
+    );
+    const allInstallNone = sevs.every(
+      (s) => (sa[s]?.install ?? 'none') === 'none',
+    );
+    if (allRuntimeEnable && allInstallNone) {
       findings.push({
-        level: 'error',
-        code: 'CISCO_AID_KEY_ENV_MISSING',
-        message: `Cisco AI Defense api_key_env "${aid.api_key_env}" is not a valid env-var name. The wizard expects the NAME of the env var (e.g. CISCO_AI_DEFENSE_API_KEY), not the key value.`,
-        location: 'cisco_ai_defense.api_key_env',
-        fix: 'Use UPPER_SNAKE_CASE matching [A-Z_][A-Z0-9_]+ — the gateway looks up the actual secret via os.Getenv() at boot.',
+        level: 'warning',
+        code: 'RISKY_ALL_ACTIONS_ALLOW',
+        message:
+          'Every severity tier in skill_actions allows runtime AND install with no quarantine. This effectively disables enforcement across the matrix — the gateway will scan but never block.',
+        location: 'skill_actions',
+        fix: 'Pick at least one (severity, surface) where action != allow/none. The "default" preset blocks runtime + install at HIGH and CRITICAL; that\'s a reasonable floor.',
+      });
+    }
+  }
+
+  for (const snippet of policy.custom_rego) {
+    // Identity-allow Rego — `default allow := true` with no other
+    // rules — is a footgun. We exempt the "canary" name we ship in
+    // dump-install-script.ts so internal test fixtures don't trip
+    // the lint. Production policies that genuinely intend a no-op
+    // rule can suppress this by adding even a trivial guard like
+    // `allow if {input.principal != "anyone"}`.
+    if (
+      /\bdefault\s+allow\s*:?=\s*true\b/.test(snippet.source) &&
+      !/allow\s+(?:if|=)\s*\{/.test(snippet.source) &&
+      snippet.name !== 'verify-canary'
+    ) {
+      findings.push({
+        level: 'warning',
+        code: 'RISKY_CUSTOM_REGO_IDENTITY_ALLOW',
+        message: `Custom Rego snippet "${snippet.name}" sets default allow := true with no overriding rules. It always allows. If you intended a no-op, document that — if you intended to gate something, add at least one allow-if rule.`,
+        location: `custom_rego.${snippet.name}`,
+      });
+    }
+  }
+
+  // Mismatched judge / threshold expectation: every judge disabled
+  // but the block_threshold suggests the operator still expects
+  // judgments to escalate. Most likely a partial config where the
+  // operator turned off the judges but forgot to lower
+  // block_threshold accordingly.
+  if (
+    policy.guardrail?.block_threshold !== undefined &&
+    policy.guardrail.block_threshold > 0 &&
+    Array.isArray(policy.judges) &&
+    policy.judges.length > 0 &&
+    policy.judges.every((j) => !j.enabled)
+  ) {
+    findings.push({
+      level: 'warning',
+      code: 'RISKY_JUDGE_THRESHOLD_MISMATCH',
+      message: `guardrail.block_threshold=${policy.guardrail.block_threshold} expects the LLM judges to contribute verdicts, but every judge in policy.judges is disabled. The threshold will only ever be reached by deterministic scanners.`,
+      location: 'guardrail.block_threshold',
+      fix: 'Either enable at least one judge or document that the threshold is set assuming deterministic-scanner verdicts only.',
+    });
+  }
+
+  if (Array.isArray(policy.correlator) && policy.correlator.length > 0) {
+    const enabledCount = policy.correlator.filter((p) => p.enabled).length;
+    if (enabledCount === 0) {
+      findings.push({
+        level: 'warning',
+        code: 'RISKY_CORRELATOR_ALL_DISABLED',
+        message: `${policy.correlator.length} session-correlator pattern${policy.correlator.length === 1 ? ' is' : 's are'} configured but every one is disabled. Layer 5 (session correlator) will not fire on this policy.`,
+        location: 'correlator',
+        fix: 'Enable at least one pattern or remove the disabled set to keep the policy minimal.',
       });
     }
   }
 
   return findings;
 }
+
+/** Codes that should appear in the pinned "risky configuration"
+ *  banner rather than only in the expanded validator details. Used
+ *  by the Playground header to surface high-impact misconfigurations
+ *  the operator might otherwise miss. */
+export const RISKY_CONFIG_CODES: ReadonlySet<ValidationCode> = new Set([
+  'RISKY_FIREWALL_DEFAULT_ALLOW',
+  'RISKY_ALL_ACTIONS_ALLOW',
+  'RISKY_CUSTOM_REGO_IDENTITY_ALLOW',
+  'RISKY_JUDGE_THRESHOLD_MISMATCH',
+  'RISKY_CORRELATOR_ALL_DISABLED',
+]);
 
 /** Helper: count findings by level. */
 export function summarize(findings: ValidationFinding[]): {

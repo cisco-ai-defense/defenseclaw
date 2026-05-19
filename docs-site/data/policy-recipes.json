@@ -1,5 +1,4 @@
 {
-  "generated_at": "2026-05-19T18:01:48.327Z",
   "recipes": [
     {
       "id": "RECIPE-C2-WEBHOOK-SITE",
@@ -2005,7 +2004,8 @@
         "credential"
       ],
       "data_axis": [
-        "sensitive_access"
+        "sensitive_access",
+        "egress_external"
       ]
     },
     {
@@ -2030,7 +2030,8 @@
         "credential"
       ],
       "data_axis": [
-        "sensitive_access"
+        "sensitive_access",
+        "egress_external"
       ]
     },
     {
