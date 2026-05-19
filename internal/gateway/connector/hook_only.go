@@ -23,10 +23,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"gopkg.in/yaml.v3"
@@ -51,6 +51,7 @@ type hookOnlyConnector struct {
 
 	gatewayToken string
 	masterKey    string
+	loopbackWarn sync.Once
 }
 
 func NewHermesConnector() *hookOnlyConnector {
@@ -191,6 +192,95 @@ func (c *hookOnlyConnector) SubprocessPolicy() SubprocessPolicy     { return Sub
 func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string     { return []string{c.scriptName} }
 func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return c.Capabilities(opts).Hooks
+}
+
+// HookProfile implements HookProfileProvider for the 5 generic
+// hook-only connectors. Today only geminicli emits native OTLP (via
+// the JSON-block telemetry section in settings.json with a scoped
+// path-token); copilot returns an env-block spec that mirrors the
+// NativeOTLP capability advertised to doctor/setup; cursor, windsurf,
+// and hermes return spec=nil because their CLIs do not expose a native
+// OTel exporter. When a future cursor release adds native OTLP support,
+// that connector can flip its branch here to return a non-nil spec
+// without changing the dispatcher.
+//
+// SupportsTraceparent is true for the entire generic family: every
+// shipped hook script (cursor-hook.sh, windsurf-hook.sh,
+// hermes-hook.sh, geminicli-hook.sh, copilot-hook.sh — see
+// internal/gateway/connector/hooks/) sources _hardening.sh and
+// invokes defenseclaw_extract_trace_context to forward the W3C
+// traceparent / tracestate headers from DEFENSECLAW_TRACEPARENT
+// (or TRACEPARENT / OTEL_TRACEPARENT). The pre-v6 era was when
+// only codex / claudecode forwarded the header; v6 generalised the
+// helper so the profile MUST advertise this capability or the
+// gateway expects a fresh root span where the script is actually
+// shipping a remote parent — collapsing trace continuity in
+// dashboards.
+func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
+	profile := HookProfile{
+		Name:                c.name,
+		Capabilities:        c.HookCapabilities(opts),
+		SupportsTraceparent: true,
+		MapVerdict:          hookOnlyProfileMapVerdict,
+		Respond:             hookOnlyProfileRespond,
+	}
+	if c.name == "geminicli" {
+		profile.NativeOTLP = geminiCLINativeOTLPSpec(opts)
+	}
+	if c.name == "copilot" {
+		profile.NativeOTLP = copilotNativeOTLPSpec(opts)
+	}
+	return ApplyHookContract(profile, opts)
+}
+
+func copilotNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
+	headers := map[string]string{
+		"x-defenseclaw-source": "copilot",
+		"x-defenseclaw-client": "copilot-otel/1.0",
+	}
+	if opts.APIToken != "" {
+		headers["x-defenseclaw-token"] = opts.APIToken
+	}
+	return &NativeOTLPSpec{
+		Kind:               NativeOTLPEnvBlock,
+		Endpoint:           "http://" + strings.TrimSpace(opts.APIAddr),
+		Protocol:           "http/json",
+		Headers:            headers,
+		ServiceName:        "copilot",
+		ResourceAttributes: map[string]string{"service.name": "copilot", "defenseclaw.connector": "copilot"},
+		ExtraEnv:           map[string]string{"COPILOT_OTEL_ENABLED": "true"},
+	}
+}
+
+// geminiCLINativeOTLPSpec returns the JSON-block spec for Gemini CLI
+// native OTLP. The spec carries an unresolved PathToken/PathScope —
+// the installer is expected to call EnsureOTLPPathToken on disk and
+// inject the token before rendering. This matches the way
+// patchGeminiTelemetry handles the mint today; the spec only carries
+// the descriptive shape.
+//
+// patchGeminiTelemetry calls spec.JSONBlock() to produce the
+// telemetry object embedded in settings.json.
+func geminiCLINativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
+	spec := &NativeOTLPSpec{
+		Kind:           NativeOTLPJSONBlock,
+		Endpoint:       "http://" + strings.TrimSpace(opts.APIAddr),
+		Protocol:       "http",
+		PathScope:      OTLPScopeGeminiCLI,
+		LogUserPrompts: redaction.DisableAll(),
+	}
+	// Best-effort: mint or load the scoped token here so the spec
+	// can render its endpoint deterministically. patchGeminiTelemetry
+	// runs the same EnsureOTLPPathToken call before serializing the
+	// block; this duplicates the cheap lookup so callers that only
+	// want the descriptive spec (parity tests, doctor reports) see
+	// the resolved URL.
+	if opts.DataDir != "" {
+		if tok, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); err == nil && tok != "" {
+			spec.PathToken = tok
+		}
+	}
+	return spec
 }
 
 func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
@@ -474,7 +564,12 @@ func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
 	if c.gatewayToken != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.gatewayToken) {
 		return true
 	}
-	return IsLoopback(r)
+	if c.masterKey != "" && SecureTokenMatch(ExtractBearerKey(r.Header.Get("Authorization")), c.masterKey) {
+		return true
+	}
+	return AcceptLoopbackWithWarning(r, c.gatewayToken, c.name,
+		"hook-only connectors run as local shell hooks; setup injects Authorization when possible, but loopback remains accepted for legacy hook installs",
+		&c.loopbackWarn)
 }
 
 func (c *hookOnlyConnector) Route(r *http.Request, body []byte) (*ConnectorSignals, error) {
@@ -905,8 +1000,8 @@ func patchGeminiHooks(path, hookScript string) error {
 // segment that the gateway's tokenAuth middleware accepts only for
 // loopback callers (see parseOTLPPathToken + tokenAuth in api.go).
 //
-// SECURITY (Plan B5, H-1 fix): the token embedded in the URL is now a
-// per-connector SCOPED OTLP path-token, NOT the master gateway bearer.
+// SECURITY: the token embedded in the URL is now a per-connector scoped
+// OTLP path-token, NOT the master gateway bearer.
 //
 //   - The scoped token is minted by EnsureOTLPPathToken() and stored
 //     in ${data_dir}/hooks/.otlp-geminicli.token at 0o600.
@@ -920,12 +1015,10 @@ func patchGeminiHooks(path, hookScript string) error {
 //     path-token POSTs so a browser CSRF cannot smuggle a non-OTLP
 //     payload.
 //
-// We fall back to opts.APIToken only when the per-source mint fails
-// AND opts.APIToken is non-empty — that path preserves backwards
-// compatibility with deployments that ran an older defenseclaw setup
-// (no scoped token on disk yet) and a partial sidecar rollout. The
-// fallback is loud (stderr) so the operator notices and can re-run
-// `defenseclaw setup` to regenerate the file.
+// Setup fails loud if the scoped token cannot be minted. We never write
+// the master gateway bearer into settings.json: that file is connector-
+// readable configuration, and leaking it must not grant /api/v1/*
+// authority or cross-namespace OTLP access.
 func patchGeminiTelemetry(path string, opts SetupOpts) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
@@ -936,40 +1029,44 @@ func patchGeminiTelemetry(path string, opts SetupOpts) error {
 		if tok, mintErr := EnsureOTLPPathToken(opts.DataDir, OTLPScopeGeminiCLI); mintErr == nil {
 			pathToken = tok
 		} else {
-			fmt.Fprintf(os.Stderr, "[geminicli] mint scoped OTLP token failed (%v); falling back to master bearer for back-compat — re-run `defenseclaw setup` to fix\n", mintErr)
+			return fmt.Errorf("mint scoped Gemini CLI OTLP token: %w", mintErr)
 		}
 	}
 	if pathToken == "" {
-		// Back-compat fallback. Strictly worse than the scoped
-		// token (full sidecar admin if the file is read), but
-		// preserves the v0 behaviour for existing installs.
-		pathToken = opts.APIToken
+		return fmt.Errorf("mint scoped Gemini CLI OTLP token: data dir is required")
 	}
 	telemetry := ensureJSONObject(cfg, "telemetry")
-	endpoint := "http://" + strings.TrimSpace(opts.APIAddr) + "/otlp/geminicli/" + url.PathEscape(pathToken)
-	// Gemini CLI's settings.json schema (see
-	// https://geminicli.com/docs/reference/configuration/) constrains
-	// `telemetry.target` to {"local","gcp"}, names the protocol field
-	// `otlpProtocol` with values {"grpc","http"}, and rejects unknown
-	// keys outright (so a former `managedBy` marker now fails the
-	// loader with "Unrecognized key(s) in object").
+
+	// Spec-driven: drive the telemetry block from the connector's
+	// NativeOTLPSpec via spec.JSONBlock(). The spec emits the same
+	// shape Gemini CLI's settings.json schema requires
+	// (https://geminicli.com/docs/reference/configuration/):
+	// enabled/target/useCollector/otlpEndpoint/otlpProtocol/logPrompts.
 	//
-	// We therefore use target=local + useCollector=true to forward to
-	// our loopback OTLP-HTTP receiver, which accepts both protobuf
-	// (default for `otlpProtocol: http`) and OTLP-JSON. The marker we
-	// rely on for teardown detection is the path-scoped endpoint URL
-	// containing "/otlp/geminicli/" — that pattern is already unique
-	// to DefenseClaw, so removing the unsupported `managedBy` key is
-	// safe (see removeManagedGeminiTelemetry).
-	telemetry["enabled"] = true
-	telemetry["target"] = "local"
-	telemetry["useCollector"] = true
-	telemetry["otlpEndpoint"] = endpoint
-	telemetry["otlpProtocol"] = "http"
-	telemetry["logPrompts"] = redaction.DisableAll()
-	// Drop legacy keys that older defenseclaw versions wrote — they
-	// are unrecognized by the current Gemini schema and would crash
-	// `gemini` startup if a stale settings.json is upgraded in place.
+	// We always override spec.PathToken with the canonical token
+	// just resolved above, so the disk-write path is the single
+	// source of truth for which token is embedded (the spec's
+	// best-effort lookup may have raced with another sidecar mint).
+	//
+	// Legacy keys "managedBy" and "protocol" are unrecognized by
+	// the current Gemini schema and would crash `gemini` startup
+	// if a stale settings.json is upgraded in place, so we delete
+	// them unconditionally — that is also how
+	// removeManagedGeminiTelemetry detects DefenseClaw-managed
+	// blocks for teardown (it keys on the path-scoped endpoint URL
+	// containing "/otlp/geminicli/").
+	spec := geminiCLINativeOTLPSpec(opts)
+	if spec == nil {
+		return fmt.Errorf("geminicli: nil NativeOTLPSpec")
+	}
+	spec.PathToken = pathToken
+	block, err := spec.JSONBlock()
+	if err != nil {
+		return fmt.Errorf("geminicli: render OTLP block: %w", err)
+	}
+	for k, v := range block {
+		telemetry[k] = v
+	}
 	delete(telemetry, "managedBy")
 	delete(telemetry, "protocol")
 	return writeJSONObject(path, cfg)

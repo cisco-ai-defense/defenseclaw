@@ -27,6 +27,7 @@ Run via ``make check-schemas``.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -64,11 +65,38 @@ EXPECTED_CLAW_MODE_ENUM = {
     "",
 }
 
+METRICS_GO = ROOT / "internal" / "telemetry" / "metrics.go"
+HOOK_AUDIT_GO = ROOT / "internal" / "gateway" / "hook_audit_envelope.go"
+OTEL_METRIC_INSTRUMENT_TYPES = {
+    "Int64Counter": "counter",
+    "Float64Histogram": "histogram",
+    "Int64Histogram": "histogram",
+    "Int64UpDownCounter": "updowncounter",
+    "Int64Gauge": "gauge",
+    "Float64Gauge": "gauge",
+}
+
 
 def load_json(path: Path) -> dict:
+    def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+        out = {}
+        seen = set()
+        for key, value in pairs:
+            if key in seen:
+                raise ValueError(f"duplicate JSON object key {key!r}")
+            seen.add(key)
+            out[key] = value
+        return out
+
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_keys,
+        )
     except json.JSONDecodeError as exc:
+        print(f"check_schemas: {path} is not valid JSON: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    except ValueError as exc:
         print(f"check_schemas: {path} is not valid JSON: {exc}", file=sys.stderr)
         raise SystemExit(1)
 
@@ -95,6 +123,7 @@ def ensure_valid_meta(doc: dict, path: Path) -> bool:
 
 
 def check_audit_event(doc: dict) -> bool:
+    ok = True
     props = doc.get("properties", {})
     sv = props.get("schema_version")
     if not isinstance(sv, dict):
@@ -109,8 +138,57 @@ def check_audit_event(doc: dict) -> bool:
     required = set(doc.get("required", []))
     if "schema_version" not in required:
         print("check_schemas: audit-event.json: 'schema_version' must be in required[]", file=sys.stderr)
-        return False
-    return True
+        ok = False
+    structured = props.get("structured")
+    if not isinstance(structured, dict):
+        print("check_schemas: audit-event.json: missing structured property", file=sys.stderr)
+        ok = False
+    elif "object" not in structured.get("type", []):
+        print("check_schemas: audit-event.json: structured must allow object", file=sys.stderr)
+        ok = False
+    return ok
+
+
+def discover_hook_audit_schema_const() -> str:
+    text = HOOK_AUDIT_GO.read_text(encoding="utf-8")
+    match = re.search(r'HookAuditEnvelopeSchema\s*=\s*"([^"]+)"', text)
+    if not match:
+        raise RuntimeError("HookAuditEnvelopeSchema constant not found")
+    return match.group(1)
+
+
+def check_hook_audit_envelope(doc: dict) -> bool:
+    ok = True
+    props = doc.get("properties", {})
+    schema = props.get("schema", {})
+    expected = discover_hook_audit_schema_const()
+    if schema.get("const") != expected:
+        print(
+            "check_schemas: hook-audit-envelope.json: "
+            f"schema.const={schema.get('const')!r}, want {expected!r}",
+            file=sys.stderr,
+        )
+        ok = False
+    required = set(doc.get("required", []))
+    expected_required = {"schema", "timestamp", "connector", "event", "result", "would_block"}
+    missing = expected_required - required
+    if missing:
+        print(
+            "check_schemas: hook-audit-envelope.json: missing required fields "
+            f"{sorted(missing)}",
+            file=sys.stderr,
+        )
+        ok = False
+    result = set((props.get("result") or {}).get("enum") or [])
+    expected_results = {"ok", "panic", "rejected", "encode_error"}
+    if result != expected_results:
+        print(
+            "check_schemas: hook-audit-envelope.json: result enum drift "
+            f"got={sorted(result)} want={sorted(expected_results)}",
+            file=sys.stderr,
+        )
+        ok = False
+    return ok
 
 
 def check_envelope(doc: dict) -> bool:
@@ -156,6 +234,116 @@ def check_resource(doc: dict) -> bool:
         )
         return False
     return True
+
+
+def discover_otel_metric_instruments() -> dict[str, dict[str, str]]:
+    """Read internal/telemetry/metrics.go and return declared instruments.
+
+    The public metrics schema says it is the downstream contract for emitted
+    DefenseClaw OTel metrics. A JSON schema can be perfectly valid but still
+    stale if a new meter is added in Go and forgotten in the schema catalog.
+    Keep this lightweight parser intentionally narrow: it only follows the
+    canonical metricsSet constructor pattern used in metrics.go.
+    """
+    text = METRICS_GO.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    out: dict[str, dict[str, str]] = {}
+    pattern = re.compile(
+        r"ms\.\w+,\s+err\s+=\s+m\."
+        r"(Int64Counter|Float64Histogram|Int64Histogram|"
+        r"Int64UpDownCounter|Int64Gauge|Float64Gauge)"
+        r"\(\"([^\"]+)\""
+    )
+    for idx, line in enumerate(lines):
+        match = pattern.search(line)
+        if not match:
+            continue
+        instrument_type, name = match.groups()
+        block = "\n".join(lines[idx : idx + 24])
+        unit_match = re.search(r"metric\.WithUnit\(\"([^\"]*)\"\)", block)
+        desc_match = re.search(r"metric\.WithDescription\(\"([^\"]*)\"\)", block)
+        out[name] = {
+            "type": OTEL_METRIC_INSTRUMENT_TYPES[instrument_type],
+            "unit": unit_match.group(1) if unit_match else "",
+            "description": desc_match.group(1) if desc_match else "",
+        }
+    return out
+
+
+def check_metrics_catalog(doc: dict) -> bool:
+    """Verify schemas/otel/metrics.schema.json names every emitted metric."""
+    ok = True
+    catalog = doc.get("x-emitted-metrics")
+    if not isinstance(catalog, list):
+        print(
+            "check_schemas: otel/metrics.schema.json: missing x-emitted-metrics catalog",
+            file=sys.stderr,
+        )
+        return False
+
+    schema_metrics: dict[str, dict] = {}
+    duplicates: set[str] = set()
+    for item in catalog:
+        if not isinstance(item, dict):
+            print(
+                f"check_schemas: otel/metrics.schema.json: non-object catalog item {item!r}",
+                file=sys.stderr,
+            )
+            ok = False
+            continue
+        name = str(item.get("name") or "")
+        if not name:
+            print(
+                "check_schemas: otel/metrics.schema.json: catalog item missing name",
+                file=sys.stderr,
+            )
+            ok = False
+            continue
+        if name in schema_metrics:
+            duplicates.add(name)
+        schema_metrics[name] = item
+
+    if duplicates:
+        print(
+            "check_schemas: otel/metrics.schema.json: duplicate metric names "
+            f"{sorted(duplicates)}",
+            file=sys.stderr,
+        )
+        ok = False
+
+    emitted = discover_otel_metric_instruments()
+    missing = sorted(set(emitted) - set(schema_metrics))
+    extra = sorted(set(schema_metrics) - set(emitted))
+    if missing or extra:
+        print(
+            "check_schemas: otel/metrics.schema.json: emitted metric catalog drift "
+            f"missing={missing} extra={extra}",
+            file=sys.stderr,
+        )
+        ok = False
+
+    for name in sorted(set(emitted) & set(schema_metrics)):
+        expected = emitted[name]
+        got = schema_metrics[name]
+        for field in ("type", "unit"):
+            if got.get(field) != expected[field]:
+                print(
+                    "check_schemas: otel/metrics.schema.json: "
+                    f"{name}.{field}={got.get(field)!r}, want {expected[field]!r}",
+                    file=sys.stderr,
+                )
+                ok = False
+        if not str(got.get("description") or "").strip():
+            print(
+                "check_schemas: otel/metrics.schema.json: "
+                f"{name} missing description",
+                file=sys.stderr,
+            )
+            ok = False
+
+    if ok:
+        print(f"check_schemas: otel/metrics.schema.json catalog OK ({len(emitted)} metrics)")
+    return ok
 
 
 GATEWAYLOG_SCHEMA_DIR = ROOT / "internal" / "gatewaylog" / "schemas"
@@ -235,12 +423,28 @@ def main() -> int:
         print("check_schemas: gateway-event-envelope.json missing", file=sys.stderr)
         ok = False
 
+    hook_path = SCHEMA_DIR / "hook-audit-envelope.json"
+    if hook_path.exists():
+        if not check_hook_audit_envelope(load_json(hook_path)):
+            ok = False
+    else:
+        print("check_schemas: hook-audit-envelope.json missing", file=sys.stderr)
+        ok = False
+
     resource_path = SCHEMA_DIR / "otel" / "resource.schema.json"
     if resource_path.exists():
         if not check_resource(load_json(resource_path)):
             ok = False
     else:
         print("check_schemas: schemas/otel/resource.schema.json missing", file=sys.stderr)
+        ok = False
+
+    metrics_path = SCHEMA_DIR / "otel" / "metrics.schema.json"
+    if metrics_path.exists():
+        if not check_metrics_catalog(load_json(metrics_path)):
+            ok = False
+    else:
+        print("check_schemas: schemas/otel/metrics.schema.json missing", file=sys.stderr)
         ok = False
 
     if not check_schema_mirrors():

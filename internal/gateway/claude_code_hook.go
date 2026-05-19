@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,83 +81,13 @@ type claudeCodeHookResponse struct {
 	ClaudeCodeOutput  map[string]interface{} `json:"claude_code_output,omitempty"`
 }
 
-func (a *APIServer) handleClaudeCodeHook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "method", 0)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var payload map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "invalid_json", 0)
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	b, _ := json.Marshal(payload)
-	var req claudeCodeHookRequest
-	if err := json.Unmarshal(b, &req); err != nil {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "invalid_payload", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Claude Code hook payload"})
-		return
-	}
-	req.Payload = payload
-	if req.HookEventName == "" {
-		a.recordConnectorHookRejection(r.Context(), "claudecode", "unknown", "missing_event", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
-		return
-	}
-	req.CWD = sanitizeHookCWD(req.CWD)
-	req.NewCWD = sanitizeHookCWD(req.NewCWD)
-	req.OldCWD = sanitizeHookCWD(req.OldCWD)
-	ctx := r.Context()
-	rawEventIDs := a.rememberClaudeCodeRawHookEvents(req)
-	a.emitClaudeCodeHookLLMEvent(ctx, req, rawEventIDs, b)
-
-	t0 := time.Now()
-	resp := a.evaluateClaudeCodeHook(ctx, req)
-	elapsed := time.Since(t0)
-
-	if a.health != nil {
-		a.health.RecordConnectorRequest()
-		if resp.Action == "block" {
-			a.health.RecordToolBlock()
-		}
-		if isToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspection()
-		}
-	}
-
-	if a.otel != nil {
-		reason := resp.Action
-		if resp.WouldBlock {
-			reason = "would_block"
-		}
-		enrichConnectorHookTelemetrySpan(ctx, "claudecode", req.HookEventName, "ok", reason, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed)
-		a.otel.RecordConnectorHookInvocation(ctx, "claudecode", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(ctx, "claudecode:"+req.HookEventName, resp.Action, resp.Severity)
-		a.otel.RecordInspectLatency(ctx, "claudecode:"+req.HookEventName, float64(elapsed.Milliseconds()))
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", "claudecode", "ok", 1, int64(len(b)),
-			fmt.Sprintf("source=hook connector=claudecode event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
-				req.HookEventName, claudeCodeToolName(req), resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
-	}
-
-	details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-		resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-	details = appendRawTelemetryDetails(details, "raw_payload", b)
-	details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-	a.logConnectorHookAudit(ctx, "claudecode", req.HookEventName, details)
-
-	a.writeJSON(w, http.StatusOK, resp)
-}
-
-func isToolInspectionEvent(event string) bool {
-	switch event {
-	case "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch", "PermissionRequest":
-		return true
-	}
-	return false
-}
+// Claude Code hook traffic flows through the unified pipeline at
+// handleAgentHook("claudecode"); the profile-runtime registry invokes
+// the connector-specific evaluator kept below. The pipeline's shared
+// concerns — audit envelope refresh, dispatch metric, dedup, trace
+// propagation, OTel emissions — live in exactly one place
+// (handleAgentHook) so per-connector handlers cannot drift apart on
+// any of those signals.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
 	mode := a.claudeCodeMode()

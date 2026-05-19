@@ -925,7 +925,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("--accept-splunk-license", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._apply_logs_config")
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     def test_setup_splunk_logs_non_interactive_with_license_flag(
         self, _mock_preflight, mock_apply_logs_config,
     ):
@@ -941,7 +941,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
         mock_apply_logs_config.assert_called_once()
 
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
     def test_setup_splunk_logs_bootstrap_bridge_free_mode(
@@ -985,7 +985,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Local Splunk configured (Free mode from day 1)", result.output)
         self.assertIn("Log in with admin", result.output)
 
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
     def test_setup_splunk_logs_bootstrap_bridge_s3_export_env(
@@ -1040,7 +1040,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(env["S3_PREFIX"], "agentwatch/defenseclaw")
         self.assertEqual(env["AWS_REGION"], "us-west-2")
 
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     @patch("defenseclaw.commands.cmd_setup.subprocess.run")
     @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
     def test_setup_splunk_s3_export_implies_logs(
@@ -1141,7 +1141,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
-    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
     def test_setup_splunk_logs_non_interactive_fails_when_bridge_bootstrap_fails(
         self, _mock_preflight, _mock_bootstrap_bridge,
     ):
@@ -1155,6 +1155,144 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertFalse(self.app.cfg.splunk.enabled)
         self.assertNotIn("Local Splunk configured (Free mode from day 1)", result.output)
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._preflight_docker",
+        return_value=(False, "port_8000_in_use"),
+    )
+    def test_setup_splunk_logs_non_interactive_port_conflict_message(
+        self, _mock_preflight,
+    ):
+        """Regression: when pre-flight fails on a busy port the
+        non-interactive error must name the port, not lie about Docker.
+        """
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertNotIn("Docker is required for --logs", result.output)
+        self.assertIn("port 8000 is already in use", result.output)
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._preflight_docker",
+        return_value=(False, "docker_daemon_not_running"),
+    )
+    def test_setup_splunk_logs_non_interactive_docker_daemon_message(
+        self, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Docker daemon is not running", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_setup.splunk_bridge_bin",
+        return_value="/tmp/fake-splunk-claw-bridge",
+    )
+    def test_bootstrap_bridge_empty_stdout_emits_diagnostic(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        """Regression: when the bridge exits 0 but writes nothing to
+        stdout (or writes non-JSON), the operator must see a
+        self-explanatory error plus a tail of the bridge's stderr
+        rather than the raw ``json`` module exception.
+        """
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="",
+            stderr="docker compose: failed to package app\nsee log above\n",
+        )
+
+        contract = _bootstrap_bridge(self.tmp_dir, refresh_bundle=False)
+
+        self.assertIsNone(contract)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_setup.splunk_bridge_bin",
+        return_value="/tmp/fake-splunk-claw-bridge",
+    )
+    def test_bootstrap_bridge_malformed_json_surfaces_stderr_tail(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from click.testing import CliRunner
+
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="not-json-at-all",
+            stderr="line1\nline2\nfatal: ansible bootstrap failed\n",
+        )
+
+        result = CliRunner().invoke(
+            setup,
+            ["splunk", "--logs", "--non-interactive", "--accept-splunk-license"],
+            obj=self.app,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("malformed JSON contract", result.output)
+        self.assertIn("Last bridge stderr:", result.output)
+        self.assertIn("fatal: ansible bootstrap failed", result.output)
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_setup.splunk_bridge_bin",
+        return_value="/tmp/fake-splunk-claw-bridge",
+    )
+    def test_setup_splunk_s3_export_emits_implies_logs_notice(
+        self, _mock_bridge_bin, mock_run, _mock_preflight,
+    ):
+        from defenseclaw.commands.cmd_setup import setup
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
+            stderr="",
+        )
+
+        result = self.runner.invoke(
+            setup,
+            [
+                "splunk",
+                "--s3-export",
+                "--s3-bucket",
+                "agentwatch-demo",
+                "--non-interactive",
+                "--accept-splunk-license",
+            ],
+            obj=self.app,
+            catch_exceptions=False,
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("--s3-export implies --logs", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker")
     def test_setup_splunk_logs_interactive_decline_license(self, mock_preflight):
@@ -1175,6 +1313,26 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertIn("Local Splunk enablement cancelled.", result.output)
         self.assertFalse(self.app.cfg.splunk.enabled)
         mock_preflight.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(False, "docker_not_installed"))
+    def test_setup_splunk_logs_interactive_preflight_failure_stops_logs(self, mock_preflight):
+        from defenseclaw.commands.cmd_setup import setup
+
+        user_input = "\n".join([
+            "n",           # Enable O11y?
+            "y",           # Enable local logs?
+            "y",           # Accept Splunk license?
+            "n",           # Enable Enterprise?
+        ]) + "\n"
+
+        result = self.runner.invoke(
+            setup, ["splunk"], obj=self.app,
+            input=user_input, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.splunk.enabled)
+        self.assertNotIn("Local Splunk configured", result.output)
+        mock_preflight.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_setup._preflight_docker")
     def test_setup_splunk_o11y_and_logs_interactive_decline_logs_preserves_o11y(

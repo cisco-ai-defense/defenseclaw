@@ -101,6 +101,9 @@ class _ModeBase(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._write_picked_connector_hint",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             return _invoke(["mode", target, *extra], self.app)
 

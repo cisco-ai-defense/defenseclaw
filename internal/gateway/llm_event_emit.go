@@ -294,7 +294,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = req.TurnID
+		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "call", req.ToolName, stringFromJSONRaw(req.ToolArgs), "", nil)
 	case isResultLikeEvent(req.HookEventName):
@@ -303,7 +303,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = req.TurnID
+		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "result", req.ToolName, "", req.Content, nil)
 	}

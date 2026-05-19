@@ -1,6 +1,6 @@
 {
-  "_source": "Hand-curated from internal/gateway/connector/{hook_only,claudecode,codex,openclaw,zeptoclaw}.go and cli/defenseclaw/commands/cmd_setup.py (_CONNECTOR_META, _hilt_support_note). Re-extract on every connector change.",
-  "_lastVerified": "2026-05-08",
+  "_source": "Hand-curated from internal/gateway/connector hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
+  "_lastVerified": "2026-05-19",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {

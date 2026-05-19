@@ -531,11 +531,14 @@ test-file:
 
 check: check-v7 check-provider-coverage
 
-check-v7: check-audit-actions check-error-codes check-schemas
+check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
 
 check-audit-actions:
 	@$(VENV)/bin/python scripts/check_audit_actions.py
+
+check-audit-no-raw-literals:
+	@$(VENV)/bin/python scripts/check_audit_no_raw_literals.py
 
 check-error-codes:
 	@$(VENV)/bin/python scripts/check_error_codes.py

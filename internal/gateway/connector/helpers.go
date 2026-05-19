@@ -19,9 +19,12 @@ package connector
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 )
 
 // SecureTokenMatch compares two token strings in constant time to prevent
@@ -132,4 +135,103 @@ func isChatPath(path string) bool {
 	return strings.Contains(path, "/chat/completions") ||
 		strings.Contains(path, "/messages") ||
 		strings.Contains(path, "/responses")
+}
+
+// AcceptLoopbackWithWarning centralizes the "trust loopback because the
+// vendor CLI is a native binary with no seam to inject X-DC-Auth" carve-
+// out used today by the Codex connector. Centralizing the pattern means
+// any future connector that needs the same exception must opt in
+// explicitly (callers pass their own warned *sync.Once + reason) and the
+// [SECURITY] line wording stays uniform across connectors so operators
+// grepping audit/console output recognize the bypass immediately.
+//
+// Usage:
+//
+//	type FooConnector struct {
+//	    gatewayToken string
+//	    warned       sync.Once
+//	}
+//	func (c *FooConnector) Authenticate(r *http.Request) bool {
+//	    if connector.AcceptLoopbackWithWarning(r, c.gatewayToken,
+//	        "foo", "foo-cli has no header-injection seam", &c.warned) {
+//	        return true
+//	    }
+//	    // ... fall back to header-based auth checks ...
+//	    return false
+//	}
+//
+// The helper:
+//
+//   - returns false (no trust) when r is not a loopback request, so the
+//     caller falls through to its real auth path;
+//   - returns true when r IS loopback;
+//   - emits a single `[SECURITY] <connector>: loopback request accepted
+//     without X-DC-Auth — DEFENSECLAW_GATEWAY_TOKEN is set but the
+//     <connector> native binary has no seam to inject it. <reason>` line
+//     to stderr the FIRST time it returns true while gatewayToken is
+//     non-empty (subsequent calls suppress the warning via warned).
+//   - never logs when gatewayToken is empty — that is the "no gateway
+//     auth configured at all" case where loopback trust is the explicit
+//     operator default.
+//
+// # SECURITY MODEL — IMPORTANT
+//
+// This helper is the only sanctioned way to take the loopback carve-out
+// in the codebase. Anyone reviewing a connector PR can grep for
+// `AcceptLoopbackWithWarning` and immediately see every connector that
+// elects to trust loopback unconditionally, alongside the human-readable
+// `reason` string explaining why. Adding the carve-out by writing
+// `if IsLoopback(r) { return true }` directly in a connector is a
+// security regression and should be rejected at code review.
+//
+// connectorName is the connector's short name. Today there is exactly
+// one authorised caller (Codex). If you are about to call this from a
+// second connector, you must:
+//
+//  1. document the reason that connector cannot inject X-DC-Auth in the
+//     connector's Authenticate() godoc, AND
+//  2. add a test asserting the [SECURITY] line is emitted exactly once
+//     per process for that new caller.
+func AcceptLoopbackWithWarning(r *http.Request, gatewayToken, connectorName, reason string, warned *sync.Once) bool {
+	if !IsLoopback(r) {
+		return false
+	}
+	// SECURITY: the warned argument is REQUIRED — passing nil
+	// would silently suppress the [SECURITY] log line that
+	// announces every loopback bypass, recreating the silent-trust
+	// vulnerability this helper was built to prevent. We panic
+	// here instead of returning true-without-warn so the misuse is
+	// caught at first call (typically immediately after a
+	// connector's Authenticate is wired up), not in production
+	// where the missing warning would only surface during an
+	// audit.
+	if warned == nil {
+		panic("connector.AcceptLoopbackWithWarning: warned argument must not be nil (would silently suppress the [SECURITY] loopback-bypass log)")
+	}
+	connectorName = strings.TrimSpace(connectorName)
+	if connectorName == "" {
+		connectorName = "unknown"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "vendor CLI has no header-injection seam"
+	}
+	// Only emit the warning when the operator has actually
+	// configured a token; without a token there is no "bypass"
+	// (the gateway accepts unauthenticated loopback by default).
+	// We keep the warning at WARN-only because the carve-out is a
+	// deliberate trust decision documented in INFO.md, not an
+	// unexpected configuration.
+	if strings.TrimSpace(gatewayToken) != "" {
+		warned.Do(func() {
+			fmt.Fprintf(os.Stderr,
+				"[SECURITY] %s: loopback request accepted without X-DC-Auth — "+
+					"DEFENSECLAW_GATEWAY_TOKEN is set but the %s native binary "+
+					"has no seam to inject it. %s. Any process on this host "+
+					"can route through this connector's API with no further "+
+					"authentication.\n",
+				connectorName, connectorName, reason)
+		})
+	}
+	return true
 }

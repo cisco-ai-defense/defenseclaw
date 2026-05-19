@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v6
 # DefenseClaw Hermes hook — forwards Hermes shell-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
@@ -44,9 +44,12 @@ fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: hermes hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    exit 2
+  fi
   exit 0
 }
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
 # into this script). The env var takes precedence if already set.
@@ -81,10 +84,17 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
+# W3C trace propagation: forward validated traceparent / tracestate via _hardening.sh v6.
+TRACE_HEADER_ARGS=()
+if command -v mapfile >/dev/null 2>&1; then
+  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/hermes/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: hermes-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

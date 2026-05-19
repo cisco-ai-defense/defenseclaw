@@ -31,6 +31,7 @@ import urllib.request
 import click
 
 from defenseclaw import ux
+from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
@@ -1354,6 +1355,7 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
         _doctor_subsection("Connector")
     active_connector = _active_connector(cfg)
     _check_connector_inventory(cfg, active_connector, r)
+    _check_hook_contract_lock(cfg, active_connector, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
     # operators who switch connectors via 'defenseclaw setup guardrail
@@ -1432,7 +1434,7 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 
     if app.logger:
         app.logger.log_action(
-            "doctor", "health-check",
+            ACTION_DOCTOR, "health-check",
             f"passed={r.passed} failed={r.failed} warned={r.warned} skipped={r.skipped}",
         )
 
@@ -1602,6 +1604,67 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
     else:
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
+
+
+def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
+    if connector in {"openclaw", "zeptoclaw"}:
+        _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
+        return
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    lock_path = os.path.join(data_dir, "hook_contract_lock.json")
+    try:
+        with open(lock_path, encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except FileNotFoundError:
+        _emit("warn", "Hook contract", "no hook_contract_lock.json yet — restart gateway after setup", r=r)
+        return
+    except Exception as exc:
+        _emit("fail", "Hook contract", f"cannot read {lock_path}: {exc}", r=r)
+        return
+
+    entry = ((lock.get("connectors") or {}).get(connector) or {})
+    if not entry:
+        _emit("warn", "Hook contract", f"no lock entry for active connector {connector}", r=r)
+        return
+
+    status = str(entry.get("compatibility_status") or "")
+    contract = str(entry.get("contract_id") or "")
+    raw_version = str(entry.get("raw_agent_version") or "")
+    normalized = str(entry.get("normalized_agent_version") or "")
+    script_version = str(entry.get("hook_script_version") or "")
+    detail = f"contract={contract or '?'} status={status or '?'}"
+    if raw_version:
+        detail += f" agent={raw_version}"
+    if normalized:
+        detail += f" normalized={normalized}"
+    if script_version:
+        detail += f" script={script_version}"
+
+    current_version = _discovered_agent_version(data_dir, connector)
+    if current_version and raw_version and current_version != raw_version:
+        _emit(
+            "fail",
+            "Hook contract",
+            f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}",
+            r=r,
+        )
+        return
+    if status == "unknown":
+        _emit("fail", "Hook contract", detail, r=r)
+    elif status in {"known", "unversioned"}:
+        _emit("pass", "Hook contract", detail, r=r)
+    else:
+        _emit("warn", "Hook contract", detail, r=r)
+
+
+def _discovered_agent_version(data_dir: str, connector: str) -> str:
+    try:
+        with open(os.path.join(data_dir, "agent_discovery.json"), encoding="utf-8") as fh:
+            disc = json.load(fh)
+    except Exception:
+        return ""
+    signal = ((disc.get("agents") or {}).get(connector) or {})
+    return str(signal.get("version") or "").strip()
 
 
 # Maps connector name → list of *expected* artifact filenames (relative

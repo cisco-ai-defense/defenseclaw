@@ -237,6 +237,115 @@ func (c *ClaudeCodeConnector) HookScripts(opts SetupOpts) []string {
 	return c.AgentPaths(opts).HookScripts
 }
 
+// HookCapabilities declares the Claude Code hook surface for the
+// unified collector and the verdict mapper. The shape mirrors the
+// events handled in evaluateClaudeCodeHook + claudeCodeOutput.
+//
+// CanBlock=true: PreToolUse/PermissionRequest honour permissionDecision=
+// deny; UserPromptSubmit and most others honour decision=block; tasks
+// honour continue=false.
+//
+// CanAskNative=true: PreToolUse renders permissionDecision=ask when a
+// hook returns confirm, which Claude Code surfaces as a native HITL
+// prompt.
+//
+// SupportsFailClosed=true: claude-code-hook.sh honours
+// DEFENSECLAW_FAIL_MODE=closed at the shell layer.
+func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
+	return HookCapability{
+		CanBlock:     true,
+		CanAskNative: true,
+		AskEvents:    []string{"PreToolUse"},
+		BlockEvents: []string{
+			"UserPromptSubmit",
+			"UserPromptExpansion",
+			"PreToolUse",
+			"PermissionRequest",
+			"PostToolUse",
+			"PostToolBatch",
+			"TaskCreated",
+			"TaskCompleted",
+			"TeammateIdle",
+			"Stop",
+			"SubagentStop",
+			"PreCompact",
+			"Elicitation",
+			"ElicitationResult",
+		},
+		SupportsFailClosed: true,
+		Scope:              "user",
+		ConfigPath:         claudeCodeSettingsPath(),
+	}
+}
+
+// HookProfile implements HookProfileProvider. The returned
+// NativeOTLPSpec is the declarative form of buildClaudeCodeOtelEnv:
+// an env-block targeting the gateway's loopback OTLP-HTTP receiver,
+// with per-signal exporter env vars + CSRF / token / source headers.
+// buildClaudeCodeOtelEnv renders this spec via spec.EnvBlock()
+// instead of computing the map by hand.
+//
+// ExtraEnv carries the connector-specific vars that the OTel
+// renderer does not emit: CLAUDE_CODE_ENABLE_TELEMETRY (the
+// vendor's master switch), DEFENSECLAW_FAIL_MODE (read by the hook
+// script for fail-closed handling), and OTEL_LOG_USER_PROMPTS when
+// redaction is disabled.
+func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
+	headers := map[string]string{
+		"x-defenseclaw-source": "claudecode",
+		"x-defenseclaw-client": "claudecode-otel/1.0",
+	}
+	if opts.APIToken != "" {
+		headers["x-defenseclaw-token"] = opts.APIToken
+	}
+	failMode := "open"
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		failMode = normalizeHookFailMode(opts.HookFailMode)
+	}
+	extra := map[string]string{
+		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+		"DEFENSECLAW_FAIL_MODE":        failMode,
+		// Match V1's exporter selection: metrics + logs only.
+		// Claude Code does not currently consume traces from its
+		// CLI process; setting OTEL_TRACES_EXPORTER would force
+		// the OTel SDK to push every span the CLI emits and the
+		// gateway receiver would have to filter them out. Adding
+		// traces is a future spec extension; today the parity test
+		// pins the exact V1 keys.
+		"OTEL_METRICS_EXPORTER": "otlp",
+		"OTEL_LOGS_EXPORTER":    "otlp",
+	}
+	if redaction.DisableAll() {
+		extra["OTEL_LOG_USER_PROMPTS"] = "1"
+	}
+	profile := HookProfile{
+		Name:                "claudecode",
+		Capabilities:        c.HookCapabilities(opts),
+		SupportsTraceparent: true,
+		NativeOTLP: &NativeOTLPSpec{
+			Kind:               NativeOTLPEnvBlock,
+			Endpoint:           "http://" + opts.APIAddr,
+			Protocol:           "http/json",
+			Headers:            headers,
+			PerSignal:          false,
+			ServiceName:        "claudecode",
+			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},
+			ExtraEnv:           extra,
+			LogUserPrompts:     redaction.DisableAll(),
+		},
+		// Profile-driven callbacks are the canonical shape for
+		// claudecode hook decode / verdict mapping / response. The
+		// gateway profile-runtime registry uses these pure callbacks
+		// for response/mode behavior and keeps APIServer-owned
+		// scanner / asset-policy / notifier work in the unified
+		// collector. Golden tests keep those layers in lockstep.
+		Decode:     claudeCodeProfileDecode,
+		MapVerdict: claudeCodeProfileMapVerdict,
+		Respond:    claudeCodeProfileRespond,
+	}
+	return ApplyHookContract(profile, opts)
+}
+
 // --- ComponentScanner interface ---
 
 func (c *ClaudeCodeConnector) SupportsComponentScanning() bool { return true }
@@ -487,46 +596,20 @@ var claudeCodeOtelEnvKeys = []string{
 // prompt contract as DefenseClaw's own hook telemetry. Teardown
 // restores the operator's pristine env block.
 func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
-	endpoint := "http://" + opts.APIAddr
-	headers := []string{
-		"x-defenseclaw-source=claudecode",
-		// X-DefenseClaw-Client is required by the gateway's CSRF
-		// gate (apiCSRFProtect rejects POSTs without it). OTel
-		// exporters propagate OTEL_EXPORTER_OTLP_HEADERS verbatim
-		// into every outbound request, so adding it here ensures
-		// claude code's OTel POSTs satisfy the same auth contract
-		// as the python CLI and the inspect hooks.
-		"x-defenseclaw-client=claudecode-otel/1.0",
+	// Spec-driven: render from the connector's declarative
+	// NativeOTLPSpec via spec.EnvBlock(). Returning an empty map on
+	// validation error is the safest fail-closed behaviour for
+	// claude code: an unset OTEL_EXPORTER_OTLP_ENDPOINT means the
+	// CLI's OTel SDK disables the exporter entirely, so we never
+	// silently leak telemetry to a wrong endpoint when the spec is
+	// misconfigured in code.
+	spec := (&ClaudeCodeConnector{}).HookProfile(opts).NativeOTLP
+	if spec == nil {
+		return map[string]string{}
 	}
-	if opts.APIToken != "" {
-		// OTEL_EXPORTER_OTLP_HEADERS is a comma-separated key=value
-		// list per the spec. URL-encoding is not required for the
-		// token (we generate it from a controlled charset) but we
-		// keep the format strict to match third-party OTel consumers.
-		headers = append(headers, "x-defenseclaw-token="+opts.APIToken)
-	}
-	// Switch to OTLP-JSON over HTTP so Claude Code telemetry stays on
-	// the same stable receive path as Codex. The gateway can normalize
-	// OTLP protobuf too, but "http/json" is documented at
-	// https://code.claude.com/docs/en/monitoring-usage and keeps setup
-	// deterministic across upgrades.
-	failMode := "open"
-	if strings.TrimSpace(opts.HookFailMode) != "" {
-		failMode = normalizeHookFailMode(opts.HookFailMode)
-	}
-	env := map[string]string{
-		"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-		"DEFENSECLAW_FAIL_MODE":        failMode,
-		"OTEL_METRICS_EXPORTER":        "otlp",
-		"OTEL_LOGS_EXPORTER":           "otlp",
-		"OTEL_EXPORTER_OTLP_PROTOCOL":  "http/json",
-		"OTEL_EXPORTER_OTLP_ENDPOINT":  endpoint,
-		"OTEL_EXPORTER_OTLP_HEADERS":   strings.Join(headers, ","),
-		"OTEL_SERVICE_NAME":            "claudecode",
-		"OTEL_RESOURCE_ATTRIBUTES":     "service.name=claudecode,defenseclaw.connector=claudecode",
-	}
-	if redaction.DisableAll() {
-		env["OTEL_LOG_USER_PROMPTS"] = "1"
+	env, err := spec.EnvBlock()
+	if err != nil {
+		return map[string]string{}
 	}
 	return env
 }

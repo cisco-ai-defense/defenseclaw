@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,8 +49,13 @@ func (a *APIServer) recordConnectorHookRejection(ctx context.Context, connectorN
 				connectorName, eventType, reason, bodyBytes))
 	}
 	if a.logger != nil {
-		_ = a.logger.LogActionCtx(ctx, string(audit.ActionConnectorHook), eventType,
-			fmt.Sprintf("connector=%s result=rejected reason=%s bytes=%d", connectorName, reason, bodyBytes))
+		a.logConnectorHookAuditEnvelope(ctx, HookAuditEnvelope{
+			Connector: connectorName,
+			Event:     eventType,
+			Result:    "rejected",
+			Reason:    reason,
+			BodyBytes: bodyBytes,
+		})
 	}
 }
 
@@ -64,6 +70,59 @@ func (a *APIServer) logConnectorHookAudit(ctx context.Context, connectorName, ev
 	}
 	_ = a.logger.LogActionCtx(ctx, string(audit.ActionConnectorHook), eventType,
 		fmt.Sprintf("connector=%s %s", connectorName, details))
+}
+
+// logConnectorHookAuditEnvelope is the structured-audit entry point
+// every connector hook handler should use once it has a fully-built
+// HookAuditEnvelope.
+//
+// The audit row carries two representations of the same hook outcome:
+//
+//   - Event.Structured is the canonical machine-readable
+//     defenseclaw.hook.v1 envelope for SQLite export and audit sinks.
+//   - Details keeps the legacy "connector=… action=… raw_action=…"
+//     key=value tail plus details_json= for backwards-compatible
+//     operator greps and downstream parsers during migration.
+//
+// The Details JSON value is strconv.Quote'd so it can carry embedded
+// commas and quotes without breaking the surrounding tail.
+//
+// stripLogInjectionRunes runs on every string field in both forms,
+// per codeguard-0-logging: a hostile prompt that smuggles CR/LF/ANSI
+// escapes cannot forge fake audit rows or corrupt the operator's
+// terminal.
+//
+// Optional action override: when env.AuditActionOverride is set
+// (today: ActionConnectorHookSynthetic for synthetic
+// codex-notify-derived events), the override is used as the audit
+// row's action column instead of the canonical
+// ActionConnectorHook. Sinks that want to keep "1 row per
+// codex.notify in" should filter on action=connector-hook only.
+func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookAuditEnvelope) {
+	if a.logger == nil {
+		return
+	}
+	env.Connector = normalizeHookTelemetryLabel(env.Connector, "unknown")
+	env.Event = normalizeHookTelemetryLabel(env.Event, "unknown")
+	if env.Result == "" {
+		env.Result = "ok"
+	}
+	auditAction := string(audit.ActionConnectorHook)
+	if env.AuditActionOverride != "" && audit.IsKnownAction(env.AuditActionOverride) {
+		auditAction = env.AuditActionOverride
+	}
+	jsonDetails, structured := renderHookAuditEnvelopePayload(env)
+	legacy := renderHookAuditLegacyDetails(env)
+	combined := fmt.Sprintf("connector=%s %s details_json=%s",
+		env.Connector, legacy, strconv.Quote(jsonDetails))
+	_ = a.logger.LogEventCtx(ctx, audit.Event{
+		Action:     auditAction,
+		Target:     env.Event,
+		Actor:      "defenseclaw",
+		Details:    combined,
+		Severity:   "INFO",
+		Structured: structured,
+	})
 }
 
 func (a *APIServer) logAssetPolicyAudit(ctx context.Context, target, details string) {

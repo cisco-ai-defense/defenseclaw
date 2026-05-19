@@ -116,11 +116,15 @@ func DefaultSourceTypeOverrides() map[string]string {
 		// Judge events go to their own sourcetype so the Splunk
 		// dashboards can pivot on model + verdict + confidence
 		// without colliding with regular audit lines.
+		// Key mirrors audit.ActionLLMJudgeResponse; this package
+		// cannot import internal/audit without creating a cycle.
 		"llm-judge-response": "defenseclaw:judge",
 		// Guardrail verdicts are the single highest-value audit
 		// signal for SOC teams; giving them a dedicated
 		// sourcetype lets search-head admins pin retention
 		// independently of the generic audit stream.
+		// Key mirrors audit.ActionGuardrailVerdict; this package
+		// cannot import internal/audit without creating a cycle.
 		"guardrail-verdict": "defenseclaw:verdict",
 	}
 }
@@ -194,6 +198,10 @@ type splunkAuditEvent struct {
 	DestinationApp    string         `json:"destination_app,omitempty"`
 	ToolName          string         `json:"tool_name,omitempty"`
 	ToolID            string         `json:"tool_id,omitempty"`
+	SchemaVersion     int            `json:"schema_version,omitempty"`
+	ContentHash       string         `json:"content_hash,omitempty"`
+	Generation        uint64         `json:"generation,omitempty"`
+	BinaryVersion     string         `json:"binary_version,omitempty"`
 	Structured        map[string]any `json:"structured,omitempty"`
 }
 
@@ -418,6 +426,10 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			DestinationApp:    e.DestinationApp,
 			ToolName:          e.ToolName,
 			ToolID:            e.ToolID,
+			SchemaVersion:     e.SchemaVersion,
+			ContentHash:       e.ContentHash,
+			Generation:        e.Generation,
+			BinaryVersion:     e.BinaryVersion,
 			Structured:        e.Structured,
 		},
 	}

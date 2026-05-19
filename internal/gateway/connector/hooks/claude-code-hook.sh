@@ -1,8 +1,13 @@
 #!/bin/bash
-# defenseclaw-managed-hook v3
+# defenseclaw-managed-hook v6
 # DefenseClaw Claude Code hook — forwards the full hook event payload to the
 # DefenseClaw gateway's /api/v1/claude-code/hook endpoint. Claude Code pipes
 # the structured JSON event to stdin and reads the response from stdout.
+#
+# Forwards W3C trace context (traceparent / tracestate) when the agent
+# has exported it via DEFENSECLAW_TRACEPARENT or OTEL_TRACEPARENT, so
+# the hook span links back to the agent's parent span. See
+# codex-hook.sh for the validation contract.
 set -euo pipefail
 
 # Fail-open guard. See inspect-request.sh for rationale.
@@ -40,9 +45,13 @@ fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: claudecode hook refusing oversized payload" >&2
+  if [ "$FAIL_MODE" = "closed" ]; then
+    printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
+    exit 2
+  fi
   exit 0
 }
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
 # into this script). The env var takes precedence if already set.
@@ -80,10 +89,17 @@ if [ -n "${API_TOKEN}" ]; then
   AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
 fi
 
+# W3C trace propagation: forward validated traceparent / tracestate.
+TRACE_HEADER_ARGS=()
+if command -v mapfile >/dev/null 2>&1; then
+  mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/claude-code/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: claude-code-hook/1.0" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
+  "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 10 \
   -d "$PAYLOAD" 2>/dev/null) || {

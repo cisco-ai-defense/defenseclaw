@@ -5644,6 +5644,48 @@ func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
 	}
 }
 
+func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeGeminiCLI: "scoped-token-abc",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master token on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master token despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master bearer on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master bearer despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped token: status=%d want 200", rr.Code)
+	}
+}
+
 // TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
 // H-2 follow-up: the path-token branch of apiCSRFProtect skips the
 // X-DefenseClaw-Client header (OTLP exporters can't set arbitrary

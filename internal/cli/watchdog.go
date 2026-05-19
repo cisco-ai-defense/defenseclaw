@@ -212,7 +212,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				if current != stateHealthy {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway recovered: %s → healthy\n", current)
 					_ = notify.Send("DefenseClaw", "Gateway is back online. Protection restored.")
-					dispatchHealthEvent(webhooks, "gateway-recovered", "INFO", "Gateway recovered from "+current.String())
+					dispatchHealthEvent(webhooks, string(audit.ActionGatewayRecovered), "INFO", "Gateway recovered from "+current.String())
 					// The watchdog is the only surface that observes the
 					// full "down → healthy" transition from outside the
 					// sidecar process, so this is where the reconnection
@@ -231,7 +231,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				if failCount >= debounce && current == stateHealthy {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway degraded\n")
 					_ = notify.Send("DefenseClaw", "Gateway guardrail is disconnected. Prompt protection is disabled.")
-					dispatchHealthEvent(webhooks, "guardrail-degraded", "HIGH", "Guardrail proxy is disconnected; prompt protection is disabled")
+					dispatchHealthEvent(webhooks, string(audit.ActionGuardrailDegraded), "HIGH", "Guardrail proxy is disconnected; prompt protection is disabled")
 					current = stateDegraded
 					saveWatchdogState(dataDir, current)
 				}
@@ -241,7 +241,7 @@ func runWatchdogLoop(ctx context.Context, healthURL string, interval time.Durati
 				if failCount >= debounce && current != stateDown {
 					fmt.Fprintf(os.Stderr, "[watchdog] gateway down (after %d failures)\n", failCount)
 					_ = notify.Send("DefenseClaw", "Gateway is not running. Your AI agent traffic is unprotected.")
-					dispatchHealthEvent(webhooks, "gateway-down", "CRITICAL", fmt.Sprintf("Gateway unreachable after %d consecutive failures", failCount))
+					dispatchHealthEvent(webhooks, string(audit.ActionGatewayDown), "CRITICAL", fmt.Sprintf("Gateway unreachable after %d consecutive failures", failCount))
 					current = stateDown
 					saveWatchdogState(dataDir, current)
 				}

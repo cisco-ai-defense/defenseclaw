@@ -40,6 +40,7 @@ from typing import Any
 import click
 
 from defenseclaw import ux
+from defenseclaw.audit_actions import ACTION_SETUP_LOCAL_OBSERVABILITY
 from defenseclaw.bundle_refresh import (
     LOCAL_OBSERVABILITY_COMPOSE_PROJECT,
     RefreshResult,
@@ -271,7 +272,7 @@ def up_cmd(
 
     if app.logger:
         app.logger.log_action(
-            "setup-local-observability",
+            ACTION_SETUP_LOCAL_OBSERVABILITY,
             "stack",
             (
                 f"action=up endpoint={otlp_endpoint} protocol={otlp_protocol} "
@@ -326,7 +327,7 @@ def down_cmd(app: AppContext, disable_config: bool) -> None:
 
     if app.logger:
         app.logger.log_action(
-            "setup-local-observability",
+            ACTION_SETUP_LOCAL_OBSERVABILITY,
             "stack",
             (
                 "action=down "
@@ -356,7 +357,7 @@ def reset_cmd(app: AppContext, yes: bool) -> None:
 
     if app.logger:
         app.logger.log_action(
-            "setup-local-observability", "stack", "action=reset",
+            ACTION_SETUP_LOCAL_OBSERVABILITY, "stack", "action=reset",
         )
 
 

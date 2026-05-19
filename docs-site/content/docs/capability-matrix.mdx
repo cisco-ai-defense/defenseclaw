@@ -33,6 +33,7 @@ This page is the single source of truth for "can this connector do X?". Every ro
 | Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
 | Subprocess policy | `_CONNECTOR_META[<id>].subprocess_policy` in `cli/defenseclaw/commands/cmd_setup.py` |
 | Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
+| Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
 | HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
 
 The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.

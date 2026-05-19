@@ -167,6 +167,8 @@ defenseclaw alerts                                          # Recent alerts (pag
 defenseclaw tui                                             # Live dashboard
 ```
 
+Audit export includes the legacy `details` text and, when present, first-class `structured` JSON from `audit_events.structured_json`. Connector hook rows use `schema: "defenseclaw.hook.v1"`; older parsers can still read the mirrored `details_json=` token inside `details`.
+
 ### Config
 
 | Method | Path | Purpose |

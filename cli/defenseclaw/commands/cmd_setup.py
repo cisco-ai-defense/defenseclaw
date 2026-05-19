@@ -34,6 +34,18 @@ import click
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
 from defenseclaw import ux
+from defenseclaw.audit_actions import (
+    ACTION_SETUP_CONNECTOR_MODE,
+    ACTION_SETUP_GATEWAY,
+    ACTION_SETUP_GUARDRAIL,
+    ACTION_SETUP_HOOK_CONNECTOR,
+    ACTION_SETUP_MCP_SCANNER,
+    ACTION_SETUP_NOTIFICATIONS_SET,
+    ACTION_SETUP_NOTIFICATIONS_TOGGLE,
+    ACTION_SETUP_REDACTION_TOGGLE,
+    ACTION_SETUP_SKILL_SCANNER,
+    ACTION_SETUP_SPLUNK,
+)
 from defenseclaw.bundle_refresh import (
     SPLUNK_COMPOSE_PROJECT,
     RefreshResult,
@@ -42,7 +54,15 @@ from defenseclaw.bundle_refresh import (
 )
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
 from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
+from defenseclaw.connector_contracts import (
+    STATUS_KNOWN,
+    STATUS_NOT_GATED,
+    STATUS_UNVERSIONED,
+    normalize_connector,
+    resolve_connector_contract,
+)
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import bundled_extensions_dir, splunk_bridge_bin
 
 # Key used to stash the pre-invocation config.yaml mtime in the Click
@@ -546,7 +566,7 @@ def setup_skill_scanner(
             parts.append(f"llm_provider={llm.provider}")
         if sc.policy:
             parts.append(f"policy={sc.policy}")
-        app.logger.log_action("setup-skill-scanner", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SKILL_SCANNER, "config", " ".join(parts))
 
 
 def _interactive_setup(sc, llm, aid, cfg) -> None:
@@ -1016,7 +1036,7 @@ def setup_mcp_scanner(
         if llm.model:
             parts.append(f"llm_model={llm.model}")
         parts.append("mcp_managed_via=openclaw_config")
-        app.logger.log_action("setup-mcp-scanner", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_MCP_SCANNER, "config", " ".join(parts))
 
 
 def _interactive_mcp_setup(mc, cfg) -> None:
@@ -1345,7 +1365,7 @@ def setup_gateway(
 
     if app.logger:
         mode = "remote" if (remote or gw.resolved_token()) else "local"
-        app.logger.log_action("setup-gateway", "config", f"mode={mode} host={gw.host} port={gw.port}")
+        app.logger.log_action(ACTION_SETUP_GATEWAY, "config", f"mode={mode} host={gw.host} port={gw.port}")
 
 
 def _interactive_gateway_local(gw, openclaw_config_file: str, data_dir: str) -> None:
@@ -1758,6 +1778,127 @@ def _print_connector_info(name: str) -> None:
         )
 
 
+def _check_connector_version_supported_for_setup(
+    connector: str,
+    *,
+    mode: str = "observe",
+    emit: bool = True,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> bool:
+    """Verify the selected connector's installed version before setup.
+
+    Runtime enforcement happens in the Go gateway too, but setup should tell
+    the operator before it writes config and restarts services. Unknown hook
+    contracts are fatal in action mode unless the explicit exploratory
+    override used by the gateway is set.
+    """
+    connector = normalize_connector(connector)
+    label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
+    action_mode = (mode or "").strip().lower() == "action"
+    allow_drift = os.environ.get("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
+    try:
+        disc = agent_discovery.discover_agents(
+            use_cache=False,
+            refresh=True,
+            data_dir=data_dir,
+        )
+        signal = disc.agents.get(connector)
+    except Exception as exc:
+        compatibility = resolve_connector_contract(connector, "")
+        if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+            if emit:
+                ux.err(
+                    f"{label}: could not refresh local version discovery ({exc}); "
+                    "refusing action-mode hook setup."
+                )
+                ux.subhead(
+                    "Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for "
+                    "exploratory testing."
+                )
+            return False
+        if emit:
+            ux.warn(
+                f"{label}: could not refresh local version discovery ({exc}); "
+                "setup will continue."
+            )
+        return True
+
+    raw_version = ""
+    installed = False
+    probe_error = ""
+    if signal is not None:
+        raw_version = signal.version or ""
+        installed = bool(signal.installed)
+        probe_error = signal.error or ""
+
+    compatibility = resolve_connector_contract(connector, raw_version)
+    version_display = raw_version or "(not probed)"
+    contract = compatibility.contract.contract_id if compatibility.contract else "none"
+
+    if not installed:
+        if emit:
+            ux.warn(
+                f"{label}: connector was not detected locally; "
+                "setup will write DefenseClaw config anyway."
+            )
+        return True
+
+    if compatibility.status == STATUS_KNOWN:
+        if emit:
+            ux.ok(f"{label}: version {version_display} is supported by {contract}.")
+        return True
+
+    if compatibility.status == STATUS_NOT_GATED:
+        if emit:
+            ux.ok(
+                f"{label}: version {version_display}; "
+                "proxy/chat connector has no hook contract gate."
+            )
+        return True
+
+    if compatibility.status == STATUS_UNVERSIONED:
+        detail = f"{label}: version not available"
+        if probe_error:
+            detail += f" ({probe_error})"
+        detail += f"; using default hook contract {contract}."
+        if action_mode and not allow_drift:
+            if emit:
+                ux.err(
+                    detail
+                    + " Refusing action-mode hook setup because the installed "
+                    "connector version could not be verified."
+                )
+                ux.subhead(
+                    "Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for "
+                    "exploratory testing."
+                )
+            return False
+        if emit:
+            ux.warn(detail)
+        return True
+
+    detail = (
+        f"{label}: installed version {version_display} is not covered by a "
+        f"DefenseClaw hook contract ({compatibility.reason})."
+    )
+    if probe_error:
+        detail += f" Probe detail: {probe_error}."
+    if action_mode and not allow_drift:
+        if emit:
+            ux.err(detail)
+            ux.subhead(
+                "Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for "
+                "exploratory testing."
+            )
+        return False
+    if emit:
+        ux.warn(
+            detail
+            + " Continuing because setup is not in action mode or drift override is set."
+        )
+    return True
+
+
 def _hilt_support_note(connector: str) -> str:
     """Return the operator-facing HILT support note for a connector."""
     if connector == "openclaw":
@@ -2063,6 +2204,13 @@ def setup_guardrail(
         click.echo("  Guardrail not enabled. Run again without declining to configure.")
         return
 
+    if not _check_connector_version_supported_for_setup(
+        gc.connector or "openclaw",
+        mode=gc.mode or "observe",
+        data_dir=getattr(app.cfg, "data_dir", None),
+    ):
+        return
+
     ok, warnings = execute_guardrail_setup(app, save_config=True)
     if not ok:
         return
@@ -2139,7 +2287,7 @@ def setup_guardrail(
 
     if app.logger:
         app.logger.log_action(
-            "setup-guardrail", "config",
+            ACTION_SETUP_GUARDRAIL, "config",
             f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} "
             f"model={gc.model} hilt={bool(gc.hilt.enabled)!s} "
             f"disable_redaction={bool(app.cfg.privacy.disable_redaction)!s}",
@@ -2266,6 +2414,13 @@ def _apply_hook_connector_setup(
     if desired_mode not in ("observe", "action"):
         desired_mode = "observe"
 
+    if not _check_connector_version_supported_for_setup(
+        connector,
+        mode=desired_mode,
+        data_dir=getattr(app.cfg, "data_dir", None),
+    ):
+        return False
+
     cfg = app.cfg
     gc = cfg.guardrail
 
@@ -2311,7 +2466,7 @@ def _apply_hook_connector_setup(
 
     if app.logger:
         app.logger.log_action(
-            "setup-hook-connector",
+            ACTION_SETUP_HOOK_CONNECTOR,
             "config",
             f"connector={connector} mode={desired_mode} surface=hook",
         )
@@ -3048,6 +3203,12 @@ def _apply_connector_mode_switch(
         return False
 
     if prev == new_connector:
+        if not _check_connector_version_supported_for_setup(
+            new_connector,
+            mode=gc.mode or "observe",
+            data_dir=getattr(cfg, "data_dir", None),
+        ):
+            return False
         click.echo(
             f"  • Already on {_CONNECTOR_META[new_connector]['label']} "
             f"({new_connector}) — nothing to change."
@@ -3086,6 +3247,14 @@ def _apply_connector_mode_switch(
         )
 
     # Destination is openclaw or zeptoclaw.
+    proxy_mode = gc.mode if prev in _GUARDRAIL_SUPPORTING_CONNECTORS else "observe"
+    if not _check_connector_version_supported_for_setup(
+        new_connector,
+        mode=proxy_mode or "observe",
+        data_dir=getattr(cfg, "data_dir", None),
+    ):
+        return False
+
     cfg.claw.mode = new_connector
     gc.connector = new_connector
 
@@ -3160,7 +3329,7 @@ def _apply_connector_mode_switch(
 
     if app.logger:
         app.logger.log_action(
-            "setup-connector-mode",
+            ACTION_SETUP_CONNECTOR_MODE,
             "config",
             f"from={prev} to={new_connector}",
         )
@@ -3346,7 +3515,7 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
 
     if app.logger:
         app.logger.log_action(
-            "setup-redaction-toggle",
+            ACTION_SETUP_REDACTION_TOGGLE,
             "config",
             f"disable_redaction={desired!s}",
         )
@@ -3514,7 +3683,7 @@ def setup_notifications(
 
     if app.logger:
         app.logger.log_action(
-            "setup-notifications-toggle",
+            ACTION_SETUP_NOTIFICATIONS_TOGGLE,
             "config",
             f"enabled={desired!s}",
         )
@@ -3647,7 +3816,7 @@ def setup_notifications_set(
 
     if app.logger:
         app.logger.log_action(
-            "setup-notifications-set",
+            ACTION_SETUP_NOTIFICATIONS_SET,
             "config",
             f"slot={slot} value={value.lower()}",
         )
@@ -4205,7 +4374,7 @@ def _disable_guardrail(app: AppContext, gc, *, restart: bool = False) -> None:
     click.echo()
 
     if app.logger:
-        app.logger.log_action("setup-guardrail", "config", f"disabled connector={connector_name}")
+        app.logger.log_action(ACTION_SETUP_GUARDRAIL, "config", f"disabled connector={connector_name}")
 
 
 def _write_guardrail_runtime(data_dir: str, gc) -> None:
@@ -4824,6 +4993,16 @@ def setup_splunk(
         return
 
     if s3_export:
+        # The S3 exporter ships as a sidecar to the local Splunk
+        # docker compose stack — there is no Docker-free S3 path. Emit
+        # a one-line notice so operators are not surprised when the
+        # Docker pre-flight checks below run.
+        if not enable_logs:
+            click.echo(
+                "  note: --s3-export implies --logs (the S3 exporter is a "
+                "sidecar to the local Splunk stack). Running Docker pre-flight "
+                "checks…"
+            )
         enable_logs = True
 
     if not enable_o11y and not enable_logs and not enable_enterprise and not non_interactive:
@@ -4881,9 +5060,11 @@ def setup_splunk(
 
     # Note: no app.cfg.save() here — the observability writer invoked
     # from _apply_o11y_config / _apply_logs_config already persists to
-    # config.yaml atomically while preserving unmodeled sections
-    # (audit_sinks, otel.resource.attributes). Calling cfg.save() again
-    # would serialize the dataclass only and drop those sections.
+    # config.yaml atomically. A second cfg.save() would be a no-op
+    # round-trip now (Config.save deep-merges over the existing file
+    # and preserves unmodelled keys like audit_sinks /
+    # otel.resource.attributes), but it's still
+    # wasteful so we skip it to keep this path single-writer.
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
     _print_splunk_status(app)
@@ -4901,7 +5082,7 @@ def setup_splunk(
                 parts.append("s3_export=enabled")
         if did_enterprise:
             parts.append("enterprise=enabled")
-        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
 # Register `defenseclaw setup splunk dashboards` (Terraform-backed dashboard
@@ -4966,8 +5147,9 @@ def _interactive_splunk_setup(
         return
 
     # observability.apply_preset() already persisted to config.yaml;
-    # calling cfg.save() here would drop audit_sinks (see note in
-    # setup_splunk()).
+    # see the matching note in setup_splunk() for why we deliberately
+    # skip a second cfg.save() here (single-writer hygiene, not
+    # correctness — Config.save is round-trip-safe).
     click.echo()
     click.echo("  Config saved to ~/.defenseclaw/config.yaml")
     click.echo()
@@ -4984,7 +5166,7 @@ def _interactive_splunk_setup(
             parts.append("logs=enabled")
         if did_enterprise:
             parts.append("enterprise=enabled")
-        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
 def _interactive_o11y(
@@ -5099,7 +5281,7 @@ def _interactive_logs(app: AppContext) -> bool:
         click.echo("  Local Splunk enablement cancelled.")
         return False
 
-    ok = _preflight_docker()
+    ok, _reason = _preflight_docker()
     if not ok:
         return False
 
@@ -5196,10 +5378,28 @@ def _setup_logs(
     ):
         return False
 
-    ok = _preflight_docker()
+    ok, reason = _preflight_docker()
     if not ok:
         if non_interactive:
-            click.echo("  error: Docker is required for --logs", err=True)
+            # Map the pre-flight reason code to a one-line, accurate
+            # error so the operator does not have to re-read the
+            # checklist above. Historically this branch always said
+            # "Docker is required for --logs", which was misleading
+            # when the actual failure was a busy port.
+            detail = {
+                "docker_not_installed": "Docker is not installed",
+                "docker_daemon_not_running": "Docker daemon is not running",
+            }.get(reason)
+            if detail is None and reason.startswith("port_") and reason.endswith("_in_use"):
+                # reason looks like "port_8000_in_use"
+                port = reason.split("_", 2)[1]
+                detail = (
+                    f"port {port} is already in use — free it (or stop the "
+                    f"existing Splunk instance) and re-run"
+                )
+            if detail is None:
+                detail = "pre-flight checks failed (see messages above)"
+            click.echo(f"  error: {detail}", err=True)
             raise SystemExit(1)
         return False
 
@@ -5635,6 +5835,12 @@ def _bootstrap_bridge(
             env["S3_PREFIX"] = s3_prefix
         if aws_region:
             env["AWS_REGION"] = aws_region
+    # Hoist `result` out of the try so the exception handlers below can
+    # surface the bridge's stdout/stderr tails. Without this, a malformed
+    # or empty JSON contract was reported only as the bare json module
+    # exception ("Expecting value: line 1 column 1 (char 0)"), forcing
+    # operators to re-run the bridge by hand to see what actually failed.
+    result: subprocess.CompletedProcess[str] | None = None
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": 300}
         if env is not None:
@@ -5645,12 +5851,19 @@ def _bootstrap_bridge(
         )
         if result.returncode != 0:
             click.echo(f"  Bridge startup failed (exit {result.returncode})")
-            err = (result.stderr or result.stdout or "").strip()
-            for line in err.splitlines()[:5]:
-                click.echo(f"    {line}")
+            _echo_bridge_output_tail(result)
             return None
 
-        contract = _json.loads(result.stdout.strip())
+        stdout = (result.stdout or "").strip()
+        if not stdout:
+            click.echo(
+                "  Bridge startup error: bridge exited 0 but produced no JSON "
+                "contract on stdout (expected from `splunk-claw-bridge up "
+                "--output json`)"
+            )
+            _echo_bridge_output_tail(result)
+            return None
+        contract = _json.loads(stdout)
         click.echo("  Local Splunk is ready")
         web_url = contract.get("splunk_web_url", "http://127.0.0.1:8000")
         click.echo(f"    Web UI: {web_url}")
@@ -5666,23 +5879,64 @@ def _bootstrap_bridge(
     except subprocess.TimeoutExpired:
         click.echo("  Bridge startup timed out after 5 minutes")
         return None
-    except (_json.JSONDecodeError, OSError) as exc:
-        click.echo(f"  Bridge startup error: {exc}")
+    except _json.JSONDecodeError as exc:
+        click.echo(f"  Bridge startup error: malformed JSON contract ({exc})")
+        if result is not None:
+            _echo_bridge_output_tail(result)
         return None
+    except OSError as exc:
+        click.echo(f"  Bridge startup error: {exc}")
+        if result is not None:
+            _echo_bridge_output_tail(result)
+        return None
+
+
+def _echo_bridge_output_tail(
+    result: subprocess.CompletedProcess[str],
+    *,
+    max_lines: int = 10,
+) -> None:
+    """Print the last ``max_lines`` of the bridge's stdout / stderr.
+
+    Used by the failure paths in :func:`_bootstrap_bridge` so an
+    operator can tell *why* the bridge failed without re-running it by
+    hand. Both streams are emitted under labelled headers when present;
+    streams that are empty (or whitespace-only) are skipped silently.
+    """
+    for label, raw in (
+        ("Last bridge stdout", result.stdout),
+        ("Last bridge stderr", result.stderr),
+    ):
+        text = (raw or "").strip()
+        if not text:
+            continue
+        lines = text.splitlines()[-max_lines:]
+        click.echo(f"  {label}:")
+        for line in lines:
+            click.echo(f"    {line}")
 
 
 # ---------------------------------------------------------------------------
 # Docker pre-flight
 # ---------------------------------------------------------------------------
 
-def _preflight_docker() -> bool:
-    """Check Docker is installed and running. Return True if OK."""
+def _preflight_docker() -> tuple[bool, str]:
+    """Check Docker prerequisites for the local Splunk stack.
+
+    Returns ``(ok, reason)``. ``reason`` is an empty string on success
+    and a short, machine-readable failure code on failure
+    (``"docker_not_installed"``, ``"docker_daemon_not_running"``,
+    ``"port_<n>_in_use"``). Callers surface ``reason`` verbatim in
+    non-interactive error output so operators can tell *which* check
+    failed without having to re-read the human-readable lines printed
+    above (those lines remain the primary signal in interactive mode).
+    """
     click.echo("  Pre-flight checks:")
     docker = shutil.which("docker")
     if not docker:
         click.echo("    Docker installed... NOT FOUND")
         click.echo("    Install Docker: https://docs.docker.com/get-docker/")
-        return False
+        return False, "docker_not_installed"
     click.echo("    Docker installed... ok")
 
     try:
@@ -5692,20 +5946,20 @@ def _preflight_docker() -> bool:
         if result.returncode != 0:
             click.echo("    Docker daemon running... NOT RUNNING")
             click.echo("    Start Docker and try again.")
-            return False
+            return False, "docker_daemon_not_running"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         click.echo("    Docker daemon running... NOT RUNNING")
-        return False
+        return False, "docker_daemon_not_running"
     click.echo("    Docker daemon running... ok")
 
     for port, label in [(8000, "Splunk Web"), (8088, "HEC")]:
         if _port_in_use(port):
             click.echo(f"    Port {port} ({label})... IN USE")
             click.echo(f"    Free port {port} or stop the existing Splunk instance.")
-            return False
+            return False, f"port_{port}_in_use"
         click.echo(f"    Port {port} ({label})... available")
 
-    return True
+    return True, ""
 
 
 def _port_in_use(port: int) -> bool:
@@ -5800,7 +6054,7 @@ def _disable_splunk(
             parts.append("logs=disabled")
         if disable_both or enterprise_only:
             parts.append("enterprise=disabled")
-        app.logger.log_action("setup-splunk", "config", " ".join(parts))
+        app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
 def _stop_bridge(data_dir: str) -> None:

@@ -4,7 +4,7 @@ set -euo pipefail
 SHIM_DIR="$(cd "$(dirname "$0")" && pwd)"
 REAL_BINARY=$(PATH="$(echo "$PATH" | sed "s|${SHIM_DIR}:||g; s|:${SHIM_DIR}||g")" which curl 2>/dev/null || echo /usr/bin/curl)
 
-API_ADDR="${DEFENSECLAW_API_ADDR:-{{.APIAddr}}}"
+API_ADDR="{{.APIAddr}}"
 
 RESULT=$("$REAL_BINARY" -s -X POST "http://${API_ADDR}/api/v1/inspect/tool" \
   -H "Content-Type: application/json" \

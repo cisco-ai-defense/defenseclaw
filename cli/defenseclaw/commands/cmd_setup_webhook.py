@@ -46,6 +46,7 @@ from typing import Any
 import click
 
 from defenseclaw import ux
+from defenseclaw.audit_actions import ACTION_SETUP_WEBHOOK
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import (
     DispatchResult,
@@ -214,7 +215,7 @@ def add_webhook(  # noqa: PLR0913 — mirrors the prompt surface
 
     if app.logger and not dry_run:
         app.logger.log_action(
-            "setup-webhook",
+            ACTION_SETUP_WEBHOOK,
             "config",
             f"action=add type={result.type} name={result.name}",
         )
@@ -437,7 +438,7 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     # dispatches still leave an audit trail.
     if app.logger and not dry_run:
         app.logger.log_action(
-            "setup-webhook",
+            ACTION_SETUP_WEBHOOK,
             "test",
             f"name={v.name} type={v.type} ok={result.ok}",
         )

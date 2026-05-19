@@ -117,7 +117,7 @@ func syntheticScanEvent(b *ScanBlock) *audit.Event {
 	return &audit.Event{
 		ID:        "gw:scan:" + s.ScanID,
 		Timestamp: b.TS,
-		Action:    "scan",
+		Action:    string(audit.ActionScan),
 		Target:    s.Target,
 		Details:   details,
 		Severity:  sev,
@@ -126,7 +126,7 @@ func syntheticScanEvent(b *ScanBlock) *audit.Event {
 
 func syntheticFindingEvent(b *ScanBlock, fi int) *audit.Event {
 	if fi < 0 || fi >= len(b.Findings) {
-		return &audit.Event{ID: "gw:finding:invalid", Severity: "INFO", Action: "scan-finding"}
+		return &audit.Event{ID: "gw:finding:invalid", Severity: "INFO", Action: string(audit.ActionScanFinding)}
 	}
 	f := b.Findings[fi]
 	sev := string(f.Severity)
@@ -142,7 +142,7 @@ func syntheticFindingEvent(b *ScanBlock, fi int) *audit.Event {
 	return &audit.Event{
 		ID:        fmt.Sprintf("gw:finding:%s:%d", f.ScanID, fi),
 		Timestamp: b.TS,
-		Action:    "scan-finding",
+		Action:    string(audit.ActionScanFinding),
 		Target:    f.Target,
 		Details:   details,
 		Severity:  sev,

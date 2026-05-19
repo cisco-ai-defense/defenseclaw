@@ -815,15 +815,18 @@ modifying the agent traffic plane unless the connector explicitly supports it.
 
 ### 9.2 SIEM consumer guidance
 
-Audit events emitted from the new ingest paths carry the same envelope
-shape as every other audit row but expose three new top-level
-attributes worth indexing in your SIEM:
+Audit events emitted from connector ingest paths carry the same v7
+envelope shape as every other audit row and sink event. The most useful
+fields to index are:
 
-| Field           | Type   | Meaning                                                                 |
-|-----------------|--------|-------------------------------------------------------------------------|
-| `action`        | enum   | One of `connector-hook`, `asset-policy`, `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
-| `actor`         | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
-| `details`       | string | Structured one-line summary: `signal=logs size=4096 bytes resources=2 logRecords=14 services=[codex=1,claudecode=1]`. |
+| Field | Type | Meaning |
+|--------|------|---------|
+| `schema_version` | integer | Required audit contract version. v7 events include provenance and three-tier agent identity. |
+| `action` | enum | One of `connector-hook`, `connector-hook-synthetic`, `asset-policy`, `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum and the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
+| `actor` | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
+| `structured` | object | Machine-readable payload when the row has one. Connector hook rows use `schema="defenseclaw.hook.v1"` from `schemas/hook-audit-envelope.json`. |
+| `details` | string | Legacy redacted summary. Connector-hook rows keep a quoted `details_json=` mirror during migration; new consumers should prefer `structured`. |
+| `content_hash`, `generation`, `binary_version` | string/integer | Provenance for deterministic replay and dashboard bucketing. |
 
 The matching OTel connector log contract
 (`schemas/otel/connector-telemetry-event.schema.json`) carries

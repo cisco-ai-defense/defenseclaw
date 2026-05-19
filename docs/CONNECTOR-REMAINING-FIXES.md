@@ -1,6 +1,6 @@
 # Connector Package — Remaining Fixes
 
-**Date**: 2026-04-28 (updated by PR #194 single rollup)
+**Date**: 2026-04-28 (updated by PR #194 single rollup; PR #284 hook-contract update)
 **Package**: `internal/gateway/connector/`
 **Review base**: Full code review against techspec, 18 findings total, 12 fixed.
 
@@ -15,11 +15,11 @@ focuses on the connector-package review thread.
 
 | # | Severity | Status as of PR #194 |
 |---|----------|----------------------|
-| 6  | HIGH    | OPEN — needs event-list decision |
+| 6  | HIGH    | DONE in PR #284 — Claude Code event coverage is sourced from the versioned hook contract/profile registry |
 | 7  | HIGH    | DONE (Option A) — `HookEventHandler` interface deleted via Phase A5; gateway-level dispatcher is the canonical owner |
 | 8  | MEDIUM  | OPEN — chose pragmatic Option C (test added) |
 | 9  | MEDIUM  | DONE — `withFileLock` + atomic-rename helpers in `helpers.go` |
-| 12 | MEDIUM  | OPEN — needs config-schema decision |
+| 12 | MEDIUM  | DONE in PR #284 — fail-closed capability is profile-driven and scoped in connector capabilities |
 | 14 | MEDIUM  | OPEN — `*PathOverride` globals retained for now; SetupOpts plumbing tracked as a follow-up |
 
 ---
@@ -44,7 +44,19 @@ focuses on the connector-package review thread.
 
 ## Remaining: Requires Design Decision
 
-### #6 — HIGH: Only 8 of 22+ techspec events registered in hookGroups
+### #6 — HIGH: Resolved hook event coverage gap
+
+**Status**: DONE in PR #284.
+
+Claude Code hook coverage is now contract/profile driven. The
+`claudecode-hooks-v1` contract covers the current documented event set
+including `PermissionRequest`, `PermissionDenied`, `UserPromptExpansion`,
+`PostToolUseFailure`, `PostToolBatch`, task events, compact events,
+elicitation events, `ConfigChange`, `FileChanged`, and notification-style
+events. Runtime setup, dispatch, audit, and docs consume the same contract
+metadata instead of maintaining an isolated bespoke event list.
+
+Historical context below is retained for traceability.
 
 **File**: `claudecode.go:226-239`
 
@@ -103,7 +115,19 @@ focuses on the connector-package review thread.
 
 ---
 
-### #12 — MEDIUM: InstallScope and FailClosed config fields not implemented
+### #12 — MEDIUM: Resolved fail-closed capability gap
+
+**Status**: DONE in PR #284 for fail-closed handling; install scope remains
+connector-specific where the upstream host supports it.
+
+Fail-closed behavior is now represented in hook capabilities
+(`supports_fail_closed`) and in generated hook scripts through
+`guardrail.hook_fail_mode`. Connectors that do not support fail-closed are
+downgraded to fail-open by the profile, which prevents a global operator knob
+from creating a false fail-closed promise. Setup and doctor also check
+versioned hook contracts before action-mode use.
+
+Historical context below is retained for traceability.
 
 **File**: `claudecode.go` (Setup method), hook script templates
 

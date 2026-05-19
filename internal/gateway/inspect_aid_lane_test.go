@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -56,6 +57,90 @@ func TestHookAIDInspect_GateBehavior(t *testing.T) {
 			t.Fatalf("expected nil for empty content, got %+v", v)
 		}
 	})
+}
+
+func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
+	cases := []struct {
+		connector string
+		path      string
+		event     string
+	}{
+		{"codex", "/api/v1/codex/hook", "PreToolUse"},
+		{"claudecode", "/api/v1/claude-code/hook", "PreToolUse"},
+		{"cursor", "/api/v1/cursor/hook", "beforeShellExecution"},
+		{"geminicli", "/api/v1/geminicli/hook", "BeforeTool"},
+		{"hermes", "/api/v1/hermes/hook", "pre_tool_call"},
+		{"windsurf", "/api/v1/windsurf/hook", "pre_run_command"},
+		{"copilot", "/api/v1/copilot/hook", "PreToolUse"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.connector, func(t *testing.T) {
+			var calls int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{
+					"is_safe": false,
+					"action": "Block",
+					"rules": [{"rule_name":"AID hook contract","classification":"VIOLATION"}],
+					"processed_rules": [{"rule_name":"AID hook contract"}]
+				}`))
+			}))
+			defer srv.Close()
+
+			api := &APIServer{
+				scannerCfg: &config.Config{
+					Guardrail: config.GuardrailConfig{
+						Connector: tc.connector,
+						Mode:      "action",
+					},
+				},
+				ciscoInspector: &CiscoInspectClient{
+					apiKey:   "test-key",
+					endpoint: srv.URL,
+					client:   srv.Client(),
+				},
+			}
+			body, err := json.Marshal(map[string]interface{}{
+				"hook_event_name": tc.event,
+				"session_id":      "sess-aid-" + tc.connector,
+				"turn_id":         "turn-aid-" + tc.connector,
+				"tool_name":       "safeTool",
+				"tool_use_id":     "tool-aid-" + tc.connector,
+				"tool_input":      map[string]interface{}{"value": "ordinary payload"},
+			})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(body))
+			w := httptest.NewRecorder()
+			api.handleAgentHook(tc.connector).ServeHTTP(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			if calls == 0 {
+				t.Fatalf("expected AID lane to be called for %s", tc.connector)
+			}
+			var got map[string]interface{}
+			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if got["action"] != "block" {
+				t.Fatalf("%s action=%v want block body=%s", tc.connector, got["action"], w.Body.String())
+			}
+			findings, _ := got["findings"].([]interface{})
+			hasAID := false
+			for _, f := range findings {
+				if s, _ := f.(string); strings.HasPrefix(s, "ai-defense:") {
+					hasAID = true
+				}
+			}
+			if !hasAID {
+				t.Fatalf("%s response missing ai-defense finding: %s", tc.connector, w.Body.String())
+			}
+		})
+	}
 }
 
 // TestHookAIDInspect_DefaultsToEnabledWhenKeyPresent ensures an

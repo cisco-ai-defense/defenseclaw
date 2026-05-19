@@ -97,6 +97,9 @@ class TestSetupCodexAlias(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             return _invoke(["codex", "--yes", *extra_args], self.app)
 
@@ -157,6 +160,9 @@ class TestSetupCodexAlias(unittest.TestCase):
         ) as restart_mock, patch(
             "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             result = _invoke(["codex", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -188,6 +194,9 @@ class TestSetupClaudeCodeAlias(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             return _invoke(["claude-code", "--yes", *extra_args], self.app)
 
@@ -243,6 +252,9 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
             ) as restart_mock, patch(
                 "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
                 return_value=None,
+            ), patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
@@ -303,6 +315,9 @@ class TestSetupCodexAliasInteractiveDecline(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             result = _invoke(["codex"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -363,6 +378,9 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
         with patch(
             "defenseclaw.commands.cmd_setup._restart_services",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             ok1 = _apply_connector_observability_only(
                 self.app, connector="codex", restart=False,

@@ -20,28 +20,43 @@ import "net/http"
 
 // init wires the gateway-package hook handlers into the
 // connector-name-keyed registry consumed by
-// APIServer.registerConnectorHookRoutes. Plan C1 / S2.4: this
+// APIServer.registerConnectorHookRoutes. The registry
 // removes the case-statement in api.go that previously hard-coded
 // per-connector handler dispatch — adding a new connector now needs
 // only a registerHookHandler call here, plus a HookEndpoint
 // implementation in the connector package.
 //
-// The factory pattern (rather than a direct method-value) lets the
-// handler close over APIServer state at registration time; the
-// returned http.HandlerFunc captures the active server's redactor,
-// otel, audit logger, etc., so test fixtures that build their own
-// APIServer pick up the right wiring without leaking globals.
+// Every connector — including codex and claudecode — routes through
+// handleUnifiedConnectorHook, which delegates to the unified
+// handleAgentHook. Connector-specific evaluation, event emission, and
+// raw-event correlation live behind the profile-runtime registry while
+// all shared concerns stay in one place.
+// The unified handler owns:
+//
+//   - structured audit envelope writes (logConnectorHookAuditEnvelope),
+//   - native OTel metrics (RecordHookOutcome / RecordHookTokenUsage),
+//   - raw-event deduplication (profile runtime RememberRawEvents),
+//   - W3C trace propagation from the agent-side span,
+//   - panic recovery across dedupe, emit, evaluate, audit, and
+//     metric sections so a single connector bug no longer takes the
+//     entire agent estate down.
+//
+// PR #284 deleted the bespoke handleClaudeCodeHook /
+// handleCodexHook handlers. This PR moves the remaining connector
+// differences behind HookProfile runtime callbacks so future
+// connector changes extend the registry instead of adding another
+// gateway hook implementation.
 func init() {
 	registerHookHandler("claudecode", func(a *APIServer) http.HandlerFunc {
-		return a.handleClaudeCodeHook
+		return a.handleUnifiedConnectorHook("claudecode")
 	})
 	registerHookHandler("codex", func(a *APIServer) http.HandlerFunc {
-		return a.handleCodexHook
+		return a.handleUnifiedConnectorHook("codex")
 	})
 	for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot"} {
 		connectorName := name
 		registerHookHandler(connectorName, func(a *APIServer) http.HandlerFunc {
-			return a.handleAgentHook(connectorName)
+			return a.handleUnifiedConnectorHook(connectorName)
 		})
 	}
 }

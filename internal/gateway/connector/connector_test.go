@@ -2087,22 +2087,22 @@ env_key = "OPENROUTER_API_KEY"
 	}
 }
 
-// TestCodex_Setup_HealsStaleProxyRedirect covers the migration path for
-// operators upgrading from a pre-PR-#265 install. The legacy setup
-// rewrote ~/.codex/config.toml's top-level openai_base_url to point at
-// the gateway's :4000/c/codex proxy mount; PR #265 deleted that mount
-// but left the operator's config.toml carrying a now-broken value, so
-// every Codex turn fails with "stream disconnected before completion"
-// against the closed loopback port.
+// TestCodex_Setup_HealsStaleProxyRedirect covers the migration path
+// for operators upgrading from an installation done before codex
+// became hook-only. The legacy setup rewrote ~/.codex/config.toml's
+// top-level openai_base_url to point at the gateway's :4000/c/codex
+// proxy mount; that mount has since been removed but the operator's
+// config.toml still carries the now-broken value, so every Codex
+// turn fails with "stream disconnected before completion" against
+// the closed loopback port.
 //
-// PR #265's "Open question #1" predicted this and the call was to let
-// the next `defenseclaw setup codex` overwrite — but the new Setup is
-// intentionally non-destructive toward openai_base_url (see
-// TestCodex_Setup_DefaultObservability_NoProxyRewrite), so without
-// this heal the stale value survives forever. This test pins the
-// narrow strip: only the loopback /c/codex shape DefenseClaw itself
-// wrote gets removed, and the heal is independent of port number
-// because the pre-#265 default of :4000 was operator-configurable.
+// The current Setup is intentionally non-destructive toward
+// openai_base_url (see TestCodex_Setup_DefaultObservability_NoProxyRewrite),
+// so without this heal the stale value would survive forever. This
+// test pins the narrow strip: only the loopback /c/codex URL shape
+// DefenseClaw itself wrote gets removed, and the heal is independent
+// of port number because the historical default of :4000 was
+// operator-configurable.
 func TestCodex_Setup_HealsStaleProxyRedirect(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -3601,15 +3601,15 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 	// and contains no .disabled sentinel so the hook proceeds to the
 	// curl path the caller cares about.
 	dcHome := t.TempDir()
-	cmd := exec.Command("bash", scriptPath)
-	// Plan B4 / S0.4: hooks lock PATH down by default. The test
-	// stubs `curl` inside an ephemeral tmpdir; tell the hardening
-	// helpers to keep our path rather than reset it to system bins.
+	// Hooks lock PATH down by default. The test stubs `curl` inside
+	// an ephemeral tmpdir; bake that path into the generated helper
+	// file so the runtime environment cannot spoof the trust decision.
 	hookPath := stubDir + ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+	bakeHookPathForTest(t, scriptPath, hookPath)
+	cmd := exec.Command("bash", scriptPath)
 	cmd.Env = append(os.Environ(),
 		"PATH="+stubDir+":"+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
-		"DEFENSECLAW_HOOK_PATH="+hookPath,
 	)
 	for k, v := range extraEnv {
 		cmd.Env = append(cmd.Env, k+"="+v)
@@ -3623,6 +3623,27 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 		t.Fatalf("curl stub never recorded args: %v", err)
 	}
 	return string(data)
+}
+
+func bakeHookPathForTest(t *testing.T, scriptPath, hookPath string) {
+	t.Helper()
+	helperPath := filepath.Join(filepath.Dir(scriptPath), "_hardening.sh")
+	b, err := os.ReadFile(helperPath)
+	if err != nil {
+		t.Fatalf("read _hardening.sh: %v", err)
+	}
+	replacement := "DEFENSECLAW_BAKED_HOOK_PATH=" + shellSingleQuoteForTest(hookPath)
+	next := strings.Replace(string(b), `DEFENSECLAW_BAKED_HOOK_PATH=""`, replacement, 1)
+	if next == string(b) {
+		t.Fatalf("_hardening.sh missing DEFENSECLAW_BAKED_HOOK_PATH sentinel")
+	}
+	if err := os.WriteFile(helperPath, []byte(next), 0o644); err != nil {
+		t.Fatalf("write _hardening.sh baked hook path: %v", err)
+	}
+}
+
+func shellSingleQuoteForTest(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // containsAuthBearer returns true if the stubbed curl argv lines contain
@@ -6294,6 +6315,42 @@ func TestHardening_SweepStaleHookDirs(t *testing.T) {
 	}
 	if _, err := os.Stat(unrelated); err != nil {
 		t.Errorf("unrelated dir %s was swept; the sweep must only touch hook-tmp.*: %v", unrelated, err)
+	}
+}
+
+func TestHardening_IgnoresRuntimeHookPathOverride(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available")
+	}
+	helperBytes, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embed: %v", err)
+	}
+	tmp := t.TempDir()
+	helperPath := filepath.Join(tmp, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helperBytes, 0o600); err != nil {
+		t.Fatalf("write helper: %v", err)
+	}
+
+	cmd := exec.Command("bash", "-c", `source "$1"; defenseclaw_harden_env; printf '%s\n' "$PATH"; printf '%s\n' "${DEFENSECLAW_HOOK_PATH-unset}"`, "bash", helperPath)
+	cmd.Env = append(os.Environ(),
+		"DEFENSECLAW_HOME="+filepath.Join(tmp, "home"),
+		"DEFENSECLAW_HOOK_PATH="+filepath.Join(tmp, "evil"),
+		"DEFENSECLAW_HOOK_PATH_TRUSTED=1",
+	)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run hardening helper: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("unexpected helper output %q", out)
+	}
+	if strings.Contains(lines[0], "evil") {
+		t.Fatalf("runtime DEFENSECLAW_HOOK_PATH influenced PATH: %q", lines[0])
+	}
+	if lines[1] != "unset" {
+		t.Fatalf("DEFENSECLAW_HOOK_PATH after harden = %q, want unset", lines[1])
 	}
 }
 

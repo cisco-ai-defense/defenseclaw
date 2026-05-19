@@ -58,7 +58,7 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw alerts` | Snapshot of recent alerts (default 25) as a table. `--limit N` to widen, `--show <n>` for full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
 
 ## Scanning

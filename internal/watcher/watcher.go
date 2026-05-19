@@ -180,7 +180,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 		return fmt.Errorf("watcher: no directories to watch — check claw.mode and claw.home_dir")
 	}
 
-	_ = w.logger.LogAction("watch-start", "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
+	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
 	if w.opa != nil && w.otel != nil {
 		w.opa.SetOTelProvider(w.otel)
@@ -197,7 +197,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			_ = w.logger.LogAction("watch-stop", "", "context cancelled")
+			_ = w.logger.LogAction(string(audit.ActionWatchStop), "", "context cancelled")
 			return ctx.Err()
 
 		case event, ok := <-fsw.Events:
@@ -303,7 +303,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 	}()
 
-	_ = w.logger.LogAction("install-detected", evt.Path,
+	_ = w.logger.LogAction(string(audit.ActionInstallDetected), evt.Path,
 		fmt.Sprintf("type=%s name=%s", targetType, evt.Name))
 
 	// Build block/allow lists from the SQLite store for the OPA input.
@@ -328,7 +328,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			})
 		}
 		if assetDecision.Action == "block" {
-			_ = w.logger.LogAction("install-rejected", evt.Path,
+			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
 			w.enforceBlock(ctx, evt)
 			w.recordAdmission(ctx, "blocked", targetType)
@@ -350,7 +350,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		if err == nil {
 			switch out.Verdict {
 			case "blocked":
-				_ = w.logger.LogAction("install-rejected", evt.Path,
+				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 					fmt.Sprintf("type=%s reason=blocked", targetType))
 				if w.otel != nil {
 					w.otel.EmitPolicyDecision("admission", "blocked", evt.Name, targetType, out.Reason, nil)
@@ -360,7 +360,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 				res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
 				return res
 			case "rejected":
-				_ = w.logger.LogAction("install-rejected", evt.Path,
+				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 					fmt.Sprintf("type=%s reason=policy-rejected", targetType))
 				if w.otel != nil {
 					w.otel.EmitPolicyDecision("admission", "rejected", evt.Name, targetType, out.Reason, nil)
@@ -370,7 +370,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 				res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason}
 				return res
 			case "allowed":
-				_ = w.logger.LogAction("install-allowed", evt.Path,
+				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 					fmt.Sprintf("type=%s reason=allow-listed", targetType))
 				if w.otel != nil {
 					w.otel.EmitPolicyDecision("admission", "allowed", evt.Name, targetType, out.Reason, nil)
@@ -386,14 +386,14 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		fallbackOut := policy.EvaluateAdmissionFallback(input, fallbackProfile)
 		switch fallbackOut.Verdict {
 		case "blocked":
-			_ = w.logger.LogAction("install-rejected", evt.Path,
+			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=blocked", targetType))
 			w.enforceBlock(ctx, evt)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: fallbackOut.Reason}
 			return res
 		case "allowed":
-			_ = w.logger.LogAction("install-allowed", evt.Path,
+			_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 				fmt.Sprintf("type=%s reason=allow-listed", targetType))
 			w.recordAdmission(ctx, "allowed", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: fallbackOut.Reason}
@@ -410,14 +410,14 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		out := policy.EvaluateAdmissionFallback(input, fallbackProfile)
 		switch out.Verdict {
 		case "blocked":
-			_ = w.logger.LogAction("install-rejected", evt.Path,
+			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=blocked", targetType))
 			w.enforceBlock(ctx, evt)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
 			return res
 		case "allowed":
-			_ = w.logger.LogAction("install-allowed", evt.Path,
+			_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 				fmt.Sprintf("type=%s reason=allow-listed", targetType))
 			w.recordAdmission(ctx, "allowed", targetType)
 			res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
@@ -438,7 +438,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 
 	result, err := s.Scan(scanCtx, evt.Path)
 	if err != nil {
-		_ = w.logger.LogAction("install-scan-error", evt.Path,
+		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
 		if w.otel != nil {
 			w.otel.RecordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
@@ -452,7 +452,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	// scan was running.
 	if blocked, bErr := pe.IsBlocked(targetType, evt.Name); bErr == nil && blocked {
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
-		_ = w.logger.LogAction("install-rejected", evt.Path,
+		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
 		_ = w.logger.LogScanWithVerdict(result, "blocked")
 		w.enforceBlock(ctx, evt)
@@ -466,7 +466,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	}
 	if allowed, aErr := pe.IsAllowed(targetType, evt.Name); aErr == nil && allowed {
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
-		_ = w.logger.LogAction("install-allowed", evt.Path,
+		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
 		_ = w.logger.LogScanWithVerdict(result, "allowed")
 		if w.otel != nil {
@@ -567,17 +567,17 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 	// Re-check allow list to guard against races where the item became
 	// allowed between the pre-scan check and post-scan enforcement.
 	if allowed, err := pe.IsAllowed(targetType, evt.Name); err == nil && allowed {
-		_ = w.logger.LogAction("install-allowed-skip-enforce", evt.Path,
+		_ = w.logger.LogAction(string(audit.ActionInstallAllowedSkipEnforce), evt.Path,
 			fmt.Sprintf("type=%s %s is allow-listed — skipping auto-enforcement", targetType, evt.Name))
 		return
 	}
 
 	switch out.Verdict {
 	case "clean":
-		_ = w.logger.LogAction("install-clean", evt.Path,
+		_ = w.logger.LogAction(string(audit.ActionInstallClean), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s", targetType, scannerName))
 	case "rejected":
-		_ = w.logger.LogAction("install-rejected", evt.Path,
+		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s severity=%s scanner=%s install_action=%s file_action=%s",
 				targetType, result.MaxSeverity(), scannerName, out.InstallAction, out.FileAction))
 
@@ -607,7 +607,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 				_ = pe.Disable(targetType, evt.Name, blockReason)
 			}
 
-			_ = w.logger.LogActionWithEnforcement("watcher-block", evt.Name,
+			_ = w.logger.LogActionWithEnforcement(string(audit.ActionWatcherBlock), evt.Name,
 				fmt.Sprintf("type=%s reason=%s", targetType, blockReason), enforcement)
 
 			if fileAction == "quarantine" || runtimeAction == "block" {
@@ -615,7 +615,7 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 			}
 		}
 	case "warning":
-		_ = w.logger.LogAction("install-warning", evt.Path,
+		_ = w.logger.LogAction(string(audit.ActionInstallWarning), evt.Path,
 			fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, result.MaxSeverity(), scannerName))
 	}
 }

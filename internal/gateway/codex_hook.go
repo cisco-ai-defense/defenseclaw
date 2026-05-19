@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,88 +77,18 @@ type codexHookResponse struct {
 	CodexOutput       map[string]interface{} `json:"codex_output,omitempty"`
 }
 
-func (a *APIServer) handleCodexHook(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "method", 0)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
-	if err != nil {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "invalid_json", 0)
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
-		return
-	}
-	var req codexHookRequest
-	if err := json.Unmarshal(b, &req); err != nil {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "invalid_payload", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Codex hook payload"})
-		return
-	}
-	req.Payload = payload
-	if req.HookEventName == "" {
-		a.recordConnectorHookRejection(r.Context(), "codex", "unknown", "missing_event", int64(len(b)))
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook_event_name is required"})
-		return
-	}
-	req.CWD = sanitizeHookCWD(req.CWD)
-	ctx := enrichCodexHookContext(r.Context(), req)
-	rawEventIDs := a.rememberCodexRawHookEvents(req)
-	a.emitCodexHookLLMEvent(ctx, req, rawEventIDs, b)
-
-	t0 := time.Now()
-	resp := a.evaluateCodexHook(ctx, req)
-	elapsed := time.Since(t0)
-
-	if a.health != nil {
-		a.health.RecordConnectorRequest()
-		if resp.Action == "block" {
-			a.health.RecordToolBlock()
-		}
-		if isToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspection()
-		}
-	}
-
-	if a.otel != nil {
-		reason := resp.Action
-		if resp.WouldBlock {
-			reason = "would_block"
-		}
-		enrichConnectorHookTelemetrySpan(ctx, "codex", req.HookEventName, "ok", reason, resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed)
-		a.otel.RecordConnectorHookInvocation(ctx, "codex", req.HookEventName, "ok", reason, float64(elapsed.Milliseconds()))
-		a.otel.RecordInspectEvaluation(ctx, "codex:"+req.HookEventName, resp.Action, resp.Severity)
-		a.otel.RecordInspectLatency(ctx, "codex:"+req.HookEventName, float64(elapsed.Milliseconds()))
-		a.otel.EmitConnectorTelemetryLog(ctx, "hook", "codex", "ok", 1, int64(len(b)),
-			fmt.Sprintf("source=hook connector=codex event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d",
-				req.HookEventName, codexToolName(req), resp.Action, resp.RawAction, resp.WouldBlock, resp.Mode, elapsed.Milliseconds()))
-	}
-
-	details := fmt.Sprintf("action=%s severity=%s mode=%s would_block=%v elapsed=%s",
-		resp.Action, resp.Severity, resp.Mode, resp.WouldBlock, elapsed)
-	details = appendRawTelemetryDetails(details, "raw_payload", b)
-	details = appendRawTelemetryCanonicalDetails(details, "hook", true, rawEventIDs)
-	a.logConnectorHookAudit(ctx, "codex", req.HookEventName, details)
-
-	a.writeJSON(w, http.StatusOK, resp)
-}
-
-func enrichCodexHookContext(ctx context.Context, req codexHookRequest) context.Context {
-	ctx = ContextWithSessionID(ctx, req.SessionID)
-	agentName := strings.TrimSpace(req.AgentType)
-	if agentName == "" {
-		agentName = "codex"
-	}
-	ctx = ContextWithAgentIdentity(ctx, AgentIdentity{
-		AgentID:   strings.TrimSpace(req.AgentID),
-		AgentName: agentName,
-		AgentType: agentName,
-	})
-	enrichHTTPSpanFromContext(ctx)
-	enrichCodexHookSpan(ctx, req)
-	return ctx
-}
+// handleCodexHook + enrichCodexHookContext were deleted in PR #284.
+// Codex hook traffic now flows through the unified pipeline at
+// handleAgentHook("codex"); the typed evaluator (evaluateCodexHook,
+// kept below) is invoked through the HookProfile runtime registry.
+// Codex-specific span enrichment (turn_id, gen_ai.tool.call.id, model)
+// is preserved by the runtime callback immediately before
+// evaluateCodexHook runs.
+//
+// The unified pipeline owns shared concerns (audit envelope refresh,
+// dispatch metric, dedup, trace propagation, OTel emissions) in
+// exactly one place now. See agent_hook.go and hook_profile_runtime.go
+// for the registry and shared-pipeline rationale.
 
 func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 	span := trace.SpanFromContext(ctx)
