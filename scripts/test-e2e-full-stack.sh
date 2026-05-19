@@ -966,6 +966,50 @@ run_agent_prompt() {
     timeout "$timeout_s" openclaw agent --session-id "$session_id" -m "$prompt" 2>&1 || true
 }
 
+guardrail_prompt_strategy() {
+    python3 - <<'PY'
+import os
+import yaml
+from pathlib import Path
+
+cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+if not cfg_path.exists():
+    print("")
+    raise SystemExit(0)
+
+with cfg_path.open() as f:
+    cfg = yaml.safe_load(f) or {}
+
+print(str((cfg.get("guardrail") or {}).get("detection_strategy_prompt") or ""))
+PY
+}
+
+set_guardrail_prompt_strategy() {
+    local strategy="$1"
+    DEFENSECLAW_E2E_PROMPT_STRATEGY="$strategy" python3 - <<'PY'
+import os
+import yaml
+from pathlib import Path
+
+cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+if not cfg_path.exists():
+    raise SystemExit("config.yaml not found")
+
+with cfg_path.open() as f:
+    cfg = yaml.safe_load(f) or {}
+
+cfg.setdefault("guardrail", {})["detection_strategy_prompt"] = os.environ["DEFENSECLAW_E2E_PROMPT_STRATEGY"]
+
+with cfg_path.open("w") as f:
+    yaml.safe_dump(cfg, f, sort_keys=False)
+PY
+}
+
+restart_sidecar_after_guardrail_config_change() {
+    defenseclaw-gateway restart 2>/dev/null || true
+    ensure_sidecar_connected 90
+}
+
 openclaw_skills_list_json() {
     openclaw skills list --json 2>/dev/null || echo "[]"
 }
@@ -1905,9 +1949,22 @@ phase_block_allow() {
     local tool_expected tool_status tool_command tool_prompt
     local allow_before allow_after block_before block_after recover_before recover_after
     local allow_out block_out recover_out
+    local original_prompt_strategy prompt_strategy_overridden
     tool_expected="tool-block-test-${RUN_SLUG}"
     tool_command=$(printf "printf '%%s\\n' %q" "$tool_expected")
     tool_prompt="Use the exec tool to run exactly this command: $tool_command. Reply with exactly the single line printed by that command and nothing else. Do not answer from memory. Do not use any tool other than exec."
+    prompt_strategy_overridden=false
+
+    if is_full_live; then
+        # The live prompt judge is intentionally strict about prompts that
+        # mandate tool selection. This phase validates runtime tool governance,
+        # so keep the proxy alive but let the prompt path use regex-only
+        # inspection while the agent exercises exec block/allow behavior.
+        original_prompt_strategy=$(guardrail_prompt_strategy)
+        set_guardrail_prompt_strategy "regex_only"
+        restart_sidecar_after_guardrail_config_change
+        prompt_strategy_overridden=true
+    fi
 
     if is_full_live; then
         allow_before=$(alerts_action_count "inspect-tool-allow" "$tool_name")
@@ -1967,6 +2024,11 @@ phase_block_allow() {
         else
             fail "block/allow: agent recovered exec after unblock" "$recover_out"
         fi
+    fi
+
+    if is_full_live && [ "$prompt_strategy_overridden" = "true" ]; then
+        set_guardrail_prompt_strategy "$original_prompt_strategy"
+        restart_sidecar_after_guardrail_config_change
     fi
 
     local alerts skill_block_events skill_reject_events skill_allow_events skill_install_allow_events
