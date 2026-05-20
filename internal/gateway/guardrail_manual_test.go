@@ -290,6 +290,51 @@ func TestAdjudicateFindings_EmptySignals(t *testing.T) {
 	}
 }
 
+func TestLLMJudge_VLLMRequestsDisableThinking(t *testing.T) {
+	mock := &mockLLMProvider{
+		response: &ChatResponse{
+			Choices: []ChatChoice{{
+				Message: &ChatMessage{Content: `{
+					"Email Address": {"detection_result": false, "entities": []},
+					"IP Address": {"detection_result": false, "entities": []},
+					"Phone Number": {"detection_result": false, "entities": []},
+					"Driver's License Number": {"detection_result": false, "entities": []},
+					"Passport Number": {"detection_result": false, "entities": []},
+					"Social Security Number": {"detection_result": false, "entities": []},
+					"Username": {"detection_result": false, "entities": []},
+					"Password": {"detection_result": false, "entities": []}
+				}`},
+			}},
+		},
+	}
+	j := &LLMJudge{
+		cfg: &config.JudgeConfig{
+			Enabled:   true,
+			Timeout:   5,
+			PII:       true,
+			PIIPrompt: true,
+		},
+		model:    "vllm/Qwen/Qwen3-14B-FP8",
+		provider: mock,
+		rp:       guardrail.LoadRulePack(""),
+	}
+
+	v := j.RunJudges(context.Background(), "prompt", "This is benign text long enough for the judge.", "")
+	if v.Action != "allow" {
+		t.Fatalf("expected allow verdict, got %+v", v)
+	}
+	if len(mock.captured) != 1 {
+		t.Fatalf("expected one judge request, got %d", len(mock.captured))
+	}
+	kwargs, ok := mock.captured[0].ExtraParams["chat_template_kwargs"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing chat_template_kwargs: %#v", mock.captured[0].ExtraParams)
+	}
+	if kwargs["enable_thinking"] != false {
+		t.Errorf("enable_thinking = %#v, want false", kwargs["enable_thinking"])
+	}
+}
+
 func TestAdjudicateFindings_InjectionBlock(t *testing.T) {
 	adjResp := `{
 		"findings": [{"pattern": "ignore all", "verdict": "true_positive", "reasoning": "Real injection"}],
