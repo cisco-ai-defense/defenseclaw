@@ -41,7 +41,6 @@ type Event struct {
 	Target     string         `json:"target"`
 	Actor      string         `json:"actor"`
 	Details    string         `json:"details"`
-	Structured map[string]any `json:"structured,omitempty"`
 	Severity   string         `json:"severity"`
 	RunID      string         `json:"run_id,omitempty"`
 	TraceID    string         `json:"trace_id,omitempty"`

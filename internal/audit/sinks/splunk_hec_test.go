@@ -242,6 +242,37 @@ func TestSplunkHECSink_SourceTypeOverride_Defaults(t *testing.T) {
 }
 
 func TestSplunkHECSink_EmitsStructuredExtraHECEvents(t *testing.T) {
+	testSplunkHECSinkEmitsStructuredExtraHECEvents(t, []map[string]any{
+		{
+			"time":       float64(1700000001),
+			"source":     "otel",
+			"sourcetype": "otel:log",
+			"index":      "defenseclaw_local",
+			"event": map[string]any{
+				"session_id": "sess-1",
+				"action":     "codex.user_prompt",
+			},
+		},
+	})
+}
+
+func TestSplunkHECSink_EmitsStructuredExtraHECEventsAfterJSONClone(t *testing.T) {
+	testSplunkHECSinkEmitsStructuredExtraHECEvents(t, []any{
+		map[string]any{
+			"time":       float64(1700000001),
+			"source":     "otel",
+			"sourcetype": "otel:log",
+			"index":      "defenseclaw_local",
+			"event": map[string]any{
+				"session_id": "sess-1",
+				"action":     "codex.user_prompt",
+			},
+		},
+	})
+}
+
+func testSplunkHECSinkEmitsStructuredExtraHECEvents(t *testing.T, extraEvents any) {
+	t.Helper()
 	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
 	sink, err := NewSplunkHECSink(SplunkHECConfig{
 		Endpoint:       srv.URL,
@@ -260,19 +291,8 @@ func TestSplunkHECSink_EmitsStructuredExtraHECEvents(t *testing.T) {
 		Severity:  "INFO",
 		Timestamp: time.Unix(1700000000, 0).UTC(),
 		Structured: map[string]any{
-			"summary": "kept",
-			structuredSplunkHECEventsKey: []map[string]any{
-				{
-					"time":       float64(1700000001),
-					"source":     "otel",
-					"sourcetype": "otel:log",
-					"index":      "defenseclaw_local",
-					"event": map[string]any{
-						"session_id": "sess-1",
-						"action":     "codex.user_prompt",
-					},
-				},
-			},
+			"summary":                    "kept",
+			structuredSplunkHECEventsKey: extraEvents,
 		},
 	})
 	if err != nil {

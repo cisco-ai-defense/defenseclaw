@@ -477,8 +477,8 @@ func splitStructuredSplunkHECEvents(structured map[string]any) (map[string]any, 
 		cleaned = nil
 	}
 
-	items, ok := raw.([]map[string]any)
-	if !ok {
+	items := structuredSplunkHECEventItems(raw)
+	if len(items) == 0 {
 		return cleaned, nil
 	}
 	events := make([]splunkEvent, 0, len(items))
@@ -497,6 +497,23 @@ func splitStructuredSplunkHECEvents(structured map[string]any) (map[string]any, 
 		})
 	}
 	return cleaned, events
+}
+
+func structuredSplunkHECEventItems(raw any) []map[string]any {
+	switch items := raw.(type) {
+	case []map[string]any:
+		return items
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func splunkString(v any) string {
