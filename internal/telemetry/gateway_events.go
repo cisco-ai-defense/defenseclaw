@@ -205,6 +205,9 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 	if e.SessionID != "" {
 		attrs = append(attrs, log.String("gen_ai.conversation.id", e.SessionID))
 	}
+	if e.TurnID != "" {
+		attrs = append(attrs, log.String("defenseclaw.turn_id", e.TurnID))
+	}
 	if e.Provider != "" {
 		attrs = append(attrs, log.String("defenseclaw.llm.provider", e.Provider))
 	}
@@ -346,7 +349,7 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 				log.String("defenseclaw.llm.prompt_id", p.PromptID),
 				log.String("defenseclaw.llm.source", p.Source),
 			)
-			if p.TurnID != "" {
+			if p.TurnID != "" && e.TurnID == "" {
 				attrs = append(attrs, log.String("defenseclaw.turn_id", p.TurnID))
 			}
 		}
@@ -357,7 +360,7 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 				log.String("defenseclaw.llm.reply_to_prompt_id", r.ReplyToPromptID),
 				log.String("defenseclaw.llm.source", r.Source),
 			)
-			if r.TurnID != "" {
+			if r.TurnID != "" && e.TurnID == "" {
 				attrs = append(attrs, log.String("defenseclaw.turn_id", r.TurnID))
 			}
 			if len(r.FinishReasons) > 0 {
@@ -371,7 +374,7 @@ func (p *Provider) EmitGatewayEventWithContext(ctx context.Context, e gatewaylog
 				log.String("defenseclaw.tool.call_id", t.ToolCallID),
 				log.String("defenseclaw.tool.source", t.Source),
 			)
-			if t.TurnID != "" {
+			if t.TurnID != "" && e.TurnID == "" {
 				attrs = append(attrs, log.String("defenseclaw.turn_id", t.TurnID))
 			}
 			if t.ReplyToPromptID != "" {

@@ -281,6 +281,9 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 			otel.RecordSchemaViolation(context.Background(), string(et), code)
 		})
 	}
+	if logger != nil {
+		events.WithFanoutContext(logger.ForwardGatewayEventToSinks)
+	}
 	SetEventWriter(events)
 	// Layer 3 egress observability: wire the OTel provider so
 	// RecordEgress fires alongside every EventEgress emission.

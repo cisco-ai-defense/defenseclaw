@@ -24,6 +24,7 @@ func TestEnvelopeFromContext_RoundTrip(t *testing.T) {
 		TraceID:         "trace-rt",
 		RequestID:       "req-rt",
 		SessionID:       "sess-rt",
+		TurnID:          "turn-rt",
 		AgentID:         "agent-rt",
 		AgentName:       "openclaw",
 		AgentInstanceID: "inst-rt",
@@ -59,6 +60,7 @@ func TestLogEventCtx_FillsFromEnvelope(t *testing.T) {
 		TraceID:         "trace-ctx",
 		RequestID:       "req-ctx",
 		SessionID:       "sess-ctx",
+		TurnID:          "turn-ctx",
 		AgentID:         "agent-ctx",
 		AgentName:       "ctx-agent",
 		AgentInstanceID: "inst-ctx",
@@ -68,6 +70,11 @@ func TestLogEventCtx_FillsFromEnvelope(t *testing.T) {
 		ToolID:          "tool-1",
 	}
 	ctx := ContextWithEnvelope(context.Background(), env)
+	pending := Event{}
+	ApplyEnvelope(&pending, env)
+	if pending.TurnID != env.TurnID {
+		t.Fatalf("ApplyEnvelope TurnID=%q want %q", pending.TurnID, env.TurnID)
+	}
 
 	// Caller provides only action + target; the ctx should fill
 	// the rest. This is the "handler wrote one line" ergonomic

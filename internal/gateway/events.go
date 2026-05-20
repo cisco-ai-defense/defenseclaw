@@ -25,6 +25,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -156,14 +157,18 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev == nil || ctx == nil {
 		return
 	}
+	env := audit.EnvelopeFromContext(ctx)
 	if ev.RequestID == "" {
-		ev.RequestID = RequestIDFromContext(ctx)
+		ev.RequestID = firstNonEmpty(RequestIDFromContext(ctx), env.RequestID)
 	}
 	if ev.SessionID == "" {
-		ev.SessionID = SessionIDFromContext(ctx)
+		ev.SessionID = firstNonEmpty(SessionIDFromContext(ctx), env.SessionID)
+	}
+	if ev.TurnID == "" {
+		ev.TurnID = env.TurnID
 	}
 	if ev.TraceID == "" {
-		ev.TraceID = TraceIDFromContext(ctx)
+		ev.TraceID = firstNonEmpty(TraceIDFromContext(ctx), env.TraceID)
 		if ev.TraceID == "" {
 			if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
 				ev.TraceID = sp.SpanContext().TraceID().String()
@@ -171,23 +176,35 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 		}
 	}
 	if ev.RunID == "" {
-		ev.RunID = gatewaylog.ProcessRunID()
+		ev.RunID = firstNonEmpty(env.RunID, gatewaylog.ProcessRunID())
 	}
 	id := AgentIdentityFromContext(ctx)
 	if ev.AgentID == "" {
-		ev.AgentID = id.AgentID
+		ev.AgentID = firstNonEmpty(id.AgentID, env.AgentID)
 	}
 	if ev.AgentName == "" {
-		ev.AgentName = id.AgentName
+		ev.AgentName = firstNonEmpty(id.AgentName, env.AgentName)
 	}
 	if ev.AgentType == "" {
 		ev.AgentType = id.AgentType
 	}
 	if ev.AgentInstanceID == "" {
-		ev.AgentInstanceID = id.AgentInstanceID
+		ev.AgentInstanceID = firstNonEmpty(id.AgentInstanceID, env.AgentInstanceID)
 	}
 	if ev.SidecarInstanceID == "" {
-		ev.SidecarInstanceID = id.SidecarInstanceID
+		ev.SidecarInstanceID = firstNonEmpty(id.SidecarInstanceID, env.SidecarInstanceID)
+	}
+	if ev.PolicyID == "" {
+		ev.PolicyID = env.PolicyID
+	}
+	if ev.DestinationApp == "" {
+		ev.DestinationApp = env.DestinationApp
+	}
+	if ev.ToolName == "" {
+		ev.ToolName = env.ToolName
+	}
+	if ev.ToolID == "" {
+		ev.ToolID = env.ToolID
 	}
 }
 

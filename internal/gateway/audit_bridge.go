@@ -89,6 +89,7 @@ func (b *auditBridge) EmitAudit(e audit.Event) {
 		RunID:             e.RunID,
 		RequestID:         e.RequestID,
 		SessionID:         e.SessionID,
+		TurnID:            e.TurnID,
 		TraceID:           e.TraceID,
 		AgentID:           e.AgentID,
 		AgentName:         e.AgentName,

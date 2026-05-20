@@ -60,6 +60,7 @@ type Event struct {
 	// blanks without erroring. See audit.Event for the semantic
 	// contract of each field.
 	SessionID string `json:"session_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 	AgentName string `json:"agent_name,omitempty"`
 	AgentID   string `json:"agent_id,omitempty"`
 	// AgentInstanceID is per-session in v7 (empty when no session

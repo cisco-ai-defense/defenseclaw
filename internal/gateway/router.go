@@ -273,6 +273,15 @@ func (r *EventRouter) streamEnvelope(ctx context.Context, sessionKey string) aud
 	return env
 }
 
+func (r *EventRouter) streamContext(sessionKey string, overlay audit.CorrelationEnvelope) context.Context {
+	env := audit.MergeEnvelope(r.streamEnvelope(context.Background(), sessionKey), overlay)
+	ctx := context.Background()
+	if env.SessionID != "" {
+		ctx = ContextWithSessionID(ctx, env.SessionID)
+	}
+	return audit.ContextWithEnvelope(ctx, env)
+}
+
 // logStreamAction is the stream-path analogue of
 // audit.Logger.LogActionCtx: it synthesizes a correlation envelope
 // from the router defaults + the current session and records an
@@ -688,7 +697,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				// Async read-loop context — stamp session_id so the
 				// verdict event carries the conversation identifier
 				// even though we're outside any HTTP request.
-				vctx := ContextWithSessionID(context.Background(), envelope.SessionKey)
+				vctx := r.streamContext(envelope.SessionKey, audit.CorrelationEnvelope{TurnID: envelope.MessageID})
 				emitVerdict(vctx, gatewaylog.StageMultiTurn, gatewaylog.DirectionPrompt, "",
 					"warn", "repeated injection patterns across user turns",
 					gatewaylog.SeverityHigh, []string{"injection:multi-turn"}, 0)
@@ -776,7 +785,7 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	severity := deriveSeverity(verdict.Severity)
 	categories := categoriesOf(verdict.Findings)
 
-	vctx := ContextWithSessionID(context.Background(), sessionKey)
+	vctx := r.streamContext(sessionKey, audit.CorrelationEnvelope{TurnID: messageID})
 	emitVerdict(
 		vctx,
 		gatewaylog.StageSessionMessage,
@@ -1163,8 +1172,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	if r.policy != nil {
 		if blocked, _ := r.policy.IsBlocked("tool", payload.Tool); blocked {
 			fmt.Fprintf(os.Stderr, "[sidecar] BLOCKED tool call: %q is on the static block list\n", payload.Tool)
-			r.logStreamToolAction(payload.SessionID, string(audit.ActionGatewayToolCallBlocked), payload.Tool, payload.ID, "reason=static-block-list")
-			vctx := ContextWithSessionID(context.Background(), payload.SessionID)
+			r.logStreamToolAction(payload.SessionID, "gateway-tool-call-blocked", payload.Tool, payload.ID, "reason=static-block-list")
+			vctx := r.streamContext(payload.SessionID, audit.CorrelationEnvelope{
+				DestinationApp: "builtin",
+				ToolName:       payload.Tool,
+				ToolID:         payload.ID,
+			})
 			emitVerdict(vctx, gatewaylog.StageBlockList, gatewaylog.DirectionPrompt, payload.Tool,
 				"block", "static block list",
 				gatewaylog.SeverityHigh, []string{"policy:block", "surface:tool_call"}, 0)
@@ -1481,7 +1494,11 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		sessionID, _ := r.activeAgentCorrelation()
 		r.logStreamAction(sessionID, string(audit.ActionGatewayApprovalDenied), payload.ID,
 			fmt.Sprintf("reason=%s command_name=%s", topFinding.RuleID, cmdName))
-		vctx := ContextWithSessionID(context.Background(), sessionID)
+		vctx := r.streamContext(sessionID, audit.CorrelationEnvelope{
+			DestinationApp: "builtin",
+			ToolName:       cmdName,
+			ToolID:         payload.ID,
+		})
 		emitVerdict(vctx, gatewaylog.StageApproval, gatewaylog.DirectionPrompt, cmdName,
 			"block", fmt.Sprintf("%s: %s", topFinding.RuleID, topFinding.Title),
 			deriveSeverity(topFinding.Severity), []string{"approval:denied", "surface:exec"}, 0)

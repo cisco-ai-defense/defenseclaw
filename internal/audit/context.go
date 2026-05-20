@@ -32,6 +32,7 @@ type CorrelationEnvelope struct {
 	TraceID           string
 	RequestID         string
 	SessionID         string
+	TurnID            string
 	AgentID           string
 	AgentName         string
 	AgentInstanceID   string
@@ -92,6 +93,9 @@ func MergeEnvelope(base, overlay CorrelationEnvelope) CorrelationEnvelope {
 	}
 	if base.SessionID == "" {
 		base.SessionID = overlay.SessionID
+	}
+	if base.TurnID == "" {
+		base.TurnID = overlay.TurnID
 	}
 	if base.AgentID == "" {
 		base.AgentID = overlay.AgentID
@@ -154,6 +158,9 @@ func applyEnvelope(e *Event, env CorrelationEnvelope) {
 	}
 	if e.SessionID == "" {
 		e.SessionID = env.SessionID
+	}
+	if e.TurnID == "" {
+		e.TurnID = env.TurnID
 	}
 	if e.AgentID == "" {
 		e.AgentID = env.AgentID

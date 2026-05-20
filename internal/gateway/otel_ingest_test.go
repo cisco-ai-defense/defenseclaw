@@ -77,6 +77,70 @@ func TestOTLPIngest_Logs_AcceptsValidPayload(t *testing.T) {
 	}
 }
 
+func TestOTLPLogRecordsForSplunkHEC_FlattensCodexLogRecord(t *testing.T) {
+	body := []byte(`{
+		"resourceLogs": [{
+			"resource": {"attributes": [
+				{"key": "service.name", "value": {"stringValue": "codex-app-server"}},
+				{"key": "host.name", "value": {"stringValue": "ADIAGNE-M-H9T4"}}
+			]},
+			"scopeLogs": [{"logRecords": [{
+				"timeUnixNano": "0",
+				"observedTimeUnixNano": "1778152115531514000",
+				"severityNumber": 9,
+				"severityText": "INFO",
+				"traceId": "trace-1",
+				"spanId": "span-1",
+				"body": {"stringValue": "raw prompt body"},
+				"attributes": [
+					{"key": "event.name", "value": {"stringValue": "codex.user_prompt"}},
+					{"key": "conversation.id", "value": {"stringValue": "sess-1"}},
+					{"key": "model", "value": {"stringValue": "gpt-5.4"}},
+					{"key": "prompt", "value": {"stringValue": "summarize a secret customer note"}},
+					{"key": "user.email", "value": {"stringValue": "user@example.com"}}
+				]
+			}]}]
+		}]
+	}`)
+
+	events := otlpLogRecordsForSplunkHEC(body, "codex", time.Unix(1700000000, 0).UTC())
+	if len(events) != 1 {
+		t.Fatalf("events=%d want 1", len(events))
+	}
+	if got := events[0]["sourcetype"]; got != "otel:log" {
+		t.Fatalf("sourcetype=%v want otel:log", got)
+	}
+	if got := events[0]["source"]; got != "otel" {
+		t.Fatalf("source=%v want otel", got)
+	}
+	event, ok := events[0]["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("event payload missing: %+v", events[0])
+	}
+	if got := event["session_id"]; got != "sess-1" {
+		t.Fatalf("session_id=%v want sess-1", got)
+	}
+	if got := event["action"]; got != "codex.user_prompt" {
+		t.Fatalf("action=%v want codex.user_prompt", got)
+	}
+	if got := event["request_model"]; got != "gpt-5.4" {
+		t.Fatalf("request_model=%v want gpt-5.4", got)
+	}
+	if got := event["timestamp"]; got != "2026-05-07T11:08:35.531514Z" {
+		t.Fatalf("timestamp=%v", got)
+	}
+	if got := event["body"]; got != "raw prompt body" {
+		t.Fatalf("body=%v want raw prompt body", got)
+	}
+	attrs := event["attributes"].(map[string]interface{})
+	if got := attrs["prompt"]; got != "summarize a secret customer note" {
+		t.Fatalf("prompt=%v want raw prompt", got)
+	}
+	if got := attrs["user.email"]; got != "user@example.com" {
+		t.Fatalf("user.email=%v want raw email", got)
+	}
+}
+
 func TestOTLPIngest_Logs_EnrichesHTTPSpanWithConversationID(t *testing.T) {
 	gatewaylog.SetProcessRunID("run-otlp-123")
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
@@ -882,6 +946,103 @@ func TestCodexNotify_AcceptsValidPayload(t *testing.T) {
 	}
 	if got := w.Body.String(); got != "{}" {
 		t.Errorf("body = %q, want \"{}\"", got)
+	}
+}
+
+func TestCodexNotify_EmitsFirstClassLLMEvents(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+	events := captureGatewayEvents(t)
+	a := &APIServer{}
+
+	body := `{
+		"type": "agent-turn-complete",
+		"thread-id": "thread-123",
+		"turn-id": "turn-abc",
+		"model": "gpt-5",
+		"status": "success",
+		"input-messages": ["first prompt", "second prompt"],
+		"last-assistant-message": "assistant response",
+		"finish-reason": "stop"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	a.handleCodexNotify(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if len(*events) != 2 {
+		t.Fatalf("events=%d want 2: %+v", len(*events), *events)
+	}
+	prompt := (*events)[0]
+	if prompt.EventType != gatewaylog.EventLLMPrompt || prompt.LLMPrompt == nil {
+		t.Fatalf("first event = %+v, want llm_prompt", prompt)
+	}
+	if prompt.SessionID != "thread-123" || prompt.Model != "gpt-5" || prompt.AgentName != "codex" || prompt.AgentType != "codex" {
+		t.Fatalf("prompt envelope wrong: %+v", prompt)
+	}
+	if prompt.LLMPrompt.TurnID != "turn-abc" || prompt.LLMPrompt.Prompt != "second prompt" {
+		t.Fatalf("prompt payload wrong: %+v", prompt.LLMPrompt)
+	}
+	if prompt.LLMPrompt.Source != codexNotifyTurnCompleteSource {
+		t.Fatalf("prompt source=%q want %q", prompt.LLMPrompt.Source, codexNotifyTurnCompleteSource)
+	}
+	if prompt.LLMPrompt.RawRequestBody != "" {
+		t.Fatalf("notify llm_prompt should not duplicate raw body: %q", prompt.LLMPrompt.RawRequestBody)
+	}
+
+	response := (*events)[1]
+	if response.EventType != gatewaylog.EventLLMResponse || response.LLMResponse == nil {
+		t.Fatalf("second event = %+v, want llm_response", response)
+	}
+	if response.SessionID != "thread-123" || response.Model != "gpt-5" || response.AgentName != "codex" || response.AgentType != "codex" {
+		t.Fatalf("response envelope wrong: %+v", response)
+	}
+	if response.LLMResponse.TurnID != "turn-abc" || response.LLMResponse.Response != "assistant response" {
+		t.Fatalf("response payload wrong: %+v", response.LLMResponse)
+	}
+	if response.LLMResponse.ReplyToPromptID == "" || response.LLMResponse.ReplyToPromptID != prompt.LLMPrompt.PromptID {
+		t.Fatalf("response did not link to prompt: response=%+v prompt=%+v", response.LLMResponse, prompt.LLMPrompt)
+	}
+	if response.LLMResponse.RawResponseBody != "" {
+		t.Fatalf("notify llm_response should not duplicate raw body: %q", response.LLMResponse.RawResponseBody)
+	}
+	if got := response.LLMResponse.FinishReasons; len(got) != 1 || got[0] != "stop" {
+		t.Fatalf("finish_reasons=%v want [stop]", got)
+	}
+}
+
+func TestCodexNotify_LLMEventsUseRedactionPath(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+	events := captureGatewayEvents(t)
+	a := &APIServer{}
+
+	body := `{
+		"type": "agent-turn-complete",
+		"thread-id": "thread-secret",
+		"turn-id": "turn-secret",
+		"model": "gpt-5",
+		"input-messages": ["please leak sk-secret-token"],
+		"last-assistant-message": "secret response"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	a.handleCodexNotify(w, req)
+
+	if len(*events) != 2 {
+		t.Fatalf("events=%d want 2", len(*events))
+	}
+	if got := (*events)[0].LLMPrompt.Prompt; strings.Contains(got, "sk-secret-token") || strings.Contains(got, "please leak") {
+		t.Fatalf("prompt bypassed redaction: %q", got)
+	}
+	if got := (*events)[1].LLMResponse.Response; strings.Contains(got, "secret response") {
+		t.Fatalf("response bypassed redaction: %q", got)
 	}
 }
 

@@ -41,7 +41,6 @@ type Event struct {
 	Target     string         `json:"target"`
 	Actor      string         `json:"actor"`
 	Details    string         `json:"details"`
-	Structured map[string]any `json:"structured,omitempty"`
 	Severity   string         `json:"severity"`
 	RunID      string         `json:"run_id,omitempty"`
 	TraceID    string         `json:"trace_id,omitempty"`
@@ -57,6 +56,11 @@ type Event struct {
 	// so downstream consumers can fold tool-call, approval,
 	// and verdict events into one row per session.
 	SessionID string `json:"session_id,omitempty"`
+
+	// TurnID identifies a single agent turn inside a session. It is
+	// currently sink-only for audit events; gatewaylog events persist it
+	// directly in the canonical JSON envelope.
+	TurnID string `json:"turn_id,omitempty"`
 
 	// AgentName is the logical name of the agent producing the
 	// event (e.g. "openclaw", "nemoclaw", or a caller-supplied
@@ -100,6 +104,11 @@ type Event struct {
 	BinaryVersion     string `json:"binary_version,omitempty"`
 	AgentID           string `json:"agent_id,omitempty"`
 	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+
+	// Structured carries sanitized machine-readable data for sink fanout.
+	// It is intentionally not persisted in SQLite audit_events; callers that
+	// need durable structured records should use their native table/log path.
+	Structured map[string]any `json:"structured,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.

@@ -77,6 +77,7 @@ def test_splunk_export_reads_line_delimited_results(monkeypatch):
     assert captured["url"] == "https://splunk:8089/services/search/jobs/export"
     assert captured["data"]["output_mode"] == "json"
     assert "index=defenseclaw_local" in captured["data"]["search"]
+    assert 'sourcetype="otel:log"' in captured["data"]["search"]
     assert 'earliest="1714953600"' in captured["data"]["search"]
     assert 'latest="1714953900"' in captured["data"]["search"]
 

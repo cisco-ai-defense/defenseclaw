@@ -187,6 +187,7 @@ func TestAuditBridge_DetailsOmitEnvelopeFields(t *testing.T) {
 		RunID:     "run-xyz",
 		RequestID: "req-abc-001",
 		TraceID:   "trace-abc",
+		TurnID:    "turn-abc",
 	})
 	_ = w.Close()
 
@@ -208,6 +209,9 @@ func TestAuditBridge_DetailsOmitEnvelopeFields(t *testing.T) {
 	}
 	if got.TraceID != "trace-abc" {
 		t.Errorf("envelope trace_id=%q want trace-abc", got.TraceID)
+	}
+	if got.TurnID != "turn-abc" {
+		t.Errorf("envelope turn_id=%q want turn-abc", got.TurnID)
 	}
 
 	// Details must NOT duplicate fields that already live on the
