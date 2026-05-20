@@ -177,10 +177,10 @@ func TestSplunkHECSink_FilterSuppressesLowSeverity(t *testing.T) {
 }
 
 // TestSplunkHECSink_SourceTypeOverride_Defaults verifies that every
-// sink, even one built without SourceTypeOverrides, routes judge and
-// verdict actions to their Phase 3 canonical sourcetypes. This is the
-// load-bearing invariant for the Splunk dashboard split and for the
-// E2E observability assertions.
+// sink — even one built without SourceTypeOverrides — routes judge
+// and verdict actions to their Phase 3 canonical sourcetypes. This is
+// the load-bearing invariant for the Splunk dashboard split and for
+// the E2E observability assertions (which grep for defenseclaw:judge).
 func TestSplunkHECSink_SourceTypeOverride_Defaults(t *testing.T) {
 	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
 	sink, err := NewSplunkHECSink(SplunkHECConfig{
@@ -368,8 +368,8 @@ func TestSplunkHECSink_SourceTypeOverride_OperatorWins(t *testing.T) {
 		Timestamp: time.Unix(1700000000, 0).UTC(),
 	})
 
-	// The default that the operator didn't override must not create a
-	// dedicated guardrail verdict sourcetype.
+    // The defaults that the operator didn't override must still apply
+	// (Phase 3 plan: defaults win unless explicitly overridden).
 	_ = sink.Forward(context.Background(), Event{
 		ID: "v1", Action: "guardrail-verdict", Severity: "HIGH",
 		Timestamp: time.Unix(1700000001, 0).UTC(),
@@ -393,7 +393,7 @@ func TestSplunkHECSink_SourceTypeOverride_OperatorWins(t *testing.T) {
 		t.Fatalf("operator override lost: got %q", first.SourceType)
 	}
 	if second.SourceType != "defenseclaw:verdict" {
-		t.Fatalf("guardrail verdict sourcetype lost: got %q", second.SourceType)
+		t.Fatalf("default dropped when operator override set: got %q", second.SourceType)
 	}
 }
 
