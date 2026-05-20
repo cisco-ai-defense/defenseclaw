@@ -1,0 +1,59 @@
+{
+  "id": "defenseclaw-plugin",
+  "name": "DefenseClaw Security (ClawHub)",
+  "version": "0.1.0",
+  "description": "Wire DefenseClaw security governance into any OpenClaw instance. Installs fetch interception, tool inspection hooks, and security scanning — no DefenseClaw-side deployment required.",
+  "enabledByDefault": true,
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "agent": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Logical agent identity for sidecar correlation (X-DefenseClaw-Agent-Id)",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Stable logical agent id; overrides the persisted extension id when set"
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional display name (X-DefenseClaw-Agent-Name)"
+          },
+          "policyId": {
+            "type": "string",
+            "description": "Optional policy id (X-DefenseClaw-Policy-Id)"
+          }
+        }
+      },
+      "sidecarHost": {
+        "type": "string",
+        "default": "127.0.0.1",
+        "description": "Hostname or IP of the DefenseClaw gateway"
+      },
+      "sidecarPort": {
+        "type": "integer",
+        "default": 18970,
+        "description": "Port for the DefenseClaw Go sidecar REST API"
+      },
+      "guardrailPort": {
+        "type": "integer",
+        "default": 4000,
+        "description": "Port for the DefenseClaw guardrail proxy"
+      },
+      "mode": {
+        "type": "string",
+        "enum": ["observe", "action"],
+        "default": "observe",
+        "description": "Guardrail mode: observe (log only) or action (block threats)"
+      },
+      "awsHttp1Shim": {
+        "type": "string",
+        "enum": ["auto", "on", "off"],
+        "default": "auto",
+        "description": "Amazon Bedrock: force HTTP/1 so LLM traffic hits the guardrail proxy. auto = on only if OpenClaw model config references Bedrock; on = always; off = never."
+      }
+    }
+  }
+}
