@@ -29,6 +29,7 @@ func TestFriendlyConnectorNameCoversHookSurfaceConnectors(t *testing.T) {
 		"windsurf":  "Windsurf",
 		"geminicli": "Gemini CLI",
 		"copilot":   "GitHub Copilot CLI",
+		"openhands": "OpenHands",
 	}
 	for wire, want := range cases {
 		if got := FriendlyConnectorName(wire); got != want {
@@ -49,6 +50,12 @@ func TestConnectorSourceLabelCoversHookSurfaceConnectors(t *testing.T) {
 		{"windsurf", "config", ".codeium/windsurf/hooks.json"},
 		{"geminicli", "plugins", ".gemini/extensions"},
 		{"copilot", "mcps", ".github/mcp.json"},
+		{"openhands", "config", ".openhands/hooks.json"},
+		{"openhands", "skills", ".agents/skills"},
+		{"openhands", "skills", ".openhands/skills"},
+		{"openhands", "skills", ".openhands/cache/skills/public-skills/skills"},
+		{"openhands", "mcps", ".openhands/mcp.json"},
+		{"openhands", "plugins", "unsupported"},
 	}
 	for _, tc := range cases {
 		tc := tc

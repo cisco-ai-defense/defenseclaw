@@ -103,7 +103,7 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 	return provider.HookProfile(connector.SetupOpts{
 		DataDir:        a.configDataDir(),
 		APIAddr:        a.apiAddrForCapabilities(),
-		WorkspaceDir:   currentWorkingDir(),
+		WorkspaceDir:   a.connectorWorkspaceDir(),
 		AgentVersion:   agentVersion,
 		HookContractID: contractID,
 	})

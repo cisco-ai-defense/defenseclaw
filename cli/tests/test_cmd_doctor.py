@@ -14,8 +14,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import sys
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,9 +28,11 @@ from defenseclaw.commands.cmd_doctor import (
     _ANTHROPIC_DEFAULT_PROBE_MODEL,
     _anthropic_probe_model,
     _bedrock_region,
+    _check_copilot_hooks,
     _check_guardrail_proxy,
     _check_hilt_support,
     _check_llm_api_key,
+    _check_openhands_hooks,
     _check_sidecar,
     _DoctorResult,
     _probe_splunk_hec,
@@ -74,21 +78,23 @@ class DoctorGuardrailTests(unittest.TestCase):
         """
         import json as _json
 
-        health_body = _json.dumps({
-            "gateway": {
-                "state": "disabled",
-                "details": {
-                    "summary": "no OpenClaw fleet configured (standalone mode)",
-                    "connector": "codex",
-                    "host": "127.0.0.1",
-                    "port": 18789,
-                    "hint": "set gateway.host to a real OpenClaw upstream and restart",
+        health_body = _json.dumps(
+            {
+                "gateway": {
+                    "state": "disabled",
+                    "details": {
+                        "summary": "no OpenClaw fleet configured (standalone mode)",
+                        "connector": "codex",
+                        "host": "127.0.0.1",
+                        "port": 18789,
+                        "hint": "set gateway.host to a real OpenClaw upstream and restart",
+                    },
                 },
-            },
-            "watcher": {"state": "running"},
-            "guardrail": {"state": "running", "details": {"mode": "observe"}},
-            "api": {"state": "running"},
-        })
+                "watcher": {"state": "running"},
+                "guardrail": {"state": "running", "details": {"mode": "observe"}},
+                "api": {"state": "running"},
+            }
+        )
         mock_probe.return_value = (200, health_body)
 
         cfg = Config(
@@ -106,12 +112,10 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         _check_sidecar(cfg, result)
 
-        gateway_rows = [
-            c for c in result.checks
-            if c.get("label", "").strip().endswith("gateway")
-        ]
+        gateway_rows = [c for c in result.checks if c.get("label", "").strip().endswith("gateway")]
         self.assertEqual(
-            len(gateway_rows), 1,
+            len(gateway_rows),
+            1,
             f"expected exactly one gateway row, got {gateway_rows!r}",
         )
         row = gateway_rows[0]
@@ -134,12 +138,14 @@ class DoctorGuardrailTests(unittest.TestCase):
         """
         import json as _json
 
-        health_body = _json.dumps({
-            "gateway": {"state": "disabled"},  # no details
-            "watcher": {"state": "running"},
-            "guardrail": {"state": "running"},
-            "api": {"state": "running"},
-        })
+        health_body = _json.dumps(
+            {
+                "gateway": {"state": "disabled"},  # no details
+                "watcher": {"state": "running"},
+                "guardrail": {"state": "running"},
+                "api": {"state": "running"},
+            }
+        )
         mock_probe.return_value = (200, health_body)
 
         cfg = Config(
@@ -155,10 +161,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         cfg.claw.mode = "codex"
         result = _DoctorResult()
         _check_sidecar(cfg, result)
-        gateway_rows = [
-            c for c in result.checks
-            if c.get("label", "").strip().endswith("gateway")
-        ]
+        gateway_rows = [c for c in result.checks if c.get("label", "").strip().endswith("gateway")]
         self.assertEqual(len(gateway_rows), 1)
         self.assertEqual(gateway_rows[0]["status"], "skip")
         self.assertEqual(
@@ -245,6 +248,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         action-mode Codex / Claude Code installations look passive.
         """
         from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
+
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -339,6 +343,94 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.warned, 1)
         self.assertIn("no native human approval surface", result.checks[0]["detail"])
 
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "openhands", result)
+        self.assertEqual(result.warned, 1)
+        self.assertIn("no native human approval surface", result.checks[0]["detail"])
+
+
+class DoctorHookReachabilityTests(unittest.TestCase):
+    def _cfg(self, tmp: str, connector: str) -> Config:
+        return Config(
+            data_dir=os.path.join(tmp, ".defenseclaw"),
+            audit_db=os.path.join(tmp, ".defenseclaw", "audit.db"),
+            quarantine_dir=os.path.join(tmp, ".defenseclaw", "quarantine"),
+            plugin_dir=os.path.join(tmp, ".defenseclaw", "plugins"),
+            policy_dir=os.path.join(tmp, ".defenseclaw", "policies"),
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector=connector),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+
+    def test_openhands_hooks_accept_sdk_home_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            workspace = os.path.join(tmp, "repo")
+            hook_path = os.path.join(home, ".openhands", "hooks.json")
+            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+            os.makedirs(workspace, exist_ok=True)
+            with open(hook_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "pre_tool_use": [
+                            {
+                                "matcher": "*",
+                                "hooks": [
+                                    {
+                                        "type": "command",
+                                        "command": os.path.join(tmp, ".defenseclaw", "hooks", "openhands-hook.sh"),
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                    fh,
+                )
+            cfg = self._cfg(tmp, "openhands")
+            cfg.claw.workspace_dir = workspace
+            with patch.dict(os.environ, {"HOME": home}, clear=False):
+                result = _DoctorResult()
+                _check_openhands_hooks(cfg, result)
+            self.assertEqual(result.failed, 0, result.checks)
+            self.assertEqual(result.passed, 1)
+            self.assertIn("reachable", result.checks[0]["detail"])
+
+    def test_copilot_hooks_fail_when_workspace_is_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, "copilot")
+            cfg.claw.workspace_dir = cfg.data_dir
+            result = _DoctorResult()
+            _check_copilot_hooks(cfg, result)
+            self.assertEqual(result.failed, 1, result.checks)
+            self.assertIn("inside DefenseClaw data dir", result.checks[0]["detail"])
+
+    def test_copilot_hooks_verify_workspace_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = os.path.join(tmp, "repo")
+            hook_path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
+            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+            with open(hook_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "version": 1,
+                        "hooks": {
+                            "PreToolUse": [
+                                {
+                                    "type": "command",
+                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh"),
+                                }
+                            ]
+                        },
+                    },
+                    fh,
+                )
+            cfg = self._cfg(tmp, "copilot")
+            cfg.claw.workspace_dir = workspace
+            result = _DoctorResult()
+            _check_copilot_hooks(cfg, result)
+            self.assertEqual(result.failed, 0, result.checks)
+            self.assertEqual(result.passed, 1)
+
 
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     """Regression: provider routing must be prefix-based, not substring-based.
@@ -369,13 +461,16 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
         )
 
     @patch.dict(os.environ, {"BIFROST_API_KEY": "ABSKtest-not-an-anthropic-key"}, clear=False)
-    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key",
-           return_value="ABSKtest-not-an-anthropic-key")
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="ABSKtest-not-an-anthropic-key")
     @patch("defenseclaw.commands.cmd_doctor._verify_bedrock")
     @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
     def test_bedrock_inference_profile_routes_to_bedrock(
-        self, mock_openai, mock_anthropic, mock_bedrock, _mock_resolve,
+        self,
+        mock_openai,
+        mock_anthropic,
+        mock_bedrock,
+        _mock_resolve,
     ):
         cfg = self._make_cfg(
             model="amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -393,7 +488,9 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="ABSKtoken==")
     @patch("defenseclaw.commands.cmd_doctor._verify_bedrock")
     def test_explicit_bedrock_provider_routes_even_with_bare_model(
-        self, mock_bedrock, _mock_resolve,
+        self,
+        mock_bedrock,
+        _mock_resolve,
     ):
         cfg = self._make_cfg(
             model="us.anthropic.claude-haiku-4-5-20251001-v1:0",
@@ -414,7 +511,9 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-ant-test")
     @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
     def test_anthropic_prefix_routes_to_anthropic_verify(
-        self, mock_anthropic, _mock_resolve,
+        self,
+        mock_anthropic,
+        _mock_resolve,
     ):
         cfg = self._make_cfg(
             model="anthropic/claude-sonnet-4-5-20250514",
@@ -430,7 +529,9 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-test")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
     def test_openai_prefix_routes_to_openai_verify(
-        self, mock_openai, _mock_resolve,
+        self,
+        mock_openai,
+        _mock_resolve,
     ):
         cfg = self._make_cfg(model="openai/gpt-4o", api_key_env="OPENAI_API_KEY")
         r = _DoctorResult()
@@ -444,7 +545,10 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
     def test_env_name_fallback_only_when_model_has_no_prefix(
-        self, mock_openai, mock_anthropic, _mock_resolve,
+        self,
+        mock_openai,
+        mock_anthropic,
+        _mock_resolve,
     ):
         # Empty model string — env-name fallback kicks in and routes to
         # Anthropic. Previously an env_name prefix of "ANTHROPIC_" would
@@ -459,12 +563,14 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
         mock_openai.assert_not_called()
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "ABSK-bedrock-in-anthropic-slot"}, clear=False)
-    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key",
-           return_value="ABSK-bedrock-in-anthropic-slot")
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="ABSK-bedrock-in-anthropic-slot")
     @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
     def test_model_prefix_wins_over_env_name(
-        self, mock_openai, mock_anthropic, _mock_resolve,
+        self,
+        mock_openai,
+        mock_anthropic,
+        _mock_resolve,
     ):
         # Operator accidentally stored a Bedrock bearer token in a variable
         # called ANTHROPIC_API_KEY. The model says amazon-bedrock/... so
@@ -489,9 +595,7 @@ class AnthropicProbeModelTests(unittest.TestCase):
         self.assertEqual(got, "claude-opus-4-20250805")
 
     def test_env_override(self):
-        with patch.dict(os.environ,
-                        {"DEFENSECLAW_ANTHROPIC_PROBE_MODEL": "claude-3-opus-20240229"},
-                        clear=False):
+        with patch.dict(os.environ, {"DEFENSECLAW_ANTHROPIC_PROBE_MODEL": "claude-3-opus-20240229"}, clear=False):
             got = _anthropic_probe_model("")
         self.assertEqual(got, "claude-3-opus-20240229")
 
@@ -540,6 +644,7 @@ class DoctorCacheWriteTests(unittest.TestCase):
             DOCTOR_CACHE_FILENAME,
             _write_doctor_cache,
         )
+
         cfg = Config(
             data_dir=tmpdir,
             audit_db=os.path.join(tmpdir, "audit.db"),
@@ -556,6 +661,7 @@ class DoctorCacheWriteTests(unittest.TestCase):
     def test_writes_cache_with_counts_and_checks(self):
         import json
         import tempfile
+
         r = _DoctorResult()
         r.passed = 3
         r.failed = 1
@@ -579,11 +685,11 @@ class DoctorCacheWriteTests(unittest.TestCase):
         # captured_at must be an ISO-8601 with Z suffix so Go's
         # time.Time parser accepts it.
         self.assertIn("captured_at", payload)
-        self.assertTrue(payload["captured_at"].endswith("Z"),
-                        payload["captured_at"])
+        self.assertTrue(payload["captured_at"].endswith("Z"), payload["captured_at"])
 
     def test_skips_write_when_no_data_dir(self):
         from defenseclaw.commands.cmd_doctor import _write_doctor_cache
+
         # A cfg with data_dir="" must not raise and must not touch
         # the filesystem — we silently no-op so nothing is logged
         # to stderr for the common "--help" / embedded-runner case.
@@ -604,8 +710,11 @@ class DoctorCacheWriteTests(unittest.TestCase):
         # — no `.tmp` residue — so the TUI never sees a half-written
         # JSON document.
         import tempfile
-        r1 = _DoctorResult(); r1.passed = 1
-        r2 = _DoctorResult(); r2.failed = 7
+
+        r1 = _DoctorResult()
+        r1.passed = 1
+        r2 = _DoctorResult()
+        r2.failed = 7
         with tempfile.TemporaryDirectory() as tmp:
             self._run_write(tmp, r1)
             self._run_write(tmp, r2)
@@ -624,15 +733,13 @@ class DoctorCacheWriteTests(unittest.TestCase):
         import threading
 
         with tempfile.TemporaryDirectory() as tmp:
+
             def write_one(i):
                 r = _DoctorResult()
                 r.passed = i
                 self._run_write(tmp, r)
 
-            threads = [
-                threading.Thread(target=write_one, args=(i,))
-                for i in range(1, 9)
-            ]
+            threads = [threading.Thread(target=write_one, args=(i,)) for i in range(1, 9)]
             for t in threads:
                 t.start()
             for t in threads:
@@ -754,8 +861,7 @@ class VerifyBedrockTests(unittest.TestCase):
     def test_region_defaults_to_us_east_1(self):
         # Strip all the AWS region env vars we might inherit from the
         # developer shell so the default kicks in deterministically.
-        env_copy = {k: v for k, v in os.environ.items()
-                    if not k.startswith("AWS_")}
+        env_copy = {k: v for k, v in os.environ.items() if not k.startswith("AWS_")}
         with patch.dict(os.environ, env_copy, clear=True):
             self.assertEqual(_bedrock_region(), "us-east-1")
 
@@ -772,7 +878,10 @@ class BedrockRoutingTests(unittest.TestCase):
             plugin_dir="/tmp/defenseclaw/plugins",
             policy_dir="/tmp/defenseclaw/policies",
             guardrail=GuardrailConfig(
-                enabled=True, model=model, port=4000, api_key_env=api_key_env,
+                enabled=True,
+                model=model,
+                port=4000,
+                api_key_env=api_key_env,
             ),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
@@ -784,7 +893,11 @@ class BedrockRoutingTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
     def test_bedrock_prefix_routes_to_bedrock_verify(
-        self, mock_openai, mock_anthropic, mock_bedrock, _mock_resolve,
+        self,
+        mock_openai,
+        mock_anthropic,
+        mock_bedrock,
+        _mock_resolve,
     ):
         cfg = self._make_cfg(
             model="bedrock/us.anthropic.claude-3-5-haiku-20241022-v1:0",
@@ -800,7 +913,9 @@ class BedrockRoutingTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="ABSKtoken==")
     @patch("defenseclaw.commands.cmd_doctor._verify_bedrock")
     def test_env_name_fallback_routes_when_model_empty(
-        self, mock_bedrock, _mock_resolve,
+        self,
+        mock_bedrock,
+        _mock_resolve,
     ):
         # Model empty + api_key_env=AWS_BEARER_TOKEN_BEDROCK: the
         # env-name fallback should still route to the bedrock verifier.

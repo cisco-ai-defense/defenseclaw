@@ -197,6 +197,31 @@ func digitKey(text string) tea.KeyPressMsg {
 	return tea.KeyPressMsg(tea.Key{Text: text, Code: []rune(text)[0]})
 }
 
+func TestOpenHandsConnectorHidesPluginsPanel(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Claw.Mode = config.ClawMode("openhands")
+	model := New(Deps{Config: cfg, Version: "test"})
+	model.width = 100
+	model.height = 40
+
+	if !model.panelHidden(PanelPlugins) {
+		t.Fatal("OpenHands must hide the Plugins panel")
+	}
+
+	model.activePanel = PanelOverview
+	next, _ := model.handleKey(digitKey("5"))
+	got := next.(Model)
+	if got.activePanel != PanelOverview {
+		t.Fatalf("OpenHands plugin shortcut switched to panel %d, want PanelOverview", got.activePanel)
+	}
+
+	got.activePanel = PanelPlugins
+	out := got.renderActivePanel()
+	if !strings.Contains(out, "DefenseClaw plugins are an OpenClaw-only concept") {
+		t.Fatalf("OpenHands Plugins panel render did not show disabled notice:\n%s", out)
+	}
+}
+
 func setupSectionIndex(t *testing.T, p SetupPanel, name string) int {
 	t.Helper()
 	for i, sec := range p.sections {

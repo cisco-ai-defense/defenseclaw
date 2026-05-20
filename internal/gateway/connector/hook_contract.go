@@ -51,19 +51,20 @@ func HookContractNeedsActionOverride(resolution HookContractResolution) bool {
 // deciding whether a hook event is blockable/askable/AID-eligible; it should
 // never assume that "latest connector code" describes every installed agent.
 type HookContract struct {
-	Connector             string
-	ContractID            string
-	MinAgentVersion       string
-	MaxAgentVersion       string
-	DefaultForUnversioned bool
-	HookScriptVersion     string
-	ResponseFieldName     string
-	Events                []string
-	AIDSurfaces           []string
-	Capabilities          HookCapability
-	SupportsTraceparent   bool
-	NativeOTLP            bool
-	Notes                 []string
+	Connector               string
+	ContractID              string
+	MinAgentVersion         string
+	MaxAgentVersion         string
+	DefaultForUnversioned   bool
+	HookScriptVersion       string
+	HookConfigPathTemplates []string
+	ResponseFieldName       string
+	Events                  []string
+	AIDSurfaces             []string
+	Capabilities            HookCapability
+	SupportsTraceparent     bool
+	NativeOTLP              bool
+	Notes                   []string
 }
 
 // HookContractResolution records how a raw agent --version string mapped to a
@@ -87,12 +88,13 @@ var proxyConnectorsWithoutHookGate = map[string]bool{
 
 var builtinHookContracts = map[string][]HookContract{
 	"codex": {{
-		Connector:             "codex",
-		ContractID:            "codex-hooks-v1",
-		MinAgentVersion:       "0.124.0",
-		DefaultForUnversioned: true,
-		HookScriptVersion:     "v6",
-		ResponseFieldName:     "codex_output",
+		Connector:               "codex",
+		ContractID:              "codex-hooks-v1",
+		MinAgentVersion:         "0.124.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.codex/config.toml"},
+		ResponseFieldName:       "codex_output",
 		Events: []string{
 			"SessionStart",
 			"UserPromptSubmit",
@@ -123,12 +125,13 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"claudecode": {{
-		Connector:             "claudecode",
-		ContractID:            "claudecode-hooks-v1",
-		MinAgentVersion:       "2.1.144",
-		DefaultForUnversioned: true,
-		HookScriptVersion:     "v6",
-		ResponseFieldName:     "claude_code_output",
+		Connector:               "claudecode",
+		ContractID:              "claudecode-hooks-v1",
+		MinAgentVersion:         "2.1.144",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.claude/settings.json"},
+		ResponseFieldName:       "claude_code_output",
 		Events: []string{
 			"SessionStart",
 			"UserPromptSubmit",
@@ -186,14 +189,15 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"hermes": {{
-		Connector:             "hermes",
-		ContractID:            "hermes-hooks-v1",
-		MinAgentVersion:       "0.11.0",
-		DefaultForUnversioned: true,
-		HookScriptVersion:     "v6",
-		ResponseFieldName:     "hook_output",
-		Events:                []string{"pre_tool_call"},
-		AIDSurfaces:           []string{"tool_call"},
+		Connector:               "hermes",
+		ContractID:              "hermes-hooks-v1",
+		MinAgentVersion:         "0.11.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.hermes/config.yaml"},
+		ResponseFieldName:       "hook_output",
+		Events:                  []string{"pre_tool_call"},
+		AIDSurfaces:             []string{"tool_call"},
 		Capabilities: HookCapability{
 			CanBlock:           true,
 			CanAskNative:       false,
@@ -207,12 +211,13 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"cursor": {{
-		Connector:             "cursor",
-		ContractID:            "cursor-hooks-v1",
-		MinAgentVersion:       "1.7.0",
-		DefaultForUnversioned: true,
-		HookScriptVersion:     "v6",
-		ResponseFieldName:     "hook_output",
+		Connector:               "cursor",
+		ContractID:              "cursor-hooks-v1",
+		MinAgentVersion:         "1.7.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.cursor/hooks.json"},
+		ResponseFieldName:       "hook_output",
 		Events: []string{
 			"preToolUse",
 			"beforeShellExecution",
@@ -249,12 +254,13 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"windsurf": {{
-		Connector:             "windsurf",
-		ContractID:            "windsurf-hooks-v1",
-		MinAgentVersion:       "1.12.41",
-		DefaultForUnversioned: true,
-		HookScriptVersion:     "v6",
-		ResponseFieldName:     "hook_output",
+		Connector:               "windsurf",
+		ContractID:              "windsurf-hooks-v1",
+		MinAgentVersion:         "1.12.41",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.codeium/windsurf/hooks.json"},
+		ResponseFieldName:       "hook_output",
 		Events: []string{
 			"pre_user_prompt",
 			"pre_read_code",
@@ -276,12 +282,13 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"geminicli": {{
-		Connector:             "geminicli",
-		ContractID:            "geminicli-hooks-v1",
-		MinAgentVersion:       "0.26.0",
-		DefaultForUnversioned: true,
-		HookScriptVersion:     "v6",
-		ResponseFieldName:     "hook_output",
+		Connector:               "geminicli",
+		ContractID:              "geminicli-hooks-v1",
+		MinAgentVersion:         "0.26.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.gemini/settings.json"},
+		ResponseFieldName:       "hook_output",
 		Events: []string{
 			"BeforeAgent",
 			"BeforeModel",
@@ -310,12 +317,13 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 	}},
 	"copilot": {{
-		Connector:             "copilot",
-		ContractID:            "copilot-hooks-v1",
-		MinAgentVersion:       "1.0.18",
-		DefaultForUnversioned: true,
-		HookScriptVersion:     "v6",
-		ResponseFieldName:     "hook_output",
+		Connector:               "copilot",
+		ContractID:              "copilot-hooks-v1",
+		MinAgentVersion:         "1.0.18",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.copilot/hooks/defenseclaw.json", "<workspace>/.github/hooks/defenseclaw.json"},
+		ResponseFieldName:       "hook_output",
 		Events: []string{
 			"preToolUse",
 			"PreToolUse",
@@ -348,12 +356,47 @@ var builtinHookContracts = map[string][]HookContract{
 				"PostToolUseFailure",
 			},
 			SupportsFailClosed: false,
-			Scope:              "workspace",
+			Scope:              "user,workspace",
 		},
 		SupportsTraceparent: true,
 		Notes: []string{
 			"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
 			"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+		},
+	}},
+	"openhands": {{
+		Connector:               "openhands",
+		ContractID:              "openhands-hooks-v1",
+		MinAgentVersion:         "0.0.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.openhands/hooks.json", "<workspace>/.openhands/hooks.json"},
+		ResponseFieldName:       "hook_output",
+		Events: []string{
+			"pre_tool_use",
+			"post_tool_use",
+			"user_prompt_submit",
+			"stop",
+			"session_start",
+			"session_end",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			BlockEvents: []string{
+				"pre_tool_use",
+				"user_prompt_submit",
+				"stop",
+			},
+			SupportsFailClosed: true,
+			Scope:              "user,workspace",
+		},
+		SupportsTraceparent: true,
+		Notes: []string{
+			"OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
+			"Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
+			"OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask/permission prompt surface is documented, so confirm verdicts are downgraded to additionalContext alerts.",
 		},
 	}},
 }
@@ -501,6 +544,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	contract := resolution.Contract
 	profile.ContractID = contract.ContractID
 	profile.HookScriptVersion = contract.HookScriptVersion
+	profile.HookConfigPathTemplates = append([]string(nil), contract.HookConfigPathTemplates...)
 	profile.SupportedEvents = append([]string(nil), contract.Events...)
 	profile.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 	profile.SupportsTraceparent = contract.SupportsTraceparent
@@ -537,6 +581,8 @@ func normalizeConnectorName(name string) string {
 		return "claudecode"
 	case "gemini", "gemini-cli", "gemini_cli":
 		return "geminicli"
+	case "open-hands", "open_hands":
+		return "openhands"
 	default:
 		return name
 	}

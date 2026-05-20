@@ -710,7 +710,11 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	var compTargets map[string][]string
 	if conn != nil {
 		if scanner, ok := conn.(connector.ComponentScanner); ok && scanner.SupportsComponentScanning() {
-			compTargets = scanner.ComponentTargets("")
+			workspaceDir := ""
+			if cfg != nil {
+				workspaceDir = cfg.ConnectorWorkspaceDir()
+			}
+			compTargets = scanner.ComponentTargets(workspaceDir)
 		}
 	}
 
@@ -1141,7 +1145,7 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 	}
 	conn, ok := reg.Get(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot) or remove the field to default to openclaw", surface, trimmed)
+		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot, openhands) or remove the field to default to openclaw", surface, trimmed)
 	}
 	return conn, nil
 }
@@ -1227,7 +1231,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	masterKey := deriveMasterKey(s.cfg.DataDir)
 	conn.SetCredentials(apiToken, masterKey)
 
-	workspaceDir, _ := os.Getwd()
+	workspaceDir := s.cfg.ConnectorWorkspaceDir()
 	agentVersion := connector.LoadCachedAgentVersion(s.cfg.DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupOpts := connector.SetupOpts{
@@ -1439,7 +1443,7 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	switch conn.Name() {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		return false
 	default:
 		return true
@@ -1473,7 +1477,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	switch configuredConnectorName(cfg) {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		return false
 	default:
 		return true
@@ -1508,7 +1512,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 //	                             gateway.host at a real upstream
 //	                             (LAN IP, FQDN, etc.); they want
 //	                             fleet integration alongside hooks.
-//	hermes / cursor / windsurf / geminicli / copilot
+//	hermes / cursor / windsurf / geminicli / copilot / openhands
 //	                           → SKIP. These connectors are local
 //	                             hook/native-telemetry surfaces in
 //	                             this PR and do not use the OpenClaw
@@ -1542,7 +1546,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		return false
 	default:
 		// Empty / unknown connector: prefer DISABLED over reconnect

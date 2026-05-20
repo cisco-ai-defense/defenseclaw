@@ -45,16 +45,17 @@ type hookContractLock struct {
 // doctor/setup can detect "the agent binary changed underneath us" instead of
 // silently applying stale capabilities to a new upstream hook protocol.
 type HookContractLockEntry struct {
-	Connector              string            `json:"connector"`
-	RawAgentVersion        string            `json:"raw_agent_version,omitempty"`
-	NormalizedAgentVersion string            `json:"normalized_agent_version,omitempty"`
-	ContractID             string            `json:"contract_id,omitempty"`
-	CompatibilityStatus    string            `json:"compatibility_status,omitempty"`
-	CompatibilityReason    string            `json:"compatibility_reason,omitempty"`
-	HookScriptVersion      string            `json:"hook_script_version,omitempty"`
-	HookScriptDigests      map[string]string `json:"hook_script_digests,omitempty"`
-	DefenseClawVersion     string            `json:"defenseclaw_version,omitempty"`
-	UpdatedAt              string            `json:"updated_at"`
+	Connector              string             `json:"connector"`
+	RawAgentVersion        string             `json:"raw_agent_version,omitempty"`
+	NormalizedAgentVersion string             `json:"normalized_agent_version,omitempty"`
+	ContractID             string             `json:"contract_id,omitempty"`
+	CompatibilityStatus    string             `json:"compatibility_status,omitempty"`
+	CompatibilityReason    string             `json:"compatibility_reason,omitempty"`
+	HookScriptVersion      string             `json:"hook_script_version,omitempty"`
+	HookScriptDigests      map[string]string  `json:"hook_script_digests,omitempty"`
+	Locations              ConnectorLocations `json:"locations,omitempty"`
+	DefenseClawVersion     string             `json:"defenseclaw_version,omitempty"`
+	UpdatedAt              string             `json:"updated_at"`
 }
 
 // LoadActiveConnector reads the previously active connector name from
@@ -158,6 +159,7 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		CompatibilityReason:    resolution.Reason,
 		HookScriptVersion:      contract.HookScriptVersion,
 		HookScriptDigests:      HookScriptDigests(opts, conn),
+		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
@@ -165,6 +167,53 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		entry.ContractID = opts.HookContractID
 	}
 	return entry
+}
+
+func ResolvedConnectorLocations(opts SetupOpts, conn Connector) ConnectorLocations {
+	loc := ConnectorLocations{
+		WorkspaceDir: strings.TrimSpace(opts.WorkspaceDir),
+	}
+	if conn == nil {
+		return loc
+	}
+	if hp, ok := conn.(HookCapabilityProvider); ok {
+		caps := hp.HookCapabilities(opts)
+		loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.ConfigPath))
+	}
+	for _, path := range hookScriptPathsForConnector(opts, conn) {
+		loc.HookScriptPaths = append(loc.HookScriptPaths, path)
+	}
+	loc.HookScriptPaths = uniqueNonEmptyStrings(loc.HookScriptPaths)
+
+	cp, ok := conn.(ConnectorCapabilityProvider)
+	if !ok {
+		return loc
+	}
+	caps := cp.Capabilities(opts)
+	loc.HookConfigPaths = uniqueNonEmptyStrings(append(loc.HookConfigPaths, caps.Hooks.ConfigPath))
+	loc.TelemetryConfigPaths = uniqueNonEmptyStrings(caps.Telemetry.ConfigPaths)
+	loc.Surfaces = map[string]SurfaceLocations{
+		"mcp":     surfaceLocations(caps.MCP),
+		"skills":  surfaceLocations(caps.Skills),
+		"rules":   surfaceLocations(caps.Rules),
+		"plugins": surfaceLocations(caps.Plugins),
+		"agents":  surfaceLocations(caps.Agents),
+	}
+	return loc
+}
+
+func surfaceLocations(cap SurfaceCapability) SurfaceLocations {
+	return SurfaceLocations{
+		Supported:      cap.Supported,
+		Scope:          cap.Scope,
+		ConfigPaths:    uniqueNonEmptyStrings(cap.ConfigPaths),
+		ReadPaths:      uniqueNonEmptyStrings(cap.ReadPaths),
+		WritePaths:     uniqueNonEmptyStrings(cap.WritePaths),
+		InstallTargets: uniqueNonEmptyStrings(cap.InstallTargets),
+		DiscoveryOnly:  cap.DiscoveryOnly,
+		RequiresOptIn:  cap.RequiresOptIn,
+		Notes:          append([]string(nil), cap.Notes...),
+	}
 }
 
 func HookContractLockDrifted(previous, current HookContractLockEntry) bool {

@@ -55,9 +55,15 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "/sbin",
     "/opt/homebrew/bin",
     "/opt/homebrew/sbin",
+    "/opt/homebrew/Cellar",
+    "/opt/homebrew/lib/node_modules",
+    "/usr/local/Cellar",
+    "/usr/local/lib/node_modules",
     "/opt/local/bin",
     "/opt/local/sbin",
     "~/.local/bin",
+    "~/.local/share/claude",
+    "~/.local/share/uv/tools",
     "~/.cargo/bin",
     "~/.npm-global/bin",
     "~/.volta/bin",
@@ -80,6 +86,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "windsurf",
     "geminicli",
     "copilot",
+    "openhands",
 )
 
 
@@ -132,6 +139,9 @@ _SPECS: dict[str, _AgentSpec] = {
         ),
         "copilot",
         ("version",),
+    ),
+    "openhands": _AgentSpec(
+        (".openhands/hooks.json", ".openhands", "~/.openhands/mcp.json"), "openhands", ("--version",)
     ),
 }
 
@@ -314,13 +324,22 @@ def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tupl
     # anything outside the canonical install prefixes.
     if not _is_trusted_binary_path(binary_path):
         return "", "binary path is not in a trusted install prefix"
+    binary_name = os.path.basename(binary_path).lower()
+    env = None
+    timeout = VERSION_TIMEOUT_SECONDS
+    if binary_name in {"hermes", "openhands"}:
+        timeout = 8.0
+    if binary_name == "openhands":
+        env = {**os.environ, "OPENHANDS_SUPPRESS_BANNER": "1"}
+
     try:
         result = subprocess.run(
             [binary_path, *(version_args or ("--version",))],
             shell=False,
-            timeout=VERSION_TIMEOUT_SECONDS,
+            timeout=timeout,
             capture_output=True,
             text=True,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return "", "version probe timed out"
@@ -335,7 +354,19 @@ def _version_for_binary(binary_path: str, version_args: tuple[str, ...]) -> tupl
         return "", f"version probe exited {result.returncode}"
     if not stdout:
         return "", "version probe returned empty stdout"
-    return stdout.splitlines()[0].strip(), ""
+    return _version_line_for_binary(binary_path, stdout), ""
+
+
+def _version_line_for_binary(binary_path: str, stdout: str) -> str:
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    binary_name = os.path.basename(binary_path).lower()
+    if binary_name == "openhands":
+        for line in reversed(lines):
+            if "openhands cli" in line.lower():
+                return line
+    return lines[0]
 
 
 def _first_existing_path(candidates: tuple[str, ...]) -> str:
@@ -465,6 +496,8 @@ def _normalize_connector(value: str | None) -> str:
     name = value.strip().lower()
     if name in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
+    if name in {"open-hands", "open_hands"}:
+        return "openhands"
     return name
 
 
@@ -489,12 +522,14 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
         lines.append(
-            " | ".join([
-                signal.name,
-                "yes" if signal.installed else "no",
-                _display_path(signal.config_path),
-                _display_path(signal.binary_path),
-                signal.version or signal.error,
-            ])
+            " | ".join(
+                [
+                    signal.name,
+                    "yes" if signal.installed else "no",
+                    _display_path(signal.config_path),
+                    _display_path(signal.binary_path),
+                    signal.version or signal.error,
+                ]
+            )
         )
     return "\n".join(lines) + "\n"

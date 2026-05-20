@@ -158,6 +158,55 @@ def test_version_probe_uses_no_shell_and_list_args(monkeypatch, tmp_path):
     assert kwargs["text"] is True
 
 
+def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/openhands")
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
+
+    banner = """+----------------------------------------------------------------------+
+|  OpenHands SDK v1.21.0                                               |
++----------------------------------------------------------------------+
+
+OpenHands CLI 1.16.0
+"""
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=banner, stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    signal = ad._scan_agent("openhands")
+
+    assert signal.installed is True
+    assert signal.version == "OpenHands CLI 1.16.0"
+    args, kwargs = calls[0]
+    assert args == ["/opt/bin/openhands", "--version"]
+    assert kwargs["timeout"] == 8.0
+    assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
+
+
+def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/hermes")
+    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
+
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="Hermes Agent v0.13.0\n", stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+
+    signal = ad._scan_agent("hermes")
+
+    assert signal.installed is True
+    assert signal.version == "Hermes Agent v0.13.0"
+    _, kwargs = calls[0]
+    assert kwargs["timeout"] == 8.0
+
+
 # M-4 regression coverage: the version probe MUST refuse to exec a
 # binary that lives outside the canonical install prefixes (an attacker
 # who can prepend a hostile directory to PATH could otherwise have us
@@ -196,6 +245,45 @@ def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     binary.parent.chmod(0o755)
     monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(tmp_path))
     assert ad._is_trusted_binary_path(str(binary)) is True
+
+
+def test_trust_check_accepts_homebrew_symlink_targets(monkeypatch, tmp_path):
+    homebrew = tmp_path / "homebrew"
+    real = homebrew / "lib" / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/usr/bin/env node\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+    link_dir = homebrew / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "codex"
+    link.symlink_to(real)
+
+    monkeypatch.setattr(ad, "_TRUSTED_BIN_PREFIXES_DEFAULT", (str(link_dir), str(homebrew / "lib" / "node_modules")))
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+
+    assert ad._is_trusted_binary_path(str(link)) is True
+
+
+def test_trust_check_accepts_claude_local_share_target(monkeypatch, tmp_path):
+    real = tmp_path / ".local" / "share" / "claude" / "versions" / "2.1.139"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+    link_dir = tmp_path / ".local" / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "claude"
+    link.symlink_to(real)
+
+    monkeypatch.setattr(
+        ad,
+        "_TRUSTED_BIN_PREFIXES_DEFAULT",
+        (str(link_dir), str(tmp_path / ".local" / "share" / "claude")),
+    )
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+
+    assert ad._is_trusted_binary_path(str(link)) is True
 
 
 def test_trust_check_rejects_world_writable_parent(monkeypatch, tmp_path):

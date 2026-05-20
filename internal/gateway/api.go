@@ -483,7 +483,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot"} {
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -694,7 +694,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 	reg := a.connectorRegistry
 	if reg == nil {
 		// Reuse the lazy singleton instead of paying a fresh
-		// NewDefaultRegistry() build (eight builtin
+		// NewDefaultRegistry() build (ten builtin
 		// registrations) on every /connectors GET.
 		reg = getFallbackConnectorRegistry()
 	}
@@ -706,6 +706,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		SubprocessPolicy   string                           `json:"subprocess_policy"`
 		HookCapabilities   *connector.HookCapability        `json:"hook_capabilities,omitempty"`
 		Capabilities       *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
+		Locations          *connector.ConnectorLocations    `json:"locations,omitempty"`
 	}
 	avail := reg.Available()
 	entries := make([]connectorEntry, len(avail))
@@ -721,8 +722,10 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			opts := connector.SetupOpts{
 				DataDir:      a.configDataDir(),
 				APIAddr:      a.apiAddrForCapabilities(),
-				WorkspaceDir: currentWorkingDir(),
+				WorkspaceDir: a.connectorWorkspaceDir(),
 			}
+			loc := connector.ResolvedConnectorLocations(opts, conn)
+			entry.Locations = &loc
 			if cp, ok := conn.(connector.ConnectorCapabilityProvider); ok {
 				caps := cp.Capabilities(opts)
 				entry.Capabilities = &caps
@@ -809,7 +812,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		mode = "observability"
 		intercept = false
 		telemetry = []string{"hooks"}

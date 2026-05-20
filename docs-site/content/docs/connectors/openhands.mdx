@@ -1,0 +1,120 @@
+---
+title: OpenHands
+description: OpenHands connector wires DefenseClaw into global ~/.openhands/hooks.json command hooks by default, with MCP discovery through ~/.openhands/mcp.json and optional workspace-local skills.
+keywords:
+  - DefenseClaw OpenHands connector
+  - OpenHands hooks
+  - OpenHands hooks.json
+  - OpenHands guardrail
+---
+
+The OpenHands connector wires DefenseClaw into [OpenHands lifecycle hooks](https://docs.openhands.dev/openhands/usage/customization/hooks). DefenseClaw installs the hook globally at `~/.openhands/hooks.json` by default so local OpenHands sessions across repositories report into the same DefenseClaw gateway, while OpenHands still talks directly to its configured upstream model provider.
+
+## Setup
+
+```bash
+defenseclaw setup openhands                # observe (default) - record only
+defenseclaw setup openhands --mode action  # block on policy hits via hook deny
+defenseclaw setup openhands --workspace /path/to/repo
+```
+
+By default this is **global/user-scoped**: DefenseClaw writes native OpenHands hook entries into `~/.openhands/hooks.json` and installs the shared hook script at `~/.defenseclaw/hooks/openhands-hook.sh`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `.openhands/hooks.json` wiring for that repository. **There is no proxy-enforcement path** for OpenHands — blocking happens hook-side with OpenHands' documented exit code `2` deny response.
+
+<Callout type="info">
+The OpenHands connector is **hook-only**. `defenseclaw setup openhands` defaults to observability-only `mode=observe`, and `defenseclaw setup openhands --mode action` enables hook-native blocking. OpenHands still talks directly to its configured upstream model provider in both modes; DefenseClaw never inserts an LLM proxy.
+</Callout>
+
+#### What `setup openhands` actually does
+
+The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--yes / -y` | off | Skip the confirmation prompt. |
+| `--mode observe\|action` | `observe` | `observe` records only; `action` returns OpenHands' documented deny response on policy hits. |
+| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
+| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
+| `--workspace / --workspace-dir` | unset | Opt into repo-local `.openhands/hooks.json`; unset means global `~/.openhands/hooks.json`. |
+
+Pinned by the alias regardless of flags: `claw.mode=openhands`, `guardrail.connector=openhands`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. `claw.workspace_dir` is cleared for global setup and set only when `--workspace` is supplied. `guardrail.mode` defaults to `observe` and changes to `action` only when `--mode action` is passed. To tune the broader guardrail matrix after install, use [`defenseclaw setup guardrail --connector openhands`](/docs/setup/guardrail).
+
+#### Version contract
+
+DefenseClaw validates the installed OpenHands CLI version during setup when the trusted `openhands --version` probe succeeds. The OpenHands connector is documented and tested against `OpenHands CLI 1.16.0`; the hook contract remains listed as "unversioned / documented hooks" until upstream publishes a hook-version floor for `.openhands/hooks.json`.
+
+<Callout type="warn">
+Global OpenHands setup observes local OpenHands sessions that load `~/.openhands/hooks.json`. A repository-local `.openhands/hooks.json` can still override or layer with that behavior depending on OpenHands' own config loading. Use `--workspace` when you want DefenseClaw to manage a repo-local file explicitly.
+</Callout>
+
+## Hook schema
+
+DefenseClaw writes the native OpenHands shape: top-level `snake_case` event keys, each containing matcher groups and `command` hooks. It does not wrap the config in a Claude Code-style top-level `hooks` object.
+
+```json
+{
+  "pre_tool_use": [
+    {
+      "matcher": "*",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "~/.defenseclaw/hooks/openhands-hook.sh",
+          "timeout": 60
+        }
+      ]
+    }
+  ]
+}
+```
+
+OpenHands can block `pre_tool_use`, `user_prompt_submit`, and `stop`. Non-blocking events still feed telemetry and audit. When DefenseClaw blocks, the hook script returns JSON shaped like OpenHands expects:
+
+```json
+{ "decision": "deny", "reason": "policy denied" }
+```
+
+OpenHands documents `additionalContext` for context injection. DefenseClaw uses that field for downgraded alerts or confirm verdicts because OpenHands does not expose a native ask/approval surface in the documented hook contract.
+
+## Local surfaces
+
+<Files>
+  <Folder name="~/.openhands" defaultOpen>
+    <File name="hooks.json" />
+    <File name="mcp.json" />
+  </Folder>
+  <Folder name="~/.agents">
+    <Folder name="skills">
+      <File name="..." />
+    </Folder>
+  </Folder>
+  <Folder name="<workspace>/.openhands">
+    <File name="hooks.json (only with --workspace)" />
+  </Folder>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name="hooks">
+      <File name="openhands-hook.sh" />
+    </Folder>
+  </Folder>
+</Files>
+
+OpenHands MCP servers are managed in [`~/.openhands/mcp.json`](https://docs.openhands.dev/openhands/usage/cli/mcp-servers), so MCP discovery is global by default. Current OpenHands skills use `.agents/skills`; global setup resolves that as `~/.agents/skills`, and workspace setup resolves it under the pinned repository. DefenseClaw also discovers deprecated `.openhands/skills` and `.openhands/microagents` paths, installed skills in `~/.openhands/skills/installed`, and the public OpenHands extensions cache at `~/.openhands/cache/skills/public-skills/skills`. That cache is where OpenHands' own "Loaded: N skills" count comes from after the SDK syncs public skills. OpenHands has no plugin install surface in the documented local contract, so DefenseClaw treats plugins as unsupported and hides the Plugins TUI panel while `claw.mode=openhands`.
+
+`claw.workspace_dir` is optional. Empty means global user scope. When set via `--workspace`, workspace-local skills/rules discovery uses that repository until you clear it with a global setup run or point it at another workspace.
+
+The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` under `locations`, so `defenseclaw doctor` can report both the hook contract and the concrete hook/MCP/skill locations it is using.
+
+## Hook capabilities
+
+<HookEventsList connector="openhands" />
+
+<Callout>
+OpenHands can block supported hook events but has no native human-approval surface; HITL approvals fall back to confirm verdicts in the DefenseClaw TUI / audit log, with `raw_action: "confirm"` preserved.
+</Callout>
+
+## Disable
+
+```bash
+defenseclaw setup guardrail --disable
+```
+
+Teardown removes DefenseClaw-owned hook entries from `~/.openhands/hooks.json` or the pinned workspace hook file and leaves unrelated OpenHands hooks untouched.

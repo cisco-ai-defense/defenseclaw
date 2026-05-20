@@ -238,6 +238,7 @@ class ClawConfig:
     mode: str = "openclaw"
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
+    workspace_dir: str = ""
     openclaw_home_original: str = ""
 
 
@@ -1178,7 +1179,19 @@ class Config:
         return connector_paths.connector_home(
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
+            workspace_dir=self.connector_workspace_dir(),
         ) or _expand(self.claw.home_dir)
+
+    def connector_workspace_dir(self) -> str:
+        """Return the explicitly pinned connector workspace, if any."""
+        raw = (self.claw.workspace_dir or "").strip()
+        if not raw:
+            return ""
+        raw = _expand(raw)
+        try:
+            return str(Path(raw).expanduser().resolve(strict=False))
+        except OSError:
+            return os.path.abspath(raw)
 
     def active_connector(self) -> str:
         """Return the canonical connector name for this config.
@@ -1207,6 +1220,7 @@ class Config:
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
             openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
         )
 
     def plugin_dirs(self) -> list[str]:
@@ -1217,6 +1231,7 @@ class Config:
         return connector_paths.plugin_dirs(
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
+            workspace_dir=self.connector_workspace_dir(),
         )
 
     def mcp_servers(self) -> list[MCPServerEntry]:
@@ -1230,6 +1245,7 @@ class Config:
         return connector_paths.mcp_servers(
             self.active_connector(),
             openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
             openclaw_bin_resolver=openclaw_bin,
             openclaw_cmd_prefix=openclaw_cmd_prefix(),
         )
@@ -2528,6 +2544,7 @@ def load() -> Config:
             mode=raw.get("claw", {}).get("mode", "openclaw"),
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
+            workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
             openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),

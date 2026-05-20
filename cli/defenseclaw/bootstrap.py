@@ -66,10 +66,10 @@ class BootstrapReport:
     audit_db: str = ""
     is_new_config: bool = False
     dirs_created: list[str] = field(default_factory=list)
-    rego_seeded: str = ""       # destination path, "" if bundle missing
+    rego_seeded: str = ""  # destination path, "" if bundle missing
     guardrail_profiles_seeded: list[str] = field(default_factory=list)
     guardrail_profiles_preserved: list[str] = field(default_factory=list)
-    splunk_bridge_dest: str = ""      # "" if bundle missing, otherwise dest path
+    splunk_bridge_dest: str = ""  # "" if bundle missing, otherwise dest path
     splunk_bridge_preserved: bool = False
     openclaw_token_detected: bool = False
     device_key_file: str = ""
@@ -297,11 +297,13 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
     try:
         cfg.save()
-        setup.append(StepResult(
-            "Config",
-            "pass",
-            "created defaults" if new_config else "preserved existing config",
-        ))
+        setup.append(
+            StepResult(
+                "Config",
+                "pass",
+                "created defaults" if new_config else "preserved existing config",
+            )
+        )
     except OSError as exc:
         setup.append(StepResult("Config", "fail", str(exc), "defenseclaw config validate"))
 
@@ -337,12 +339,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
 
     if options.sandbox:
-        setup.append(StepResult(
-            "Sandbox",
-            "warn",
-            "sandbox bootstrap remains Linux-only; run the dedicated sandbox setup",
-            "defenseclaw sandbox setup",
-        ))
+        setup.append(
+            StepResult(
+                "Sandbox",
+                "warn",
+                "sandbox bootstrap remains Linux-only; run the dedicated sandbox setup",
+                "defenseclaw sandbox setup",
+            )
+        )
 
     if options.start_gateway:
         setup.append(_start_gateway_structured(cfg))
@@ -354,9 +358,11 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     except OSError as exc:
         setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
 
-    readiness = targeted_readiness(cfg, options) if options.verify else [
-        StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")
-    ]
+    readiness = (
+        targeted_readiness(cfg, options)
+        if options.verify
+        else [StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")]
+    )
 
     try:
         logger.close()
@@ -381,25 +387,31 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     """Run scoped readiness checks for the choices made during first run."""
     steps: list[StepResult] = []
     cfg_path = os.path.join(cfg.data_dir, "config.yaml")
-    steps.append(StepResult(
-        "Config file",
-        "pass" if os.path.isfile(cfg_path) else "fail",
-        cfg_path if os.path.isfile(cfg_path) else "missing",
-        "defenseclaw init" if not os.path.isfile(cfg_path) else "",
-    ))
-    steps.append(StepResult(
-        "Audit database",
-        "pass" if os.path.isfile(cfg.audit_db) else "fail",
-        cfg.audit_db,
-        "defenseclaw doctor --fix" if not os.path.isfile(cfg.audit_db) else "",
-    ))
+    steps.append(
+        StepResult(
+            "Config file",
+            "pass" if os.path.isfile(cfg_path) else "fail",
+            cfg_path if os.path.isfile(cfg_path) else "missing",
+            "defenseclaw init" if not os.path.isfile(cfg_path) else "",
+        )
+    )
+    steps.append(
+        StepResult(
+            "Audit database",
+            "pass" if os.path.isfile(cfg.audit_db) else "fail",
+            cfg.audit_db,
+            "defenseclaw doctor --fix" if not os.path.isfile(cfg.audit_db) else "",
+        )
+    )
     device_key = cfg.gateway.device_key_file
-    steps.append(StepResult(
-        "Device key",
-        "pass" if device_key and os.path.isfile(device_key) else "fail",
-        device_key or "(unset)",
-        "defenseclaw doctor --fix" if not (device_key and os.path.isfile(device_key)) else "",
-    ))
+    steps.append(
+        StepResult(
+            "Device key",
+            "pass" if device_key and os.path.isfile(device_key) else "fail",
+            device_key or "(unset)",
+            "defenseclaw doctor --fix" if not (device_key and os.path.isfile(device_key)) else "",
+        )
+    )
 
     for s in _scanner_availability(cfg):
         if s.status == "warn":
@@ -412,12 +424,14 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
     if options.start_gateway:
         pid_file = os.path.join(cfg.data_dir, "gateway.pid")
         running = _pid_file_running(pid_file)
-        steps.append(StepResult(
-            "Sidecar",
-            "pass" if running else "warn",
-            "running" if running else "not confirmed after start",
-            "defenseclaw-gateway status" if not running else "",
-        ))
+        steps.append(
+            StepResult(
+                "Sidecar",
+                "pass" if running else "warn",
+                "running" if running else "not confirmed after start",
+                "defenseclaw-gateway status" if not running else "",
+            )
+        )
 
     llm = cfg.resolve_llm("guardrail")
     if cfg.guardrail.enabled and llm.is_local_provider():
@@ -436,12 +450,14 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         steps.append(StepResult("Cisco AI Defense", "skip", "scanner_mode is local"))
 
     if shutil.which("defenseclaw-gateway") is None:
-        steps.append(StepResult(
-            "Gateway binary",
-            "warn",
-            "defenseclaw-gateway not on PATH",
-            "make gateway-install",
-        ))
+        steps.append(
+            StepResult(
+                "Gateway binary",
+                "warn",
+                "defenseclaw-gateway not on PATH",
+                "make gateway-install",
+            )
+        )
     else:
         steps.append(StepResult("Gateway binary", "pass", "found on PATH"))
 
@@ -484,6 +500,7 @@ def _apply_first_run_choices(
     scanner_mode: str,
 ) -> None:
     cfg.claw.mode = connector
+    cfg.claw.workspace_dir = ""
     cfg.guardrail.connector = connector
     cfg.guardrail.scanner_mode = scanner_mode
     cfg.guardrail.mode = "action" if profile == "action" else "observe"
@@ -517,9 +534,7 @@ def _apply_first_run_choices(
     # severities trigger an approval prompt.
     severity = (options.hilt_min_severity or "").strip().upper()
     if severity:
-        cfg.guardrail.hilt.min_severity = (
-            severity if severity in HILT_MIN_SEVERITIES else "HIGH"
-        )
+        cfg.guardrail.hilt.min_severity = severity if severity in HILT_MIN_SEVERITIES else "HIGH"
 
     # Defensive: if we just enabled HITL but the existing
     # min_severity is empty (default_config seeds "HIGH" but
@@ -708,28 +723,35 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         if running is not None and running != desired:
             try:
                 result = subprocess.run(
-                    [gw, "restart"], capture_output=True, text=True, timeout=30,
+                    [gw, "restart"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
                 )
             except subprocess.TimeoutExpired:
                 return StepResult(
-                    "Sidecar", "warn",
+                    "Sidecar",
+                    "warn",
                     f"connector drift detected ({running} → {desired}) but restart timed out",
                     "defenseclaw-gateway restart",
                 )
             except OSError as exc:
                 return StepResult(
-                    "Sidecar", "warn",
+                    "Sidecar",
+                    "warn",
                     f"connector drift detected ({running} → {desired}): {exc}",
                     "defenseclaw-gateway restart",
                 )
             if result.returncode == 0:
                 return StepResult(
-                    "Sidecar", "pass",
+                    "Sidecar",
+                    "pass",
                     f"restarted (was {running}, now {desired})",
                 )
             detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
             return StepResult(
-                "Sidecar", "warn",
+                "Sidecar",
+                "warn",
                 f"connector drift detected ({running} → {desired}) but restart failed: "
                 f"{detail[0] if detail else 'restart failed'}",
                 "defenseclaw-gateway restart",
@@ -811,11 +833,26 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "Gemini CLI settings found")
         return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup mode geminicli")
     if connector == "copilot":
-        cwd = getattr(cfg, "cwd", "") or os.getcwd()
-        path = os.path.join(cwd, ".github", "hooks", "defenseclaw.json")
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        if workspace:
+            path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
+        else:
+            path = os.path.expanduser("~/.copilot/hooks/defenseclaw.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
         return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup mode copilot")
+    if connector == "openhands":
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        candidates = [
+            os.path.expanduser("~/.openhands/hooks.json"),
+        ]
+        if workspace:
+            candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
+        if any(os.path.isfile(path) for path in candidates):
+            return StepResult("Connector", "pass", "OpenHands hooks found")
+        return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup mode openhands")
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 
@@ -897,6 +934,7 @@ def _next_commands(
 # ---------------------------------------------------------------------------
 # Step helpers
 # ---------------------------------------------------------------------------
+
 
 def _seed_rego(policy_dir: str, report: BootstrapReport) -> None:
     from defenseclaw.paths import bundled_rego_dir

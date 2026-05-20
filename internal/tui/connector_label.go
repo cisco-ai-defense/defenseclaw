@@ -49,6 +49,8 @@ func FriendlyConnectorName(name string) string {
 		return "Gemini CLI"
 	case "copilot":
 		return "GitHub Copilot CLI"
+	case "openhands":
+		return "OpenHands"
 	default:
 		// Capitalise the first rune for an unknown plugin connector
 		// so we still show "Foo" rather than "foo" — but never
@@ -146,6 +148,14 @@ func skillSources(connector string) []string {
 			cwdRel(".agents/skills"),
 			tildePath(filepath.Join(home, ".copilot", "skills")),
 		}
+	case "openhands":
+		return []string{
+			tildePath(filepath.Join(home, ".agents", "skills")),
+			tildePath(filepath.Join(home, ".openhands", "skills")) + " (deprecated)",
+			tildePath(filepath.Join(home, ".openhands", "microagents")) + " (deprecated)",
+			tildePath(filepath.Join(home, ".openhands", "skills", "installed")),
+			tildePath(filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills")) + " (public cache)",
+		}
 	default:
 		return []string{
 			cwdRel("skills"),
@@ -195,6 +205,8 @@ func mcpSources(connector string) []string {
 			cwdRel(".github/mcp.json"),
 			cwdRel(".mcp.json"),
 		}
+	case "openhands":
+		return []string{tildePath(filepath.Join(home, ".openhands", "mcp.json"))}
 	default:
 		return []string{"openclaw config get mcp.servers", "openclaw.json (mcp.servers)"}
 	}
@@ -218,7 +230,7 @@ func pluginSources(connector string) []string {
 		return []string{cwdRel(".gemini/extensions")}
 	case "copilot":
 		return []string{"copilot plugin list"}
-	case "cursor", "windsurf":
+	case "cursor", "windsurf", "openhands":
 		return []string{"unsupported"}
 	default:
 		return []string{tildePath(filepath.Join(home, ".openclaw", "extensions"))}
@@ -244,6 +256,8 @@ func configSources(connector string) []string {
 		return []string{tildePath(filepath.Join(home, ".gemini", "settings.json"))}
 	case "copilot":
 		return []string{cwdRel(".github/hooks/*.json")}
+	case "openhands":
+		return []string{cwdRel(".openhands/hooks.json")}
 	default:
 		return []string{tildePath(filepath.Join(home, ".openclaw", "openclaw.json"))}
 	}

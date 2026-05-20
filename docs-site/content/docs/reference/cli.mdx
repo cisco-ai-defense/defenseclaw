@@ -36,13 +36,14 @@ Tables below tag each row with the binary that owns it.
 | --- | --- |
 | `defenseclaw setup guardrail` | The central setup command. See [Setup Guardrail](/docs/setup/guardrail). |
 | `defenseclaw setup mode <connector>` | Switch the active claw connector with smart guardrail inheritance. See [Switching connectors](/docs/setup/guardrail/switching-connectors). |
-| `defenseclaw setup claude-code` | Observability-only alias for Claude Code. |
-| `defenseclaw setup codex` | Observability-only alias for Codex. |
-| `defenseclaw setup cursor` | Observability-only alias for Cursor. |
-| `defenseclaw setup windsurf` | Observability-only alias for Windsurf. |
-| `defenseclaw setup geminicli` | Observability-only alias for Gemini CLI. |
-| `defenseclaw setup copilot` | Observability-only alias for GitHub Copilot CLI. |
-| `defenseclaw setup hermes` | Observability-only alias for Hermes. |
+| `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup cursor` | Hook setup alias for Cursor; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup windsurf` | Hook setup alias for Windsurf; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup geminicli` | Hook setup alias for Gemini CLI; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
 | `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |

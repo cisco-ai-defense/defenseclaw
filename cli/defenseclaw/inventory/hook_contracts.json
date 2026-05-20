@@ -36,6 +36,9 @@
           "default_for_unversioned": true,
           "hook_script_version": "v6",
           "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
           "response_field": "codex_output",
           "events": [
             "SessionStart",
@@ -87,6 +90,9 @@
           "default_for_unversioned": true,
           "hook_script_version": "v6",
           "hook_script": "claude-code-hook.sh",
+          "hook_config_path_templates": [
+            "~/.claude/settings.json"
+          ],
           "response_field": "claude_code_output",
           "events": [
             "SessionStart",
@@ -167,6 +173,9 @@
           "default_for_unversioned": true,
           "hook_script_version": "v6",
           "hook_script": "hermes-hook.sh",
+          "hook_config_path_templates": [
+            "~/.hermes/config.yaml"
+          ],
           "response_field": "hook_output",
           "events": [
             "pre_tool_call"
@@ -206,6 +215,9 @@
           "default_for_unversioned": true,
           "hook_script_version": "v6",
           "hook_script": "cursor-hook.sh",
+          "hook_config_path_templates": [
+            "~/.cursor/hooks.json"
+          ],
           "response_field": "hook_output",
           "events": [
             "preToolUse",
@@ -263,6 +275,9 @@
           "default_for_unversioned": true,
           "hook_script_version": "v6",
           "hook_script": "windsurf-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codeium/windsurf/hooks.json"
+          ],
           "response_field": "hook_output",
           "events": [
             "pre_user_prompt",
@@ -312,6 +327,9 @@
           "default_for_unversioned": true,
           "hook_script_version": "v6",
           "hook_script": "geminicli-hook.sh",
+          "hook_config_path_templates": [
+            "~/.gemini/settings.json"
+          ],
           "response_field": "hook_output",
           "events": [
             "BeforeAgent",
@@ -361,6 +379,10 @@
           "default_for_unversioned": true,
           "hook_script_version": "v6",
           "hook_script": "copilot-hook.sh",
+          "hook_config_path_templates": [
+            "~/.copilot/hooks/defenseclaw.json",
+            "<workspace>/.github/hooks/defenseclaw.json"
+          ],
           "response_field": "hook_output",
           "events": [
             "preToolUse",
@@ -403,11 +425,67 @@
               "PostToolUseFailure"
             ],
             "supports_fail_closed": false,
-            "scope": "workspace"
+            "scope": "user,workspace"
           },
           "notes": [
             "GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
             "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks."
+          ]
+        }
+      ]
+    },
+    "openhands": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "openhands --version",
+      "docs_url": "https://docs.openhands.dev/openhands/usage/customization/hooks",
+      "contracts": [
+        {
+          "contract_id": "openhands-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "0.0.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "openhands-hook.sh",
+          "hook_config_path_templates": [
+            "~/.openhands/hooks.json",
+            "<workspace>/.openhands/hooks.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "pre_tool_use",
+            "post_tool_use",
+            "user_prompt_submit",
+            "stop",
+            "session_start",
+            "session_end"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result",
+            "event_content"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "pre_tool_use",
+              "user_prompt_submit",
+              "stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user,workspace"
+          },
+          "notes": [
+            "OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
+            "Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
+            "OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask/permission prompt surface is documented, so confirm verdicts are downgraded to additionalContext alerts."
           ]
         }
       ]

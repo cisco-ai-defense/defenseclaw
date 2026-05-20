@@ -42,6 +42,7 @@ class ConnectorContract:
     default_for_unversioned: bool = False
     hook_script_version: str = ""
     hook_script: str = ""
+    hook_config_path_templates: tuple[str, ...] = ()
     response_field: str = ""
     events: tuple[str, ...] = ()
     aid_surfaces: tuple[str, ...] = ()
@@ -118,6 +119,9 @@ def _load_contracts_from_manifest(
                     ),
                     hook_script_version=str(raw_contract.get("hook_script_version", "") or ""),
                     hook_script=str(raw_contract.get("hook_script", "") or ""),
+                    hook_config_path_templates=tuple(
+                        str(v) for v in raw_contract.get("hook_config_path_templates", []) if v
+                    ),
                     response_field=str(raw_contract.get("response_field", "") or ""),
                     events=tuple(str(v) for v in raw_contract.get("events", []) if v),
                     aid_surfaces=tuple(str(v) for v in raw_contract.get("aid_surfaces", []) if v),

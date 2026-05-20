@@ -78,6 +78,12 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		}
 	case "copilot":
 		output = copilotHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
+	case "openhands":
+		if in.Action == "block" {
+			output = map[string]interface{}{"decision": "deny", "reason": reason}
+		} else if (in.Action == "alert" || in.RawAction == "confirm") && in.AdditionalContext != "" {
+			output = map[string]interface{}{"additionalContext": in.AdditionalContext}
+		}
 	}
 	if output == nil && in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}

@@ -891,13 +891,13 @@ Provisioned in `bundles/local_observability_stack/`:
 
 ### 9.4 Hook-only enforcement
 
-The Codex and Claude Code connectors are hook-only. There is no
-LLM-proxy data path — those agents talk directly to their native
-upstreams (`api.openai.com`, `api.anthropic.com`, the ChatGPT
-backend) and DefenseClaw observes / enforces via the `PreToolUse`
-and `UserPromptSubmit` hooks. There is no proxy listener to enable
-for Codex or Claude Code; tool-call decisions are surfaced through
-the hook's deny verdict.
+The Codex, Claude Code, Hermes, Cursor, Windsurf, Gemini CLI, Copilot
+CLI, and OpenHands connectors are hook-only. There is no LLM-proxy
+data path — those agents talk directly to their native upstreams and
+DefenseClaw observes / enforces via each connector's documented hook
+bus. There is no proxy listener to enable for hook connectors; in
+`guardrail.mode=action`, tool-call decisions are surfaced through the
+hook's deny verdict.
 
 For connectors that still bind the proxy (OpenClaw, ZeptoClaw), set
 `guardrail.mode=action` and restart the gateway.
@@ -905,10 +905,11 @@ For connectors that still bind the proxy (OpenClaw, ZeptoClaw), set
 ### 9.5 One-shot setup aliases
 
 For operators who only want telemetry (no enforcement, no proxy
-listener), DefenseClaw exposes dedicated setup paths that wrap the
-observability-only branch of `setup guardrail` and additionally pin
-`claw.mode` so the rest of the CLI/TUI surfaces the matching
-connector's source-of-truth files.
+listener), DefenseClaw exposes dedicated setup paths that default to
+`guardrail.mode=observe` and additionally pin `claw.mode` so the rest
+of the CLI/TUI surfaces the matching connector's source-of-truth
+files. The same aliases also accept `--mode action` for hook-native
+blocking without inserting a proxy.
 
 ```bash
 # Codex: hooks + native OTel + notify-bridge.sh
@@ -923,6 +924,10 @@ defenseclaw setup cursor --yes
 defenseclaw setup windsurf --yes
 defenseclaw setup geminicli --yes
 defenseclaw setup copilot --yes
+defenseclaw setup openhands --yes
+
+# Hook-native blocking, still no proxy:
+defenseclaw setup openhands --yes --mode action
 
 # Optionally bring up the bundled Prom/Loki/Tempo/Grafana stack in
 # the same step:
@@ -936,7 +941,7 @@ Both aliases persist:
 | `claw.mode`                                   | selected connector | TUI / scanners read from the connector's documented local surfaces instead of the OpenClaw layout. |
 | `guardrail.connector`                         | selected connector | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
 | `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
-| `guardrail.mode`                              | `observe`         | Default mode for hook-only connectors.                                 |
+| `guardrail.mode`                              | `observe` by default, `action` with `--mode action` | Default mode for hook-only connectors is observability-only; action mode blocks through the hook. |
 | `<data_dir>/picked_connector`                 | selected connector | So `defenseclaw setup guardrail`, `init`, and quickstart default to the same connector on subsequent runs. |
 
 After both aliases run, the gateway is restarted (unless `--no-restart`

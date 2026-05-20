@@ -340,7 +340,7 @@ func zeroConnectorRequestsNotice(cfg *config.Config, connectorName string, uptim
 			name,
 			formatDuration(uptime),
 		)
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		return fmt.Sprintf(
 			"%s connector has seen 0 hook events after %s — normal until the agent emits a supported hook; verify connector hook setup if this persists",
 			name,
@@ -541,6 +541,7 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 		}
 		rows := [][2]string{
 			{"Agent", modeLabel},
+			{"Scope", connectorScopeText(p.cfg)},
 			{"Redaction", p.redactionStatusText()},
 			{"Policy posture", p.policyPostureText()},
 			{"Enforcement", p.connectorEnforcementText()},
@@ -583,6 +584,17 @@ func (p *OverviewPanel) renderConfigBox(w int) string {
 	}
 
 	return box.Render(content.String())
+}
+
+func connectorScopeText(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	workspace := strings.TrimSpace(cfg.ConnectorWorkspaceDir())
+	if workspace != "" {
+		return fmt.Sprintf("workspace (%s)", workspace)
+	}
+	return "global user config"
 }
 
 func (p *OverviewPanel) redactionStatusText() string {
@@ -675,7 +687,7 @@ func (p *OverviewPanel) connectorEnforcementText() string {
 		return p.theme.High.Render("ZeptoClaw proxy-gated")
 	case "openclaw":
 		return p.theme.High.Render("OpenClaw proxy enforcement")
-	case "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		// Hook-enforced connectors render mode explicitly so the
 		// operator can tell at a glance whether PreToolUse will
 		// block on policy hits. The colour treatment mirrors the
@@ -708,7 +720,7 @@ func (p *OverviewPanel) hiltSupportText() string {
 		label = "partial: documented ask events"
 	case "codex", "zeptoclaw":
 		label = "no native ask: alert fallback"
-	case "hermes", "windsurf", "geminicli":
+	case "hermes", "windsurf", "geminicli", "openhands":
 		label = "no native ask: alert fallback"
 	default:
 		label = "unknown connector support"

@@ -74,6 +74,10 @@ func applyHermeticConnectorHomes(t *testing.T) {
 	connector.CodexConfigPathOverride = filepath.Join(tmpHome, ".codex", "config.toml")
 	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
 
+	prevOpenHands := connector.OpenHandsHooksPathOverride
+	connector.OpenHandsHooksPathOverride = filepath.Join(tmpHome, "workspace", ".openhands", "hooks.json")
+	t.Cleanup(func() { connector.OpenHandsHooksPathOverride = prevOpenHands })
+
 	// Plan A4 / S0.12: ZeptoClaw's Setup refuses to proceed when the
 	// provider list is empty. Seed a single usable provider so the
 	// matrix subtest reaches the persist step.
@@ -188,7 +192,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
@@ -278,7 +282,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
 			reg := connector.NewDefaultRegistry()

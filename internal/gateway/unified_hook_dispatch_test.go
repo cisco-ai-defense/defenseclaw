@@ -54,6 +54,7 @@ func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 		"windsurf",
 		"geminicli",
 		"copilot",
+		"openhands",
 		"made-up",
 	}
 	for _, name := range connectors {
@@ -100,6 +101,7 @@ func TestHookProfileForConnector(t *testing.T) {
 		{"claudecode", "claudecode", "claudecode", true, true, true},
 		{"hermes", "hermes", "hermes", false, true, true},
 		{"cursor", "cursor", "cursor", false, true, true},
+		{"openhands", "openhands", "openhands", false, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
 	for _, tc := range cases {
@@ -158,6 +160,7 @@ func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 		{"windsurf", "hook_output"},
 		{"geminicli", "hook_output"},
 		{"copilot", "hook_output"},
+		{"openhands", "hook_output"},
 		{"made-up", "hook_output"},
 	}
 	for _, tc := range cases {

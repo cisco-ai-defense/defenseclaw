@@ -47,11 +47,11 @@ from unittest.mock import MagicMock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
-    _DoctorResult,
     _active_connector,
     _check_connector_inventory,
     _check_hook_contract_lock,
     _check_scan_coverage,
+    _DoctorResult,
 )
 
 
@@ -213,6 +213,10 @@ class TestCheckHookContractLock(unittest.TestCase):
                                 "raw_agent_version": "0.30.0",
                                 "normalized_agent_version": "0.30.0",
                                 "hook_script_version": "codex-hook.sh:1",
+                                "locations": {
+                                    "workspace_dir": "/tmp/repo",
+                                    "hook_config_paths": ["/home/test/.codex/config.toml"],
+                                },
                             }
                         }
                     },
@@ -225,6 +229,8 @@ class TestCheckHookContractLock(unittest.TestCase):
             self.assertEqual(check["status"], "pass")
             self.assertIn("codex-hooks-v1", check["detail"])
             self.assertIn("0.30.0", check["detail"])
+            self.assertIn("workspace=/tmp/repo", check["detail"])
+            self.assertIn("hook_path=/home/test/.codex/config.toml", check["detail"])
 
     def test_discovered_version_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

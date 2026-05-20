@@ -165,6 +165,8 @@ def _list_skills_from_filesystem(cfg: Config) -> list[dict[str, Any]]:
         except OSError:
             continue
         for entry in sorted(entries):
+            if _is_openhands_installed_container(skill_dir, entry):
+                continue
             full = os.path.join(skill_dir, entry)
             if not os.path.isdir(full):
                 continue
@@ -185,6 +187,14 @@ def _list_skills_from_filesystem(cfg: Config) -> list[dict[str, Any]]:
     return rows
 
 
+def _is_openhands_installed_container(skill_dir: str, entry: str) -> bool:
+    return (
+        entry == "installed"
+        and os.path.basename(skill_dir) == "skills"
+        and os.path.basename(os.path.dirname(skill_dir)) == ".openhands"
+    )
+
+
 def _skill_dir_is_eligible(path: str) -> bool:
     for marker in ("SKILL.md", "skill.json", "README.md"):
         if os.path.isfile(os.path.join(path, marker)):
@@ -193,7 +203,7 @@ def _skill_dir_is_eligible(path: str) -> bool:
 
 
 def _read_skill_description(path: str) -> str:
-    """Return the first non-empty stripped line of SKILL.md / README.md.
+    """Return a short description from SKILL.md / README.md.
 
     Bounded to 2 KiB so we don't accidentally slurp a multi-MB README
     into the listing.
@@ -207,8 +217,24 @@ def _read_skill_description(path: str) -> str:
                 text = f.read(2048)
         except OSError:
             continue
+        frontmatter_description = _frontmatter_description(text)
+        if frontmatter_description:
+            return frontmatter_description[:200]
         for line in text.splitlines():
             stripped = line.strip().lstrip("#").strip()
             if stripped:
                 return stripped[:200]
+    return ""
+
+
+def _frontmatter_description(text: str) -> str:
+    if not text.startswith("---"):
+        return ""
+    end = text.find("\n---", 3)
+    if end < 0:
+        return ""
+    for line in text[3:end].splitlines():
+        key, sep, value = line.partition(":")
+        if sep and key.strip() == "description":
+            return value.strip().strip("\"'")
     return ""

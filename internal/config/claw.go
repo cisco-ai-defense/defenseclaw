@@ -119,23 +119,29 @@ func (c *Config) ReadMCPServers() ([]MCPServerEntry, error) {
 
 // ReadMCPServersForConnector returns MCP servers for a specific connector.
 func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry, error) {
+	workspaceDir := ""
+	if c != nil {
+		workspaceDir = c.ConnectorWorkspaceDir()
+	}
 	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
-		return readMCPServersClaudeCode()
+		return readMCPServersClaudeCode(workspaceDir)
 	case "codex":
-		return readMCPServersCodex()
+		return readMCPServersCodex(workspaceDir)
 	case "zeptoclaw":
-		return readMCPServersZeptoClaw()
+		return readMCPServersZeptoClaw(workspaceDir)
 	case "hermes":
 		return readMCPServersHermes()
 	case "cursor":
-		return readMCPServersCursor()
+		return readMCPServersCursor(workspaceDir)
 	case "windsurf":
 		return readMCPServersWindsurf()
 	case "geminicli":
 		return readMCPServersGeminiCLI()
 	case "copilot":
-		return readMCPServersCopilot()
+		return readMCPServersCopilot(workspaceDir)
+	case "openhands":
+		return readMCPServersOpenHands()
 	default:
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
 	}
@@ -337,6 +343,27 @@ func (c *Config) ClawHomeDir() string {
 	return c.ConnectorHomeDir(c.activeConnector())
 }
 
+// ConnectorWorkspaceDir returns the explicitly pinned project/workspace root
+// for connectors whose hook or component surfaces are repository-scoped. Empty
+// means "global/user scope"; the daemon must not infer a workspace from its
+// own cwd because it usually starts from the DefenseClaw data directory.
+func (c *Config) ConnectorWorkspaceDir() string {
+	root := ""
+	if c != nil {
+		root = strings.TrimSpace(c.Claw.WorkspaceDir)
+	}
+	if root == "" {
+		return ""
+	}
+	root = expandPath(root)
+	if !filepath.IsAbs(root) {
+		if abs, err := filepath.Abs(root); err == nil {
+			root = abs
+		}
+	}
+	return filepath.Clean(root)
+}
+
 // ConnectorHomeDir returns the conventional home/config root for a connector.
 // OpenClaw uses the configured claw.home_dir; the hook-native connectors use
 // the vendor paths their setup and discovery flows write/read.
@@ -360,6 +387,11 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		return filepath.Join(home, ".gemini")
 	case "copilot":
 		return filepath.Join(home, ".copilot")
+	case "openhands":
+		if workspace := c.ConnectorWorkspaceDir(); workspace != "" {
+			return filepath.Join(workspace, ".openhands")
+		}
+		return filepath.Join(home, ".openhands")
 	default:
 		if c == nil {
 			return expandPath("~/.openclaw")
@@ -379,6 +411,29 @@ func dedup(paths []string) []string {
 		}
 	}
 	return out
+}
+
+func dedupNonEmpty(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
+}
+
+func workspaceJoin(workspace string, parts ...string) string {
+	workspace = strings.TrimSpace(workspace)
+	if workspace == "" {
+		return ""
+	}
+	all := append([]string{workspace}, parts...)
+	return filepath.Join(all...)
 }
 
 // SkillDirsForOpenClaw returns the skill directories for an OpenClaw
@@ -422,45 +477,57 @@ func SkillDirsForOpenClaw(homeDir string) []string {
 // layout via skillDirsOpenClaw().
 func (c *Config) SkillDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
+	cwd := c.ConnectorWorkspaceDir()
 
 	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
-		return dedup([]string{
+		return dedupNonEmpty([]string{
 			filepath.Join(home, ".claude", "skills"),
-			filepath.Join(cwd, ".claude", "skills"),
+			workspaceJoin(cwd, ".claude", "skills"),
 		})
 	case "codex":
-		return dedup([]string{
+		return dedupNonEmpty([]string{
 			filepath.Join(home, ".codex", "skills"),
-			filepath.Join(cwd, ".codex", "skills"),
+			workspaceJoin(cwd, ".codex", "skills"),
 		})
 	case "zeptoclaw":
-		return dedup([]string{
+		return dedupNonEmpty([]string{
 			filepath.Join(home, ".zeptoclaw", "skills"),
-			filepath.Join(cwd, ".zeptoclaw", "skills"),
+			workspaceJoin(cwd, ".zeptoclaw", "skills"),
 		})
 	case "hermes":
 		return []string{filepath.Join(home, ".hermes", "skills")}
 	case "cursor":
-		return dedup([]string{
-			filepath.Join(cwd, ".cursor", "skills"),
-			filepath.Join(cwd, ".agents", "skills"),
+		return dedupNonEmpty([]string{
 			filepath.Join(home, ".cursor", "skills"),
 			filepath.Join(home, ".agents", "skills"),
+			workspaceJoin(cwd, ".cursor", "skills"),
+			workspaceJoin(cwd, ".agents", "skills"),
 		})
 	case "windsurf":
 		return nil
 	case "geminicli":
-		return dedup([]string{
-			filepath.Join(cwd, ".gemini", "skills"),
-			filepath.Join(cwd, ".agents", "skills"),
+		return dedupNonEmpty([]string{
+			filepath.Join(home, ".gemini", "skills"),
+			workspaceJoin(cwd, ".gemini", "skills"),
+			workspaceJoin(cwd, ".agents", "skills"),
 		})
 	case "copilot":
-		return dedup([]string{
-			filepath.Join(cwd, ".github", "skills"),
-			filepath.Join(cwd, ".agents", "skills"),
+		return dedupNonEmpty([]string{
 			filepath.Join(home, ".copilot", "skills"),
+			workspaceJoin(cwd, ".github", "skills"),
+			workspaceJoin(cwd, ".agents", "skills"),
+		})
+	case "openhands":
+		return dedupNonEmpty([]string{
+			workspaceJoin(cwd, ".agents", "skills"),
+			workspaceJoin(cwd, ".openhands", "skills"),
+			workspaceJoin(cwd, ".openhands", "microagents"),
+			filepath.Join(home, ".agents", "skills"),
+			filepath.Join(home, ".openhands", "skills"),
+			filepath.Join(home, ".openhands", "microagents"),
+			filepath.Join(home, ".openhands", "skills", "installed"),
+			filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
 		})
 	default:
 		return c.skillDirsOpenClaw()
@@ -472,7 +539,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 // fall through to the OpenClaw extensions layout.
 func (c *Config) PluginDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
+	cwd := c.ConnectorWorkspaceDir()
 
 	switch strings.ToLower(strings.TrimSpace(connector)) {
 	case "claudecode":
@@ -488,16 +555,16 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".zeptoclaw", "plugins"),
 		}
 	case "hermes":
-		return dedup([]string{
+		return dedupNonEmpty([]string{
 			filepath.Join(home, ".hermes", "plugins"),
-			filepath.Join(cwd, ".hermes", "plugins"),
+			workspaceJoin(cwd, ".hermes", "plugins"),
 		})
 	case "geminicli":
-		return dedup([]string{
-			filepath.Join(cwd, ".gemini", "extensions"),
+		return dedupNonEmpty([]string{
 			filepath.Join(home, ".gemini", "extensions"),
+			workspaceJoin(cwd, ".gemini", "extensions"),
 		})
-	case "cursor", "windsurf", "copilot":
+	case "cursor", "windsurf", "copilot", "openhands":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()
@@ -506,12 +573,12 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 
 // --- Connector-specific MCP readers ---
 
-func readMCPServersClaudeCode() ([]MCPServerEntry, error) {
+func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	cwd, _ := os.Getwd()
+	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
 
@@ -520,15 +587,17 @@ func readMCPServersClaudeCode() ([]MCPServerEntry, error) {
 		entries = append(entries, e...)
 	}
 
-	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
-	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
-		entries = append(entries, e...)
+	if cwd != "" {
+		mcpJsonPath := filepath.Join(cwd, ".mcp.json")
+		if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
+			entries = append(entries, e...)
+		}
 	}
 
 	return dedupMCPEntries(entries), nil
 }
 
-func readMCPServersCodex() ([]MCPServerEntry, error) {
+func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 	// Codex registers MCP servers in two places — the global
 	// `~/.codex/config.toml` `[mcp_servers]` table and the
 	// project-local `./.mcp.json` (a Codex SDK / Claude Code
@@ -538,7 +607,7 @@ func readMCPServersCodex() ([]MCPServerEntry, error) {
 	// per-project overrides win — matching how Codex itself layers
 	// them at runtime.
 	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
+	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
 	if home != "" {
@@ -547,9 +616,11 @@ func readMCPServersCodex() ([]MCPServerEntry, error) {
 			entries = append(entries, e...)
 		}
 	}
-	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
-	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
-		entries = append(entries, e...)
+	if cwd != "" {
+		mcpJsonPath := filepath.Join(cwd, ".mcp.json")
+		if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
+			entries = append(entries, e...)
+		}
 	}
 	return dedupMCPEntries(entries), nil
 }
@@ -597,12 +668,12 @@ func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 	return out, nil
 }
 
-func readMCPServersZeptoClaw() ([]MCPServerEntry, error) {
+func readMCPServersZeptoClaw(workspaceDir string) ([]MCPServerEntry, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	cwd, _ := os.Getwd()
+	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
 
@@ -611,9 +682,11 @@ func readMCPServersZeptoClaw() ([]MCPServerEntry, error) {
 		entries = append(entries, e...)
 	}
 
-	mcpJsonPath := filepath.Join(cwd, ".mcp.json")
-	if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
-		entries = append(entries, e...)
+	if cwd != "" {
+		mcpJsonPath := filepath.Join(cwd, ".mcp.json")
+		if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
+			entries = append(entries, e...)
+		}
 	}
 
 	return dedupMCPEntries(entries), nil
@@ -624,15 +697,17 @@ func readMCPServersHermes() ([]MCPServerEntry, error) {
 	return readMCPFromYAMLPath(filepath.Join(home, ".hermes", "config.yaml"), []string{"mcp", "servers"}, []string{"mcpServers"})
 }
 
-func readMCPServersCursor() ([]MCPServerEntry, error) {
+func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
 	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
+	cwd := strings.TrimSpace(workspaceDir)
 	var entries []MCPServerEntry
-	if e, err := readMCPFromDotMCPJSON(filepath.Join(cwd, ".cursor", "mcp.json")); err == nil {
-		entries = append(entries, e...)
-	}
 	if e, err := readMCPFromDotMCPJSON(filepath.Join(home, ".cursor", "mcp.json")); err == nil {
 		entries = append(entries, e...)
+	}
+	if cwd != "" {
+		if e, err := readMCPFromDotMCPJSON(filepath.Join(cwd, ".cursor", "mcp.json")); err == nil {
+			entries = append(entries, e...)
+		}
 	}
 	return dedupMCPEntries(entries), nil
 }
@@ -656,20 +731,25 @@ func readMCPServersGeminiCLI() ([]MCPServerEntry, error) {
 	return readMCPFromJSONPath(filepath.Join(home, ".gemini", "settings.json"), []string{"mcpServers"})
 }
 
-func readMCPServersCopilot() ([]MCPServerEntry, error) {
+func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
 	home, _ := os.UserHomeDir()
-	cwd, _ := os.Getwd()
+	cwd := strings.TrimSpace(workspaceDir)
 	var entries []MCPServerEntry
-	for _, path := range []string{
-		filepath.Join(home, ".copilot", "mcp-config.json"),
-		filepath.Join(cwd, ".github", "mcp.json"),
-		filepath.Join(cwd, ".mcp.json"),
-	} {
+	paths := []string{filepath.Join(home, ".copilot", "mcp-config.json")}
+	if cwd != "" {
+		paths = append(paths, filepath.Join(cwd, ".github", "mcp.json"), filepath.Join(cwd, ".mcp.json"))
+	}
+	for _, path := range paths {
 		if e, err := readMCPFromDotMCPJSON(path); err == nil {
 			entries = append(entries, e...)
 		}
 	}
 	return dedupMCPEntries(entries), nil
+}
+
+func readMCPServersOpenHands() ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	return readMCPFromDotMCPJSON(filepath.Join(home, ".openhands", "mcp.json"))
 }
 
 func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {

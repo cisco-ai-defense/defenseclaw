@@ -66,7 +66,7 @@ const (
 	// Connector.Name() in internal/gateway/connector and with the
 	// `defenseclaw.claw.mode` enum in schemas/otel/resource.schema.json):
 	// "zeptoclaw", "claudecode", "codex", "hermes", "cursor",
-	// "windsurf", "geminicli", "copilot". Constants for those modes
+	// "windsurf", "geminicli", "copilot", "openhands". Constants for those modes
 	// are intentionally not introduced here yet — they're used as
 	// raw strings by Config.activeConnector() (see internal/config/
 	// claw.go) which dispatches to per-connector readers. Promoting
@@ -75,9 +75,10 @@ const (
 )
 
 type ClawConfig struct {
-	Mode       ClawMode `mapstructure:"mode"        yaml:"mode"`
-	HomeDir    string   `mapstructure:"home_dir"    yaml:"home_dir"`
-	ConfigFile string   `mapstructure:"config_file" yaml:"config_file"`
+	Mode         ClawMode `mapstructure:"mode"          yaml:"mode"`
+	HomeDir      string   `mapstructure:"home_dir"      yaml:"home_dir"`
+	ConfigFile   string   `mapstructure:"config_file"   yaml:"config_file"`
+	WorkspaceDir string   `mapstructure:"workspace_dir" yaml:"workspace_dir,omitempty"`
 }
 
 // AgentConfig [v7] pins the logical agent identity for this

@@ -175,6 +175,35 @@ type SurfaceCapability struct {
 	Notes           []string `json:"notes,omitempty"`
 }
 
+// SurfaceLocations is the resolved, on-this-machine path manifest for a
+// connector surface. It is derived from SurfaceCapability and SetupOpts so
+// diagnostics can distinguish static capability ("OpenHands supports skills")
+// from the concrete path being watched in this workspace.
+type SurfaceLocations struct {
+	Supported      bool     `json:"supported"`
+	Scope          string   `json:"scope,omitempty"`
+	ConfigPaths    []string `json:"config_paths,omitempty"`
+	ReadPaths      []string `json:"read_paths,omitempty"`
+	WritePaths     []string `json:"write_paths,omitempty"`
+	InstallTargets []string `json:"install_targets,omitempty"`
+	DiscoveryOnly  bool     `json:"discovery_only,omitempty"`
+	RequiresOptIn  bool     `json:"requires_opt_in,omitempty"`
+	Notes          []string `json:"notes,omitempty"`
+}
+
+// ConnectorLocations is the resolved connector path contract captured into
+// hook_contract_lock.json and exposed by connector metadata. Static hook
+// contracts say what protocol DefenseClaw supports; this manifest says where
+// DefenseClaw installed hooks and where it will discover MCP servers, skills,
+// plugins, rules, and agents for the selected workspace.
+type ConnectorLocations struct {
+	WorkspaceDir         string                      `json:"workspace_dir,omitempty"`
+	HookConfigPaths      []string                    `json:"hook_config_paths,omitempty"`
+	HookScriptPaths      []string                    `json:"hook_script_paths,omitempty"`
+	TelemetryConfigPaths []string                    `json:"telemetry_config_paths,omitempty"`
+	Surfaces             map[string]SurfaceLocations `json:"surfaces,omitempty"`
+}
+
 // CodeGuardCapability models native Project CodeGuard asset installation for
 // a connector. Server-side CodeGuard scanning remains independent from this:
 // these flags only describe optional skill/rule/plugin assets placed into the
@@ -269,19 +298,20 @@ type HookCapabilityProvider interface {
 //     ("hook_output", "codex_output", "claude_code_output"). nil =
 //     caller uses hookOutputFor and the "hook_output" field.
 type HookProfile struct {
-	Name                   string
-	Capabilities           HookCapability
-	SupportsTraceparent    bool
-	NativeOTLP             *NativeOTLPSpec
-	ContractID             string
-	HookScriptVersion      string
-	ResponseFieldName      string
-	SupportedEvents        []string
-	AIDSurfaces            []string
-	AgentVersion           string
-	NormalizedAgentVersion string
-	CompatibilityStatus    string
-	CompatibilityReason    string
+	Name                    string
+	Capabilities            HookCapability
+	SupportsTraceparent     bool
+	NativeOTLP              *NativeOTLPSpec
+	ContractID              string
+	HookScriptVersion       string
+	HookConfigPathTemplates []string
+	ResponseFieldName       string
+	SupportedEvents         []string
+	AIDSurfaces             []string
+	AgentVersion            string
+	NormalizedAgentVersion  string
+	CompatibilityStatus     string
+	CompatibilityReason     string
 
 	// Profile-driven dispatch callbacks. All optional — the
 	// unified dispatch helper consults these fields when present

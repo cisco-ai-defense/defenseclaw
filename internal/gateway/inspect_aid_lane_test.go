@@ -72,6 +72,7 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 		{"hermes", "/api/v1/hermes/hook", "pre_tool_call"},
 		{"windsurf", "/api/v1/windsurf/hook", "pre_run_command"},
 		{"copilot", "/api/v1/copilot/hook", "PreToolUse"},
+		{"openhands", "/api/v1/openhands/hook", "PreToolUse"},
 	}
 
 	for _, tc := range cases {

@@ -133,6 +133,12 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			ClawMode:       "copilot",
 			Apply:          hookOnlyFixtureApply("copilot"),
 		},
+		{
+			Name:           "openhands",
+			DestinationApp: "openhands",
+			ClawMode:       "openhands",
+			Apply:          hookOnlyFixtureApply("openhands"),
+		},
 	}
 }
 
@@ -161,6 +167,10 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.CopilotHooksPathOverride
 			connector.CopilotHooksPathOverride = filepath.Join(home, "workspace", ".github", "hooks", "defenseclaw.json")
 			t.Cleanup(func() { connector.CopilotHooksPathOverride = prev })
+		case "openhands":
+			prev := connector.OpenHandsHooksPathOverride
+			connector.OpenHandsHooksPathOverride = filepath.Join(home, "workspace", ".openhands", "hooks.json")
+			t.Cleanup(func() { connector.OpenHandsHooksPathOverride = prev })
 		}
 		return home, t.TempDir()
 	}

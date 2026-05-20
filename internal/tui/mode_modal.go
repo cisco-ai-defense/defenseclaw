@@ -31,7 +31,7 @@ type modeChoice struct {
 	wire    string // canonical connector config value
 	label   string // user-facing display name
 	hotkey  rune   // single-letter shortcut for this row
-	guardOK bool   // does this connector support enforcement?
+	guardOK bool   // does this connector use proxy-backed guardrail setup?
 	tagline string // one-line description shown in the row
 }
 
@@ -54,6 +54,8 @@ var modePickerChoices = []modeChoice{
 		tagline: "settings.json hooks + structured deny responses"},
 	{wire: "copilot", label: "Copilot", hotkey: 'p', guardOK: false,
 		tagline: "workspace hooks + native pre-tool approval"},
+	{wire: "openhands", label: "OpenHands", hotkey: 'n', guardOK: false,
+		tagline: "repo-local hooks + exit-code deny responses"},
 }
 
 // ModePickerModal is the overlay launched by `[m]` on the Overview
@@ -181,7 +183,7 @@ func (p *ModePickerModal) previewForSwitch(dest string) string {
 	if destGuard {
 		return "Runs proxy-backed connector setup and pins claw.mode plus guardrail.connector; preserves the existing guardrail.mode."
 	}
-	return "Runs hook-driven connector setup — wires hooks, native OTel where supported, and CodeGuard surfaces. Honors guardrail.mode (action blocks via PreToolUse deny verdict)."
+	return "Runs hook-driven connector setup — wires hooks, native OTel where supported, and CodeGuard surfaces. Honors guardrail.mode (action blocks via the pre-tool hook)."
 }
 
 func isGuardrailSupporting(wire string) bool {
@@ -197,7 +199,7 @@ func connectorSetupAlias(wire string) string {
 	switch strings.ToLower(strings.TrimSpace(wire)) {
 	case "claudecode", "claude-code", "claude_code":
 		return "claude-code"
-	case "openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		return strings.ToLower(strings.TrimSpace(wire))
 	default:
 		return ""
@@ -210,6 +212,18 @@ func connectorSetupCommandForMode(wire string) ([]string, string) {
 		return nil, ""
 	}
 	return []string{"setup", alias, "--yes"}, "setup " + alias
+}
+
+func connectorSetupCommandForModeWithGuardrailMode(wire, mode string) ([]string, string) {
+	args, display := connectorSetupCommandForMode(wire)
+	if len(args) == 0 || isGuardrailSupporting(wire) {
+		return args, display
+	}
+	normalizedMode := "observe"
+	if strings.EqualFold(strings.TrimSpace(mode), "action") {
+		normalizedMode = "action"
+	}
+	return append(args, "--mode", normalizedMode), display
 }
 
 // View renders the modal. Returns "" when not visible so the
@@ -277,9 +291,9 @@ func (p *ModePickerModal) View() string {
 	b.WriteString("\n")
 	b.WriteString("\n")
 	if p.theme != nil {
-		b.WriteString(p.theme.Help.Render("↑/↓ move  •  o/z/k/c/h/u/w/g/p jump  •  enter confirm  •  esc close"))
+		b.WriteString(p.theme.Help.Render("↑/↓ move  •  o/z/k/c/h/u/w/g/p/n jump  •  enter confirm  •  esc close"))
 	} else {
-		b.WriteString("↑/↓ move  •  o/z/k/c/h/u/w/g/p jump  •  enter confirm  •  esc close")
+		b.WriteString("↑/↓ move  •  o/z/k/c/h/u/w/g/p/n jump  •  enter confirm  •  esc close")
 	}
 
 	content := b.String()

@@ -6,9 +6,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased] — Hook collector unification
 
-This rollup unifies the agent hook collector across all 7
+This rollup unifies the agent hook collector across all 8 hook-first
 connectors (codex, claudecode, hermes, cursor, windsurf, geminicli,
-copilot) onto a single declarative `HookProfile`-driven pipeline.
+copilot, openhands) onto a single declarative `HookProfile`-driven pipeline.
 There are **no new environment variables** — the unification is the
 default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
@@ -103,6 +103,15 @@ deleted.
 
 ### Connector profile surface
 
+- **OpenHands is now a first-class hook connector.** `defenseclaw setup
+  openhands` writes the documented repo-local `.openhands/hooks.json`
+  native schema, registers `/api/v1/openhands/hook`, maps blocking to
+  OpenHands' `decision=deny` / exit-code-2 contract, discovers
+  `~/.openhands/mcp.json`, and installs current skills into
+  `.agents/skills` while treating `.openhands/skills` and
+  `.openhands/microagents` as deprecated discovery paths. The hook
+  contract is documented against `OpenHands CLI 1.16.0` while staying
+  unbounded until upstream publishes a hook-version floor.
 - New `connector.HookProfile.Decode`, `MapVerdict`, and `Respond`
   function fields let codex / claudecode declare their per-event
   wire shape declaratively.
@@ -404,7 +413,7 @@ are addressed in this rollup.
 - **M6 — End-to-end integration coverage per connector.** The new
   `agent_hook_e2e_test.go` drives an HTTP request through
   `handleAgentHook` for every registered connector
-  (claudecode, codex, hermes, cursor, windsurf, geminicli, copilot)
+  (claudecode, codex, hermes, cursor, windsurf, geminicli, copilot, openhands)
   and asserts:
 
   - HTTP 200 with valid JSON,
@@ -528,7 +537,8 @@ Claude Code now talk directly to their native upstreams in both
   previous record-only behavior.
 - The shared connector-alias factory used by the other hook-
   enforced connectors (`hermes`, `cursor`, `windsurf`, `geminicli`,
-  `copilot`) gains the same `--mode {observe,action}` knob.
+  `copilot`, `openhands`) gains the same `--mode {observe,action}`
+  knob.
 - The interactive wizard (`defenseclaw setup guardrail`) drops the
   Codex/Claude Code "observability-only vs. proxy" fork; the
   standard observe/action mode prompt now drives both connectors.

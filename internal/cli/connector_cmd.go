@@ -204,6 +204,7 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 	if cfg.Guardrail.Port != 0 {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
+	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
 	return opts
 }
 

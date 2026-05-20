@@ -1,6 +1,6 @@
 ---
 title: GitHub Copilot CLI
-description: Copilot CLI connector wires workspace-scoped hooks under .github/hooks/. Native ask supported on preToolUse; block events cover permissionRequest, agentStop, subagentStop, postToolUseFailure.
+description: Copilot CLI connector wires global ~/.copilot/hooks by default, with optional workspace .github/hooks. Native ask supported on preToolUse; block events cover permissionRequest, agentStop, subagentStop, postToolUseFailure.
 keywords:
   - DefenseClaw GitHub Copilot CLI connector
   - GitHub Copilot CLI hooks
@@ -8,15 +8,16 @@ keywords:
   - Copilot guardrail
 ---
 
-The GitHub Copilot CLI connector wires DefenseClaw into [Copilot's workspace-scoped hooks](https://docs.github.com/copilot/) under `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
+The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/copilot/) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
 
 ## Setup
 
 ```bash
 defenseclaw setup copilot
+defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-This is workspace-scoped — run it from inside the project where you want Copilot to be governed. DefenseClaw writes hook entries into `<workspace>/.github/hooks/defenseclaw.json` and leaves the rest of `.github/hooks/` alone. **There is no proxy-enforcement path** for Copilot CLI — blocking happens hook-side via the documented `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop`, and `postToolUseFailure` events. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI for that surface.
+By default this is **global/user-scoped**: DefenseClaw writes hook entries into `~/.copilot/hooks/defenseclaw.json`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `<workspace>/.github/hooks/defenseclaw.json` wiring. **There is no proxy-enforcement path** for Copilot CLI — blocking happens hook-side via the documented `preToolUse`, `permissionRequest`, `agentStop`, `subagentStop`, and `postToolUseFailure` events. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI for that surface.
 
 #### What `setup copilot` actually does
 
@@ -27,11 +28,12 @@ The wrapper accepts exactly three flags. The underlying guardrail config falls b
 | `--yes / -y` | off | Skip the confirmation prompt (alias: `--non-interactive`, `--accept-defaults`). |
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also bring up the bundled Prom/Loki/Tempo/Grafana stack via `setup local-observability up`. |
+| `--workspace / --workspace-dir` | unset | Opt into repo-local `.github/hooks`; unset means global `~/.copilot/hooks`. |
 
-Pinned by the alias regardless of flags: `claw.mode=copilot`, `guardrail.connector=copilot`, `guardrail.mode=observe`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. To tune any of those after install, use [`defenseclaw setup guardrail --connector copilot`](/docs/setup/guardrail) — see the variations below.
+Pinned by the alias regardless of flags: `claw.mode=copilot`, `guardrail.connector=copilot`, `guardrail.mode=observe`, `guardrail.scanner_mode=local`, `guardrail.judge.enabled=false`, `guardrail.detection_strategy=regex_only`. `claw.workspace_dir` is cleared for global setup and set only when `--workspace` is supplied. To tune any of those after install, use [`defenseclaw setup guardrail --connector copilot`](/docs/setup/guardrail) — see the variations below.
 
 <Callout type="warn">
-Because Copilot's hook config is **workspace-scoped** (lives at `<workspace>/.github/hooks/defenseclaw.json`), you need to re-run `setup copilot` once per repository where you want Copilot governed. The other knobs (`guardrail.*`, scanner backend, judge model, rule pack) are user-scoped in `~/.defenseclaw/config.yaml` and apply globally.
+Global setup is the default because DefenseClaw is intended to govern the operator environment, not one repo at a time. Use `--workspace` only for a repository that must carry its own hook file.
 </Callout>
 
 #### Common variations — pick the recipe that fits your phase
@@ -41,18 +43,16 @@ Because Copilot's hook config is **workspace-scoped** (lives at `<workspace>/.gi
 <Tab value="Standard">
 
 ```bash
-cd /path/to/your/repo
 defenseclaw setup copilot
 ```
 
-Confirms once, writes `<workspace>/.github/hooks/defenseclaw.json`, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Confirms once, writes `~/.copilot/hooks/defenseclaw.json`, restarts the gateway. Findings flow to `~/.defenseclaw/gateway.jsonl` and the TUI; no traffic is intercepted, no requests are blocked. Pass `--yes` to skip the confirmation in CI.
 
 </Tab>
 
 <Tab value="Local stack">
 
 ```bash
-cd /path/to/your/repo
 defenseclaw setup copilot --yes --with-local-stack
 ```
 
@@ -65,8 +65,7 @@ Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo
 ```bash
 export DEFENSECLAW_LLM_KEY=<your-key>
 
-cd /path/to/your/repo
-defenseclaw setup copilot                                 # workspace hooks first
+defenseclaw setup copilot                                 # global hooks first
 defenseclaw setup guardrail \
   --connector copilot \
   --rule-pack strict \
@@ -77,7 +76,7 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The alias keeps the connector pinned and writes the workspace hook; the follow-up `setup guardrail` swaps in the strict rule pack, runs both local + Cisco AI Defense scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
+The alias keeps the connector pinned and writes the global hook; the follow-up `setup guardrail` swaps in the strict rule pack, runs both local + Cisco AI Defense scanners, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events.
 
 </Tab>
 
@@ -115,9 +114,14 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 ## Files DefenseClaw will modify
 
 <Files>
-  <Folder name="<workspace>/.github" defaultOpen>
+  <Folder name="~/.copilot" defaultOpen>
     <Folder name="hooks">
       <File name="defenseclaw.json" />
+    </Folder>
+  </Folder>
+  <Folder name="<workspace>/.github">
+    <Folder name="hooks">
+      <File name="defenseclaw.json (only with --workspace)" />
     </Folder>
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
@@ -141,4 +145,4 @@ Copilot CLI supports native ask on documented `preToolUse` hooks. The approval p
 defenseclaw setup guardrail --disable
 ```
 
-The teardown removes `<workspace>/.github/hooks/defenseclaw.json` and leaves any other hook files in the directory untouched.
+The teardown removes `~/.copilot/hooks/defenseclaw.json` or the pinned workspace hook file and leaves any other hook files in the directory untouched.

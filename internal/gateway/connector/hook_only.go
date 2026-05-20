@@ -33,12 +33,14 @@ import (
 )
 
 var (
-	HermesConfigPathOverride    string
-	CursorHooksPathOverride     string
-	WindsurfHooksPathOverride   string
-	GeminiSettingsPathOverride  string
-	CopilotHooksPathOverride    string
-	CopilotWorkspaceDirOverride string
+	HermesConfigPathOverride      string
+	CursorHooksPathOverride       string
+	WindsurfHooksPathOverride     string
+	GeminiSettingsPathOverride    string
+	CopilotHooksPathOverride      string
+	CopilotWorkspaceDirOverride   string
+	OpenHandsHooksPathOverride    string
+	OpenHandsWorkspaceDirOverride string
 )
 
 type hookOnlyConnector struct {
@@ -155,7 +157,7 @@ func NewGeminiCLIConnector() *hookOnlyConnector {
 func NewCopilotConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "copilot",
-		description: ".github/hooks command hooks (Copilot CLI, workspace-scoped)",
+		description: "user-global Copilot CLI hooks, with optional workspace .github/hooks override",
 		apiPath:     "/api/v1/copilot/hook",
 		scriptName:  "copilot-hook.sh",
 		configPath:  copilotHooksPath,
@@ -177,8 +179,32 @@ func NewCopilotConnector() *hookOnlyConnector {
 					"PostToolUseFailure",
 				},
 				SupportsFailClosed: false,
-				Scope:              "workspace",
+				Scope:              "user,workspace",
 				ConfigPath:         copilotHooksPath(opts),
+			}
+		},
+	}
+}
+
+func NewOpenHandsConnector() *hookOnlyConnector {
+	return &hookOnlyConnector{
+		name:        "openhands",
+		description: "user-global OpenHands hooks, with optional repo-local .openhands/hooks.json override",
+		apiPath:     "/api/v1/openhands/hook",
+		scriptName:  "openhands-hook.sh",
+		configPath:  openhandsHooksPath,
+		capability: func(opts SetupOpts) HookCapability {
+			return HookCapability{
+				CanBlock:     true,
+				CanAskNative: false,
+				BlockEvents: []string{
+					"pre_tool_use",
+					"user_prompt_submit",
+					"stop",
+				},
+				SupportsFailClosed: true,
+				Scope:              "user,workspace",
+				ConfigPath:         openhandsHooksPath(opts),
 			}
 		},
 	}
@@ -194,20 +220,21 @@ func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return c.Capabilities(opts).Hooks
 }
 
-// HookProfile implements HookProfileProvider for the 5 generic
+// HookProfile implements HookProfileProvider for the 6 generic
 // hook-only connectors. Today only geminicli emits native OTLP (via
 // the JSON-block telemetry section in settings.json with a scoped
 // path-token); copilot returns an env-block spec that mirrors the
 // NativeOTLP capability advertised to doctor/setup; cursor, windsurf,
-// and hermes return spec=nil because their CLIs do not expose a native
-// OTel exporter. When a future cursor release adds native OTLP support,
-// that connector can flip its branch here to return a non-nil spec
-// without changing the dispatcher.
+// hermes, and openhands return spec=nil because their CLIs do not
+// expose a native OTel exporter. When a future cursor release adds
+// native OTLP support, that connector can flip its branch here to
+// return a non-nil spec without changing the dispatcher.
 //
 // SupportsTraceparent is true for the entire generic family: every
 // shipped hook script (cursor-hook.sh, windsurf-hook.sh,
-// hermes-hook.sh, geminicli-hook.sh, copilot-hook.sh — see
-// internal/gateway/connector/hooks/) sources _hardening.sh and
+// hermes-hook.sh, geminicli-hook.sh, copilot-hook.sh,
+// openhands-hook.sh — see internal/gateway/connector/hooks/) sources
+// _hardening.sh and
 // invokes defenseclaw_extract_trace_context to forward the W3C
 // traceparent / tracestate headers from DEFENSECLAW_TRACEPARENT
 // (or TRACEPARENT / OTEL_TRACEPARENT). The pre-v6 era was when
@@ -333,8 +360,8 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
 			Scope:           "workspace,user",
-			ConfigPaths:     []string{filepath.Join(workspaceRoot(opts), ".cursor", "mcp.json"), homePath(".cursor", "mcp.json")},
-			WritePaths:      []string{filepath.Join(workspaceRoot(opts), ".cursor", "mcp.json")},
+			ConfigPaths:     []string{workspacePath(opts, ".cursor", "mcp.json"), homePath(".cursor", "mcp.json")},
+			WritePaths:      []string{workspacePath(opts, ".cursor", "mcp.json")},
 			SupportsBackup:  true,
 			SupportsRestore: true,
 		}
@@ -342,15 +369,15 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Supported:      true,
 			Scope:          "workspace,user",
 			ReadPaths:      cursorSkillPaths(opts),
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".cursor", "skills")},
+			WritePaths:     []string{workspacePath(opts, ".cursor", "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 		}
 		caps.Rules = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".cursor", "rules"), filepath.Join(workspaceRoot(opts), "AGENTS.md")},
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".cursor", "rules")},
+			ReadPaths:      []string{workspacePath(opts, ".cursor", "rules"), workspacePath(opts, "AGENTS.md")},
+			WritePaths:     []string{workspacePath(opts, ".cursor", "rules")},
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
 		}
@@ -392,9 +419,9 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		}
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
-			Scope:          "workspace",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".gemini", "skills"), filepath.Join(workspaceRoot(opts), ".agents", "skills")},
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".gemini", "skills")},
+			Scope:          "workspace,user",
+			ReadPaths:      []string{homePath(".gemini", "skills"), workspacePath(opts, ".gemini", "skills"), workspacePath(opts, ".agents", "skills")},
+			WritePaths:     []string{homePath(".gemini", "skills"), workspacePath(opts, ".gemini", "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 		}
@@ -402,15 +429,15 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.Agents = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace,user",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".gemini", "agents"), homePath(".gemini", "agents")},
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".gemini", "agents")},
+			ReadPaths:      []string{homePath(".gemini", "agents"), workspacePath(opts, ".gemini", "agents")},
+			WritePaths:     []string{homePath(".gemini", "agents"), workspacePath(opts, ".gemini", "agents")},
 			InstallTargets: []string{"agent"},
 			RequiresOptIn:  true,
 		}
 		caps.Rules = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".agents", "skills")},
+			ReadPaths:      []string{homePath(".gemini", "skills"), workspacePath(opts, ".agents", "skills")},
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
 			Notes:          []string{"Gemini rule-style guidance is represented through skills/agents, not a guessed standalone rules file."},
@@ -431,24 +458,24 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
 			Scope:           "workspace,user",
-			ConfigPaths:     []string{homePath(".copilot", "mcp-config.json"), filepath.Join(workspaceRoot(opts), ".github", "mcp.json"), filepath.Join(workspaceRoot(opts), ".mcp.json")},
-			WritePaths:      []string{filepath.Join(workspaceRoot(opts), ".github", "mcp.json")},
+			ConfigPaths:     []string{homePath(".copilot", "mcp-config.json"), workspacePath(opts, ".github", "mcp.json"), workspacePath(opts, ".mcp.json")},
+			WritePaths:      []string{homePath(".copilot", "mcp-config.json"), workspacePath(opts, ".github", "mcp.json")},
 			SupportsBackup:  true,
 			SupportsRestore: true,
 		}
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace,user",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".github", "skills"), filepath.Join(workspaceRoot(opts), ".agents", "skills"), homePath(".copilot", "skills")},
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".github", "skills")},
+			ReadPaths:      []string{homePath(".copilot", "skills"), workspacePath(opts, ".github", "skills"), workspacePath(opts, ".agents", "skills")},
+			WritePaths:     []string{homePath(".copilot", "skills"), workspacePath(opts, ".github", "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
 		}
 		caps.Rules = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".github", "instructions")},
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".github", "instructions")},
+			ReadPaths:      []string{workspacePath(opts, ".github", "instructions")},
+			WritePaths:     []string{workspacePath(opts, ".github", "instructions")},
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
 		}
@@ -456,8 +483,8 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.Agents = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace,user",
-			ReadPaths:      []string{filepath.Join(workspaceRoot(opts), ".github", "agents"), homePath(".copilot", "agents")},
-			WritePaths:     []string{filepath.Join(workspaceRoot(opts), ".github", "agents")},
+			ReadPaths:      []string{homePath(".copilot", "agents"), workspacePath(opts, ".github", "agents")},
+			WritePaths:     []string{homePath(".copilot", "agents"), workspacePath(opts, ".github", "agents")},
 			InstallTargets: []string{"agent"},
 			RequiresOptIn:  true,
 		}
@@ -477,6 +504,37 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			SourceModes:      []string{"native", "hook"},
 			Notes:            []string{"DefenseClaw reports the required environment variables but does not mutate shell rc files."},
 		}
+	case "openhands":
+		caps.MCP = SurfaceCapability{
+			Supported:       true,
+			Scope:           "user",
+			ConfigPaths:     []string{homePath(".openhands", "mcp.json")},
+			ReadPaths:       []string{homePath(".openhands", "mcp.json")},
+			WritePaths:      []string{homePath(".openhands", "mcp.json")},
+			SupportsBackup:  true,
+			SupportsRestore: true,
+			Notes:           []string{"OpenHands MCP servers are managed through the OpenHands CLI or ~/.openhands/mcp.json."},
+		}
+		caps.Skills = SurfaceCapability{
+			Supported:      true,
+			Scope:          "user,workspace",
+			ReadPaths:      openhandsSkillPaths(opts),
+			WritePaths:     []string{filepath.Join(openhandsWorkspaceRoot(opts), ".agents", "skills")},
+			InstallTargets: []string{"skill"},
+			RequiresOptIn:  true,
+			Notes:          []string{"OpenHands recommends AgentSkills under .agents/skills; .openhands/skills, .openhands/microagents, installed skills, and the public skills cache are discovered for parity with the OpenHands loader. Global setup resolves user paths under HOME unless a workspace is pinned."},
+		}
+		caps.Rules = SurfaceCapability{
+			Supported:     true,
+			Scope:         "user,workspace",
+			ReadPaths:     []string{filepath.Join(openhandsWorkspaceRoot(opts), "AGENTS.md")},
+			DiscoveryOnly: true,
+			Notes:         []string{"OpenHands permanent repository context is AGENTS.md; DefenseClaw discovers it but does not overwrite it."},
+		}
+		caps.CodeGuard.Supported = true
+		caps.CodeGuard.InstallTargets = []string{"skill"}
+		caps.Plugins = pluginsAreOpenClawOnly()
+		caps.Agents = unsupportedSurface("OpenHands agent-specific microagents are deprecated; install AgentSkills under .agents/skills instead.")
 	default:
 		caps.MCP = unsupportedSurface("")
 		caps.Skills = unsupportedSurface("")
@@ -635,7 +693,16 @@ func (c *hookOnlyConnector) HasUsableProviders() (int, error) {
 }
 
 func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error {
+	if c.name == "copilot" {
+		root := workspaceRoot(opts)
+		if root != "" && !workspaceRootOutsideDataDir(root, opts.DataDir) {
+			return fmt.Errorf("copilot setup workspace must be outside DefenseClaw data dir; pass --workspace with the target repository or omit it for global ~/.copilot hooks")
+		}
+	}
 	path := c.configPath(opts)
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("%s setup could not resolve a hook config path", c.name)
+	}
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return err
 	}
@@ -654,6 +721,8 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 		}
 	case "copilot":
 		err = patchCopilotHooks(path, hookScript)
+	case "openhands":
+		err = patchOpenHandsHooks(path, hookScript)
 	default:
 		err = fmt.Errorf("unknown hook connector %q", c.name)
 	}
@@ -669,7 +738,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 		return removeHermesHooks(path, hookScript)
 	case "geminicli":
 		return removeGeminiConfigEntries(path, hookScript)
-	case "cursor", "windsurf", "copilot":
+	case "cursor", "windsurf", "copilot", "openhands":
 		return removeJSONHookReferences(path, hookScript)
 	default:
 		return nil
@@ -713,35 +782,80 @@ func copilotHooksPath(opts SetupOpts) string {
 	if CopilotHooksPathOverride != "" {
 		return CopilotHooksPathOverride
 	}
-	root := strings.TrimSpace(CopilotWorkspaceDirOverride)
-	if root == "" {
-		root = strings.TrimSpace(opts.WorkspaceDir)
+	if root := workspaceRoot(opts); root != "" {
+		return filepath.Join(root, ".github", "hooks", "defenseclaw.json")
 	}
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			root = cwd
+	return homePath(".copilot", "hooks", "defenseclaw.json")
+}
+
+func openhandsHooksPath(opts SetupOpts) string {
+	if OpenHandsHooksPathOverride != "" {
+		return OpenHandsHooksPathOverride
+	}
+	return filepath.Join(openhandsWorkspaceRoot(opts), ".openhands", "hooks.json")
+}
+
+func openhandsWorkspaceRoot(opts SetupOpts) string {
+	root := selectedWorkspaceRoot(OpenHandsWorkspaceDirOverride, opts.WorkspaceDir)
+	if root == "" || !workspaceRootOutsideDataDir(root, opts.DataDir) {
+		if home := strings.TrimSpace(homePath()); home != "" {
+			return home
 		}
 	}
-	if root == "" {
-		root = "."
-	}
-	return filepath.Join(root, ".github", "hooks", "defenseclaw.json")
+	return root
 }
 
 func workspaceRoot(opts SetupOpts) string {
-	root := strings.TrimSpace(CopilotWorkspaceDirOverride)
+	return selectedWorkspaceRoot(CopilotWorkspaceDirOverride, opts.WorkspaceDir)
+}
+
+func selectedWorkspaceRoot(override, workspaceDir string) string {
+	root := strings.TrimSpace(override)
 	if root == "" {
-		root = strings.TrimSpace(opts.WorkspaceDir)
-	}
-	if root == "" {
-		if cwd, err := os.Getwd(); err == nil {
-			root = cwd
-		}
-	}
-	if root == "" {
-		return "."
+		root = strings.TrimSpace(workspaceDir)
 	}
 	return root
+}
+
+func workspacePath(opts SetupOpts, parts ...string) string {
+	root := workspaceRoot(opts)
+	if strings.TrimSpace(root) == "" {
+		return ""
+	}
+	all := append([]string{root}, parts...)
+	return filepath.Join(all...)
+}
+
+func workspaceRootOutsideDataDir(root, dataDir string) bool {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return false
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return true
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return true
+	}
+	dataAbs, err := filepath.Abs(dataDir)
+	if err != nil {
+		return true
+	}
+	rootAbs = filepath.Clean(rootAbs)
+	dataAbs = filepath.Clean(dataAbs)
+	if realRoot, err := filepath.EvalSymlinks(rootAbs); err == nil {
+		rootAbs = filepath.Clean(realRoot)
+	}
+	if realData, err := filepath.EvalSymlinks(dataAbs); err == nil {
+		dataAbs = filepath.Clean(realData)
+	}
+	rel, err := filepath.Rel(dataAbs, rootAbs)
+	if err != nil {
+		return true
+	}
+	return rel != "." && (rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func homePath(parts ...string) string {
@@ -765,7 +879,7 @@ func unsupportedSurface(note string) SurfaceCapability {
 
 // pluginsAreOpenClawOnly is the canonical "Plugins is an OpenClaw-only
 // capability" surface. Hook-only connectors (hermes, cursor, windsurf,
-// geminicli, copilot) advertise it so the TUI Plugins panel and the
+// geminicli, copilot, openhands) advertise it so the TUI Plugins panel and the
 // `defenseclaw plugin list` CLI both have a single, consistent message
 // to surface to operators rather than silently doing nothing — or
 // worse, doing something that LOOKS connector-aware but ignores the
@@ -780,13 +894,31 @@ func pluginsAreOpenClawOnly() SurfaceCapability {
 }
 
 func cursorSkillPaths(opts SetupOpts) []string {
-	root := workspaceRoot(opts)
 	return []string{
-		filepath.Join(root, ".cursor", "skills"),
-		filepath.Join(root, ".agents", "skills"),
 		homePath(".cursor", "skills"),
 		homePath(".agents", "skills"),
+		workspacePath(opts, ".cursor", "skills"),
+		workspacePath(opts, ".agents", "skills"),
 	}
+}
+
+func openhandsSkillPaths(opts SetupOpts) []string {
+	paths := []string{}
+	if root := selectedWorkspaceRoot(OpenHandsWorkspaceDirOverride, opts.WorkspaceDir); root != "" && workspaceRootOutsideDataDir(root, opts.DataDir) {
+		paths = append(paths,
+			filepath.Join(root, ".agents", "skills"),
+			filepath.Join(root, ".openhands", "skills"),
+			filepath.Join(root, ".openhands", "microagents"),
+		)
+	}
+	paths = append(paths,
+		homePath(".agents", "skills"),
+		homePath(".openhands", "skills"),
+		homePath(".openhands", "microagents"),
+		homePath(".openhands", "skills", "installed"),
+		homePath(".openhands", "cache", "skills", "public-skills", "skills"),
+	)
+	return uniqueNonEmptyStrings(paths)
 }
 
 func windsurfMCPPaths() []string {
@@ -798,6 +930,9 @@ func windsurfMCPPaths() []string {
 
 func existingWindsurfRulePaths(opts SetupOpts) []string {
 	root := workspaceRoot(opts)
+	if strings.TrimSpace(root) == "" {
+		return nil
+	}
 	candidates := []string{
 		filepath.Join(root, ".windsurf", "rules"),
 		filepath.Join(root, ".codeium", "windsurf", "rules"),
@@ -1098,6 +1233,37 @@ func patchCopilotHooks(path, hookScript string) error {
 			"timeoutSec": 30,
 		}
 		hooks[event] = appendUniqueFlatHook(hooks[event], hookScript, entry)
+	}
+	return writeJSONObject(path, cfg)
+}
+
+func patchOpenHandsHooks(path, hookScript string) error {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	for _, spec := range []struct {
+		event   string
+		matcher string
+	}{
+		{"pre_tool_use", "*"},
+		{"post_tool_use", "*"},
+		{"user_prompt_submit", "*"},
+		{"stop", "*"},
+		{"session_start", "*"},
+		{"session_end", "*"},
+	} {
+		group := map[string]interface{}{
+			"matcher": spec.matcher,
+			"hooks": []interface{}{
+				map[string]interface{}{
+					"type":    "command",
+					"command": shellWord(hookScript),
+					"timeout": 60,
+				},
+			},
+		}
+		cfg[spec.event] = appendUniqueGeminiHookGroup(cfg[spec.event], hookScript, group)
 	}
 	return writeJSONObject(path, cfg)
 }

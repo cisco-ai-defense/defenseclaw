@@ -289,6 +289,7 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"windsurf_observability", &stubConnector{name: "windsurf"}, false},
 		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
+		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
@@ -323,6 +324,7 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"windsurf", "windsurf", false},
 		{"geminicli", "geminicli", false},
 		{"copilot", "copilot", false},
+		{"openhands", "openhands", false},
 		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
@@ -449,6 +451,8 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		{"geminicli_remote", "geminicli", "gw.example.com", "", false},
 		{"copilot_loopback", "copilot", "127.0.0.1", "", false},
 		{"copilot_remote", "copilot", "10.0.0.5", "", false},
+		{"openhands_loopback", "openhands", "127.0.0.1", "", false},
+		{"openhands_remote", "openhands", "gw.example.com", "", false},
 
 		// Empty / unknown connector with no override → DISABLED.
 		// Reconnect spam against an unconfigured upstream is the
@@ -2480,6 +2484,13 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantMode:         "observability",
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "openhands_observability_hooks",
+			connector:        "openhands",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks"},
 		},
 	}
 	for _, c := range cases {

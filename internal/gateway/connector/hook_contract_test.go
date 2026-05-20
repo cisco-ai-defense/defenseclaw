@@ -30,6 +30,7 @@ func TestHookContractResolution(t *testing.T) {
 		{"codex_known", "codex", "codex 0.124.0", HookCompatibilityKnown, "codex-hooks-v1", "0.124.0"},
 		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
 		{"claude_alias_known", "claude-code", "Claude Code v2.1.144", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.144"},
+		{"openhands_alias_known", "open-hands", "OpenHands 1.0.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.0.0"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
 		{"zeptoclaw_proxy_not_gated", "zeptoclaw", "zeptoclaw 0.5.0", HookCompatibilityNotGated, "", "0.5.0"},
@@ -73,7 +74,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)
@@ -109,14 +110,15 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			MinInclusive string `json:"min_inclusive"`
 			MaxExclusive string `json:"max_exclusive"`
 		} `json:"agent_version"`
-		DefaultForUnversioned bool     `json:"default_for_unversioned"`
-		HookScriptVersion     string   `json:"hook_script_version"`
-		ResponseField         string   `json:"response_field"`
-		Events                []string `json:"events"`
-		AIDSurfaces           []string `json:"aid_surfaces"`
-		SupportsTraceparent   bool     `json:"supports_traceparent"`
-		NativeOTLP            bool     `json:"native_otlp"`
-		Capabilities          struct {
+		DefaultForUnversioned   bool     `json:"default_for_unversioned"`
+		HookScriptVersion       string   `json:"hook_script_version"`
+		HookConfigPathTemplates []string `json:"hook_config_path_templates"`
+		ResponseField           string   `json:"response_field"`
+		Events                  []string `json:"events"`
+		AIDSurfaces             []string `json:"aid_surfaces"`
+		SupportsTraceparent     bool     `json:"supports_traceparent"`
+		NativeOTLP              bool     `json:"native_otlp"`
+		Capabilities            struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
 			AskEvents          []string `json:"ask_events"`
@@ -195,6 +197,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			}
 			if manifestContract.HookScriptVersion != runtime.HookScriptVersion {
 				t.Fatalf("%s hook script version=%q want %q", runtime.ContractID, manifestContract.HookScriptVersion, runtime.HookScriptVersion)
+			}
+			if !sameStrings(manifestContract.HookConfigPathTemplates, runtime.HookConfigPathTemplates) {
+				t.Fatalf("%s hook config path templates=%v want %v", runtime.ContractID, manifestContract.HookConfigPathTemplates, runtime.HookConfigPathTemplates)
 			}
 			if manifestContract.ResponseField != runtime.ResponseFieldName {
 				t.Fatalf("%s response field=%q want %q", runtime.ContractID, manifestContract.ResponseField, runtime.ResponseFieldName)
@@ -275,6 +280,15 @@ func sameStrings(a, b []string) bool {
 	return reflect.DeepEqual(a, b)
 }
 
+func stringInSlice(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	profile := NewClaudeCodeConnector().HookProfile(SetupOpts{
 		APIAddr:      "127.0.0.1:18970",
@@ -339,6 +353,50 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	changed.ContractID = "hermes-hooks-v2"
 	if !HookContractLockDrifted(loaded, changed) {
 		t.Fatalf("contract change should be drift")
+	}
+}
+
+func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	workspace := filepath.Join(dir, "repo")
+	t.Setenv("HOME", home)
+	conn := NewOpenHandsConnector()
+	opts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		APIAddr:      "127.0.0.1:18970",
+		WorkspaceDir: workspace,
+	}
+
+	entry := NewHookContractLockEntry(opts, conn, "test-build")
+	if entry.Locations.WorkspaceDir != workspace {
+		t.Fatalf("WorkspaceDir=%q want %q", entry.Locations.WorkspaceDir, workspace)
+	}
+	if !sameStrings(entry.Locations.HookConfigPaths, []string{filepath.Join(workspace, ".openhands", "hooks.json")}) {
+		t.Fatalf("HookConfigPaths=%v", entry.Locations.HookConfigPaths)
+	}
+	if !stringInSlice(entry.Locations.HookScriptPaths, filepath.Join(opts.DataDir, "hooks", "openhands-hook.sh")) {
+		t.Fatalf("HookScriptPaths=%v", entry.Locations.HookScriptPaths)
+	}
+	if got := entry.Locations.Surfaces["mcp"].ConfigPaths; !sameStrings(got, []string{filepath.Join(home, ".openhands", "mcp.json")}) {
+		t.Fatalf("mcp config paths=%v", got)
+	}
+	if got := entry.Locations.Surfaces["skills"].WritePaths; !sameStrings(got, []string{filepath.Join(workspace, ".agents", "skills")}) {
+		t.Fatalf("skill write paths=%v", got)
+	}
+	skillReads := entry.Locations.Surfaces["skills"].ReadPaths
+	for _, want := range []string{
+		filepath.Join(workspace, ".agents", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".openhands", "skills", "installed"),
+		filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
+	} {
+		if !stringInSlice(skillReads, want) {
+			t.Fatalf("skill read paths=%v missing %q", skillReads, want)
+		}
+	}
+	if entry.Locations.Surfaces["plugins"].Supported {
+		t.Fatalf("OpenHands plugins should be recorded as unsupported: %+v", entry.Locations.Surfaces["plugins"])
 	}
 }
 

@@ -61,6 +61,7 @@ func TestFirstRunPanelConnectorChoicesCoverBuiltinConnectors(t *testing.T) {
 		"windsurf",
 		"geminicli",
 		"copilot",
+		"openhands",
 	}
 	for _, name := range want {
 		if !containsArg(connectors, name) {

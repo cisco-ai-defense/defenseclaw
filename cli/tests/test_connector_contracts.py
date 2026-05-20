@@ -76,6 +76,7 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(known.normalized_version, "0.124.0")
         self.assertEqual(known.contract.contract_id, "codex-hooks-v1")
         self.assertEqual(known.contract.hook_script_version, "v6")
+        self.assertIn("~/.codex/config.toml", known.contract.hook_config_path_templates)
         self.assertIn("tool_call", known.contract.aid_surfaces)
 
         older = resolve_connector_contract("codex", "codex 0.123.0")
@@ -100,6 +101,16 @@ class TestConnectorContractManifest(unittest.TestCase):
         gemini = resolve_connector_contract("gemini-cli", "")
         self.assertEqual(gemini.connector, "geminicli")
         self.assertEqual(gemini.status, STATUS_UNVERSIONED)
+
+    def test_openhands_cli_version_matches_documented_contract(self) -> None:
+        compat = resolve_connector_contract("openhands", "OpenHands CLI 1.16.0")
+        self.assertEqual(compat.status, STATUS_KNOWN)
+        self.assertEqual(compat.normalized_version, "1.16.0")
+        self.assertEqual(compat.contract.contract_id, "openhands-hooks-v1")
+        self.assertEqual(compat.contract.hook_script_version, "v6")
+        self.assertIn("<workspace>/.openhands/hooks.json", compat.contract.hook_config_path_templates)
+        self.assertIn("~/.openhands/hooks.json", compat.contract.hook_config_path_templates)
+        self.assertIn("event_content", compat.contract.aid_surfaces)
 
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
         _, contracts = _load_contracts_from_manifest(

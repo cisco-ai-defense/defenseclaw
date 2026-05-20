@@ -51,7 +51,8 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
     { type: 'dim', text: '    6. Cursor         — hooks.json + MCP/skills/rules surfaces' },
     { type: 'dim', text: '    7. Windsurf       — Cascade hooks + local config discovery' },
     { type: 'dim', text: '    8. Gemini CLI     — settings.json hooks + native OTLP' },
-    { type: 'dim', text: '    9. GitHub Copilot CLI — .github/hooks command hooks' },
+    { type: 'dim', text: '    9. GitHub Copilot CLI — global ~/.copilot/hooks command hooks' },
+    { type: 'dim', text: '   10. OpenHands      — global ~/.openhands/hooks.json command hooks' },
     { type: 'spacer' },
     { type: 'prompt', text: '  Selection [3]: ', reply: '', pauseMs: 1100 },
     { type: 'spacer' },
@@ -116,8 +117,8 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
-| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openclaw`, `zeptoclaw`. |
-| **Select integration mode** — Claude Code / Codex only *(default: 2 = full guardrail)* | **interactive-only** | Use [`setup claude-code`](/docs/connectors/claudecode) or [`setup codex`](/docs/connectors/codex) for the observability-only branch from a script. |
+| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `openclaw`, `zeptoclaw`. |
+| **Hook connector quick setup** *(default: observe)* | `defenseclaw setup <hook-connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, and OpenHands all have one-line hook setup aliases. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
 | **Select hook fail mode** *(default: open)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |
@@ -135,7 +136,7 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **Disable redaction?** *(default: current)* | `--disable-redaction` / `--enable-redaction` | Only disable inside trusted, single-tenant environments. |
 
 <Callout type="warn">
-**Three genuinely interactive-only choices** on this command: integration mode (Claude Code / Codex split), hook fail mode (use `defenseclaw guardrail fail-mode` afterward), and judge fallback models (edit `config.yaml`). Everything else round-trips through flags.
+**Two genuinely interactive-only choices** on this command: hook fail mode (use `defenseclaw guardrail fail-mode` afterward), and judge fallback models (edit `config.yaml`). Everything else round-trips through flags.
 </Callout>
 
 ## Two modes you have to choose between
@@ -233,7 +234,7 @@ Regex still runs first (cheap and offline). The judge adjudicates anything regex
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands",
       description: "Agent framework connector. Drives traffic interception, tool inspection, and subprocess enforcement defaults.",
     },
     "--mode": {

@@ -40,6 +40,7 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"windsurf", func() Connector { return NewWindsurfConnector() }, false, true, true},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, false, true, true},
+		{"openhands", func() Connector { return NewOpenHandsConnector() }, false, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -2191,6 +2191,20 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertTrue(by_id["marked"]["eligible"])
         self.assertFalse(by_id["empty"]["eligible"])
 
+    def test_openhands_installed_container_is_not_a_skill(self):
+        cfg = _make_cfg_for_connector(self.tmp, "openhands")
+        openhands_skills = os.path.join(self.tmp, ".openhands", "skills")
+        installed = os.path.join(openhands_skills, "installed")
+        os.makedirs(installed, exist_ok=True)
+        _seed_skill(installed, "real-installed")
+
+        with self._patch_skill_dirs([openhands_skills, installed]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+
+        self.assertEqual([s["id"] for s in inv["skills"]], ["real-installed"])
+
     def test_skill_description_extracted_from_skill_md(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         skill_root = os.path.join(self.tmp, "skills")
@@ -2205,6 +2219,21 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
              self._patch_mcp([]):
             inv = build_claw_aibom(cfg, live=True)
         self.assertEqual(inv["skills"][0]["description"], "Skill Title")
+
+    def test_skill_description_prefers_frontmatter(self):
+        cfg = _make_cfg_for_connector(self.tmp, "openhands")
+        skill_root = os.path.join(self.tmp, "skills")
+        os.makedirs(skill_root, exist_ok=True)
+        _seed_skill(
+            skill_root,
+            "frontmatter",
+            body="---\nname: frontmatter\ndescription: Frontmatter description\n---\n\n# Fallback\n",
+        )
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual(inv["skills"][0]["description"], "Frontmatter description")
 
     def test_plugin_status_no_manifest(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

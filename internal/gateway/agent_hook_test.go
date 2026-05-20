@@ -50,6 +50,12 @@ func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
 	if action != "alert" || wouldBlock {
 		t.Fatalf("cursor preToolUse confirm = (%q,%v), want alert because ask is not documented for that surface", action, wouldBlock)
 	}
+
+	openhands := connector.NewOpenHandsConnector().HookCapabilities(connector.SetupOpts{})
+	action, wouldBlock = mapHookAction("confirm", "action", "pre_tool_use", openhands)
+	if action != "alert" || wouldBlock {
+		t.Fatalf("openhands confirm = (%q,%v), want alert because OpenHands has no native ask surface", action, wouldBlock)
+	}
 }
 
 func TestMapHookAction_ObserveAndUnsupportedBlock(t *testing.T) {
@@ -175,6 +181,9 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 		// geminicli -- decision="deny" + reason on block.
 		{connector: "geminicli", event: "BeforeTool", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
 
+		// openhands -- decision="deny" + exit 2 in the shell hook on block.
+		{connector: "openhands", event: "pre_tool_use", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
+
 		// copilot PreToolUse -- ask + deny on permissionDecision.
 		{connector: "copilot", event: "PreToolUse", action: "block", rawAction: "block", expectedKey: "permissionDecision", expectedValue: "deny"},
 		{connector: "copilot", event: "PreToolUse", action: "confirm", rawAction: "confirm", expectedKey: "permissionDecision", expectedValue: "ask"},
@@ -233,6 +242,8 @@ func capsForConnector(name string) connector.HookCapability {
 		return connector.NewGeminiCLIConnector().HookCapabilities(connector.SetupOpts{})
 	case "copilot":
 		return connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
+	case "openhands":
+		return connector.NewOpenHandsConnector().HookCapabilities(connector.SetupOpts{})
 	default:
 		return connector.HookCapability{}
 	}

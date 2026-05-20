@@ -46,10 +46,10 @@ import (
 // capabilities BEFORE APIServer.connectorRegistry is set (early
 // init, tests that bypass NewAPIServer, plugin discovery probes).
 //
-// Why a singleton: NewDefaultRegistry registers eight builtin
+// Why a singleton: NewDefaultRegistry registers ten builtin
 // connectors and walks the plugin directory; on the hook hot path
 // (every hookCapabilities call), constructing it per-invocation
-// turns each block-vs-allow decision into eight allocations and a
+// turns each block-vs-allow decision into ten allocations and a
 // directory walk. The singleton amortises that to once per process.
 //
 // Thread-safety: sync.Once gives us a happens-before guarantee on
@@ -1074,6 +1074,8 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 	event := firstString(payload,
 		"hook_event_name",
 		"hookEventName",
+		"event_type",
+		"eventType",
 		"event_name",
 		"eventName",
 		"agent_action_name",
@@ -1084,7 +1086,7 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 	agentID, agentName, agentType := extractAgentIdentityFromHookPayload(payload)
 	sessionID := firstString(payload, "session_id", "sessionId", "task_id", "conversation_id", "conversationId", "thread_id", "threadId")
 	turnID := firstString(payload, "turn_id", "turnId", "execution_id", "executionId", "generation_id", "generationId", "tool_call_id", "toolCallId")
-	cwd := firstString(payload, "cwd", "working_directory", "workingDirectory")
+	cwd := firstString(payload, "cwd", "working_dir", "workingDir", "working_directory", "workingDirectory")
 	if cwd == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
 			cwd = firstString(toolInfo, "cwd", "working_directory")
@@ -1501,6 +1503,13 @@ func (a *APIServer) configDataDir() string {
 	return ""
 }
 
+func (a *APIServer) connectorWorkspaceDir() string {
+	if a != nil && a.scannerCfg != nil {
+		return a.scannerCfg.ConnectorWorkspaceDir()
+	}
+	return currentWorkingDir()
+}
+
 func (a *APIServer) apiAddrForCapabilities() string {
 	if a != nil && strings.TrimSpace(a.addr) != "" {
 		return strings.TrimSpace(a.addr)
@@ -1649,6 +1658,13 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 		}
 	case "copilot":
 		return copilotHookOutput(req.HookEventName, action, rawAction, reason, additional)
+	case "openhands":
+		if action == "block" {
+			return map[string]interface{}{"decision": "deny", "reason": reason}
+		}
+		if (action == "alert" || rawAction == "confirm") && additional != "" {
+			return map[string]interface{}{"additionalContext": additional}
+		}
 	}
 	if rawAction == "confirm" && additional != "" && !caps.CanAskNative {
 		return map[string]interface{}{"systemMessage": additional}

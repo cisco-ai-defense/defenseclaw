@@ -10,7 +10,7 @@
 // Setup aliases verified against docs/setup/guardrail/aliases/:
 //   - proxies (OpenClaw, ZeptoClaw) → defenseclaw setup guardrail
 //   - hooks  → defenseclaw setup {claude-code|codex|hermes|cursor|
-//                                  windsurf|geminicli|copilot}
+//                                  windsurf|geminicli|copilot|openhands}
 
 export interface ConnectorBlock {
   id: string;
@@ -31,6 +31,7 @@ export const TERMINAL_CONNECTORS: ConnectorBlock[] = [
   { id: 'hermes',     label: 'Hermes',             command: 'defenseclaw setup hermes',      modeId: 'hermes' },
   { id: 'geminicli',  label: 'Gemini CLI',         command: 'defenseclaw setup geminicli',   modeId: 'geminicli' },
   { id: 'copilot',    label: 'GitHub Copilot CLI', command: 'defenseclaw setup copilot',     modeId: 'copilot' },
+  { id: 'openhands',  label: 'OpenHands',          command: 'defenseclaw setup openhands',   modeId: 'openhands' },
   { id: 'windsurf',   label: 'Windsurf',           command: 'defenseclaw setup windsurf',    modeId: 'windsurf' },
   { id: 'zeptoclaw',  label: 'ZeptoClaw',          command: 'defenseclaw setup guardrail',   modeId: 'zeptoclaw' },
 ];
