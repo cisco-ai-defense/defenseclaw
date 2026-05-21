@@ -3711,9 +3711,16 @@ class DefenseClawTUI(App[None]):
             keys_line = keys.label or "all required set"
         else:
             keys_line = "not checked yet - press 0 for Setup, then r to refresh credentials"
+        # Escape the lowercase hotkey labels: Rich parses ``[s]`` /
+        # ``[d]`` / ``[i]`` / ``[g]`` / ``[m]`` / ``[p]`` / ``[l]`` as
+        # opening style tags and silently drops the bracketed text from
+        # the rendered overview, so the operator sees ``Scan all`` with
+        # no key to press. ``[R]`` is uppercase so Rich already treats
+        # it as literal text — escaping is harmless either way.
         quick = (
-            "[s] Scan all   [d] Doctor   [i] Inventory   [g] Guardrail   [m] Mode   "
-            "[p] Policy   [l] Logs   [R] Redaction"
+            "\\[s] Scan all   \\[d] Doctor   \\[i] Inventory   "
+            "\\[g] Guardrail   \\[m] Mode   \\[p] Policy   \\[l] Logs   "
+            "\\[R] Redaction"
         )
         return (
             "[bold #22D3EE]Overview[/]  [#9FB2CC]Command center for live risk, setup health, and next actions.[/]\n"
@@ -4566,7 +4573,10 @@ class DefenseClawTUI(App[None]):
                 f"Ctrl+T reveal={reveal} · [bold]Ctrl+R run[/] · Esc cancel"
                 f"[/]"
                 f"{missing_line}"
-                f"{focused.hint and chr(10) + '[' + TOKENS.text_secondary + ']' + focused.hint + '[/]' or ''}"
+                # Escape ``focused.hint`` so a wizard hint that quotes a
+                # bracketed identifier (e.g. ``set webhooks[0].url``) can't
+                # collapse the styled span via Rich's silent tag-drop.
+                f"{focused.hint and chr(10) + '[' + TOKENS.text_secondary + ']' + rich_escape(focused.hint) + '[/]' or ''}"
                 f"{error}"
             )
         if self.setup_model.mode == "config":

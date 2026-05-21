@@ -583,7 +583,14 @@ class AuditPanelModel:
         if not self.filtered:
             return f"{header}\nNo events match the filter.".strip()
 
-        lines = [f"{len(self.items)} events recorded  [e] export  [/] filter"]
+        # Escape both bracketed tokens: ``[e]`` would be parsed as
+        # a Rich style tag (and Style.parse('e') would fail in the
+        # safety wrapper, forcing the panel to plain-text fallback),
+        # and ``[/]`` is a closing tag with nothing to close — that's
+        # an outright MarkupError that the wrapper has to swallow.
+        lines = [
+            f"{len(self.items)} events recorded  \\[e] export  \\[/] filter"
+        ]
         visible = max(self.list_height(height=height), 5)
         start = self.scroll_offset(height=height)
         end = min(start + visible, len(self.filtered))
@@ -611,7 +618,12 @@ class AuditPanelModel:
         filter_part = f"  filter={self.active_filter_label()!r}" if self.active_filter_label() else ""
         input_part = f"\n/ {self.filter_text}" if self.filtering else ""
         count = f"{len(self.filtered)} / {len(self.items)}" if self.filter_text else str(len(self.items))
-        return f"{count} events recorded  [e] export  [/] filter{filter_part}{input_part}"
+        # Same escape as ``render_text`` above — ``[e]`` is a tag
+        # and ``[/]`` is an unmatched close. Escape both.
+        return (
+            f"{count} events recorded  \\[e] export  \\[/] filter"
+            f"{filter_part}{input_part}"
+        )
 
     def _row_view(self, index: int, event: Event) -> AuditRowView:
         action_label, action_style = audit_action_display(event.action)

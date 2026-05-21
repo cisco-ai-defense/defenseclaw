@@ -3298,7 +3298,12 @@ def _audit_sink_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[
         name = str(_mapping_or_attr(sink, "name", "sink"))
         kind = str(_mapping_or_attr(sink, "kind", ""))
         enabled = bool(_mapping_or_attr(sink, "enabled", True))
-        summary = f"{name} [{kind}] {'enabled' if enabled else 'disabled'}"
+        # ``kind`` is the audit-sink type (``stdout``, ``file``,
+        # ``splunk_hec``, …) — every lowercase value would be parsed
+        # as a Rich style and the kind/state would silently drop
+        # from the summary. Escape both bracket pairs.
+        state = "enabled" if enabled else "disabled"
+        summary = f"{name} \\[{kind}] \\[{state}]"
         out.append(ConfigField(name, "audit_sinks." + name, "header", summary, summary))
     out.append(hint)
     return tuple(out)
