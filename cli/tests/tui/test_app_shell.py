@@ -2750,6 +2750,15 @@ _LITERAL_ALLOWLIST: tuple[str, ...] = (
     # Audit-row demonstration text (already covered by _audit_body_text
     # which routes through ``_safe_body_renderable``).
     "[Enter] view output",
+    # Overview notice hotkey hints — the consumer (``_overview_body_text``)
+    # wraps ``notice.message`` in ``rich_escape`` so the brackets render
+    # literally even though Rich would otherwise parse them as style
+    # tags. Keeping the bracketed letters readable in the source notice
+    # is more useful to the operator than spreading escape backslashes
+    # through every notice message.
+    "press [g] to set up",
+    "press [d] to refresh",
+    "press [d] on Overview",
 )
 
 # Variable expressions inside f-strings whose values are statically
@@ -2971,9 +2980,9 @@ def test_activity_history_tab_bar_escapes_t_hotkey() -> None:
 
     import inspect
 
-    from defenseclaw.tui.panels.activity import ActivityModel
+    from defenseclaw.tui.panels.activity import ActivityPanelModel
 
-    source = inspect.getsource(ActivityModel._render_history)  # noqa: SLF001
+    source = inspect.getsource(ActivityPanelModel._render_history)  # noqa: SLF001
     assert "\\\\[t] terminal mode" in source
 
 
