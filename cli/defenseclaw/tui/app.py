@@ -104,6 +104,7 @@ from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
 from defenseclaw.tui.widgets.hint_bar import HintBar
 from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
 from defenseclaw.tui.widgets.status_strip import render_status_strip
+from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 
 TOKENS = DEFAULT_TOKENS
 
@@ -567,6 +568,13 @@ class DefenseClawTUI(App[None]):
         self._command_registry = build_registry()
         self._command_palette_values: list[str] = []
         self._last_table_click: tuple[str, int] | None = None
+        # Auto-dismissing toast queue. Mirrors the Go TUI's
+        # ToastManager: cap of MAX_TOASTS (3), TTLs of 4s/4s/6s/8s for
+        # info/success/warn/error. The widget itself is mounted in
+        # compose() below the activity log; we re-render it whenever
+        # push() or tick() mutates the queue.
+        self.toasts = ToastManager()
+        self._toasts_dirty = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="root"):
@@ -748,6 +756,7 @@ class DefenseClawTUI(App[None]):
                 yield Static("", id="command-progress-snippet", markup=True)
                 yield Static("", id="command-progress-hint", markup=True)
             yield RichLog(id="activity", wrap=True, markup=True, highlight=True)
+            yield ToastStack(id="toasts")
             yield HintBar(id="hint")
             yield Static("", id="status")
 
