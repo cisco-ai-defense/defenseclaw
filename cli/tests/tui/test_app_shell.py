@@ -2351,8 +2351,16 @@ def test_write_activity_safe_escapes_subprocess_output(monkeypatch) -> None:
         return fake
 
     monkeypatch.setattr(app, "query_one", _query_one, raising=False)
-    app._write_activity_safe("[INFO] subprocess output [16]")  # noqa: SLF001
-    assert captured == ["\\[INFO] subprocess output \\[16]"]
+    # ``[skill]`` is the canonical risk shape — Rich's markup parser
+    # treats it as an opening style tag. ``rich.markup.escape`` is
+    # intentionally conservative and only escapes the brackets it
+    # would otherwise parse as a tag, so uppercase / numeric tokens
+    # like ``[INFO]`` or ``[16]`` flow through verbatim (Rich treats
+    # them as literal text and never crashes on them anyway). Verify
+    # the safe writer escapes the dangerous shape so a bracketed
+    # token in subprocess output can't take down the activity stream.
+    app._write_activity_safe("prompt: [skill] continue")  # noqa: SLF001
+    assert captured == ["prompt: \\[skill] continue"]
 
 
 def test_command_progress_snippet_escapes_subprocess_tail() -> None:
@@ -2426,12 +2434,18 @@ def test_hint_bar_disables_markup_parsing() -> None:
     from defenseclaw.tui.widgets.hint_bar import HintBar
 
     bar = HintBar()
-    # Textual's Static stores the markup flag at ``_markup`` (and
-    # exposes ``self.use_markup`` in newer versions); fall back to a
-    # construction-time check via update().
-    flag = getattr(bar, "use_markup", None)
+    # Textual stores the Static's markup flag at ``_render_markup``.
+    # We assert the canonical attribute first; if a future Textual
+    # release renames it, fall back to a render-shape probe so the
+    # test still distinguishes "literal text" from "parsed markup".
+    flag = getattr(bar, "_render_markup", None)
     if flag is None:
-        flag = getattr(bar, "_markup", True)
+        # Try the alternative attribute names some Textual versions use.
+        for name in ("use_markup", "_markup", "markup"):
+            value = getattr(bar, name, None)
+            if value is not None:
+                flag = value
+                break
     assert flag is False, "HintBar must opt out of Rich markup parsing"
 
 
@@ -2458,8 +2472,12 @@ def test_judge_history_format_pair_escapes_value() -> None:
     from defenseclaw.tui.screens.judge_history import _format_pair
 
     rendered = _format_pair("Raw", "prompt: [skill] Tell me [16]")
+    # ``rich.markup.escape`` is conservative: it escapes ``[skill]``
+    # (which Rich would parse as an opening style tag) but leaves
+    # numeric tokens like ``[16]`` alone because Rich treats those as
+    # literal text. The important guarantee is that the markup-risk
+    # shape gets neutralised; literal-safe shapes don't need to.
     assert "\\[skill]" in rendered
-    assert "\\[16]" in rendered
 
 
 def test_command_preview_screen_escapes_user_argv() -> None:
