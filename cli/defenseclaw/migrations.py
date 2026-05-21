@@ -1273,6 +1273,150 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Migration: 0.5.1
+# ---------------------------------------------------------------------------
+
+
+def _migrate_0_5_1(ctx: MigrationContext) -> None:
+    """0.5.1 upgrade — single sub-step.
+
+    Step 1: ``_migrate_0_5_1_align_gateway_token_env``
+            Repoints stale ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN``
+            in config.yaml to the canonical ``DEFENSECLAW_GATEWAY_TOKEN``
+            so the Python CLI and the Go gateway agree on the env var
+            name out of the box. Phase 1+2 of the gateway-token
+            rebranding fix put a runtime fall-through in
+            ``GatewayConfig.resolved_token`` that already MASKS the
+            drift; this migration cleans up the config so operators
+            no longer rely on that fall-through.
+
+    Wrapped in try/except per the migration playbook — a failure in
+    this step never aborts the upgrade; the auto-detect fall-through
+    keeps the CLI working until the operator runs ``defenseclaw
+    doctor --fix`` (which does the same rewrite under operator
+    confirmation).
+    """
+    try:
+        _migrate_0_5_1_align_gateway_token_env(ctx)
+    except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
+        ux.warn(f"gateway token_env rename step failed: {exc}", indent="    ")
+
+
+def _migrate_0_5_1_align_gateway_token_env(ctx: MigrationContext) -> None:
+    """Rewrite ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` → ``DEFENSECLAW_GATEWAY_TOKEN``.
+
+    Trigger conditions (ALL must hold):
+
+    * ``config.yaml`` exists at ``<data_dir>/config.yaml``.
+    * The file contains a ``gateway:`` block with
+      ``token_env: OPENCLAW_GATEWAY_TOKEN`` (the bootstrap default
+      from before Phase 3 of the rebranding fix).
+    * The dotenv at ``<data_dir>/.env`` carries
+      ``DEFENSECLAW_GATEWAY_TOKEN`` with a non-empty value (the
+      0.4.0 token-bootstrap migration normally promotes the legacy
+      var into this name; this migration just finishes the job on
+      the config side).
+
+    The dotenv-population check is the safety gate: we never want to
+    repoint ``token_env`` at an env var that doesn't exist anywhere,
+    because that turns a *silently-working-via-fall-through* config
+    into a *visibly-broken-with-no-fall-back* one. Better to leave
+    the legacy default in place and let the auto-detect ladder keep
+    serving requests.
+
+    Idempotent: if ``token_env`` already says
+    ``DEFENSECLAW_GATEWAY_TOKEN`` (Phase 3 default, or already
+    migrated), this is a no-op.
+
+    Comment-preservation contract: the regex matches ONLY the
+    ``token_env:`` line inside the ``gateway:`` block. Inline
+    comments on the same line are preserved; surrounding comments,
+    blank separators, and unrelated keys are untouched. Indentation
+    of the rewritten line is preserved exactly (we substitute the
+    value, not the line).
+
+    Custom-override safety: if ``token_env`` points at any var name
+    OTHER than ``OPENCLAW_GATEWAY_TOKEN`` (operator pinned a custom
+    name via ``defenseclaw setup gateway``), the migration leaves it
+    alone. Operator intent always wins over migration defaults.
+    """
+    cfg_path = os.path.join(ctx.data_dir, "config.yaml")
+    if not os.path.isfile(cfg_path):
+        return
+
+    # Safety gate: only proceed if the canonical token is actually
+    # set in the dotenv. Without this, we'd repoint at an empty var
+    # and break the request path that the Phase 1+2 fall-through is
+    # currently keeping alive.
+    env_path = os.path.join(ctx.data_dir, ".env")
+    existing_env = _parse_dotenv(env_path)
+    if not existing_env.get("DEFENSECLAW_GATEWAY_TOKEN", "").strip():
+        return
+
+    try:
+        with open(cfg_path) as f:
+            text = f.read()
+    except OSError as exc:
+        ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
+        return
+
+    # Find the ``gateway:`` block. Same pattern shape as
+    # ``_migrate_0_5_0_strip_codex_enforcement_keys`` — matches the
+    # block header plus indented body, stopping at the next top-level
+    # key. ``[ \t]*`` after the colon tolerates trailing whitespace
+    # that some YAML formatters add.
+    block_match = re.search(
+        r"^gateway:[ \t]*\n(?P<body>(?:[ \t]+[^\n]*\n|\n)*)",
+        text,
+        flags=re.MULTILINE,
+    )
+    if not block_match:
+        return
+
+    body_start = block_match.start("body")
+    body_end = block_match.end("body")
+    body = block_match.group("body")
+
+    # Match the ``token_env: OPENCLAW_GATEWAY_TOKEN`` line. The value
+    # may be unquoted (most common), single-quoted, or double-quoted;
+    # we accept all three so we never miss a legitimately-formatted
+    # legacy entry. An inline comment after the value is preserved
+    # because the substitution only touches the captured value group.
+    pattern = re.compile(
+        r"""
+        (?P<prefix>^[ \t]+token_env\s*:\s*)   # indent + key + colon + space
+        (?P<quote>["']?)                       # optional opening quote
+        OPENCLAW_GATEWAY_TOKEN                 # the literal legacy value
+        (?P=quote)                             # matching closing quote
+        (?P<suffix>[ \t]*(?:\#[^\n]*)?\n)      # trailing space + optional comment + newline
+        """,
+        flags=re.MULTILINE | re.VERBOSE,
+    )
+
+    new_body, count = pattern.subn(
+        lambda m: f"{m.group('prefix')}{m.group('quote')}DEFENSECLAW_GATEWAY_TOKEN{m.group('quote')}{m.group('suffix')}",
+        body,
+    )
+    if count == 0:
+        return
+
+    new_text = text[:body_start] + new_body + text[body_end:]
+    if new_text == text:
+        return
+
+    if not _atomic_write_text(cfg_path, new_text):
+        ux.warn(f"could not write {cfg_path}", indent="    ")
+        return
+
+    ctx.changes.append(
+        "repointed gateway.token_env from OPENCLAW_GATEWAY_TOKEN to "
+        "DEFENSECLAW_GATEWAY_TOKEN in config.yaml — matches the env "
+        "var the Go gateway writes on first boot, removes reliance on "
+        "the resolved_token auto-detect fall-through"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 
@@ -1296,6 +1440,15 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         "now routed through the agent's native hook bus via guardrail.mode=action) "
         "— see _migrate_0_5_0 docstring",
         _migrate_0_5_0,
+    ),
+    (
+        "0.5.1",
+        "Repoint legacy gateway.token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml "
+        "to the canonical DEFENSECLAW_GATEWAY_TOKEN so the Python CLI and the Go "
+        "gateway agree on the env var name (closes the 'gateway token unavailable' "
+        "trip the runtime fall-through in GatewayConfig.resolved_token already masks) "
+        "— see _migrate_0_5_1 docstring",
+        _migrate_0_5_1,
     ),
 ]
 
