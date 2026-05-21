@@ -470,6 +470,85 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
 
 
+def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
+    """Detect the OPENCLAW_/DEFENSECLAW_ token-env drift the user hit.
+
+    This is the doctor surface for the rebranding fix
+    (cmd_agent/_resolve_gateway_target + config/GatewayConfig). The
+    auto-detect ladder in Phase 1-2 already MASKS the misconfig at
+    runtime — `agent usage` works either way — but doctor should
+    still flag the stale ``token_env`` so operators can clean it up
+    via `--fix` and rely on the explicit (faster, no-fallthrough)
+    path going forward.
+
+    Triggers when ALL of these hold:
+
+    * ``cfg.gateway.token_env`` is set to a non-empty string.
+    * That env var is empty in ``os.environ``.
+    * The CANONICAL var (``DEFENSECLAW_GATEWAY_TOKEN``) IS populated.
+
+    "fail" tag (not "warn") is intentional — without the auto-detect
+    fall-through, this exact config would fail every `agent usage`
+    call. The fall-through is a safety net, not the design.
+    """
+    gw = getattr(cfg, "gateway", None)
+    if gw is None:
+        return
+
+    configured_env = getattr(gw, "token_env", "") or ""
+    if not configured_env:
+        # No env var configured at all — handled by other checks
+        # (e.g. _check_sidecar's auth probe). Not our concern here.
+        return
+
+    configured_val = os.environ.get(configured_env, "")
+    if configured_val:
+        # Configured var IS populated — happy path. Nothing to flag.
+        _emit("pass", "Gateway token env", f"{configured_env} is set", r=r)
+        return
+
+    # Stale token_env: configured var is empty. Check whether the
+    # canonical DEFENSECLAW_ var is populated instead — that's the
+    # drift case worth fixing.
+    canonical = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    if canonical:
+        _emit(
+            "fail",
+            "Gateway token env",
+            f"cfg.gateway.token_env={configured_env!r} is empty in env, "
+            "but DEFENSECLAW_GATEWAY_TOKEN is set. Run `defenseclaw doctor "
+            "--fix` to repoint token_env at the canonical var.",
+            r=r,
+        )
+        return
+
+    legacy = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    if legacy and configured_env != "OPENCLAW_GATEWAY_TOKEN":
+        # Custom token_env that's empty, but legacy OPENCLAW_ has a
+        # value. Rare; flag as warn so the operator can decide.
+        _emit(
+            "warn",
+            "Gateway token env",
+            f"cfg.gateway.token_env={configured_env!r} is empty, but "
+            "OPENCLAW_GATEWAY_TOKEN has a legacy value. Migrate via "
+            "`defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN <value>`.",
+            r=r,
+        )
+        return
+
+    # Both vars empty — no token configured anywhere. Other checks
+    # (sidecar /health probe) will catch the downstream effect; we
+    # just report the local config state.
+    _emit(
+        "warn",
+        "Gateway token env",
+        f"{configured_env} is empty and no DEFENSECLAW_GATEWAY_TOKEN "
+        "fallback is present. Start the gateway (auto-generates a "
+        "token) or run `defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN`.",
+        r=r,
+    )
+
+
 def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
     settings_path = os.path.expanduser("~/.claude/settings.json")
     if not os.path.isfile(settings_path):
@@ -1645,6 +1724,7 @@ def doctor(
     if not json_out:
         _doctor_subsection("Services")
     _check_sidecar(cfg, r)
+    _check_gateway_token_env_alignment(cfg, r)
     if active_connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
     elif active_connector == "claudecode":
@@ -1789,6 +1869,7 @@ def _run_fixers(
     fixers = [
         ("stale gateway PID file", _fix_stale_pid),
         ("gateway token", _fix_gateway_token),
+        ("gateway token_env", _fix_gateway_token_env),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup", _fix_pristine_backup),
         ("connector residue", _fix_connector_residue),
@@ -2184,6 +2265,70 @@ def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if current:
         return ("skip", f"{env_var} already set")
     return ("skip", f"connector {active_connector} — set {env_var} manually if needed")
+
+
+def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Repoint ``cfg.gateway.token_env`` at the canonical var when stale.
+
+    Companion to :func:`_check_gateway_token_env_alignment`. The check
+    just flags drift; this fixer actually rewrites
+    ``cfg.gateway.token_env`` from the legacy ``OPENCLAW_GATEWAY_TOKEN``
+    (or any other empty-in-env value) to ``DEFENSECLAW_GATEWAY_TOKEN``
+    when the latter is populated. Saves config.yaml in place.
+
+    Returns ``("skip", ...)`` when no fix is needed (config already
+    aligned, or no canonical token to repoint AT), ``("pass", ...)``
+    when the rewrite lands successfully, ``("fail", ...)`` on write
+    error.
+
+    Why ``cfg.save()`` and not a surgical YAML patch: ``GatewayConfig``
+    is a small dataclass and the save round-trips through the
+    canonical writer — this guarantees the field is serialized the
+    same way as anywhere else in the codebase. Surgical patching
+    would diverge from the live config schema if a future field is
+    added between writes.
+    """
+    gw = getattr(cfg, "gateway", None)
+    if gw is None:
+        return ("skip", "no gateway config")
+
+    configured_env = getattr(gw, "token_env", "") or ""
+    canonical = "DEFENSECLAW_GATEWAY_TOKEN"
+
+    # Already on the canonical name — nothing to do, regardless of
+    # whether the var is actually populated. Other fixers handle the
+    # missing-value case.
+    if configured_env == canonical:
+        return ("skip", f"token_env already set to {canonical}")
+
+    # Don't touch a custom operator override. Only auto-repoint the
+    # legacy OPENCLAW_ default.
+    if configured_env and configured_env != "OPENCLAW_GATEWAY_TOKEN":
+        return (
+            "skip",
+            f"token_env={configured_env!r} is a custom override; not auto-rewriting",
+        )
+
+    # Only proceed when the canonical var is actually populated —
+    # otherwise we'd be repointing at another empty var, which buys
+    # nothing and obscures the underlying "no token anywhere" state.
+    if not os.environ.get(canonical, ""):
+        return ("skip", f"{canonical} is not set; nothing to repoint at")
+
+    if not assume_yes and not click.confirm(
+        f"    Repoint cfg.gateway.token_env from {configured_env!r} "
+        f"to {canonical!r} in config.yaml?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        gw.token_env = canonical
+        cfg.save()
+    except (OSError, AttributeError) as exc:
+        return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
+
+    return ("pass", f"token_env repointed to {canonical}")
 
 
 def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
