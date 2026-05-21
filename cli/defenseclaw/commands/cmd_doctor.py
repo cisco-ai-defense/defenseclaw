@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -521,6 +522,227 @@ def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
         f"{configured_env} is empty and no DEFENSECLAW_GATEWAY_TOKEN "
         "fallback is present. Start the gateway (auto-generates a "
         "token) or run `defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN`.",
+        r=r,
+    )
+
+
+def _read_pid_from_file(pid_file: str) -> int:
+    """Return the live PID recorded in ``gateway.pid``, or 0.
+
+    Tolerates both the legacy plain-integer format and the current
+    ``{"pid": N, ...}`` JSON envelope. Returns 0 on any read/parse
+    error or when the PID is not actually alive — callers treat 0 as
+    "no live sidecar to inspect".
+    """
+    if not os.path.isfile(pid_file):
+        return 0
+    try:
+        with open(pid_file, encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except OSError:
+        return 0
+    try:
+        pid = int(raw)
+    except ValueError:
+        try:
+            pid = int(json.loads(raw).get("pid", 0))
+        except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            return 0
+    if pid <= 0:
+        return 0
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return 0
+    return pid
+
+
+def _read_process_env_var(pid: int, var_name: str) -> str | None:
+    """Return the named env var's value from a running process's env.
+
+    Tries ``/proc/<pid>/environ`` first (Linux fast path; no
+    subprocess), falls back to ``ps eww -p <pid>`` (macOS / BSD where
+    /proc isn't a thing, plus a backup path if /proc read fails).
+    The fallback parses the FIRST line of ps output (the env line)
+    and matches ``VAR=`` tokens; it intentionally does NOT shell out
+    to grep so this works with hostile env values (which can contain
+    spaces, single quotes, equals signs).
+
+    Returns:
+      * The env-var value (possibly empty string "") on success.
+      * ``None`` when the process is gone, the env is unreadable
+        (perms — common on macOS for processes owned by other users),
+        or the var is genuinely not in the process env. ``None`` is
+        the "I don't know" sentinel; callers MUST treat it as
+        "can't detect drift" not "drift confirmed". Conflating the
+        two would turn a permissions blip into a false alarm that
+        nags the operator to restart a healthy sidecar.
+    """
+    if pid <= 0 or not var_name:
+        return None
+
+    # Linux fast path: /proc/<pid>/environ is null-separated KEY=VALUE.
+    proc_environ = f"/proc/{pid}/environ"
+    if os.path.isfile(proc_environ):
+        try:
+            with open(proc_environ, "rb") as fh:
+                blob = fh.read()
+        except (OSError, PermissionError):
+            blob = b""
+        if blob:
+            for entry in blob.split(b"\x00"):
+                if not entry:
+                    continue
+                key, sep, value = entry.partition(b"=")
+                if sep and key.decode("utf-8", errors="replace") == var_name:
+                    return value.decode("utf-8", errors="replace")
+            # /proc was readable but the var isn't there — definitive
+            # absence.
+            return ""
+
+    # macOS / fallback: ps eww -p <pid> prints "PID TTY STAT TIME CMD ENV...".
+    # We ask for just the args (the env appears inline on macOS).
+    try:
+        proc = subprocess.run(
+            ["ps", "eww", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+
+    # ps output: header line, then one or more lines for the process.
+    # The env tokens are space-separated VAR=VALUE pairs. Iterate
+    # tokens and pick the first one whose key matches; this handles
+    # multi-line output and values that don't contain unescaped spaces.
+    needle = var_name + "="
+    for line in proc.stdout.splitlines()[1:]:
+        for token in line.split():
+            if token.startswith(needle):
+                return token[len(needle):]
+    # We could parse, but the var wasn't there — definitive absence.
+    return ""
+
+
+def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
+    """Detect a stale-sidecar-token vs current-.env-token mismatch.
+
+    Failure mode this closes: the sidecar caches its auth token at
+    startup (from env / dotenv). If anything later rewrites
+    ``~/.defenseclaw/.env`` — Phase 4 migration, a fresh
+    ``EnsureGatewayToken`` run, manual ``defenseclaw keys set``, an
+    install script that touches the dotenv — the running sidecar
+    keeps using the OLD token while the CLI reads the NEW one. Every
+    subsequent ``defenseclaw agent usage`` (and any other auth'd API
+    call) returns HTTP 401 with no hint of the root cause.
+
+    Triggers when ALL of these hold:
+
+    * ``gateway.pid`` exists and the recorded PID is alive.
+    * The sidecar process's ``DEFENSECLAW_GATEWAY_TOKEN`` env var is
+      readable and non-empty.
+    * The current ``.env``'s ``DEFENSECLAW_GATEWAY_TOKEN`` is non-empty.
+    * The two differ.
+
+    "fail" tag is intentional — this configuration is BROKEN at
+    runtime (every API call returns 401), not just suboptimal.
+    Operators need to know this, not a soft "warn".
+
+    Permission-denied / process-gone cases emit ``"skip"`` rather
+    than ``"warn"`` — those aren't drift, just "can't tell". Nagging
+    on indeterminacy would erode trust in the check.
+    """
+    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    pid = _read_pid_from_file(pid_file)
+    if pid == 0:
+        # No running sidecar — nothing to compare against. Other
+        # checks (e.g. _check_sidecar) handle the "sidecar down"
+        # case; this one is exclusively about drift between live
+        # process and on-disk dotenv.
+        return
+
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    dotenv_token = ""
+    if os.path.isfile(dotenv_path):
+        try:
+            with open(dotenv_path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
+                        value = line[len("DEFENSECLAW_GATEWAY_TOKEN="):]
+                        # Strip optional surrounding quotes the same
+                        # way config._load_dotenv_into_os does, so
+                        # the comparison matches the value the CLI
+                        # would actually send.
+                        if (
+                            len(value) >= 2
+                            and value[0] == value[-1]
+                            and value[0] in ('"', "'")
+                        ):
+                            value = value[1:-1]
+                        dotenv_token = value
+                        break
+        except OSError:
+            return
+    if not dotenv_token:
+        # No token in .env to compare against. _check_sidecar /
+        # _check_gateway_token_env_alignment surface the upstream
+        # "no token configured" state; nothing to report here.
+        return
+
+    process_token = _read_process_env_var(pid, "DEFENSECLAW_GATEWAY_TOKEN")
+    if process_token is None:
+        # Couldn't read the process env — permissions or process
+        # raced away. Skip silently rather than warn; "can't tell"
+        # is not drift.
+        _emit(
+            "skip",
+            "Gateway token drift",
+            f"could not inspect sidecar (pid {pid}) env — permissions?",
+            r=r,
+        )
+        return
+    if not process_token:
+        # Sidecar started with no DEFENSECLAW_GATEWAY_TOKEN in env.
+        # Either it's an older binary that read the dotenv directly,
+        # or the user started it manually without sourcing the
+        # dotenv. The check below would falsely flag "drift" here;
+        # treat this as inconclusive and let _check_sidecar surface
+        # the auth issue if one exists.
+        _emit(
+            "skip",
+            "Gateway token drift",
+            f"sidecar (pid {pid}) has no DEFENSECLAW_GATEWAY_TOKEN in env; "
+            "comparing dotenv to process not meaningful",
+            r=r,
+        )
+        return
+
+    if process_token == dotenv_token:
+        _emit(
+            "pass",
+            "Gateway token drift",
+            f"sidecar (pid {pid}) token matches ~/.defenseclaw/.env",
+            r=r,
+        )
+        return
+
+    # Mismatch confirmed. Show only first 8 chars of each so the
+    # operator can confirm with their eyes without leaking the full
+    # secret into stdout / log / screenshot.
+    proc_prefix = process_token[:8] + "…" if len(process_token) >= 8 else "<too short>"
+    env_prefix = dotenv_token[:8] + "…" if len(dotenv_token) >= 8 else "<too short>"
+    _emit(
+        "fail",
+        "Gateway token drift",
+        f"sidecar (pid {pid}) is running with token {proc_prefix} but "
+        f"~/.defenseclaw/.env has {env_prefix}. Every API call will "
+        "return HTTP 401. Run `defenseclaw doctor --fix` (or "
+        "`defenseclaw-gateway restart`) to reconcile.",
         r=r,
     )
 
@@ -1465,6 +1687,7 @@ def doctor(
         _doctor_subsection("Services")
     _check_sidecar(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
+    _check_gateway_token_drift(cfg, r)
     if active_connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
     elif active_connector == "claudecode":
@@ -1602,6 +1825,7 @@ def _run_fixers(
         ("stale gateway PID file",   _fix_stale_pid),
         ("gateway token",            _fix_gateway_token),
         ("gateway token_env",        _fix_gateway_token_env),
+        ("gateway token drift",      _fix_gateway_token_drift),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup",   _fix_pristine_backup),
         ("connector residue",        _fix_connector_residue),
@@ -1988,6 +2212,99 @@ def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
         return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
 
     return ("pass", f"token_env repointed to {canonical}")
+
+
+def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Restart the sidecar when its in-memory token != current .env.
+
+    Companion to :func:`_check_gateway_token_drift`. The check just
+    flags the drift; this fixer offers to bounce the sidecar so it
+    re-reads the dotenv and starts serving the current token. We
+    deliberately do NOT touch the dotenv itself — the operator's
+    intent is preserved.
+
+    Why a restart and not an in-place token reload: the sidecar
+    holds the token in memory in a dozen places (auth middleware,
+    connector credentials, hook scripts cached on disk). A
+    SIGHUP-style reload would have to walk all of those; a clean
+    restart is the only honest fix.
+
+    Returns ``("skip", ...)`` when there's nothing to fix (no drift
+    detected, no live sidecar, can't introspect), ``("pass", ...)``
+    on successful restart, ``("fail", ...)`` when the restart
+    invocation errors out.
+    """
+    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    pid = _read_pid_from_file(pid_file)
+    if pid == 0:
+        return ("skip", "no live sidecar to restart")
+
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    if not os.path.isfile(dotenv_path):
+        return ("skip", "no .env file to compare against")
+
+    dotenv_token = ""
+    try:
+        with open(dotenv_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
+                    value = line[len("DEFENSECLAW_GATEWAY_TOKEN="):]
+                    if (
+                        len(value) >= 2
+                        and value[0] == value[-1]
+                        and value[0] in ('"', "'")
+                    ):
+                        value = value[1:-1]
+                    dotenv_token = value
+                    break
+    except OSError as exc:
+        return ("warn", f"could not read {dotenv_path}: {exc}")
+    if not dotenv_token:
+        return ("skip", "no DEFENSECLAW_GATEWAY_TOKEN in .env to reconcile")
+
+    process_token = _read_process_env_var(pid, "DEFENSECLAW_GATEWAY_TOKEN")
+    if process_token is None:
+        return ("skip", f"could not inspect sidecar pid {pid} env")
+    if not process_token:
+        return ("skip", f"sidecar pid {pid} has no DEFENSECLAW_GATEWAY_TOKEN in env")
+    if process_token == dotenv_token:
+        return ("skip", "sidecar token already matches .env")
+
+    # Drift confirmed. Find the gateway binary and offer to restart.
+    gw_binary = shutil.which("defenseclaw-gateway")
+    if not gw_binary:
+        return (
+            "warn",
+            "drift detected but defenseclaw-gateway not on PATH; "
+            "restart the sidecar manually to reconcile",
+        )
+
+    if not assume_yes and not click.confirm(
+        f"    Restart sidecar (pid {pid}) to pick up the current "
+        ".env token? In-flight requests will be interrupted.",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        result = subprocess.run(
+            [gw_binary, "restart"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ("fail", "restart command timed out after 30s")
+    except OSError as exc:
+        return ("fail", f"could not invoke restart: {exc}")
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
+        return ("fail", detail[0] if detail else "restart failed")
+
+    return ("pass", f"sidecar restarted; will now serve token from {dotenv_path}")
 
 
 def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:

@@ -842,6 +842,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_stale_pid") as fix_pid,
             patch.object(cmd_doctor, "_fix_gateway_token") as fix_token,
             patch.object(cmd_doctor, "_fix_gateway_token_env") as fix_token_env,
+            patch.object(cmd_doctor, "_fix_gateway_token_drift") as fix_drift,
             patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
             patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
             patch.object(cmd_doctor, "_fix_connector_residue") as fix_residue,
@@ -853,6 +854,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             fix_pid.assert_not_called()
             fix_token.assert_not_called()
             fix_token_env.assert_not_called()
+            fix_drift.assert_not_called()
             fix_dotenv.assert_not_called()
             fix_pristine.assert_not_called()
             fix_residue.assert_not_called()
@@ -860,7 +862,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
         # Each fixer should have produced a "skip" record so the TUI
         # can list every step the real run would touch.
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 6)
+        self.assertEqual(len(fix_records), 7)
         for record in fix_records:
             self.assertEqual(record["status"], "skip")
             self.assertIn("dry-run", record["detail"])
@@ -874,6 +876,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             patch.object(cmd_doctor, "_fix_stale_pid", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
             patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")),
@@ -883,7 +886,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
             )
 
         fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 6)
+        self.assertEqual(len(fix_records), 7)
         for record in fix_records:
             self.assertEqual(record["status"], "pass")
 
