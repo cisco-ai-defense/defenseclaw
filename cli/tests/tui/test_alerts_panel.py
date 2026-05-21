@@ -278,3 +278,133 @@ def test_alerts_table_metadata_marks_scan_rows_non_selectable(tmp_path) -> None:
     scan_details = next(row.event.details for row in model.filtered if row.kind == "scan")
     assert "total=2" in scan_details
     assert "counts=HIGH=1,LOW=1" in scan_details
+
+
+def test_alerts_connector_hook_row_surfaces_connector_and_decision() -> None:
+    """Hook rows should encode connector + decision in the table cells."""
+
+    hook_event = AlertEvent(
+        id="h1",
+        severity="LOW",
+        action="connector-hook",
+        target="preToolUse",
+        details=(
+            "connector=claudecode action=allow severity=LOW mode=observe "
+            "elapsed=320ms tool=Bash audit_id=abc123"
+        ),
+    )
+    plain_event = AlertEvent(
+        id="p1",
+        severity="HIGH",
+        action="proxy",
+        target="gateway",
+        details="host=api port=443 mode=strict",
+    )
+
+    model = AlertsPanelModel()
+    model.set_events([hook_event, plain_event])
+
+    rows = {row.alert_id: row for row in model.data_table_row_models()}
+    assert rows["h1"].cells[4] == "claudecode · preToolUse"
+    # ``LOW`` is non-NONE so it gets folded into the summary alongside
+    # the decision and elapsed; the rest of the kv blob is hidden.
+    assert rows["h1"].cells[5] == "allow · LOW · 320ms"
+
+    # Non-hook rows preserve their existing humanized rendering so the
+    # proxy/scan/egress legacy table layout is untouched.
+    assert rows["p1"].cells[4] == "gateway"
+    assert rows["p1"].cells[5] == "api:443 strict"
+
+
+def test_alerts_connector_hook_detail_pairs_expand_kv_into_rows() -> None:
+    """Hook detail panes should split kv details into labelled rows."""
+
+    hook_event = AlertEvent(
+        id="h1",
+        severity="INFO",
+        action="connector-hook",
+        target="preToolUse",
+        details=(
+            "connector=claudecode action=allow severity=NONE mode=observe "
+            "would_block=false elapsed=180ms tool=Bash "
+            "payload=<redacted len=12 sha=deadbeefcafebabe>"
+        ),
+    )
+
+    model = AlertsPanelModel()
+    model.set_events([hook_event])
+    model.toggle_expand_or_detail()
+
+    pairs = dict(model.detail_pairs())
+    # The kv blob is exploded into its own rows…
+    assert pairs["Connector"] == "claudecode"
+    assert pairs["Decision"] == "allow"
+    assert pairs["Enforcement mode"] == "observe"
+    assert pairs["Elapsed"] == "180ms"
+    assert pairs["Tool"] == "Bash"
+    # …redacted blobs are prettified for humans, and noisy
+    # severity=NONE / would_block=false in observe mode are hidden.
+    assert "redacted" in pairs["Payload"]
+    assert "12 bytes" in pairs["Payload"]
+    assert "Severity" not in pairs or pairs["Severity"] != "NONE"
+    assert "Would block" not in pairs
+    # The legacy Summary/Details rows are no longer emitted because
+    # the exploded rows are strictly more useful.
+    assert "Summary" not in pairs
+    assert "Details" not in pairs
+
+
+def test_alerts_connector_hook_blocked_keeps_severity_and_block_flag() -> None:
+    """Enforce-mode blocked hooks must keep severity + would_block visible."""
+
+    hook_event = AlertEvent(
+        id="h1",
+        severity="HIGH",
+        action="connector-hook",
+        target="postToolUse",
+        details=(
+            "connector=claudecode action=block severity=HIGH mode=enforce "
+            "would_block=true elapsed=42ms reason=policy_match"
+        ),
+    )
+
+    model = AlertsPanelModel()
+    model.set_events([hook_event])
+    model.toggle_expand_or_detail()
+
+    pairs = dict(model.detail_pairs())
+    assert pairs["Decision"] == "block"
+    # In enforce mode we keep the structured severity + block flag so
+    # operators see exactly why the request was rejected.
+    assert pairs["Severity"] == "HIGH"
+    assert pairs["Would block"] == "yes"
+    assert pairs["Reason"] == "policy_match"
+
+
+def test_alerts_connector_hook_copy_text_uses_structured_rows() -> None:
+    """`y` should copy the same hook-aware view shown in the detail pane."""
+
+    hook_event = AlertEvent(
+        id="h1",
+        severity="LOW",
+        action="connector-hook",
+        target="preToolUse",
+        details=(
+            "connector=claudecode action=allow severity=LOW mode=observe "
+            "elapsed=99ms tool=Read"
+        ),
+    )
+
+    model = AlertsPanelModel()
+    model.set_events([hook_event])
+    model.toggle_expand_or_detail()
+
+    copied = model.handle_key("y").copy_text
+    assert "Connector: claudecode" in copied
+    assert "Decision: allow" in copied
+    assert "Tool: Read" in copied
+    # Hook copy text drops the noisy ``Summary``/``Details`` lines
+    # used for proxy/scan rows; structured rows are the source of
+    # truth.
+    assert "Summary:" not in copied
+    assert "Details: connector=" not in copied
