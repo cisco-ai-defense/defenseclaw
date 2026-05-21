@@ -2704,6 +2704,7 @@ def test_alerts_finding_scanner_badge_escaped() -> None:
 # numeric, whitespace-led, ``/`` close-tag, ``!``, etc. — is rendered
 # as literal text. So the *only* unsafe shape we have to ban is a
 # bracket pair starting with a lowercase letter.
+import ast as _ast_scanner
 import re as _re_scanner
 
 # Rich style names that are intentional and safe to leave unescaped.
@@ -2720,32 +2721,116 @@ _RICH_STYLE_ALLOWLIST = frozenset({
     "on red", "on green", "on blue", "on yellow", "on cyan",
     "on magenta", "on white", "on black",
     "link", "reset", "none",
-    # Tokens we use that combine bold/dim with a hex color — those
-    # are matched by the ``#`` prefix check below, but the leading
-    # ``bold `` / ``dim `` is still captured by the regex; allow.
 })
 
+# Per-string-literal allow-list for legitimate intentional uses
+# of bracket-tag-shaped tokens that we don't want the scanner to
+# flag (e.g. example markup in docstrings/help text, hostile-input
+# corpora used by the markup tests themselves). Each entry is a
+# substring; if the literal *contains* the substring, it's exempt.
+_LITERAL_ALLOWLIST: tuple[str, ...] = (
+    # Test fixtures that deliberately exercise hostile inputs.
+    "target:[skill]",
+    "prompt[16]",
+    "Selection [3]:",
+    "unclosed [bracket",
+    "nested [bold][skill]nope",
+    # Help / cheatsheet text that documents valid Rich markup.
+    "[bold #22D3EE]",
+    "[#9FB2CC]",
+    # Docstring example in _safe_body_renderable's prose.
+    "``[e] export``",
+)
 
-# Per-line allow-list for sites where the literal bracket pair is
-# intentional (e.g. CSS selectors, regex patterns, doctest output)
-# and not a Rich-rendered string. Each entry is (relpath, line-fragment).
-_RAW_BRACKET_ALLOWLIST: tuple[tuple[str, str], ...] = (
-    # Test corpora that intentionally exercise hostile inputs.
-    ("cli/tests/tui/test_app_shell.py", "_HOSTILE_CORPUS"),
-    # Style allow-list constants in this very test file.
-    ("cli/tests/tui/test_app_shell.py", "_RICH_STYLE_ALLOWLIST"),
+# Variable expressions inside f-strings whose values are statically
+# guaranteed to be safe (hex colors, known Rich styles). Adding to
+# this list is fine; missing one only causes a false-positive flag.
+_FSTRING_EXPR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
+    "TOKENS.",
+    "DEFAULT_TOKENS.",
+    "color",
+    "snippet_color",
+    "alert_color",
+    "icon_color",
 )
 
 
-def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
-    """Return ``(relpath, lineno, snippet)`` for every literal /
-    f-string in the TUI source tree that looks like ``"[lowercase…]"``
-    or ``f"[{lowercase_var}]"`` and isn't either backslash-escaped
-    or covered by the allow-lists.
+_RAW_BRACKET_RE = _re_scanner.compile(r"(?<!\\)\[(?P<tag>[a-z][^\[\]]{0,40})\]")
+_FSTRING_BRACKET_RE = _re_scanner.compile(r"(?<!\\)\[\{(?P<expr>[^{}]+)\}\]")
 
-    The matcher is deliberately conservative — it only flags shapes
-    Rich would actually parse as a tag — so a green run is a strong
-    signal that no new crash-class regressions slipped in.
+
+def _is_allowlisted_literal(literal: str) -> bool:
+    return any(fragment in literal for fragment in _LITERAL_ALLOWLIST)
+
+
+def _flag_raw_string(literal: str) -> list[str]:
+    """Return the offending bracket tokens from a literal Python str."""
+
+    if _is_allowlisted_literal(literal):
+        return []
+    findings: list[str] = []
+    for match in _RAW_BRACKET_RE.finditer(literal):
+        tag = match.group("tag").rstrip()
+        if tag in _RICH_STYLE_ALLOWLIST:
+            continue
+        first_token = tag.split(" ")[0]
+        if first_token in _RICH_STYLE_ALLOWLIST:
+            continue
+        findings.append(match.group(0))
+    return findings
+
+
+def _flag_fstring(joined_text: str, expressions: list[str]) -> list[str]:
+    """Return offending bracket tokens for an f-string. ``joined_text``
+    is the full f-string with ``{}`` placeholders for interpolations
+    and ``expressions`` is the source-code text of each interpolation
+    in order.
+    """
+
+    if _is_allowlisted_literal(joined_text):
+        return []
+    findings: list[str] = []
+    # First check raw bracketed tokens that happen to live in the
+    # static parts of the f-string (e.g. ``f"[bold]{x}[/]"``).
+    findings.extend(_flag_raw_string(joined_text))
+    # Then check the ``[{expr}]`` shape — risky because ``expr``
+    # evaluates at runtime and may be any lowercase string.
+    for match in _FSTRING_BRACKET_RE.finditer(joined_text):
+        expr = match.group("expr").strip()
+        if expr.startswith(_FSTRING_EXPR_ALLOWLIST_PREFIXES):
+            continue
+        findings.append(match.group(0))
+    return findings
+
+
+def _joined_str_text_and_exprs(node: object) -> tuple[str, list[str]]:
+    """Convert an ``ast.JoinedStr`` to its joined text (with ``{}``
+    placeholders for FormattedValue parts) and the list of Python
+    source for each interpolation in order. Returns ``("", [])`` if
+    ``node`` isn't a JoinedStr.
+    """
+
+    if not isinstance(node, _ast_scanner.JoinedStr):
+        return "", []
+    parts: list[str] = []
+    exprs: list[str] = []
+    for value in node.values:
+        if isinstance(value, _ast_scanner.Constant) and isinstance(value.value, str):
+            parts.append(value.value)
+        elif isinstance(value, _ast_scanner.FormattedValue):
+            exprs.append(_ast_scanner.unparse(value.value))
+            parts.append("{" + exprs[-1] + "}")
+    return "".join(parts), exprs
+
+
+def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
+    """Return ``(relpath, lineno, snippet)`` for every Python string
+    literal or f-string in the TUI source tree that contains an
+    unescaped ``[lowercase…]`` token Rich would parse as a markup tag.
+
+    The walk is AST-based: only ``Constant(str)`` and ``JoinedStr``
+    nodes are inspected. Type subscripts (``list[str]``), dict/list
+    indexing, and other non-string syntax are ignored automatically.
     """
 
     from pathlib import Path as _Path
@@ -2763,56 +2848,33 @@ def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
         elif target.is_file():
             files.append(target)
 
-    # Match the *opening* of a tag-shaped bracket pair anywhere on a
-    # line:
-    #   - inside a normal string:   "[lowercase…]
-    #   - inside an f-string:       f"[{lowercase…
-    # We require the bracket NOT be backslash-escaped (the Phase-1/2
-    # fix shape) and the leading char inside the brackets to be a
-    # lowercase ASCII letter.
-    raw_pattern = _re_scanner.compile(r"(?<!\\)\[(?P<tag>[a-z][^\[\]]{0,40})\]")
-    fstr_pattern = _re_scanner.compile(r"(?<!\\)\[\{(?P<expr>[^{}]+)\}\]")
-
     findings: list[tuple[str, int, str]] = []
     for path in files:
         rel = str(path.relative_to(repo))
-        text = path.read_text()
-        for line_no, line in enumerate(text.splitlines(), 1):
-            stripped = line.strip()
-            # Skip pure comments — ``# foo [bar]`` is documentation, not markup.
-            if stripped.startswith("#"):
-                continue
-            # Allow-listed lines (full-string match against fragments).
-            allowed = False
-            for arel, fragment in _RAW_BRACKET_ALLOWLIST:
-                if rel.endswith(arel.replace("cli/", "")) or rel == arel:
-                    if fragment in line:
-                        allowed = True
-                        break
-            if allowed:
-                continue
-            for match in raw_pattern.finditer(line):
-                tag = match.group("tag").rstrip()
-                # Skip Rich's intentional style names.
-                if tag in _RICH_STYLE_ALLOWLIST:
+        try:
+            tree = _ast_scanner.parse(path.read_text(), filename=str(path))
+        except SyntaxError:
+            continue
+        for node in _ast_scanner.walk(tree):
+            if isinstance(node, _ast_scanner.Constant) and isinstance(node.value, str):
+                # Skip docstrings — they're prose, not Rich-rendered.
+                # We can identify a docstring as the first statement of
+                # a module / class / function body, but the simpler
+                # heuristic is to skip any string > 200 chars long
+                # (docstrings) since real markup strings are much
+                # shorter than that.
+                if len(node.value) > 200:
                     continue
-                # Skip multi-token style strings whose first word is in
-                # the allow-list (e.g. ``[bold red]`` / ``[dim #44d]``).
-                first_token = tag.split(" ")[0]
-                if first_token in _RICH_STYLE_ALLOWLIST:
+                bad = _flag_raw_string(node.value)
+                for token in bad:
+                    findings.append((rel, node.lineno, token))
+            elif isinstance(node, _ast_scanner.JoinedStr):
+                joined, exprs = _joined_str_text_and_exprs(node)
+                if not joined:
                     continue
-                findings.append((rel, line_no, stripped[:120]))
-            for match in fstr_pattern.finditer(line):
-                expr = match.group("expr").strip()
-                # ``[{TOKENS.x}]`` and ``[{color}]`` and similar named
-                # variables are almost always hex colors. We don't try
-                # to prove that statically; if a real risk slips in,
-                # the per-site Phase-1 / Phase-2 unit tests catch it.
-                if expr.startswith(("TOKENS.", "color", "snippet_color", "alert_color", "DEFAULT_TOKENS.")):
-                    continue
-                findings.append((rel, line_no, stripped[:120]))
-
-        del text
+                bad = _flag_fstring(joined, exprs)
+                for token in bad:
+                    findings.append((rel, node.lineno, token))
     return findings
 
 
