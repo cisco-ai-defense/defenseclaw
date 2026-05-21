@@ -1791,3 +1791,91 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         assert "defenseclaw doctor" in contents
         assert "checking docker daemon" in contents
         assert "ok" in contents
+
+
+def test_safe_body_renderable_falls_back_on_invalid_style() -> None:
+    """Bogus single-letter ``[e]`` markup must not crash rendering.
+
+    The audit toolbar template ``[{action.key}] {action.label}`` was
+    emitting strings like ``[e] export filter`` that Rich parsed as a
+    style tag named ``e``. When the renderer later resolved that
+    style it raised ``MissingStyle: 'e' is not a valid color`` and
+    tore down the entire TUI. ``_safe_body_renderable`` must validate
+    styles up front and fall back to plain text rather than re-throw.
+    """
+
+    rendered = DefenseClawTUI._safe_body_renderable(  # noqa: SLF001 - exercising defense in depth.
+        "500 shown of 500 events   [e] export filter"
+    )
+    # We don't care which path the wrapper took (escape vs plain
+    # fallback); we only care that it returned a Text object instead
+    # of crashing — that's the regression we lock in.
+    plain = rendered.plain
+    assert "export" in plain
+    assert "filter" in plain
+
+
+def test_audit_body_text_escapes_action_key_brackets() -> None:
+    """Escaped brackets keep ``[e] export`` rendered as literal text.
+
+    Without escaping, the audit body crashes with ``MissingStyle`` the
+    moment the panel renders. We assert both that the raw body string
+    contains the escape and that the safety wrapper resolves it back
+    to literal ``[e] export`` plain text.
+    """
+
+    panel = AuditPanelModel()
+    app = DefenseClawTUI(audit_model=panel)
+    app.active_panel = "audit"
+    body = app._audit_body_text()  # noqa: SLF001 - regression for crash on switch.
+    assert "\\[e]" in body
+    rendered = DefenseClawTUI._safe_body_renderable(body)  # noqa: SLF001
+    assert "[e] export" in rendered.plain
+
+
+def test_mark_restart_passes_started_at_to_setup_model() -> None:
+    """The health worker must pass ``started_at`` into the setup model.
+
+    Calling ``mark_restart_started`` without arguments raised
+    ``TypeError`` and crashed ``_poll_health`` on every poll once the
+    gateway restarted (which is exactly what ``setup`` toggles like
+    redaction trigger). Verify both the happy path forwards the
+    timestamp *and* a model that doesn't accept that signature falls
+    back to ``clear_restart_queue`` instead of bubbling.
+    """
+
+    class FakeSetupHappy:
+        def __init__(self) -> None:
+            self.received: list[str] = []
+
+        def mark_restart_started(self, started_at: str) -> bool:
+            self.received.append(started_at)
+            return True
+
+        def clear_restart_queue(self) -> None:
+            self.received.append("CLEARED")
+
+    class FakeSetupLegacy:
+        def __init__(self) -> None:
+            self.cleared = False
+
+        def mark_restart_started(self) -> bool:  # pragma: no cover - intentional bad signature
+            raise TypeError("legacy stub mimicking pre-Phase-2 SetupPanelModel")
+
+        def clear_restart_queue(self) -> None:
+            self.cleared = True
+
+    happy = FakeSetupHappy()
+    app = DefenseClawTUI(setup_model=happy)
+    app._last_gateway_started_at = "old-timestamp"  # noqa: SLF001 - exercising poll path.
+    snapshot = SimpleNamespace(started_at="new-timestamp")
+    app._mark_restart_if_gateway_restarted(snapshot)  # type: ignore[arg-type]  # noqa: SLF001
+    assert happy.received == ["new-timestamp"]
+    assert app._last_gateway_started_at == "new-timestamp"  # noqa: SLF001
+
+    legacy = FakeSetupLegacy()
+    app2 = DefenseClawTUI(setup_model=legacy)
+    app2._last_gateway_started_at = "old"  # noqa: SLF001
+    app2._mark_restart_if_gateway_restarted(SimpleNamespace(started_at="newer"))  # type: ignore[arg-type]  # noqa: SLF001
+    assert legacy.cleared is True
+    assert app2._last_gateway_started_at == "newer"  # noqa: SLF001

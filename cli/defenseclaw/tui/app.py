@@ -757,10 +757,56 @@ class DefenseClawTUI(App[None]):
                 yield Static("", id="command-progress-snippet", markup=True)
                 yield Static("", id="command-progress-hint", markup=True)
             yield RichLog(id="activity", wrap=True, markup=True, highlight=True)
+            with Horizontal(id="activity-controls", classes="panel-controls hidden"):
+                # Click-first action bar for the Activity panel. Cancel
+                # only appears while a command is running; the rest are
+                # always visible so operators can pivot to "save the
+                # last output", "rerun the last command", or "wipe the
+                # scrollback" without leaving the panel. Keystrokes
+                # (! rerun, Ctrl+C cancel) keep working unchanged.
+                yield Button(
+                    "✕ Cancel",
+                    id="activity-cancel",
+                    compact=True,
+                    variant="error",
+                    tooltip="Send SIGINT to the running command (same as Ctrl+C)",
+                )
+                yield Button(
+                    "Clear history",
+                    id="activity-clear",
+                    compact=True,
+                    tooltip="Drop completed Activity entries (keeps any running command)",
+                )
+                yield Button(
+                    "Save output…",
+                    id="activity-save",
+                    compact=True,
+                    tooltip="Write the highlighted command's output to a file",
+                )
+                yield Button(
+                    "Rerun last",
+                    id="activity-rerun",
+                    compact=True,
+                    tooltip="Re-invoke the most recent Activity command (same as !)",
+                )
+                yield Button(
+                    "View in Drawer",
+                    id="activity-open-drawer",
+                    compact=True,
+                    tooltip="Open the command drawer to issue a new command",
+                )
+            # Stdin pipe stays hidden until the executor reports a live
+            # command; the CSS `display: none` keeps it out of the
+            # layout flow until `_sync_activity_stdin` flips it on.
+            stdin_pipe = Input(
+                placeholder="Send to running command (Enter to submit; e.g. type 3 to answer Selection [3])",
+                id="activity-stdin",
+            )
+            stdin_pipe.display = False
+            yield stdin_pipe
             yield ToastStack(id="toasts")
             yield HintBar(id="hint")
             yield Static("", id="status")
-    # MARKER_PHASE_1A_PROBE_LINE_DO_NOT_REMOVE
 
     def on_unmount(self) -> None:
         # Signal background pollers to stop spawning fresh subprocess
