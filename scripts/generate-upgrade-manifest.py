@@ -169,11 +169,21 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="validate the manifest contract without writing an artifact",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "release-discipline gate: refuse to emit if the migrations "
+            "registry contains forward-keyed versions. The release "
+            "manager runs this on the release branch; dev/PR CI leaves "
+            "it off so placeholder migrations don't block merges."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
         manifest = build_manifest()
-        if args.check:
+        if args.strict:
             validate_release_manifest()
     except Exception as exc:  # noqa: BLE001 - print concise CI diagnostics
         print(f"upgrade manifest check failed: {exc}", file=sys.stderr)

@@ -1085,7 +1085,6 @@ def _structured_detail_rows(details: str) -> tuple[tuple[str, str], ...]:
     if not parsed:
         return ()
     is_observe = parsed.get("mode", "") == "observe"
-    severity_value = parsed.get("severity", "")
     rows: list[tuple[str, str]] = []
     for key in _DETAIL_KEY_ORDER:
         if key not in parsed:

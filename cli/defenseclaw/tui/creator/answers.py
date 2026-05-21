@@ -152,8 +152,8 @@ class BlockCard:
 
 
 def _build_block_display_order(
-    categories: tuple["BlockCategoryCard", ...],
-    cards: tuple["BlockCard", ...],
+    categories: tuple[BlockCategoryCard, ...],
+    cards: tuple[BlockCard, ...],
 ) -> tuple[int, ...]:
     """Return ``BLOCK_CARDS`` indices in *render* order.
 

@@ -28,29 +28,18 @@ without spinning up a Textual ``App`` for every micro-edit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Callable, Literal, Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import Literal
 
 from defenseclaw.tui.creator.diff import DiffEntry, diff_against_base
 from defenseclaw.tui.creator.types import (
     SCANNER_TYPES,
     SEVERITIES,
-    AdmissionConfig,
-    AuditConfig,
-    CiscoAIDefenseConfig,
-    EnforcementConfig,
-    FirewallConfig,
-    FirstPartyEntry,
-    GuardrailConfig,
-    JudgeConfig,
     Policy,
-    SensitiveTool,
     Severity,
-    SeverityActionMatrix,
     SeverityActionTriple,
     SeverityUpper,
-    WatchConfig,
-    WebhookEntry,
 )
 from defenseclaw.tui.creator.validators import (
     ValidationFinding,
@@ -58,7 +47,6 @@ from defenseclaw.tui.creator.validators import (
     summarize,
     validate_policy,
 )
-
 
 SectionStatus = Literal["untouched", "customized", "warning"]
 

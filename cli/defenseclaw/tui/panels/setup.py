@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import IntEnum
@@ -21,10 +21,20 @@ from typing import Any, Literal
 from defenseclaw import config as dc_config
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
+)
+from defenseclaw.tui.services.cli_choices import (
     CONNECTORS as _CHOICE_CONNECTORS,
+)
+from defenseclaw.tui.services.cli_choices import (
     GUARDRAIL_CONNECTORS as _CHOICE_GUARDRAIL_CONNECTORS,
+)
+from defenseclaw.tui.services.cli_choices import (
     LLM_OVERRIDE_PROVIDERS as _CHOICE_LLM_OVERRIDE_PROVIDERS,
+)
+from defenseclaw.tui.services.cli_choices import (
     LLM_PROVIDERS as _CHOICE_LLM_PROVIDERS,
+)
+from defenseclaw.tui.services.cli_choices import (
     WIZARD_LLM_PROVIDERS as _CHOICE_WIZARD_LLM_PROVIDERS,
 )
 from defenseclaw.tui.services.setup_state import (
@@ -1686,7 +1696,7 @@ def _build_ai_discovery_args(fields: Sequence[WizardFormField]) -> tuple[str, ..
     if max_bytes := wizard_field_value(fields, "Max Bytes / File"):
         args.extend(("--max-file-bytes", max_bytes))
 
-    _BOOL_FLAGS: tuple[tuple[str, str, str], ...] = (
+    bool_flags: tuple[tuple[str, str, str], ...] = (
         ("Shell History", "--include-shell-history", "--no-include-shell-history"),
         ("Package Manifests", "--include-package-manifests", "--no-include-package-manifests"),
         ("Env Var Names", "--include-env-var-names", "--no-include-env-var-names"),
@@ -1695,7 +1705,7 @@ def _build_ai_discovery_args(fields: Sequence[WizardFormField]) -> tuple[str, ..
         ("Honor Workspace Signatures", "--allow-workspace-signatures", "--no-allow-workspace-signatures"),
         ("Store Raw Local Paths", "--store-raw-local-paths", "--no-store-raw-local-paths"),
     )
-    for label, on_flag, off_flag in _BOOL_FLAGS:
+    for label, on_flag, off_flag in bool_flags:
         value = wizard_bool_value(fields, label, "yes")
         args.append(on_flag if value == "yes" else off_flag)
 

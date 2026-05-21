@@ -1180,7 +1180,7 @@ def _try_rego_compile(rego_dir: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _hydrate_policy_from_path(name: str, path: Path) -> "object":
+def _hydrate_policy_from_path(name: str, path: Path) -> object:
     """Load a YAML policy file and translate it into a ``Policy``."""
 
     from defenseclaw.tui.creator.presets import policy_from_yaml
