@@ -273,6 +273,64 @@ def test_operator_set_token_env_is_preserved_on_init():
     )
 
 
+def test_missing_token_error_message_includes_remediation():
+    """Phase 5 contract: the failure message must tell the operator how to fix it.
+
+    Pre-fix the message was the 3-word string ``"gateway token
+    unavailable"`` — zero context, zero remediation. The new message
+    must contain at minimum:
+
+    * The canonical env var name (``DEFENSECLAW_GATEWAY_TOKEN``) so
+      the operator knows WHICH var to set.
+    * A reference to ``~/.defenseclaw/.env`` so they know WHERE.
+    * A one-liner the operator can copy/paste to remediate.
+
+    Locking the substrings (not the exact text) lets us refine the
+    copy in future without breaking this test.
+    """
+    from defenseclaw.commands.cmd_agent import _format_missing_token_error
+
+    msg = _format_missing_token_error(_StubAppContext(_StubGateway(token_env="DEFENSECLAW_GATEWAY_TOKEN")))
+    assert "DEFENSECLAW_GATEWAY_TOKEN" in msg
+    assert "~/.defenseclaw/.env" in msg
+    assert "defenseclaw-gateway start" in msg
+    assert "defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN" in msg
+
+
+def test_missing_token_error_includes_configured_env_when_set():
+    """Surface the actual configured token_env in the error.
+
+    When the operator has pinned a custom var (or the legacy
+    OPENCLAW_ default never got migrated), include it in the
+    parenthetical so they can verify the resolver is looking at the
+    right name without having to dig into config.yaml. Without this
+    breadcrumb, a misconfigured token_env is invisible from the CLI
+    error alone.
+    """
+    from defenseclaw.commands.cmd_agent import _format_missing_token_error
+
+    msg = _format_missing_token_error(
+        _StubAppContext(_StubGateway(token_env="OPENCLAW_GATEWAY_TOKEN"))
+    )
+    assert "OPENCLAW_GATEWAY_TOKEN" in msg
+    assert "cfg.gateway.token_env" in msg
+
+
+def test_missing_token_error_handles_no_config():
+    """When app.cfg is None (early boot), the error still renders cleanly.
+
+    No KeyError, no traceback, no NoneType crash — just the canonical
+    remediation message. Important because the no-config path is
+    exactly where doctor pre-checks fire from.
+    """
+    from defenseclaw.commands.cmd_agent import _format_missing_token_error
+
+    msg = _format_missing_token_error(_StubAppContext(None))
+    assert "DEFENSECLAW_GATEWAY_TOKEN" in msg
+    # No configured-env breadcrumb when we can't read cfg.
+    assert "cfg.gateway.token_env" not in msg
+
+
 def test_cli_host_port_override_wins_over_config():
     """Sanity: --gateway-host / --gateway-port still take precedence.
 
