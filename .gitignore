@@ -79,7 +79,19 @@ coverage*.xml
 scripts/provision-*
 scripts/e2e-*-session*
 .worktrees/
+
+# Temporary files and directories — local-only scratch artifacts.
 tmp/
+.tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Local-only TUI testing notes and panel walkthroughs. These are
+# personal/agent scratch docs and should not be source-controlled.
+docs/testing/
 
 # Playwright session/console logs and outputs (transient debug artifacts).
 .playwright-cli/
