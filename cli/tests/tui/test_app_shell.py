@@ -2592,12 +2592,12 @@ def test_policy_tab_bar_escapes_active_tab_label() -> None:
 
     import inspect
 
-    from defenseclaw.tui.services.policy_state import PolicyState
+    from defenseclaw.tui.services.policy_state import PolicyPanelModel
 
-    source = inspect.getsource(PolicyState.render_text)
+    source = inspect.getsource(PolicyPanelModel.render_text)
     assert "\\\\[{name}]" in source
 
-    supp_source = inspect.getsource(PolicyState.view_suppressions)
+    supp_source = inspect.getsource(PolicyPanelModel.view_suppressions)
     assert "\\\\[{name}]" in supp_source
 
 
@@ -2609,21 +2609,21 @@ def test_policy_active_badge_and_enabled_flag_escaped() -> None:
 
     import inspect
 
-    from defenseclaw.tui.services.policy_state import PolicyState
+    from defenseclaw.tui.services.policy_state import PolicyPanelModel
 
-    pol_source = inspect.getsource(PolicyState.view_policies)
+    pol_source = inspect.getsource(PolicyPanelModel.view_policies)
     assert "\\\\[active]" in pol_source
 
-    judge_source = inspect.getsource(PolicyState.view_judge)
+    judge_source = inspect.getsource(PolicyPanelModel.view_judge)
     assert "\\\\[{enabled}]" in judge_source
 
 
 def test_policy_opa_test_hotkey_escaped() -> None:
     import inspect
 
-    from defenseclaw.tui.services.policy_state import PolicyState
+    from defenseclaw.tui.services.policy_state import PolicyPanelModel
 
-    source = inspect.getsource(PolicyState.view_opa)
+    source = inspect.getsource(PolicyPanelModel.view_opa)
     assert "\\\\[t]" in source
 
 
@@ -2748,13 +2748,15 @@ def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
     signal that no new crash-class regressions slipped in.
     """
 
-    repo = Path(__file__).resolve().parents[3]
+    from pathlib import Path as _Path
+
+    repo = _Path(__file__).resolve().parents[3]
     targets = [
         repo / "cli/defenseclaw/tui",
         repo / "cli/defenseclaw/commands/cmd_tui.py",
     ]
 
-    files: list[Path] = []
+    files: list[_Path] = []
     for target in targets:
         if target.is_dir():
             files.extend(p for p in target.rglob("*.py") if "__pycache__" not in p.parts)
