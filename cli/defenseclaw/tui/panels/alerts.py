@@ -17,6 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from rich.markup import escape as rich_escape
+
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     structured_detail_rows,
@@ -513,7 +515,15 @@ class AlertsPanelModel:
         active = self.severity_filter or "All"
         selected = len(self.selected_ids)
         filter_label = f"  search={self.filter_text!r}" if self.filter_text else ""
-        search_prompt = f"\n[#22D3EE]/ {self.filter_text}[/]" if self.filtering else ""
+        # ``filter_text`` is operator-typed search input that may
+        # contain bracketed tokens (``target:[skill]``). Escape so the
+        # markup parser can't drop the bracketed substring or, worse,
+        # leave the span unclosed when the user types a stray ``[``.
+        search_prompt = (
+            f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]"
+            if self.filtering
+            else ""
+        )
         return (
             "[bold #22D3EE]Alerts[/]  [#9FB2CC]Alert queue. Click a severity chip above or press 1-5.[/]\n"
             f"[bold]All {sum(counts.values())}[/]  "
@@ -615,7 +625,11 @@ class AlertsPanelModel:
         for finding in info.findings:
             value = f"{finding.severity} {finding.title}".strip()
             if finding.scanner:
-                value += f" [{finding.scanner}]"
+                # Escape ``[{scanner}]``: scanner names are lowercase
+                # identifiers (``trivy``, ``semgrep``, …) that Rich
+                # would parse as style tags, dropping the badge from
+                # the detail line.
+                value += f" \\[{finding.scanner}]"
             if finding.location:
                 value += f" @ {finding.location}"
             lines.append(f"Finding: {value}")
@@ -698,7 +712,10 @@ class AlertsPanelModel:
         for index, finding in enumerate(info.findings, start=1):
             value = f"{finding.severity} {finding.title}".strip()
             if finding.scanner:
-                value += f" [{finding.scanner}]"
+                # Same escape as ``detail_text`` above; scanner names
+                # are lowercase tag-shapes that Rich would silently
+                # consume as styles.
+                value += f" \\[{finding.scanner}]"
             if finding.location:
                 value += f" @ {finding.location}"
             pairs.append((f"Finding {index}", value))

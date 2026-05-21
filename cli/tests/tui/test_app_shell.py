@@ -2537,3 +2537,311 @@ def test_tui_panel_outputs_survive_hostile_markup_corpus() -> None:
         ):
             rendered = safe(composed)
             assert isinstance(rendered, Text), composed
+
+
+# ---------------------------------------------------------------------
+# Phase-2 markup-safety regression suite. These complement the
+# Phase-1 crash-site tests above by covering the *fallback* sites —
+# strings the safety wrapper catches but Rich silently drops content
+# from. They also include a static scanner that walks the TUI source
+# tree and bans any new unescaped lowercase-bracket tokens, with an
+# explicit allow-list for known-safe Rich style names.
+# ---------------------------------------------------------------------
+
+
+def test_overview_quick_actions_escape_lowercase_hotkeys() -> None:
+    """The overview quick-action key map renders through the panel
+    body's Rich-parsed Static. Every lowercase hotkey letter (``[s]``,
+    ``[d]``, ``[i]``, ``[g]``, ``[m]``, ``[p]``, ``[l]``) would be
+    parsed as a Rich style tag and silently drop the label from the
+    rendered output. Confirm the source still uses the escaped form.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._overview_body_text)  # noqa: SLF001
+    for key in ("\\\\[s]", "\\\\[d]", "\\\\[i]", "\\\\[g]", "\\\\[m]", "\\\\[p]", "\\\\[l]"):
+        assert key in source, (
+            f"overview quick-action key {key!r} should be backslash-escaped"
+        )
+
+
+def test_setup_wizard_mode_hint_escapes_focused_hint() -> None:
+    """The wizard-mode body interpolates ``focused.hint`` directly
+    into a markup span. Operator-facing hints often quote bracketed
+    identifiers (``set webhooks[0].url``) which would collapse the
+    span. Verify the hint is wrapped in ``rich_escape``.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._setup_body_text)  # noqa: SLF001
+    assert "rich_escape(focused.hint)" in source
+
+
+def test_policy_tab_bar_escapes_active_tab_label() -> None:
+    """The policy panel renders tab bars as ``[name]`` for the
+    active tab. With lowercase tab names the bracket pair is parsed
+    as a Rich style tag, dropping the active-tab label. Verify the
+    source emits the backslash-escaped form.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.services.policy_state import PolicyState
+
+    source = inspect.getsource(PolicyState.render_text)
+    assert "\\\\[{name}]" in source
+
+    supp_source = inspect.getsource(PolicyState.view_suppressions)
+    assert "\\\\[{name}]" in supp_source
+
+
+def test_policy_active_badge_and_enabled_flag_escaped() -> None:
+    """``[active]`` (policy badge) and ``[on]`` / ``[off]`` (judge
+    category state) are lowercase tag-shapes Rich would consume.
+    Confirm both are escaped.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.services.policy_state import PolicyState
+
+    pol_source = inspect.getsource(PolicyState.view_policies)
+    assert "\\\\[active]" in pol_source
+
+    judge_source = inspect.getsource(PolicyState.view_judge)
+    assert "\\\\[{enabled}]" in judge_source
+
+
+def test_policy_opa_test_hotkey_escaped() -> None:
+    import inspect
+
+    from defenseclaw.tui.services.policy_state import PolicyState
+
+    source = inspect.getsource(PolicyState.view_opa)
+    assert "\\\\[t]" in source
+
+
+def test_setup_audit_sink_summary_escapes_kind_and_state() -> None:
+    """Audit-sink summaries render ``name [kind] [state]``. ``kind``
+    is a lowercase identifier (``stdout``, ``file``, ``splunk_hec``);
+    Rich would parse ``[stdout]`` as a style tag and drop the badge
+    from the rendered config row. Verify both bracket pairs escaped.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.panels.setup import _audit_sink_summary_fields
+
+    source = inspect.getsource(_audit_sink_summary_fields)
+    assert "\\\\[{kind}]" in source
+    assert "\\\\[{state}]" in source
+
+
+def test_audit_panel_render_and_summary_escape_e_export_close_filter() -> None:
+    """Two legacy audit headers still embed ``[e] export  [/] filter``.
+    Both must be escaped: ``[e]`` is a lowercase tag-shape, and ``[/]``
+    is an unmatched close that raises MarkupError. The safety wrapper
+    catches the error but the visible content is gone — escape both.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.panels.audit import AuditPanelModel
+
+    render_source = inspect.getsource(AuditPanelModel.render_text)
+    assert "\\\\[e] export" in render_source
+    assert "\\\\[/] filter" in render_source
+
+    summary_source = inspect.getsource(AuditPanelModel.summary_text)
+    assert "\\\\[e] export" in summary_source
+    assert "\\\\[/] filter" in summary_source
+
+
+def test_alerts_summary_escapes_user_filter_text() -> None:
+    """The Alerts panel summary line embeds the operator's free-text
+    search inside a styled span (``[#22D3EE]/ {filter_text}[/]``). A
+    user typing ``target:[skill]`` would otherwise have the rest of
+    the prompt dropped into Rich's tag-parser. Confirm escape.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.panels.alerts import AlertsPanelModel
+
+    source = inspect.getsource(AlertsPanelModel.summary_text)
+    assert "rich_escape(self.filter_text)" in source
+
+
+def test_alerts_finding_scanner_badge_escaped() -> None:
+    """Scanner names (``trivy``, ``semgrep``, ``yara``) are lowercase
+    identifiers that Rich would parse as style tags. Verify the
+    detail-text and detail-pairs producers both escape the badge.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.panels.alerts import AlertsPanelModel
+
+    detail_text_source = inspect.getsource(AlertsPanelModel.detail_text)
+    assert "\\\\[{finding.scanner}]" in detail_text_source
+
+    detail_pairs_source = inspect.getsource(AlertsPanelModel.detail_pairs)
+    assert "\\\\[{finding.scanner}]" in detail_pairs_source
+
+
+# Static scanner: the regression net for this entire bug class.
+# ----------------------------------------------------------------
+
+# The empirical rule (verified by probing Rich at runtime): Rich
+# treats ``[X]`` as a markup tag iff X starts with a lowercase letter,
+# ``#`` (hex color), or ``@`` (variable). Everything else — uppercase,
+# numeric, whitespace-led, ``/`` close-tag, ``!``, etc. — is rendered
+# as literal text. So the *only* unsafe shape we have to ban is a
+# bracket pair starting with a lowercase letter.
+import re as _re_scanner
+
+# Rich style names that are intentional and safe to leave unescaped.
+# Anything in this set is allowed to appear as ``[name]`` in markup
+# strings without a backslash escape because Rich resolves it to a
+# real style.
+_RICH_STYLE_ALLOWLIST = frozenset({
+    "bold", "dim", "italic", "underline", "blink", "reverse",
+    "strike", "conceal", "overline", "frame", "encircle",
+    "black", "red", "green", "yellow", "blue", "magenta",
+    "cyan", "white",
+    "bright_black", "bright_red", "bright_green", "bright_yellow",
+    "bright_blue", "bright_magenta", "bright_cyan", "bright_white",
+    "on red", "on green", "on blue", "on yellow", "on cyan",
+    "on magenta", "on white", "on black",
+    "link", "reset", "none",
+    # Tokens we use that combine bold/dim with a hex color — those
+    # are matched by the ``#`` prefix check below, but the leading
+    # ``bold `` / ``dim `` is still captured by the regex; allow.
+})
+
+
+# Per-line allow-list for sites where the literal bracket pair is
+# intentional (e.g. CSS selectors, regex patterns, doctest output)
+# and not a Rich-rendered string. Each entry is (relpath, line-fragment).
+_RAW_BRACKET_ALLOWLIST: tuple[tuple[str, str], ...] = (
+    # Test corpora that intentionally exercise hostile inputs.
+    ("cli/tests/tui/test_app_shell.py", "_HOSTILE_CORPUS"),
+    # Style allow-list constants in this very test file.
+    ("cli/tests/tui/test_app_shell.py", "_RICH_STYLE_ALLOWLIST"),
+)
+
+
+def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
+    """Return ``(relpath, lineno, snippet)`` for every literal /
+    f-string in the TUI source tree that looks like ``"[lowercase…]"``
+    or ``f"[{lowercase_var}]"`` and isn't either backslash-escaped
+    or covered by the allow-lists.
+
+    The matcher is deliberately conservative — it only flags shapes
+    Rich would actually parse as a tag — so a green run is a strong
+    signal that no new crash-class regressions slipped in.
+    """
+
+    repo = Path(__file__).resolve().parents[3]
+    targets = [
+        repo / "cli/defenseclaw/tui",
+        repo / "cli/defenseclaw/commands/cmd_tui.py",
+    ]
+
+    files: list[Path] = []
+    for target in targets:
+        if target.is_dir():
+            files.extend(p for p in target.rglob("*.py") if "__pycache__" not in p.parts)
+        elif target.is_file():
+            files.append(target)
+
+    # Match the *opening* of a tag-shaped bracket pair anywhere on a
+    # line:
+    #   - inside a normal string:   "[lowercase…]
+    #   - inside an f-string:       f"[{lowercase…
+    # We require the bracket NOT be backslash-escaped (the Phase-1/2
+    # fix shape) and the leading char inside the brackets to be a
+    # lowercase ASCII letter.
+    raw_pattern = _re_scanner.compile(r"(?<!\\)\[(?P<tag>[a-z][^\[\]]{0,40})\]")
+    fstr_pattern = _re_scanner.compile(r"(?<!\\)\[\{(?P<expr>[^{}]+)\}\]")
+
+    findings: list[tuple[str, int, str]] = []
+    for path in files:
+        rel = str(path.relative_to(repo))
+        text = path.read_text()
+        for line_no, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            # Skip pure comments — ``# foo [bar]`` is documentation, not markup.
+            if stripped.startswith("#"):
+                continue
+            # Allow-listed lines (full-string match against fragments).
+            allowed = False
+            for arel, fragment in _RAW_BRACKET_ALLOWLIST:
+                if rel.endswith(arel.replace("cli/", "")) or rel == arel:
+                    if fragment in line:
+                        allowed = True
+                        break
+            if allowed:
+                continue
+            for match in raw_pattern.finditer(line):
+                tag = match.group("tag").rstrip()
+                # Skip Rich's intentional style names.
+                if tag in _RICH_STYLE_ALLOWLIST:
+                    continue
+                # Skip multi-token style strings whose first word is in
+                # the allow-list (e.g. ``[bold red]`` / ``[dim #44d]``).
+                first_token = tag.split(" ")[0]
+                if first_token in _RICH_STYLE_ALLOWLIST:
+                    continue
+                findings.append((rel, line_no, stripped[:120]))
+            for match in fstr_pattern.finditer(line):
+                expr = match.group("expr").strip()
+                # ``[{TOKENS.x}]`` and ``[{color}]`` and similar named
+                # variables are almost always hex colors. We don't try
+                # to prove that statically; if a real risk slips in,
+                # the per-site Phase-1 / Phase-2 unit tests catch it.
+                if expr.startswith(("TOKENS.", "color", "snippet_color", "alert_color", "DEFAULT_TOKENS.")):
+                    continue
+                findings.append((rel, line_no, stripped[:120]))
+
+        del text
+    return findings
+
+
+def test_no_unescaped_lowercase_bracket_tokens_in_tui_sources() -> None:
+    """Permanent guardrail: walk every Python file under the TUI
+    package and refuse to merge any change that introduces a new
+    unescaped ``[lowercase…]`` literal or ``f"[{lowercase_var}]"``
+    pattern. Rich parses such tokens as opening style tags and either
+    silently drops the bracketed content or — worse — fails the
+    safety wrapper's per-span ``Style.parse`` validation, forcing
+    the whole panel body to plain-text fallback.
+
+    Failures here mean the operator will see panels with content
+    silently dropped (``"  Scan all"`` instead of ``"[s] Scan all"``)
+    or whole-panel color regressions when the wrapper falls back.
+    Either escape the bracket (``\\[s]``), pick an uppercase label,
+    or — if the token is a deliberate Rich style — add it to
+    ``_RICH_STYLE_ALLOWLIST`` above.
+    """
+
+    findings = _scan_tui_source_for_lowercase_brackets()
+    if findings:
+        report = "\n".join(
+            f"  {rel}:{lineno}  {snippet}" for rel, lineno, snippet in findings[:50]
+        )
+        # Truncated message keeps the failure log scannable.
+        assert not findings, (
+            f"Found {len(findings)} unescaped lowercase-bracket token(s) in "
+            f"the TUI source. Each one is parsed by Rich as a style tag and "
+            f"silently drops the bracketed text. Either backslash-escape the "
+            f"opening bracket (``\\\\[s]``), pick an uppercase label, or — if it "
+            f"is an intentional Rich style — register it in "
+            f"``_RICH_STYLE_ALLOWLIST``.\n\nOffending lines:\n{report}"
+        )

@@ -1374,8 +1374,11 @@ class PolicyPanelModel:
     def render_text(self, *, width: int = 120, height: int = 40) -> str:
         if not self.loaded:
             self.load()
+        # Tab labels render through the panel's Rich-parsed Static.
+        # Escape the brackets so any lowercase tab name (and any future
+        # rename to a lowercase identifier) renders as literal text.
         tabs = " ".join(
-            f"[{name}]" if index == self.active_tab else f" {name} "
+            f"\\[{name}]" if index == self.active_tab else f" {name} "
             for index, name in enumerate(POLICY_TAB_NAMES)
         )
         content_height = max(height - 3, 3)
@@ -1420,7 +1423,9 @@ class PolicyPanelModel:
         for index in range(start, end):
             policy = self.filtered_policies[index]
             prefix = "> " if index == self.policy_cursor else "  "
-            suffix = "  [active]" if policy.name == self.active_policy else ""
+            # ``[active]`` is parsed as a Rich style tag and silently
+            # drops the bracketed text; escape so the badge renders.
+            suffix = "  \\[active]" if policy.name == self.active_policy else ""
             lines.append(f"{prefix}{policy.name}{suffix}")
         return "\n".join(lines)
 
@@ -1539,13 +1544,21 @@ class PolicyPanelModel:
                 for category in judge.categories:
                     severity = category.effective_severity(fallback=category.severity)
                     enabled = "on" if category.enabled else "off"
-                    lines.append(f"  {category.name:<24} {severity:<8} {category.finding_id} [{enabled}]")
+                    # ``[on]`` / ``[off]`` are lowercase tag-shapes;
+                    # escape so they render literally.
+                    lines.append(
+                        f"  {category.name:<24} {severity:<8} "
+                        f"{category.finding_id} \\[{enabled}]"
+                    )
         return "\n".join(lines)
 
     def view_suppressions(self, width: int, height: int) -> str:
         _ = height
+        # Section names rendered as ``[name]`` — escape so any
+        # lowercase identifier in SUPPRESSION_SECTION_NAMES renders
+        # literally instead of being parsed as a markup tag.
         section_tabs = " ".join(
-            f"[{name}]" if index == self.supp_section else name
+            f"\\[{name}]" if index == self.supp_section else name
             for index, name in enumerate(SUPPRESSION_SECTION_NAMES)
         )
         lines = [section_tabs, ""]
@@ -1594,7 +1607,13 @@ class PolicyPanelModel:
         return "\n".join(lines)
 
     def view_opa(self, width: int, height: int) -> str:
-        lines = ["REGO MODULES", f"[t] {'hide tests' if self.show_tests else 'show tests'}", ""]
+        # Escape ``[t]``: lowercase letters get consumed as style tags
+        # and the hotkey label disappears from the rendered panel.
+        lines = [
+            "REGO MODULES",
+            f"\\[t] {'hide tests' if self.show_tests else 'show tests'}",
+            "",
+        ]
         for index, path in enumerate(self.rego_files):
             prefix = "> " if index == self.rego_cursor else "  "
             lines.append(prefix + Path(path).name)
