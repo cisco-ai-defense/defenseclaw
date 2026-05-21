@@ -4532,21 +4532,35 @@ class DefenseClawTUI(App[None]):
 
     def _write_activity_safe(self, text: str) -> None:
         """Write subprocess output to the Activity RichLog without ever
-        crashing the markup parser.
+        crashing the markup parser AND honouring terminal ANSI colors.
 
-        The Activity RichLog is created with ``markup=True`` so the
-        intentional-style writes (``[#FBBF24]running[/] foo``) light up
-        with color. That makes raw subprocess stdout the single biggest
-        source of MarkupError / MissingStyle frames in the TUI: a
-        progress bar like ``Selection [3]:`` or an installer's ``[INFO]``
-        prefix takes down the whole frame and never refreshes again
-        until the panel is re-mounted. Pre-escape the text so the
-        bracket characters render literally — there's no intentional
-        Rich markup in subprocess output we'd want to honor anyway.
+        Two failure modes this closes:
+
+        1. Markup crash. The Activity RichLog is created with
+           ``markup=True`` so the intentional-style writes
+           (``[#FBBF24]running[/] foo``) light up with color. That
+           makes raw subprocess stdout the single biggest source of
+           MarkupError / MissingStyle frames in the TUI — a progress
+           bar like ``Selection [3]:`` or an installer's ``[INFO]``
+           prefix takes down the whole frame and never refreshes
+           again until the panel is re-mounted.
+        2. ANSI leak. ``defenseclaw`` subprocess output flows through
+           ``ux.warn`` / ``ux.ok`` / ``click.style`` etc., all of
+           which emit raw ANSI escape sequences (``\\x1b[1;33m``).
+           ``rich_escape`` (the previous implementation) preserved
+           those bytes verbatim, so the renderer showed them as
+           literal text — operators saw ``[1;33m\u25b3 warning:[0m``
+           in the panel instead of an actual yellow warning.
+
+        Fix: route the text through :meth:`rich.text.Text.from_ansi`
+        which both interprets SGR codes as Rich styles AND treats
+        the resulting content as opaque (no further markup parsing
+        re-trips the bracket crash). One call covers both problems
+        without needing a separate ``rich_escape`` step.
         """
 
         self.activity_lines.append(text)
-        self.query_one("#activity", RichLog).write(rich_escape(text))
+        self.query_one("#activity", RichLog).write(Text.from_ansi(text))
 
     def _export_audit(self, path: Path | None) -> Path:
         target = path or Path("defenseclaw-audit-export.json")
