@@ -364,3 +364,170 @@ def test_tools_split_accepts_go_scope_and_python_cli_scope_edge_case() -> None:
     assert split_tool_target("write_file@filesystem") == ("write_file", "filesystem")
     assert split_tool_target("filesystem/write_file") == ("write_file", "filesystem")
     assert split_tool_target("delete_file") == ("delete_file", "")
+
+
+# ---------------------------------------------------------------------------
+# Detail pane parity tests for Skills / MCP / Plugins / Tools.
+#
+# The detail pane is the primary surface operators use to understand
+# "why is this row in this state and what can I do about it", so these
+# tests lock in the structured sections (Status, Decisions, Scan,
+# Source, Registry, Actions legend). Snapshot-style assertions on the
+# specific labels protect against silent reflows that would force
+# operators to relearn the layout.
+# ---------------------------------------------------------------------------
+
+
+def test_skill_list_to_row_preserves_scan_and_decision_details() -> None:
+    """``skill list --json`` carries scan + action sub-objects that the
+    detail pane needs. The row parser must denormalize them so the
+    detail renderer doesn't have to re-parse the original JSON.
+    """
+
+    row = skill_list_to_row(
+        {
+            "name": "alpha",
+            "description": "math helper",
+            "source": "/skills/alpha",
+            "eligible": True,
+            "scan": {
+                "clean": False,
+                "max_severity": "HIGH",
+                "total_findings": 3,
+                "target": "/skills/alpha/SKILL.md",
+            },
+            "actions": {"install": "allow", "runtime": "disable"},
+        }
+    )
+
+    assert row.total_findings == 3
+    assert row.scan_clean is False
+    assert row.scan_target == "/skills/alpha/SKILL.md"
+    assert row.install_action == "allow"
+    assert row.runtime_action == "disable"
+    assert row.file_action == ""
+
+
+def test_skill_detail_pane_renders_decisions_scan_and_action_legend() -> None:
+    """Skills detail pane shows Status / Decisions / Scan / Source /
+    Registry / a one-line action legend. The legend replaces the
+    legacy ``press o for actions`` mystery with the actual keys.
+    """
+
+    from defenseclaw.tui.services.catalog_state import catalog_detail_text
+
+    row = SkillRow(
+        name="alpha",
+        status="blocked",
+        actions="blocked, quarantined",
+        description="math helper",
+        source="/skills/alpha",
+        severity="HIGH",
+        registry_source="corp-skills",
+        total_findings=3,
+        scan_clean=False,
+        scan_target="/skills/alpha/SKILL.md",
+        install_action="block",
+        runtime_action="disable",
+        file_action="quarantine",
+    )
+    out = catalog_detail_text(row)
+
+    assert "[bold #22D3EE]Skill[/] alpha" in out
+    assert "Status     [#F87171]blocked[/]" in out
+    assert "install=block" in out and "runtime=disable" in out and "file=quarantine" in out
+    assert "Scan       [#F87171]HIGH[/] · 3 findings · target=/skills/alpha/SKILL.md" in out
+    assert "Source     /skills/alpha" in out
+    assert "Registry   registry:corp-skills" in out
+    # The legend should surface the actual shortcut keys, not a vague
+    # "press o for menu" hint. Blocked status exposes Unblock so the
+    # operator can recover without spelunking through the action menu.
+    assert "[s] Scan" in out and "[i] Info" in out
+    assert "[u] Unblock" in out
+
+
+def test_skill_detail_pane_handles_clean_row_without_findings_bloat() -> None:
+    """A clean row should NOT show ``0 findings`` (visually noisy).
+
+    Operators reading the detail pane should see ``Scan  CLEAN`` and
+    move on; the finding count only appears when something is wrong.
+    """
+
+    from defenseclaw.tui.services.catalog_state import catalog_detail_text
+
+    row = SkillRow(name="alpha", status="active")
+    out = catalog_detail_text(row)
+
+    assert "Scan       [#34D399]CLEAN[/]" in out
+    assert "findings" not in out
+
+
+def test_mcp_detail_pane_renders_transport_url_and_command() -> None:
+    from defenseclaw.tui.services.catalog_state import catalog_detail_text
+    from defenseclaw.tui.panels.mcps import MCPRow
+
+    row = MCPRow(
+        name="context7",
+        status="allowed",
+        actions="allowed",
+        transport="stdio",
+        command="uvx mcp-server-context7",
+        server_url="https://example.invalid/mcp",
+        install_action="allow",
+    )
+    out = catalog_detail_text(row)
+
+    assert "[bold #22D3EE]MCP[/] context7" in out
+    assert "Status     [#34D399]allowed[/]" in out
+    assert "Transport  stdio" in out
+    assert "URL        https://example.invalid/mcp" in out
+    assert "Command    uvx mcp-server-context7" in out
+    # MCP legend should expose the unset-target hint via mcp_actions
+    # under the action key list.
+    assert "[s] Scan" in out and "[i] Info" in out
+
+
+def test_plugin_detail_pane_renders_scan_summary_and_runtime_state() -> None:
+    from defenseclaw.tui.services.catalog_state import (
+        PluginRow,
+        PluginScanSummary,
+        catalog_detail_text,
+    )
+
+    row = PluginRow(
+        id="hello-world",
+        name="hello-world",
+        description="example",
+        version="1.2.0",
+        origin="builtin",
+        status="installed",
+        enabled=True,
+        scan=PluginScanSummary(clean=False, max_severity="MEDIUM", total_findings=2),
+    )
+    out = catalog_detail_text(row)
+
+    assert "[bold #22D3EE]Plugin[/] hello-world" in out
+    assert "Version    1.2.0" in out
+    assert "Origin     builtin" in out
+    assert "Scan       [#FBBF24]MEDIUM[/] · 2 findings" in out
+    # Enabled plugin should expose the Disable action shortcut.
+    assert "[d] Disable" in out
+
+
+def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
+    """The header now groups navigation and action keys on separate
+    lines so operators see the action set (including the previously
+    hidden ``o open menu``) without scanning a single dense line.
+    """
+
+    panel = SkillsPanelModel()
+    panel.apply_loaded([SkillRow(name="alpha", status="active")])
+
+    text = panel.summary_text("Skills")
+    # Action set is on its own line so it can't be missed.
+    assert "[dim]Actions:[/]" in text
+    assert "o open menu" in text
+    # Navigation primer is on the row above, not jammed in with actions.
+    assert "[dim]Navigate:[/]" in text
+    # Filter / detail metadata still on line 2.
+    assert "1 of 1 rows" in text
