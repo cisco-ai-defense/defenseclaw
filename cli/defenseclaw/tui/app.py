@@ -1069,6 +1069,83 @@ class DefenseClawTUI(App[None]):
 
         return [name for name, _key, _label in PANELS if not self._panel_hidden(name)]
 
+    def _panel_total_count(self, panel: str) -> int:
+        """Return the current "interesting items" count for ``panel``.
+
+        Only stream-style panels (alerts, audit, logs, activity, ai)
+        return a meaningful count; everything else returns 0 so the
+        badge renderer can short-circuit. Defensive ``getattr``
+        chains keep this safe to call before models hydrate (e.g.
+        during compose() on a brand-new TUI session).
+        """
+
+        if panel == "alerts":
+            audit_events = getattr(self.alerts_model, "audit_events", ()) or ()
+            egress_events = getattr(self.alerts_model, "egress_events", ()) or ()
+            return len(audit_events) + len(egress_events)
+        if panel == "audit":
+            return len(getattr(self.audit_model, "items", ()) or ())
+        if panel == "activity":
+            return getattr(self.activity_model, "count", 0)
+        if panel == "logs":
+            lines = getattr(self.logs_model, "lines", {}) or {}
+            return sum(len(rows) for rows in lines.values())
+        if panel == "ai":
+            snapshot = getattr(self.ai_discovery_model, "snapshot", None)
+            agents = getattr(snapshot, "agents", ()) if snapshot else ()
+            return len(agents)
+        return 0
+
+    def _panel_unread_count(self, panel: str) -> int:
+        """Return ``max(0, total - seen)`` for the tab-badge renderer.
+
+        Capped at 99 so the tab strip stays one cell wide — anything
+        above that is already "lots of new things, just open the
+        panel". Skips badging on the currently active panel so the
+        cursor doesn't lap itself (you can't have unread content on a
+        panel you're staring at).
+        """
+
+        if panel == self.active_panel:
+            return 0
+        total = self._panel_total_count(panel)
+        if total <= 0:
+            return 0
+        try:
+            seen = self.state_store.get_seen_count(panel)
+        except AttributeError:
+            seen = 0
+        return min(99, max(0, total - seen))
+
+    def _update_tab_labels(self) -> None:
+        """Refresh Tab labels with "(N)" unread badges in-place.
+
+        Called from ``_render_chrome`` so the badges stay in sync with
+        whatever just changed (panel switch, model refresh, command
+        finish). Silently no-ops when the Tabs widget isn't mounted
+        yet (early compose).
+        """
+
+        try:
+            tabs = self.query_one("#tabs", Tabs)
+        except NoMatches:
+            return
+        for name, key, label in PANELS:
+            if self._panel_hidden(name):
+                continue
+            unread = self._panel_unread_count(name)
+            text = f"{key} {label}"
+            if unread:
+                text = f"{text} ({unread})"
+            try:
+                tab = tabs.query_one(f"#tab-{name}", Tab)
+            except NoMatches:
+                continue
+            # Textual Tab.label accepts either str or rich Text; str
+            # is the simplest and avoids markup escaping issues with
+            # panel names that contain brackets.
+            tab.label = text
+
     def action_switch_panel(self, panel: str) -> None:
         self.active_panel = panel
         self.help_open = False
@@ -1079,6 +1156,11 @@ class DefenseClawTUI(App[None]):
         try:
             self.state_store.set_active_panel(panel)
             self.state_store.mark_seen(panel)
+            # Record the current item count too — that's what the tab
+            # badge compares against to compute "(N) new since last
+            # visit". Without this the badge would stick on every
+            # panel forever after the first visit.
+            self.state_store.record_seen_count(panel, self._panel_total_count(panel))
             self.state = self.state_store.state
             self.state_store.save()
         except Exception:  # noqa: BLE001 - persistence is cosmetic
@@ -1728,6 +1810,11 @@ class DefenseClawTUI(App[None]):
 
     def _render_chrome(self) -> None:
         self.query_one("#tabs", Tabs).active = f"tab-{self.active_panel}"
+        # Refresh unread "(N)" badges on every tab whenever chrome
+        # re-renders. Cheap (≤ 14 string updates) and keeps the tab
+        # strip honest after refresh loops add new alerts / audit
+        # entries while the operator is parked on a different panel.
+        self._update_tab_labels()
         self.query_one("#activity", RichLog).set_class(self.active_panel != "activity", "hidden")
         body_widget = self.query_one("#body", Static)
         if self.active_panel == "overview" and not self.help_open:

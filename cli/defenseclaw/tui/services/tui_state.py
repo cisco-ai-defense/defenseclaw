@@ -41,6 +41,13 @@ class TUIState:
     palette_mru: tuple[str, ...] = ()
     panel_last_seen: dict[str, str] = field(default_factory=dict)
     panel_filters: dict[str, str] = field(default_factory=dict)
+    # Count of "interesting items" the operator had already seen the
+    # last time they visited each panel. Used by the tab-badge renderer
+    # to show "(N)" when more rows/alerts/log lines have arrived since.
+    # Distinct from ``panel_last_seen`` (a timestamp) because counts
+    # don't strictly correspond to wall-clock — e.g. log rotation can
+    # shrink the on-disk count without time travelling.
+    panel_seen_counts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -76,11 +83,25 @@ class TUIState:
             for key, value in filters_raw.items():
                 if isinstance(key, str) and isinstance(value, str):
                     filters[key] = value
+        counts_raw = payload.get("panel_seen_counts", {})
+        counts: dict[str, int] = {}
+        if isinstance(counts_raw, dict):
+            for key, value in counts_raw.items():
+                if not isinstance(key, str):
+                    continue
+                # Tolerate JSON that round-trips ints as floats or
+                # strings — strict typing would reject reasonable
+                # values and silently lose the cursor.
+                try:
+                    counts[key] = max(0, int(value))
+                except (TypeError, ValueError):
+                    continue
         return cls(
             active_panel=active,
             palette_mru=mru,
             panel_last_seen=seen,
             panel_filters=filters,
+            panel_seen_counts=counts,
         )
 
 
@@ -207,6 +228,28 @@ class TUIStateStore:
         seen[panel] = stamp
         self._state = replace(self._state, panel_last_seen=seen)
         return self._state
+
+    def record_seen_count(self, panel: str, count: int) -> TUIState:
+        """Snapshot the per-panel item count when the operator opens it.
+
+        Pairs with ``mark_seen`` to support tab unread-badges: the
+        timestamp tells us *when* they last visited, while this count
+        tells us *how many* items they saw. If new items land later,
+        ``current_count - seen_count`` is the badge number.
+
+        Negative counts are clamped to 0 so callers can pass
+        ``len(model.entries)`` without first checking for emptiness.
+        """
+
+        if not panel:
+            return self._state
+        counts = dict(self._state.panel_seen_counts)
+        counts[panel] = max(0, int(count))
+        self._state = replace(self._state, panel_seen_counts=counts)
+        return self._state
+
+    def get_seen_count(self, panel: str) -> int:
+        return int(self._state.panel_seen_counts.get(panel, 0))
 
     def set_active_panel(self, panel: str) -> TUIState:
         if not panel:
