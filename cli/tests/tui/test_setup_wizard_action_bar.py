@@ -18,7 +18,7 @@ from dataclasses import replace
 import pytest
 from textual.widgets import Button
 
-from cli.defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.app import DefenseClawTUI
 
 
 @pytest.mark.asyncio
@@ -170,3 +170,91 @@ async def test_setup_wizard_reveal_button_only_enabled_for_secret_fields() -> No
             app._render_chrome()  # noqa: SLF001
             await pilot.pause()
             assert reveal.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_run_button_submits_form_when_ready(monkeypatch) -> None:
+    """Run button fires ``submit_wizard_form`` + flows the intent forward.
+
+    Positive sibling to ``test_setup_wizard_bar_run_disabled_when_...``.
+    Without this test a regression that pointed Run at the wrong key
+    (e.g. ``enter`` instead of ``ctrl+r``) would only show up in
+    manual QA — the submit path is the entire reason the wizard
+    sub-bar exists.
+    """
+
+    from defenseclaw.tui.panels.setup import SetupCommandIntent, SetupPanelAction
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("0")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.setup_model.form_active is True
+
+        # Pre-load a fake submit result so the handler thinks the
+        # form is valid and a real intent should flow to the
+        # preview-and-run pipeline. We don't want the real argv
+        # builder to actually shell out during the test.
+        fake_intent = SetupCommandIntent(
+            label="defenseclaw test wizard",
+            args=("test", "wizard"),
+        )
+
+        def fake_submit() -> SetupPanelAction:
+            return SetupPanelAction(handled=True, intent=fake_intent)
+
+        monkeypatch.setattr(app.setup_model, "submit_wizard_form", fake_submit)
+
+        captured: list[SetupCommandIntent] = []
+
+        # ``_confirm_and_run_intent`` is consumed via ``run_worker``
+        # which insists on a coroutine, so the patch must return one
+        # — a sync lambda raises ``WorkerError: Unsupported attempt to
+        # run an async worker``.
+        async def fake_confirm(intent: SetupCommandIntent) -> None:
+            captured.append(intent)
+
+        monkeypatch.setattr(app, "_confirm_and_run_intent", fake_confirm)
+
+        app._handle_setup_control("setup-wizard-run")  # noqa: SLF001
+        await pilot.pause()
+        assert captured == [fake_intent], (
+            "Run button must route the SetupCommandIntent through "
+            "_confirm_and_run_intent, mirroring the Ctrl+R flow."
+        )
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_buttons_set_status_when_form_inactive() -> None:
+    """Wizard buttons defend against being fired while no form is open.
+
+    The sub-bar is hidden when ``form_active`` is False, so these
+    clicks shouldn't normally be possible — but a mouse-down race or
+    a stale Textual focus path could still deliver one. The handler
+    must surface a status instead of falling through to a key handler
+    that would misinterpret Ctrl+R on the wizard list.
+    """
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("0")  # Setup panel, but wizard list (no form).
+        await pilot.pause()
+        assert app.setup_model.form_active is False
+        for wizard_button in (
+            "setup-wizard-run",
+            "setup-wizard-cancel",
+            "setup-wizard-prev",
+            "setup-wizard-next",
+            "setup-wizard-reveal",
+            "setup-wizard-clear",
+        ):
+            app._handle_setup_control(wizard_button)  # noqa: SLF001
+            await pilot.pause()
+            assert "Open a wizard first" in app.status_text, (
+                f"{wizard_button} should set status when form inactive, "
+                f"got {app.status_text!r}"
+            )
+            # form_active must remain False — handler must not
+            # accidentally open the form via the key dispatcher.
+            assert app.setup_model.form_active is False
