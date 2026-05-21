@@ -160,6 +160,16 @@ class SkillRow:
     verdict: str = ""
     severity: str = ""
     registry_source: str = ""
+    # Denormalized scan / decision data so the detail pane can render
+    # the same context the JSON payload carries without re-parsing
+    # the original mapping. Defaults keep existing call sites that
+    # build SkillRow directly (tests, sample data) working unchanged.
+    total_findings: int = 0
+    scan_clean: bool = True
+    scan_target: str = ""
+    file_action: str = ""
+    install_action: str = ""
+    runtime_action: str = ""
 
     @property
     def registry_badge(self) -> str:
@@ -179,6 +189,14 @@ class MCPRow:
     severity: str = ""
     verdict: str = ""
     registry_source: str = ""
+    # Same denormalization as SkillRow so the detail pane can show
+    # the file/runtime/install state without re-parsing the JSON.
+    total_findings: int = 0
+    scan_clean: bool = True
+    scan_target: str = ""
+    file_action: str = ""
+    install_action: str = ""
+    runtime_action: str = ""
 
     @property
     def url(self) -> str:
@@ -367,10 +385,17 @@ class CatalogListModel(Generic[RowT]):
     def summary_text(self, title: str) -> str:
         filter_text = f" filter={self.filter_text!r}" if self.filter_text else ""
         detail = " detail=open" if self.detail_open else ""
+        # Group navigation vs. action keys on separate lines so the
+        # eye lands on the action set (which is what operators reach
+        # for) instead of getting buried in the navigation primer.
+        # The legacy single-line hint hid ``o`` between ``Enter`` and
+        # ``r`` so operators couldn't tell that pressing ``o`` opens
+        # the per-row action menu.
         return (
             f"[bold #22D3EE]{title}[/]\n"
             f"{len(self.filtered)} of {len(self.items)} rows{filter_text}{detail}\n"
-            "Keys: j/k move, Enter detail, o actions, r refresh, / filter, Esc close."
+            "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
+            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  R reveal in registry"
         )
 
     def _haystack(self, row: RowT) -> str:
@@ -792,6 +817,12 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         source=source,
         verdict=str(raw.get("verdict") or ""),
         severity=severity,
+        total_findings=scan.total_findings if scan is not None else 0,
+        scan_clean=scan.clean if scan is not None else True,
+        scan_target=scan.target if scan is not None else "",
+        file_action=actions.file,
+        install_action=actions.install,
+        runtime_action=actions.runtime,
     )
 
 
@@ -802,6 +833,7 @@ def parse_mcp_list_json(text: str) -> tuple[MCPRow, ...]:
 
 def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
     actions = CatalogActionState.from_mapping(_mapping_or_none(raw.get("actions")))
+    scan = CatalogScanSummary.from_mapping(_mapping_or_none(raw.get("scan")))
     status = "active"
     if actions.file == "quarantine":
         status = "quarantined"
@@ -818,8 +850,14 @@ def mcp_list_to_row(raw: Mapping[str, Any]) -> MCPRow:
         transport=str(raw.get("transport") or ""),
         command=str(raw.get("command") or ""),
         server_url=str(raw.get("url") or ""),
-        severity=str(raw.get("severity") or ""),
+        severity=str(raw.get("severity") or scan.max_severity if scan else ""),
         verdict=str(raw.get("verdict") or ""),
+        total_findings=scan.total_findings if scan is not None else 0,
+        scan_clean=scan.clean if scan is not None else True,
+        scan_target=scan.target if scan is not None else "",
+        file_action=actions.file,
+        install_action=actions.install,
+        runtime_action=actions.runtime,
     )
 
 
@@ -1237,39 +1275,233 @@ def catalog_row_cells(row: object) -> tuple[str, str, str, str, str]:
 
 
 def catalog_detail_text(row: object | None) -> str:
+    """Render the richer per-row detail pane shown below catalog tables.
+
+    The layout groups facts into named sections so an operator can scan
+    the pane top-to-bottom: identity → enforcement decisions → scan
+    posture → provenance → quick action keys. Status, finding count,
+    and severity are colorized so the eye lands on the riskiest rows
+    first. The renderer keeps the contract narrow (input is the
+    dataclass row, output is a Rich-markup string), so app.py and
+    tests can both render without touching the screen.
+    """
+
     if row is None:
         return ""
     if isinstance(row, SkillRow):
-        lines = [f"[bold #22D3EE]Skill: {row.name}[/]", f"Status: {row.status}", f"Actions: {row.actions}"]
-        if row.description:
-            lines.append(f"Description: {row.description}")
-        if row.registry_badge:
-            lines.append(f"Registry: {row.registry_badge}")
-        return "\n".join(lines)
+        return _format_skill_detail(row)
     if isinstance(row, MCPRow):
-        lines = [f"[bold #22D3EE]MCP: {row.name}[/]", f"Status: {row.status}", f"Transport: {row.transport or '-'}"]
-        if row.server_url:
-            lines.append(f"URL: {row.server_url}")
-        if row.command:
-            lines.append(f"Command: {row.command}")
-        if row.registry_badge:
-            lines.append(f"Registry: {row.registry_badge}")
-        return "\n".join(lines)
+        return _format_mcp_detail(row)
     if isinstance(row, PluginRow):
-        lines = [
-            f"[bold #22D3EE]Plugin: {row.display_name}[/]",
-            f"Status: {row.status or '-'}",
-            f"Enabled: {'yes' if row.enabled else 'no'}",
-        ]
-        if row.description:
-            lines.append(f"Description: {row.description}")
-        return "\n".join(lines)
+        return _format_plugin_detail(row)
     if isinstance(row, ToolRow):
-        lines = [f"[bold #22D3EE]Tool: {row.name}[/]", f"Scope: {row.display_scope}", f"Status: {row.status}"]
-        if row.reason:
-            lines.append(f"Reason: {row.reason}")
-        return "\n".join(lines)
+        return _format_tool_detail(row)
     return ""
+
+
+# Severity → Rich color so HIGH/CRITICAL rows pop in the detail pane.
+# Mirrors the palette used by the Alerts panel for consistency.
+_SEVERITY_COLOR: Mapping[str, str] = {
+    "CRITICAL": "#F87171",
+    "HIGH": "#F87171",
+    "MEDIUM": "#FBBF24",
+    "LOW": "#22D3EE",
+    "CLEAN": "#34D399",
+    "": "",
+}
+
+# Status → Rich color. Anything outside this table renders in default
+# color so we never bury unknown statuses behind a misleading badge.
+_STATUS_COLOR: Mapping[str, str] = {
+    "blocked": "#F87171",
+    "rejected": "#F87171",
+    "quarantined": "#F87171",
+    "warning": "#FBBF24",
+    "disabled": "#94A3B8",
+    "removed": "#94A3B8",
+    "inactive": "#94A3B8",
+    "allowed": "#34D399",
+    "active": "#34D399",
+    "enabled": "#34D399",
+}
+
+
+def _colored(value: str, palette: Mapping[str, str]) -> str:
+    """Return ``value`` wrapped in Rich color markup when the key is
+    known. Unknown values fall through unstyled so we never emit an
+    empty ``[#]`` tag (which Rich would render as a literal).
+    """
+
+    if not value:
+        return "-"
+    color = palette.get(value.upper(), palette.get(value, ""))
+    return f"[{color}]{value}[/]" if color else value
+
+
+def _format_severity(severity: str) -> str:
+    return _colored(severity, _SEVERITY_COLOR)
+
+
+def _format_status(status: str) -> str:
+    return _colored(status, _STATUS_COLOR)
+
+
+def _format_decisions(file_action: str, install_action: str, runtime_action: str) -> str:
+    """Build a one-line summary of the three enforcement decisions.
+
+    Each axis renders as ``axis=value`` (``-`` when the policy hasn't
+    spoken) so the operator sees at a glance which knob is driving
+    the current status, instead of guessing from the Actions column.
+    """
+
+    return (
+        f"install={install_action or '-'}  "
+        f"runtime={runtime_action or '-'}  "
+        f"file={file_action or '-'}"
+    )
+
+
+def _scan_line(severity: str, total_findings: int, clean: bool, target: str) -> str:
+    """Render the scan posture as ``<severity> · N findings · target=…``.
+
+    ``CLEAN`` skips the findings count because there's nothing to
+    surface; a dirty scan with zero findings (defensive) shows
+    ``0 findings`` so the operator notices the inconsistency.
+    """
+
+    sev = (severity or "").upper() or ("CLEAN" if clean else "UNKNOWN")
+    parts = [_format_severity(sev)]
+    if not clean or total_findings > 0:
+        suffix = "finding" if total_findings == 1 else "findings"
+        parts.append(f"{total_findings} {suffix}")
+    if target:
+        parts.append(f"target={target}")
+    return " · ".join(parts)
+
+
+def _format_skill_detail(row: SkillRow) -> str:
+    lines = [
+        f"[bold #22D3EE]Skill[/] {row.name}",
+        f"  Status     {_format_status(row.status)}    Actions  {row.actions}",
+        f"  Decisions  {_format_decisions(row.file_action, row.install_action, row.runtime_action)}",
+        f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target)}",
+    ]
+    if row.source:
+        lines.append(f"  Source     {row.source}")
+    if row.registry_badge:
+        lines.append(f"  Registry   {row.registry_badge}")
+    if row.description:
+        lines.append("")
+        lines.append(f"  {row.description}")
+    if row.verdict and row.verdict not in {row.status, row.severity}:
+        lines.append(f"  Verdict    {row.verdict}")
+    if row.reason:
+        lines.append(f"  Reason     {row.reason}")
+    lines.append("")
+    lines.append(_skill_action_legend(row.status))
+    return "\n".join(lines)
+
+
+def _format_mcp_detail(row: MCPRow) -> str:
+    lines = [
+        f"[bold #22D3EE]MCP[/] {row.name}",
+        f"  Status     {_format_status(row.status)}    Actions  {row.actions}",
+        f"  Decisions  {_format_decisions(row.file_action, row.install_action, row.runtime_action)}",
+        f"  Transport  {row.transport or '-'}",
+    ]
+    if row.server_url:
+        lines.append(f"  URL        {row.server_url}")
+    if row.command:
+        lines.append(f"  Command    {row.command}")
+    if row.total_findings > 0 or row.severity or row.scan_target:
+        lines.append(
+            f"  Scan       {_scan_line(row.severity, row.total_findings, row.scan_clean, row.scan_target)}"
+        )
+    if row.registry_badge:
+        lines.append(f"  Registry   {row.registry_badge}")
+    if row.verdict and row.verdict not in {row.status, row.severity}:
+        lines.append(f"  Verdict    {row.verdict}")
+    if row.reason:
+        lines.append(f"  Reason     {row.reason}")
+    lines.append("")
+    lines.append(_mcp_action_legend(row.status))
+    return "\n".join(lines)
+
+
+def _format_plugin_detail(row: PluginRow) -> str:
+    status = row.status or ("enabled" if row.enabled else "disabled")
+    enabled_label = "yes" if row.enabled else "no"
+    lines = [
+        f"[bold #22D3EE]Plugin[/] {row.display_name}",
+        f"  Status     {_format_status(status)}    Enabled  {enabled_label}",
+    ]
+    if row.version:
+        lines.append(f"  Version    {row.version}")
+    if row.origin:
+        lines.append(f"  Origin     {row.origin}")
+    if row.scan is not None:
+        sev = row.scan.max_severity or ("CLEAN" if row.scan.clean else "UNKNOWN")
+        parts = [_format_severity(sev)]
+        if row.scan.total_findings > 0 or not row.scan.clean:
+            suffix = "finding" if row.scan.total_findings == 1 else "findings"
+            parts.append(f"{row.scan.total_findings} {suffix}")
+        lines.append(f"  Scan       {' · '.join(parts)}")
+    if row.verdict and row.verdict not in {status, row.scan.max_severity if row.scan else ""}:
+        lines.append(f"  Verdict    {row.verdict}")
+    if row.description:
+        lines.append("")
+        lines.append(f"  {row.description}")
+    lines.append("")
+    lines.append(_plugin_action_legend(row.verdict, status, row.enabled))
+    return "\n".join(lines)
+
+
+def _format_tool_detail(row: ToolRow) -> str:
+    lines = [
+        f"[bold #22D3EE]Tool[/] {row.name}",
+        f"  Status     {_format_status(row.status)}",
+        f"  Scope      {row.display_scope}",
+    ]
+    if row.reason:
+        lines.append(f"  Reason     {row.reason}")
+    if row.target_name and row.target_name != row.name:
+        lines.append(f"  Target     {row.target_name}")
+    return "\n".join(lines)
+
+
+def _action_legend(actions: tuple[CatalogMenuAction, ...]) -> str:
+    """Return a one-line ``[s] Scan · [b] Block · …`` hint.
+
+    Replaces the Go-era "press o for actions" mystery with the actual
+    shortcut keys for the *current* row, so operators can act without
+    opening the menu first. Disabled actions are dimmed so they read
+    as "available but currently a no-op".
+    """
+
+    if not actions:
+        return "  [dim]No actions available for this row.[/]"
+    chunks: list[str] = []
+    for action in actions:
+        label = f"[{action.key}] {action.label}"
+        chunks.append(f"[dim]{label}[/]" if action.disabled else label)
+    return "  [dim]Actions:[/] " + "  ·  ".join(chunks)
+
+
+def _skill_action_legend(status: str) -> str:
+    return _action_legend(skill_actions(status))
+
+
+def _mcp_action_legend(status: str) -> str:
+    # Connector-specific labels (e.g. ``Unset`` target) need the active
+    # connector. The caller passes "" here because the row doesn't
+    # carry it; the model's ``menu_actions`` is still the source of
+    # truth at action-menu open time, but the legend stays accurate
+    # for the connector-independent keys (Scan / Info / Block / Allow).
+    return _action_legend(mcp_actions(status, ""))
+
+
+def _plugin_action_legend(verdict: str, status: str, enabled: bool) -> str:
+    return _action_legend(plugin_actions(verdict, status, enabled))
 
 
 def _truncate(value: str, width: int) -> str:
