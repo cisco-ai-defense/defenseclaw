@@ -2405,7 +2405,11 @@ class DefenseClawTUI(App[None]):
             )
             return
         if button_id == "activity-save":
-            self.run_worker(self._save_activity_output_interactive(), exclusive=False, thread=False)
+            # Synchronous write — the typical Activity output is a few
+            # KB and `Path.write_text` is fast enough that spinning up
+            # a worker just to call it would hide failures behind the
+            # exception-swallowing default of `run_worker(thread=False)`.
+            self._save_activity_output_interactive()
             return
         if button_id == "activity-rerun":
             # Reuse the existing "!" handler so we share validation,
@@ -2416,13 +2420,15 @@ class DefenseClawTUI(App[None]):
             self.action_open_command()
             return
 
-    async def _save_activity_output_interactive(self) -> None:
+    def _save_activity_output_interactive(self) -> None:
         """Write the highlighted Activity entry's output to a file.
 
         Uses the data_dir convention (same as ``_export_audit``) and
         falls back to the working directory when no data_dir is wired
         yet. The filename embeds the command's timestamp so repeated
-        saves don't clobber previous artifacts.
+        saves don't clobber previous artifacts. Synchronous — Activity
+        outputs are bounded by ``Executor`` ring-buffer size so this
+        always completes in single-digit milliseconds for typical use.
         """
 
         if not self.activity_model.entries:
@@ -2478,27 +2484,34 @@ class DefenseClawTUI(App[None]):
             self._render_chrome()
             return
         if button_id == "ai-export":
-            self.run_worker(self._export_ai_discovery_snapshot(), exclusive=False, thread=False)
+            self._export_ai_discovery_snapshot()
             return
 
-    async def _export_ai_discovery_snapshot(self) -> None:
+    def _export_ai_discovery_snapshot(self) -> None:
         """Write the loaded AI usage snapshot to a JSON file on disk.
 
         Mirrors the ``_export_audit`` pattern so operators have a
-        single mental model for "Export" buttons across panels: filename
-        is deterministic, target lives under ``data_dir``, and the
-        response is surfaced via the status line. We use
-        ``dataclasses.asdict`` over a custom field list so future
-        additions to ``AIUsageSnapshot`` automatically appear in the
-        export — bespoke field plucking has bitrotted in this codebase
-        before.
+        single mental model for "Export" buttons across panels: target
+        lives under ``data_dir`` and the response is surfaced via the
+        status line. We use ``dataclasses.asdict`` over a custom field
+        list so future additions to ``AIUsageSnapshot`` automatically
+        appear in the export — bespoke field plucking has bitrotted in
+        this codebase before.
+
+        Filename embeds a UTC timestamp so back-to-back exports don't
+        silently overwrite each other (operators routinely scan twice
+        to diff before/after enabling/disabling AI discovery).
         """
 
         snapshot = self.ai_discovery_model.snapshot
         if snapshot is None:
             self._set_status("No AI usage snapshot loaded — try Refresh first.")
             return
-        target = (self.data_dir or Path.cwd()) / "defenseclaw-ai-usage-export.json"
+        # `replace(microsecond=0)` keeps the suffix short and stable;
+        # second-level resolution is fine because a human can't click
+        # Export twice in one second.
+        stamp = datetime.now(timezone.utc).replace(microsecond=0).strftime("%Y%m%dT%H%M%SZ")
+        target = (self.data_dir or Path.cwd()) / f"defenseclaw-ai-usage-{stamp}.json"
         payload = asdict(snapshot)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -2512,8 +2525,14 @@ class DefenseClawTUI(App[None]):
         self._set_status(f"Exported AI usage snapshot to {target}")
 
     @staticmethod
-    def _json_default(value: Any) -> str:
-        """Stringify datetime / Path / set values for ``json.dumps``."""
+    def _json_default(value: Any) -> Any:
+        """Coerce datetime / Path / set / tuple into JSON-safe shapes.
+
+        Returns ``Any`` rather than ``str`` because the ``default=``
+        callback for ``json.dumps`` is allowed (and here, expected) to
+        return non-string types — sets and tuples become lists, which
+        ``json.dumps`` then encodes recursively.
+        """
 
         if isinstance(value, datetime):
             return value.isoformat()

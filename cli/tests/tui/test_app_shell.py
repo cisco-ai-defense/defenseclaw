@@ -1563,6 +1563,11 @@ async def test_setup_mouse_controls_open_config_save_and_resource_editor() -> No
         setup.active_section = 0
         setup.active_line = 0
         app._render_chrome()  # noqa: SLF001 - deterministic save state.
+        # Let Textual flush the chrome re-render before clicking;
+        # without this idle pause the synthesized mouse event races
+        # the layout pass and ``pilot.click`` lands on the previous
+        # frame, producing a no-op that flakes this assertion.
+        await pilot.pause()
         await pilot.click("#setup-save")
         await pilot.pause(0.5)
         assert app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen"
@@ -1784,7 +1789,7 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         app.activity_model.append_output("ok")
         app.activity_model.finish_entry(0)
         await pilot.pause()
-        await app._save_activity_output_interactive()  # noqa: SLF001
+        app._save_activity_output_interactive()  # noqa: SLF001 - sync write, no await needed
         # The filename embeds a timestamp + command slug.
         saved = list(tmp_path.glob("defenseclaw-activity-*-defenseclaw-doctor.txt"))
         assert len(saved) == 1
@@ -1889,6 +1894,85 @@ async def test_ai_discovery_scan_and_refresh_buttons_route_to_commands(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_ai_discovery_disable_button_routes_to_command(monkeypatch) -> None:
+    """Clicking Disable submits the matching ``--yes`` disable command.
+
+    Lacking this test, a typo that wired Disable back to ``enable``
+    would silently flip semantics — high-risk on a security tool.
+    """
+
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(AIUsageSnapshot(enabled=True, signals=()))
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+    submitted: list[str] = []
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        monkeypatch.setattr(app, "_submit_command_text", lambda text: submitted.append(text))
+        app._handle_ai_control("ai-disable")  # noqa: SLF001
+        await pilot.pause()
+        assert submitted == ["defenseclaw agent discovery disable --yes"]
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_open_detail_toggles_when_row_selected() -> None:
+    """Open agent details toggles the detail panel when a row is highlighted.
+
+    Mirrors the ``enter`` keystroke on the AI panel. We seed at least
+    one signal so ``selected()`` returns non-None and the button is
+    enabled — the disabled-when-empty path is already covered.
+    """
+
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(AIUsageSignal(name="openai-agent", vendor="OpenAI"),),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        assert ai_model.detail_open is False
+        app._handle_ai_control("ai-open-detail")  # noqa: SLF001
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        # Click again → toggles back closed (parity with keystroke).
+        app._handle_ai_control("ai-open-detail")  # noqa: SLF001
+        await pilot.pause()
+        assert ai_model.detail_open is False
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_export_without_snapshot_sets_status(tmp_path) -> None:
+    """Export with no snapshot leaves disk untouched and posts status.
+
+    The button is greyed via ``_sync_ai_controls`` but the handler
+    must also defend itself — a stray keyboard chord, mouse-down race,
+    or future refactor could fire it with the snapshot still None.
+    """
+
+    ai_model = AIDiscoveryPanelModel()  # No snapshot loaded.
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        app.data_dir = tmp_path
+        # Stay on the AI panel but ensure the auto-load status
+        # ("Refreshing AI discovery snapshot...") doesn't mask the
+        # button's own status message — clear it before invoking.
+        app.status_text = ""
+        app._export_ai_discovery_snapshot()  # noqa: SLF001
+        # No file written, status describes the missing snapshot.
+        assert list(tmp_path.glob("defenseclaw-ai-usage-*.json")) == []
+        assert "No AI usage snapshot loaded" in app.status_text
+
+
+@pytest.mark.asyncio
 async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
     """Export button writes the loaded snapshot as JSON under data_dir."""
 
@@ -1906,9 +1990,12 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         await pilot.press("V")
         await pilot.pause()
         app.data_dir = tmp_path
-        await app._export_ai_discovery_snapshot()  # noqa: SLF001
-        target = tmp_path / "defenseclaw-ai-usage-export.json"
-        assert target.exists()
+        app._export_ai_discovery_snapshot()  # noqa: SLF001 - sync write, no await needed
+        # Filename embeds a UTC timestamp so successive exports don't
+        # silently overwrite each other.
+        matches = list(tmp_path.glob("defenseclaw-ai-usage-*.json"))
+        assert len(matches) == 1, f"expected exactly one export, got {matches}"
+        target = matches[0]
         body = json.loads(target.read_text())
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"
