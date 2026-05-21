@@ -6,11 +6,10 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 
 | Command | Scope |
 |---------|-------|
-| `make test` | Python CLI unit tests plus focused Go gateway/TUI/test packages |
+| `make test` | Python CLI unit tests plus focused Go gateway/test packages |
 | `make cli-test` | Python `unittest` suite under `cli/tests/` |
 | `make cli-test-cov` | Python pytest coverage report |
-| `make gateway-test` | Race-enabled Go tests for gateway, TUI, and `test/` |
-| `make tui-test` | Race-enabled TUI package tests |
+| `make gateway-test` | Race-enabled Go tests for gateway and `test/` |
 | `make go-test-cov` | Race-enabled Go coverage across all packages |
 | `make ts-test` | OpenClaw plugin Vitest suite |
 | `make rego-test` | OPA tests for `policies/rego/` |

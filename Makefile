@@ -14,7 +14,7 @@ DIST_DIR    := dist
 
 .PHONY: all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov gateway-test tui-test go-test-cov \
+        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync \
@@ -466,16 +466,16 @@ plugin-install: cli-install plugin
 test: cli-test gateway-test
 
 cli-test:
-	$(VENV)/bin/python -m unittest discover -s cli/tests -v
+	$(VENV)/bin/python -m pytest cli/tests -q
 
 cli-test-cov:
 	$(VENV)/bin/python -m pytest cli/tests/ -v --tb=short --cov=defenseclaw --cov-report=xml:coverage-py.xml
 
-gateway-test: sync-openclaw-extension
-	go test -race ./internal/gateway/ ./internal/tui/ ./test/... -v
+cli-test-snap:
+	$(VENV)/bin/python -m pytest cli/tests/tui -q $(if $(UPDATE),--snapshot-update,)
 
-tui-test:
-	go test -race -count=1 ./internal/tui/ -v
+gateway-test: sync-openclaw-extension
+	go test -race ./internal/gateway/ ./test/... -v
 
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -coverprofile=coverage.out ./...
@@ -488,7 +488,6 @@ go-connector-matrix-test: sync-openclaw-extension
 		./internal/config \
 		./internal/gateway \
 		./internal/gateway/connector \
-		./internal/tui \
 		./test/e2e \
 		-run 'Connector|Hook|CodeGuard|Telemetry|OTLP|AgentHook|Mode|Setup|Teardown|Capability|Matrix'
 
