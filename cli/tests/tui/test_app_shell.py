@@ -2124,3 +2124,73 @@ def test_safe_body_renderable_handles_bracketed_status_strings() -> None:
         # (either via the validator dropping the bogus span or the
         # MarkupError fallback returning the whole string verbatim).
         assert hostile in rendered.plain
+
+
+def test_judge_history_prefix_escapes_index_brackets() -> None:
+    """``judge_response_detail_pairs`` must escape numeric prefixes.
+
+    Without escaping, the modal renders ``[1] Timestamp`` which Rich
+    interprets as ANSI color 1 (red) for the entire row, and once
+    the operator has 16+ retained rows the prefix flips to ``[16]``
+    and explodes with ``MissingStyle: '16' is not a valid color``.
+    """
+
+    from defenseclaw.tui.screens.judge_history import judge_response_detail_pairs
+
+    rows = [
+        {
+            "timestamp": "2026-05-21T00:00:00Z",
+            "kind": "policy",
+            "direction": "inbound",
+            "action": "allow",
+            "severity": "LOW",
+            "category": "",
+            "rule": "",
+            "decision_score": 0.0,
+            "abridged": False,
+            "source": "judge",
+            "request_id": "r1",
+            "trace_id": "t1",
+            "span_id": "s1",
+            "model": "m",
+        }
+        for _ in range(2)
+    ]
+    pairs = judge_response_detail_pairs(rows)
+    labels = [label for label, _ in pairs if label]
+    assert any(label.startswith("\\[1]") for label in labels)
+    assert any(label.startswith("\\[2]") for label in labels)
+    for label in labels:
+        assert not label.startswith("[1]")
+        assert not label.startswith("[2]")
+
+
+def test_setup_webhook_summary_escapes_status_brackets() -> None:
+    """Webhook summaries must escape ``[enabled]`` / ``[disabled]``."""
+
+    from defenseclaw.tui.panels.setup import _webhook_summary_fields
+
+    cfg = {
+        "webhooks": [
+            {"type": "webhook", "name": "ops", "url": "https://example/test", "enabled": True},
+            {"type": "webhook", "name": "audit", "url": "https://example/audit", "enabled": False},
+        ]
+    }
+    fields = _webhook_summary_fields(cfg)
+    summaries = [field.value for field in fields if field.value]
+    assert any(summary.startswith("\\[enabled]") for summary in summaries)
+    assert any(summary.startswith("\\[disabled]") for summary in summaries)
+    for summary in summaries:
+        assert not summary.startswith("[enabled]")
+        assert not summary.startswith("[disabled]")
+
+
+def test_mode_picker_choice_action_escapes_hotkey_brackets() -> None:
+    """Mode-picker MenuActions must escape the hotkey bracket."""
+
+    from defenseclaw.tui.screens.mode_picker import MODE_PICKER_CHOICES, _choice_action
+
+    for choice in MODE_PICKER_CHOICES:
+        action = _choice_action(choice, current_wire="")
+        assert action.label.startswith("\\["), action.label
+        assert f"\\[{choice.hotkey}]" in action.label

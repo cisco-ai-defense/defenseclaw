@@ -109,7 +109,12 @@ def judge_response_detail_pairs(rows: Sequence[object]) -> tuple[tuple[str, str]
     for index, row in enumerate(rows, start=1):
         if index > 1:
             pairs.append(("", ""))
-        prefix = f"[{index}] "
+        # Escape the opening bracket so Rich treats ``[1] Timestamp``
+        # as literal text instead of a markup tag. Numeric tokens 0–15
+        # happen to be valid ANSI color names (so ``[1]`` would tint
+        # the rest of the line red); 16+ raise ``MissingStyle`` and
+        # crash the modal as soon as someone has 17 retained rows.
+        prefix = f"\\[{index}] "
         pairs.extend(
             (
                 (prefix + "Timestamp", _timestamp(_value(row, "timestamp"))),
