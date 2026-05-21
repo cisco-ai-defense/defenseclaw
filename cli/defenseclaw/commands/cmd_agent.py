@@ -2067,6 +2067,21 @@ def _resolve_gateway_target(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> tuple[str, int, str]:
+    """Resolve (host, port, token) for sidecar/orchestrator calls.
+
+    Token precedence mirrors :meth:`GatewayConfig.resolved_token`
+    (Phase 1) so the CLI and the config object can never disagree on
+    where credentials come from:
+
+    1. ``--gateway-token-env`` CLI override → ``os.environ[<that>]``.
+    2. Falls through to ``cfg.gateway.resolved_token()`` which itself
+       checks ``cfg.gateway.token_env`` → ``DEFENSECLAW_GATEWAY_TOKEN``
+       → ``OPENCLAW_GATEWAY_TOKEN`` → ``cfg.gateway.token`` literal.
+
+    Returns the empty string for the token component when nothing is
+    reachable; callers turn that into a friendly ClickException with
+    remediation text (see ``_usage_client``).
+    """
     host = gateway_host or "127.0.0.1"
     port = gateway_port or 18970
     token = os.environ.get(gateway_token_env or "", "") if gateway_token_env else ""
@@ -2087,6 +2102,16 @@ def _resolve_gateway_target(
             port = gateway_port or int(getattr(gw, "api_port", 0) or port)
             if not token and hasattr(gw, "resolved_token"):
                 token = gw.resolved_token()
+
+    # Last-resort safety net: even when no Config object is reachable
+    # (e.g. early-boot smoke tests, doctor pre-config) we still want
+    # `defenseclaw agent usage` to succeed if the Go gateway has
+    # written its token to the environment. Mirrors the auto-detect
+    # ladder in GatewayConfig.resolved_token so the two stay in sync.
+    if not token:
+        token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    if not token:
+        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
 
     return host, port, token
 
