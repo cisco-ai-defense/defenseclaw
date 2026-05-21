@@ -90,7 +90,7 @@ def test_help_body_text_includes_section_titles() -> None:
     assert "Global" in body
     assert "Active panel" in body
     assert "While a command is running" in body
-    assert "DefenseClaw  Keybindings" in body
+    assert "DefenseClaw Keybindings" in body
 
 
 def test_unknown_active_panel_falls_back_gracefully() -> None:
