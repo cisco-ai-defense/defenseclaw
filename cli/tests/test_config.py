@@ -962,22 +962,86 @@ class TestConfigTopLevelSections(unittest.TestCase):
 
 
 class TestGatewayResolvedToken(unittest.TestCase):
-    def test_empty_token_env_reads_openclaw_env(self):
-        gw = GatewayConfig(token_env="", token="")
-        with patch.dict(os.environ, {"OPENCLAW_GATEWAY_TOKEN": "t1"}, clear=False):
-            self.assertEqual(gw.resolved_token(), "t1")
+    # Helper to wipe both gateway env vars from the test env so each
+    # case starts from a known-empty baseline. `patch.dict(..., clear=False)`
+    # only ADDS keys; leaking env vars from the developer's shell would
+    # silently make these tests false-positive.
+    _GATEWAY_VARS = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN", "MY_TOK")
 
-    def test_custom_token_env_takes_precedence(self):
+    def _clean_env(self, **overrides: str) -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in self._GATEWAY_VARS}
+        env.update(overrides)
+        return env
+
+    def test_empty_token_env_prefers_defenseclaw_over_openclaw(self):
+        """DEFENSECLAW_ wins over OPENCLAW_ when both are present.
+
+        The Go gateway writes ``DEFENSECLAW_GATEWAY_TOKEN`` on first
+        boot; old installs may still have ``OPENCLAW_GATEWAY_TOKEN``
+        in their dotenv. We must prefer the new name so the back-compat
+        shim doesn't silently route through stale credentials.
+        """
+        gw = GatewayConfig(token_env="", token="")
+        env = self._clean_env(
+            DEFENSECLAW_GATEWAY_TOKEN="new-token",
+            OPENCLAW_GATEWAY_TOKEN="legacy-token",
+        )
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "new-token")
+
+    def test_empty_token_env_falls_back_to_openclaw_env(self):
+        """Legacy OPENCLAW_ still works when DEFENSECLAW_ is unset.
+
+        Protects upgraders whose Go gateway hasn't been restarted yet
+        and whose dotenv only carries the old name.
+        """
+        gw = GatewayConfig(token_env="", token="")
+        env = self._clean_env(OPENCLAW_GATEWAY_TOKEN="legacy-token")
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "legacy-token")
+
+    def test_custom_token_env_takes_precedence_over_both_defaults(self):
+        """Operator-pinned env var beats both DEFENSECLAW_ and OPENCLAW_."""
         gw = GatewayConfig(token_env="MY_TOK", token="inline")
-        env = {"MY_TOK": "from-env", "OPENCLAW_GATEWAY_TOKEN": "other"}
-        with patch.dict(os.environ, env, clear=False):
+        env = self._clean_env(
+            MY_TOK="from-env",
+            DEFENSECLAW_GATEWAY_TOKEN="dc-tok",
+            OPENCLAW_GATEWAY_TOKEN="oc-tok",
+        )
+        with patch.dict(os.environ, env, clear=True):
             self.assertEqual(gw.resolved_token(), "from-env")
 
-    def test_custom_token_env_empty_ignores_openclaw_env(self):
-        gw = GatewayConfig(token_env="MY_TOK", token="fallback")
-        env = {"OPENCLAW_GATEWAY_TOKEN": "other"}
-        with patch.dict(os.environ, env, clear=False):
-            self.assertEqual(gw.resolved_token(), "fallback")
+    def test_custom_token_env_empty_falls_through_to_defenseclaw(self):
+        """Stale ``token_env`` pointing at an unset var falls through.
+
+        This is the exact case that bites operators upgrading from
+        OpenClaw: ``bootstrap.py`` wrote ``token_env=OPENCLAW_GATEWAY_TOKEN``
+        on first install, the operator never touched that var, and the
+        Go gateway only writes ``DEFENSECLAW_GATEWAY_TOKEN``. Without
+        the fall-through the CLI raises 'gateway token unavailable'
+        even though the right token is sitting in os.environ.
+        """
+        gw = GatewayConfig(token_env="MY_TOK", token="literal-fallback")
+        env = self._clean_env(DEFENSECLAW_GATEWAY_TOKEN="dc-tok")
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "dc-tok")
+
+    def test_literal_token_is_last_resort_when_no_env_set(self):
+        """When neither token_env nor the auto-detect vars are set,
+        fall back to the literal ``self.token`` from config.yaml.
+        Plaintext-secret deprecation is handled by `_warn_plaintext_secrets`.
+        """
+        gw = GatewayConfig(token_env="", token="literal-from-yaml")
+        env = self._clean_env()
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "literal-from-yaml")
+
+    def test_returns_empty_when_nothing_configured(self):
+        """No token anywhere → empty string. Callers gate on truthiness."""
+        gw = GatewayConfig(token_env="", token="")
+        env = self._clean_env()
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(gw.resolved_token(), "")
 
 
 class TestGuardrailHostField(unittest.TestCase):
