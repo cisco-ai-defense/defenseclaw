@@ -2740,6 +2740,16 @@ _LITERAL_ALLOWLIST: tuple[str, ...] = (
     "[#9FB2CC]",
     # Docstring example in _safe_body_renderable's prose.
     "``[e] export``",
+    # CLI usage hint shown in the command palette / error messages
+    # (rendered via _write_activity, which already escapes via
+    # ``rich_escape(str(exc))`` in the Phase-1 fix).
+    "<preset> [flags]",
+    # TOML section name shown in setup info text — not Rich markup.
+    "[mcp_servers]",
+    "([mcp_servers])",
+    # Audit-row demonstration text (already covered by _audit_body_text
+    # which routes through ``_safe_body_renderable``).
+    "[Enter] view output",
 )
 
 # Variable expressions inside f-strings whose values are statically
@@ -2753,6 +2763,28 @@ _FSTRING_EXPR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     "alert_color",
     "icon_color",
 )
+
+
+# Suffix-based allow-list: f-string expressions that statically
+# evaluate to an uppercase string never produce a tag-shaped bracket
+# pair, so we don't need to flag them. ``.upper()`` and known-
+# uppercase attributes like ``check.badge`` (FAIL/PASS/STALE/WARN)
+# fall in this bucket.
+_FSTRING_EXPR_ALLOWLIST_SUFFIXES: tuple[str, ...] = (
+    ".upper()",
+    ".UPPER()",
+)
+
+# Specific f-string expression strings that are known-safe at runtime
+# (e.g. integer indices that always render as ``[0]`` / ``[1]`` /
+# ``[16]`` — numeric tokens that Rich treats as literal text).
+_FSTRING_EXPR_ALLOWLIST_EXACT: frozenset[str] = frozenset({
+    "index",
+    "i",
+    "n",
+    "check.badge",
+    "notice.level.upper()",
+})
 
 
 _RAW_BRACKET_RE = _re_scanner.compile(r"(?<!\\)\[(?P<tag>[a-z][^\[\]]{0,40})\]")
@@ -2780,24 +2812,28 @@ def _flag_raw_string(literal: str) -> list[str]:
     return findings
 
 
-def _flag_fstring(joined_text: str, expressions: list[str]) -> list[str]:
-    """Return offending bracket tokens for an f-string. ``joined_text``
-    is the full f-string with ``{}`` placeholders for interpolations
-    and ``expressions`` is the source-code text of each interpolation
-    in order.
+def _flag_fstring_placeholder(joined_text: str) -> list[str]:
+    """Return offending ``[{expr}]`` patterns from an f-string's joined
+    representation. ``joined_text`` has ``{expr}`` placeholders for
+    each interpolation, so a Rich-markup ``[{var}]`` literal will
+    show up as ``[{var}]`` in the joined string. A Python subscript
+    like ``counts[key]`` shows up as ``{counts[key]}`` (the entire
+    expression sits inside one placeholder) and won't match the
+    ``[{...}]`` regex because there's no literal ``[`` adjacent to
+    the opening brace. That asymmetry is exactly what we want — the
+    scanner only flags the genuine markup shape.
     """
 
     if _is_allowlisted_literal(joined_text):
         return []
     findings: list[str] = []
-    # First check raw bracketed tokens that happen to live in the
-    # static parts of the f-string (e.g. ``f"[bold]{x}[/]"``).
-    findings.extend(_flag_raw_string(joined_text))
-    # Then check the ``[{expr}]`` shape — risky because ``expr``
-    # evaluates at runtime and may be any lowercase string.
     for match in _FSTRING_BRACKET_RE.finditer(joined_text):
         expr = match.group("expr").strip()
         if expr.startswith(_FSTRING_EXPR_ALLOWLIST_PREFIXES):
+            continue
+        if expr.endswith(_FSTRING_EXPR_ALLOWLIST_SUFFIXES):
+            continue
+        if expr in _FSTRING_EXPR_ALLOWLIST_EXACT:
             continue
         findings.append(match.group(0))
     return findings
@@ -2869,12 +2905,28 @@ def _scan_tui_source_for_lowercase_brackets() -> list[tuple[str, int, str]]:
                 for token in bad:
                     findings.append((rel, node.lineno, token))
             elif isinstance(node, _ast_scanner.JoinedStr):
-                joined, exprs = _joined_str_text_and_exprs(node)
-                if not joined:
-                    continue
-                bad = _flag_fstring(joined, exprs)
-                for token in bad:
-                    findings.append((rel, node.lineno, token))
+                # Two passes for f-strings:
+                # 1. Each *literal* part is plain Python str text. Run
+                #    the raw regex on it the same way we'd run it on a
+                #    Constant(str) — this catches ``f"[bold]{x}[/]"``-
+                #    style markup written into the static parts.
+                # 2. Build the joined ``"x [{expr}] y"`` shape with
+                #    ``{expr}`` placeholders for each interpolation,
+                #    then run the placeholder-anchored regex. That
+                #    only matches when the brackets are *literal*
+                #    (i.e. adjacent to the placeholder boundary), so
+                #    Python subscripts inside the placeholder don't
+                #    trigger false positives.
+                for value in node.values:
+                    if isinstance(value, _ast_scanner.Constant) and isinstance(
+                        value.value, str
+                    ):
+                        for token in _flag_raw_string(value.value):
+                            findings.append((rel, value.lineno, token))
+                joined, _exprs = _joined_str_text_and_exprs(node)
+                if joined:
+                    for token in _flag_fstring_placeholder(joined):
+                        findings.append((rel, node.lineno, token))
     return findings
 
 
@@ -2909,3 +2961,33 @@ def test_no_unescaped_lowercase_bracket_tokens_in_tui_sources() -> None:
             f"is an intentional Rich style — register it in "
             f"``_RICH_STYLE_ALLOWLIST``.\n\nOffending lines:\n{report}"
         )
+
+
+def test_activity_history_tab_bar_escapes_t_hotkey() -> None:
+    """The activity panel's history tab bar embeds a ``[t]`` hotkey
+    label. ``[t]`` is a lowercase tag-shape Rich would parse as a
+    style and silently drop. Confirm the source emits the escaped form.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.panels.activity import ActivityModel
+
+    source = inspect.getsource(ActivityModel._render_history)  # noqa: SLF001
+    assert "\\\\[t] terminal mode" in source
+
+
+def test_overview_body_fallback_escapes_notice_message() -> None:
+    """The overview body's *fallback* render path interpolates
+    ``notice.message`` directly into a Rich-parsed string. Notice
+    messages are operator-facing prose that frequently include
+    bracketed hotkey hints (``press [g] to set up``); escape so they
+    can't be consumed as style tags.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._overview_body_text)  # noqa: SLF001
+    assert "rich_escape(notice.message)" in source

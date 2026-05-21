@@ -215,7 +215,11 @@ class ActivityPanelModel:
         return "\n".join(lines)
 
     def _render_history(self, *, height: int) -> str:
-        lines = ["  Command History  [Enter] view output  [t] terminal mode", ""]
+        # Escape the ``[t]`` hotkey: Rich parses single lowercase
+        # letters as opening style tags and silently drops the
+        # bracketed text. ``[Enter]`` is uppercase-led so Rich already
+        # treats it as literal — escaping it is harmless either way.
+        lines = ["  Command History  \\[Enter] view output  \\[t] terminal mode", ""]
         for index, entry in enumerate(self.entries):
             prefix = "->" if index == self.cursor else "  "
             lines.append(f"{prefix} {entry.command}  {entry.status_label} ({len(entry.output)} lines)")
