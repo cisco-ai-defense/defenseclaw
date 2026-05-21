@@ -12,18 +12,13 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-from pathlib import Path
 from types import ModuleType
 
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
-
-
-FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _command_line_module() -> ModuleType:
@@ -213,13 +208,3 @@ def test_textual_command_parser_accepts_go_gateway_registry_commands() -> None:
     assert parsed.needs_preview is False
 
 
-def test_migration_ledger_fixture_skeleton_is_well_formed() -> None:
-    payload = json.loads((FIXTURES / "migration_ledger_skeleton.json").read_text(encoding="utf-8"))
-
-    assert payload["schema_version"] == 1
-    assert payload["migration"] == "python-textual-tui"
-    assert payload["expected_interfaces"]["backend_option"] == "--backend"
-    assert payload["expected_interfaces"]["backend_env"] == "DEFENSECLAW_TUI_BACKEND"
-    assert "defenseclaw.tui.command_line.parse_command_line" in payload["expected_interfaces"]["parser"]
-    assert payload["expected_interfaces"]["parser_error"] == "defenseclaw.tui.command_line.CommandLineError"
-    assert payload["expected_interfaces"]["command_registry_count"] == 224

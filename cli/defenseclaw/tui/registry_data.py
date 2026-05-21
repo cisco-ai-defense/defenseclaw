@@ -10,11 +10,10 @@
 
 # ruff: noqa: E501
 
-"""Go TUI command registry port for the Textual backend.
+"""Command palette registry for the Textual TUI.
 
-Generated mechanically from internal/tui/command.go::BuildRegistry.
-Keep this data exact so parity tests can catch drift before the
-Textual backend becomes the default.
+Originally ported from the deleted Go TUI's BuildRegistry; now the
+single source of truth for the Textual command palette.
 """
 
 from __future__ import annotations
@@ -245,5 +244,3 @@ GO_PARITY_REGISTRY: tuple[tuple[str, str, tuple[str, ...], str, str, bool, str],
     ('readiness', 'defenseclaw', ('doctor',), 'Run health checks that feed Setup Readiness', 'info', False, ''),
     ('help', 'defenseclaw', ('--help',), 'Show CLI help', 'info', False, ''),
 )
-
-GO_PARITY_ENTRY_COUNT = 224
