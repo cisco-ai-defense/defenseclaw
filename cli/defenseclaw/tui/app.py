@@ -13,9 +13,10 @@ from time import monotonic
 from typing import Any
 
 from rich.console import Group, RenderableType
-from rich.errors import MarkupError
+from rich.errors import MarkupError, MissingStyle, StyleSyntaxError
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
+from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 from textual import events, on
@@ -1440,12 +1441,28 @@ class DefenseClawTUI(App[None]):
         rendering with markup disabled when parsing fails. The
         fallback path also escapes the brackets so downstream
         consumers won't try to re-parse them.
+
+        ``MarkupError`` fires during ``from_markup`` itself, but bad
+        style names (``[e] export`` -> style ``e``) only blow up later
+        when the renderer calls ``Console.get_style`` and surfaces
+        ``MissingStyle``. We catch that too — by validating each span's
+        style up front against ``Style.parse`` — so a bogus style in
+        any panel body falls back to plain text instead of taking down
+        the whole TUI several frames later.
         """
 
         try:
-            return Text.from_markup(content)
+            text = Text.from_markup(content)
         except MarkupError:
             return Text(content, no_wrap=False)
+        try:
+            for span in text.spans:
+                style = span.style
+                if isinstance(style, str) and style:
+                    Style.parse(style)
+        except (MissingStyle, StyleSyntaxError):
+            return Text(content, no_wrap=False)
+        return text
 
     def _body_text(self) -> str:
         self._table_columns = ()
@@ -3097,7 +3114,17 @@ class DefenseClawTUI(App[None]):
 
     def _audit_body_text(self) -> str:
         toolbar = self.audit_model.toolbar_state()
-        actions = "  ".join(f"[{action.key}] {action.label}" for action in toolbar.actions)
+        # Escape the literal brackets around each action key so Rich
+        # treats ``[e] export`` as plain text. Without the backslashes
+        # the toolbar emitted a string like ``[e] export filter`` that
+        # Rich's markup parser interpreted as an opening tag with
+        # style ``e``; the renderer then raised
+        # ``MissingStyle: 'e' is not a valid color`` and crashed the
+        # whole TUI the moment the Audit panel was rendered (which
+        # happens on every panel switch, every health poll, and every
+        # ``_render_chrome`` call after a setup change like toggling
+        # redaction).
+        actions = "  ".join(f"\\[{action.key}\\] {action.label}" for action in toolbar.actions)
         lines = [
             "[bold #22D3EE]Audit Trail[/]  [#9FB2CC]Click common filters above, or search with field:value terms.[/]",
             f"{toolbar.summary_label}  {actions}",
@@ -4842,10 +4869,19 @@ class DefenseClawTUI(App[None]):
         last_seen = getattr(self, "_last_gateway_started_at", "")
         if last_seen and snapshot.started_at != last_seen:
             try:
-                self.setup_model.mark_restart_started()
-            except AttributeError:
-                # Older SetupPanelModel without this method — fall back
-                # to clearing the local queue directly.
+                # SetupPanelModel.mark_restart_started requires the new
+                # ``started_at`` so it can compare against the timestamp
+                # captured when the restart was queued. Calling it with
+                # no args raised ``TypeError`` and crashed the
+                # ``_poll_health`` worker on every poll, so the moment
+                # the operator changed any setting that triggers a
+                # restart (e.g. toggling redaction off via setup) the
+                # whole TUI tore down.
+                self.setup_model.mark_restart_started(snapshot.started_at)
+            except (AttributeError, TypeError):
+                # Older SetupPanelModel without this method (or with a
+                # different signature) — fall back to clearing the
+                # local queue directly so the banner doesn't get stuck.
                 if hasattr(self.setup_model, "clear_restart_queue"):
                     self.setup_model.clear_restart_queue()
         self._last_gateway_started_at = snapshot.started_at
