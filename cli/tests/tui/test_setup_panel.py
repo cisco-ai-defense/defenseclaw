@@ -913,6 +913,32 @@ def test_notifications_routing_wizard_emits_one_intent_per_changed_slot() -> Non
     assert all(intent.args[-1] == "--no-restart" for intent in intents)
 
 
+def test_notifications_routing_submit_with_no_changes_surfaces_form_error() -> None:
+    """Guard against the malformed ``setup notifications-set`` invocation
+    that would happen if the operator opened the wizard, made no toggle
+    changes, and pressed Submit.
+
+    Without this guard the primary intent would be the bare prefix
+    ``("setup", "notifications-set")`` (no slot positional arg) which
+    Click rejects with ``Error: Missing argument 'SLOT'``. The wizard
+    submitter should refuse early with a friendly hint instead.
+    """
+
+    from defenseclaw.tui.panels.setup import SetupWizard, SetupPanelModel
+
+    model = SetupPanelModel(cfg=None)
+    model.open_wizard_form(SetupWizard.NOTIFICATIONS_ROUTING)
+    result = model.submit_wizard_form()
+    # The submit handler should signal "handled" but emit no command
+    # intent — the wizard form stays open with a form_error hint.
+    assert result.handled is True
+    assert result.intent is None
+    assert model.form_error is not None
+    assert "No toggles changed" in model.form_error
+    # And the wizard's status must NOT have been bumped to running.
+    assert model.wizard_status.get(SetupWizard.NOTIFICATIONS_ROUTING) != "running..."
+
+
 def test_cli_choices_module_matches_cli_source_of_truth() -> None:
     """``cli_choices`` is the only place the TUI should read provider
     catalogues from. This test asserts the centralized lists agree

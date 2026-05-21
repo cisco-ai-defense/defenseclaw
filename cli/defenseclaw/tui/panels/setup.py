@@ -972,6 +972,18 @@ class SetupPanelModel:
             if looks_like_secret_value(env_name):
                 self.form_error = "Env Name looks like a secret value. Use an env var name such as DEFENSECLAW_LLM_KEY."
                 return SetupPanelAction(True)
+        # Notifications routing fans out one CLI call per *changed*
+        # slot. With no changes there is nothing to apply; emitting the
+        # bare ``setup notifications-set`` prefix here would run a
+        # malformed CLI invocation (missing the slot positional arg)
+        # that Click would reject. Bail with a friendly hint instead.
+        if self.active_wizard == SetupWizard.NOTIFICATIONS_ROUTING:
+            if not notifications_routing_intents(self.form_fields):
+                self.form_error = (
+                    "No toggles changed — flip at least one notification "
+                    "slot before submitting, or press Escape to cancel."
+                )
+                return SetupPanelAction(True)
         args = build_wizard_args(self.active_wizard, self.form_fields, self.config)
         name = WIZARD_NAMES[int(self.active_wizard)]
         follow_up: tuple[SetupCommandIntent, ...] = ()
@@ -981,10 +993,9 @@ class SetupPanelModel:
             follow_up = splunk_wizard_follow_up_intents(self.form_fields)
         elif self.active_wizard == SetupWizard.NOTIFICATIONS_ROUTING:
             # The first changed slot is the primary intent; remaining
-            # slots run as follow_ups in order.
-            routing_intents = notifications_routing_intents(self.form_fields)
-            if routing_intents:
-                follow_up = routing_intents[1:]
+            # slots run as follow_ups in order. The "no changes" path
+            # is already short-circuited above.
+            follow_up = notifications_routing_intents(self.form_fields)[1:]
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
