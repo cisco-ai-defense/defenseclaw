@@ -3871,24 +3871,6 @@ class DefenseClawTUI(App[None]):
         self.activity_lines.append(text)
         self.query_one("#activity", RichLog).write(rich_escape(text))
 
-    def _write_activity_safe(self, text: str) -> None:
-        """Write subprocess output to the Activity RichLog without ever
-        crashing the markup parser.
-
-        The Activity RichLog is created with ``markup=True`` so the
-        intentional-style writes (``[#FBBF24]running[/] foo``) light up
-        with color. That makes raw subprocess stdout the single biggest
-        source of MarkupError / MissingStyle frames in the TUI: a
-        progress bar like ``Selection [3]:`` or an installer's ``[INFO]``
-        prefix takes down the whole frame and never refreshes again
-        until the panel is re-mounted. Pre-escape the text so the
-        bracket characters render literally — there's no intentional
-        Rich markup in subprocess output we'd want to honor anyway.
-        """
-
-        self.activity_lines.append(text)
-        self.query_one("#activity", RichLog).write(rich_escape(text))
-
     def _export_audit(self, path: Path | None) -> Path:
         target = path or Path("defenseclaw-audit-export.json")
         if not target.is_absolute():
