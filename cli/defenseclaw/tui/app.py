@@ -85,6 +85,7 @@ from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
 from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
+from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
 from defenseclaw.tui.screens.redaction import RedactionToggleScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
     SetupResourceEditorScreen,
@@ -503,6 +504,7 @@ class DefenseClawTUI(App[None]):
         Binding("?", "toggle_help", "Help"),
         Binding(":", "open_command", "Command"),
         Binding("ctrl+k", "open_command", "Command"),
+        Binding("ctrl+p", "open_panel_jumper", "Jump panel"),
         Binding("tab", "next_panel", "Next"),
         Binding("shift+tab", "previous_panel", "Previous"),
     ]
@@ -1240,6 +1242,30 @@ class DefenseClawTUI(App[None]):
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
         self._set_status("Command palette open. Type, use Up/Down, Tab complete, or click a row.")
+
+    def action_open_panel_jumper(self) -> None:
+        """Open the Ctrl+P fuzzy panel jumper modal.
+
+        Builds a ``PanelChoice`` per *visible* panel (so the modal
+        respects connector gating — no offering Plugins on Claude
+        Code) and pushes the modal. The dismiss value is the panel
+        name to switch to, or ``None`` to cancel.
+        """
+
+        visible = [
+            PanelChoice(name=name, label=label, hotkey=key)
+            for name, key, label in PANELS
+            if not self._panel_hidden(name)
+        ]
+        if not visible:
+            return
+
+        def _on_dismiss(target: str | None) -> None:
+            if not target:
+                return
+            self.action_switch_panel(target)
+
+        self.push_screen(PanelJumperScreen(tuple(visible)), _on_dismiss)
 
     def action_toggle_help(self) -> None:
         self.help_open = not self.help_open
@@ -2029,7 +2055,11 @@ class DefenseClawTUI(App[None]):
         """
 
         lines: list[str] = [
-            "[bold #22D3EE]DefenseClaw  Keybindings[/]",
+            # Single-space title — preserves the legacy
+            # ``"DefenseClaw Keybindings"`` substring the
+            # app-shell test asserts on, while keeping the
+            # bold-cyan styling.
+            "[bold #22D3EE]DefenseClaw Keybindings[/]",
             "[#475569]" + ("─" * 48) + "[/]",
             "",
         ]
