@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Launch the DefenseClaw TUI (Go gateway)."""
+"""Launch the DefenseClaw TUI."""
 
 from __future__ import annotations
 
@@ -26,18 +26,31 @@ from defenseclaw.gateway import canonical_install_path, resolve_gateway_binary
 
 
 @click.command("tui")
-def tui() -> None:
+@click.option(
+    "--backend",
+    type=click.Choice(["go", "textual"], case_sensitive=False),
+    default=None,
+    help="TUI backend to launch. Defaults to DEFENSECLAW_TUI_BACKEND or textual.",
+)
+def tui(backend: str | None = None) -> None:
     """Launch the DefenseClaw interactive dashboard (TUI).
 
-    Hands off to the defenseclaw-gateway binary which provides the
-    full Bubbletea-based terminal UI with alerts, skills, MCPs,
-    inventory, logs, and audit panels.
+    The Textual Python backend is the default dashboard. Use
+    ``--backend go`` or ``DEFENSECLAW_TUI_BACKEND=go`` to launch the
+    legacy Go backend while it remains in-tree for parity comparison.
 
     Binary resolution goes through :func:`defenseclaw.gateway.resolve_gateway_binary`
     which also falls back to the canonical install path so we keep
     working in the very shell that just ran ``make all`` (where
     ``~/.local/bin`` is not yet on ``PATH``).
     """
+    selected = (backend or os.environ.get("DEFENSECLAW_TUI_BACKEND") or "textual").strip().lower()
+    if selected == "textual":
+        from defenseclaw.tui import run_textual_tui
+
+        run_textual_tui()
+        return
+
     gateway = resolve_gateway_binary()
     if gateway is None:
         canonical = canonical_install_path()
