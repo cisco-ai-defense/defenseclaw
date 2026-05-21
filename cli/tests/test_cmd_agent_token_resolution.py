@@ -181,6 +181,98 @@ def test_no_config_with_defenseclaw_env_uses_env():
     assert token == "dc-tok-from-env"
 
 
+def test_fresh_install_defaults_use_defenseclaw_env_name():
+    """Phase 3 contract: `_setup_gateway_defaults` writes the new env name.
+
+    Locks in that a non-OpenClaw fresh install ends with
+    ``cfg.gateway.token_env == "DEFENSECLAW_GATEWAY_TOKEN"`` (matches
+    what the Go gateway writes on first boot), not the legacy
+    ``OPENCLAW_GATEWAY_TOKEN`` default that bit the user.
+
+    Mocks ``_resolve_gateway_for_connector`` to return no token so we
+    hit the else-branch — the only branch that controls the default.
+    """
+    from unittest.mock import MagicMock
+
+    from defenseclaw.commands.cmd_init import _setup_gateway_defaults
+
+    cfg = MagicMock()
+    cfg.guardrail.connector = "defenseclaw"
+    cfg.gateway.host = ""
+    cfg.gateway.port = 0
+    cfg.gateway.token_env = ""  # Simulate fresh install — nothing set yet.
+    cfg.gateway.api_port = 18970
+    cfg.gateway.watcher.enabled = False
+    cfg.gateway.watcher.skill.enabled = False
+    cfg.gateway.watcher.skill.take_action = False
+    cfg.gateway.watcher.plugin.enabled = False
+    cfg.gateway.watcher.plugin.take_action = False
+    cfg.gateway.watcher.plugin.dirs = []
+    cfg.gateway.device_key_file = "/tmp/test-device.key"
+    cfg.gateway.resolved_token.return_value = ""
+    cfg.ai_discovery.enabled = False
+    cfg.ai_discovery.mode = "off"
+    cfg.plugin_dirs.return_value = []
+
+    logger = MagicMock()
+
+    with patch(
+        "defenseclaw.commands.cmd_init._resolve_gateway_for_connector",
+        return_value={"host": "127.0.0.1", "port": 18789, "token": ""},
+    ), patch("defenseclaw.commands.cmd_init._ensure_device_key"):
+        _setup_gateway_defaults(cfg, logger, is_new_config=True)
+
+    assert cfg.gateway.token_env == "DEFENSECLAW_GATEWAY_TOKEN", (
+        "Fresh install should default token_env to DEFENSECLAW_GATEWAY_TOKEN "
+        "(matches the Go gateway's first-boot write). Got: "
+        f"{cfg.gateway.token_env!r}"
+    )
+
+
+def test_operator_set_token_env_is_preserved_on_init():
+    """`_setup_gateway_defaults` must not stomp an operator-pinned token_env.
+
+    If the user has already run `defenseclaw setup gateway` and pinned
+    a custom env var, re-running init must NOT silently rewrite it
+    to the default. The `or` short-circuit in the else branch is the
+    guard; this test makes the contract explicit.
+    """
+    from unittest.mock import MagicMock
+
+    from defenseclaw.commands.cmd_init import _setup_gateway_defaults
+
+    cfg = MagicMock()
+    cfg.guardrail.connector = "defenseclaw"
+    cfg.gateway.host = ""
+    cfg.gateway.port = 0
+    cfg.gateway.token_env = "MY_CUSTOM_TOKEN_ENV"  # Operator override.
+    cfg.gateway.api_port = 18970
+    cfg.gateway.watcher.enabled = False
+    cfg.gateway.watcher.skill.enabled = False
+    cfg.gateway.watcher.skill.take_action = False
+    cfg.gateway.watcher.plugin.enabled = False
+    cfg.gateway.watcher.plugin.take_action = False
+    cfg.gateway.watcher.plugin.dirs = []
+    cfg.gateway.device_key_file = "/tmp/test-device.key"
+    cfg.gateway.resolved_token.return_value = ""
+    cfg.ai_discovery.enabled = False
+    cfg.ai_discovery.mode = "off"
+    cfg.plugin_dirs.return_value = []
+
+    logger = MagicMock()
+
+    with patch(
+        "defenseclaw.commands.cmd_init._resolve_gateway_for_connector",
+        return_value={"host": "127.0.0.1", "port": 18789, "token": ""},
+    ), patch("defenseclaw.commands.cmd_init._ensure_device_key"):
+        _setup_gateway_defaults(cfg, logger, is_new_config=True)
+
+    assert cfg.gateway.token_env == "MY_CUSTOM_TOKEN_ENV", (
+        "Operator-pinned token_env must survive re-running init. "
+        f"Got: {cfg.gateway.token_env!r}"
+    )
+
+
 def test_cli_host_port_override_wins_over_config():
     """Sanity: --gateway-host / --gateway-port still take precedence.
 

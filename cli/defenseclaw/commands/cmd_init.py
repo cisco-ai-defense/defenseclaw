@@ -1036,7 +1036,14 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
         cfg.gateway.token_env = env_name
         token_configured = True
     else:
-        cfg.gateway.token_env = cfg.gateway.token_env or "OPENCLAW_GATEWAY_TOKEN"
+        # Default token_env to the canonical DEFENSECLAW_ name (the
+        # Go gateway auto-generates it on first boot and writes it to
+        # ~/.defenseclaw/.env). Preserve any operator-set value to
+        # respect explicit overrides from `defenseclaw setup gateway`.
+        # `resolved_token()` falls back to OPENCLAW_GATEWAY_TOKEN
+        # automatically, so upgraders with only the legacy var still
+        # authenticate without any manual remediation.
+        cfg.gateway.token_env = cfg.gateway.token_env or "DEFENSECLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
 
     if not cfg.gateway.device_key_file:
