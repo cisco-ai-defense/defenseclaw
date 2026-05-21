@@ -53,10 +53,18 @@ class ConsequenceAction:
 
     @property
     def display_label(self) -> str:
-        """Return the label with a hotkey prefix when one exists."""
+        """Return the label with a hotkey prefix when one exists.
+
+        The bracket around the hotkey is escaped (``\\[a]``) so Rich
+        treats ``[a] Apply`` as literal text. Without the backslash
+        the markup parser interprets the single-letter hotkey as a
+        style name and the modal render explodes with
+        ``MissingStyle: 'a' is not a valid color`` — same bug class
+        that took down the audit panel before we hardened that path.
+        """
 
         if self.hotkey:
-            return f"[{self.hotkey}] {self.label}"
+            return f"\\[{self.hotkey}] {self.label}"
         return self.label
 
 

@@ -3319,7 +3319,12 @@ def _webhook_summary_fields(cfg: object | Mapping[str, Any] | None) -> tuple[Con
         name = str(_mapping_or_attr(hook, "name", "") or f"{kind}[{index}]")
         url = str(_mapping_or_attr(hook, "url", ""))
         enabled = bool(_mapping_or_attr(hook, "enabled", False))
-        summary = f"[{'enabled' if enabled else 'disabled'}] {url}"
+        # Escape the opening bracket so Rich renders ``[enabled] url``
+        # as literal text. Without the backslash the parser interprets
+        # ``enabled``/``disabled`` as a style name and the setup panel
+        # crashes with ``MissingStyle: 'enabled' is not a valid color``
+        # the moment any webhook is configured.
+        summary = f"\\[{'enabled' if enabled else 'disabled'}] {url}"
         out.append(ConfigField(name, f"webhooks.{index}", "header", summary, summary))
     out.append(hint)
     return tuple(out)

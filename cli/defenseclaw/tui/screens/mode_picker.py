@@ -195,6 +195,11 @@ def _choice_action(choice: ModeChoice, *, current_wire: str) -> MenuAction:
     guardrail = "guardrail" if choice.guardrail_ok else "hooks"
     return MenuAction(
         action_id=choice.wire,
-        label=f"[{choice.hotkey}] {choice.label}{active}",
+        # Escape the opening bracket so Rich treats ``[c] Codex`` as
+        # literal text. Without the leading backslash the markup parser
+        # interprets the single-letter token as a style name and the
+        # menu render crashes with ``MissingStyle: 'c' is not a valid
+        # color`` the moment the picker is shown.
+        label=f"\\[{choice.hotkey}] {choice.label}{active}",
         description=f"{guardrail}: {choice.tagline}",
     )

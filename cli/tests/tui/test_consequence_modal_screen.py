@@ -74,6 +74,22 @@ def test_consequence_model_resolves_default_and_hotkey() -> None:
     assert model.action_for_hotkey("x") is None
 
 
+def test_consequence_action_display_label_escapes_hotkey_brackets() -> None:
+    """Hotkey labels must escape the opening bracket so Rich renders
+    ``[p] Preview`` as literal text instead of treating ``p`` as a
+    style name (which raises ``MissingStyle`` and crashes the modal).
+    """
+
+    action = ConsequenceAction(
+        action_id="preview", hotkey="p", label="Preview", description="Dry run only."
+    )
+    assert action.display_label.startswith("\\[p]")
+    assert "Preview" in action.display_label
+
+    bare = ConsequenceAction(action_id="cancel", label="Cancel", description="")
+    assert bare.display_label == "Cancel"
+
+
 @pytest.mark.asyncio
 async def test_consequence_modal_enter_confirms_default_action() -> None:
     app = ConsequenceHarness(_model())
