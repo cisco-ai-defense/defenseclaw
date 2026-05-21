@@ -878,6 +878,73 @@ def test_splunk_dashboards_wizard_apply_destroy_round_trips() -> None:
     assert ("--name-prefix", "smoke-") == argv[argv.index("--name-prefix") : argv.index("--name-prefix") + 2]
 
 
+def test_splunk_dashboards_wizard_drops_enable_detectors_when_with_detectors_off() -> None:
+    """``--enable-detectors`` MUST be gated on ``--with-detectors``.
+
+    If we let it through unconditionally the CLI would silently ignore
+    it (the dashboards subgroup only persists detector-tuning when the
+    detectors actually ship) and operators would assume the toggle
+    "worked" when it didn't. The form should not paper over that
+    mismatch.
+    """
+
+    from defenseclaw.tui.panels.setup import (
+        _build_splunk_dashboards_args,
+        splunk_dashboards_wizard_fields,
+    )
+
+    fields = splunk_dashboards_wizard_fields()
+    # Operator flipped Enable Detectors=yes but left With Detectors=no.
+    rogue = _with_field(fields, "Enable Detectors", "yes")
+    argv = _build_splunk_dashboards_args(rogue)
+    assert "--with-detectors" not in argv
+    assert "--enable-detectors" not in argv
+
+
+def test_splunk_dashboards_wizard_omits_empty_optional_flags() -> None:
+    """Empty optional fields (``Name Prefix`` / ``O11y API Token`` /
+    ``API URL``) must NOT be forwarded as empty arg pairs.
+
+    A bare ``--o11y-api-token ""`` reaches the Click parser and the
+    CLI proceeds to authenticate with an empty bearer, which then
+    looks like a credential bug at the SignalFx layer. The wizard
+    must drop these cleanly when the operator leaves them blank.
+    """
+
+    from defenseclaw.tui.panels.setup import (
+        _build_splunk_dashboards_args,
+        splunk_dashboards_wizard_fields,
+    )
+
+    fields = splunk_dashboards_wizard_fields()
+    argv = _build_splunk_dashboards_args(fields)
+    # None of the optional pass-through flags should appear when their
+    # backing fields are empty (the defaults are all empty strings).
+    for flag in ("--name-prefix", "--o11y-api-token", "--api-url"):
+        assert flag not in argv, f"{flag} leaked into argv: {argv}"
+
+
+def test_ai_discovery_disable_honors_no_restart_flag() -> None:
+    """Disabling AI Discovery while opting out of the gateway restart
+    should produce ``agent discovery disable --yes --no-restart`` and
+    nothing else.
+
+    The disable sub-command rejects every tuning flag the enable form
+    surfaces, so any flag bleed-through here would fail the CLI run.
+    """
+
+    from defenseclaw.tui.panels.setup import (
+        _build_ai_discovery_args,
+        ai_discovery_wizard_fields,
+    )
+
+    fields = ai_discovery_wizard_fields(None)
+    fields = _with_field(fields, "Enable", "no")
+    fields = _with_field(fields, "Restart Gateway", "no")
+    argv = _build_ai_discovery_args(fields)
+    assert argv == ("agent", "discovery", "disable", "--yes", "--no-restart")
+
+
 def test_notifications_routing_wizard_emits_one_intent_per_changed_slot() -> None:
     """The Notifications Routing wizard turns each *changed* slot into
     a ``setup notifications-set <slot> on|off`` invocation.
