@@ -1433,8 +1433,13 @@ class DefenseClawTUI(App[None]):
                     "type a full command like `defenseclaw doctor`, pick a "
                     "highlighted palette row with Tab/Enter, or Esc to close"
                 )
+                # Both ``exc`` and ``hint`` flow into a markup-parsed
+                # RichLog; either piece may quote argv tokens like ``[skill]``
+                # that Rich would mis-parse as a style name and crash the
+                # whole TUI mid-frame. Escape both.
                 self._write_activity(
-                    f"[#F87171]Rejected:[/] {exc}  [#9FB2CC]({hint})[/]"
+                    f"[#F87171]Rejected:[/] {rich_escape(str(exc))}  "
+                    f"[#9FB2CC]({rich_escape(hint)})[/]"
                 )
                 self._strip_rejected(str(exc))
                 self._set_status(f"Command rejected — {hint}.")
@@ -1580,7 +1585,13 @@ class DefenseClawTUI(App[None]):
                     self._command_started_at = time.monotonic()
                     self.commands_run += 1
                     self.activity_model.add_entry(event.text)
-                    self._write_activity(f"[#FBBF24]running[/] {event.text}")
+                    # event.text is the parsed command label (argv joined
+                    # with spaces); arguments routinely contain brackets
+                    # (e.g. ``defenseclaw scan skill[0]``). Escape so the
+                    # markup-parsed RichLog never crashes.
+                    self._write_activity(
+                        f"[#FBBF24]running[/] {rich_escape(event.text)}"
+                    )
                     # The strip is the single source of truth for command
                     # lifecycle. Status text shows the ambient hint so we
                     # don't double up on "running …" in two places.
@@ -1588,7 +1599,11 @@ class DefenseClawTUI(App[None]):
                     self._refresh_hint()
                 elif event.kind == "output":
                     self.activity_model.append_output(event.text)
-                    self._write_activity(event.text)
+                    # Subprocess stdout/stderr is the highest-volume crash
+                    # source: ``Selection [3]:`` / ``[INFO] foo`` / colored
+                    # progress bars all break Rich's markup parser. Hand
+                    # the line to the safe writer which escapes brackets.
+                    self._write_activity_safe(event.text)
                     # Surface a live tail so users on Overview can see the
                     # wizard prompt or scanner progress without switching
                     # panels. ``_strip_output`` filters whitespace.
@@ -1624,7 +1639,13 @@ class DefenseClawTUI(App[None]):
                 "answer its prompt, or press Ctrl+C to cancel it before starting a "
                 "new one."
             )
-            self._write_activity(f"[#FBBF24]{exc}[/]  [#9FB2CC]{guidance}[/]")
+            # ``exc`` may include user argv (``defenseclaw scan skill[a]``)
+            # and ``guidance`` echoes the operator's own command label;
+            # both must be escaped before markup parsing.
+            self._write_activity(
+                f"[#FBBF24]{rich_escape(str(exc))}[/]  "
+                f"[#9FB2CC]{rich_escape(guidance)}[/]"
+            )
             self._strip_rejected(f"{exc} — {guidance}")
             # The submit code optimistically flagged the wizard row as
             # "running..." before the executor rejected the new run; clear
@@ -1640,7 +1661,10 @@ class DefenseClawTUI(App[None]):
             self.command_running = False
             self.command_label = ""
             self._command_started_at = 0.0
-            self._write_activity(f"[#F87171]command crashed: {exc}[/]")
+            # Exception messages routinely include argv fragments; escape.
+            self._write_activity(
+                f"[#F87171]command crashed: {rich_escape(str(exc))}[/]"
+            )
             # Treat a crash as finished-but-failed: same dismissable strip,
             # same "press A for full output" affordance. The label stays
             # bound to the original command so users see what blew up.
@@ -2772,7 +2796,12 @@ class DefenseClawTUI(App[None]):
             return breakdown
         short_target = target if len(target) <= 18 else target[:17] + "…"
         sev_letter = (severity_letter_src or "")[:1] or "·"
-        return f"{breakdown} · top: [{TOKENS.accent_cyan}]{short_target}[/] {sev_letter}"
+        # ``short_target`` comes from raw audit events and may contain
+        # bracket characters; escape before Rich parses the markup.
+        return (
+            f"{breakdown} · top: [{TOKENS.accent_cyan}]"
+            f"{rich_escape(short_target)}[/] {sev_letter}"
+        )
 
     def _ai_agents_metric_detail(self, ai_box: Any) -> str:
         if not ai_box.rows:
@@ -2782,9 +2811,17 @@ class DefenseClawTUI(App[None]):
             vendor = (row.vendor or "unknown").strip()
             vendors[vendor] = vendors.get(vendor, 0) + 1
         top_vendor, top_count = max(vendors.items(), key=lambda kv: kv[1])
+        # Vendor strings come from arbitrary AI Discovery rows; escape.
+        safe_vendor = rich_escape(top_vendor)
         if len(vendors) == 1:
-            return f"[{TOKENS.accent_violet}]{top_vendor}[/] · {top_count} agent" + ("s" if top_count != 1 else "")
-        return f"[{TOKENS.accent_violet}]{top_vendor}[/] x{top_count} · {len(vendors)} vendors"
+            return (
+                f"[{TOKENS.accent_violet}]{safe_vendor}[/] · {top_count} agent"
+                + ("s" if top_count != 1 else "")
+            )
+        return (
+            f"[{TOKENS.accent_violet}]{safe_vendor}[/] "
+            f"x{top_count} · {len(vendors)} vendors"
+        )
 
     def _connector_hook_breakdown(self) -> tuple[int, int, int, str]:
         """Scan recent audit events for connector-hook action breakdown.
@@ -3150,8 +3187,11 @@ class DefenseClawTUI(App[None]):
             snippet = self._strip_summary
             snippet_color = TOKENS.accent_red
         truncated = _truncate_for_strip(snippet, panel.size.width or 120)
+        # ``truncated`` is live subprocess tail (``Selection [3]:`` etc.).
+        # Without escaping, a single bracketed token in stdout takes the
+        # whole TUI frame down. Escape before letting Rich parse markup.
         self.query_one("#command-progress-snippet", Static).update(
-            f"[{snippet_color}]{truncated}[/]"
+            f"[{snippet_color}]{rich_escape(truncated)}[/]"
         )
 
         hint = {
@@ -3207,6 +3247,12 @@ class DefenseClawTUI(App[None]):
             style=f"italic {TOKENS.text_secondary}",
         )
 
+        # Build the notice lines via ``Text.append`` rather than
+        # ``Text.from_markup``: the icons (``[!]`` / ``[*]`` / ``[>]``)
+        # and the literal ``[OK]`` would be parsed as style names ``!`` /
+        # ``OK`` etc. and crash the overview the moment any notice is
+        # emitted. ``notice.message`` also routinely includes bracketed
+        # tokens (``[skill] missing scan``) — same crash class.
         notice_block: list[Text] = []
         for notice in notices[:3]:
             if notice.level == "error":
@@ -3217,15 +3263,16 @@ class DefenseClawTUI(App[None]):
                 icon, color = "[>]", TOKENS.accent_blue
             else:
                 icon, color = "[-]", TOKENS.accent_green
-            notice_block.append(
-                Text.from_markup(f" [{color} bold]{icon}[/] {notice.message}")
-            )
+            line = Text(" ")
+            line.append(icon, style=f"{color} bold")
+            line.append(" ")
+            line.append(notice.message)
+            notice_block.append(line)
         if not notice_block:
-            notice_block.append(
-                Text.from_markup(
-                    f" [{TOKENS.accent_green} bold][OK][/] Runtime signals are quiet."
-                )
-            )
+            quiet = Text(" ")
+            quiet.append("[OK]", style=f"{TOKENS.accent_green} bold")
+            quiet.append(" Runtime signals are quiet.")
+            notice_block.append(quiet)
 
         services_table = Table.grid(padding=(0, 1), expand=True)
         services_table.add_column(no_wrap=True, width=2)
@@ -3791,6 +3838,42 @@ class DefenseClawTUI(App[None]):
     def _write_activity(self, text: str) -> None:
         self.activity_lines.append(text)
         self.query_one("#activity", RichLog).write(text)
+
+    def _write_activity_safe(self, text: str) -> None:
+        """Write subprocess output to the Activity RichLog without ever
+        crashing the markup parser.
+
+        The Activity RichLog is created with ``markup=True`` so the
+        intentional-style writes (``[#FBBF24]running[/] foo``) light up
+        with color. That makes raw subprocess stdout the single biggest
+        source of MarkupError / MissingStyle frames in the TUI: a
+        progress bar like ``Selection [3]:`` or an installer's ``[INFO]``
+        prefix takes down the whole frame and never refreshes again
+        until the panel is re-mounted. Pre-escape the text so the
+        bracket characters render literally — there's no intentional
+        Rich markup in subprocess output we'd want to honor anyway.
+        """
+
+        self.activity_lines.append(text)
+        self.query_one("#activity", RichLog).write(rich_escape(text))
+
+    def _write_activity_safe(self, text: str) -> None:
+        """Write subprocess output to the Activity RichLog without ever
+        crashing the markup parser.
+
+        The Activity RichLog is created with ``markup=True`` so the
+        intentional-style writes (``[#FBBF24]running[/] foo``) light up
+        with color. That makes raw subprocess stdout the single biggest
+        source of MarkupError / MissingStyle frames in the TUI: a
+        progress bar like ``Selection [3]:`` or an installer's ``[INFO]``
+        prefix takes down the whole frame and never refreshes again
+        until the panel is re-mounted. Pre-escape the text so the
+        bracket characters render literally — there's no intentional
+        Rich markup in subprocess output we'd want to honor anyway.
+        """
+
+        self.activity_lines.append(text)
+        self.query_one("#activity", RichLog).write(rich_escape(text))
 
     def _export_audit(self, path: Path | None) -> Path:
         target = path or Path("defenseclaw-audit-export.json")
