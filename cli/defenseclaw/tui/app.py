@@ -89,6 +89,7 @@ from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
+from defenseclaw.tui.screens.playground import PlaygroundScreen
 from defenseclaw.tui.screens.quick_start import QuickStartScreen
 from defenseclaw.tui.screens.redaction import RedactionToggleScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
@@ -2488,10 +2489,17 @@ class DefenseClawTUI(App[None]):
             )
             return self.body_text
         if self.active_panel == "policy":
-            self._table_columns, self._table_rows = self._policy_table()
+            # The Policy panel renders its own list, navigation cursor,
+            # tab bar, and detail overlays inside ``render_text``. The
+            # shared DataTable that sits below the body would render
+            # the same rows a second time, so we deliberately leave
+            # ``_table_columns`` empty and let ``_render_panel_table``
+            # hide the widget entirely.
+            self._table_columns = ()
+            self._table_rows = ()
             self.body_text = "[bold #22D3EE]Policy[/]\n" + self.policy_model.render_text(
                 width=max(self.size.width - 8, 80),
-                height=max(self.size.height - 18, 12),
+                height=max(self.size.height - 8, 20),
             )
             return self.body_text
         if self.active_panel == "setup":
@@ -5461,6 +5469,12 @@ class DefenseClawTUI(App[None]):
                 exclusive=True,
                 thread=False,
             )
+        if action.open_playground:
+            self.run_worker(
+                self._launch_playground(action.open_playground_policy_name),
+                exclusive=True,
+                thread=False,
+            )
         if action.intent is not None:
             intent = action.intent
             if intent.kind == "editor":
@@ -5513,6 +5527,46 @@ class DefenseClawTUI(App[None]):
         target = policy_dir / f"{name}.yaml"
         target.write_text(policy_to_gateway_yaml(policy), encoding="utf-8")
         return target
+
+    async def _launch_playground(self, policy_name: str) -> None:
+        """Push :class:`PlaygroundScreen` for an existing policy.
+
+        Loads ``<policy_dir>/<name>.yaml`` off disk to seed the modal
+        so live edits to the file by another process are picked up
+        cleanly. Saves through ``_save_wizard_policy`` (same target,
+        same emit pipeline) so the on-disk format is byte-identical
+        to whatever Quick Start would produce.
+        """
+
+        from defenseclaw.tui.creator.presets import policy_from_yaml
+        import yaml as _yaml
+
+        policy_dir = self.policy_model.policy_dir
+        if policy_dir is None:
+            self._set_status("policy_dir is not configured.")
+            return
+        target = policy_dir / f"{policy_name}.yaml"
+        if not target.is_file():
+            self._set_status(f"Policy file not found: {target}")
+            return
+        try:
+            data = _yaml.safe_load(target.read_text(encoding="utf-8")) or {}
+        except (OSError, _yaml.YAMLError) as exc:
+            self._set_status(f"Failed to load {target}: {exc}")
+            return
+        policy = policy_from_yaml(policy_name, data)
+        result = await self.push_screen_wait(PlaygroundScreen(policy))
+        if result is None:
+            self._set_status("Playground cancelled.")
+            return
+        try:
+            written = self._save_wizard_policy(result)
+        except (OSError, ValueError) as exc:
+            self._set_status(f"Playground save failed: {exc}")
+            return
+        self.policy_model.reload_from_disk()
+        self._render_chrome()
+        self._set_status(f"Saved policy to {written}.")
 
     def _apply_setup_action(self, action: SetupPanelAction) -> bool:
         if not action.handled:

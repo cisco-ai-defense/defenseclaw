@@ -1167,3 +1167,183 @@ def _try_rego_compile(rego_dir: str) -> bool:
     except subprocess.TimeoutExpired:
         ux.err("FAIL: opa check timed out")
         return False
+
+
+# ---------------------------------------------------------------------------
+# Phase 13: export / import (share-link encode/decode)
+#
+# These subcommands wrap ``defenseclaw.tui.creator.share`` so operators
+# can hand a policy to a teammate as a single line of base64url
+# (gzip-compressed JSON) without going through a registry. The encode
+# format mirrors the docs-site Policy Creator's share lane so a blob
+# produced here is readable in the web Creator and vice-versa.
+# ---------------------------------------------------------------------------
+
+
+def _hydrate_policy_from_path(name: str, path: Path) -> "object":
+    """Load a YAML policy file and translate it into a ``Policy``."""
+
+    from defenseclaw.tui.creator.presets import policy_from_yaml
+
+    with path.open() as fh:
+        data = yaml.safe_load(fh) or {}
+    return policy_from_yaml(name, data)
+
+
+@policy.command()
+@click.argument("name")
+@click.option(
+    "--out", "-o",
+    "out_path",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default=None,
+    help="Write the encoded blob to this file. Defaults to stdout.",
+)
+@click.option(
+    "--url",
+    "as_url",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit a docs-site share-link fragment "
+        "(``#policy=v1.<...>``) instead of the bare blob."
+    ),
+)
+@pass_ctx
+def export(app: AppContext, name: str, out_path: Path | None, as_url: bool) -> None:
+    """Export a policy as a single-line gzip+base64url share blob.
+
+    Round-trips with ``defenseclaw policy import``. The blob is
+    deterministic: encoding the same policy twice produces the same
+    output, so changes diff cleanly in version control.
+    """
+
+    from defenseclaw.tui.creator.share import encode_policy
+
+    path = _find_policy(app, name)
+    if not path:
+        raise click.ClickException(f"policy not found: {name}")
+    policy_obj = _hydrate_policy_from_path(name, Path(path))
+
+    blob = encode_policy(policy_obj)  # type: ignore[arg-type]
+    output = f"#policy={blob}" if as_url else blob
+
+    if out_path:
+        out_path.write_text(output + "\n")
+        ux.ok(f"wrote share blob to {out_path}")
+        return
+    click.echo(output)
+
+
+@policy.command("import")
+@click.argument("blob", required=False)
+@click.option(
+    "--from-file", "-f",
+    "from_file",
+    type=click.Path(exists=True, dir_okay=False, readable=True, path_type=Path),
+    default=None,
+    help="Read the share blob from this file instead of an argument.",
+)
+@click.option(
+    "--name",
+    "rename_to",
+    default=None,
+    help=(
+        "Override the imported policy's name. Defaults to the name "
+        "encoded in the blob."
+    ),
+)
+@click.option(
+    "--force/--no-force",
+    default=False,
+    help="Overwrite an existing policy with the same name.",
+)
+@pass_ctx
+def import_cmd(
+    app: AppContext,
+    blob: str | None,
+    from_file: Path | None,
+    rename_to: str | None,
+    force: bool,
+) -> None:
+    """Import a policy from a gzip+base64url share blob.
+
+    Accepts a positional argument or ``--from-file``. Writes the
+    decoded policy to ``policy_dir/<name>.yaml``. Refuses to clobber
+    an existing policy unless ``--force`` is supplied. URL fragments
+    of the form ``#policy=...`` (or ``policy=...``) are accepted -
+    we strip the fragment shell and decode the embedded payload.
+    """
+
+    from defenseclaw.tui.creator.emit import policy_to_gateway_yaml
+    from defenseclaw.tui.creator.share import (
+        DecodeErr,
+        DecodeFailure,
+        DecodeOk,
+        decode_policy,
+        extract_payload_from_hash,
+    )
+
+    if from_file is not None:
+        blob = from_file.read_text()
+    if not blob:
+        raise click.ClickException(
+            "no share blob provided; pass it as an argument or via --from-file"
+        )
+    blob = blob.strip()
+
+    # Accept the docs-creator URL fragment shape transparently.
+    if blob.startswith("#") or "policy=" in blob:
+        extracted = extract_payload_from_hash(blob.lstrip("#"))
+        if extracted:
+            blob = extracted
+
+    result = decode_policy(blob)
+    if isinstance(result, DecodeErr):
+        reason_msg = {
+            DecodeFailure.VERSION: (
+                "encoded with an unsupported version (newer DefenseClaw "
+                "required to import this blob)."
+            ),
+            DecodeFailure.TOO_LARGE: (
+                "blob is too large; refuse to decompress to avoid a "
+                "gzip-bomb attack."
+            ),
+            DecodeFailure.MALFORMED: (
+                "could not be parsed; verify the paste is complete and "
+                "wasn't truncated by your terminal."
+            ),
+            DecodeFailure.INVALID_SHAPE: (
+                "decoded payload is not a valid Policy object."
+            ),
+        }.get(result.reason, "unknown decode failure")
+        raise click.ClickException(f"failed to decode share blob: {reason_msg}")
+
+    assert isinstance(result, DecodeOk)
+    policy_obj = result.policy
+    if rename_to:
+        policy_obj.name = _sanitize_policy_name(rename_to)
+    elif not policy_obj.name:
+        raise click.ClickException(
+            "decoded policy has no name; pass --name to assign one"
+        )
+    else:
+        policy_obj.name = _sanitize_policy_name(policy_obj.name)
+
+    target_dir = _ensure_policies_dir(app)
+    target_path = Path(target_dir) / f"{policy_obj.name}.yaml"
+    if target_path.exists() and not force:
+        raise click.ClickException(
+            f"policy already exists: {target_path}. Pass --force to overwrite."
+        )
+
+    from defenseclaw.tui.creator.share import KNOWN_POLICY_TOP_LEVEL_KEYS  # noqa: F401
+
+    yaml_text = policy_to_gateway_yaml(policy_obj)
+    target_path.write_text(yaml_text)
+    ux.ok(f"imported policy '{policy_obj.name}' -> {target_path}")
+    if result.unknown_keys:
+        ux.warn(
+            "import warning: dropped unknown top-level keys: "
+            + ", ".join(result.unknown_keys)
+        )

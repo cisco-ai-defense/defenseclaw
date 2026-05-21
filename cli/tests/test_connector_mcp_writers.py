@@ -263,6 +263,14 @@ class TestCodexWrites:
 
 class TestRoundTrip:
     def test_codex_set_then_read_then_unset(self, tmp_path, monkeypatch):
+        # Isolate HOME so the real user's ``~/.codex/config.toml``
+        # (which may register global MCP servers like ``playwright``)
+        # doesn't bleed into ``mcp_servers("codex")`` — the codex
+        # reader merges the global TOML table with the project-local
+        # ``./.mcp.json`` we're about to write, and without HOME
+        # pinned to ``tmp_path`` this assertion is non-deterministic
+        # across dev machines.
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.chdir(tmp_path)
 
         set_mcp_server(

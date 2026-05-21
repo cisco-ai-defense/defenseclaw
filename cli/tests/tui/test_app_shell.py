@@ -856,7 +856,11 @@ async def test_skills_panel_renders_catalog_table_and_action_menu() -> None:
         await pilot.press("enter")
         await pilot.pause()
         assert skills.detail_open is True
-        assert "Skill: beta" in app.detail_text
+        # ``_format_skill_detail`` renders the header as
+        # ``[bold]Skill[/] beta`` (no colon) — the assertion mirrors
+        # the live formatting so the detail pane copy stays
+        # self-documenting.
+        assert "Skill[/] beta" in app.detail_text
 
         await pilot.press("escape")
         await pilot.press("o")
@@ -1209,7 +1213,14 @@ async def test_policy_panel_renders_table_and_detail_overlay(tmp_path) -> None:
 
         assert app.active_panel == "policy"
         assert "Policy" in app.body_text
-        assert app.query_one("#panel-table", DataTable).row_count == 1
+        # The policy panel renders its own list inside body_text, so the
+        # shared DataTable widget is intentionally hidden / empty when
+        # this panel is active (the previous render duplicated rows
+        # both above and below the policy view).
+        table = app.query_one("#panel-table", DataTable)
+        assert table.row_count == 0
+        assert table.has_class("hidden")
+        assert "alpha" in app.body_text
 
         await pilot.press("enter")
         await pilot.pause()
@@ -2975,6 +2986,12 @@ _LITERAL_ALLOWLIST: tuple[str, ...] = (
     # Audit-row demonstration text (already covered by _audit_body_text
     # which routes through ``_safe_body_renderable``).
     "[Enter] view output",
+    # Regex character classes inside raw-string patterns that never
+    # flow through Rich markup (validators.py / answers.py only feed
+    # these into ``re.compile``).
+    "[a-z0-9][a-z0-9-]",
+    "[A-Z][A-Z0-9_-]",
+    "[a-z_]+",
     # Overview notice hotkey hints — the consumer (``_overview_body_text``)
     # wraps ``notice.message`` in ``rich_escape`` so the brackets render
     # literally even though Rich would otherwise parse them as style
@@ -3018,6 +3035,12 @@ _FSTRING_EXPR_ALLOWLIST_EXACT: frozenset[str] = frozenset({
     "n",
     "check.badge",
     "notice.level.upper()",
+    # Catalog action key (single character). The surrounding code
+    # in catalog_state.py wraps the rendered chunks in ``[dim]…[/]``
+    # before display, so the bracket-tag shape never reaches the
+    # user's terminal as a literal — Rich consumes the outer tags
+    # first and the inner bracket pair is harmless.
+    "action.key",
 })
 
 

@@ -13,13 +13,19 @@
 from __future__ import annotations
 
 import json
-import re
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
+
+from defenseclaw.paths import (
+    bundled_guardrail_profiles_dir,
+    bundled_policies_dir,
+    bundled_rego_dir,
+)
 
 POLICY_TAB_POLICIES = 0
 POLICY_TAB_RULE_PACKS = 1
@@ -31,23 +37,6 @@ POLICY_TAB_NAMES = ("Policies", "Rule Packs", "Judge Prompts", "Suppressions", "
 SUPPRESSION_SECTION_NAMES = ("Pre-Judge Strips", "Finding Suppressions", "Tool Suppressions")
 PREFERRED_JUDGE_ORDER = ("injection", "pii", "tool-injection", "exfil")
 SEVERITIES = ("critical", "high", "medium", "low", "info")
-VALID_POLICY_ACTIONS = frozenset(("", "block", "warn", "allow"))
-VALID_POLICY_PRESETS = frozenset(("", "default", "strict", "permissive"))
-
-POLICY_CREATE_LABELS = (
-    "Name (required - alphanumeric, _ or -)",
-    "Description (optional)",
-    "From preset (default / strict / permissive / blank)",
-    "Critical action (block / warn / allow / blank)",
-    "High action (block / warn / allow / blank)",
-    "Medium action (block / warn / allow / blank)",
-    "Low action (block / warn / allow / blank)",
-    "Scan on install (yes / no / blank)",
-    "Allow-list bypass (yes / no / blank)",
-)
-
-POLICY_CREATE_BOOL_INDICES: frozenset[int] = frozenset({7, 8})
-VALID_POLICY_BOOLS = frozenset(("", "yes", "no"))
 
 PolicyIntentKind = Literal["command", "editor"]
 ReadinessStatus = Literal["pass", "warn", "fail"]
@@ -86,16 +75,19 @@ class PolicyPanelAction:
     reload_requested: bool = False
     detail_opened: bool = False
     detail_closed: bool = False
-
-
-@dataclass(frozen=True)
-class PolicyCreateFieldState:
-    index: int
-    label: str
-    value: str
-    active: bool
-    required: bool = False
-    hint: str = ""
+    # When True, the app shell should push the Quick Start wizard
+    # ModalScreen and, on Save, persist the resulting Policy to the
+    # user's policy_dir. The model never opens the screen itself
+    # because pushing modal screens is a Textual-app responsibility.
+    open_quick_start: bool = False
+    # When True, the app shell should push the Playground modal seeded
+    # with the currently-selected policy. Same dispatch contract as
+    # ``open_quick_start``: on save, the app re-emits the policy YAML
+    # via ``policy_to_gateway_yaml`` and writes it to ``policy_dir``.
+    # ``open_playground_policy_name`` carries the slug so the app can
+    # reload that exact file off disk.
+    open_playground: bool = False
+    open_playground_policy_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -394,168 +386,6 @@ class RegoActionState:
     edit_intent: PolicyCommandIntent | None = None
 
 
-class PolicyCreateFormModel:
-    """Sequential form for ``defenseclaw policy create``."""
-
-    def __init__(self) -> None:
-        self.active = False
-        self.field = 0
-        self.values = [""] * len(POLICY_CREATE_LABELS)
-        self.status = ""
-        self.width = 0
-        self.height = 0
-
-    def is_active(self) -> bool:
-        return self.active
-
-    def open(self) -> None:
-        self.active = True
-        self.field = 0
-        self.values = [""] * len(POLICY_CREATE_LABELS)
-        self.status = ""
-
-    def close(self) -> None:
-        self.active = False
-        self.field = 0
-        self.values = [""] * len(POLICY_CREATE_LABELS)
-        self.status = ""
-
-    def set_size(self, width: int, height: int) -> None:
-        self.width = width
-        self.height = height
-
-    def current_field(self) -> int:
-        return self.field
-
-    def value(self, field_index: int) -> str:
-        if 0 <= field_index < len(self.values):
-            return self.values[field_index]
-        return ""
-
-    def set_value(self, field_index: int, value: str) -> None:
-        if 0 <= field_index < len(self.values):
-            self.values[field_index] = value
-
-    def field_states(self) -> tuple[PolicyCreateFieldState, ...]:
-        return tuple(
-            PolicyCreateFieldState(
-                index=index,
-                label=label,
-                value=self.values[index],
-                active=index == self.field,
-                required=index == 0,
-                hint=_policy_create_field_hint(index),
-            )
-            for index, label in enumerate(POLICY_CREATE_LABELS)
-        )
-
-    def submit_action(self) -> PolicyPanelAction:
-        try:
-            args = self.build_command()
-        except ValueError as exc:
-            return PolicyPanelAction(True, hint=str(exc))
-        name = self.values[0].strip()
-        return PolicyPanelAction(
-            True,
-            policy_command_intent(args, label=f"policy create {name}", origin="policy:create"),
-            hint=f"creating {name}...",
-        )
-
-    def handle_key(self, key: str) -> PolicyPanelAction:
-        if not self.active:
-            return PolicyPanelAction(False)
-        key = _normal_key(key)
-
-        if key == "esc":
-            self.close()
-            return PolicyPanelAction(True, detail_closed=True)
-        if key in {"tab", "down"}:
-            self.field = (self.field + 1) % len(POLICY_CREATE_LABELS)
-            self.status = ""
-            return PolicyPanelAction(True)
-        if key in {"shift+tab", "up"}:
-            self.field = (self.field - 1) % len(POLICY_CREATE_LABELS)
-            self.status = ""
-            return PolicyPanelAction(True)
-        if key == "enter":
-            if self.field < len(POLICY_CREATE_LABELS) - 1:
-                self.field += 1
-                self.status = ""
-                return PolicyPanelAction(True)
-            action = self.submit_action()
-            self.status = action.hint
-            return action
-        if key == "backspace":
-            self.values[self.field] = self.values[self.field][:-1]
-            return PolicyPanelAction(True)
-        if key == "ctrl+u":
-            self.values[self.field] = ""
-            return PolicyPanelAction(True)
-        if len(key) == 1:
-            self.values[self.field] += key
-            return PolicyPanelAction(True)
-        return PolicyPanelAction(True)
-
-    def build_command(self) -> tuple[str, ...]:
-        name = self.values[0].strip()
-        if not name:
-            raise ValueError("name is required")
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
-            raise ValueError("name may only contain letters, digits, _ or -")
-
-        preset = self.values[2].strip().lower()
-        if preset not in VALID_POLICY_PRESETS:
-            raise ValueError("preset must be default, strict, permissive, or blank")
-
-        args = ["policy", "create", name]
-        description = self.values[1].strip()
-        if description:
-            args.extend(("--description", description))
-        if preset:
-            args.extend(("--from-preset", preset))
-
-        for field_index, label, flag in (
-            (3, "critical", "--critical-action"),
-            (4, "high", "--high-action"),
-            (5, "medium", "--medium-action"),
-            (6, "low", "--low-action"),
-        ):
-            value = self.values[field_index].strip().lower()
-            if value not in VALID_POLICY_ACTIONS:
-                raise ValueError(f"{label} action must be block, warn, allow, or blank")
-            if value:
-                args.extend((flag, value))
-
-        for field_index, label, flag in (
-            (7, "scan on install", "--scan-on-install"),
-            (8, "allow-list bypass", "--allow-list-bypass"),
-        ):
-            value = self.values[field_index].strip().lower()
-            if value not in VALID_POLICY_BOOLS:
-                raise ValueError(f"{label} must be yes, no, or blank")
-            # Flag is a click switch; only forward when set to yes.
-            # ``no`` is the CLI default so we keep the form blankable.
-            if value == "yes":
-                args.append(flag)
-        return tuple(args)
-
-    def render_text(self) -> str:
-        lines = [
-            "Create Policy",
-            "Tab/down next | Shift+Tab/up prev | Enter submits on last field | Esc cancel",
-            "",
-        ]
-        for index, label in enumerate(POLICY_CREATE_LABELS):
-            prefix = "> " if index == self.field else "  "
-            value = self.values[index] or "(empty)"
-            if index == self.field and self.values[index]:
-                value = f"{value}|"
-            lines.extend((f"{prefix}{label}", f"    {value}"))
-        if self.status:
-            lines.extend(("", self.status))
-        return "\n".join(lines)
-
-
 class PolicyPanelModel:
     """Go-compatible Policy panel state without Textual widget coupling."""
 
@@ -588,7 +418,6 @@ class PolicyPanelModel:
         self.policy_scroll = 0
         self.policy_filter_text = ""
         self.policies_loaded = False
-        self.policy_form = PolicyCreateFormModel()
         self.policy_detail_open = False
         self.policy_detail_yaml = ""
         self.policy_detail_name = ""
@@ -628,6 +457,24 @@ class PolicyPanelModel:
         self.loaded = True
         self.errors.clear()
         rule_pack_dir = self.rule_pack_dir
+        # Fall back to the bundled rule-pack tree (policies/guardrail/
+        # default|strict|permissive) when no gateway-configured
+        # ``rule_pack_dir`` exists. Without this fallback, fresh users
+        # in standalone mode see empty Rule Packs / Judge Prompts /
+        # Suppressions tabs even though the wheel ships the data.
+        if rule_pack_dir is None or not rule_pack_dir.exists():
+            bundled_root = bundled_guardrail_profiles_dir()
+            if bundled_root is not None and bundled_root.is_dir():
+                # Prefer the active policy's matching pack when possible
+                # (so a user with ``active: strict`` sees the strict
+                # rule-pack rows instead of always defaulting to
+                # ``default``).
+                active_name = active_policy_name(self.policy_dir) if self.policy_dir else ""
+                preferred = bundled_root / active_name if active_name else None
+                if preferred is None or not preferred.is_dir():
+                    preferred = bundled_root / "default"
+                if preferred.is_dir():
+                    rule_pack_dir = preferred
         if rule_pack_dir:
             pack_base = rule_pack_dir.parent
             self.packs = discover_packs(pack_base)
@@ -660,7 +507,7 @@ class PolicyPanelModel:
         return Path(value) if value else None
 
     def is_overlay_active(self) -> bool:
-        return self.policy_detail_open or self.rule_detail_open or self.policy_form.is_active()
+        return self.policy_detail_open or self.rule_detail_open
 
     def set_sub_tab(self, index: int) -> None:
         if 0 <= index < len(POLICY_TAB_NAMES):
@@ -687,13 +534,13 @@ class PolicyPanelModel:
 
         self.active_policy = active_policy_name(policy_dir)
         rows: list[PolicyProfile] = []
+        seen_names: set[str] = set()
+
         try:
             entries = sorted(policy_dir.iterdir(), key=lambda path: path.name)
         except OSError as exc:
-            self.policies = ()
+            entries = []
             self.message = f"Error loading policies: {exc}"
-            self.apply_policy_filter()
-            return
 
         for path in entries:
             if path.is_dir() or path.suffix not in {".yaml", ".yml"}:
@@ -708,12 +555,133 @@ class PolicyPanelModel:
                     path=str(path),
                     description=str(data.get("description") or ""),
                     active=name == self.active_policy,
+                    source="user",
                     data=data,
                 )
             )
-        rows.sort(key=lambda item: item.name)
+            seen_names.add(name)
+
+        bundled = bundled_policies_dir()
+        try:
+            bundled_entries = (
+                sorted(bundled.iterdir(), key=lambda path: path.name)
+                if bundled.is_dir()
+                else []
+            )
+        except OSError:
+            bundled_entries = []
+
+        for path in bundled_entries:
+            if path.is_dir() or path.suffix not in {".yaml", ".yml"}:
+                continue
+            name = path.stem
+            if name == "active" or name in seen_names:
+                continue
+            data = load_yaml_mapping(path)
+            rows.append(
+                PolicyProfile(
+                    name=name,
+                    path=str(path),
+                    description=str(data.get("description") or ""),
+                    active=name == self.active_policy,
+                    source="bundled",
+                    data=data,
+                )
+            )
+            seen_names.add(name)
+
+        rows.sort(key=lambda item: (item.source != "user", item.name))
         self.policies = tuple(rows)
         self.apply_policy_filter()
+
+    def materialize_bundled(self) -> tuple[Path, ...]:
+        """Copy any bundled preset assets that aren't already present in the
+        user's policy dir. Returns the list of newly-written paths so the UI
+        can echo them in the activity strip.
+
+        Materializes three layers, all idempotent:
+          - YAML presets (default.yaml, strict.yaml, permissive.yaml, ...)
+          - rego/ modules + data.json
+          - guardrail/<profile>/ rule packs
+
+        Existing files are never overwritten. We never touch the bundled
+        source dir; everything lands under ``policy_dir`` so the operator
+        owns the result.
+        """
+        policy_dir = self.policy_dir
+        if policy_dir is None:
+            return ()
+
+        try:
+            policy_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return ()
+
+        written: list[Path] = []
+
+        bundled = bundled_policies_dir()
+        if bundled.is_dir():
+            for src in sorted(bundled.iterdir(), key=lambda p: p.name):
+                if not src.is_file() or src.suffix not in {".yaml", ".yml"}:
+                    continue
+                if src.name.startswith("."):
+                    continue
+                dst = policy_dir / src.name
+                if dst.exists():
+                    continue
+                try:
+                    shutil.copy2(str(src), str(dst))
+                    written.append(dst)
+                except OSError:
+                    continue
+
+        rego_src = bundled_rego_dir()
+        rego_dst = policy_dir / "rego"
+        if rego_src.is_dir():
+            try:
+                rego_dst.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                rego_dst = None  # type: ignore[assignment]
+            if rego_dst is not None:
+                for src in sorted(rego_src.iterdir(), key=lambda p: p.name):
+                    if not src.is_file() or src.suffix not in {".rego", ".json"}:
+                        continue
+                    if src.name.startswith("."):
+                        continue
+                    dst = rego_dst / src.name
+                    if dst.exists():
+                        continue
+                    try:
+                        shutil.copy2(str(src), str(dst))
+                        written.append(dst)
+                    except OSError:
+                        continue
+
+        guardrail_src = bundled_guardrail_profiles_dir()
+        if guardrail_src is not None:
+            guardrail_dst = policy_dir / "guardrail"
+            try:
+                guardrail_dst.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                guardrail_dst = None  # type: ignore[assignment]
+            if guardrail_dst is not None:
+                for profile in sorted(guardrail_src.iterdir(), key=lambda p: p.name):
+                    if not profile.is_dir() or profile.name.startswith("."):
+                        continue
+                    target = guardrail_dst / profile.name
+                    if target.exists():
+                        continue
+                    try:
+                        shutil.copytree(str(profile), str(target))
+                        written.append(target)
+                    except OSError:
+                        continue
+
+        if written:
+            self.policies_loaded = False
+            self.load_policies()
+
+        return tuple(written)
 
     def apply_policy_filter(self) -> None:
         if not self.policy_filter_text:
@@ -769,12 +737,6 @@ class PolicyPanelModel:
         if not self.loaded:
             self.load()
         key = _normal_key(key)
-
-        if self.policy_form.is_active():
-            action = self.policy_form.handle_key(key)
-            if action.intent is not None:
-                self.policy_form.close()
-            return action
 
         if self.policy_detail_open:
             return self._handle_policy_detail_key(key)
@@ -921,8 +883,64 @@ class PolicyPanelModel:
         if key == "v":
             return PolicyPanelAction(True, policy_command_intent(("policy", "validate"), label="policy validate"))
         if key in {"n", "+"}:
-            self.policy_form.open()
-            return PolicyPanelAction(True, hint="Create policy form opened.")
+            # The Quick Start wizard runs as a Textual ``ModalScreen``;
+            # the model has no handle on the screen tree so we surface
+            # an ``open_quick_start`` signal that ``app.py`` translates
+            # into ``push_screen(QuickStartScreen)`` and, on Save,
+            # writes the resulting ``Policy`` YAML to ``policy_dir``.
+            return PolicyPanelAction(
+                True,
+                open_quick_start=True,
+                hint="Opening Quick Start wizard...",
+            )
+        if key == "E":
+            # Open the Playground modal for the selected policy. We
+            # pass the policy NAME (not the parsed Policy object) so
+            # the app can re-load the YAML from disk under the same
+            # contract used by ``policy edit`` - that way live edits
+            # to the file by another tool are picked up cleanly when
+            # the operator opens the Playground.
+            name = self.selected_policy_name()
+            if not name:
+                return PolicyPanelAction(
+                    True,
+                    hint="Select a policy first (Up/Down) to open Playground.",
+                )
+            return PolicyPanelAction(
+                True,
+                open_playground=True,
+                open_playground_policy_name=name,
+                hint=f"Opening Playground for {name}...",
+            )
+        if key == "M":
+            # Phase 1: surface a one-shot action that copies the
+            # bundled preset tree (YAMLs, rego/, guardrail/) into the
+            # user's policy_dir. The actual filesystem work runs
+            # in-band on the panel worker via ``materialize_bundled``;
+            # we return a non-empty hint so the activity strip echoes
+            # what just happened, and a placeholder
+            # ``policy_materialize_intent`` so the executor pipeline
+            # also logs the action consistently with other policy
+            # actions. The intent's actual ``argv`` is ignored here -
+            # the model already did the work.
+            written = self.materialize_bundled()
+            if not written:
+                return PolicyPanelAction(
+                    True,
+                    hint=(
+                        "Nothing to materialize: bundled presets are absent or "
+                        "every preset already exists in your policy dir."
+                    ),
+                )
+            count = len(written)
+            preview = ", ".join(p.name for p in written[:3])
+            if count > 3:
+                preview += f", ... (+{count - 3} more)"
+            return PolicyPanelAction(
+                True,
+                hint=f"Materialized {count} bundled file(s): {preview}",
+                reload_requested=True,
+            )
         return PolicyPanelAction(False)
 
     def handle_rule_pack_key(self, key: str) -> PolicyPanelAction:
@@ -958,7 +976,7 @@ class PolicyPanelModel:
             selected = self.packs[self.pack_cursor]
             if selected != self.active_pack:
                 self.switch_pack(selected)
-                return PolicyPanelAction(True, policy_command_intent(("policy", "reload"), label="policy reload"))
+                return PolicyPanelAction(True, policy_reload_intent())
             self.pack_detail = True
             self.rule_cursor = 0
             return PolicyPanelAction(True, detail_opened=True)
@@ -1174,8 +1192,6 @@ class PolicyPanelModel:
         content_y = rel_y - 2
 
         if self.active_tab == POLICY_TAB_POLICIES:
-            if self.policy_form.is_active():
-                return PolicyPanelAction(True)
             if content_y >= 4:
                 index = content_y - 4 + self.policy_scroll
                 if 0 <= index < len(self.filtered_policies):
@@ -1193,10 +1209,7 @@ class PolicyPanelModel:
                         selected = self.packs[index]
                         if selected != self.active_pack:
                             self.switch_pack(selected)
-                            return PolicyPanelAction(
-                                True,
-                                policy_command_intent(("policy", "reload"), label="policy reload"),
-                            )
+                            return PolicyPanelAction(True, policy_reload_intent())
                         self.pack_detail = True
                         self.rule_cursor = 0
                         return PolicyPanelAction(True, detail_opened=True)
@@ -1359,7 +1372,27 @@ class PolicyPanelModel:
             checks.append(ReadinessCheckSummary("Active policy", "warn", "No active policy marker found."))
 
         if rule_pack_dir is None:
-            checks.append(ReadinessCheckSummary("Rule pack", "warn", "No guardrail.rule_pack_dir configured."))
+            # ``load()`` falls back to the bundled rule-pack tree
+            # when the gateway hasn't been told where to look. Surface
+            # that fact instead of a misleading "warn: nothing
+            # configured" - the panel actually has data to show.
+            bundled_root = bundled_guardrail_profiles_dir()
+            if bundled_root is not None and bundled_root.is_dir():
+                checks.append(
+                    ReadinessCheckSummary(
+                        "Rule pack",
+                        "pass",
+                        f"bundled ({self.active_pack or 'default'})",
+                    )
+                )
+            else:
+                checks.append(
+                    ReadinessCheckSummary(
+                        "Rule pack",
+                        "warn",
+                        "No guardrail.rule_pack_dir configured.",
+                    )
+                )
         elif rule_pack_dir.exists():
             checks.append(ReadinessCheckSummary("Rule pack", "pass", self.active_pack or rule_pack_dir.name))
         else:
@@ -1396,25 +1429,60 @@ class PolicyPanelModel:
 
     def view_policies(self, width: int, height: int) -> str:
         _ = width
-        if self.policy_form.is_active():
-            self.policy_form.set_size(width, height)
-            return self.policy_form.render_text()
         if self.policy_detail_open:
             return self.render_policy_detail_overlay(width, height)
         if not self.policies_loaded:
             self.load_policies()
 
-        lines = ["Admission Policies", f"  {len(self.filtered_policies)} of {len(self.policies)} policies"]
+        user_count = sum(1 for policy in self.policies if policy.source == "user")
+        bundled_count = len(self.policies) - user_count
+
+        header = (
+            f"  {len(self.filtered_policies)} of {len(self.policies)} policies"
+            f"  ({user_count} user, {bundled_count} bundled)"
+        )
+        lines = ["Admission Policies", header]
         if self.active_policy:
             lines[-1] += f"  |  active: {self.active_policy}"
         if self.policy_filter_text:
             lines[-1] += f"  |  filter: {self.policy_filter_text!r}"
+
+        # Phase 4: surface ``readiness_summary()`` as a single-line
+        # banner so an operator can see, without leaving the panel,
+        # whether the policy_dir is missing, the active marker is
+        # absent, the rule pack path is broken, or the OPA modules
+        # never loaded. Only render when there is something
+        # actionable - clean state stays out of the way.
+        readiness = self.readiness_summary()
+        problems = tuple(check for check in readiness if check.status != "pass")
+        if problems:
+            badge_for = {"fail": "FAIL", "warn": "WARN"}
+            preview = " · ".join(
+                f"{badge_for.get(check.status, check.status.upper())} {check.title}: {check.detail}"
+                for check in problems[:2]
+            )
+            if len(problems) > 2:
+                preview += f"  (+{len(problems) - 2} more)"
+            lines.append(f"  Readiness: {preview}")
+
         lines.append("")
         if self.message:
             lines.append(f"  {self.message}")
             return "\n".join(lines)
         if not self.filtered_policies:
-            lines.append("  (no policies yet - press 'n' to create one)")
+            # Phase 1 surfaces bundled presets, so the only path to
+            # "zero rows" is either an empty user dir AND an empty
+            # bundled dir (highly unusual - usually only in tests) or
+            # an over-aggressive ``/`` filter. Tell the user which
+            # situation they're in and what action to take.
+            if self.policy_filter_text:
+                lines.append(
+                    f"  (no policies match {self.policy_filter_text!r} - press 'esc' to clear filter)"
+                )
+            else:
+                lines.append(
+                    "  (no policies yet - press 'n' to create one or 'M' to copy bundled presets)"
+                )
             return "\n".join(lines)
 
         max_rows = max(height - 5, 3)
@@ -1423,9 +1491,19 @@ class PolicyPanelModel:
         for index in range(start, end):
             policy = self.filtered_policies[index]
             prefix = "> " if index == self.policy_cursor else "  "
-            # ``[active]`` is parsed as a Rich style tag and silently
-            # drops the bracketed text; escape so the badge renders.
-            suffix = "  \\[active]" if policy.name == self.active_policy else ""
+            # Brackets are parsed as Rich style tags and would silently
+            # drop the bracketed text; escape so the badges render. The
+            # ``[active]`` badge marks the policy bound by ``policy
+            # activate`` (read from rego/data.json); the ``[bundled]``
+            # badge means the row comes from the wheel/_data tree and
+            # editing it requires running ``policy materialize`` (key
+            # ``M``) or ``policy create`` (key ``n``) to fork a user copy.
+            badges: list[str] = []
+            if policy.name == self.active_policy:
+                badges.append("\\[active]")
+            if policy.source == "bundled":
+                badges.append("\\[bundled]")
+            suffix = ("  " + " ".join(badges)) if badges else ""
             lines.append(f"{prefix}{policy.name}{suffix}")
         return "\n".join(lines)
 
@@ -1607,37 +1685,85 @@ class PolicyPanelModel:
         return "\n".join(lines)
 
     def view_opa(self, width: int, height: int) -> str:
-        # Escape ``[t]``: lowercase letters get consumed as style tags
-        # and the hotkey label disappears from the rendered panel.
-        lines = [
-            "REGO MODULES",
-            f"\\[t] {'hide tests' if self.show_tests else 'show tests'}",
-            "",
-        ]
-        for index, path in enumerate(self.rego_files):
-            prefix = "> " if index == self.rego_cursor else "  "
-            lines.append(prefix + Path(path).name)
+        # The rendered output flows through Rich's markup parser via
+        # ``app.py``'s body_text Static, so we can ship inline color
+        # tags. This produces a much more readable view than a
+        # monochrome dump of the source: rego keywords pop, comments
+        # fade, and line numbers anchor the eye.
+        from rich.markup import escape as _esc
+
+        rendered: list[str] = []
+        # Header line with hotkey hint - escape ``[t]`` so the literal
+        # bracketed letter renders instead of being eaten as a tag.
+        toggle_label = "hide tests" if self.show_tests else "show tests"
+        rendered.append(
+            f"[bold #22D3EE]REGO MODULES[/]  "
+            f"[dim](\\[t] {toggle_label})[/]"
+        )
+        rendered.append("")
+
+        # Compact file picker: each file is a chip; the active one is
+        # highlighted with reverse-video so the operator sees the
+        # selection at a glance instead of having to scan a vertical
+        # column for the ``> `` arrow.
+        if self.rego_files:
+            chips: list[str] = []
+            for index, path in enumerate(self.rego_files):
+                name = _esc(Path(path).name)
+                if index == self.rego_cursor:
+                    chips.append(f"[bold reverse #22D3EE] {name} [/]")
+                else:
+                    chips.append(f"[dim] {name} [/]")
+            # Wrap the chip line so it stays inside the panel width
+            # even when many files exist (e.g. with tests on).
+            chip_line = " ".join(chips)
+            rendered.append(chip_line)
+            rendered.append("")
+
         if self.rego_cursor < len(self.rego_files):
-            lines.extend(("", Path(self.rego_files[self.rego_cursor]).name, ""))
-            source_lines = self.rego_source.splitlines()
-            max_lines = max(height - 4, 1)
+            file_path = self.rego_files[self.rego_cursor]
+            file_name = Path(file_path).name
+            rendered.append(
+                f"[bold #F59E0B]{_esc(file_name)}[/]  "
+                f"[dim]{_esc(file_path)}[/]"
+            )
+            rendered.append("")
+            source_lines = self.rego_source.splitlines() or [""]
+            max_lines = max(height - 8, 4)
             max_scroll = max(len(source_lines) - max_lines, 0)
             self.rego_scroll = max(0, min(self.rego_scroll, max_scroll))
-            for line in source_lines[self.rego_scroll : self.rego_scroll + max_lines]:
-                lines.append("  " + _truncate(line, max(width - 4, 8)))
+            visible_first = self.rego_scroll
+            visible_last = min(len(source_lines), visible_first + max_lines)
+            line_no_width = len(str(visible_last))
+            for offset, raw_line in enumerate(
+                source_lines[visible_first:visible_last]
+            ):
+                line_no = visible_first + offset + 1
+                styled = _highlight_rego_line(raw_line, max(width - line_no_width - 4, 16))
+                rendered.append(
+                    f"[dim]{line_no:>{line_no_width}}[/]  {styled}"
+                )
+            # Scroll position pill (dimmed) so the operator knows
+            # there is more above/below the visible window.
+            if max_scroll > 0:
+                rendered.append(
+                    f"[dim]    lines {visible_first + 1}-{visible_last} of {len(source_lines)}"
+                    f"  ({self.rego_scroll}/{max_scroll} scrolled)[/]"
+                )
+
         if self.rego_output:
-            lines.extend(("", "OUTPUT:", self.rego_output))
-        return "\n".join(lines)
+            rendered.append("")
+            rendered.append("[bold #F59E0B]OUTPUT[/]")
+            rendered.append(_esc(self.rego_output))
+        return "\n".join(rendered)
 
     def help_text(self) -> str:
         if self.active_tab == POLICY_TAB_POLICIES:
-            if self.policy_form.is_active():
-                return "tab/down next | shift+tab/up prev | enter submit | esc cancel"
             if self.policy_detail_open:
                 return "up/down scroll | pgup/pgdn page | g/G jump | esc/enter/q close"
             return (
-                "up/down nav | s/enter show | a activate | n create | d delete | l list | "
-                "v validate | r refresh | ]/[ tab"
+                "up/down nav | s/enter show | a activate | n new (wizard) | E playground | "
+                "M materialize | d delete | l list | v validate | r refresh | ]/[ tab"
             )
         if self.active_tab == POLICY_TAB_RULE_PACKS:
             if self.rule_detail_open:
@@ -1692,7 +1818,23 @@ def policy_validate_intent(*, origin: str = "policy") -> PolicyCommandIntent:
 
 
 def policy_reload_intent(*, origin: str = "policy") -> PolicyCommandIntent:
-    return policy_command_intent(("policy", "reload"), label="policy reload", origin=origin)
+    """Intent for ``policy reload`` (hot-reload OPA in the running sidecar).
+
+    The Python ``defenseclaw`` CLI does not register a ``policy reload``
+    subcommand - that command lives on the ``defenseclaw-gateway``
+    binary (see ``registry_data.py`` line 125, and the Go original at
+    ``internal/cli/policy.go:245``). Pre-Phase-4 this intent defaulted
+    ``binary="defenseclaw"`` so pressing ``r`` on the OPA tab invoked
+    a binary that didn't have the subcommand at all - silent breakage.
+    Mirror the registry's truth here so the executor pipeline gets a
+    runnable command.
+    """
+    return policy_command_intent(
+        ("policy", "reload"),
+        label="policy reload",
+        binary="defenseclaw-gateway",
+        origin=origin,
+    )
 
 
 def policy_test_intent() -> PolicyCommandIntent:
@@ -1702,6 +1844,25 @@ def policy_test_intent() -> PolicyCommandIntent:
         origin="policy:opa",
         run_in_panel=True,
         timeout_seconds=30,
+    )
+
+
+def policy_materialize_intent() -> PolicyCommandIntent:
+    """In-panel intent: copy bundled presets into the user policy_dir.
+
+    The actual filesystem work runs through ``PolicyPanelModel.materialize_bundled``;
+    this intent is the surface the executor pipeline uses to log the
+    action in the activity strip and serialize it against other panel
+    actions. ``run_in_panel`` keeps the work on the panel's worker so
+    the UI stays responsive on slow filesystems.
+    """
+    return policy_command_intent(
+        ("policy", "materialize"),
+        label="policy materialize bundled",
+        origin="policy:materialize",
+        category="policy",
+        run_in_panel=True,
+        timeout_seconds=10,
     )
 
 
@@ -1750,21 +1911,36 @@ def discover_packs(directory: Path) -> tuple[str, ...]:
 
 
 def active_policy_name(policy_dir: Path) -> str:
-    for marker in (policy_dir / "active.yaml", policy_dir / "active.yml"):
-        if marker.is_symlink():
-            try:
-                target = marker.readlink()
-            except OSError:
-                continue
-            return target.name.removesuffix(".yaml").removesuffix(".yml")
-    data_json = policy_dir / "rego" / "data.json"
-    try:
-        data = json.loads(data_json.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ""
-    config = data.get("config")
-    if isinstance(config, Mapping):
-        return str(config.get("policy_name") or "")
+    """Return the active policy's name by reading OPA's data.json.
+
+    Mirrors ``cmd_policy._get_active_policy_name``: the user's
+    ``{policy_dir}/rego/data.json`` is preferred (that's where
+    ``policy activate`` writes), falling back to the bundled
+    ``policies/rego/data.json`` so a fresh user with no activations
+    still sees the shipped default in the panel header.
+
+    The legacy ``active.yaml`` symlink branch was removed: the Go TUI
+    never honored it (``internal/tui/policy.go`` ``loadPolicies``) and
+    the CLI doesn't either, so honoring it here just produced a
+    three-way disagreement.
+    """
+    bundled = bundled_rego_dir()
+    bundled_data_json = bundled / "data.json" if bundled.is_dir() else None
+
+    candidates: list[Path] = [policy_dir / "rego" / "data.json"]
+    if bundled_data_json is not None and bundled_data_json != candidates[0]:
+        candidates.append(bundled_data_json)
+
+    for data_json in candidates:
+        try:
+            data = json.loads(data_json.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        config = data.get("config")
+        if isinstance(config, Mapping):
+            name = config.get("policy_name")
+            if name:
+                return str(name)
     return ""
 
 
@@ -2036,20 +2212,6 @@ def _normal_key(key: str) -> str:
     return "esc" if key == "escape" else key
 
 
-def _policy_create_field_hint(index: int) -> str:
-    if index == 0:
-        return "Policy name passed as the required positional argument."
-    if index == 1:
-        return "Optional --description text."
-    if index == 2:
-        return "Optional --from-preset value."
-    if index == 7:
-        return "yes => --scan-on-install: scan skills as they're added."
-    if index == 8:
-        return "yes => --allow-list-bypass: trusted publishers skip scan gate."
-    return "Optional severity override; blank lets the preset decide."
-
-
 def _active_connector(config: object | None) -> str:
     if config is None:
         return ""
@@ -2071,6 +2233,101 @@ def _truncate(value: str, width: int) -> str:
     if len(value) <= width:
         return value
     return value[: max(width, 0)]
+
+
+# Rego keywords that should pop in the OPA panel's syntax highlighter.
+# Kept tight (only the ones a non-Rego author needs to recognize) so
+# the colorization stays meaningful instead of becoming visual noise.
+_REGO_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "package",
+        "import",
+        "default",
+        "if",
+        "else",
+        "in",
+        "every",
+        "some",
+        "not",
+        "with",
+        "as",
+        "true",
+        "false",
+        "null",
+    }
+)
+_REGO_BUILTINS: frozenset[str] = frozenset(
+    {
+        "allow",
+        "deny",
+        "input",
+        "data",
+        "rule_name",
+        "action",
+        "rego",
+        "v1",
+    }
+)
+
+
+def _highlight_rego_line(line: str, max_width: int) -> str:
+    """Return ``line`` with Rich markup tags applied to keywords,
+    comments, and string literals.
+
+    Used by ``view_opa`` to make Rego source readable inside the
+    Policy panel. Rendering relies on the panel body's Rich-parsed
+    Static, so the returned string is free to interleave styled
+    tags with literal characters.
+    """
+
+    from rich.markup import escape as _esc
+
+    # Comments dominate the rest of the line - render them whole
+    # in dim/grey so the eye skips past them on first read.
+    stripped = line.lstrip()
+    if stripped.startswith("#"):
+        return f"[dim]{_esc(_truncate(line, max_width))}[/]"
+
+    truncated = _truncate(line, max_width)
+    out: list[str] = []
+    i = 0
+    n = len(truncated)
+    while i < n:
+        ch = truncated[i]
+        # String literal: walk to closing quote so we don't try to
+        # syntax-highlight tokens inside it.
+        if ch == '"':
+            end = i + 1
+            while end < n and truncated[end] != '"':
+                if truncated[end] == "\\" and end + 1 < n:
+                    end += 2
+                    continue
+                end += 1
+            literal = truncated[i : min(end + 1, n)]
+            out.append(f"[#A3E635]{_esc(literal)}[/]")
+            i = min(end + 1, n)
+            continue
+        # Trailing comment: dim the rest of the line.
+        if ch == "#":
+            out.append(f"[dim]{_esc(truncated[i:])}[/]")
+            break
+        # Identifier-ish run: classify whole word for keywords/builtins.
+        if ch.isalpha() or ch == "_":
+            end = i
+            while end < n and (truncated[end].isalnum() or truncated[end] == "_"):
+                end += 1
+            word = truncated[i:end]
+            if word in _REGO_KEYWORDS:
+                out.append(f"[bold #C084FC]{_esc(word)}[/]")
+            elif word in _REGO_BUILTINS:
+                out.append(f"[#22D3EE]{_esc(word)}[/]")
+            else:
+                out.append(_esc(word))
+            i = end
+            continue
+        out.append(_esc(ch))
+        i += 1
+    return "".join(out)
 
 
 EMBEDDED_EXFIL_JUDGE_YAML = """
