@@ -22,8 +22,9 @@ from dataclasses import dataclass, field, replace
 
 import pytest
 
-from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.app import DefenseClawTUI, _palette_row_for_entry
 from defenseclaw.tui.command_line import infer_command_risk
+from defenseclaw.tui.registry import CmdEntry
 
 
 @dataclass
@@ -158,3 +159,134 @@ def test_palette_match_dataclass_immutable() -> None:
     entry = app._command_registry[0]
     with pytest.raises(Exception):  # FrozenInstanceError subclasses TypeError on some versions
         entry.tui_name = "mutated"  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------
+# _palette_row_for_entry — the pure renderer helper.
+#
+# Composing the (name, badge, preview, hint) tuple is the bit that
+# changes user-visible output. Testing it directly lets us catch
+# format regressions (missing brackets, wrong join character,
+# accidentally leaking arg_hint on non-needs_arg rows) without
+# spinning up a Textual DataTable.
+# ---------------------------------------------------------------------------
+
+
+def test_row_helper_zero_arg_read_only_command() -> None:
+    """A bare ``doctor`` row should produce the read-only badge, an
+    argv preview that's just the binary + subcommand, and an empty
+    needs hint (because ``needs_arg`` is False)."""
+
+    entry = CmdEntry(
+        tui_name="doctor",
+        cli_binary="defenseclaw",
+        cli_args=("doctor",),
+        description="Run health checks",
+        category="info",
+    )
+    name, badge, preview, hint = _palette_row_for_entry(entry)
+    assert name == "doctor"
+    assert badge == "[info/read-only]"
+    assert preview == "defenseclaw doctor"
+    assert hint == ""
+
+
+def test_row_helper_setup_command_shows_setup_risk() -> None:
+    """Setup-category commands must surface the ``[…/setup]`` badge
+    so the operator knows a state-changing action will run before
+    they confirm."""
+
+    entry = CmdEntry(
+        tui_name="setup guardrail",
+        cli_binary="defenseclaw",
+        cli_args=("setup", "guardrail"),
+        description="Initialize guardrail",
+        category="setup",
+    )
+    _, badge, preview, _ = _palette_row_for_entry(entry)
+    assert badge == "[setup/setup]"
+    assert preview == "defenseclaw setup guardrail"
+
+
+def test_row_helper_destructive_command_badged() -> None:
+    """``uninstall`` should infer the destructive risk so the badge
+    column previews intent before the confirm dialog appears."""
+
+    entry = CmdEntry(
+        tui_name="uninstall",
+        cli_binary="defenseclaw",
+        cli_args=("uninstall",),
+        description="Remove install",
+        category="setup",
+    )
+    _, badge, _, _ = _palette_row_for_entry(entry)
+    assert badge == "[setup/destructive]"
+
+
+def test_row_helper_needs_arg_surfaces_hint() -> None:
+    """When ``needs_arg`` is True the hint column must carry the
+    arg_hint so operators see what to type next."""
+
+    entry = CmdEntry(
+        tui_name="set skill",
+        cli_binary="defenseclaw",
+        cli_args=("set", "skill"),
+        description="Apply skill config",
+        category="setup",
+        needs_arg=True,
+        arg_hint="<name>",
+    )
+    _, _, _, hint = _palette_row_for_entry(entry)
+    assert hint == "<name>"
+
+
+def test_row_helper_ignores_hint_for_complete_commands() -> None:
+    """A registered command with ``needs_arg=False`` must NOT leak
+    its (likely empty) arg_hint, even if the registry data carried
+    one accidentally. Hint stays empty so the column collapses."""
+
+    entry = CmdEntry(
+        tui_name="status",
+        cli_binary="defenseclaw",
+        cli_args=("status",),
+        description="Print status",
+        category="info",
+        needs_arg=False,
+        arg_hint="<stale-hint>",
+    )
+    _, _, _, hint = _palette_row_for_entry(entry)
+    assert hint == ""
+
+
+def test_row_helper_gateway_binary_preserved() -> None:
+    """Commands targeting ``defenseclaw-gateway`` must show that
+    binary in the preview so operators don't think the alias is
+    going through the main ``defenseclaw`` CLI."""
+
+    entry = CmdEntry(
+        tui_name="gateway status",
+        cli_binary="defenseclaw-gateway",
+        cli_args=("status",),
+        description="Gateway health",
+        category="info",
+    )
+    _, _, preview, _ = _palette_row_for_entry(entry)
+    assert preview.startswith("defenseclaw-gateway ")
+
+
+def test_row_helper_handles_empty_cli_args() -> None:
+    """Defensive: a registry row with no cli_args (e.g. a top-level
+    binary alias) shouldn't render a trailing space in the preview."""
+
+    entry = CmdEntry(
+        tui_name="open shell",
+        cli_binary="defenseclaw",
+        cli_args=(),
+        description="open repl",
+        category="info",
+    )
+    _, _, preview, _ = _palette_row_for_entry(entry)
+    assert preview == "defenseclaw"
+    # No trailing space, no double spaces.
+    assert "  " not in preview
+    assert not preview.endswith(" ")

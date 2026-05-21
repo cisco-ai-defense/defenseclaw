@@ -18,7 +18,11 @@ the high-value layer.
 
 from __future__ import annotations
 
-from defenseclaw.tui.screens.panel_jumper import PanelChoice, filter_choices
+from defenseclaw.tui.screens.panel_jumper import (
+    PanelChoice,
+    PanelJumperScreen,
+    filter_choices,
+)
 
 
 CHOICES = (
@@ -120,3 +124,105 @@ def test_whitespace_query_treated_as_empty() -> None:
 
     result = filter_choices("   ", CHOICES)
     assert _names(result) == [c.name for c in CHOICES]
+
+
+# ---------------------------------------------------------------------------
+# PanelJumperScreen action coverage
+#
+# Modal screens normally need a Textual harness to dispatch ``dismiss``,
+# but the actions we care about (cursor wrap, choose, cancel) only
+# call ``self.dismiss(...)`` and read ``self._filtered``. We instantiate
+# the screen directly and monkey-patch ``dismiss`` to capture the value
+# — no event loop required, so the tests stay sub-second.
+# ---------------------------------------------------------------------------
+
+
+def _new_screen(choices: tuple[PanelChoice, ...] = CHOICES) -> tuple[PanelJumperScreen, list[object]]:
+    screen = PanelJumperScreen(choices)
+    captured: list[object] = []
+    screen.dismiss = lambda value=None: captured.append(value)  # type: ignore[method-assign]
+    # Cursor actions call ``_refresh_list`` which queries a mounted
+    # ``Static#panel-jumper-list``. We're testing the action logic,
+    # not the DOM refresh, so stub it out to keep the test
+    # event-loop-free.
+    screen._refresh_list = lambda: None  # type: ignore[method-assign]
+    return screen, captured
+
+
+def test_action_cursor_down_wraps_at_end() -> None:
+    """Pressing Down past the last row wraps to 0 — mirrors the Go
+    TUI's quick-open and prevents the cursor from going off-screen."""
+
+    screen, _ = _new_screen()
+    last = len(screen._filtered) - 1
+    screen.selected_index = last
+    screen.action_cursor_down()
+    assert screen.selected_index == 0
+
+
+def test_action_cursor_up_wraps_at_start() -> None:
+    """Pressing Up from the first row wraps to the last so muscle
+    memory of 'one Up gets me to the bottom' works."""
+
+    screen, _ = _new_screen()
+    screen.selected_index = 0
+    screen.action_cursor_up()
+    assert screen.selected_index == len(screen._filtered) - 1
+
+
+def test_action_cursor_handlers_safe_on_empty_filter() -> None:
+    """If the user typed a junk query and the filtered list is empty,
+    Up/Down must NOT IndexError. They early-return so the selection
+    stays at 0."""
+
+    screen, _ = _new_screen()
+    screen._filtered = []
+    screen.selected_index = 0
+    screen.action_cursor_up()
+    screen.action_cursor_down()
+    assert screen.selected_index == 0
+
+
+def test_action_choose_dispatches_selected_name() -> None:
+    """Pressing Enter dismisses the modal with the highlighted
+    panel's internal name (not the label)."""
+
+    screen, captured = _new_screen()
+    # Pick the third row deliberately so we'd catch an off-by-one.
+    screen.selected_index = 2
+    expected = screen._filtered[2].name
+    screen.action_choose()
+    assert captured == [expected]
+
+
+def test_action_choose_dismisses_none_on_empty() -> None:
+    """When the filter is empty (user typed gibberish) Enter must
+    cancel cleanly rather than IndexError into ``_filtered[0]``."""
+
+    screen, captured = _new_screen()
+    screen._filtered = []
+    screen.action_choose()
+    assert captured == [None]
+
+
+def test_action_choose_clamps_stale_selected_index() -> None:
+    """Defensive: if ``selected_index`` somehow points past the end
+    of ``_filtered`` (race between Input.Changed and a key event)
+    we clamp to the last row instead of crashing."""
+
+    screen, captured = _new_screen()
+    # Simulate the race: list shrinks but selected_index is stale.
+    screen._filtered = list(CHOICES[:2])
+    screen.selected_index = 99
+    screen.action_choose()
+    # Should have dismissed with the LAST filtered choice's name.
+    assert captured == [screen._filtered[-1].name]
+
+
+def test_action_cancel_returns_none() -> None:
+    """Esc dismisses with None so the caller knows the operator
+    bailed out without picking anything."""
+
+    screen, captured = _new_screen()
+    screen.action_cancel()
+    assert captured == [None]
