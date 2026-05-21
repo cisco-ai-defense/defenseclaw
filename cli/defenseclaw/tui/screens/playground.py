@@ -39,7 +39,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 from defenseclaw.tui.creator.command_palette import Command
-from defenseclaw.tui.creator.diff import DiffEntry, render_diff_lines
+from defenseclaw.tui.creator.diff import render_diff_lines
 from defenseclaw.tui.creator.emit import policy_to_gateway_yaml
 from defenseclaw.tui.creator.emit_script import emit_install_script
 from defenseclaw.tui.creator.playground_model import (
@@ -56,7 +56,6 @@ from defenseclaw.tui.creator.types import (
     SCANNER_TYPES,
     SEVERITIES,
     Policy,
-    Severity,
 )
 from defenseclaw.tui.screens.command_palette import CommandPaletteScreen
 from defenseclaw.tui.theme import DEFAULT_TOKENS

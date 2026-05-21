@@ -40,7 +40,6 @@ from typing import Any, Literal, cast
 
 from defenseclaw.tui.creator.types import (
     Policy,
-    PresetName,
 )
 
 VERSION = "v1"

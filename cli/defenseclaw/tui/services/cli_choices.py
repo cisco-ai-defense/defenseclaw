@@ -27,7 +27,6 @@ the parity guarantee.
 
 from __future__ import annotations
 
-
 # Connectors the TUI knows how to set up. The order here drives the
 # wizard's connector picker, so put first-class proxies (openclaw,
 # zeptoclaw) first and hook-based connectors after.

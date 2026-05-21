@@ -43,7 +43,7 @@ class SetupCommandIntent:
     binary: str = "defenseclaw"
     category: str = "setup"
     origin: str = "setup"
-    follow_up: tuple["SetupCommandIntent", ...] = ()
+    follow_up: tuple[SetupCommandIntent, ...] = ()
 
     @property
     def argv(self) -> tuple[str, ...]:

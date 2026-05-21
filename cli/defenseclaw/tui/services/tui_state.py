@@ -55,7 +55,7 @@ class TUIState:
         return data
 
     @classmethod
-    def from_dict(cls, payload: object) -> "TUIState":
+    def from_dict(cls, payload: object) -> TUIState:
         if not isinstance(payload, dict):
             return cls()
         active = payload.get("active_panel", "overview")
