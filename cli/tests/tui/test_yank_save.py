@@ -284,3 +284,97 @@ def test_action_yank_output_success_path(tmp_path: Path) -> None:
 
     assert captured and captured[-1][0] == "success"
     assert "pbcopy" in captured[-1][1]
+
+
+def test_clipboard_copy_keeps_trying_after_timeout(tmp_path: Path) -> None:
+    """A transport that hangs past the 4s subprocess timeout
+    shouldn't abort the chain — we should walk to the next
+    candidate. Without this guard a stuck pbcopy on a degraded
+    macOS box could swallow Y forever."""
+
+    import subprocess as _subprocess
+
+    app = _make_app(tmp_path)
+    calls: list[str] = []
+
+    class _Ok:
+        returncode = 0
+
+    def _which(name: str) -> str | None:
+        # Only pbcopy and xclip are "installed" — wl-copy and xsel
+        # are missing, so we'll attempt pbcopy first (which throws
+        # TimeoutExpired) and fall back to xclip.
+        if name in {"pbcopy", "xclip"}:
+            return "/usr/bin/" + name
+        return None
+
+    def _run(argv, **_: object):
+        calls.append(argv[0])
+        if argv[0] == "pbcopy":
+            raise _subprocess.TimeoutExpired(cmd=argv, timeout=4)
+        return _Ok()
+
+    with (
+        patch("defenseclaw.tui.app.shutil.which", side_effect=_which),
+        patch("defenseclaw.tui.app.subprocess.run", side_effect=_run),
+    ):
+        ok, transport = app._clipboard_copy("payload")
+
+    assert ok is True
+    assert transport == "xclip"
+    # pbcopy was tried (and timed out) before xclip succeeded.
+    assert calls == ["pbcopy", "xclip"]
+
+
+def test_action_save_last_run_log_surfaces_oserror(tmp_path: Path) -> None:
+    """When the write target is unwritable (read-only filesystem,
+    permission denied, etc.) we must toast an ``error`` rather than
+    silently failing — operators expect a clear failure signal."""
+
+    app = _make_app(tmp_path)
+    _seed_entry(app, ("captured",))
+
+    captured: list[tuple[str, str]] = []
+    app.notify_toast = lambda level, msg: captured.append((level, msg))  # type: ignore[assignment]
+
+    with patch.object(Path, "write_text", side_effect=OSError("read-only fs")):
+        app.action_save_last_run_log()
+
+    assert captured, "expected an error toast"
+    level, msg = captured[-1]
+    assert level == "error"
+    assert "save failed" in msg.lower()
+
+
+def test_alert_copy_text_routes_through_clipboard(tmp_path: Path) -> None:
+    """When the alerts panel returns an ``AlertPanelAction`` with
+    ``copy_text`` populated, ``_apply_alert_action`` must call the
+    shared clipboard helper and toast the outcome. Before this
+    wiring the alert ``y`` flow set the status but never actually
+    landed bytes in the clipboard."""
+
+    from defenseclaw.tui.panels.alerts import AlertPanelAction
+
+    app = _make_app(tmp_path)
+
+    captured_toasts: list[tuple[str, str]] = []
+    app.notify_toast = lambda level, msg: captured_toasts.append((level, msg))  # type: ignore[assignment]
+
+    captured_copies: list[str] = []
+    def _fake_copy(text: str) -> tuple[bool, str]:
+        captured_copies.append(text)
+        return True, "pbcopy"
+    app._clipboard_copy = _fake_copy  # type: ignore[method-assign]
+
+    # The render_chrome + status-bar paths query the DOM; stub them
+    # so the test exercises the wiring without a mounted app.
+    app._render_chrome = lambda: None  # type: ignore[method-assign]
+    app._set_status = lambda _msg: None  # type: ignore[method-assign]
+
+    action = AlertPanelAction(handled=True, hint="Alert detail copied.", copy_text="severity=HIGH")
+    handled = app._apply_alert_action(action)
+
+    assert handled is True
+    assert captured_copies == ["severity=HIGH"]
+    assert captured_toasts, "clipboard wiring must emit a toast"
+    assert captured_toasts[0] == ("success", "Copied alert detail (pbcopy).")

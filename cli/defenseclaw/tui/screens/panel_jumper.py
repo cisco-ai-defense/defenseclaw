@@ -210,7 +210,13 @@ class PanelJumperScreen(ModalScreen[str | None]):
         if not self._filtered:
             self.dismiss(None)
             return
-        choice = self._filtered[self.selected_index]
+        # Clamp defensively: if a key sequence sneaks in between an
+        # ``Input.Changed`` event and the next ``_refresh_list``, the
+        # reactive ``selected_index`` can briefly point past the
+        # newly-shortened ``_filtered`` list. Indexing that directly
+        # would IndexError and crash the modal mid-dismiss.
+        index = max(0, min(self.selected_index, len(self._filtered) - 1))
+        choice = self._filtered[index]
         self.dismiss(choice.name)
 
     def action_cancel(self) -> None:

@@ -571,6 +571,11 @@ class DefenseClawTUI(App[None]):
         self.command_running = False
         self.command_label = ""
         self._command_started_at: float = 0.0
+        # Independent flag for the Shift+D "lightweight doctor" probe.
+        # ``command_running`` only tracks the main executor pipeline,
+        # so without this we'd let a second Shift+D press spawn a
+        # parallel ``defenseclaw doctor`` subprocess.
+        self._diagnose_running = False
         self.commands_run = 0
         self.activity_model = ActivityPanelModel()
         self.alerts_model = alerts_model or AlertsPanelModel(self.data_dir)
@@ -1441,17 +1446,8 @@ class DefenseClawTUI(App[None]):
         # full "what would actually run" picture before pressing Enter.
         palette.add_columns("Command", "Risk", "Would run", "Needs")
         for index, entry in enumerate(matches):
-            risk = infer_command_risk(entry.category, entry.cli_args)
-            badge = f"[{entry.category}/{risk}]"
-            preview = f"{entry.cli_binary} " + " ".join(entry.cli_args)
-            hint = entry.arg_hint if entry.needs_arg else ""
-            palette.add_row(
-                entry.tui_name,
-                badge,
-                preview,
-                hint,
-                key=str(index),
-            )
+            name, badge, preview, hint = _palette_row_for_entry(entry)
+            palette.add_row(name, badge, preview, hint, key=str(index))
         if matches:
             palette.move_cursor(row=0, column=0, animate=False)
         else:
@@ -3011,6 +3007,15 @@ class DefenseClawTUI(App[None]):
                 "Wait for it to finish or press Ctrl+C to cancel.",
             )
             return
+        if self._diagnose_running:
+            # Second Shift+D while the first probe is still going.
+            # Without this guard ``run_worker`` would happily spawn a
+            # parallel ``defenseclaw doctor`` subprocess — two
+            # concurrent probes write to the same toast lane and race
+            # on stdout pipes.
+            self.notify_toast("warn", "Diagnose already running — waiting for current probe to finish.")
+            return
+        self._diagnose_running = True
         self.notify_toast("info", "Running defenseclaw doctor…")
         self.run_worker(
             self._run_diagnose_background(),
@@ -3027,54 +3032,61 @@ class DefenseClawTUI(App[None]):
         Overview. The toast's summary line is the first non-empty
         stdout line for read-only success, or a short failure tail
         for non-zero exits.
+
+        Always clears ``_diagnose_running`` in a ``finally`` so a
+        crashed probe can't permanently lock subsequent Shift+D
+        presses behind the "already running" guard.
         """
 
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "defenseclaw",
-                "doctor",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        except (FileNotFoundError, OSError) as exc:
-            # Most common failure here: ``defenseclaw`` binary not on
-            # PATH (e.g. running the TUI from a checkout without
-            # ``uv pip install -e .``). Surface clearly so the user
-            # knows it's a setup issue, not a doctor verdict.
-            self.notify_toast("error", f"Diagnose failed to launch: {exc}")
-            return
-
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
-        except asyncio.TimeoutError:
             try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            self.notify_toast(
-                "error",
-                "Diagnose timed out after 60s — run `defenseclaw doctor` manually.",
-            )
-            return
+                proc = await asyncio.create_subprocess_exec(
+                    "defenseclaw",
+                    "doctor",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            except (FileNotFoundError, OSError) as exc:
+                # Most common failure here: ``defenseclaw`` binary not on
+                # PATH (e.g. running the TUI from a checkout without
+                # ``uv pip install -e .``). Surface clearly so the user
+                # knows it's a setup issue, not a doctor verdict.
+                self.notify_toast("error", f"Diagnose failed to launch: {exc}")
+                return
 
-        text = (stdout or b"").decode("utf-8", errors="replace")
-        # Strip ANSI color codes so the toast doesn't render escape
-        # sequences as literal characters — the doctor CLI emits
-        # bracketed colour codes for the section headers.
-        clean = _ANSI_RE.sub("", text)
-        lines = [line.rstrip() for line in clean.splitlines() if line.strip()]
-        summary = _diagnose_summary_line(lines)
-        if proc.returncode == 0:
-            self.notify_toast("success", f"Doctor OK · {summary}" if summary else "Doctor OK")
-        else:
-            # Non-zero exit: prefer the *last* non-empty line because
-            # CLI tooling almost universally writes the "failure
-            # reason" as the final pre-exit line.
-            tail = lines[-1] if lines else ""
-            self.notify_toast(
-                "warn",
-                f"Doctor exit {proc.returncode} · {tail}" if tail else f"Doctor exit {proc.returncode}",
-            )
+            try:
+                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+                self.notify_toast(
+                    "error",
+                    "Diagnose timed out after 60s — run `defenseclaw doctor` manually.",
+                )
+                return
+
+            text = (stdout or b"").decode("utf-8", errors="replace")
+            # Strip ANSI color codes so the toast doesn't render escape
+            # sequences as literal characters — the doctor CLI emits
+            # bracketed colour codes for the section headers.
+            clean = _ANSI_RE.sub("", text)
+            lines = [line.rstrip() for line in clean.splitlines() if line.strip()]
+            summary = _diagnose_summary_line(lines)
+            if proc.returncode == 0:
+                self.notify_toast("success", f"Doctor OK · {summary}" if summary else "Doctor OK")
+            else:
+                # Non-zero exit: prefer the *last* non-empty line because
+                # CLI tooling almost universally writes the "failure
+                # reason" as the final pre-exit line.
+                tail = lines[-1] if lines else ""
+                self.notify_toast(
+                    "warn",
+                    f"Doctor exit {proc.returncode} · {tail}" if tail else f"Doctor exit {proc.returncode}",
+                )
+        finally:
+            self._diagnose_running = False
 
     def action_save_last_run_log(self) -> None:
         """Write the last Activity entry's output to ``last-run.log``."""
@@ -6988,6 +7000,33 @@ def _truncate_for_strip(value: str, width: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)] + "..."
+
+
+def _palette_row_for_entry(entry: CmdEntry) -> tuple[str, str, str, str]:
+    """Return ``(name, badge, preview, hint)`` for a palette row.
+
+    Pure helper so the row layout is unit-testable without spinning
+    up Textual. Mirrors the Go TUI's palette visual contract:
+
+    * ``name``    — the operator-facing TUI alias (e.g. ``setup guardrail``)
+    * ``badge``   — ``[category/risk]``, computed via
+      :func:`infer_command_risk`, so destructive vs read-only is
+      visible at a glance.
+    * ``preview`` — exact argv that will run when the operator
+      presses Enter (``defenseclaw setup guardrail``). Joined with
+      spaces; argv tokens are NOT shell-quoted because the registry
+      never contains shell metacharacters.
+    * ``hint``    — for ``needs_arg`` entries, the ``arg_hint`` string;
+      empty string otherwise so the column collapses visually.
+    """
+
+    risk = infer_command_risk(entry.category, entry.cli_args)
+    badge = f"[{entry.category}/{risk}]"
+    preview = entry.cli_binary
+    if entry.cli_args:
+        preview = preview + " " + " ".join(entry.cli_args)
+    hint = entry.arg_hint if entry.needs_arg else ""
+    return entry.tui_name, badge, preview, hint
 
 
 def _diagnose_summary_line(lines: list[str]) -> str:

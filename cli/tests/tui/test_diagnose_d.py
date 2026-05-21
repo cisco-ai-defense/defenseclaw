@@ -255,3 +255,134 @@ async def test_run_diagnose_background_strips_ansi_codes(tmp_path: Path) -> None
     _, msg = captured[-1]
     assert "\x1b" not in msg
     assert "All checks passed" in msg
+
+
+# ---------------------------------------------------------------------------
+# Re-entry guard + ``_diagnose_running`` flag lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_action_refuses_when_already_running(tmp_path: Path) -> None:
+    """A second Shift+D while the first probe is in flight must toast
+    a warn — without this guard ``run_worker`` would happily spawn a
+    parallel subprocess and the two probes would race on stdout."""
+
+    app = _make_app(tmp_path)
+    app._diagnose_running = True
+    captured = _capture_toasts(app)
+
+    app.action_run_diagnose()
+
+    assert captured, "expected a warn toast"
+    level, msg = captured[0]
+    assert level == "warn"
+    assert "already running" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_background_clears_flag_on_success(tmp_path: Path) -> None:
+    """After a successful probe completes the flag must reset so the
+    next Shift+D can fire — otherwise the guard turns into a
+    permanent lockout the moment a probe finishes."""
+
+    app = _make_app(tmp_path)
+    app._diagnose_running = True  # caller would have set this
+    _capture_toasts(app)
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _FakeProc:
+        return _FakeProc(returncode=0, stdout=b"All checks passed\n")
+
+    import defenseclaw.tui.app as app_mod
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(app_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        await app._run_diagnose_background()
+
+    assert app._diagnose_running is False, "flag must reset after a clean probe"
+
+
+@pytest.mark.asyncio
+async def test_background_clears_flag_on_launch_failure(tmp_path: Path) -> None:
+    """Even when the launcher raises (missing binary), the finally
+    block must clear the flag so the user can retry without being
+    permanently locked out."""
+
+    app = _make_app(tmp_path)
+    app._diagnose_running = True
+    _capture_toasts(app)
+
+    async def _raise(*_args: object, **_kwargs: object) -> _FakeProc:
+        raise FileNotFoundError("defenseclaw")
+
+    import defenseclaw.tui.app as app_mod
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(app_mod.asyncio, "create_subprocess_exec", _raise)
+        await app._run_diagnose_background()
+
+    assert app._diagnose_running is False
+
+
+@pytest.mark.asyncio
+async def test_background_clears_flag_on_timeout(tmp_path: Path) -> None:
+    """A probe that takes longer than 60s must be killed AND clear
+    the re-entry flag so the next Shift+D can fire after the user
+    waits out the timeout."""
+
+    app = _make_app(tmp_path)
+    app._diagnose_running = True
+    captured = _capture_toasts(app)
+
+    killed: list[bool] = []
+
+    class _HangingProc:
+        returncode: int | None = None
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            # asyncio.wait_for(…, timeout=60.0) cancels us before
+            # this resolves; we sleep forever to simulate a hang.
+            import asyncio as _asyncio
+            await _asyncio.sleep(3600)
+            return b"", b""
+
+        def kill(self) -> None:
+            killed.append(True)
+
+    async def _fake_exec(*_args: object, **_kwargs: object) -> _HangingProc:
+        return _HangingProc()
+
+    async def _fake_wait_for(_aw, timeout: float) -> tuple[bytes, bytes]:
+        # Pretend we hit the timeout immediately so the test doesn't
+        # wait 60 real seconds.
+        raise __import__("asyncio").TimeoutError
+
+    import defenseclaw.tui.app as app_mod
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(app_mod.asyncio, "create_subprocess_exec", _fake_exec)
+        mp.setattr(app_mod.asyncio, "wait_for", _fake_wait_for)
+        await app._run_diagnose_background()
+
+    assert killed == [True], "timeout path must kill the subprocess"
+    assert app._diagnose_running is False
+    assert captured, "expected an error toast on timeout"
+    level, msg = captured[-1]
+    assert level == "error"
+    assert "timed out" in msg.lower()
+
+
+def test_action_sets_diagnose_running_before_dispatch(tmp_path: Path) -> None:
+    """Calling ``action_run_diagnose`` from idle must flip the
+    re-entry flag synchronously so a second keystroke arriving in
+    the same tick gets rejected by the guard."""
+
+    app = _make_app(tmp_path)
+    assert app._diagnose_running is False
+    # Stop the worker from actually firing — we only want to observe
+    # the synchronous side-effect (flag set + info toast emitted).
+    app.run_worker = lambda *_a, **_k: None  # type: ignore[assignment]
+    captured = _capture_toasts(app)
+
+    app.action_run_diagnose()
+    assert app._diagnose_running is True
+    assert captured and captured[0] == ("info", "Running defenseclaw doctor…")
