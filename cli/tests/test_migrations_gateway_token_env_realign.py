@@ -1,13 +1,14 @@
-"""Phase 4 of the gateway-token rebranding fix — 0.5.1 migration.
+"""Gateway-token rebranding fix — config.yaml realignment migration.
 
-Tests for ``_migrate_0_5_1_align_gateway_token_env``: surgically
-rewrite ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` →
-``DEFENSECLAW_GATEWAY_TOKEN`` in config.yaml when (and only when)
-the dotenv has ``DEFENSECLAW_GATEWAY_TOKEN`` set.
+Tests for ``_align_gateway_token_env_in_config``: surgically rewrite
+``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` →
+``DEFENSECLAW_GATEWAY_TOKEN`` in config.yaml when (and only when) the
+dotenv has ``DEFENSECLAW_GATEWAY_TOKEN`` set.
 
-The migration sits at version 0.5.1 in the registry; bumping
-``__version__`` to 0.5.1 is what makes existing 0.5.0 installs
-pick it up on next ``defenseclaw upgrade``.
+The migration is wired into the registry at whatever version the
+release manager cuts (currently keyed at 0.6.2 — see migrations.py
+for the rationale). Tests use ``_REGISTRY_VERSION`` so re-keying the
+registry needs zero test changes.
 
 Contract under test:
 
@@ -38,8 +39,17 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.migrations import (
     MIGRATIONS,
     MigrationContext,
-    _migrate_0_5_1,
-    _migrate_0_5_1_align_gateway_token_env,
+    _align_gateway_token_env_in_config,
+    _migrate_gateway_token_env_realign,
+)
+
+# Version the realignment migration is registered under. Pulled from
+# the registry so a re-key in migrations.py does not break these
+# tests — the contract is "this callable is wired into the registry",
+# not "it's wired at a hardcoded version".
+_REGISTRY_VERSION = next(
+    (ver for ver, _desc, fn in MIGRATIONS if fn is _migrate_gateway_token_env_realign),
+    None,
 )
 
 
@@ -66,7 +76,7 @@ def _read_config(data_dir: str) -> str:
 
 class TestAlignGatewayTokenEnv(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-051-")
+        self.tmp = tempfile.mkdtemp(prefix="dclaw-mig-gw-tokenv-")
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -90,7 +100,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         ))
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         after = _read_config(self.tmp)
         self.assertIn("token_env: DEFENSECLAW_GATEWAY_TOKEN", after)
@@ -116,7 +126,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         _seed_config(self.tmp, original)
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         self.assertEqual(_read_config(self.tmp), original)
         self.assertEqual(ctx.changes, [])
@@ -135,7 +145,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         _seed_config(self.tmp, original)
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         # Config is untouched.
         self.assertEqual(_read_config(self.tmp), original)
@@ -151,7 +161,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         _seed_config(self.tmp, original)
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         self.assertEqual(_read_config(self.tmp), original)
         self.assertEqual(ctx.changes, [])
@@ -168,7 +178,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         _seed_config(self.tmp, original)
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         self.assertEqual(_read_config(self.tmp), original)
         self.assertEqual(ctx.changes, [])
@@ -189,7 +199,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         _seed_config(self.tmp, original)
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         self.assertEqual(_read_config(self.tmp), original)
         self.assertEqual(ctx.changes, [])
@@ -207,7 +217,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         ))
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         after = _read_config(self.tmp)
         self.assertIn(
@@ -230,7 +240,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         ))
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         after = _read_config(self.tmp)
         self.assertIn('token_env: "DEFENSECLAW_GATEWAY_TOKEN"', after)
@@ -243,7 +253,7 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         # No _seed_config() — config.yaml does not exist.
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         self.assertEqual(ctx.changes, [])
         self.assertFalse(os.path.exists(os.path.join(self.tmp, "config.yaml")))
@@ -261,52 +271,63 @@ class TestAlignGatewayTokenEnv(unittest.TestCase):
         _seed_config(self.tmp, original)
 
         ctx = self._ctx()
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
 
         self.assertEqual(_read_config(self.tmp), original)
         self.assertEqual(ctx.changes, [])
 
     def test_wrapper_swallows_step_failures(self):
-        """``_migrate_0_5_1`` (the wrapper) must never raise even if
-        the inner step crashes — the playbook says migrations never
-        abort an upgrade. Simulated by deleting the data_dir so the
-        inner step hits an OSError on the dotenv read.
-
-        Actually the inner step is defensive; let's instead validate
-        the wrapper contract by passing in a context with a non-existent
-        data_dir which won't crash anything because the inner step
-        skips on missing files. The contract is that the wrapper
-        catches and logs without re-raising — proven by the fact that
-        passing ANY context completes without an exception.
+        """``_migrate_gateway_token_env_realign`` (the wrapper) must
+        never raise even if the inner step crashes — the playbook
+        says migrations never abort an upgrade. Validated by passing
+        a context with a non-existent data_dir; the inner step
+        skips defensively, so the wrapper has nothing to swallow,
+        but the contract that "any context completes without raising"
+        still holds.
         """
         ctx = MigrationContext(
             openclaw_home="/nonexistent/path",
             data_dir="/nonexistent/path",
         )
-        # No assertion needed beyond "this does not raise".
-        _migrate_0_5_1(ctx)
+        _migrate_gateway_token_env_realign(ctx)
 
 
 class TestRegistry(unittest.TestCase):
-    """Lock down the registry entry — version string, ordering,
-    callable identity. Catches accidental refactors that break the
-    cursor-driven dispatch.
+    """Lock down the registry entry — callable identity, ordering, and
+    that *some* version key exists. Catches accidental refactors that
+    break the cursor-driven dispatch.
+
+    The specific version key is intentionally NOT asserted (it's a
+    release-manager decision); we only assert the callable is wired
+    in and that it sorts after the prior gateway-touching migration.
     """
 
-    def test_0_5_1_entry_is_present_and_well_formed(self):
-        entry = next((e for e in MIGRATIONS if e[0] == "0.5.1"), None)
-        self.assertIsNotNone(entry, "MIGRATIONS must include a 0.5.1 entry")
+    def test_realign_callable_is_registered(self):
+        entry = next(
+            (e for e in MIGRATIONS if e[2] is _migrate_gateway_token_env_realign),
+            None,
+        )
+        self.assertIsNotNone(
+            entry,
+            "_migrate_gateway_token_env_realign must be wired into MIGRATIONS",
+        )
         ver, desc, fn = entry
-        self.assertEqual(ver, "0.5.1")
+        self.assertTrue(ver, "registry entry must carry a non-empty version key")
         self.assertIn("gateway.token_env", desc)
-        self.assertIs(fn, _migrate_0_5_1)
+        self.assertIs(fn, _migrate_gateway_token_env_realign)
 
-    def test_0_5_1_appears_after_0_5_0(self):
-        """Order matters: migrations run in registry order, and 0.5.1
-        depends on the dotenv being in the post-0.4.0 shape.
+    def test_realign_appears_after_0_5_0_token_bootstrap(self):
+        """Order matters: realignment depends on the dotenv being in
+        the post-0.4.0 / 0.5.0 shape (DEFENSECLAW_GATEWAY_TOKEN
+        already promoted into the .env). Must run after 0.5.0.
         """
         versions = [e[0] for e in MIGRATIONS]
-        self.assertLess(versions.index("0.5.0"), versions.index("0.5.1"))
+        realign_idx = next(
+            (i for i, e in enumerate(MIGRATIONS) if e[2] is _migrate_gateway_token_env_realign),
+            -1,
+        )
+        self.assertGreaterEqual(realign_idx, 0)
+        self.assertLess(versions.index("0.5.0"), realign_idx)
 
 
 if __name__ == "__main__":

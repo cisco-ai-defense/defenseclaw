@@ -1273,22 +1273,25 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Migration: 0.5.1
+# Migration: gateway.token_env realignment (registered at version 0.6.2)
 # ---------------------------------------------------------------------------
+#
+# The version key in MIGRATIONS is what the cursor uses to decide
+# whether to fire — symbol names and docstrings deliberately avoid
+# pinning to it so a future release manager can re-key without
+# touching the implementation.
 
 
-def _migrate_0_5_1(ctx: MigrationContext) -> None:
-    """0.5.1 upgrade — single sub-step.
+def _migrate_gateway_token_env_realign(ctx: MigrationContext) -> None:
+    """Single-step wrapper around ``_align_gateway_token_env_in_config``.
 
-    Step 1: ``_migrate_0_5_1_align_gateway_token_env``
-            Repoints stale ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN``
-            in config.yaml to the canonical ``DEFENSECLAW_GATEWAY_TOKEN``
-            so the Python CLI and the Go gateway agree on the env var
-            name out of the box. Phase 1+2 of the gateway-token
-            rebranding fix put a runtime fall-through in
-            ``GatewayConfig.resolved_token`` that already MASKS the
-            drift; this migration cleans up the config so operators
-            no longer rely on that fall-through.
+    Repoints stale ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` in
+    config.yaml to the canonical ``DEFENSECLAW_GATEWAY_TOKEN`` so
+    the Python CLI and the Go gateway agree on the env var name
+    out of the box. The runtime fall-through in
+    ``GatewayConfig.resolved_token`` already MASKS the drift; this
+    migration cleans up the config so operators no longer rely on
+    that fall-through.
 
     Wrapped in try/except per the migration playbook — a failure in
     this step never aborts the upgrade; the auto-detect fall-through
@@ -1297,12 +1300,12 @@ def _migrate_0_5_1(ctx: MigrationContext) -> None:
     confirmation).
     """
     try:
-        _migrate_0_5_1_align_gateway_token_env(ctx)
+        _align_gateway_token_env_in_config(ctx)
     except Exception as exc:  # noqa: BLE001 — never abort upgrade on migration error
         ux.warn(f"gateway token_env rename step failed: {exc}", indent="    ")
 
 
-def _migrate_0_5_1_align_gateway_token_env(ctx: MigrationContext) -> None:
+def _align_gateway_token_env_in_config(ctx: MigrationContext) -> None:
     """Rewrite ``gateway.token_env: OPENCLAW_GATEWAY_TOKEN`` → ``DEFENSECLAW_GATEWAY_TOKEN``.
 
     Trigger conditions (ALL must hold):
@@ -1310,7 +1313,7 @@ def _migrate_0_5_1_align_gateway_token_env(ctx: MigrationContext) -> None:
     * ``config.yaml`` exists at ``<data_dir>/config.yaml``.
     * The file contains a ``gateway:`` block with
       ``token_env: OPENCLAW_GATEWAY_TOKEN`` (the bootstrap default
-      from before Phase 3 of the rebranding fix).
+      from before the rebranding fix's defaults patch).
     * The dotenv at ``<data_dir>/.env`` carries
       ``DEFENSECLAW_GATEWAY_TOKEN`` with a non-empty value (the
       0.4.0 token-bootstrap migration normally promotes the legacy
@@ -1442,13 +1445,17 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         _migrate_0_5_0,
     ),
     (
-        "0.5.1",
+        # Registered at 0.6.2 because upstream is at 0.6.1 and this
+        # migration ships in the NEXT patch release. The function name
+        # deliberately does NOT mention a version so re-keying here at
+        # merge time (if a different version is cut) needs no rename.
+        "0.6.2",
         "Repoint legacy gateway.token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml "
         "to the canonical DEFENSECLAW_GATEWAY_TOKEN so the Python CLI and the Go "
         "gateway agree on the env var name (closes the 'gateway token unavailable' "
         "trip the runtime fall-through in GatewayConfig.resolved_token already masks) "
-        "— see _migrate_0_5_1 docstring",
-        _migrate_0_5_1,
+        "— see _migrate_gateway_token_env_realign docstring",
+        _migrate_gateway_token_env_realign,
     ),
 ]
 
