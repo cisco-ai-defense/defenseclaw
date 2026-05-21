@@ -1316,8 +1316,24 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
 @click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
 @click.option("--fix", "do_fix", is_flag=True, help="Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.)")
 @click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    help=(
+        "When used with --fix, list the fixers that would run without "
+        "mutating anything on disk. Useful as a preview step before "
+        "approving a real ``--fix --yes`` run from a TUI/CI wrapper."
+    ),
+)
 @pass_ctx
-def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> None:
+def doctor(
+    app: AppContext,
+    json_out: bool,
+    do_fix: bool,
+    assume_yes: bool,
+    dry_run: bool,
+) -> None:
     """Verify credentials, endpoints, and connectivity.
 
     Runs a series of checks against every configured service and API key
@@ -1394,8 +1410,14 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 
     if do_fix:
         if not json_out:
-            _doctor_subsection("Auto-fix")
-        _run_fixers(cfg, r, assume_yes=assume_yes, json_out=json_out)
+            _doctor_subsection("Auto-fix" + (" (dry-run)" if dry_run else ""))
+        _run_fixers(
+            cfg,
+            r,
+            assume_yes=assume_yes,
+            json_out=json_out,
+            dry_run=dry_run,
+        )
 
     # Persist the cached snapshot before exit so the Go TUI (and any
     # other cron-style caller) can pick it up without re-probing. We
@@ -1476,13 +1498,25 @@ def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
 # --fix auto-repair
 # ---------------------------------------------------------------------------
 
-def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> None:
+def _run_fixers(
+    cfg,
+    r: _DoctorResult,
+    *,
+    assume_yes: bool,
+    json_out: bool,
+    dry_run: bool = False,
+) -> None:
     """Run each fixer in sequence, narrating what changed.
 
     Fixers are intentionally *small* and independent — none of them
     restart the sidecar or mutate connector configs beyond what setup
     already would. Anything that needs a full re-patch is deferred to
     the human.
+
+    With ``dry_run=True`` we *list* each fixer instead of invoking it.
+    The reported tag is always ``"skip"`` and the detail explains the
+    fixer would run; this lets a TUI / CI caller render a preview
+    before granting an explicit ``--yes`` to mutate anything.
     """
     fixers = [
         ("stale gateway PID file",   _fix_stale_pid),
@@ -1493,10 +1527,13 @@ def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> N
     ]
 
     for title, fn in fixers:
-        try:
-            outcome = fn(cfg, assume_yes=assume_yes)
-        except Exception as exc:  # defensive — one fixer shouldn't abort the rest
-            outcome = ("error", f"{type(exc).__name__}: {exc}")
+        if dry_run:
+            outcome = ("skip", "would run (dry-run; no changes made)")
+        else:
+            try:
+                outcome = fn(cfg, assume_yes=assume_yes)
+            except Exception as exc:  # defensive — one fixer shouldn't abort the rest
+                outcome = ("error", f"{type(exc).__name__}: {exc}")
 
         tag, detail = outcome
         if json_out:

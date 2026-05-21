@@ -760,6 +760,7 @@ class DefenseClawTUI(App[None]):
             yield ToastStack(id="toasts")
             yield HintBar(id="hint")
             yield Static("", id="status")
+    # MARKER_PHASE_1A_PROBE_LINE_DO_NOT_REMOVE
 
     def on_unmount(self) -> None:
         # Signal background pollers to stop spawning fresh subprocess
@@ -3124,7 +3125,7 @@ class DefenseClawTUI(App[None]):
         # happens on every panel switch, every health poll, and every
         # ``_render_chrome`` call after a setup change like toggling
         # redaction).
-        actions = "  ".join(f"\\[{action.key}\\] {action.label}" for action in toolbar.actions)
+        actions = "  ".join(f"\\[{action.key}] {action.label}" for action in toolbar.actions)
         lines = [
             "[bold #22D3EE]Audit Trail[/]  [#9FB2CC]Click common filters above, or search with field:value terms.[/]",
             f"{toolbar.summary_label}  {actions}",
