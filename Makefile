@@ -1,6 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
-VERSION     := 0.5.1
+VERSION     := 0.5.0
 GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
 GOBIN       := $(shell go env GOPATH)/bin
