@@ -1264,7 +1264,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
 
         # Each fixer should have produced a "skip" record so the TUI
         # can list every step the real run would touch.
-        fix_records = [c for c in result.checks if c["name"].startswith("fix:")]
+        fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
         self.assertEqual(len(fix_records), 5)
         for record in fix_records:
             self.assertEqual(record["status"], "skip")
@@ -1286,7 +1286,7 @@ class DoctorFixDryRunTests(unittest.TestCase):
                 cfg, result, assume_yes=True, json_out=True, dry_run=False,
             )
 
-        fix_records = [c for c in result.checks if c["name"].startswith("fix:")]
+        fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
         self.assertEqual(len(fix_records), 5)
         for record in fix_records:
             self.assertEqual(record["status"], "pass")
