@@ -42,7 +42,8 @@ from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.policy_state import POLICY_TAB_OPA
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.widgets.native_metrics import MetricTile, OverviewMetrics
-from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline
+from rich.text import Text
+from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static
 
 
 @pytest.mark.asyncio
@@ -1793,6 +1794,127 @@ async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
         assert "ok" in contents
 
 
+# ---------------------------------------------------------------------------
+# AI Discovery panel button bar (Phase 1b click-first plan).
+# Locks in the action bar so the panel is never view-only again —
+# previously operators had to leave the panel to enable/scan via the
+# drawer, which was the exact friction the user called out.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_panel_exposes_action_bar() -> None:
+    """AI Discovery panel renders Enable/Scan/Refresh/Export buttons."""
+
+    ai_model = AIDiscoveryPanelModel()
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")  # AI Discovery panel key.
+        await pilot.pause()
+        assert app.active_panel == "ai"
+        for selector in (
+            "#ai-enable",
+            "#ai-disable",
+            "#ai-scan",
+            "#ai-refresh",
+            "#ai-open-detail",
+            "#ai-export",
+        ):
+            assert app.query_one(selector, Button) is not None
+        # No snapshot loaded → Enable visible (default-offered),
+        # Disable + Scan hidden, Open detail + Export disabled.
+        assert app.query_one("#ai-enable", Button).has_class("hidden") is False
+        assert app.query_one("#ai-disable", Button).has_class("hidden") is True
+        assert app.query_one("#ai-scan", Button).has_class("hidden") is True
+        assert app.query_one("#ai-open-detail", Button).disabled is True
+        assert app.query_one("#ai-export", Button).disabled is True
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_bar_swaps_enable_for_disable_when_enabled() -> None:
+    """When discovery is enabled, hide Enable + show Disable + Scan."""
+
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(AIUsageSnapshot(enabled=True, signals=()))
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        assert app.query_one("#ai-enable", Button).has_class("hidden") is True
+        assert app.query_one("#ai-disable", Button).has_class("hidden") is False
+        assert app.query_one("#ai-scan", Button).has_class("hidden") is False
+        # Export button is enabled because there is a snapshot now.
+        assert app.query_one("#ai-export", Button).disabled is False
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_enable_button_routes_to_command(monkeypatch) -> None:
+    """Clicking Enable submits the same command the drawer would."""
+
+    ai_model = AIDiscoveryPanelModel()
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+    submitted: list[str] = []
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        monkeypatch.setattr(app, "_submit_command_text", lambda text: submitted.append(text))
+        app._handle_ai_control("ai-enable")  # noqa: SLF001
+        await pilot.pause()
+        assert submitted == ["defenseclaw agent discovery enable --yes"]
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_scan_and_refresh_buttons_route_to_commands(monkeypatch) -> None:
+    """Scan + Refresh route to the existing scan/usage CLI calls."""
+
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(AIUsageSnapshot(enabled=True, signals=()))
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+    submitted: list[str] = []
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        monkeypatch.setattr(app, "_submit_command_text", lambda text: submitted.append(text))
+        app._handle_ai_control("ai-scan")  # noqa: SLF001
+        app._handle_ai_control("ai-refresh")  # noqa: SLF001
+        await pilot.pause()
+        assert submitted == [
+            "defenseclaw agent discover",
+            "defenseclaw agent usage --json",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
+    """Export button writes the loaded snapshot as JSON under data_dir."""
+
+    snapshot = AIUsageSnapshot(
+        enabled=True,
+        summary=AIUsageSummary(scan_id="scan-1", total_signals=1),
+        signals=(
+            AIUsageSignal(name="openai-agent", vendor="OpenAI", category="chat"),
+        ),
+    )
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(snapshot)
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        app.data_dir = tmp_path
+        await app._export_ai_discovery_snapshot()  # noqa: SLF001
+        target = tmp_path / "defenseclaw-ai-usage-export.json"
+        assert target.exists()
+        body = json.loads(target.read_text())
+        assert body["enabled"] is True
+        assert body["summary"]["scan_id"] == "scan-1"
+        assert body["signals"][0]["name"] == "openai-agent"
+
+
 def test_safe_body_renderable_falls_back_on_invalid_style() -> None:
     """Bogus single-letter ``[e]`` markup must not crash rendering.
 
@@ -1879,3 +2001,126 @@ def test_mark_restart_passes_started_at_to_setup_model() -> None:
     app2._mark_restart_if_gateway_restarted(SimpleNamespace(started_at="newer"))  # type: ignore[arg-type]  # noqa: SLF001
     assert legacy.cleared is True
     assert app2._last_gateway_started_at == "newer"  # noqa: SLF001
+
+
+def test_audit_body_text_escapes_bracketed_filter_and_search_input() -> None:
+    """User-supplied filter/search must not re-trigger the markup crash.
+
+    The action-key fix escaped the static ``[e] export`` legend, but the
+    Audit panel also echoes the operator's filter chip and the live ``/``
+    search box. Both of those echo whatever the user typed — so a search
+    for ``target:[skill]`` previously crashed the render pipeline with
+    ``StyleSyntaxError: 'skill' is not a valid color``. Lock both paths
+    in so future toolbar tweaks can't silently re-open the bug.
+    """
+
+    from rich.style import Style
+    from rich.text import Text
+
+    for hostile in ("target:[skill]", "run:[abc-123]", "[bogus]"):
+        panel = AuditPanelModel()
+        panel.filter_text = hostile
+        panel.filtering = True
+        app = DefenseClawTUI(audit_model=panel)
+        app.active_panel = "audit"
+        body = app._audit_body_text()  # noqa: SLF001 - regression for user-input crash.
+
+        # ``from_markup`` is lazy: bad style names only blow up when
+        # the renderer resolves them. Walk the spans and resolve each
+        # style up-front — any unescaped ``[skill]`` shows up here.
+        text = Text.from_markup(body)
+        for span in text.spans:
+            if isinstance(span.style, str) and span.style:
+                Style.parse(span.style)  # raises if escape was missed.
+
+        rendered = DefenseClawTUI._safe_body_renderable(body)  # noqa: SLF001
+        assert hostile in rendered.plain, f"user input {hostile!r} dropped from rendered body"
+
+
+def test_refresh_cached_config_closes_stale_audit_store(monkeypatch, tmp_path) -> None:
+    """Reload must close the previous SQLite handles, not leak them.
+
+    ``_refresh_cached_config`` swaps ``alerts_model.store`` and
+    ``audit_model.store`` with a freshly-opened ``Store`` on every
+    setup-driven reload. Replacing the attribute without calling
+    ``close()`` on the prior handle leaked a file descriptor per
+    reload, and a typical session triggers several (connector pick,
+    registry add, redaction toggle, etc.). Verify the stale store
+    gets closed and that an identical post-swap handle (operator
+    just toggled a flag with no audit_db change) is left untouched.
+    """
+
+    class FakeStore:
+        def __init__(self, tag: str) -> None:
+            self.tag = tag
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    old_store = FakeStore("old")
+    new_store = FakeStore("new")
+
+    app = DefenseClawTUI(
+        alerts_model=AlertsPanelModel(store=old_store),
+        audit_model=AuditPanelModel(store=old_store),
+    )
+    # Stub the heavy fan-out so we only exercise the close-on-swap
+    # branch. We don't need a real config reload — ``_audit_store``
+    # is the seam that produces the replacement handle.
+    monkeypatch.setattr(
+        "defenseclaw.tui.app._audit_store",
+        lambda _cfg: new_store,
+    )
+    monkeypatch.setattr(app, "_refresh_models_from_disk", lambda: None)
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: None)
+    monkeypatch.setattr(app, "_propagate_connector", lambda _h: None)
+    monkeypatch.setattr(app, "_write_activity", lambda *a, **kw: None)
+    monkeypatch.setattr("defenseclaw.tui.app.config_module.load", lambda: app.config)
+
+    app._refresh_cached_config()  # noqa: SLF001 - exercising reload path.
+
+    assert old_store.closed is True, "previous audit store handle leaked"
+    assert new_store.closed is False
+    assert app.alerts_model.store is new_store
+    assert app.audit_model.store is new_store
+
+    # Second reload returning the SAME handle must NOT close it
+    # (otherwise we'd close the live store we just installed).
+    app._refresh_cached_config()  # noqa: SLF001
+    assert new_store.closed is False, "live store was closed by no-op reload"
+
+
+def test_safe_body_renderable_handles_bracketed_status_strings() -> None:
+    """``_set_status`` now routes its f-string through ``_safe_body_renderable``.
+
+    Several status callers pass operator-supplied text straight through
+    (e.g. ``self.audit_model.active_filter_label()`` after typing
+    ``target:[skill]`` into the ``/`` search box). The previous
+    implementation inlined that text into a Rich-parsed f-string and
+    inherited the same ``MissingStyle`` / ``StyleSyntaxError`` crash
+    class the audit-body fix closed. Verify the exact composed string
+    the new ``_set_status`` feeds into the widget — ``f"{text}  [#444444]│[/]  {strip}"`` —
+    survives the defensive wrapper on hostile input that uses
+    *invalid* style names (the actual crash trigger). Inputs that
+    happen to spell a valid Rich style (``[red]``) still get
+    interpreted as markup — that's a known UX wart of layering
+    user text inside a markup-parsed f-string and is the reason
+    source-side escaping (see ``_audit_body_text``) is preferred
+    for the panels we've already fixed.
+    """
+
+    safe = DefenseClawTUI._safe_body_renderable  # noqa: SLF001 - exercising defense in depth.
+    for hostile in (
+        "target:[skill]",
+        "run:[abc-xyz]",
+        "search:[unmatched",  # unbalanced bracket -> MarkupError fallback.
+    ):
+        composed = f"{hostile}  [#444444]│[/]  Ready"
+        rendered = safe(composed)
+        assert isinstance(rendered, Text)
+        # Defensive guarantee: no crash, and the operator's text
+        # survives as literal characters in the rendered plain text
+        # (either via the validator dropping the bogus span or the
+        # MarkupError fallback returning the whole string verbatim).
+        assert hostile in rendered.plain

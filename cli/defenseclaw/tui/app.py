@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -27,6 +28,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__
+from defenseclaw import config as config_module
 from defenseclaw.tui.command_line import CommandLineError, ParsedCommand, parse_command_line
 from defenseclaw.tui.executor import CommandAlreadyRunningError, CommandExecutor
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
@@ -594,11 +596,23 @@ class DefenseClawTUI(App[None]):
         self._toasts_dirty = False
 
     def compose(self) -> ComposeResult:
+        # If the persisted ``active_panel`` is now connector-gated
+        # (e.g. operator quit on Plugins, then changed connector before
+        # relaunch), fall back to the first visible panel. Otherwise
+        # Tabs(active="tab-plugins", ...) would resolve to a Tab that
+        # isn't in the list and Textual raises during validate_active.
+        visible_panels = self._visible_panels() or ["overview"]
+        if self.active_panel not in visible_panels:
+            self.active_panel = visible_panels[0]
         with Vertical(id="root"):
             with Horizontal(id="header"):
                 yield Static(f"DefenseClaw {__version__}", id="title")
                 yield Tabs(
-                    *(Tab(f"{key} {label}", id=f"tab-{name}") for name, key, label in PANELS),
+                    *(
+                        Tab(f"{key} {label}", id=f"tab-{name}")
+                        for name, key, label in PANELS
+                        if not self._panel_hidden(name)
+                    ),
                     active=f"tab-{self.active_panel}",
                     id="tabs",
                 )
@@ -742,6 +756,52 @@ class DefenseClawTUI(App[None]):
                     yield Button("Restart", id="setup-restart", compact=True)
                     yield Button("Clear restart", id="setup-clear-restart", compact=True)
                     yield Button("Refresh keys", id="setup-refresh-credentials", compact=True)
+                with Horizontal(id="ai-controls", classes="panel-controls hidden"):
+                    # AI Discovery panel was view-only — operators had
+                    # to leave the panel to enable/disable/scan via the
+                    # drawer. These buttons drive the same CLI commands
+                    # through `_submit_command_text` so preview gating,
+                    # already-running guards, and Activity streaming
+                    # keep working. Enable/Disable are mutually
+                    # exclusive based on the snapshot's `enabled` flag.
+                    yield Button(
+                        "Enable AI Discovery",
+                        id="ai-enable",
+                        compact=True,
+                        variant="success",
+                        tooltip="Run `defenseclaw agent discovery enable --yes`",
+                    )
+                    yield Button(
+                        "Disable AI Discovery",
+                        id="ai-disable",
+                        compact=True,
+                        variant="warning",
+                        tooltip="Run `defenseclaw agent discovery disable --yes`",
+                    )
+                    yield Button(
+                        "Scan now",
+                        id="ai-scan",
+                        compact=True,
+                        tooltip="Run `defenseclaw agent discover` to rescan",
+                    )
+                    yield Button(
+                        "Refresh",
+                        id="ai-refresh",
+                        compact=True,
+                        tooltip="Reload the AI usage snapshot (`agent usage --json`)",
+                    )
+                    yield Button(
+                        "Open agent details",
+                        id="ai-open-detail",
+                        compact=True,
+                        tooltip="Open the highlighted agent's detail view",
+                    )
+                    yield Button(
+                        "Export JSON",
+                        id="ai-export",
+                        compact=True,
+                        tooltip="Save the AI usage snapshot to disk",
+                    )
                 yield DataTable(
                     id="panel-table",
                     classes="hidden",
@@ -920,8 +980,39 @@ class DefenseClawTUI(App[None]):
         if panel is None:
             return
 
+        # Connector-gated panels (today: Plugins on non-OpenClaw) keep
+        # the digit shortcut mapped so muscle memory does not break,
+        # but the keystroke becomes a silent no-op instead of opening
+        # an empty placeholder. Mirrors the Go TUI's panelHidden check.
+        if self._panel_hidden(panel):
+            event.stop()
+            return
+
         self.action_switch_panel(panel)
         event.stop()
+
+    def _panel_hidden(self, panel: str) -> bool:
+        """Return True if ``panel`` should be hidden from tabs + cycling.
+
+        Mirrors Go's ``Model.panelHidden`` (see ``internal/tui/app.go``).
+        Today only the Plugins panel is connector-gated — DefenseClaw
+        plugins are an OpenClaw-only concept (G4); showing the tab for
+        any other connector would yield an empty list and operator
+        confusion.
+        """
+
+        if panel != "plugins":
+            return False
+        return _active_connector(self.config).lower() != "openclaw"
+
+    def _visible_panels(self) -> list[str]:
+        """Ordered list of panel names that should currently be visible.
+
+        Used by tab cycling and the compose-time tab filter so the two
+        always agree on what's reachable for the current connector.
+        """
+
+        return [name for name, _key, _label in PANELS if not self._panel_hidden(name)]
 
     def action_switch_panel(self, panel: str) -> None:
         self.active_panel = panel
@@ -960,14 +1051,27 @@ class DefenseClawTUI(App[None]):
             )
 
     def action_next_panel(self) -> None:
-        names = [name for name, _key, _label in PANELS]
-        idx = names.index(self.active_panel)
-        self.action_switch_panel(names[(idx + 1) % len(names)])
+        visible = self._visible_panels()
+        if not visible:
+            return
+        try:
+            idx = visible.index(self.active_panel)
+        except ValueError:
+            # Active panel is currently hidden (e.g. operator landed on
+            # Plugins, then the connector flipped). Treat "next" as
+            # "first visible" so the operator gets unstuck immediately.
+            idx = -1
+        self.action_switch_panel(visible[(idx + 1) % len(visible)])
 
     def action_previous_panel(self) -> None:
-        names = [name for name, _key, _label in PANELS]
-        idx = names.index(self.active_panel)
-        self.action_switch_panel(names[(idx - 1) % len(names)])
+        visible = self._visible_panels()
+        if not visible:
+            return
+        try:
+            idx = visible.index(self.active_panel)
+        except ValueError:
+            idx = 0
+        self.action_switch_panel(visible[(idx - 1) % len(visible)])
 
     def action_open_command(self) -> None:
         # Refuse to open the palette while a subprocess is in flight.
@@ -1059,6 +1163,10 @@ class DefenseClawTUI(App[None]):
         if button_id.startswith("activity-"):
             event.stop()
             self._handle_activity_control(button_id)
+            return
+        if button_id.startswith("ai-"):
+            event.stop()
+            self._handle_ai_control(button_id)
             return
 
     def action_local_close(self) -> None:
@@ -1685,6 +1793,7 @@ class DefenseClawTUI(App[None]):
         policy = self.query_one("#policy-controls", Horizontal)
         setup = self.query_one("#setup-controls", Horizontal)
         activity = self.query_one("#activity-controls", Horizontal)
+        ai = self.query_one("#ai-controls", Horizontal)
         overview.set_class(self.active_panel != "overview" or self.help_open, "hidden")
         alerts.set_class(self.active_panel != "alerts" or self.help_open, "hidden")
         audit.set_class(self.active_panel != "audit" or self.help_open, "hidden")
@@ -1701,6 +1810,7 @@ class DefenseClawTUI(App[None]):
         policy.set_class(self.active_panel != "policy" or self.help_open, "hidden")
         setup.set_class(self.active_panel != "setup" or self.help_open, "hidden")
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
+        ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
         # Stdin pipe is panel-scoped to Activity but command-state-scoped
         # to "executor is busy" — handle it after the per-panel sync so
         # the visibility check sees the freshest state.
@@ -1723,6 +1833,8 @@ class DefenseClawTUI(App[None]):
             self._sync_setup_controls()
         if self.active_panel == "activity" and not self.help_open:
             self._sync_activity_controls()
+        if self.active_panel == "ai" and not self.help_open:
+            self._sync_ai_controls()
 
     def _sync_overview_controls(self) -> None:
         """Light up the click-first quick actions for the Overview panel.
@@ -1894,6 +2006,34 @@ class DefenseClawTUI(App[None]):
             stdin.remove_class("open")
             stdin.display = False
             stdin.value = ""
+
+    def _sync_ai_controls(self) -> None:
+        """Toggle AI Discovery action-bar buttons to match the snapshot.
+
+        Enable/Disable are mutually exclusive — we hide the one that
+        doesn't apply so the bar reads as "what can I do right now?"
+        instead of "here's every button, half of them are a no-op".
+        Open agent details / Export are disabled (greyed) when there's
+        no row highlighted / no snapshot loaded — they're permanent
+        fixtures so disappearing them on every load would feel jittery.
+        """
+
+        snapshot = self.ai_discovery_model.snapshot
+        enabled = bool(snapshot and snapshot.enabled)
+        # When the snapshot is missing entirely (offline / never loaded)
+        # we don't know whether discovery is on, so default to offering
+        # Enable; the existing CLI flag is idempotent so this is safe.
+        snapshot_known = snapshot is not None
+        self._set_button_visible("#ai-enable", (not enabled) or (not snapshot_known))
+        self._set_button_visible("#ai-disable", enabled)
+        # Scan only makes sense when discovery is on — discover requires
+        # the daemon to be running, otherwise the CLI errors out.
+        self._set_button_visible("#ai-scan", enabled)
+        self.query_one("#ai-refresh", Button).disabled = False
+        # Open agent details requires a highlighted row.
+        self.query_one("#ai-open-detail", Button).disabled = self.ai_discovery_model.selected() is None
+        # Export needs an actual snapshot.
+        self.query_one("#ai-export", Button).disabled = snapshot is None
 
     def _set_button_active(self, selector: str, active: bool) -> None:
         try:
@@ -2188,6 +2328,82 @@ class DefenseClawTUI(App[None]):
             self._set_status(f"Save failed: {exc}")
             return
         self._set_status(f"Saved Activity output to {target}")
+
+    def _handle_ai_control(self, button_id: str) -> None:
+        """Route an AI Discovery action-bar button to the matching helper.
+
+        Enable/Disable/Scan/Refresh are thin wrappers around the CLI
+        the existing keystroke shortcuts already exercise — sharing
+        `_submit_command_text` means preview gating, "already running"
+        guards, and Activity-panel streaming keep working unchanged.
+        Open agent details routes to the panel's own toggle so the
+        detail surface stays in sync regardless of how it was opened.
+        """
+
+        if button_id == "ai-enable":
+            self._submit_command_text("defenseclaw agent discovery enable --yes")
+            return
+        if button_id == "ai-disable":
+            self._submit_command_text("defenseclaw agent discovery disable --yes")
+            return
+        if button_id == "ai-scan":
+            self._submit_command_text("defenseclaw agent discover")
+            return
+        if button_id == "ai-refresh":
+            self._submit_command_text("defenseclaw agent usage --json")
+            return
+        if button_id == "ai-open-detail":
+            if self.ai_discovery_model.selected() is None:
+                self._set_status("Highlight an agent row first (↑/↓), then click Open agent details.")
+                return
+            self.ai_discovery_model.toggle_detail()
+            self._render_chrome()
+            return
+        if button_id == "ai-export":
+            self.run_worker(self._export_ai_discovery_snapshot(), exclusive=False, thread=False)
+            return
+
+    async def _export_ai_discovery_snapshot(self) -> None:
+        """Write the loaded AI usage snapshot to a JSON file on disk.
+
+        Mirrors the ``_export_audit`` pattern so operators have a
+        single mental model for "Export" buttons across panels: filename
+        is deterministic, target lives under ``data_dir``, and the
+        response is surfaced via the status line. We use
+        ``dataclasses.asdict`` over a custom field list so future
+        additions to ``AIUsageSnapshot`` automatically appear in the
+        export — bespoke field plucking has bitrotted in this codebase
+        before.
+        """
+
+        snapshot = self.ai_discovery_model.snapshot
+        if snapshot is None:
+            self._set_status("No AI usage snapshot loaded — try Refresh first.")
+            return
+        target = (self.data_dir or Path.cwd()) / "defenseclaw-ai-usage-export.json"
+        payload = asdict(snapshot)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                json.dumps(payload, indent=2, default=self._json_default),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self._set_status(f"AI export failed: {exc}")
+            return
+        self._set_status(f"Exported AI usage snapshot to {target}")
+
+    @staticmethod
+    def _json_default(value: Any) -> str:
+        """Stringify datetime / Path / set values for ``json.dumps``."""
+
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, (set, frozenset, tuple)):
+            return list(value)
+        return repr(value)
 
     def _overview_metric_data(self) -> tuple[MetricDatum, ...]:
         """Build the metric-tile row for the Overview header.
@@ -2597,8 +2813,17 @@ class DefenseClawTUI(App[None]):
         badge counts up — `_periodic_refresh` is paused while a command
         is running, and without this poke the timer would freeze and look
         like a hang.
+
+        Also drives toast expiry. Toast TTLs (4–8s) are short enough that
+        piggy-backing on the existing 250ms strip tick keeps the visible
+        list within ~250ms of the manager's notion of "now" without
+        adding a second timer.
         """
 
+        if self.toasts.tick():
+            self._toasts_dirty = True
+        if self._toasts_dirty:
+            self._render_toasts()
         if self._strip_state != "running":
             return
         self._strip_spinner_tick = (self._strip_spinner_tick + 1) % len(self._SPINNER_FRAMES)
@@ -2650,6 +2875,17 @@ class DefenseClawTUI(App[None]):
         else:
             tail = self._strip_last_output
             self._strip_summary = tail or f"exit {exit_code} · no output captured"
+        # Fire a transient toast as well so operators on a different
+        # panel still notice the result without having to switch back to
+        # Activity. Strip is the persistent receipt; toast is the nudge.
+        label = self._strip_label or "command"
+        if exit_code == 0:
+            self.notify_toast("success", f"{label} finished in {duration:.1f}s")
+        else:
+            self.notify_toast(
+                "error",
+                f"{label} failed (exit {exit_code}) — {self._strip_summary}",
+            )
         self._render_command_strip()
 
     def _strip_rejected(self, reason: str) -> None:
@@ -2660,6 +2896,7 @@ class DefenseClawTUI(App[None]):
         self._strip_frozen_duration = None
         self._strip_last_output = ""
         self._strip_summary = reason or "command did not parse"
+        self.notify_toast("warn", f"Rejected: {self._strip_summary}")
         self._render_command_strip()
 
     def _strip_clear(self) -> None:
@@ -2673,8 +2910,35 @@ class DefenseClawTUI(App[None]):
         self._strip_summary = ""
         self._render_command_strip()
 
+    def notify_toast(self, level: ToastLevel, message: str) -> None:
+        """Push a toast and re-render the stack.
+
+        Mirrors the Go TUI's ``ToastManager.Push``: keep this the single
+        funnel so every caller (executor finish, audit export, rerun,
+        gateway-restart detector, …) gets the same eviction policy and
+        TTL behaviour. Failures are swallowed because a toast that
+        can't render must never block a real workflow.
+        """
+
+        try:
+            self.toasts.push(level, message)
+            self._toasts_dirty = True
+            self._render_toasts()
+        except Exception:  # noqa: BLE001 - cosmetic UI affordance
+            pass
+
+    def _render_toasts(self) -> None:
+        """Sync the ToastStack widget with the current ToastManager queue."""
+
+        try:
+            stack = self.query_one("#toasts", ToastStack)
+        except NoMatches:
+            return
+        stack.render_items(list(self.toasts.items))
+        self._toasts_dirty = False
+
     def _render_command_strip(self) -> None:
-        """Push current state into the DOM. Safe to call at any time.
+        """Push current command-progress state into the DOM.
 
         Tolerates being invoked before the app is mounted (Textual raises
         ``ScreenStackError`` from ``query_one`` when there's no screen
@@ -3352,10 +3616,18 @@ class DefenseClawTUI(App[None]):
             "[bold #22D3EE]Audit Trail[/]  [#9FB2CC]Click common filters above, or search with field:value terms.[/]",
             f"{toolbar.summary_label}  {actions}",
         ]
+        # ``filter_label`` and ``search_prompt`` are operator-supplied:
+        # the filter chip and the ``/`` search field both echo whatever
+        # the user typed (e.g. ``target:[skill]``). Without escaping,
+        # ``[skill]`` parses as a style tag named ``skill`` and the
+        # render path re-trips the same ``MissingStyle`` /
+        # ``StyleSyntaxError`` crash the action-key fix above closed.
+        # ``_safe_body_renderable`` catches the fallout defensively,
+        # but escaping at source means we never waste a render frame.
         if toolbar.filter_label:
-            lines.append(toolbar.filter_label)
+            lines.append(rich_escape(toolbar.filter_label))
         if toolbar.search_prompt:
-            lines.append(f"[{TOKENS.accent_cyan}]{toolbar.search_prompt}[/]")
+            lines.append(f"[{TOKENS.accent_cyan}]{rich_escape(toolbar.search_prompt)}[/]")
         lines.append(
             "Search examples: severity:HIGH action:block target:skill run:<id>. "
             "Use Same target or Same run to correlate the selected event."
@@ -3365,7 +3637,19 @@ class DefenseClawTUI(App[None]):
     def _set_status(self, text: str) -> None:
         self.status_text = text
         strip = render_status_strip(self._hint_status_model())
-        self.query_one("#status", Static).update(f"{text}  [#444444]│[/]  {strip}")
+        # ``text`` is operator-supplied via every ``_set_status`` caller —
+        # including ``self.audit_model.active_filter_label()`` and the
+        # logs search prompt — both of which echo whatever was typed
+        # into the ``/`` field. Without ``_safe_body_renderable`` the
+        # f-string below would feed ``Static.update`` markup like
+        # ``[red] │ …`` and Textual's renderer would later trip
+        # ``MissingStyle`` (same root cause as the audit toolbar
+        # crash). Build a Text object via the defensive wrapper so a
+        # hostile filter degrades to plain text instead of tearing
+        # down the status strip mid-frame.
+        self.query_one("#status", Static).update(
+            self._safe_body_renderable(f"{text}  [#444444]│[/]  {strip}")
+        )
 
     def _write_activity(self, text: str) -> None:
         self.activity_lines.append(text)
@@ -3503,7 +3787,14 @@ class DefenseClawTUI(App[None]):
             panel.update("")
             return
         panel.remove_class("hidden")
-        panel.update(detail)
+        # Detail strings can contain hostile-looking markup the same
+        # way bodies do — judge history rows prefix labels with
+        # ``[1] Timestamp`` and webhook summaries say
+        # ``[enabled] https://…`` — both of which Rich would try to
+        # parse as styles ``1`` / ``enabled`` and crash on render.
+        # Route every detail update through the same safety wrapper
+        # the body uses so a bogus span never tears down the TUI.
+        panel.update(self._safe_body_renderable(detail))
 
     def _detail_text(self) -> str:
         if self.active_panel == "alerts":
@@ -3550,7 +3841,12 @@ class DefenseClawTUI(App[None]):
         if self.active_panel == "overview" and not self.help_open:
             body_widget.update(self._overview_renderable())
         else:
-            body_widget.update(self._body_text())
+            # Same defense-in-depth as ``_render_chrome`` — any panel's
+            # body string can contain malformed markup (the audit
+            # toolbar's ``[e] export`` was the canonical case) and we
+            # must never let a single bad span crash the renderer
+            # mid-frame and tear down the TUI.
+            body_widget.update(self._safe_body_renderable(self._body_text()))
         self._render_panel_controls()
         self._render_detail_panel()
 
@@ -4538,12 +4834,10 @@ class DefenseClawTUI(App[None]):
         """
 
         try:
-            from defenseclaw import config as config_module
-
             new_cfg: object | None = config_module.load()
         except Exception as exc:  # noqa: BLE001 — bad YAML must not crash the TUI.
             self._write_activity(
-                f"[#FBBF24]config reload failed:[/] {exc}; keeping current snapshot."
+                f"[#FBBF24]config reload failed:[/] {rich_escape(str(exc))}; keeping current snapshot."
             )
             new_cfg = self.config
 
@@ -4567,12 +4861,31 @@ class DefenseClawTUI(App[None]):
         if hasattr(self.alerts_model, "set_data_dir"):
             self.alerts_model.set_data_dir(new_data_dir)
 
-        # Re-open audit store at the new path.
+        # Re-open audit store at the new path. Capture the previous
+        # handles *before* the swap so we can close them after — the
+        # alerts and audit panels each held a reference and replacing
+        # the attribute alone leaked the SQLite file descriptor on
+        # every setup-driven reload (which a typical session triggers
+        # several times: connector pick, registry add, redaction
+        # toggle, etc.). The previous handles can be the same Store
+        # instance, so dedupe before closing.
         new_store = _audit_store(new_cfg)
+        old_stores: list[object] = []
+        for model in (self.alerts_model, self.audit_model):
+            prior = getattr(model, "store", None)
+            if prior is not None and prior is not new_store and prior not in old_stores:
+                old_stores.append(prior)
         if hasattr(self.alerts_model, "set_store"):
             self.alerts_model.set_store(new_store)
         if hasattr(self.audit_model, "set_store"):
             self.audit_model.set_store(new_store)
+        for stale in old_stores:
+            close = getattr(stale, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:  # noqa: BLE001 — best-effort cleanup; never block the reload.
+                    pass
 
         # Re-apply the known health snapshot so subsystem state stays
         # populated through the reload (next poll overwrites this in 3s).
