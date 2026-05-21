@@ -118,7 +118,7 @@ func codexHomeDir() string {
 	if home := strings.TrimSpace(os.Getenv("CODEX_HOME")); home != "" {
 		return home
 	}
-	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+	if home := strings.TrimSpace(userHomeDir()); home != "" {
 		return filepath.Join(home, ".codex")
 	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {

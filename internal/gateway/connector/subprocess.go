@@ -394,8 +394,37 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
+		// On Windows, agent runtimes cannot execute .sh files directly and
+		// may run them through a shell that cannot exec Windows .exe files.
+		// Write a .cmd wrapper alongside each .sh hook so connectors can
+		// reference the .cmd path as the hook command — cmd.exe runs it
+		// natively and forwards stdin/stdout to Git Bash correctly.
+		if runtime.GOOS == "windows" && strings.HasSuffix(name, ".sh") {
+			if err := writeWindowsHookWrapper(hookDir, name); err != nil {
+				return fmt.Errorf("write windows hook wrapper %s: %w", name, err)
+			}
+		}
 	}
 	return nil
+}
+
+// writeWindowsHookWrapper writes a .cmd file that calls Git Bash to execute
+// the corresponding .sh hook. Using a .cmd wrapper avoids the ambiguity of
+// which bash (Git Bash vs WSL) a runtime picks up from PATH, and ensures
+// cmd.exe — which always works on Windows — is the entry point.
+func writeWindowsHookWrapper(hookDir, shName string) error {
+	bashExe := filepath.ToSlash(resolveWindowsBash())
+	// Strip leading/trailing quotes resolveWindowsBash may add.
+	bashExe = strings.Trim(bashExe, `"`)
+	shPath := filepath.ToSlash(filepath.Join(hookDir, shName))
+	cmdName := strings.TrimSuffix(shName, ".sh") + ".cmd"
+	cmdPath := filepath.Join(hookDir, cmdName)
+	// %* forwards any extra arguments; stdin/stdout are inherited by cmd.exe.
+	// "exit /b %ERRORLEVEL%" explicitly propagates the bash exit code
+	// (e.g. exit 2 for hook-block) to the calling agent runtime; without
+	// it some cmd.exe invocations silently reset the exit code.
+	content := "@echo off\r\n\"" + bashExe + "\" \"" + shPath + "\" %*\r\nexit /b %ERRORLEVEL%\r\n"
+	return os.WriteFile(cmdPath, []byte(content), 0o700)
 }
 
 func hookScriptNamesForConnector(opts SetupOpts, c Connector) []string {

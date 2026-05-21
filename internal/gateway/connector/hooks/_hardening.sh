@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v5
+# defenseclaw-managed-hook v6
 # Plan B4 / S0.4: shell-side hook hardening helpers.
 #
 # Schema versions:
@@ -26,6 +26,20 @@
 #        (no helper signatures changed), so a downgrade to v3 only
 #        loses the stale-dir sweep — older hook scripts that source
 #        either version keep working unmodified.
+#   v6 — defenseclaw_harden_env now preserves access to curl and jq even
+#        when the locked-down PATH omits their install directory. Before
+#        locking, the function snapshots the paths of curl and jq
+#        (command -v); after locking it adds each tool's directory back
+#        only if the tool is no longer reachable on the hardened PATH.
+#        This fixes "gateway unreachable" errors on Windows Git Bash,
+#        where curl lives in /mingw64/bin and the [ -d /mingw64/bin ]
+#        guard can silently fail for subprocess-spawned bash instances.
+#        Also adds the _dc_jq shim: real jq when available (unchanged on
+#        Mac/Linux), python3 fallback for object + string fields, then a
+#        pure-shell string-only last resort.  jq is not bundled with Git
+#        for Windows so the shim makes block decisions parse-able without
+#        requiring a separate jq install.  No helper signatures changed;
+#        hook scripts just replace bare `jq` calls with `_dc_jq`.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -52,6 +66,15 @@
 # DEFENSECLAW_HOME/logs) are idempotent and pure — no side effects
 # beyond setting env / ulimit. They MUST NOT call out to the agent or
 # the gateway.
+
+# Windows compatibility: some agent runtimes (e.g. Codex on Windows) do
+# not set HOME when spawning hook subprocesses. Without this, `set -u`
+# causes an immediate "unbound variable" exit 1. Fall back to USERPROFILE
+# (standard on Windows) or ~ expansion.
+if [ -z "${HOME:-}" ]; then
+  HOME="${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}"
+  export HOME
+fi
 
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
@@ -89,6 +112,16 @@ defenseclaw_harden_env() {
         GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_PACK_ACCESS \
         GIT_SSH GIT_SSH_COMMAND
 
+  # Snapshot locations of tools we require BEFORE locking PATH.  If the
+  # hardened PATH omits their directory (common on Windows Git Bash where
+  # curl lives in /mingw64/bin and the [ -d /mingw64/bin ] guard can
+  # silently fail for subprocess-spawned bash), we restore only those
+  # specific directories afterwards — preserving the security goal (no
+  # agent-injected bins) while keeping curl and jq reachable.
+  local _dc_pre_curl _dc_pre_jq
+  _dc_pre_curl="$(command -v curl 2>/dev/null || true)"
+  _dc_pre_jq="$(command -v jq 2>/dev/null || true)"
+
   # Lock down PATH — keep only the standard system bins where curl /
   # jq / sed / tail / cat / mktemp must live. Operators (and tests)
   # that need a custom path must set DEFENSECLAW_HOOK_PATH explicitly;
@@ -97,9 +130,28 @@ defenseclaw_harden_env() {
   # the override and falls back to the locked-down default.
   if [ -n "${DEFENSECLAW_HOOK_PATH:-}" ]; then
     export PATH="$DEFENSECLAW_HOOK_PATH"
+  elif [ -d /mingw64/bin ]; then
+    # Git for Windows installs curl.exe under /mingw64/bin. Keep the Unix
+    # system dirs too so sed/head/tail remain available.
+    export PATH="/mingw64/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   else
     export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   fi
+
+  # After lockdown: if curl or jq vanished, add back only their directory.
+  # _dc_restore_tool_dir is a local helper — defined here, used immediately.
+  _dc_restore_tool_dir() {
+    local _p="$1"
+    [ -z "$_p" ] && return 0
+    local _d
+    _d="$(dirname "$_p" 2>/dev/null)"
+    case ":$PATH:" in
+      *":$_d:"*) ;;
+      *) export PATH="$PATH:$_d" ;;
+    esac
+  }
+  command -v curl >/dev/null 2>&1 || _dc_restore_tool_dir "$_dc_pre_curl"
+  command -v jq   >/dev/null 2>&1 || _dc_restore_tool_dir "$_dc_pre_jq"
 
   # Keep the locale predictable so jq output / sed regex behavior
   # don't shift under the agent's locale.
@@ -196,6 +248,96 @@ defenseclaw_json_escape() {
     printf '%s' "${1:-}" | tr '\000-\037' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'
   } 2>/dev/null || printf unavailable
   return 0
+}
+
+# defenseclaw_json_string_field extracts a simple top-level JSON string field.
+# It is intentionally small: hook block/allow parsing only needs fields like
+# "action" and "reason" when jq is unavailable (common in Git Bash on Windows).
+defenseclaw_json_string_field() {
+  local json="${1:-}"
+  local field="${2:-}"
+  if [ -z "$field" ]; then
+    return 1
+  fi
+  printf '%s' "$json" | tr '\n\r' '  ' | sed -nE \
+    's/.*"'"$field"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' |
+    sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
+}
+
+# _dc_jq is a drop-in shim for jq covering the small subset of filters
+# used by DefenseClaw hook scripts.  When the real jq binary is present
+# (all Unix installs; some Windows installs) it is used unchanged.
+# When jq is absent the shim tries python3 (handles both string and
+# object fields such as claude_code_output), then falls back to
+# defenseclaw_json_string_field for string-only fields.  Object fields
+# (e.g. claude_code_output) return empty from the string-only fallback;
+# hook scripts handle empty output correctly (fall through to exit-2
+# block path).
+#
+# Supported filter forms (covers all patterns in DefenseClaw hooks):
+#   .field                    — raw value
+#   .field // empty           — value or nothing on null/missing
+#   .field // "default"       — value or literal default string
+#
+# Flags honored: -r (raw string output), -c (compact JSON output)
+# shellcheck disable=SC2120
+_dc_jq() {
+  if command -v jq >/dev/null 2>&1; then
+    jq "$@"
+    return
+  fi
+  local _dcjq_raw=0 _dcjq_compact=0 _dcjq_filter=""
+  for _dcjq_a in "$@"; do
+    case "$_dcjq_a" in
+      -r)   _dcjq_raw=1 ;;
+      -c)   _dcjq_compact=1 ;;
+      # Handle accidental merged forms: -r.field or -c.field (no space)
+      -r.*) _dcjq_raw=1;     _dcjq_filter="${_dcjq_a#-r}" ;;
+      -c.*) _dcjq_compact=1; _dcjq_filter="${_dcjq_a#-c}" ;;
+      *)    _dcjq_filter="$_dcjq_a" ;;
+    esac
+  done
+  # Python3 fallback: handles both string scalars and nested objects.
+  # All values are passed via env to avoid shell quoting issues.
+  # The script uses only double-quoted Python strings so it is safe
+  # inside shell single quotes.
+  if command -v python3 >/dev/null 2>&1; then
+    DCJQ_FILTER="$_dcjq_filter" DCJQ_RAW="$_dcjq_raw" DCJQ_COMPACT="$_dcjq_compact" \
+      python3 -c \
+'import json,sys,os,re
+f=os.environ.get("DCJQ_FILTER","")
+raw=os.environ.get("DCJQ_RAW","0")=="1"
+compact=os.environ.get("DCJQ_COMPACT","0")=="1"
+try:
+  data=json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+m=re.match(r"^\.(\w+)\s*(?://\s*(.+))?$",f.strip())
+if not m:
+  sys.exit(1)
+field=m.group(1)
+dflt=(m.group(2) or "").strip()
+val=data.get(field)
+if val is None:
+  if dflt in ("empty","null",""):
+    sys.exit(0)
+  dm=re.match(r"^\"(.*)\"$",dflt)
+  sys.stdout.write((dm.group(1) if dm else dflt)+"\n")
+  sys.exit(0)
+if isinstance(val,str):
+  sys.stdout.write(val+"\n")
+else:
+  sep=(",",":") if compact else (", ",": ")
+  sys.stdout.write(json.dumps(val,separators=sep)+"\n")'
+    return
+  fi
+  # String-only last resort: covers action / reason / block_reason.
+  # Object fields (claude_code_output, codex_output, hook_output) return
+  # empty; callers already handle the empty case correctly.
+  local _dcjq_field
+  _dcjq_field="${_dcjq_filter#.}"
+  _dcjq_field="${_dcjq_field%%[[:space:]]*}"
+  defenseclaw_json_string_field "$(cat)" "$_dcjq_field"
 }
 
 # defenseclaw_log_hook_failure writes a structured JSON line to

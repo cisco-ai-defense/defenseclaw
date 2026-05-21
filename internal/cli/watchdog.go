@@ -27,7 +27,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -135,7 +134,7 @@ func runWatchdogForeground(_ *cobra.Command, _ []string) error {
 	_ = os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o644)
 	defer os.Remove(pidPath)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), watchdogShutdownSignals()...)
 	defer stop()
 
 	// The watchdog subcommand overrides rootCmd.PersistentPreRunE (see the
@@ -323,7 +322,7 @@ func runWatchdogStart(_ *cobra.Command, _ []string) error {
 	if data, err := os.ReadFile(pidPath); err == nil {
 		if pid, err := strconv.Atoi(string(data)); err == nil {
 			if proc, err := os.FindProcess(pid); err == nil {
-				if err := proc.Signal(syscall.Signal(0)); err == nil {
+				if watchdogProcessAlive(pid, proc) {
 					Warn(fmt.Sprintf("Watchdog is already running (PID %d)", pid))
 					return nil
 				}
@@ -366,9 +365,9 @@ func (c *execCommand) start() error {
 		return fmt.Errorf("open %s: %w", os.DevNull, err)
 	}
 	proc, err := os.StartProcess(c.path, append([]string{c.path}, c.args...), &os.ProcAttr{
-		Dir:   "/",
+		Dir:   watchdogStartDir(),
 		Files: []*os.File{devNull, c.logFile, c.logFile},
-		Sys:   &syscall.SysProcAttr{Setsid: true},
+		Sys:   watchdogSysProcAttr(),
 	})
 	_ = devNull.Close()
 	if err != nil {
@@ -404,7 +403,7 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	}
 
 	fmt.Printf("Stopping watchdog (PID %d)... ", pid)
-	if err := proc.Signal(syscall.SIGTERM); err != nil {
+	if err := watchdogTerminate(proc); err != nil {
 		fmt.Println(Dim("already stopped"))
 		_ = os.Remove(pidPath)
 		return nil
@@ -420,7 +419,7 @@ func runWatchdogStop(_ *cobra.Command, _ []string) error {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		_ = proc.Signal(syscall.SIGKILL)
+		_ = watchdogKill(proc)
 	}
 
 	_ = os.Remove(pidPath)
@@ -461,7 +460,7 @@ func runWatchdogStatus(_ *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
+	if !watchdogProcessAlive(pid, proc) {
 		Warn(fmt.Sprintf("Watchdog: not running (PID %d is stale)", pid))
 		_ = os.Remove(pidPath)
 		return nil

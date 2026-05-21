@@ -3,6 +3,9 @@
 # DefenseClaw Cursor hook — forwards Cursor command-hook payloads to the
 # DefenseClaw gateway.
 set -euo pipefail
+# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
+export HOME
 
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
@@ -90,7 +93,7 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-OUTPUT=$(echo "$RESULT" | jq -c '.hook_output // empty' 2>/dev/null) || {
+OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
