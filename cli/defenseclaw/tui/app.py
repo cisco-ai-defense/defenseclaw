@@ -254,6 +254,22 @@ class DefenseClawTUI(App[None]):
         display: none;
     }
 
+    /* Stdin pipe shown only while a command is actually running so
+       operators can finish interactive subprocesses (e.g. typing "3"
+       at a `Selection [3]:` prompt) with a click instead of trying
+       to forward single keystrokes through the panel handler. */
+    #activity-stdin {
+        display: none;
+        height: 3;
+        margin: 0 1;
+        border: round TOKEN_BORDER_ACTIVE;
+        background: TOKEN_SURFACE_RAISED;
+    }
+
+    #activity-stdin.open {
+        display: block;
+    }
+
     #overview-metrics {
         margin-bottom: 1;
     }
@@ -1040,6 +1056,10 @@ class DefenseClawTUI(App[None]):
             event.stop()
             self._handle_setup_control(button_id)
             return
+        if button_id.startswith("activity-"):
+            event.stop()
+            self._handle_activity_control(button_id)
+            return
 
     def action_local_close(self) -> None:
         command = self.query_one("#command-input", Input)
@@ -1148,6 +1168,36 @@ class DefenseClawTUI(App[None]):
         if 0 <= row < len(self._command_palette_values):
             return self._command_palette_values[row]
         return ""
+
+    @on(Input.Submitted, "#activity-stdin")
+    def _on_activity_stdin_submitted(self, event: Input.Submitted) -> None:
+        """Forward Activity-pipe input to the running subprocess.
+
+        Every submission appends ``\n`` so we mirror how a real terminal
+        delivers the line — interactive prompts like ``Selection [3]:``
+        expect to see a newline before they advance. Empty submissions
+        just send the newline (equivalent to "press Enter to accept the
+        default") instead of silently dropping the event, which matches
+        what an operator hitting Enter on a blank prompt expects.
+        """
+
+        if not (self.command_running or self.executor.is_running):
+            self._set_status("No command is running — nothing to send.")
+            event.input.value = ""
+            return
+        payload = (event.value or "") + "\n"
+        try:
+            self.executor.write_stdin(payload)
+        except Exception as exc:  # noqa: BLE001 - executor failure should not crash TUI
+            self._set_status(f"Send failed: {exc}")
+            return
+        sent_label = repr(event.value) if event.value else "(blank line)"
+        self._set_status(f"Sent {sent_label} to running command.")
+        event.input.value = ""
+        # Keep focus in the input so the operator can answer multiple
+        # prompts in a row (e.g. interactive setup picker with several
+        # questions) without re-clicking.
+        self.set_focus(event.input)
 
     @on(Input.Submitted, "#command-input")
     async def _on_command_submitted(self, event: Input.Submitted) -> None:
@@ -1634,6 +1684,7 @@ class DefenseClawTUI(App[None]):
         registries = self.query_one("#registries-controls", Horizontal)
         policy = self.query_one("#policy-controls", Horizontal)
         setup = self.query_one("#setup-controls", Horizontal)
+        activity = self.query_one("#activity-controls", Horizontal)
         overview.set_class(self.active_panel != "overview" or self.help_open, "hidden")
         alerts.set_class(self.active_panel != "alerts" or self.help_open, "hidden")
         audit.set_class(self.active_panel != "audit" or self.help_open, "hidden")
@@ -1649,6 +1700,11 @@ class DefenseClawTUI(App[None]):
         registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
         policy.set_class(self.active_panel != "policy" or self.help_open, "hidden")
         setup.set_class(self.active_panel != "setup" or self.help_open, "hidden")
+        activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
+        # Stdin pipe is panel-scoped to Activity but command-state-scoped
+        # to "executor is busy" — handle it after the per-panel sync so
+        # the visibility check sees the freshest state.
+        self._sync_activity_stdin()
         if self.active_panel == "overview" and not self.help_open:
             self._sync_overview_controls()
         if self.active_panel == "alerts" and not self.help_open:
@@ -1665,6 +1721,8 @@ class DefenseClawTUI(App[None]):
             self._sync_policy_controls()
         if self.active_panel == "setup" and not self.help_open:
             self._sync_setup_controls()
+        if self.active_panel == "activity" and not self.help_open:
+            self._sync_activity_controls()
 
     def _sync_overview_controls(self) -> None:
         """Light up the click-first quick actions for the Overview panel.
@@ -1792,6 +1850,50 @@ class DefenseClawTUI(App[None]):
         self.query_one("#setup-revert", Button).disabled = self.setup_model.mode != "config"
         self.query_one("#setup-restart", Button).disabled = not self.setup_model.restart_queue.pending
         self.query_one("#setup-clear-restart", Button).disabled = not self.setup_model.restart_queue.pending
+
+    def _sync_activity_controls(self) -> None:
+        """Toggle Activity action-bar buttons to match the live state.
+
+        Cancel only appears while a command is running so the bar
+        doesn't read like a fake offer when there's nothing to cancel.
+        Save/Rerun are disabled (greyed) instead of hidden when there's
+        no history yet — they're permanent fixtures and disappearing
+        them on every fresh launch would feel jittery.
+        """
+
+        running = bool(self.command_running or self.executor.is_running)
+        self._set_button_visible("#activity-cancel", running)
+        has_history = bool(self.activity_model.entries)
+        self.query_one("#activity-clear", Button).disabled = not has_history
+        self.query_one("#activity-save", Button).disabled = not has_history
+        rerun_disabled = (not self.activity_model.last_command) or running
+        self.query_one("#activity-rerun", Button).disabled = rerun_disabled
+
+    def _sync_activity_stdin(self) -> None:
+        """Show the send-to-stdin Input only while a command is running.
+
+        The pipe forwards bytes through ``executor.write_stdin`` so the
+        operator can answer interactive prompts (e.g. ``Selection [3]:``)
+        with a click rather than trying to type individual keystrokes
+        through ``_forward_activity_stdin``. We only show it on Activity
+        — operators monitoring Logs or Audit don't need an input field
+        hanging around.
+        """
+
+        try:
+            stdin = self.query_one("#activity-stdin", Input)
+        except NoMatches:
+            return
+        running = bool(self.command_running or self.executor.is_running)
+        want_open = running and self.active_panel == "activity" and not self.help_open
+        is_open = stdin.has_class("open")
+        if want_open and not is_open:
+            stdin.add_class("open")
+            stdin.display = True
+        elif not want_open and is_open:
+            stdin.remove_class("open")
+            stdin.display = False
+            stdin.value = ""
 
     def _set_button_active(self, selector: str, active: bool) -> None:
         try:
@@ -2012,6 +2114,80 @@ class DefenseClawTUI(App[None]):
         key = key_by_button.get(button_id)
         if key is not None:
             self._apply_setup_action(self._handle_setup_key(key))
+
+    def _handle_activity_control(self, button_id: str) -> None:
+        """Route an Activity action-bar button to the matching helper.
+
+        These buttons sit alongside the existing keyboard shortcuts
+        (``!`` rerun, ``Ctrl+C`` cancel) so operators on a mouse-only
+        terminal aren't locked out of the panel's lifecycle controls.
+        Cancel and Rerun both reuse the exact code paths the keystroke
+        version exercises so we don't accumulate a second implementation
+        of "send SIGINT" or "rerun last".
+        """
+
+        if button_id == "activity-cancel":
+            if self.command_running or self.executor.is_running:
+                self.run_worker(self._cancel_running_command(), exclusive=False, thread=False)
+            else:
+                self._set_status("No command is running.")
+            return
+        if button_id == "activity-clear":
+            removed = self.activity_model.clear_history()
+            try:
+                self.query_one("#activity", RichLog).clear()
+            except NoMatches:
+                pass
+            self.activity_lines = []
+            self._render_chrome()
+            self._set_status(
+                f"Cleared {removed} Activity entr{'y' if removed == 1 else 'ies'}."
+                if removed
+                else "Activity history is already empty."
+            )
+            return
+        if button_id == "activity-save":
+            self.run_worker(self._save_activity_output_interactive(), exclusive=False, thread=False)
+            return
+        if button_id == "activity-rerun":
+            # Reuse the existing "!" handler so we share validation,
+            # preview gating, and toast messaging with the keystroke.
+            self._handle_activity_key("!")
+            return
+        if button_id == "activity-open-drawer":
+            self.action_open_command()
+            return
+
+    async def _save_activity_output_interactive(self) -> None:
+        """Write the highlighted Activity entry's output to a file.
+
+        Uses the data_dir convention (same as ``_export_audit``) and
+        falls back to the working directory when no data_dir is wired
+        yet. The filename embeds the command's timestamp so repeated
+        saves don't clobber previous artifacts.
+        """
+
+        if not self.activity_model.entries:
+            self._set_status("No Activity entries to save.")
+            return
+        cursor = max(0, min(self.activity_model.cursor, len(self.activity_model.entries) - 1))
+        entry = self.activity_model.entries[cursor]
+        stamp = entry.started_at.strftime("%Y%m%d-%H%M%S")
+        safe_command = "".join(c if c.isalnum() else "-" for c in entry.command)[:40].strip("-") or "command"
+        filename = f"defenseclaw-activity-{stamp}-{safe_command}.txt"
+        target = (self.data_dir or Path.cwd()) / filename
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            header = (
+                f"# {entry.command}\n"
+                f"# {entry.status_label}\n"
+                f"# saved {datetime.now(timezone.utc).isoformat()}\n\n"
+            )
+            target.write_text(header + "\n".join(entry.output) + "\n", encoding="utf-8")
+        except OSError as exc:
+            self._set_status(f"Save failed: {exc}")
+            return
+        self._set_status(f"Saved Activity output to {target}")
 
     def _overview_metric_data(self) -> tuple[MetricDatum, ...]:
         """Build the metric-tile row for the Overview header.

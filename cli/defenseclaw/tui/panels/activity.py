@@ -112,6 +112,26 @@ class ActivityPanelModel:
             return
         self.cursor = max(0, min(index, len(self.entries) - 1))
 
+    def clear_history(self) -> int:
+        """Drop completed Activity entries and reset cursors.
+
+        Returns the number of entries removed so callers can surface a
+        confirmation message. A running entry (last entry, not yet
+        ``done``) is preserved so clicking Clear during a live command
+        doesn't orphan the executor's output stream — the user almost
+        always wants Clear to mean "wipe history", not "abort what's
+        running".
+        """
+
+        if not self.entries:
+            return 0
+        keep_running = self.entries[-1] if not self.entries[-1].done else None
+        removed = len(self.entries) - (1 if keep_running else 0)
+        self.entries = [keep_running] if keep_running else []
+        self.cursor = 0
+        self.term_scroll = 0
+        return removed
+
     def scroll_by(self, delta: int) -> None:
         if self.term_mode:
             self.term_scroll = max(0, self.term_scroll - delta)
