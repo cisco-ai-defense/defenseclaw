@@ -58,9 +58,31 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 			t.Errorf("got %q, want plain", got)
 		}
 	})
-	t.Run("custom token env empty does not use openclaw env", func(t *testing.T) {
+	t.Run("custom token env empty falls through to canonical", func(t *testing.T) {
+		// Behavior change: pre-fix, an empty TokenEnv hard-blocked
+		// the canonical/legacy checks, which diverged from Python's
+		// resolved_token() and broke the very common config state
+		// "TokenEnv=OPENCLAW_GATEWAY_TOKEN (stale default) + only
+		// DEFENSECLAW_ populated in dotenv". Post-fix the canonical
+		// → legacy → inline ladder ALWAYS runs after the named env
+		// var miss, so Go and Python can never disagree on which
+		// token is live. See ResolvedToken doc comment.
 		t.Setenv("MY_GATEWAY_TOKEN", "")
-		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "wrong")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "from-canonical")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "from-legacy")
+		g := GatewayConfig{TokenEnv: "MY_GATEWAY_TOKEN", Token: "inline"}
+		if got := g.ResolvedToken(); got != "from-canonical" {
+			t.Errorf("got %q, want from-canonical (canonical wins after named miss)", got)
+		}
+	})
+	t.Run("custom token env empty falls through to inline when no env set", func(t *testing.T) {
+		// With NO canonical / legacy populated, the chain bottoms
+		// out at the inline g.Token — preserves the "honest
+		// failure" path so an operator with a fully-empty
+		// environment still gets a working literal value.
+		t.Setenv("MY_GATEWAY_TOKEN", "")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 		g := GatewayConfig{TokenEnv: "MY_GATEWAY_TOKEN", Token: "fallback"}
 		if got := g.ResolvedToken(); got != "fallback" {
 			t.Errorf("got %q, want fallback", got)
@@ -80,6 +102,33 @@ func TestGatewayConfigResolvedToken(t *testing.T) {
 		g := GatewayConfig{TokenEnv: "", Token: ""}
 		if got := g.ResolvedToken(); got != "legacy-token" {
 			t.Errorf("got %q, want legacy-token", got)
+		}
+	})
+	t.Run("stale OPENCLAW_ TokenEnv falls through to DEFENSECLAW_ canonical", func(t *testing.T) {
+		// The exact user-reported scenario: bootstrap from a prior
+		// 0.5.x install left token_env=OPENCLAW_GATEWAY_TOKEN in
+		// config.yaml, but the rewritten dotenv only carries
+		// DEFENSECLAW_GATEWAY_TOKEN. Pre-fix, Go's ResolvedToken
+		// returned g.Token (empty) here while Python found the
+		// canonical token via fall-through — every Go caller of
+		// ResolvedToken outside the EnsureGatewayToken safety net
+		// silently failed. Post-fix, Go matches Python.
+		t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "real-live-token")
+		g := GatewayConfig{TokenEnv: "OPENCLAW_GATEWAY_TOKEN", Token: ""}
+		if got := g.ResolvedToken(); got != "real-live-token" {
+			t.Errorf("got %q, want real-live-token (canonical fall-through)", got)
+		}
+	})
+	t.Run("explicit token env wins over canonical fall-through", func(t *testing.T) {
+		// Operator intent preserved: when the named env var IS
+		// populated, it wins outright. The fall-through only
+		// engages when the named var is empty.
+		t.Setenv("MY_GATEWAY_TOKEN", "operator-pinned")
+		t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "should-not-use")
+		g := GatewayConfig{TokenEnv: "MY_GATEWAY_TOKEN", Token: "inline"}
+		if got := g.ResolvedToken(); got != "operator-pinned" {
+			t.Errorf("got %q, want operator-pinned", got)
 		}
 	})
 }

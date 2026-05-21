@@ -1279,23 +1279,44 @@ const defaultGatewayTokenEnv = "DEFENSECLAW_GATEWAY_TOKEN"
 // backward compatibility with existing .env files.
 const legacyGatewayTokenEnv = "OPENCLAW_GATEWAY_TOKEN"
 
-// ResolvedToken returns the gateway token from the env var (if set) or the direct value.
-// When token_env is empty (default config), checks DEFENSECLAW_GATEWAY_TOKEN first, then
-// falls back to OPENCLAW_GATEWAY_TOKEN for backward compatibility. When token_env is set
-// to a custom var, only that var is consulted — it does not fall through to the global
-// env vars, preserving operator intent.
+// ResolvedToken returns the gateway token, walking the precedence
+// ladder. The order mirrors GatewayConfig.resolved_token in
+// cli/defenseclaw/config.py so the Python CLI and the Go gateway
+// can never disagree on which token is "live".
+//
+// Resolution:
+//
+//  1. g.TokenEnv (operator-supplied override) — if set AND the
+//     named env var is populated, return it.
+//  2. defaultGatewayTokenEnv (DEFENSECLAW_GATEWAY_TOKEN) — the
+//     canonical name EnsureGatewayToken writes on first boot.
+//  3. legacyGatewayTokenEnv (OPENCLAW_GATEWAY_TOKEN) — back-compat
+//     shim for installs that bootstrapped before the rename.
+//  4. g.Token literal — last resort because plaintext secrets in
+//     config.yaml are discouraged.
+//
+// Why fall through past g.TokenEnv when it's set-but-empty:
+// pre-fix this function had `if/else` semantics — when TokenEnv
+// was set the canonical+legacy checks were SKIPPED entirely.
+// That broke the symmetric Python flow: with the pre-defenseclaw
+// default token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml AND
+// only DEFENSECLAW_GATEWAY_TOKEN in the dotenv (the post-firstboot
+// state), Python found the token via fall-through while Go
+// silently returned g.Token (empty) for every non-sidecar-boot
+// caller (judge LLM init, etc.). The sidecar boot path masked
+// the bug via EnsureGatewayToken's own fallback, so it only
+// surfaced in obscure code paths until investigation.
 func (g *GatewayConfig) ResolvedToken() string {
 	if g.TokenEnv != "" {
 		if v := os.Getenv(g.TokenEnv); v != "" {
 			return v
 		}
-	} else {
-		if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
-			return v
-		}
-		if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
-			return v
-		}
+	}
+	if v := os.Getenv(defaultGatewayTokenEnv); v != "" {
+		return v
+	}
+	if v := os.Getenv(legacyGatewayTokenEnv); v != "" {
+		return v
 	}
 	return g.Token
 }
