@@ -633,15 +633,37 @@ class GatewayConfig:
     watcher: GatewayWatcherConfig = field(default_factory=GatewayWatcherConfig)
 
     def resolved_token(self) -> str:
-        """Return gateway token from env var (if set) or direct value."""
+        """Return the gateway auth token, walking the precedence ladder.
+
+        Resolution order:
+
+        1. ``self.token_env`` — operator-supplied override, ALWAYS wins.
+           This lets ``defenseclaw setup`` / ops tooling pin the var
+           name explicitly without us guessing.
+        2. ``DEFENSECLAW_GATEWAY_TOKEN`` — the canonical name the Go
+           gateway (`internal/gateway/firstboot.go::EnsureGatewayToken`)
+           writes to ``~/.defenseclaw/.env`` on first boot.
+        3. ``OPENCLAW_GATEWAY_TOKEN`` — back-compat shim for installs
+           that bootstrapped before the defenseclaw rename. The Go
+           gateway also reads this for the same reason; honouring it
+           here keeps the two sides symmetric.
+        4. ``self.token`` — literal value from ``config.yaml``. Last
+           resort because plaintext secrets in YAML are discouraged
+           (and ``_warn_plaintext_secrets`` already nags about it).
+
+        Returns the empty string when no token is reachable; callers
+        gate on the truthiness, so empty == "unauthenticated".
+        """
         if self.token_env:
             val = os.environ.get(self.token_env, "")
             if val:
                 return val
-        else:
-            val = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
-            if val:
-                return val
+        val = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+        if val:
+            return val
+        val = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+        if val:
+            return val
         return self.token
 
 
