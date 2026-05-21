@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -392,7 +393,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 func (c *CodexConnector) SupportsComponentScanning() bool { return true }
 
 func (c *CodexConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
+	home := userHomeDir()
 	codexDir := filepath.Join(home, ".codex")
 
 	targets := map[string][]string{
@@ -416,7 +417,7 @@ func codexConfigPath() string {
 	if CodexConfigPathOverride != "" {
 		return CodexConfigPathOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
+	return filepath.Join(userHomeDir(), ".codex", "config.toml")
 }
 
 // codexConfigBackup captures the pre-DefenseClaw shape of the three
@@ -518,6 +519,9 @@ func isDefenseClawCodexProxyRedirect(v string) bool {
 }
 
 func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) error {
+	// filepath.ToSlash is a no-op on Unix (already uses '/'). On Windows it
+	// converts backslashes so bash (Git Bash / MSYS2) can resolve the path.
+	hookScript = filepath.ToSlash(hookScript)
 	configPath := codexConfigPath()
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
 		return fmt.Errorf("capture codex config backup: %w", err)
@@ -664,6 +668,13 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 // SetupOpts: observability-only installs allow the tool when the
 // gateway is unavailable, while enforcement installs can block.
 func buildCodexHooksTable(configPath, hookScript string) map[string]interface{} {
+	// On Windows, use the .cmd wrapper written alongside the .sh script.
+	// cmd.exe runs .cmd files natively and forwards stdin/stdout correctly,
+	// avoiding the bash variant ambiguity (Git Bash vs WSL).
+	hookCommand := hookScript
+	if runtime.GOOS == "windows" {
+		hookCommand = strings.TrimSuffix(hookScript, ".sh") + ".cmd"
+	}
 	out := map[string]interface{}{}
 	state := map[string]interface{}{}
 	keySource := codexHookStateKeySource(configPath)
@@ -672,7 +683,7 @@ func buildCodexHooksTable(configPath, hookScript string) map[string]interface{} 
 			"hooks": []interface{}{
 				map[string]interface{}{
 					"type":    "command",
-					"command": hookScript,
+					"command": hookCommand,
 					"timeout": group.timeout,
 				},
 			},

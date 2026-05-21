@@ -478,7 +478,7 @@ func (c *ZeptoClawConnector) HasUsableProviders() (int, error) {
 func (c *ZeptoClawConnector) SupportsComponentScanning() bool { return true }
 
 func (c *ZeptoClawConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
+	home := userHomeDir()
 	zeptoDir := filepath.Join(home, ".zeptoclaw")
 
 	targets := map[string][]string{
@@ -520,7 +520,7 @@ func zeptoClawConfigPath() string {
 	if ZeptoClawConfigPathOverride != "" {
 		return ZeptoClawConfigPathOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".zeptoclaw", "config.json")
+	return filepath.Join(userHomeDir(), ".zeptoclaw", "config.json")
 }
 
 // patchZeptoClawConfig reads ZeptoClaw's config.json, backs up the original

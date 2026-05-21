@@ -84,7 +84,7 @@ func openClawHome() string {
 	if OpenClawHomeOverride != "" {
 		return OpenClawHomeOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".openclaw")
+	return filepath.Join(userHomeDir(), ".openclaw")
 }
 
 // OpenClawConnector handles LLM traffic routing and tool inspection for OpenClaw.
@@ -599,7 +599,7 @@ func (c *OpenClawConnector) RequiredEnv() []EnvRequirement {
 func (c *OpenClawConnector) SupportsComponentScanning() bool { return true }
 
 func (c *OpenClawConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
+	home := userHomeDir()
 	openclawHome := filepath.Join(home, ".openclaw")
 	workspace := filepath.Join(openclawHome, "workspace")
 

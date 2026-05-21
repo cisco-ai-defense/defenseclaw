@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -551,7 +552,13 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("%s hook script: %w", c.name, err)
 	}
-	if err := c.patchConfig(opts, filepath.Join(hookDir, c.scriptName)); err != nil {
+	scriptName := c.scriptName
+	// On Windows use the .cmd wrapper so cmd.exe is the entry point rather
+	// than a bash variant that may not be able to exec Windows binaries.
+	if runtime.GOOS == "windows" {
+		scriptName = strings.TrimSuffix(scriptName, ".sh") + ".cmd"
+	}
+	if err := c.patchConfig(opts, filepath.Join(hookDir, scriptName)); err != nil {
 		return fmt.Errorf("%s hook config: %w", c.name, err)
 	}
 	return nil
@@ -859,7 +866,7 @@ func workspaceRootOutsideDataDir(root, dataDir string) bool {
 }
 
 func homePath(parts ...string) string {
-	home := strings.TrimSpace(os.Getenv("HOME"))
+	home := strings.TrimSpace(userHomeDir())
 	if home == "" {
 		if h, err := os.UserHomeDir(); err == nil {
 			home = strings.TrimSpace(h)
