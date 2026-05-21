@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
+import subprocess
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -506,6 +508,13 @@ class DefenseClawTUI(App[None]):
         Binding(":", "open_command", "Command"),
         Binding("ctrl+k", "open_command", "Command"),
         Binding("ctrl+p", "open_panel_jumper", "Jump panel"),
+        # Y / Ctrl+S target the *most recent* Activity entry's output
+        # so they work the same from any panel — no need to switch to
+        # Activity first just to grab the log. Both are global and
+        # priority=False so Input widgets (command drawer, modal
+        # forms) absorb the keystroke when they're focused.
+        Binding("Y", "yank_output", "Copy last output", show=False),
+        Binding("ctrl+s", "save_last_run_log", "Save log", show=False),
         Binding("tab", "next_panel", "Next"),
         Binding("shift+tab", "previous_panel", "Previous"),
     ]
@@ -750,11 +759,35 @@ class DefenseClawTUI(App[None]):
                     yield Button("Reject", id="registries-reject", compact=True)
                     yield Button("Remove", id="registries-remove-source", compact=True, variant="error")
                 with Horizontal(id="policy-controls", classes="panel-controls hidden"):
+                    # Tab labels mirror ``POLICY_TAB_NAMES`` from
+                    # ``policy_state.py`` so the styled-button chrome
+                    # never disagrees with the body's tab bar (or the
+                    # CLI's ``policy --help`` output).
                     yield Button("Policies", id="policy-tab-0", compact=True)
                     yield Button("Rule Packs", id="policy-tab-1", compact=True)
-                    yield Button("Judge", id="policy-tab-2", compact=True)
+                    yield Button("Judge Prompts", id="policy-tab-2", compact=True)
                     yield Button("Suppressions", id="policy-tab-3", compact=True)
-                    yield Button("OPA", id="policy-tab-4", compact=True)
+                    yield Button("OPA / Rego", id="policy-tab-4", compact=True)
+                    # ``New`` is the ``n`` keybind on the Policies tab
+                    # (opens the in-panel create form). ``Materialize``
+                    # is the Phase-1 ``M`` keybind: copies bundled
+                    # presets (default.yaml, strict.yaml, ...) into
+                    # the user's policy_dir so they can be edited. We
+                    # surface them on the controls bar so mouse-only
+                    # operators get the full Phase-1 capability.
+                    yield Button(
+                        "New",
+                        id="policy-new",
+                        compact=True,
+                        variant="success",
+                        tooltip="Create a new policy YAML in this dir (n)",
+                    )
+                    yield Button(
+                        "Materialize",
+                        id="policy-materialize",
+                        compact=True,
+                        tooltip="Copy bundled presets into this policy dir (M)",
+                    )
                     yield Button("Refresh", id="policy-refresh", compact=True)
                     yield Button("Validate", id="policy-validate", compact=True)
                     yield Button("Test", id="policy-test", compact=True)
@@ -2395,7 +2428,16 @@ class DefenseClawTUI(App[None]):
     def _sync_policy_controls(self) -> None:
         for index, _name in enumerate(POLICY_TAB_NAMES):
             self._set_button_active(f"#policy-tab-{index}", self.policy_model.active_tab == index)
+        on_policies = self.policy_model.active_tab == POLICY_TAB_POLICIES
         opa = self.policy_model.active_tab == POLICY_TAB_OPA
+        # ``New`` opens the create form; only meaningful on Policies.
+        # ``Materialize`` copies bundled presets; only meaningful on
+        # Policies. We grey them out elsewhere so the controls bar is
+        # honest about what'll happen on click. ``Validate`` /
+        # ``Test`` are OPA-only (the model intent factories tie them
+        # to ``policy:opa``) so they keep their existing gating.
+        self.query_one("#policy-new", Button).disabled = not on_policies
+        self.query_one("#policy-materialize", Button).disabled = not on_policies
         self.query_one("#policy-test", Button).disabled = not opa
         self.query_one("#policy-validate", Button).disabled = not opa
 
@@ -2710,6 +2752,17 @@ class DefenseClawTUI(App[None]):
             self.policy_model.reset_scrolls()
             self._render_chrome()
             return
+        # ``New`` and ``Materialize`` only do anything on the Policies
+        # sub-tab. Force-switch first so a mouse-only operator who
+        # clicked from another tab (e.g. OPA) gets a sensible result
+        # instead of a silent no-op.
+        if button_id in {"policy-new", "policy-materialize"}:
+            if self.policy_model.active_tab != POLICY_TAB_POLICIES:
+                self.policy_model.set_sub_tab(POLICY_TAB_POLICIES)
+                self.policy_model.reset_scrolls()
+            key = "n" if button_id == "policy-new" else "M"
+            self._apply_policy_action(self.policy_model.handle_key(key))
+            return
         key_by_button = {
             "policy-refresh": "r",
             "policy-validate": "v",
@@ -2811,6 +2864,147 @@ class DefenseClawTUI(App[None]):
         if button_id == "activity-open-drawer":
             self.action_open_command()
             return
+
+    # ------------------------------------------------------------------
+    # Yank / save-log helpers (Step 10).
+    #
+    # ``Y`` copies the most recent Activity entry's output to the OS
+    # clipboard; ``Ctrl+S`` writes that same output to a stable path
+    # (``~/.defenseclaw/tui/last-run.log``) so the operator can ``tail
+    # -f`` it from another terminal or attach it to a bug report
+    # without scrolling the TUI back to the start of a long run.
+    # ------------------------------------------------------------------
+
+    def _clipboard_copy(self, text: str) -> tuple[bool, str]:
+        """Push ``text`` to the OS clipboard, returning ``(ok, transport)``.
+
+        Tries the platform-appropriate command-line tool in order:
+        pbcopy (macOS) → wl-copy (Wayland) → xclip → xsel (X11). If
+        none of those exist or all of them fail, we fall back to a
+        last-resort file at ``~/.defenseclaw/tui/last-copy.txt`` so
+        operators on headless boxes still have *some* way to recover
+        the payload. Failure here never crashes the TUI — the caller
+        toasts the outcome.
+        """
+
+        if not text:
+            return False, ""
+        candidates: tuple[tuple[str, tuple[str, ...]], ...] = (
+            ("pbcopy", ("pbcopy",)),
+            ("wl-copy", ("wl-copy",)),
+            ("xclip", ("xclip", "-selection", "clipboard")),
+            ("xsel", ("xsel", "--clipboard", "--input")),
+        )
+        payload = text.encode("utf-8", errors="replace")
+        for name, argv in candidates:
+            if shutil.which(argv[0]) is None:
+                continue
+            try:
+                proc = subprocess.run(
+                    argv,
+                    input=payload,
+                    check=False,
+                    capture_output=True,
+                    timeout=4,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if proc.returncode == 0:
+                return True, name
+        # File fallback: still useful — operators can ``cat`` it from
+        # another shell. Mode 0600 so the contents stay scoped to the
+        # current user; activity output frequently contains tokens
+        # and secrets that the masker may not have caught upstream.
+        target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-copy.txt"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                pass
+        except OSError:
+            return False, ""
+        return True, f"file:{target}"
+
+    def _last_run_output_payload(self) -> tuple[str, str] | None:
+        """Return ``(header, body)`` for the most recent Activity entry.
+
+        Both Y and Ctrl+S share the same source so they always agree
+        on "what is the last command". Returns ``None`` when there is
+        no Activity history yet (fresh TUI session). ``body`` is the
+        raw output stream joined with newlines; ``header`` describes
+        the run (command label, status, timestamp) for the saved log
+        — kept out of the clipboard payload so the operator only
+        pastes the actual output, not the metadata.
+        """
+
+        if not self.activity_model.entries:
+            return None
+        entry = self.activity_model.entries[-1]
+        stamp = entry.started_at.astimezone(timezone.utc).isoformat()
+        status = entry.status_label or ("running" if not entry.done else f"exit {entry.exit_code}")
+        header = (
+            f"# {entry.command}\n"
+            f"# {status}\n"
+            f"# started {stamp}\n"
+            f"# saved   {datetime.now(timezone.utc).isoformat()}\n"
+            "\n"
+        )
+        body = "\n".join(entry.output)
+        return header, body
+
+    def action_yank_output(self) -> None:
+        """Copy the last Activity entry's output to the OS clipboard."""
+
+        payload = self._last_run_output_payload()
+        if payload is None:
+            self.notify_toast("warn", "No command output to copy yet.")
+            return
+        _, body = payload
+        if not body.strip():
+            self.notify_toast("warn", "Last command produced no output.")
+            return
+        ok, transport = self._clipboard_copy(body)
+        if ok:
+            if transport.startswith("file:"):
+                # File fallback transports the *target path* in ``transport``;
+                # surface that so the operator knows where to ``cat`` from.
+                self.notify_toast(
+                    "info",
+                    f"No clipboard tool found · wrote output to {transport[5:]}",
+                )
+            else:
+                self.notify_toast("success", f"Copied last output to clipboard ({transport}).")
+        else:
+            self.notify_toast(
+                "error",
+                "Copy failed — install pbcopy / wl-copy / xclip and try again.",
+            )
+
+    def action_save_last_run_log(self) -> None:
+        """Write the last Activity entry's output to ``last-run.log``."""
+
+        payload = self._last_run_output_payload()
+        if payload is None:
+            self.notify_toast("warn", "No command output to save yet.")
+            return
+        header, body = payload
+        target = (self.data_dir or Path.home() / ".defenseclaw" / "tui") / "last-run.log"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(header + body + "\n", encoding="utf-8")
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                # Best effort — Windows / restricted filesystems don't
+                # honour chmod and that's fine; the data still landed
+                # at the intended path with normal user perms.
+                pass
+        except OSError as exc:
+            self.notify_toast("error", f"Save failed: {exc}")
+            return
+        self.notify_toast("success", f"Wrote last-run.log → {target}")
 
     def _save_activity_output_interactive(self) -> None:
         """Write the highlighted Activity entry's output to a file.
@@ -4527,6 +4721,25 @@ class DefenseClawTUI(App[None]):
     def _apply_alert_action(self, action: AlertPanelAction) -> bool:
         if not action.handled:
             return False
+        if action.copy_text:
+            # The alerts panel signals "copy this to the clipboard" by
+            # populating ``copy_text``. Without this branch the hint
+            # said "Alert detail copied." but nothing actually landed
+            # in the system clipboard — pure lie. Reusing the shared
+            # ``_clipboard_copy`` helper means the alert ``y`` flow
+            # benefits from the same pbcopy → wl-copy → xclip → xsel
+            # → file fallback chain as the global ``Y`` binding.
+            ok, transport = self._clipboard_copy(action.copy_text)
+            if ok and not transport.startswith("file:"):
+                self.notify_toast("success", f"Copied alert detail ({transport}).")
+            elif ok:
+                # File fallback — surface where the bytes went.
+                self.notify_toast("info", f"Wrote alert detail to {transport[5:]}.")
+            else:
+                self.notify_toast(
+                    "error",
+                    "Copy failed — install pbcopy / wl-copy / xclip and try again.",
+                )
         if action.hint:
             self._set_status(action.hint)
         if action.intent is not None:
@@ -6505,7 +6718,12 @@ def _panel_key(event: events.Key) -> str:
     if event.key in {"up", "down"}:
         return event.key
     if event.character:
-        if event.character in {"A", "C", "E", "G", "J", "N", "R", "S", "T", "V", "X"}:
+        # Capital-letter keys that panels distinguish from their
+        # lowercase form (e.g. ``M`` materialize bundled vs ``m`` no-op,
+        # ``T`` policy test vs ``t`` activity transcript). Anything
+        # outside this set is lowercased so global vim-style shortcuts
+        # ignore Shift/CapsLock state.
+        if event.character in {"A", "C", "E", "G", "J", "M", "N", "R", "S", "T", "V", "X"}:
             return event.character
         return event.character.lower()
     return event.key
