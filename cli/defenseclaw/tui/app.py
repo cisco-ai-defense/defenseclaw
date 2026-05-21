@@ -515,6 +515,13 @@ class DefenseClawTUI(App[None]):
         # forms) absorb the keystroke when they're focused.
         Binding("Y", "yank_output", "Copy last output", show=False),
         Binding("ctrl+s", "save_last_run_log", "Save log", show=False),
+        # ``D`` (uppercase) runs ``defenseclaw doctor`` as a quick
+        # background health probe and toasts the summary. Distinct
+        # from lowercase ``d`` on Overview (which goes through the
+        # full preview/streaming pipeline) so operators on any panel
+        # can ask "is everything still OK?" without disturbing the
+        # current panel or Activity log.
+        Binding("D", "run_diagnose", "Diagnose", show=False),
         Binding("tab", "next_panel", "Next"),
         Binding("shift+tab", "previous_panel", "Previous"),
     ]
@@ -2980,6 +2987,93 @@ class DefenseClawTUI(App[None]):
             self.notify_toast(
                 "error",
                 "Copy failed — install pbcopy / wl-copy / xclip and try again.",
+            )
+
+    def action_run_diagnose(self) -> None:
+        """Spawn ``defenseclaw doctor`` in the background, toast result.
+
+        Designed as a "tap D, get answer" health probe — distinct from
+        the lowercase ``d`` shortcut on Overview, which routes through
+        the full preview/streaming pipeline and takes over the Activity
+        panel. This variant stays out of the way: it doesn't switch
+        panels, doesn't write to the RichLog, and reports the outcome
+        through a single toast so operators don't lose their place.
+
+        If another command is already running through the main
+        executor we toast a warn instead of fighting for the slot;
+        the doctor probe is best-effort.
+        """
+
+        if self.command_running:
+            self.notify_toast(
+                "warn",
+                "Cannot diagnose while another command is running. "
+                "Wait for it to finish or press Ctrl+C to cancel.",
+            )
+            return
+        self.notify_toast("info", "Running defenseclaw doctor…")
+        self.run_worker(
+            self._run_diagnose_background(),
+            exclusive=False,
+            thread=False,
+        )
+
+    async def _run_diagnose_background(self) -> None:
+        """Run ``defenseclaw doctor`` and toast a one-line summary.
+
+        Output is captured but intentionally NOT written to Activity —
+        Step 11's whole point is "lightweight probe". If the operator
+        wants the full streamed view they have lowercase ``d`` on
+        Overview. The toast's summary line is the first non-empty
+        stdout line for read-only success, or a short failure tail
+        for non-zero exits.
+        """
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "defenseclaw",
+                "doctor",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except (FileNotFoundError, OSError) as exc:
+            # Most common failure here: ``defenseclaw`` binary not on
+            # PATH (e.g. running the TUI from a checkout without
+            # ``uv pip install -e .``). Surface clearly so the user
+            # knows it's a setup issue, not a doctor verdict.
+            self.notify_toast("error", f"Diagnose failed to launch: {exc}")
+            return
+
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            self.notify_toast(
+                "error",
+                "Diagnose timed out after 60s — run `defenseclaw doctor` manually.",
+            )
+            return
+
+        text = (stdout or b"").decode("utf-8", errors="replace")
+        # Strip ANSI color codes so the toast doesn't render escape
+        # sequences as literal characters — the doctor CLI emits
+        # bracketed colour codes for the section headers.
+        clean = _ANSI_RE.sub("", text)
+        lines = [line.rstrip() for line in clean.splitlines() if line.strip()]
+        summary = _diagnose_summary_line(lines)
+        if proc.returncode == 0:
+            self.notify_toast("success", f"Doctor OK · {summary}" if summary else "Doctor OK")
+        else:
+            # Non-zero exit: prefer the *last* non-empty line because
+            # CLI tooling almost universally writes the "failure
+            # reason" as the final pre-exit line.
+            tail = lines[-1] if lines else ""
+            self.notify_toast(
+                "warn",
+                f"Doctor exit {proc.returncode} · {tail}" if tail else f"Doctor exit {proc.returncode}",
             )
 
     def action_save_last_run_log(self) -> None:
@@ -6894,6 +6988,34 @@ def _truncate_for_strip(value: str, width: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(0, limit - 3)] + "..."
+
+
+def _diagnose_summary_line(lines: list[str]) -> str:
+    """Pick the most informative summary line from ``defenseclaw doctor``.
+
+    The CLI prints a multi-line report; for the toast we want the
+    single line that best answers "what's the state?". Preference
+    order:
+        1. Lines containing the word ``summary`` (matches Go TUI
+           parity which keys off the same string).
+        2. The last "verdict" line — typically ``All checks passed``
+           or ``N issue(s) detected``.
+        3. The first non-empty line as a last resort.
+
+    Returns an empty string for empty input so the caller can
+    distinguish "no output" from a real summary.
+    """
+
+    if not lines:
+        return ""
+    for line in reversed(lines):
+        if "summary" in line.lower():
+            return line.strip(": -=").strip()
+    for needle in ("checks passed", "issues detected", "issue(s)", "failures", "errors", "OK"):
+        for line in reversed(lines):
+            if needle.lower() in line.lower():
+                return line.strip(": -=").strip()
+    return lines[0].strip(": -=").strip()
 
 
 def _derive_command_label(binary: str, args: tuple[str, ...]) -> str:
