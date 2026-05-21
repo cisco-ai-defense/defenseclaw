@@ -24,7 +24,16 @@ ActivityTab = Literal["commands", "mutations"]
 
 @dataclass
 class ActivityEntry:
-    """One command execution entry."""
+    """One command execution entry.
+
+    The ``masked_argv`` / ``config_reloaded`` / ``restart_completed``
+    / ``doctor_cache_refreshed`` / ``suggested_next_action`` fields
+    mirror the Go TUI's ``CommandResultMeta`` (see
+    ``internal/tui/command_intent.go``). They feed the activity meta
+    footer so operators can see at a glance whether a command actually
+    changed gateway state, refreshed the doctor cache, or what they
+    should try next — without having to scroll through raw output.
+    """
 
     command: str
     started_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
@@ -34,6 +43,11 @@ class ActivityEntry:
     done: bool = False
     expanded: bool = True
     cancelled: bool = False
+    masked_argv: tuple[str, ...] = ()
+    config_reloaded: bool = False
+    restart_completed: bool = False
+    doctor_cache_refreshed: bool = False
+    suggested_next_action: str = ""
 
     @property
     def status_label(self) -> str:
@@ -44,6 +58,28 @@ class ActivityEntry:
         if self.exit_code == 0:
             return f"exit 0 ({self.duration})"
         return f"exit {self.exit_code} ({self.duration})"
+
+    @property
+    def meta_footer(self) -> str:
+        """Render the structured-meta line for the activity panel.
+
+        Returns an empty string when no meta is set so callers can
+        skip the footer rather than render an empty parenthetical.
+        Order is deterministic so screenshot/snapshot tests are
+        stable: side-effects first (state changes), then the next
+        action hint at the end where eyes land last.
+        """
+
+        parts: list[str] = []
+        if self.config_reloaded:
+            parts.append("config reloaded")
+        if self.restart_completed:
+            parts.append("gateway restarted")
+        if self.doctor_cache_refreshed:
+            parts.append("doctor cache refreshed")
+        if self.suggested_next_action:
+            parts.append(f"next: {self.suggested_next_action}")
+        return " · ".join(parts)
 
 
 class ActivityPanelModel:
@@ -80,8 +116,20 @@ class ActivityPanelModel:
     def set_tab(self, tab: ActivityTab) -> None:
         self.tab = tab
 
-    def add_entry(self, command: str, *, started_at: datetime | None = None) -> None:
-        self.entries.append(ActivityEntry(command=command, started_at=started_at or datetime.now(timezone.utc)))
+    def add_entry(
+        self,
+        command: str,
+        *,
+        started_at: datetime | None = None,
+        masked_argv: tuple[str, ...] | None = None,
+    ) -> None:
+        self.entries.append(
+            ActivityEntry(
+                command=command,
+                started_at=started_at or datetime.now(timezone.utc),
+                masked_argv=tuple(masked_argv) if masked_argv else (),
+            )
+        )
         self.cursor = len(self.entries) - 1
         self.term_mode = True
         self.term_scroll = 0
@@ -97,6 +145,10 @@ class ActivityPanelModel:
         duration: timedelta = timedelta(),
         *,
         cancelled: bool = False,
+        config_reloaded: bool = False,
+        restart_completed: bool = False,
+        doctor_cache_refreshed: bool = False,
+        suggested_next_action: str = "",
     ) -> None:
         if not self.entries:
             return
@@ -105,6 +157,14 @@ class ActivityPanelModel:
         entry.exit_code = exit_code
         entry.duration = duration
         entry.cancelled = cancelled
+        # Side-effect flags mirror Go's CommandResultMeta — only flip
+        # when the caller positively observed the side effect (e.g.
+        # gateway started_at advanced) so a quiet success doesn't
+        # over-claim "config reloaded".
+        entry.config_reloaded = bool(config_reloaded)
+        entry.restart_completed = bool(restart_completed)
+        entry.doctor_cache_refreshed = bool(doctor_cache_refreshed)
+        entry.suggested_next_action = suggested_next_action or ""
 
     def select_entry(self, index: int) -> None:
         if not self.entries:
