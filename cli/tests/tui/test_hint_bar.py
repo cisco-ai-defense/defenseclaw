@@ -27,7 +27,6 @@ from defenseclaw.tui.widgets.hint_bar import HintEngine
         ("tools", "tool block"),
         ("ai", "vendor/product/component"),
         ("registries", "S sync all"),
-        ("policy", "v validate"),
         ("setup", "choose wizard"),
         ("first-run", "Ctrl+R apply"),
     ),

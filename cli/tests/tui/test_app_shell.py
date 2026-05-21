@@ -35,12 +35,10 @@ from defenseclaw.tui.panels.inventory import InventoryPanelModel, InventorySnaps
 from defenseclaw.tui.panels.logs import LogsPanelModel
 from defenseclaw.tui.panels.mcps import MCPRow, MCPsPanelModel
 from defenseclaw.tui.panels.overview import EnforcementCounts, HealthSnapshot, OverviewPanelModel, SubsystemHealth
-from defenseclaw.tui.panels.policy import PolicyPanelModel
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTab
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
-from defenseclaw.tui.services.policy_state import POLICY_TAB_OPA
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.widgets.native_metrics import MetricTile, OverviewMetrics
 from rich.text import Text
@@ -1194,78 +1192,6 @@ def test_fetch_ai_usage_uses_gateway_auth_and_accept_headers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_policy_panel_renders_table_and_detail_overlay(tmp_path) -> None:
-    policy_dir = tmp_path / "policies"
-    policy_dir.mkdir()
-    (policy_dir / "alpha.yaml").write_text("description: alpha policy\n", encoding="utf-8")
-    config = SimpleNamespace(
-        policy_dir=str(policy_dir),
-        guardrail=SimpleNamespace(rule_pack_dir="", enabled=True, mode="observe", scanner_mode="local"),
-        claw=SimpleNamespace(mode="codex"),
-        active_connector=lambda: "codex",
-    )
-    policy = PolicyPanelModel(config)
-    app = DefenseClawTUI(config=config, policy_model=policy)
-
-    async with app.run_test(size=(150, 40)) as pilot:
-        await pilot.press("7")
-        await pilot.pause()
-
-        assert app.active_panel == "policy"
-        assert "Policy" in app.body_text
-        # The policy panel renders its own list inside body_text, so the
-        # shared DataTable widget is intentionally hidden / empty when
-        # this panel is active (the previous render duplicated rows
-        # both above and below the policy view).
-        table = app.query_one("#panel-table", DataTable)
-        assert table.row_count == 0
-        assert table.has_class("hidden")
-        assert "alpha" in app.body_text
-
-        await pilot.press("enter")
-        await pilot.pause()
-
-        assert policy.policy_detail_open is True
-        assert "alpha policy" in app.body_text
-
-
-@pytest.mark.asyncio
-async def test_policy_opa_uppercase_shortcuts_reach_app_runner(tmp_path) -> None:
-    policy_dir = tmp_path / "policies"
-    rego_dir = policy_dir / "rego"
-    rego_dir.mkdir(parents=True)
-    rego_file = rego_dir / "admission.rego"
-    rego_file.write_text("package defenseclaw\nallow := true\n", encoding="utf-8")
-    config = SimpleNamespace(policy_dir=str(policy_dir), guardrail=SimpleNamespace(rule_pack_dir=""))
-    policy = PolicyPanelModel(config)
-    policy.load()
-    policy.active_tab = POLICY_TAB_OPA
-    app = DefenseClawTUI(config=config, policy_model=policy)
-    seen: dict[str, str] = {}
-
-    async def fake_policy_runner(intent) -> None:
-        seen["label"] = intent.label
-        policy.apply_rego_test_result("ok")
-        app._render_chrome()
-
-    app._run_policy_panel_intent = fake_policy_runner  # type: ignore[method-assign]
-
-    async with app.run_test(size=(150, 40)) as pilot:
-        await pilot.press("7")
-        await pilot.pause()
-
-        await pilot.press("T")
-        await pilot.pause()
-        assert seen["label"] == "policy test"
-        assert "ok" in app.body_text
-
-        await pilot.press("E")
-        await pilot.pause()
-        assert "Editor intent prepared" in app.status_text
-        assert str(rego_file) in app.status_text
-
-
-@pytest.mark.asyncio
 async def test_setup_panel_renders_wizards_and_form() -> None:
     setup = SetupPanelModel({})
     app = DefenseClawTUI(setup_model=setup)
@@ -1497,42 +1423,6 @@ async def test_registries_mouse_tabs_and_sync_button_open_preview(tmp_path) -> N
         screen = app.screen_stack[-1]
         assert screen.__class__.__name__ == "CommandPreviewScreen"
         assert "defenseclaw registry sync corp-skills --json" in screen.preview.masked_display
-
-
-@pytest.mark.asyncio
-async def test_policy_mouse_tabs_and_opa_action_buttons(tmp_path) -> None:
-    policy_dir = tmp_path / "policies"
-    rego_dir = policy_dir / "rego"
-    rego_dir.mkdir(parents=True)
-    (rego_dir / "admission.rego").write_text("package defenseclaw\nallow := true\n", encoding="utf-8")
-    config = SimpleNamespace(policy_dir=str(policy_dir), guardrail=SimpleNamespace(rule_pack_dir=""))
-    policy = PolicyPanelModel(config)
-    policy.load()
-    app = DefenseClawTUI(config=config, policy_model=policy)
-    seen: list[str] = []
-
-    async def fake_policy_runner(intent) -> None:
-        seen.append(intent.label)
-        policy.apply_rego_test_result("ok")
-        app._render_chrome()  # noqa: SLF001 - shell update contract.
-
-    app._run_policy_panel_intent = fake_policy_runner  # type: ignore[method-assign]
-
-    async with app.run_test(size=(190, 44)) as pilot:
-        await pilot.press("7")
-        await pilot.pause()
-
-        await pilot.click("#policy-tab-4")
-        await pilot.pause()
-        assert policy.active_tab == POLICY_TAB_OPA
-
-        await pilot.click("#policy-test")
-        await pilot.pause()
-        assert seen == ["policy test"]
-
-        await pilot.click("#policy-edit")
-        await pilot.pause()
-        assert "Editor intent prepared" in app.status_text
 
 
 @pytest.mark.asyncio
@@ -2721,7 +2611,7 @@ def test_tui_panel_outputs_survive_hostile_markup_corpus() -> None:
 async def test_overview_body_text_renders_quick_action_hotkeys_literally() -> None:
     """Render the live overview body and verify every lowercase
     quick-action hotkey letter survives in plain text. If any of the
-    seven escapes regresses, Rich consumes the bracket pair as a
+    six escapes regresses, Rich consumes the bracket pair as a
     style tag and the operator sees ``Scan all`` with no hotkey to
     press. The end-to-end render includes the safety wrapper, so this
     test also catches a class of bugs where the wrapper falls back to
@@ -2732,7 +2622,7 @@ async def test_overview_body_text_renders_quick_action_hotkeys_literally() -> No
     async with app.run_test(size=(180, 60)) as pilot:
         await pilot.pause()
         plain = Text.from_markup(app.body_text).plain
-        for key in ("[s]", "[d]", "[i]", "[g]", "[m]", "[p]", "[l]"):
+        for key in ("[s]", "[d]", "[i]", "[g]", "[m]", "[l]"):
             assert key in plain, f"overview quick-action key {key!r} dropped"
 
 
@@ -2762,50 +2652,6 @@ def test_setup_wizard_mode_hint_renders_bracketed_hint_literally() -> None:
     plain = Text.from_markup(fragment).plain
     # The full hint, brackets included, must survive Rich parsing.
     assert "webhooks[0].url" in plain
-
-
-def test_policy_tab_bar_renders_active_tab_label_literally() -> None:
-    """``PolicyPanelModel.render_text()`` renders ``[name]`` for the
-    active tab and bare names for the rest. Confirm the active-tab
-    bracket pair survives Rich parsing. ``POLICY_TAB_NAMES`` are all
-    uppercase-led today, so the test exercises the defense even
-    against uppercase tabs (which Rich already treats as literal).
-    """
-
-    config = SimpleNamespace(policy_dir="", guardrail=SimpleNamespace(rule_pack_dir=""))
-    policy = PolicyPanelModel(config)
-    rendered = policy.render_text(width=120, height=40)
-    plain = Text.from_markup(rendered).plain
-    # The first tab is the default active tab; "[Policies]" must
-    # survive in the rendered output.
-    assert "[Policies]" in plain
-
-
-def test_policy_view_suppressions_renders_active_section_literally() -> None:
-    """Suppression sections render ``[name]`` for the active section.
-    Same defense as the tab bar — must survive Rich parsing.
-    """
-
-    config = SimpleNamespace(policy_dir="", guardrail=SimpleNamespace(rule_pack_dir=""))
-    policy = PolicyPanelModel(config)
-    rendered = policy.view_suppressions(width=120, height=40)
-    plain = Text.from_markup(rendered).plain
-    # First section name has the active bracket markers.
-    assert "[Pre-Judge Strips]" in plain
-
-
-def test_policy_view_opa_renders_t_hotkey_literally() -> None:
-    """OPA view embeds a lowercase ``[t]`` hotkey label. Without the
-    escape Rich would parse ``[t]`` as an opening tag and silently
-    drop the bracketed text — the operator would see ``"hide tests"``
-    with no key to press.
-    """
-
-    config = SimpleNamespace(policy_dir="", guardrail=SimpleNamespace(rule_pack_dir=""))
-    policy = PolicyPanelModel(config)
-    rendered = policy.view_opa(width=120, height=40)
-    plain = Text.from_markup(rendered).plain
-    assert "[t]" in plain
 
 
 def test_setup_audit_sink_summary_renders_kind_and_state_literally(tmp_path) -> None:

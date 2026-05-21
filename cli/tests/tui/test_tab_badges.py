@@ -112,6 +112,5 @@ def test_unknown_panel_total_count_is_zero() -> None:
     """Defensive: never crash on panels we don't badge."""
 
     app = DefenseClawTUI(config=_config_for())
-    assert app._panel_total_count("policy") == 0
     assert app._panel_total_count("setup") == 0
     assert app._panel_total_count("__nonexistent__") == 0

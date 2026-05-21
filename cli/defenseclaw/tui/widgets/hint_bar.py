@@ -68,8 +68,6 @@ class HintEngine:
             return self._plugins_hint(state)
         if panel == "inventory":
             return self._inventory_hint(state)
-        if panel == "policy":
-            return self._policy_hint(state)
         if panel == "logs":
             return self._logs_hint(state)
         if panel == "audit":
@@ -173,14 +171,6 @@ class HintEngine:
         if hint := self._filter_hint(state):
             return hint
         return "h/l switch sub-tabs · 1-4 filter active list · j/k scroll · Enter detail · o fast scope · r scan."
-
-    def _policy_hint(self, state: HintState) -> str:
-        if hint := self._filter_hint(state):
-            return hint
-        return (
-            "Tab or [] switch policy tabs · j/k nav · Enter detail · v validate · "
-            "r reload · n Quick Start wizard · M materialize bundled."
-        )
 
     def _logs_hint(self, state: HintState) -> str:
         if state.logs_paused:
