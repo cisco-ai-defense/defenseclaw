@@ -1146,6 +1146,15 @@ def _row_details_label(event: Event) -> str:
     return _truncate(" · ".join(parts), 20)
 
 
+# Public aliases — re-exported so the Alerts panel (which surfaces
+# audit events too) can reuse the connector-hook formatting without
+# duplicating the parser. We deliberately keep the underscored names
+# intact so the audit panel's call sites stay unchanged.
+parse_kv_details = _parse_kv_details
+prettify_kv_value = _prettify_kv_value
+structured_detail_rows = _structured_detail_rows
+
+
 def _slug(value: str) -> str:
     slug = "".join(ch.lower() if ch.isalnum() else "-" for ch in value).strip("-")
     return slug or "row"
