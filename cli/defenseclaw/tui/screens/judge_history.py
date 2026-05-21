@@ -16,7 +16,6 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime
 
 from rich.markup import escape as rich_escape
-from rich.markup import escape as rich_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
