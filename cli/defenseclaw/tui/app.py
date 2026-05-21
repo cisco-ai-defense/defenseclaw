@@ -78,7 +78,7 @@ from defenseclaw.tui.panels.setup import (
 from defenseclaw.tui.panels.skills import SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.registry import CmdEntry, build_registry
-from defenseclaw.tui.screens.command_preview import CommandPreviewScreen
+from defenseclaw.tui.screens.command_preview import CommandPreviewScreen, mask_argv
 from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
 from defenseclaw.tui.screens.detail import DetailScreen
 from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
@@ -599,6 +599,11 @@ class DefenseClawTUI(App[None]):
         # push() or tick() mutates the queue.
         self.toasts = ToastManager()
         self._toasts_dirty = False
+        # Side-effect probes used by ``_run_command`` to populate
+        # ActivityEntry meta. Pre-set to safe defaults so the first
+        # command can compare to "before" without crashing on
+        # AttributeError when no health poll has fired yet.
+        self._last_gateway_started_at: str = ""
 
     def compose(self) -> ComposeResult:
         # If the persisted ``active_panel`` is now connector-gated
@@ -1582,6 +1587,15 @@ class DefenseClawTUI(App[None]):
         """
 
         label = display_name or _derive_command_label(binary, args)
+        # Snapshot side-effect probes BEFORE the executor fires so we
+        # can decide after the fact whether this command actually
+        # reloaded config, restarted the gateway, or refreshed the
+        # doctor cache — mirrors Go TUI's CommandResultMeta plumbing.
+        masked_argv = tuple(
+            (binary, *mask_argv(tuple(args)))
+        )
+        pre_started_at = self._last_gateway_started_at
+        pre_doctor_mtime = self._doctor_cache_mtime()
         try:
             async for event in self.executor.run(binary, args):
                 if event.kind == "start":
@@ -1589,7 +1603,7 @@ class DefenseClawTUI(App[None]):
                     self.command_label = label
                     self._command_started_at = time.monotonic()
                     self.commands_run += 1
-                    self.activity_model.add_entry(event.text)
+                    self.activity_model.add_entry(event.text, masked_argv=masked_argv)
                     # event.text is the parsed command label (argv joined
                     # with spaces); arguments routinely contain brackets
                     # (e.g. ``defenseclaw scan skill[0]``). Escape so the
@@ -1617,7 +1631,39 @@ class DefenseClawTUI(App[None]):
                     self.command_running = False
                     self.command_label = ""
                     self._command_started_at = 0.0
-                    self.activity_model.finish_entry(event.exit_code or 0)
+                    exit_code = event.exit_code or 0
+                    # Re-probe side-effect signals AFTER the command
+                    # finished. We compare to the snapshot taken before
+                    # the executor loop, so a "restart" command that
+                    # bumped gateway started_at lights up
+                    # ``restart_completed=True`` while a no-op rerun
+                    # leaves the flag off.
+                    post_started_at = self._last_gateway_started_at
+                    post_doctor_mtime = self._doctor_cache_mtime()
+                    restart_completed = bool(
+                        post_started_at
+                        and post_started_at != pre_started_at
+                        and exit_code == 0
+                    )
+                    config_reloaded = restart_completed or (
+                        exit_code == 0
+                        and binary == "defenseclaw"
+                        and args
+                        and args[0] in {"setup", "guardrail", "settings", "init", "registry"}
+                    )
+                    doctor_cache_refreshed = bool(
+                        post_doctor_mtime
+                        and post_doctor_mtime != pre_doctor_mtime
+                        and exit_code == 0
+                    )
+                    next_hint = suggested_next_action(label, exit_code)
+                    self.activity_model.finish_entry(
+                        exit_code,
+                        config_reloaded=config_reloaded,
+                        restart_completed=restart_completed,
+                        doctor_cache_refreshed=doctor_cache_refreshed,
+                        suggested_next_action=next_hint,
+                    )
                     color = "#34D399" if event.exit_code == 0 else "#F87171"
                     self._write_activity(f"[{color}]exit {event.exit_code}[/] in {event.duration:.2f}s")
                     self._strip_finished(event.exit_code or 0, event.duration or 0.0)
@@ -5654,6 +5700,27 @@ class DefenseClawTUI(App[None]):
                 if hasattr(self.setup_model, "clear_restart_queue"):
                     self.setup_model.clear_restart_queue()
         self._last_gateway_started_at = snapshot.started_at
+
+    def _doctor_cache_mtime(self) -> float:
+        """Return the doctor_cache.json mtime, 0 when missing/unreadable.
+
+        ``_run_command`` snapshots this before/after every execution to
+        detect ``doctor`` runs that successfully refreshed the cache
+        and surface the ``doctor cache refreshed`` meta footer in the
+        Activity panel. Mtime is preferred over content hashing because
+        it survives both no-op runs (mtime unchanged) and runs that
+        rewrite the same JSON content (mtime advances). Returning 0 on
+        any error keeps the caller's diff logic simple — pre == post,
+        so we don't claim a refresh that didn't happen.
+        """
+
+        data_dir = self.data_dir or _data_dir_from_config(self.config)
+        if data_dir is None:
+            return 0.0
+        try:
+            return (data_dir / "doctor_cache.json").stat().st_mtime
+        except OSError:
+            return 0.0
 
     def _load_doctor_cache(self) -> None:
         """Hydrate the Overview DOCTOR box from the on-disk cache.
