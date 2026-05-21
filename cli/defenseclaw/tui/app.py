@@ -756,6 +756,51 @@ class DefenseClawTUI(App[None]):
                     yield Button("Restart", id="setup-restart", compact=True)
                     yield Button("Clear restart", id="setup-clear-restart", compact=True)
                     yield Button("Refresh keys", id="setup-refresh-credentials", compact=True)
+                with Horizontal(id="setup-wizard-controls", classes="panel-controls hidden"):
+                    # Wizard-form sub-bar. Shows only while a wizard form
+                    # is open (`setup_model.form_active`). Buttons route
+                    # to the same key handlers as Ctrl+R / Esc / Tab /
+                    # Ctrl+T / Ctrl+U so mouse-only operators get the
+                    # exact same submission, cancellation, and field
+                    # navigation semantics as the keystroke flow.
+                    yield Button(
+                        "Run wizard",
+                        id="setup-wizard-run",
+                        compact=True,
+                        variant="success",
+                        tooltip="Submit the wizard (Ctrl+R)",
+                    )
+                    yield Button(
+                        "Cancel",
+                        id="setup-wizard-cancel",
+                        compact=True,
+                        variant="warning",
+                        tooltip="Close the wizard form without running (Esc)",
+                    )
+                    yield Button(
+                        "Prev field",
+                        id="setup-wizard-prev",
+                        compact=True,
+                        tooltip="Move to the previous field (Shift+Tab / ↑)",
+                    )
+                    yield Button(
+                        "Next field",
+                        id="setup-wizard-next",
+                        compact=True,
+                        tooltip="Move to the next field (Tab / ↓)",
+                    )
+                    yield Button(
+                        "Toggle reveal",
+                        id="setup-wizard-reveal",
+                        compact=True,
+                        tooltip="Show/hide secret values (Ctrl+T)",
+                    )
+                    yield Button(
+                        "Clear field",
+                        id="setup-wizard-clear",
+                        compact=True,
+                        tooltip="Clear the current field's value (Ctrl+U)",
+                    )
                 with Horizontal(id="ai-controls", classes="panel-controls hidden"):
                     # AI Discovery panel was view-only — operators had
                     # to leave the panel to enable/disable/scan via the
@@ -1792,6 +1837,7 @@ class DefenseClawTUI(App[None]):
         registries = self.query_one("#registries-controls", Horizontal)
         policy = self.query_one("#policy-controls", Horizontal)
         setup = self.query_one("#setup-controls", Horizontal)
+        setup_wizard = self.query_one("#setup-wizard-controls", Horizontal)
         activity = self.query_one("#activity-controls", Horizontal)
         ai = self.query_one("#ai-controls", Horizontal)
         overview.set_class(self.active_panel != "overview" or self.help_open, "hidden")
@@ -1809,6 +1855,16 @@ class DefenseClawTUI(App[None]):
         registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
         policy.set_class(self.active_panel != "policy" or self.help_open, "hidden")
         setup.set_class(self.active_panel != "setup" or self.help_open, "hidden")
+        # Wizard sub-bar is doubly-scoped: panel == setup AND a wizard
+        # form is open. Hide it during the wizard list, config editor,
+        # and any other panel so the bar doesn't advertise actions
+        # that wouldn't fire.
+        setup_wizard.set_class(
+            self.active_panel != "setup"
+            or self.help_open
+            or not self.setup_model.form_active,
+            "hidden",
+        )
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
         # Stdin pipe is panel-scoped to Activity but command-state-scoped
@@ -1831,6 +1887,8 @@ class DefenseClawTUI(App[None]):
             self._sync_policy_controls()
         if self.active_panel == "setup" and not self.help_open:
             self._sync_setup_controls()
+            if self.setup_model.form_active:
+                self._sync_setup_wizard_controls()
         if self.active_panel == "activity" and not self.help_open:
             self._sync_activity_controls()
         if self.active_panel == "ai" and not self.help_open:
@@ -1962,6 +2020,44 @@ class DefenseClawTUI(App[None]):
         self.query_one("#setup-revert", Button).disabled = self.setup_model.mode != "config"
         self.query_one("#setup-restart", Button).disabled = not self.setup_model.restart_queue.pending
         self.query_one("#setup-clear-restart", Button).disabled = not self.setup_model.restart_queue.pending
+
+    def _sync_setup_wizard_controls(self) -> None:
+        """Light up the wizard form action bar to match the live form state.
+
+        Run is disabled when there are still required fields to fill
+        in — the same gate ``submit_wizard_form()`` enforces — so the
+        button can't pretend to work when it would only surface an
+        error. Toggle reveal is enabled iff the focused field's kind
+        is ``password``, matching Ctrl+T's no-op behaviour elsewhere.
+        Clear is enabled only on free-text-ish kinds the keystroke
+        handler accepts text into. Prev/Next are always enabled while
+        the form is open (Tab/Shift+Tab parity).
+        """
+
+        model = self.setup_model
+        missing = model.missing_required_fields()
+        try:
+            run_button = self.query_one("#setup-wizard-run", Button)
+        except NoMatches:
+            return
+        run_button.disabled = bool(missing)
+        run_button.tooltip = (
+            f"Missing required field(s): {', '.join(missing)}"
+            if missing
+            else "Submit the wizard (Ctrl+R)"
+        )
+        self.query_one("#setup-wizard-cancel", Button).disabled = False
+        has_navigable = any(field.kind != "section" for field in model.form_fields)
+        self.query_one("#setup-wizard-prev", Button).disabled = not has_navigable
+        self.query_one("#setup-wizard-next", Button).disabled = not has_navigable
+        # Field kinds: see ``WizardFieldKind`` in panels/setup.py —
+        # only "password" surfaces secret-reveal semantics, and only
+        # the typed-input kinds accept Ctrl+U as a meaningful clear.
+        focused = model.focused_row_metadata()
+        focused_kind = getattr(focused, "kind", "") if focused is not None else ""
+        self.query_one("#setup-wizard-reveal", Button).disabled = focused_kind != "password"
+        clearable_kinds = {"string", "password", "int"}
+        self.query_one("#setup-wizard-clear", Button).disabled = focused_kind not in clearable_kinds
 
     def _sync_activity_controls(self) -> None:
         """Toggle Activity action-bar buttons to match the live state.
@@ -2241,6 +2337,28 @@ class DefenseClawTUI(App[None]):
             self.setup_model.mode = "config"
             self.setup_model.active_line = self.setup_model.first_editable_line()
             self._render_chrome()
+            return
+        # Wizard-form buttons share the keystroke handler so we get
+        # `submit_wizard_form()` validation, secret-reveal toggling,
+        # and field navigation for free. Routing through the same
+        # `_apply_setup_action` pipe means CommandPreviewScreen,
+        # CommandPreview gating, and `mark_wizard_complete` callbacks
+        # all fire identically to Ctrl+R / Esc / Tab paths.
+        wizard_key_by_button = {
+            "setup-wizard-run": "ctrl+r",
+            "setup-wizard-cancel": "esc",
+            "setup-wizard-prev": "shift+tab",
+            "setup-wizard-next": "tab",
+            "setup-wizard-reveal": "ctrl+t",
+            "setup-wizard-clear": "ctrl+u",
+        }
+        if button_id in wizard_key_by_button:
+            if not self.setup_model.form_active:
+                self._set_status("Open a wizard first, then use these controls.")
+                return
+            self._apply_setup_action(
+                self._handle_setup_key(wizard_key_by_button[button_id])
+            )
             return
         key_by_button = {
             "setup-open": "enter",
