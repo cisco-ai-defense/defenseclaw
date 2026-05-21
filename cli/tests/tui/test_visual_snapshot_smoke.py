@@ -27,7 +27,6 @@ from defenseclaw.tui.panels.logs import LogsPanelModel
 from defenseclaw.tui.panels.mcps import MCPRow, MCPsPanelModel
 from defenseclaw.tui.panels.overview import HealthSnapshot, OverviewPanelModel, SubsystemHealth
 from defenseclaw.tui.panels.plugins import PluginRow, PluginScanSummary, PluginsPanelModel
-from defenseclaw.tui.panels.policy import PolicyPanelModel
 from defenseclaw.tui.panels.registries import RegistriesPanelModel
 from defenseclaw.tui.panels.setup import SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
@@ -44,7 +43,6 @@ TOP_LEVEL_PANELS = (
     ("mcps", "4", "MCPs"),
     ("plugins", "5", "Plugins"),
     ("inventory", "6", "Inventory"),
-    ("policy", "7", "Policy"),
     ("logs", "8", "Logs"),
     ("audit", "9", "Audit"),
     ("activity", "a", "Activity"),
@@ -188,7 +186,6 @@ def _snapshot_app(tmp_path) -> DefenseClawTUI:
         logs_model=logs,
         audit_model=audit,
         ai_discovery_model=ai_discovery,
-        policy_model=PolicyPanelModel(config),
         registries_model=registries,
         tools_model=tools,
         setup_model=SetupPanelModel({}),

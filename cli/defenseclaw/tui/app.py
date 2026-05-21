@@ -57,16 +57,6 @@ from defenseclaw.tui.panels.overview import (
     OverviewPanelModel,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
-from defenseclaw.tui.panels.policy import (
-    POLICY_TAB_JUDGE,
-    POLICY_TAB_NAMES,
-    POLICY_TAB_OPA,
-    POLICY_TAB_POLICIES,
-    POLICY_TAB_RULE_PACKS,
-    POLICY_TAB_SUPPRESSIONS,
-    PolicyPanelAction,
-    PolicyPanelModel,
-)
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
 from defenseclaw.tui.panels.setup import (
     WIZARD_DESCRIPTIONS,
@@ -89,8 +79,6 @@ from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
-from defenseclaw.tui.screens.playground import PlaygroundScreen
-from defenseclaw.tui.screens.quick_start import QuickStartScreen
 from defenseclaw.tui.screens.redaction import RedactionToggleScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
     SetupResourceEditorScreen,
@@ -149,7 +137,6 @@ PANELS = (
     ("mcps", "4", "MCPs"),
     ("plugins", "5", "Plugins"),
     ("inventory", "6", "Inventory"),
-    ("policy", "7", "Policy"),
     ("logs", "8", "Logs"),
     ("audit", "9", "Audit"),
     ("activity", "A", "Activity"),
@@ -556,7 +543,6 @@ class DefenseClawTUI(App[None]):
         overview_model: OverviewPanelModel | None = None,
         inventory_model: InventoryPanelModel | None = None,
         ai_discovery_model: AIDiscoveryPanelModel | None = None,
-        policy_model: PolicyPanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -604,7 +590,6 @@ class DefenseClawTUI(App[None]):
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
-        self.policy_model = policy_model or PolicyPanelModel(config)
         self.setup_model = setup_model or SetupPanelModel(config)
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
@@ -796,40 +781,6 @@ class DefenseClawTUI(App[None]):
                     yield Button("Approve", id="registries-approve", compact=True)
                     yield Button("Reject", id="registries-reject", compact=True)
                     yield Button("Remove", id="registries-remove-source", compact=True, variant="error")
-                with Horizontal(id="policy-controls", classes="panel-controls hidden"):
-                    # Tab labels mirror ``POLICY_TAB_NAMES`` from
-                    # ``policy_state.py`` so the styled-button chrome
-                    # never disagrees with the body's tab bar (or the
-                    # CLI's ``policy --help`` output).
-                    yield Button("Policies", id="policy-tab-0", compact=True)
-                    yield Button("Rule Packs", id="policy-tab-1", compact=True)
-                    yield Button("Judge Prompts", id="policy-tab-2", compact=True)
-                    yield Button("Suppressions", id="policy-tab-3", compact=True)
-                    yield Button("OPA / Rego", id="policy-tab-4", compact=True)
-                    # ``New`` is the ``n`` keybind on the Policies tab
-                    # (opens the in-panel create form). ``Materialize``
-                    # is the Phase-1 ``M`` keybind: copies bundled
-                    # presets (default.yaml, strict.yaml, ...) into
-                    # the user's policy_dir so they can be edited. We
-                    # surface them on the controls bar so mouse-only
-                    # operators get the full Phase-1 capability.
-                    yield Button(
-                        "New",
-                        id="policy-new",
-                        compact=True,
-                        variant="success",
-                        tooltip="Create a new policy YAML in this dir (n)",
-                    )
-                    yield Button(
-                        "Materialize",
-                        id="policy-materialize",
-                        compact=True,
-                        tooltip="Copy bundled presets into this policy dir (M)",
-                    )
-                    yield Button("Refresh", id="policy-refresh", compact=True)
-                    yield Button("Validate", id="policy-validate", compact=True)
-                    yield Button("Test", id="policy-test", compact=True)
-                    yield Button("Edit", id="policy-edit", compact=True)
                 with Horizontal(id="setup-controls", classes="panel-controls hidden"):
                     yield Button("Wizards", id="setup-mode-wizards", compact=True)
                     yield Button("Config", id="setup-mode-config", compact=True)
@@ -1582,10 +1533,6 @@ class DefenseClawTUI(App[None]):
             event.stop()
             self._handle_registries_control(button_id)
             return
-        if button_id.startswith("policy-"):
-            event.stop()
-            self._handle_policy_control(button_id)
-            return
         if button_id.startswith("setup-"):
             event.stop()
             self._handle_setup_control(button_id)
@@ -1943,8 +1890,6 @@ class DefenseClawTUI(App[None]):
             self.inventory_model.set_cursor(event.cursor_row)
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
-        elif self.active_panel == "policy":
-            self._set_policy_cursor(event.cursor_row)
         elif self.active_panel == "setup":
             self._set_setup_cursor(event.cursor_row)
 
@@ -1993,12 +1938,6 @@ class DefenseClawTUI(App[None]):
             self.ai_discovery_model.set_cursor(event.cursor_row)
             if repeated_click:
                 self._apply_ai_discovery_action(self.ai_discovery_model.handle_key("enter"))
-            else:
-                self._update_body_only()
-        elif self.active_panel == "policy":
-            self._set_policy_cursor(event.cursor_row)
-            if repeated_click:
-                self._apply_policy_action(self.policy_model.handle_key("enter"))
             else:
                 self._update_body_only()
         elif self.active_panel == "setup":
@@ -2289,7 +2228,7 @@ class DefenseClawTUI(App[None]):
                 ("g", "Setup guardrail"),
                 ("m", "Switch connector mode"),
                 ("R", "Toggle redaction"),
-                ("p / i / l", "Jump to Policy / Inventory / Logs"),
+                ("i / l", "Jump to Inventory / Logs"),
             ],
             "alerts": [
                 ("j/k or Up/Down", "Navigate alerts"),
@@ -2330,15 +2269,6 @@ class DefenseClawTUI(App[None]):
                 ("j/k or Up/Down", "Navigate items"),
                 ("/", "Filter"),
                 ("r", "Refresh"),
-            ],
-            "policy": [
-                ("Tab / Shift+Tab", "Switch sub-tab"),
-                ("j/k or Up/Down", "Navigate items"),
-                ("Enter", "Activate pack / drill into rules"),
-                ("Esc", "Back from rule detail"),
-                ("d", "Delete suppression (Suppressions tab)"),
-                ("v / T / r", "Validate / test / reload (OPA tab)"),
-                ("t", "Toggle test files (OPA tab)"),
             ],
             "logs": [
                 ("Space", "Pause / resume auto-scroll"),
@@ -2488,20 +2418,6 @@ class DefenseClawTUI(App[None]):
                 f"{suffix}"
             )
             return self.body_text
-        if self.active_panel == "policy":
-            # The Policy panel renders its own list, navigation cursor,
-            # tab bar, and detail overlays inside ``render_text``. The
-            # shared DataTable that sits below the body would render
-            # the same rows a second time, so we deliberately leave
-            # ``_table_columns`` empty and let ``_render_panel_table``
-            # hide the widget entirely.
-            self._table_columns = ()
-            self._table_rows = ()
-            self.body_text = "[bold #22D3EE]Policy[/]\n" + self.policy_model.render_text(
-                width=max(self.size.width - 8, 80),
-                height=max(self.size.height - 8, 20),
-            )
-            return self.body_text
         if self.active_panel == "setup":
             self._table_columns, self._table_rows = self._setup_table()
             self.body_text = self._setup_body_text()
@@ -2553,7 +2469,6 @@ class DefenseClawTUI(App[None]):
         logs = self.query_one("#logs-controls", Horizontal)
         logs_filters = self.query_one("#logs-filter-controls", Horizontal)
         registries = self.query_one("#registries-controls", Horizontal)
-        policy = self.query_one("#policy-controls", Horizontal)
         setup = self.query_one("#setup-controls", Horizontal)
         setup_wizard = self.query_one("#setup-wizard-controls", Horizontal)
         activity = self.query_one("#activity-controls", Horizontal)
@@ -2581,7 +2496,6 @@ class DefenseClawTUI(App[None]):
         logs.set_class(self.active_panel != "logs" or self.help_open, "hidden")
         logs_filters.set_class(self.active_panel != "logs" or self.help_open, "hidden")
         registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
-        policy.set_class(self.active_panel != "policy" or self.help_open, "hidden")
         setup.set_class(self.active_panel != "setup" or self.help_open, "hidden")
         # Wizard sub-bar is doubly-scoped: panel == setup AND a wizard
         # form is open. Hide it during the wizard list, config editor,
@@ -2623,8 +2537,6 @@ class DefenseClawTUI(App[None]):
             self._sync_logs_controls()
         if self.active_panel == "registries" and not self.help_open:
             self._sync_registries_controls()
-        if self.active_panel == "policy" and not self.help_open:
-            self._sync_policy_controls()
         if self.active_panel == "setup" and not self.help_open:
             self._sync_setup_controls()
             if self.setup_model.form_active:
@@ -2741,22 +2653,6 @@ class DefenseClawTUI(App[None]):
         self.query_one("#registries-approve", Button).disabled = not entry_tab or selected_entry is None
         self.query_one("#registries-reject", Button).disabled = not entry_tab or selected_entry is None
         self.query_one("#registries-remove-source", Button).disabled = active != "sources" or selected_source is None
-
-    def _sync_policy_controls(self) -> None:
-        for index, _name in enumerate(POLICY_TAB_NAMES):
-            self._set_button_active(f"#policy-tab-{index}", self.policy_model.active_tab == index)
-        on_policies = self.policy_model.active_tab == POLICY_TAB_POLICIES
-        opa = self.policy_model.active_tab == POLICY_TAB_OPA
-        # ``New`` opens the create form; only meaningful on Policies.
-        # ``Materialize`` copies bundled presets; only meaningful on
-        # Policies. We grey them out elsewhere so the controls bar is
-        # honest about what'll happen on click. ``Validate`` /
-        # ``Test`` are OPA-only (the model intent factories tie them
-        # to ``policy:opa``) so they keep their existing gating.
-        self.query_one("#policy-new", Button).disabled = not on_policies
-        self.query_one("#policy-materialize", Button).disabled = not on_policies
-        self.query_one("#policy-test", Button).disabled = not opa
-        self.query_one("#policy-validate", Button).disabled = not opa
 
     def _sync_setup_controls(self) -> None:
         self._set_button_active("#setup-mode-wizards", self.setup_model.mode == "wizards")
@@ -3190,38 +3086,6 @@ class DefenseClawTUI(App[None]):
         key = key_by_button.get(button_id)
         if key is not None:
             self._apply_registry_action(self.registries_model.handle_key(key))
-
-    def _handle_policy_control(self, button_id: str) -> None:
-        tab_prefix = "policy-tab-"
-        if button_id.startswith(tab_prefix):
-            try:
-                index = int(button_id.removeprefix(tab_prefix))
-            except ValueError:
-                return
-            self.policy_model.set_sub_tab(index)
-            self.policy_model.reset_scrolls()
-            self._render_chrome()
-            return
-        # ``New`` and ``Materialize`` only do anything on the Policies
-        # sub-tab. Force-switch first so a mouse-only operator who
-        # clicked from another tab (e.g. OPA) gets a sensible result
-        # instead of a silent no-op.
-        if button_id in {"policy-new", "policy-materialize"}:
-            if self.policy_model.active_tab != POLICY_TAB_POLICIES:
-                self.policy_model.set_sub_tab(POLICY_TAB_POLICIES)
-                self.policy_model.reset_scrolls()
-            key = "n" if button_id == "policy-new" else "M"
-            self._apply_policy_action(self.policy_model.handle_key(key))
-            return
-        key_by_button = {
-            "policy-refresh": "r",
-            "policy-validate": "v",
-            "policy-test": "T",
-            "policy-edit": "E",
-        }
-        key = key_by_button.get(button_id)
-        if key is not None:
-            self._apply_policy_action(self.policy_model.handle_key(key))
 
     def _handle_setup_control(self, button_id: str) -> None:
         if button_id == "setup-mode-wizards":
@@ -3844,7 +3708,7 @@ class DefenseClawTUI(App[None]):
                     detail=guardrail_detail,
                     trend=(20, 40, 65, 80, 100) if guardrail_active else (0, 0, 8, 4, 0),
                     state="ok" if guardrail_active else "warn",
-                    target_panel="policy",
+                    target_panel="audit",
                     value_text=guardrail_value_text,
                 ),
             )
@@ -3881,7 +3745,7 @@ class DefenseClawTUI(App[None]):
                 detail=guardrail_detail,
                 trend=(20, 40, 65, 80, 100) if guardrail_active else (0, 0, 8, 4, 0),
                 state="ok" if guardrail_active else "warn",
-                target_panel="policy",
+                target_panel="audit",
                 value_text=guardrail_value_text,
             ),
             MetricDatum(
@@ -4705,7 +4569,6 @@ class DefenseClawTUI(App[None]):
             ("i", "Inventory"),
             ("g", "Guardrail"),
             ("m", "Mode"),
-            ("p", "Policy"),
             ("l", "Logs"),
             ("R", "Redaction"),
             ("N", "Notify"),
@@ -4723,7 +4586,7 @@ class DefenseClawTUI(App[None]):
             quick_text.append(label, style=TOKENS.text_primary)
 
         footer_hint = Text(
-            "Use the tabs or number keys to drill into Alerts, Audit, Logs, Policy, and Setup.",
+            "Use the tabs or number keys to drill into Alerts, Audit, Logs, and Setup.",
             style=f"italic {TOKENS.text_muted}",
         )
 
@@ -4843,14 +4706,14 @@ class DefenseClawTUI(App[None]):
         else:
             keys_line = "not checked yet - press 0 for Setup, then r to refresh credentials"
         # Escape the lowercase hotkey labels: Rich parses ``[s]`` /
-        # ``[d]`` / ``[i]`` / ``[g]`` / ``[m]`` / ``[p]`` / ``[l]`` as
-        # opening style tags and silently drops the bracketed text from
-        # the rendered overview, so the operator sees ``Scan all`` with
+        # ``[d]`` / ``[i]`` / ``[g]`` / ``[m]`` / ``[l]`` as opening
+        # style tags and silently drops the bracketed text from the
+        # rendered overview, so the operator sees ``Scan all`` with
         # no key to press. ``[R]`` is uppercase so Rich already treats
         # it as literal text — escaping is harmless either way.
         quick = (
             "\\[s] Scan all   \\[d] Doctor   \\[i] Inventory   "
-            "\\[g] Guardrail   \\[m] Mode   \\[p] Policy   \\[l] Logs   "
+            "\\[g] Guardrail   \\[m] Mode   \\[l] Logs   "
             "\\[R] Redaction"
         )
         return (
@@ -4868,7 +4731,7 @@ class DefenseClawTUI(App[None]):
             f"[bold {TOKENS.accent_pink}]DOCTOR[/]  {doctor_summary}\n" + "\n".join(doctor_lines) + "\n\n"
             f"[bold {TOKENS.accent_cyan}]DISCOVERED AI AGENTS[/]\n" + "\n".join(ai_lines) + "\n\n"
             f"[bold {TOKENS.text_primary}]ACTIONS[/]  {quick}\n"
-            "[#9FB2CC]Use the tabs or number keys to drill into Alerts, Audit, Logs, Policy, and Setup.[/]"
+            "[#9FB2CC]Use the tabs or number keys to drill into Alerts, Audit, Logs, and Setup.[/]"
         )
 
     def _inventory_body_text(self) -> str:
@@ -5234,8 +5097,6 @@ class DefenseClawTUI(App[None]):
             return self.inventory_model.cursor
         if self.active_panel == "ai":
             return self.ai_discovery_model.cursor
-        if self.active_panel == "policy":
-            return self._policy_cursor()
         if self.active_panel == "setup":
             return self._setup_cursor()
         return 0
@@ -5265,8 +5126,8 @@ class DefenseClawTUI(App[None]):
             if key == "m":
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
-            if key in {"i", "p", "l"}:
-                self.action_switch_panel({"i": "inventory", "p": "policy", "l": "logs"}[key])
+            if key in {"i", "l"}:
+                self.action_switch_panel({"i": "inventory", "l": "logs"}[key])
                 return True
             if key in {"R", "N", "X"}:
                 if key == "R":
@@ -5289,9 +5150,6 @@ class DefenseClawTUI(App[None]):
             return self._apply_ai_discovery_action(action)
         if self.active_panel == "activity":
             return self._handle_activity_key(key)
-        if self.active_panel == "policy":
-            action = self.policy_model.handle_key(_vim_key(key))
-            return self._apply_policy_action(action)
         if self.active_panel == "setup":
             if self.first_run_model.active:
                 action = self.first_run_model.handle_key(_vim_key(key))
@@ -5450,124 +5308,6 @@ class DefenseClawTUI(App[None]):
         self._render_chrome()
         return True
 
-    def _apply_policy_action(self, action: PolicyPanelAction) -> bool:
-        if not action.handled:
-            return False
-        status_message = action.hint
-        if action.hint:
-            self._set_status(action.hint)
-        if action.reload_requested:
-            self.policy_model.reload_from_disk()
-        if action.open_quick_start:
-            # Pushing modal screens is async - we cannot await inline
-            # because callers are sync key/click handlers. Run the
-            # ``push_screen_wait`` call inside a worker; the worker
-            # owns the post-dismiss save flow so the UI stays
-            # responsive while the operator interacts with the wizard.
-            self.run_worker(
-                self._launch_quick_start_wizard(),
-                exclusive=True,
-                thread=False,
-            )
-        if action.open_playground:
-            self.run_worker(
-                self._launch_playground(action.open_playground_policy_name),
-                exclusive=True,
-                thread=False,
-            )
-        if action.intent is not None:
-            intent = action.intent
-            if intent.kind == "editor":
-                status_message = f"Editor intent prepared for {intent.editor_path or intent.label}."
-            elif intent.run_in_panel:
-                self.run_worker(self._run_policy_panel_intent(intent), exclusive=False, thread=False)
-            else:
-                self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
-        self._render_chrome()
-        if status_message:
-            self._set_status(status_message)
-        return True
-
-    async def _launch_quick_start_wizard(self) -> None:
-        """Push :class:`QuickStartScreen`, write the resulting policy
-        YAML on Save, and refresh the policy list. ``None`` from
-        ``dismiss`` means the operator cancelled - we just clear the
-        status line and leave the panel untouched.
-        """
-
-        result = await self.push_screen_wait(QuickStartScreen())
-        if result is None:
-            self._set_status("Quick Start cancelled.")
-            return
-        try:
-            written = self._save_wizard_policy(result)
-        except (OSError, ValueError) as exc:
-            self._set_status(f"Quick Start save failed: {exc}")
-            return
-        self.policy_model.reload_from_disk()
-        self._render_chrome()
-        self._set_status(f"Saved policy to {written}.")
-
-    def _save_wizard_policy(self, policy: object) -> Path:
-        """Serialize a :class:`Policy` produced by the Quick Start
-        wizard to ``<policy_dir>/<name>.yaml``. Uses the gateway YAML
-        schema so the file is loadable by ``defenseclaw policy
-        activate`` without any post-processing.
-        """
-
-        from defenseclaw.tui.creator.emit import policy_to_gateway_yaml
-
-        policy_dir = self.policy_model.policy_dir
-        if policy_dir is None:
-            raise ValueError("policy_dir is not configured")
-        policy_dir.mkdir(parents=True, exist_ok=True)
-        name = (getattr(policy, "name", "") or "").strip()
-        if not name:
-            raise ValueError("policy name is required")
-        target = policy_dir / f"{name}.yaml"
-        target.write_text(policy_to_gateway_yaml(policy), encoding="utf-8")
-        return target
-
-    async def _launch_playground(self, policy_name: str) -> None:
-        """Push :class:`PlaygroundScreen` for an existing policy.
-
-        Loads ``<policy_dir>/<name>.yaml`` off disk to seed the modal
-        so live edits to the file by another process are picked up
-        cleanly. Saves through ``_save_wizard_policy`` (same target,
-        same emit pipeline) so the on-disk format is byte-identical
-        to whatever Quick Start would produce.
-        """
-
-        from defenseclaw.tui.creator.presets import policy_from_yaml
-        import yaml as _yaml
-
-        policy_dir = self.policy_model.policy_dir
-        if policy_dir is None:
-            self._set_status("policy_dir is not configured.")
-            return
-        target = policy_dir / f"{policy_name}.yaml"
-        if not target.is_file():
-            self._set_status(f"Policy file not found: {target}")
-            return
-        try:
-            data = _yaml.safe_load(target.read_text(encoding="utf-8")) or {}
-        except (OSError, _yaml.YAMLError) as exc:
-            self._set_status(f"Failed to load {target}: {exc}")
-            return
-        policy = policy_from_yaml(policy_name, data)
-        result = await self.push_screen_wait(PlaygroundScreen(policy))
-        if result is None:
-            self._set_status("Playground cancelled.")
-            return
-        try:
-            written = self._save_wizard_policy(result)
-        except (OSError, ValueError) as exc:
-            self._set_status(f"Playground save failed: {exc}")
-            return
-        self.policy_model.reload_from_disk()
-        self._render_chrome()
-        self._set_status(f"Saved policy to {written}.")
-
     def _apply_setup_action(self, action: SetupPanelAction) -> bool:
         if not action.handled:
             return False
@@ -5646,109 +5386,6 @@ class DefenseClawTUI(App[None]):
             return False
         self._set_status("Sent input to running command.")
         return True
-
-    def _policy_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
-        if not self.policy_model.loaded:
-            self.policy_model.load()
-        if self.policy_model.active_tab == POLICY_TAB_POLICIES:
-            if not self.policy_model.policies_loaded:
-                self.policy_model.load_policies()
-            return (
-                ("Name", "Active", "Description"),
-                tuple(
-                    (policy.name, "yes" if policy.active else "", _truncate_display(policy.description, 96))
-                    for policy in self.policy_model.filtered_policies
-                ),
-            )
-        if self.policy_model.active_tab == POLICY_TAB_RULE_PACKS:
-            if self.policy_model.pack_detail:
-                rows = [
-                    (rule.id, rule.severity, rule_file.category, _truncate_display(rule.title, 72))
-                    for rule_file in self.policy_model.pack_rules
-                    for rule in rule_file.rules
-                ]
-                return ("Rule", "Severity", "Category", "Title"), tuple(rows)
-            rows = []
-            for name in self.policy_model.packs:
-                summary = self.policy_model.rule_pack_summary_for(name)
-                rows.append(
-                    (
-                        name,
-                        "yes" if name == self.policy_model.active_pack else "",
-                        str(summary.rule_count),
-                        str(summary.judge_count),
-                    )
-                )
-            return ("Pack", "Active", "Rules", "Judges"), tuple(rows)
-        if self.policy_model.active_tab == POLICY_TAB_JUDGE:
-            rows = []
-            for name in self.policy_model.judge_names:
-                judge = self.policy_model.judges.get(name)
-                rows.append(
-                    (
-                        name,
-                        "on" if judge and judge.enabled else "off",
-                        str(len(judge.categories) if judge else 0),
-                        judge.categories[0].effective_severity() if judge and judge.categories else "",
-                    )
-                )
-            return ("Judge", "Enabled", "Categories", "First Severity"), tuple(rows)
-        if self.policy_model.active_tab == POLICY_TAB_SUPPRESSIONS:
-            suppressions = self.policy_model.suppressions
-            rows: list[tuple[str, str, str]] = []
-            if suppressions is not None and self.policy_model.supp_section == 0:
-                rows = [
-                    (item.id, _truncate_display(item.pattern, 80), item.context)
-                    for item in suppressions.pre_judge_strips
-                ]
-            elif suppressions is not None and self.policy_model.supp_section == 1:
-                rows = [
-                    (item.id, _truncate_display(item.finding_pattern, 80), item.reason)
-                    for item in suppressions.finding_suppressions
-                ]
-            elif suppressions is not None:
-                rows = [
-                    (_truncate_display(item.tool_pattern, 42), ",".join(item.suppress_findings), item.reason)
-                    for item in suppressions.tool_suppressions
-                ]
-            return ("ID / Tool", "Pattern / Findings", "Reason"), tuple(rows)
-        rows = [
-            (Path(path).name, "test" if Path(path).name.endswith("_test.rego") else "module", path)
-            for path in self.policy_model.rego_files
-        ]
-        return ("File", "Kind", "Path"), tuple(rows)
-
-    def _policy_cursor(self) -> int:
-        if self.policy_model.active_tab == POLICY_TAB_POLICIES:
-            return self.policy_model.policy_cursor
-        if self.policy_model.active_tab == POLICY_TAB_RULE_PACKS:
-            return self.policy_model.rule_cursor if self.policy_model.pack_detail else self.policy_model.pack_cursor
-        if self.policy_model.active_tab == POLICY_TAB_JUDGE:
-            return self.policy_model.judge_cursor
-        if self.policy_model.active_tab == POLICY_TAB_SUPPRESSIONS:
-            return self.policy_model.supp_cursor
-        if self.policy_model.active_tab == POLICY_TAB_OPA:
-            return self.policy_model.rego_cursor
-        return 0
-
-    def _set_policy_cursor(self, row: int) -> None:
-        if row < 0:
-            return
-        if self.policy_model.active_tab == POLICY_TAB_POLICIES:
-            self.policy_model.policy_cursor = min(row, max(0, len(self.policy_model.filtered_policies) - 1))
-        elif self.policy_model.active_tab == POLICY_TAB_RULE_PACKS:
-            if self.policy_model.pack_detail:
-                self.policy_model.rule_cursor = row
-            else:
-                self.policy_model.pack_cursor = min(row, max(0, len(self.policy_model.packs) - 1))
-        elif self.policy_model.active_tab == POLICY_TAB_JUDGE:
-            self.policy_model.judge_cursor = min(row, max(0, len(self.policy_model.judge_names) - 1))
-            self.policy_model.judge_scroll = 0
-        elif self.policy_model.active_tab == POLICY_TAB_SUPPRESSIONS:
-            self.policy_model.supp_cursor = row
-        elif self.policy_model.active_tab == POLICY_TAB_OPA:
-            self.policy_model.rego_cursor = min(row, max(0, len(self.policy_model.rego_files) - 1))
-            self.policy_model.load_rego_source()
 
     def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
         if self.first_run_model.active:
@@ -5973,8 +5610,6 @@ class DefenseClawTUI(App[None]):
         return section.fields[self.setup_model.active_line]
 
     def _active_overlay_blocks_table(self) -> bool:
-        if self.active_panel == "policy":
-            return self.policy_model.is_overlay_active()
         if self.active_panel == "setup":
             return self.setup_model.form_active
         return False
@@ -6218,33 +5853,6 @@ class DefenseClawTUI(App[None]):
         )
         self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
 
-    async def _run_policy_panel_intent(self, intent: Any) -> None:
-        self._set_status(intent.hint or f"running {intent.label}")
-        self._write_activity(f"[#FBBF24]running[/] {intent.label}")
-        try:
-            process = await asyncio.create_subprocess_exec(
-                intent.binary,
-                *intent.args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await process.communicate()
-        except OSError as exc:
-            self.policy_model.apply_rego_test_result("", exc)
-            self._write_activity(f"[#F87171]{intent.label}: {exc}[/]")
-            self._render_chrome()
-            return
-
-        output = stdout.decode(errors="replace")
-        err_output = stderr.decode(errors="replace")
-        if process.returncode != 0:
-            self.policy_model.apply_rego_test_result(output or err_output, f"exit {process.returncode}")
-            self._write_activity(f"[#F87171]{intent.label} exit {process.returncode}[/]")
-        else:
-            self.policy_model.apply_rego_test_result(output or err_output)
-            self._write_activity(f"[#34D399]{intent.label} complete[/]")
-        self._render_chrome()
-
     async def _cancel_running_command(self) -> None:
         # Snapshot the running command before cancellation so we can
         # release the matching wizard's "running…" badge if it was a
@@ -6298,7 +5906,7 @@ class DefenseClawTUI(App[None]):
            — the file the just-finished wizard wrote is the source of
            truth, not the in-memory snapshot from start-up.
         2. Push the fresh ``cfg`` into every panel that caches one
-           (overview, policy, setup, registries).
+           (overview, setup, registries).
         3. Re-bind ``data_dir`` on every panel that tails files
            (logs, activity, alerts) so a setup-time relocation of
            ``~/.defenseclaw/data`` doesn't strand the JSONL tail at
@@ -6337,7 +5945,6 @@ class DefenseClawTUI(App[None]):
         # Panels that cache the config snapshot.
         self.setup_model.set_config(new_cfg)
         self.overview_model.set_cfg(_overview_config(new_cfg))
-        self.policy_model.set_config(new_cfg)
         if hasattr(self.registries_model, "set_config"):
             self.registries_model.set_config(new_cfg)
 
@@ -7399,7 +7006,7 @@ def _panel_key(event: events.Key) -> str:
     if event.character:
         # Capital-letter keys that panels distinguish from their
         # lowercase form (e.g. ``M`` materialize bundled vs ``m`` no-op,
-        # ``T`` policy test vs ``t`` activity transcript). Anything
+        # ``T`` Tools panel vs ``t`` activity transcript). Anything
         # outside this set is lowercased so global vim-style shortcuts
         # ignore Shift/CapsLock state.
         if event.character in {"A", "C", "E", "G", "J", "M", "N", "R", "S", "T", "V", "X"}:

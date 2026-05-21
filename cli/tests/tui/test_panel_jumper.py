@@ -32,7 +32,6 @@ CHOICES = (
     PanelChoice("activity", "Activity", "A"),
     PanelChoice("ai", "AI Discovery", "V"),
     PanelChoice("logs", "Logs", "8"),
-    PanelChoice("policy", "Policy", "7"),
 )
 
 
