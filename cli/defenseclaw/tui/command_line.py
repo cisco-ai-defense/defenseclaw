@@ -243,3 +243,36 @@ def _flag_is_secret(flag: str) -> bool:
     return normalized == "__value" or normalized == "__api_key" or any(
         fragment in normalized for fragment in ("key", "token", "secret", "password", "credential", "value")
     )
+
+
+def suggested_next_action(command: str, exit_code: int) -> str:
+    """Return a one-line nudge for what to do after a command finishes.
+
+    Mirrors :func:`suggestedNextAction` in
+    ``internal/tui/command_intent.go`` so the Python TUI surfaces the
+    same follow-on hints (``rerun readiness``, ``refresh gateway
+    health``, etc.) the Go TUI shows. Returns an empty string when
+    there is nothing useful to say — callers should treat that as
+    "skip the footer" rather than rendering "(none)".
+
+    Lower-cases the entire command before matching so e.g. ``KEYS
+    LIST`` and ``keys list`` produce the same hint; the Go version is
+    similarly case-insensitive.
+    """
+
+    cmd = command.strip().lower()
+    if exit_code != 0:
+        if "keys" in cmd:
+            return "open Credentials or run keys check"
+        if "doctor" in cmd:
+            return "open readiness or rerun doctor"
+        return "review output and rerun when fixed"
+    if "keys" in cmd:
+        return "rerun readiness"
+    if "doctor" in cmd:
+        return "review readiness"
+    if "setup" in cmd:
+        return "rerun readiness"
+    if "restart" in cmd:
+        return "refresh gateway health"
+    return ""
