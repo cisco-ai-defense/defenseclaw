@@ -2333,17 +2333,27 @@ def test_safe_body_renderable_handles_hostile_corpus() -> None:
 
 
 def test_write_activity_safe_escapes_subprocess_output(monkeypatch) -> None:
-    """``_write_activity_safe`` must hand bracket-escaped text to the
+    """``_write_activity_safe`` must hand a safe renderable to the
     Activity RichLog — that's the whole point of the helper. Without
-    escaping, a subprocess line like ``[INFO] foo`` crashes the Rich
-    parser and tears down the activity stream.
+    safe-handling, a subprocess line like ``[INFO] foo`` crashes the
+    Rich parser and tears down the activity stream.
+
+    Implementation note: the helper switched from ``rich_escape``
+    (which left ANSI bytes intact and leaked them as visible
+    ``[1;33m...`` in the UI) to ``Text.from_ansi`` (which converts
+    ANSI SGR sequences AND treats remaining content as opaque text,
+    closing both the markup crash AND the ANSI leak in one go).
+    Verify we now hand a ``Text`` object with the literal content
+    preserved.
     """
 
-    captured: list[str] = []
+    from rich.text import Text
+
+    captured: list = []
 
     class _FakeRichLog:
-        def write(self, text: str) -> None:
-            captured.append(text)
+        def write(self, renderable) -> None:  # noqa: ANN001
+            captured.append(renderable)
 
     fake = _FakeRichLog()
     app = DefenseClawTUI.__new__(DefenseClawTUI)
@@ -2354,15 +2364,66 @@ def test_write_activity_safe_escapes_subprocess_output(monkeypatch) -> None:
 
     monkeypatch.setattr(app, "query_one", _query_one, raising=False)
     # ``[skill]`` is the canonical risk shape — Rich's markup parser
-    # treats it as an opening style tag. ``rich.markup.escape`` is
-    # intentionally conservative and only escapes the brackets it
-    # would otherwise parse as a tag, so uppercase / numeric tokens
-    # like ``[INFO]`` or ``[16]`` flow through verbatim (Rich treats
-    # them as literal text and never crashes on them anyway). Verify
-    # the safe writer escapes the dangerous shape so a bracketed
-    # token in subprocess output can't take down the activity stream.
+    # treats it as an opening style tag. Text.from_ansi consumes
+    # the entire string as opaque text (no markup re-parse), so the
+    # literal brackets survive verbatim into the Text's ``.plain``
+    # without needing a separate escape pass.
     app._write_activity_safe("prompt: [skill] continue")  # noqa: SLF001
-    assert captured == ["prompt: \\[skill] continue"]
+    assert len(captured) == 1
+    rendered = captured[0]
+    assert isinstance(rendered, Text), (
+        "must hand a rich.text.Text object so RichLog skips its markup "
+        "re-parse and the bracketed token can't take down the stream"
+    )
+    assert rendered.plain == "prompt: [skill] continue"
+
+
+def test_write_activity_safe_converts_ansi_color_codes_to_styles(monkeypatch) -> None:
+    """``_write_activity_safe`` must translate ANSI SGR sequences from
+    subprocess stdout into actual Rich styles, NOT leak the raw escape
+    bytes through to the renderer as visible literals like ``[1;33m``.
+
+    Repro of the bug the operator screenshotted: ``ux.warn`` ->
+    ``click.style`` writes ``\\x1b[1;33m\u25b3 warning:\\x1b[0m \\x1b[33mfoo\\x1b[0m``
+    to stdout. The pre-fix safe writer fed those bytes verbatim to
+    the Activity RichLog, which rendered them as the literal text
+    the operator saw on screen. The fix routes through
+    ``Text.from_ansi`` so the SGR codes become actual styles.
+    """
+
+    from rich.text import Text
+
+    captured: list = []
+
+    class _FakeRichLog:
+        def write(self, renderable) -> None:  # noqa: ANN001
+            captured.append(renderable)
+
+    fake = _FakeRichLog()
+    app = DefenseClawTUI.__new__(DefenseClawTUI)
+    app.activity_lines = []  # type: ignore[attr-defined]
+
+    def _query_one(_selector, _expected_type):  # noqa: ANN001
+        return fake
+
+    monkeypatch.setattr(app, "query_one", _query_one, raising=False)
+    # Exact byte sequence ``click.style("warning:", fg="yellow", bold=True)``
+    # produces — bold + yellow on, then reset.
+    app._write_activity_safe("\x1b[1;33mwarning:\x1b[0m foo")  # noqa: SLF001
+
+    assert len(captured) == 1
+    rendered = captured[0]
+    assert isinstance(rendered, Text)
+    # The plain text must NOT include the raw escape bytes — that's
+    # the operator-visible regression we're closing.
+    assert "\x1b" not in rendered.plain
+    assert "[1;33m" not in rendered.plain
+    assert "[0m" not in rendered.plain
+    # The visible content is the bare strings (escape bytes consumed).
+    assert rendered.plain == "warning: foo"
+    # And the styling must have been applied — there should be at
+    # least one span (for the bold-yellow ``warning:`` segment).
+    assert len(rendered.spans) >= 1, "ANSI codes should produce styled spans"
 
 
 @pytest.mark.asyncio
