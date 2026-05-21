@@ -1588,3 +1588,206 @@ async def test_first_run_panel_starts_on_setup_when_requested() -> None:
         assert app.first_run_model.cursor == 1
         assert app.first_run_model.value("Profile") == "action"
         assert "First-run setup" in app.hint_text
+
+
+# ---------------------------------------------------------------------------
+# Activity panel button bar + stdin pipe (Phase 1a click-first plan).
+# These regression tests lock in the bar's presence so a future
+# refactor can't strand operators in front of an interactive subprocess
+# (the original "Selection [3]:" bug) with no clickable way to answer.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_activity_panel_exposes_clickable_action_bar() -> None:
+    """Activity panel renders Cancel/Clear/Save/Rerun/View buttons."""
+
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")  # Activity panel.
+        await pilot.pause()
+        assert app.active_panel == "activity"
+        for selector in (
+            "#activity-cancel",
+            "#activity-clear",
+            "#activity-save",
+            "#activity-rerun",
+            "#activity-open-drawer",
+        ):
+            assert app.query_one(selector, Button) is not None
+        # Cancel is hidden when nothing is running so the bar doesn't
+        # read like a fake offer; the rest are visible.
+        cancel = app.query_one("#activity-cancel", Button)
+        assert cancel.has_class("hidden")
+        # Rerun/Save/Clear are disabled until there's history.
+        assert app.query_one("#activity-rerun", Button).disabled is True
+        assert app.query_one("#activity-clear", Button).disabled is True
+        assert app.query_one("#activity-save", Button).disabled is True
+
+
+@pytest.mark.asyncio
+async def test_activity_clear_button_drops_history_and_richlog() -> None:
+    """The Clear button wipes Activity entries + the live RichLog."""
+
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")
+        await pilot.pause()
+        app.activity_model.add_entry("defenseclaw doctor")
+        app.activity_model.finish_entry(0)
+        app.activity_model.add_entry("defenseclaw version")
+        app.activity_model.finish_entry(0)
+        app.activity_lines = ["first", "second"]
+        await pilot.pause()
+
+        assert len(app.activity_model.entries) == 2
+        app._handle_activity_control("activity-clear")  # noqa: SLF001
+        await pilot.pause()
+        assert app.activity_model.entries == []
+        assert app.activity_lines == []
+        assert "Cleared" in app.status_text
+
+
+@pytest.mark.asyncio
+async def test_activity_clear_preserves_running_entry() -> None:
+    """Clear keeps an in-flight entry so it doesn't orphan the stream."""
+
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")
+        await pilot.pause()
+        app.activity_model.add_entry("defenseclaw doctor")
+        app.activity_model.finish_entry(0)
+        app.activity_model.add_entry("defenseclaw setup openclaw")
+        # Note: do NOT finish — this is the "running" entry.
+        await pilot.pause()
+
+        app._handle_activity_control("activity-clear")  # noqa: SLF001
+        await pilot.pause()
+        assert len(app.activity_model.entries) == 1
+        assert app.activity_model.entries[0].command == "defenseclaw setup openclaw"
+        assert app.activity_model.entries[0].done is False
+
+
+@pytest.mark.asyncio
+async def test_activity_cancel_button_calls_cancel_running_command(monkeypatch) -> None:
+    """Cancel button routes to the same code path Ctrl+C uses."""
+
+    app = DefenseClawTUI()
+    cancelled: list[bool] = []
+
+    async def fake_cancel() -> None:
+        cancelled.append(True)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")
+        await pilot.pause()
+        app.command_running = True
+        monkeypatch.setattr(app, "_cancel_running_command", fake_cancel)
+        app._handle_activity_control("activity-cancel")  # noqa: SLF001
+        await pilot.pause()
+        assert cancelled == [True]
+
+
+@pytest.mark.asyncio
+async def test_activity_rerun_button_replays_last_command(monkeypatch) -> None:
+    """Rerun button mirrors the existing `!` keystroke contract."""
+
+    app = DefenseClawTUI()
+    seen: dict[str, tuple[str, tuple[str, ...]]] = {}
+
+    async def fake_run(binary: str, args: tuple[str, ...], display_name: str = "") -> None:
+        seen["command"] = (binary, args)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")
+        await pilot.pause()
+        app.activity_model.add_entry("defenseclaw version")
+        app.activity_model.finish_entry(0)
+        monkeypatch.setattr(app, "_run_command", fake_run)
+        app._handle_activity_control("activity-rerun")  # noqa: SLF001
+        await pilot.pause()
+        assert seen.get("command") == ("defenseclaw", ("version",))
+
+
+@pytest.mark.asyncio
+async def test_activity_stdin_input_visible_only_while_command_runs() -> None:
+    """The send-to-stdin Input becomes visible when a command is running."""
+
+    app = DefenseClawTUI()
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")
+        await pilot.pause()
+        stdin = app.query_one("#activity-stdin", Input)
+        # Idle: hidden.
+        assert stdin.has_class("open") is False
+        assert stdin.display is False
+        # Simulate a running command and re-render.
+        app.command_running = True
+        app._render_chrome()  # noqa: SLF001
+        await pilot.pause()
+        assert stdin.has_class("open") is True
+        assert stdin.display is True
+        # Switch away from Activity → input hides again so it doesn't
+        # accidentally cover another panel.
+        app.command_running = True
+        app.active_panel = "logs"
+        app._render_chrome()  # noqa: SLF001
+        await pilot.pause()
+        assert stdin.has_class("open") is False
+
+
+@pytest.mark.asyncio
+async def test_activity_stdin_submission_forwards_to_executor() -> None:
+    """Submitting the stdin Input forwards bytes + newline to write_stdin."""
+
+    app = DefenseClawTUI()
+    captured: list[str] = []
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")
+        await pilot.pause()
+        app.command_running = True
+        app.executor.write_stdin = lambda text: captured.append(text)  # type: ignore[assignment]
+        app._render_chrome()  # noqa: SLF001
+        await pilot.pause()
+        stdin = app.query_one("#activity-stdin", Input)
+        # Use a SimpleNamespace stand-in so we don't have to construct
+        # Textual's dataclass-on-Message Input.Submitted by hand.
+        app._on_activity_stdin_submitted(  # noqa: SLF001
+            SimpleNamespace(input=stdin, value="3", validation_result=None)
+        )
+        assert captured[-1] == "3\n"
+        # Empty submission still sends a bare newline (= "press Enter").
+        app._on_activity_stdin_submitted(  # noqa: SLF001
+            SimpleNamespace(input=stdin, value="", validation_result=None)
+        )
+        assert captured[-1] == "\n"
+
+
+@pytest.mark.asyncio
+async def test_activity_save_button_writes_entry_output(tmp_path) -> None:
+    """Save button writes the highlighted entry to ``data_dir/...``."""
+
+    app = DefenseClawTUI()
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("A")
+        await pilot.pause()
+        app.data_dir = tmp_path
+        app.activity_model.add_entry("defenseclaw doctor")
+        app.activity_model.append_output("checking docker daemon...")
+        app.activity_model.append_output("ok")
+        app.activity_model.finish_entry(0)
+        await pilot.pause()
+        await app._save_activity_output_interactive()  # noqa: SLF001
+        # The filename embeds a timestamp + command slug.
+        saved = list(tmp_path.glob("defenseclaw-activity-*-defenseclaw-doctor.txt"))
+        assert len(saved) == 1
+        contents = saved[0].read_text()
+        assert "defenseclaw doctor" in contents
+        assert "checking docker daemon" in contents
+        assert "ok" in contents
