@@ -207,7 +207,7 @@ def test_credentials_parse_missing_and_readiness_fix_intents() -> None:
     assert rows[0].set is False
     assert by_title["Required Credentials"].status == "fail"
     assert by_title["Required Credentials"].fix is not None
-    assert by_title["Required Credentials"].fix.args == ("keys", "fill-missing", "--non-interactive")
+    assert by_title["Required Credentials"].fix.args == ("keys", "fill-missing", "--yes")
     assert by_title["Restart Pending"].status == "warn"
     assert by_title["Restart Pending"].fix is not None
     assert by_title["Restart Pending"].fix.binary == "defenseclaw-gateway"
@@ -299,7 +299,7 @@ def test_credentials_matrix_actions_are_data_only_and_validate_required_fields()
     assert build_wizard_args(SetupWizard.CREDENTIALS, _with_field(fields, "Action", "fill-missing")) == (
         "keys",
         "fill-missing",
-        "--non-interactive",
+        "--yes",
     )
 
     set_fields = _with_field(fields, "Action", "set")

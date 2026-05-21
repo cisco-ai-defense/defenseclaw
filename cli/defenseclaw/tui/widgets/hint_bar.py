@@ -177,7 +177,10 @@ class HintEngine:
     def _policy_hint(self, state: HintState) -> str:
         if hint := self._filter_hint(state):
             return hint
-        return "Tab or [] switch policy tabs · j/k nav · Enter detail · v validate · r reload · n new policy."
+        return (
+            "Tab or [] switch policy tabs · j/k nav · Enter detail · v validate · "
+            "r reload · n Quick Start wizard · M materialize bundled."
+        )
 
     def _logs_hint(self, state: HintState) -> str:
         if state.logs_paused:

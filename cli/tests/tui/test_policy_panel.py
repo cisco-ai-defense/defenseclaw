@@ -13,7 +13,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,7 +24,6 @@ from defenseclaw.tui.panels.policy import (
     POLICY_TAB_POLICIES,
     POLICY_TAB_RULE_PACKS,
     POLICY_TAB_SUPPRESSIONS,
-    PolicyCreateFormModel,
     PolicyPanelModel,
     PolicyRule,
     PreJudgeStrip,
@@ -158,121 +156,23 @@ def write_rule_pack(root: Path, name: str = "default") -> Path:
     return pack
 
 
-def test_policy_create_form_navigation_validation_and_argv_shape() -> None:
-    form = PolicyCreateFormModel()
-    form.open()
-    assert form.current_field() == 0
+def test_policy_create_n_key_signals_quick_start_wizard(tmp_path: Path) -> None:
+    """Pressing ``n`` (or ``+``) on the Policies tab signals the app to
+    push the Quick Start ModalScreen rather than opening the legacy
+    inline form. The model must NOT push any policy_command_intent on
+    its own — that's the wizard's responsibility once Save is hit."""
 
-    assert form.handle_key("enter").intent is None
-    assert form.current_field() == 1
-    form.handle_key("shift+tab")
-    assert form.current_field() == 0
-    form.handle_key("shift+tab")
-    # Form now has 9 fields (added scan-on-install + allow-list-bypass).
-    assert form.current_field() == 8
+    write_policy(tmp_path, "default")
+    model = PolicyPanelModel(make_config(tmp_path))
+    model.active_tab = POLICY_TAB_POLICIES
+    model.load_policies()
 
-    form.close()
-    form.open()
-    for char in "pr\u00f6":
-        form.handle_key(char)
-    assert form.value(0) == "pr\u00f6"
-    form.handle_key("backspace")
-    assert form.value(0) == "pr"
-
-    form.close()
-    form.open()
-    for key in ("f5", "home", "pgup", "ctrl+a", "shift+c"):
-        form.handle_key(key)
-    assert form.value(0) == ""
-
-    with pytest.raises(ValueError, match="name is required"):
-        form.build_command()
-    for bad in ("name with space", "semi;colon", "slash/path", "../escape"):
-        form.set_value(0, bad)
-        with pytest.raises(ValueError, match="letters"):
-            form.build_command()
-
-    form.set_value(0, "prod-strict")
-    form.set_value(1, "Production policy")
-    form.set_value(2, "strict")
-    form.set_value(3, "block")
-    form.set_value(4, "block")
-    form.set_value(5, "warn")
-    form.set_value(6, "allow")
-    assert form.build_command() == (
-        "policy",
-        "create",
-        "prod-strict",
-        "--description",
-        "Production policy",
-        "--from-preset",
-        "strict",
-        "--critical-action",
-        "block",
-        "--high-action",
-        "block",
-        "--medium-action",
-        "warn",
-        "--low-action",
-        "allow",
-    )
-
-    form.set_value(4, "reject")
-    with pytest.raises(ValueError, match="high action"):
-        form.build_command()
-    form.set_value(4, "block")
-    form.set_value(2, "medium")
-    with pytest.raises(ValueError, match="preset"):
-        form.build_command()
-
-
-def test_policy_create_form_forwards_scan_on_install_and_allow_list_bypass() -> None:
-    """Policy create form must expose the two CLI booleans (parity gap
-    with ``defenseclaw policy create``)."""
-
-    form = PolicyCreateFormModel()
-    form.open()
-    form.set_value(0, "wizard-pol")
-    form.set_value(2, "default")
-    form.set_value(7, "yes")
-    form.set_value(8, "yes")
-
-    argv = form.build_command()
-    assert "--scan-on-install" in argv
-    assert "--allow-list-bypass" in argv
-
-    form.set_value(7, "no")
-    form.set_value(8, "")
-    argv = form.build_command()
-    assert "--scan-on-install" not in argv
-    assert "--allow-list-bypass" not in argv
-
-    form.set_value(7, "later")
-    with pytest.raises(ValueError, match="scan on install"):
-        form.build_command()
-
-
-def test_policy_create_form_field_states_and_submit_action() -> None:
-    form = PolicyCreateFormModel()
-    form.open()
-
-    states = form.field_states()
-    assert states[0].active is True
-    assert states[0].required is True
-    assert "positional" in states[0].hint
-
-    invalid = form.submit_action()
-    assert invalid.handled is True
-    assert invalid.intent is None
-    assert invalid.hint == "name is required"
-
-    form.set_value(0, "prod")
-    form.set_value(2, "default")
-    action = form.submit_action()
-    assert action.intent is not None
-    assert action.intent.args == ("policy", "create", "prod", "--from-preset", "default")
-    assert action.intent.origin == "policy:create"
-    assert action.hint == "creating prod..."
+    for key in ("n", "+"):
+        action = model.handle_key(key)
+        assert action.handled is True
+        assert action.open_quick_start is True
+        assert action.intent is None
+        assert "Quick Start" in action.hint
 
 
 def test_policies_key_dispatch_overlay_filter_and_click_selection(tmp_path: Path) -> None:
@@ -319,15 +219,14 @@ def test_policies_key_dispatch_overlay_filter_and_click_selection(tmp_path: Path
     assert model.policy_cursor == 2
     assert model.selected_policy_name() == "gamma"
 
-    model.handle_policies_key("n")
-    assert model.policy_form.is_active() is True
-    model.handle_key("x")
-    assert model.policy_form.value(0) == "x"
-    model.handle_key("esc")
-    assert model.policy_form.is_active() is False
+    # ``n`` now signals the app shell to push the Quick Start
+    # ModalScreen — there's no in-panel form anymore.
+    action = model.handle_policies_key("n")
+    assert action.open_quick_start is True
+    assert action.intent is None
 
 
-def test_policies_empty_and_active_symlink_states(tmp_path: Path) -> None:
+def test_policies_empty_and_active_states(tmp_path: Path) -> None:
     model = PolicyPanelModel(make_config(tmp_path))
     model.load_policies()
     assert model.policies == ()
@@ -337,14 +236,286 @@ def test_policies_empty_and_active_symlink_states(tmp_path: Path) -> None:
 
     write_policy(tmp_path, "a")
     write_policy(tmp_path, "b")
-    try:
-        os.symlink(tmp_path / "b.yaml", tmp_path / "active.yaml")
-    except OSError as exc:
-        pytest.skip(f"symlinks unsupported: {exc}")
+    (tmp_path / "rego").mkdir()
+    (tmp_path / "rego" / "data.json").write_text(
+        json.dumps({"config": {"policy_name": "b"}}), encoding="utf-8"
+    )
 
     model.load_policies()
     assert model.active_policy == "b"
+    names = [policy.name for policy in model.policies]
+    assert names == ["a", "b"]
+    # Symlinked active.yaml is not honored anymore (matches CLI / Go TUI).
+    # Defensive check: a stray active.yaml in the dir is filtered out so
+    # it doesn't render as a phantom policy row.
+    (tmp_path / "active.yaml").write_text("name: active\n", encoding="utf-8")
+    model.load_policies()
     assert "active" not in [policy.name for policy in model.policies]
+
+
+def test_load_policies_merges_bundled_presets(
+    tmp_path: Path, bundled_assets: Path
+) -> None:
+    """``load_policies`` walks the user policy_dir AND the bundled presets,
+    tagging each row with its source. User-dir entries take precedence over
+    bundled ones with the same stem.
+    """
+    bundled_policies = bundled_assets / "policies"
+    write_policy(bundled_policies, "default")
+    write_policy(bundled_policies, "strict")
+    write_policy(bundled_policies, "permissive")
+
+    write_policy(tmp_path, "prod-tight")
+    # Operator-overridden default — should hide the bundled default row.
+    write_policy(tmp_path, "default", extra={"description": "operator override"})
+
+    model = PolicyPanelModel(make_config(tmp_path))
+    model.load_policies()
+
+    by_name = {p.name: p for p in model.policies}
+    assert set(by_name) == {"prod-tight", "default", "strict", "permissive"}
+    assert by_name["prod-tight"].source == "user"
+    assert by_name["default"].source == "user"
+    assert by_name["default"].description == "operator override"
+    assert by_name["strict"].source == "bundled"
+    assert by_name["permissive"].source == "bundled"
+
+    # User entries sort before bundled, then alphabetic within each group.
+    assert [p.name for p in model.policies] == [
+        "default",
+        "prod-tight",
+        "permissive",
+        "strict",
+    ]
+
+
+def test_active_policy_name_falls_back_to_bundled_data_json(
+    tmp_path: Path, bundled_assets: Path
+) -> None:
+    """When the user has no ``rego/data.json`` (fresh install), the active
+    policy is read from the bundled fallback so the panel header still
+    shows something useful instead of a blank string.
+    """
+    bundled_rego = bundled_assets / "policies" / "rego"
+    bundled_rego.mkdir(parents=True, exist_ok=True)
+    (bundled_rego / "data.json").write_text(
+        json.dumps({"config": {"policy_name": "default"}}), encoding="utf-8"
+    )
+
+    from defenseclaw.tui.services.policy_state import active_policy_name
+
+    assert active_policy_name(tmp_path) == "default"
+
+    # User data.json wins over bundled when present.
+    (tmp_path / "rego").mkdir()
+    (tmp_path / "rego" / "data.json").write_text(
+        json.dumps({"config": {"policy_name": "prod-tight"}}), encoding="utf-8"
+    )
+    assert active_policy_name(tmp_path) == "prod-tight"
+
+
+def test_materialize_bundled_copies_yaml_rego_and_guardrail(
+    tmp_path: Path, bundled_assets: Path
+) -> None:
+    """``materialize_bundled`` seeds the user policy_dir from the bundled
+    asset tree without overwriting existing files, and triggers a reload
+    so the resulting rows show ``source="user"``.
+    """
+    bundled_policies = bundled_assets / "policies"
+    bundled_rego = bundled_assets / "policies" / "rego"
+    bundled_guardrail = bundled_assets / "policies" / "guardrail"
+
+    write_policy(bundled_policies, "default")
+    write_policy(bundled_policies, "strict")
+    bundled_rego.mkdir(parents=True, exist_ok=True)
+    (bundled_rego / "admission.rego").write_text(
+        "package defenseclaw.admission\n", encoding="utf-8"
+    )
+    (bundled_rego / "data.json").write_text(
+        json.dumps({"config": {"policy_name": "default"}}), encoding="utf-8"
+    )
+    profile_dir = bundled_guardrail / "default" / "rules"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    (profile_dir / "secrets.yaml").write_text(
+        "version: 1\ncategory: secrets\nrules: []\n", encoding="utf-8"
+    )
+
+    # Pre-existing user file must NOT be clobbered.
+    write_policy(tmp_path, "default", extra={"description": "operator override"})
+
+    model = PolicyPanelModel(make_config(tmp_path))
+    written = model.materialize_bundled()
+
+    written_paths = {Path(p) for p in written}
+    assert tmp_path / "strict.yaml" in written_paths
+    assert tmp_path / "default.yaml" not in written_paths  # not clobbered
+    assert tmp_path / "rego" / "admission.rego" in written_paths
+    assert tmp_path / "rego" / "data.json" in written_paths
+    assert tmp_path / "guardrail" / "default" in written_paths
+
+    # Reload happens automatically; bundled-source rows for materialized
+    # files become user-source rows on the next render.
+    by_source = {p.name: p.source for p in model.policies}
+    assert by_source.get("default") == "user"
+    assert by_source.get("strict") == "user"
+
+    # Re-running is idempotent — every file already exists, nothing
+    # gets re-written.
+    second = model.materialize_bundled()
+    assert second == ()
+
+
+def test_capital_M_key_runs_materialize_with_summary_hint(
+    tmp_path: Path, bundled_assets: Path
+) -> None:
+    """Pressing ``M`` on the Policies tab triggers ``materialize_bundled``
+    in the model and returns a hint that names the first few files
+    that landed in the user dir, so the activity strip can echo it.
+    """
+    bundled_policies = bundled_assets / "policies"
+    write_policy(bundled_policies, "default")
+    write_policy(bundled_policies, "strict")
+    write_policy(bundled_policies, "permissive")
+
+    model = PolicyPanelModel(make_config(tmp_path))
+    model.active_tab = POLICY_TAB_POLICIES
+    model.load_policies()
+    assert all(p.source == "bundled" for p in model.policies)
+
+    action = model.handle_policies_key("M")
+    assert action.handled is True
+    assert action.reload_requested is True
+    # Hint must summarize what just happened so the activity strip
+    # has something useful to render.
+    assert "Materialized" in action.hint
+    assert "default.yaml" in action.hint or "permissive.yaml" in action.hint
+
+    # The bundled rows are now backed by user files.
+    sources = {p.name: p.source for p in model.policies}
+    assert sources["default"] == "user"
+    assert sources["strict"] == "user"
+
+    # Pressing again with everything already materialized produces
+    # the "nothing to do" hint instead of crashing or returning a
+    # misleading "Materialized 0" message.
+    action = model.handle_policies_key("M")
+    assert action.handled is True
+    assert "Nothing to materialize" in action.hint
+
+
+def test_view_policies_renders_active_and_bundled_badges(
+    tmp_path: Path, bundled_assets: Path
+) -> None:
+    """The Policies tab body shows ``[active]`` next to the active policy
+    and ``[bundled]`` next to rows backed by the bundled preset tree, and
+    counts user vs bundled separately in the header.
+    """
+    bundled_policies = bundled_assets / "policies"
+    write_policy(bundled_policies, "default")
+    write_policy(bundled_policies, "strict")
+
+    write_policy(tmp_path, "prod-tight")
+    (tmp_path / "rego").mkdir()
+    (tmp_path / "rego" / "data.json").write_text(
+        json.dumps({"config": {"policy_name": "prod-tight"}}), encoding="utf-8"
+    )
+
+    model = PolicyPanelModel(make_config(tmp_path))
+    model.active_tab = POLICY_TAB_POLICIES
+    body = model.view_policies(80, 20)
+
+    assert "1 user, 2 bundled" in body
+    assert "active: prod-tight" in body
+    assert "prod-tight" in body
+    # Badges are rendered with backslash-escaped square brackets so
+    # Rich treats them as literal text instead of style spans.
+    assert "\\[active]" in body
+    assert "\\[bundled]" in body
+
+
+def test_policy_reload_intent_targets_gateway_binary() -> None:
+    """``policy_reload_intent`` must invoke ``defenseclaw-gateway``,
+    not ``defenseclaw``.
+
+    The Python ``defenseclaw`` CLI does not expose ``policy reload``
+    (see ``cli/defenseclaw/commands/cmd_policy.py`` - 7 subcommands,
+    none of them ``reload``); the Go original lived under the gateway
+    binary, and the Python migration kept that split. Mismatched
+    binary => silent breakage when an operator presses ``r`` on the
+    OPA tab. The registry already had this right; the intent
+    factories did not.
+    """
+    from defenseclaw.tui.services.policy_state import policy_reload_intent
+
+    intent = policy_reload_intent(origin="policy:opa")
+    assert intent.binary == "defenseclaw-gateway"
+    assert intent.args == ("policy", "reload")
+    # The full argv (used by the executor) must match too.
+    assert intent.argv == ("defenseclaw-gateway", "policy", "reload")
+
+
+def test_rule_pack_switch_uses_gateway_reload_intent(tmp_path: Path) -> None:
+    """Switching guardrail rule packs (Enter on a non-active pack)
+    fires the same ``defenseclaw-gateway policy reload`` intent so the
+    gateway picks up the new pack. Pre-Phase-4 this called
+    ``defenseclaw policy reload`` and silently failed.
+    """
+    pack = write_rule_pack(tmp_path, name="default")
+    write_rule_pack(tmp_path, name="strict")
+
+    model = PolicyPanelModel(make_config(tmp_path / "policies", pack))
+    model.load()
+    model.active_tab = POLICY_TAB_RULE_PACKS
+    # cursor on a non-active pack
+    model.pack_cursor = next(i for i, name in enumerate(model.packs) if name != model.active_pack)
+    action = model.handle_rule_pack_key("enter")
+
+    assert action.handled
+    assert action.intent is not None
+    assert action.intent.binary == "defenseclaw-gateway"
+    assert action.intent.args == ("policy", "reload")
+
+
+def test_view_policies_renders_readiness_banner_for_problems(
+    tmp_path: Path, bundled_assets: Path
+) -> None:
+    """The Policies tab body surfaces a single-line readiness banner
+    when ``readiness_summary()`` reports any ``warn``/``fail`` check.
+    Clean state (all ``pass``) suppresses the banner so it doesn't
+    drown out the list.
+    """
+    bundled_policies = bundled_assets / "policies"
+    write_policy(bundled_policies, "default")
+
+    # tmp_path is a real dir, so policy_dir passes; but no active
+    # marker (no rego/data.json), no rule pack -> two warns surface.
+    model = PolicyPanelModel(make_config(tmp_path))
+    body = model.view_policies(120, 30)
+
+    assert "Readiness:" in body
+    assert "WARN" in body  # status badge for the unconfigured rule pack
+    assert "Active policy" in body or "Rule pack" in body
+
+
+def test_view_policies_filter_no_match_hint(
+    tmp_path: Path, bundled_assets: Path
+) -> None:
+    """An over-aggressive filter shouldn't show "no policies yet" — that
+    message is for fresh installs. We tell the user how to clear the
+    filter instead.
+    """
+    bundled_policies = bundled_assets / "policies"
+    write_policy(bundled_policies, "default")
+
+    model = PolicyPanelModel(make_config(tmp_path))
+    model.active_tab = POLICY_TAB_POLICIES
+    model.load_policies()
+    model.set_policy_filter("zzzzz-no-match")
+
+    body = model.view_policies(80, 20)
+    assert "no policies match" in body
+    assert "esc" in body
+    assert "create" not in body  # different message from empty-state
 
 
 def test_outer_tabs_suppressions_inner_tabs_and_subtab_clicks(tmp_path: Path) -> None:

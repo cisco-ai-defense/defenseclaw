@@ -285,7 +285,7 @@ def build_readiness_checks(
                 "Required Credentials",
                 f"{len(missing)} required credential(s) missing",
                 "fail",
-                _intent("defenseclaw", ("keys", "fill-missing", "--non-interactive"), "keys fill-missing", "setup"),
+                _intent("defenseclaw", ("keys", "fill-missing", "--yes"), "keys fill-missing", "setup"),
             ),
         )
     else:

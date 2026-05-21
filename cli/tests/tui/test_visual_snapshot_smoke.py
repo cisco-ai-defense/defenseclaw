@@ -275,7 +275,12 @@ async def test_textual_detail_state_exports_svg_snapshot(tmp_path) -> None:
         svg = app.export_screenshot()
 
     assert app.skills_model.detail_open is True
-    _assert_svg_snapshot(svg, "Skill: alpha", "math helper")
+    # ``_format_skill_detail`` builds the header as
+    # ``[bold #22D3EE]Skill[/] alpha`` and the SVG export captures the
+    # raw markup payload as literal text — checking for ``Skill[/]
+    # alpha`` keeps the assertion exactly aligned with the rendered
+    # detail pane (no colon between "Skill" and the row name).
+    _assert_svg_snapshot(svg, "Skill[/] alpha", "math helper")
 
 
 @pytest.mark.asyncio

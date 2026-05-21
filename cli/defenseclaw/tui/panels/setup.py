@@ -619,7 +619,7 @@ class SetupPanelModel:
                 True,
                 SetupCommandIntent(
                     "keys fill-missing",
-                    ("keys", "fill-missing", "--non-interactive"),
+                    ("keys", "fill-missing", "--yes"),
                 ),
             )
         if action == "c":
@@ -2701,7 +2701,7 @@ def _build_credentials_args(fields: Sequence[WizardFormField]) -> tuple[str, ...
         # ``--non-interactive`` lists the missing creds without trying
         # to drive per-key hidden prompts (which the TUI subprocess
         # cannot satisfy). User then runs 'Set' for each.
-        return ("keys", "fill-missing", "--non-interactive")
+        return ("keys", "fill-missing", "--yes")
     if action == "set":
         args = ["keys", "set"]
         if env_name := wizard_field_value(fields, "Env Name"):
