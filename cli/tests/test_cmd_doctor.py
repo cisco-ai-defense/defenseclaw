@@ -1217,5 +1217,87 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         self.assertIn("preview.api.inspect.aidefense.aiteam.cisco.com", printed)
 
 
+class DoctorFixDryRunTests(unittest.TestCase):
+    """``doctor --fix --dry-run`` previews fixers without mutating disk.
+
+    Used by the TUI's readiness check (see
+    ``cli/defenseclaw/tui/services/setup_state.py::build_readiness_checks``)
+    so the operator sees what *would* be repaired before approving
+    a real ``--fix --yes`` run.
+    """
+
+    def _make_cfg(self):
+        return Config(
+            data_dir="/tmp/defenseclaw-dryrun",
+            audit_db="/tmp/defenseclaw-dryrun/audit.db",
+            quarantine_dir="/tmp/defenseclaw-dryrun/quarantine",
+            plugin_dir="/tmp/defenseclaw-dryrun/plugins",
+            policy_dir="/tmp/defenseclaw-dryrun/policies",
+            llm=LLMConfig(),
+            guardrail=GuardrailConfig(),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+
+    def test_dry_run_skips_each_fixer_and_does_not_call_underlying_fns(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._make_cfg()
+        result = _DoctorResult()
+        # Patch the individual fixer functions to flag any invocation.
+        with (
+            patch.object(cmd_doctor, "_fix_stale_pid") as fix_pid,
+            patch.object(cmd_doctor, "_fix_gateway_token") as fix_token,
+            patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
+            patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
+            patch.object(cmd_doctor, "_fix_connector_residue") as fix_residue,
+        ):
+            cmd_doctor._run_fixers(
+                cfg, result, assume_yes=True, json_out=True, dry_run=True,
+            )
+
+            fix_pid.assert_not_called()
+            fix_token.assert_not_called()
+            fix_dotenv.assert_not_called()
+            fix_pristine.assert_not_called()
+            fix_residue.assert_not_called()
+
+        # Each fixer should have produced a "skip" record so the TUI
+        # can list every step the real run would touch.
+        fix_records = [c for c in result.checks if c["name"].startswith("fix:")]
+        self.assertEqual(len(fix_records), 5)
+        for record in fix_records:
+            self.assertEqual(record["status"], "skip")
+            self.assertIn("dry-run", record["detail"])
+
+    def test_real_fix_invokes_each_fixer_when_dry_run_false(self):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._make_cfg()
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_fix_stale_pid", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_gateway_token", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")),
+        ):
+            cmd_doctor._run_fixers(
+                cfg, result, assume_yes=True, json_out=True, dry_run=False,
+            )
+
+        fix_records = [c for c in result.checks if c["name"].startswith("fix:")]
+        self.assertEqual(len(fix_records), 5)
+        for record in fix_records:
+            self.assertEqual(record["status"], "pass")
+
+    def test_dry_run_flag_is_exposed_on_click_command(self):
+        from defenseclaw.commands.cmd_doctor import doctor
+
+        opts = {p.name: p for p in doctor.params}
+        self.assertIn("dry_run", opts)
+        self.assertTrue(opts["dry_run"].is_flag)
+
+
 if __name__ == "__main__":
     unittest.main()
