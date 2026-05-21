@@ -101,7 +101,3 @@ LLM_OVERRIDE_PROVIDERS: tuple[str, ...] = ("", *LLM_PROVIDERS)
 
 # AI Discovery cadence modes as defined by ``cmd_agent._AI_DISCOVERY_MODES``.
 AI_DISCOVERY_MODES: tuple[str, ...] = ("passive", "enhanced")
-
-# Severity ordering used by HITL/min-severity gates and finding
-# breakdowns. Order matters: render UIs in this sequence.
-SEVERITY_LEVELS: tuple[str, ...] = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
