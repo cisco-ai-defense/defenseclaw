@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from rich.markup import escape as rich_escape
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -181,15 +182,25 @@ class CommandPreviewScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         color = _risk_color(self.preview.risk)
+        # Every interpolated preview field comes from the parsed
+        # command — argv tokens, origin paths, risk labels, restart
+        # status — and any of them may include bracketed substrings
+        # the user just typed (``defenseclaw scan skill[0]``). Escape
+        # all of them so the confirm-modal can't crash mid-render.
+        summary = rich_escape(self.preview.summary)
+        masked = rich_escape(self.preview.masked_display)
+        origin = rich_escape(self.preview.origin)
+        risk = rich_escape(self.preview.risk)
+        restart = rich_escape(self.preview.restart)
         with Vertical(id="preview-dialog"):
             yield Static("Confirm Command", id="preview-title")
-            yield Static(f"[{color}]{self.preview.summary}[/]", id="preview-risk")
+            yield Static(f"[{color}]{summary}[/]", id="preview-risk")
             yield Static(
                 "[bold]Command[/]\n"
-                f"{self.preview.masked_display}\n\n"
-                f"[bold]Origin[/] {self.preview.origin}    "
-                f"[bold]Risk[/] {self.preview.risk}    "
-                f"[bold]Restart[/] {self.preview.restart}",
+                f"{masked}\n\n"
+                f"[bold]Origin[/] {origin}    "
+                f"[bold]Risk[/] {risk}    "
+                f"[bold]Restart[/] {restart}",
                 id="preview-argv",
             )
             with Horizontal(id="preview-buttons"):

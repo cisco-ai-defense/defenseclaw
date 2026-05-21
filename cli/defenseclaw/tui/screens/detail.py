@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+from rich.markup import escape as rich_escape
 from rich.table import Table
 from textual import events, on
 from textual.app import ComposeResult
@@ -47,9 +48,14 @@ class DetailModalModel:
             if not label and not value:
                 table.add_row("", "")
                 continue
+            # Both ``label`` and ``value`` come from arbitrary panel
+            # state — audit details, log lines, alert findings, scan
+            # raw output — any of which may contain ``[token]`` that
+            # Rich would parse as a style name and crash the table
+            # render. Escape both halves before they reach markup parsing.
             table.add_row(
-                f"[{DEFAULT_TOKENS.text_secondary}]{label}[/]",
-                f"[{DEFAULT_TOKENS.text_primary}]{value}[/]",
+                f"[{DEFAULT_TOKENS.text_secondary}]{rich_escape(label)}[/]",
+                f"[{DEFAULT_TOKENS.text_primary}]{rich_escape(value)}[/]",
             )
         return table
 

@@ -2281,3 +2281,241 @@ def test_mode_picker_choice_action_escapes_hotkey_brackets() -> None:
         action = _choice_action(choice, current_wire="")
         assert action.label.startswith("\\["), action.label
         assert f"\\[{choice.hotkey}]" in action.label
+
+
+# ---------------------------------------------------------------------
+# Phase-1 markup-safety regression suite. Together with the existing
+# audit/judge-history/setup/mode-picker/consequence tests above, these
+# cover every "must not crash" Rich-markup site we audited in the TUI
+# (RichLog writes, command-progress snippet, native overview notices,
+# native metric detail strings, hint bar, judge-history modal,
+# command-preview modal, and the shared detail modal).
+# ---------------------------------------------------------------------
+
+
+_HOSTILE_CORPUS = (
+    "plain text",
+    "target:[skill]",
+    "run:[abc]",
+    "[INFO] starting",
+    "[WARN] retrying",
+    "[ERROR] something broke",
+    "[OK] ready",
+    "Selection [3]:",
+    "prompt[16]",  # numeric color 16+ is invalid
+    "path with brackets [a/b/c]",
+    "unclosed [bracket",
+    "nested [bold][skill]nope[/][/]",
+    "chr [\\u001b[31mred\\u001b[0m]",
+)
+
+
+def test_safe_body_renderable_handles_hostile_corpus() -> None:
+    """Every string in our hostile corpus must survive the safety
+    wrapper — either parsed cleanly or falling back to plain text —
+    and the original characters must show up in the rendered plain
+    text. This is the regression net for every future panel author:
+    if ``_body_text``/``_detail_text`` ever produces a string with the
+    same shape, the rendering pipeline still won't crash the TUI.
+    """
+
+    safe = DefenseClawTUI._safe_body_renderable  # noqa: SLF001
+    for hostile in _HOSTILE_CORPUS:
+        rendered = safe(hostile)
+        assert isinstance(rendered, Text)
+        # The visible characters survive: both the bracket fallback
+        # path (returns the raw string) and the markup-parsing path
+        # (drops the spans) preserve the literal characters.
+        assert hostile.replace("[/", "").replace("[/]", "") in rendered.plain or \
+            rendered.plain.startswith(hostile[:20])
+
+
+def test_write_activity_safe_escapes_subprocess_output(monkeypatch) -> None:
+    """``_write_activity_safe`` must hand bracket-escaped text to the
+    Activity RichLog — that's the whole point of the helper. Without
+    escaping, a subprocess line like ``[INFO] foo`` crashes the Rich
+    parser and tears down the activity stream.
+    """
+
+    captured: list[str] = []
+
+    class _FakeRichLog:
+        def write(self, text: str) -> None:
+            captured.append(text)
+
+    fake = _FakeRichLog()
+    app = DefenseClawTUI.__new__(DefenseClawTUI)
+    app.activity_lines = []  # type: ignore[attr-defined]
+
+    def _query_one(_selector, _expected_type):  # noqa: ANN001
+        return fake
+
+    monkeypatch.setattr(app, "query_one", _query_one, raising=False)
+    app._write_activity_safe("[INFO] subprocess output [16]")  # noqa: SLF001
+    assert captured == ["\\[INFO] subprocess output \\[16]"]
+
+
+def test_command_progress_snippet_escapes_subprocess_tail() -> None:
+    """The command-progress strip's snippet field is a live tail of
+    subprocess stdout. Confirm that the truncated snippet is wrapped
+    in ``rich_escape`` before being inserted into the markup-parsed
+    Static so a bracketed token in stdout can't crash the strip.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._render_command_strip)  # noqa: SLF001
+    # The render path must pass ``truncated`` through ``rich_escape``;
+    # any future refactor that drops the call would re-introduce the
+    # MissingStyle crash and this assertion would catch it.
+    assert "rich_escape(truncated)" in source
+
+
+def test_overview_notice_block_avoids_text_from_markup() -> None:
+    """The native overview notice block must build ``Text`` lines via
+    ``Text.append`` rather than ``Text.from_markup`` — the latter
+    re-parses the icon characters (``[!]`` / ``[OK]``) as style names
+    and crashes the entire overview render. Walk the source of
+    ``_overview_renderable`` and verify the offending markup-formatted
+    icon literals are gone.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._overview_renderable)  # noqa: SLF001
+    # Old code: ``Text.from_markup(f" [{color} bold]{icon}[/] …")``
+    # New code uses ``Text.append`` + style; the literal ``{icon}``
+    # interpolation inside ``[{color} bold]…[/]`` should be gone.
+    assert "[{color} bold]{icon}[/]" not in source
+    assert "[OK][/] Runtime signals are quiet." not in source
+
+
+def test_findings_metric_detail_escapes_bracketed_target() -> None:
+    """Top-target strings from audit events may contain brackets
+    (``skill:[malware]``); ensure the metric detail string escapes
+    them so the markup-parsed Static can't crash.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._findings_metric_detail)  # noqa: SLF001
+    assert "rich_escape(short_target)" in source
+
+
+def test_ai_metric_detail_escapes_vendor() -> None:
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._ai_agents_metric_detail)  # noqa: SLF001
+    assert "rich_escape(top_vendor)" in source or "safe_vendor" in source
+
+
+def test_hint_bar_disables_markup_parsing() -> None:
+    """HintBar passes user filter strings (e.g. ``target:[skill]``)
+    straight into the Static label. The Static must have ``markup=False``
+    so a bracketed filter can't crash the hint bar's update path.
+    """
+
+    from defenseclaw.tui.widgets.hint_bar import HintBar
+
+    bar = HintBar()
+    # Textual's Static stores the markup flag at ``_markup`` (and
+    # exposes ``self.use_markup`` in newer versions); fall back to a
+    # construction-time check via update().
+    flag = getattr(bar, "use_markup", None)
+    if flag is None:
+        flag = getattr(bar, "_markup", True)
+    assert flag is False, "HintBar must opt out of Rich markup parsing"
+
+
+def test_judge_history_footer_escapes_key_brackets() -> None:
+    """The judge-history modal footer (``[Enter] close  [Esc] close``)
+    used to crash on open: ``Enter`` and ``Esc`` are not Rich style
+    names. Confirm the escaped form is what the modal yields.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
+
+    source = inspect.getsource(JudgeHistoryScreen.compose)
+    assert "\\\\[Enter] close  \\\\[Esc] close" in source
+
+
+def test_judge_history_format_pair_escapes_value() -> None:
+    """Judge bodies are raw JSON snippets; the modal must escape
+    ``value`` so a bracketed token in the body never crashes the
+    markup-parsed Static.
+    """
+
+    from defenseclaw.tui.screens.judge_history import _format_pair
+
+    rendered = _format_pair("Raw", "prompt: [skill] Tell me [16]")
+    assert "\\[skill]" in rendered
+    assert "\\[16]" in rendered
+
+
+def test_command_preview_screen_escapes_user_argv() -> None:
+    """The command-preview modal's risk/argv fields all come from
+    the parsed command; verify the escape calls are wired in compose.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.screens.command_preview import CommandPreviewScreen
+
+    source = inspect.getsource(CommandPreviewScreen.compose)
+    for call in (
+        "rich_escape(self.preview.summary)",
+        "rich_escape(self.preview.masked_display)",
+        "rich_escape(self.preview.origin)",
+        "rich_escape(self.preview.risk)",
+        "rich_escape(self.preview.restart)",
+    ):
+        assert call in source, f"command-preview compose missing {call}"
+
+
+def test_detail_modal_table_escapes_label_and_value() -> None:
+    """The shared detail modal table feeds every label/value into
+    Rich markup. Both must be escaped so the modal never crashes on
+    a bracketed audit detail or log fragment.
+    """
+
+    import inspect
+
+    from defenseclaw.tui.screens.detail import DetailModalModel
+
+    source = inspect.getsource(DetailModalModel.table)
+    assert "rich_escape(label)" in source
+    assert "rich_escape(value)" in source
+
+
+def test_tui_panel_outputs_survive_hostile_markup_corpus() -> None:
+    """Fuzz-style sweep: feed each hostile corpus string through
+    ``_safe_body_renderable`` (the wrapper used by every panel body
+    and detail update) and assert the result is a ``Text`` object —
+    *never* an exception. This is the floor: as long as the wrapper
+    holds, no panel can crash the TUI mid-frame, even if a future
+    panel author forgets to escape user input on the way in.
+    """
+
+    safe = DefenseClawTUI._safe_body_renderable  # noqa: SLF001
+    for hostile in _HOSTILE_CORPUS:
+        # Compose hostile text into the kinds of strings panels build
+        # at runtime so the test exercises the same surfaces an
+        # operator would hit.
+        for composed in (
+            hostile,
+            f"[bold #22D3EE]Header[/]\n{hostile}",
+            f"line 1\n  {hostile}\n  follow-up",
+            f"{hostile}  [#444444]│[/]  Ready",
+        ):
+            rendered = safe(composed)
+            assert isinstance(rendered, Text), composed

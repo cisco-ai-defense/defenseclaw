@@ -15,6 +15,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 
+from rich.markup import escape as rich_escape
+from rich.markup import escape as rich_escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -81,7 +83,10 @@ class JudgeHistoryScreen(ModalScreen[None]):
         with Vertical(id="judge-history-dialog"):
             yield Static(title, id="judge-history-title")
             yield Static(self._body(), id="judge-history-body", markup=True)
-            yield Static("[Enter] close  [Esc] close", id="judge-history-footer")
+            # Escape the bracketed key labels so Rich treats them as
+            # literal text. ``[Enter]`` / ``[Esc]`` are not Rich style
+            # names, so without the backslashes the modal crashes on open.
+            yield Static("\\[Enter] close  \\[Esc] close", id="judge-history-footer")
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -93,7 +98,9 @@ class JudgeHistoryScreen(ModalScreen[None]):
 
     def _body(self) -> str:
         if self.error:
-            return f"[{TOKENS.accent_red}]Error[/]\n{self.error}"
+            # ``self.error`` is filesystem text; escape so a bracketed
+            # path or sqlite error message can't crash the modal.
+            return f"[{TOKENS.accent_red}]Error[/]\n{rich_escape(self.error)}"
         if not self.rows:
             return (
                 "No judge responses persisted yet.\n"
@@ -154,7 +161,11 @@ def _append_optional(pairs: list[tuple[str, str]], key: str, value: str) -> None
 def _format_pair(key: str, value: str) -> str:
     if not key and not value:
         return ""
-    return f"[{TOKENS.accent_violet}]{key}[/]: {value}"
+    # Both ``key`` (already escaped at the call site) and ``value``
+    # (raw judge text — JSON snippets, parse errors, etc.) are about
+    # to be parsed as Rich markup. Escape ``value`` so a bracketed
+    # token in the judge body never crashes the modal.
+    return f"[{TOKENS.accent_violet}]{key}[/]: {rich_escape(value)}"
 
 
 def _value(row: object, key: str, default: object = "") -> object:

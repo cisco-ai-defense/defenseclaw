@@ -249,6 +249,15 @@ class HintBar(_Static):
     """
 
     def __init__(self, engine: HintEngine | None = None, **kwargs: object) -> None:
+        # ``markup=False`` is critical: the hint engine produces plain
+        # text strings that freely interpolate user filter values such
+        # as ``target:[skill]``. With Rich markup parsing on, the next
+        # render after a user types ``/skill`` would crash the whole
+        # frame with ``MissingStyle: 'skill' is not a valid color``.
+        # We don't paint any intentional styles in the hint bar — colors
+        # come from the widget's CSS instead — so disabling markup is
+        # purely defensive and lossless.
+        kwargs.setdefault("markup", False)
         super().__init__(classes="dc-hint-bar", **kwargs)
         self.engine = engine or HintEngine()
         self.refresh_hint(HintState())
