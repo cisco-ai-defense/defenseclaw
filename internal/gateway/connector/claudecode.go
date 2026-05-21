@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -351,7 +352,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 func (c *ClaudeCodeConnector) SupportsComponentScanning() bool { return true }
 
 func (c *ClaudeCodeConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
+	home := userHomeDir()
 	userDir := filepath.Join(home, ".claude")
 	workspaceDir := filepath.Join(cwd, ".claude")
 
@@ -424,7 +425,7 @@ func claudeCodeSettingsPath() string {
 	if ClaudeCodeSettingsPathOverride != "" {
 		return ClaudeCodeSettingsPathOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
+	return filepath.Join(userHomeDir(), ".claude", "settings.json")
 }
 
 // fileChangedMatcher targets config files that affect Claude Code's
@@ -489,6 +490,15 @@ var hookGroups = []struct {
 // The read-modify-write cycle is protected by an advisory file lock to
 // prevent corruption from concurrent gateway starts.
 func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript string) error {
+	// On Windows, use the .cmd wrapper written by writeWindowsHookWrapper so
+	// that cmd.exe (not a bash variant) is the entry point. This avoids the
+	// ambiguity of which bash (Git Bash vs WSL) the runtime picks up and the
+	// "cannot execute binary file" error when WSL's bash tries to exec a PE.
+	// filepath.ToSlash is a no-op on Unix.
+	if runtime.GOOS == "windows" {
+		hookScript = strings.TrimSuffix(hookScript, ".sh") + ".cmd"
+	}
+	hookScript = filepath.ToSlash(hookScript)
 	settingsPath := claudeCodeSettingsPath()
 
 	return withFileLock(settingsPath, func() error {

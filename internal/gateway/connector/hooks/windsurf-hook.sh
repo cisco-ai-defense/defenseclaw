@@ -3,6 +3,9 @@
 # DefenseClaw Windsurf hook — forwards Cascade hook payloads to the
 # DefenseClaw gateway. Windsurf blocks pre-hooks when this script exits 2.
 set -euo pipefail
+# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
+export HOME
 
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
@@ -102,11 +105,11 @@ if ! echo "$RESULT" | jq -e . >/dev/null 2>&1; then
   fail_response "invalid JSON response"
 fi
 
-ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 if [ "$ACTION" = "block" ]; then
-  REASON=$(echo "$RESULT" | jq -r '.reason // "DefenseClaw blocked this Cascade action."' 2>/dev/null || printf "DefenseClaw blocked this Cascade action.")
+  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // "DefenseClaw blocked this Cascade action."' 2>/dev/null || printf "DefenseClaw blocked this Cascade action.")
   echo "$REASON" >&2
   exit 2
 fi

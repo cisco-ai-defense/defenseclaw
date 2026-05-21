@@ -20,8 +20,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"syscall"
-	"time"
 )
 
 // atomicWriteFile writes data to path atomically by writing to a temp file in
@@ -96,34 +94,3 @@ func resolveAtomicWritePath(path string) (string, error) {
 	return "", fmt.Errorf("resolve symlink %s: too many symlinks", path)
 }
 
-// withFileLock acquires an exclusive advisory lock on path+".lock" before
-// running fn, and releases it when fn returns. The lock file is cleaned up
-// on success. Stale lock files older than staleLockAge are removed before
-// attempting acquisition.
-func withFileLock(path string, fn func() error) error {
-	lockPath := path + ".lock"
-	const staleLockAge = 60 * time.Second
-
-	// Clean up stale lock files from crashed processes.
-	if info, err := os.Stat(lockPath); err == nil {
-		if time.Since(info.ModTime()) > staleLockAge {
-			_ = os.Remove(lockPath)
-		}
-	}
-
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return fmt.Errorf("open lock file %s: %w", lockPath, err)
-	}
-	defer lockFile.Close()
-
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
-	}
-	defer func() {
-		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
-		_ = os.Remove(lockPath)
-	}()
-
-	return fn()
-}

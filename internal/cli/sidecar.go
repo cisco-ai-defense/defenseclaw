@@ -22,7 +22,6 @@ import (
 	"os"
 	"os/signal"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -120,23 +119,12 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 	// non-TTY fd. We want to swallow that regardless of trace flag.
 	sigCh := make(chan os.Signal, 8)
 	diag := sidecarDiagEnabled()
-	if diag {
-		signal.Notify(sigCh,
-			syscall.SIGINT, syscall.SIGTERM,
-			syscall.SIGHUP, syscall.SIGQUIT,
-			syscall.SIGPIPE, syscall.SIGUSR1, syscall.SIGUSR2)
-	} else {
-		signal.Notify(sigCh,
-			syscall.SIGINT, syscall.SIGTERM,
-			syscall.SIGHUP, syscall.SIGQUIT,
-			syscall.SIGPIPE)
-	}
+	signal.Notify(sigCh, sidecarSignals(diag)...)
 	go func() {
 		for sig := range sigCh {
 			// SIGPIPE is a normal condition when a client disconnects on
 			// a non-TTY fd; don't treat it as a shutdown trigger.
-			sysSig, ok := sig.(syscall.Signal)
-			if ok && sysSig == syscall.SIGPIPE {
+			if isSigPipe(sig) {
 				if diag {
 					fmt.Fprintf(os.Stderr,
 						"[sidecar][diag] ignoring SIGPIPE at %s pid=%d\n",
@@ -146,13 +134,9 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 				continue
 			}
 			if diag {
-				sigNum := -1
-				if ok {
-					sigNum = int(sysSig)
-				}
 				fmt.Fprintf(os.Stderr,
-					"[sidecar][diag] received signal %v (%d) at %s; pid=%d cancelling ctx\n",
-					sig, sigNum,
+					"[sidecar][diag] received signal %v at %s; pid=%d cancelling ctx\n",
+					sig,
 					time.Now().UTC().Format(time.RFC3339Nano),
 					os.Getpid())
 			}

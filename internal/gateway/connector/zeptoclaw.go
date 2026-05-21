@@ -524,11 +524,12 @@ func zeptoClawConfigPath() string {
 
 // zeptoClawHomeDir returns the ZeptoClaw home directory. Priority:
 // ZEPTOCLAW_HOME env (custom override) → $HOME/.zeptoclaw (default).
+// userHomeDir keeps this cross-platform (e.g. %USERPROFILE% on Windows).
 func zeptoClawHomeDir() string {
 	if home := os.Getenv("ZEPTOCLAW_HOME"); home != "" {
 		return home
 	}
-	return filepath.Join(os.Getenv("HOME"), ".zeptoclaw")
+	return filepath.Join(userHomeDir(), ".zeptoclaw")
 }
 
 // patchZeptoClawConfig reads ZeptoClaw's config.json, backs up the original

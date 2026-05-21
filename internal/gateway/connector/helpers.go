@@ -23,9 +23,57 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
+
+// userHomeDir returns the current user's home directory in a cross-platform
+// way. It prefers os.UserHomeDir() (which uses USERPROFILE on Windows,
+// HOME on Unix) and falls back to os.Getenv("HOME") for legacy compatibility.
+func userHomeDir() string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" {
+		return h
+	}
+	return os.Getenv("HOME")
+}
+
+// resolveWindowsBash finds a Git Bash (non-WSL) bash.exe on Windows.
+// WSL's bash runs in a separate network namespace and cannot reach the
+// Windows-side gateway on 127.0.0.1, so we prefer Git Bash.
+// Returns a quoted path if spaces are present, or just "bash" as fallback.
+func resolveWindowsBash() string {
+	if runtime.GOOS != "windows" {
+		return "bash"
+	}
+	// Check common Git for Windows locations.
+	candidates := []string{
+		filepath.Join(os.Getenv("ProgramFiles"), "Git", "bin", "bash.exe"),
+		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Git", "bin", "bash.exe"),
+		filepath.Join(os.Getenv("LocalAppData"), "Programs", "Git", "bin", "bash.exe"),
+	}
+	for _, p := range candidates {
+		if p == "" {
+			continue
+		}
+		if _, err := os.Stat(p); err == nil {
+			return `"` + p + `"`
+		}
+	}
+	// Fall back to PATH lookup — prefer git bash's bash over WSL.
+	if gitPath, err := exec.LookPath("git"); err == nil {
+		// git.exe is typically at C:\Program Files\Git\cmd\git.exe
+		// bash.exe is at C:\Program Files\Git\bin\bash.exe
+		gitDir := filepath.Dir(filepath.Dir(gitPath))
+		candidate := filepath.Join(gitDir, "bin", "bash.exe")
+		if _, err := os.Stat(candidate); err == nil {
+			return `"` + candidate + `"`
+		}
+	}
+	return "bash"
+}
 
 // SecureTokenMatch compares two token strings in constant time to prevent
 // timing-based token extraction attacks.
