@@ -29,7 +29,12 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__
 from defenseclaw import config as config_module
-from defenseclaw.tui.command_line import CommandLineError, ParsedCommand, parse_command_line
+from defenseclaw.tui.command_line import (
+    CommandLineError,
+    ParsedCommand,
+    parse_command_line,
+    suggested_next_action,
+)
 from defenseclaw.tui.executor import CommandAlreadyRunningError, CommandExecutor
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels.activity import ActivityPanelModel
@@ -3049,17 +3054,26 @@ class DefenseClawTUI(App[None]):
         else:
             tail = self._strip_last_output
             self._strip_summary = tail or f"exit {exit_code} · no output captured"
+        # Append a contextual "next thing to try" hint when we have a
+        # confident suggestion (e.g. ``rerun readiness`` after `setup
+        # guardrail`). Empty string means "no hint" — skip the footer
+        # rather than rendering an awkward dangling separator.
+        label = self._strip_label or "command"
+        hint = suggested_next_action(label, exit_code)
+        if hint:
+            self._strip_summary = f"{self._strip_summary} · next: {hint}"
         # Fire a transient toast as well so operators on a different
         # panel still notice the result without having to switch back to
         # Activity. Strip is the persistent receipt; toast is the nudge.
-        label = self._strip_label or "command"
         if exit_code == 0:
             self.notify_toast("success", f"{label} finished in {duration:.1f}s")
         else:
-            self.notify_toast(
-                "error",
-                f"{label} failed (exit {exit_code}) — {self._strip_summary}",
-            )
+            failure_msg = f"{label} failed (exit {exit_code}) — {self._strip_summary}"
+            if hint and f"next: {hint}" not in failure_msg:
+                # Defensive: keep the toast self-contained when the
+                # summary didn't already absorb the hint.
+                failure_msg = f"{failure_msg} · next: {hint}"
+            self.notify_toast("error", failure_msg)
         self._render_command_strip()
 
     def _strip_rejected(self, reason: str) -> None:
