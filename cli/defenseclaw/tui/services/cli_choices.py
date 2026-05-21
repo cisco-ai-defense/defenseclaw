@@ -14,14 +14,15 @@ Each tuple here mirrors a list defined in the CLI command modules.
 Centralizing them in one place removes the drift that previously
 caused the skill/MCP scanner wizards to lag behind ``_configure_llm``'s
 provider catalogue. The TUI and the cmd_* modules are still distinct
-import roots, but tests in ``cli/tests/tui/`` assert these lists stay
-non-empty and ``test_cli_choices_match_cli_source.py`` (when present)
-asserts byte-for-byte parity with the CLI side.
+import roots; ``test_cli_choices_module_matches_cli_source_of_truth``
+in ``cli/tests/tui/test_setup_panel.py`` asserts exact parity between
+the constants here and ``cmd_setup._WIZARD_LLM_PROVIDERS`` /
+``cmd_agent._AI_DISCOVERY_MODES`` so drift fails CI.
 
 If you add a value to a CLI choice, mirror it here in the same pull
-request and update the test fixture. Treating these as build-time
-constants keeps the wizards snappy (no import of click groups during
-TUI startup) without giving up the parity guarantee.
+request. Treating these as build-time constants keeps the wizards
+snappy (no Click group imports during TUI startup) without giving up
+the parity guarantee.
 """
 
 from __future__ import annotations
