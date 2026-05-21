@@ -1,0 +1,4158 @@
+{
+  "design_spec": "docs/design/python-textual-tui-parity-spec.md",
+  "feature_test_gate_policy": {
+    "completion_rule": "A feature cannot be marked parity-complete unless each applicable gate is covered by a named passing test or explicitly marked not_applicable with a rationale.",
+    "required_for_every_feature": [
+      "go_oracle_reference",
+      "unit_or_model_test",
+      "textual_app_integration_test",
+      "mouse_or_click_test_when_clickable",
+      "snapshot_test_when_visible",
+      "agent_tty_test_when_pty_or_child_process",
+      "negative_or_empty_state_test",
+      "test_command"
+    ],
+    "test_first_rule": "Feature work must add or update tests in the same implementation step; regressions found manually must be captured as automated tests before the fix is considered complete."
+  },
+  "feature_test_gates": [
+    {
+      "feature": "shared_shell_and_navigation",
+      "go_oracle": [
+        "internal/tui/app.go",
+        "internal/tui/header_test.go",
+        "internal/tui/statusbar_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/app.py",
+        "cli/defenseclaw/tui/widgets/"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_app_shell.py cli/tests/tui/test_visual_snapshot_smoke.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "overview_dashboard",
+      "go_oracle": [
+        "internal/tui/overview.go",
+        "internal/tui/overview_test.go",
+        "internal/tui/overview_gateway_standalone_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/overview.py",
+        "cli/defenseclaw/tui/app.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "not_applicable: read-only dashboard without child-process ownership",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_overview_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_visual_snapshot_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "alerts_panel",
+      "go_oracle": [
+        "internal/tui/alerts.go",
+        "internal/tui/alerts_test.go",
+        "internal/tui/alerts_gateway.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/alerts.py",
+        "cli/defenseclaw/tui/app.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "not_applicable: panel consumes already-recorded events; command actions use command/action gates",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_alerts_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_visual_snapshot_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "skills_mcps_plugins_tools_catalogs",
+      "go_oracle": [
+        "internal/tui/skills.go",
+        "internal/tui/mcps.go",
+        "internal/tui/plugins.go",
+        "internal/tui/tools.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/catalog.py",
+        "cli/defenseclaw/tui/widgets/action_menu.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "not_applicable: command execution covered by command registry/action-menu gates",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_catalog_panels.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_visual_snapshot_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "inventory_panel",
+      "go_oracle": [
+        "internal/tui/inventory.go",
+        "internal/tui/inventory_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/services/inventory_state.py",
+        "cli/defenseclaw/tui/app.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_inventory_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "policy_panel",
+      "go_oracle": [
+        "internal/tui/policy.go",
+        "internal/tui/policy_test.go",
+        "internal/tui/suppressions_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/policy.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_policy_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "logs_panel",
+      "go_oracle": [
+        "internal/tui/logs.go",
+        "internal/tui/logs_test.go",
+        "internal/tui/log_tail.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/logs.py",
+        "cli/defenseclaw/tui/services/gateway_log_views.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_logs_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "audit_panel",
+      "go_oracle": [
+        "internal/tui/audit.go",
+        "internal/tui/audit_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/audit.py",
+        "cli/defenseclaw/tui/app.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_audit_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_visual_snapshot_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "activity_panel_and_command_output",
+      "go_oracle": [
+        "internal/tui/activity.go",
+        "internal/tui/activity_test.go",
+        "internal/tui/command.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/activity.py",
+        "cli/defenseclaw/tui/executor.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_activity_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "ai_discovery_panel",
+      "go_oracle": [
+        "internal/tui/ai_discovery.go",
+        "internal/tui/ai_discovery_test.go",
+        "internal/tui/ai_usage.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/ai_discovery.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "not_applicable: HTTP polling is covered by service fakes; no child process required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_ai_discovery_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_visual_snapshot_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "registries_panel",
+      "go_oracle": [
+        "internal/tui/registries.go",
+        "internal/tui/registries_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/registries.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "not_applicable: index reads are file/service tests; command actions use command gates",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_registries_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_visual_snapshot_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "setup_panel_and_first_run",
+      "go_oracle": [
+        "internal/tui/setup.go",
+        "internal/tui/setup_test.go",
+        "internal/tui/first_run.go",
+        "internal/tui/first_run_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/setup.py",
+        "cli/defenseclaw/tui/__init__.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_setup_panel.py cli/tests/tui/test_first_run_panel.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "command_palette_preview_and_action_menus",
+      "go_oracle": [
+        "internal/tui/command.go",
+        "internal/tui/command_intent.go",
+        "internal/tui/actionmenu.go",
+        "internal/tui/command_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/registry.py",
+        "cli/defenseclaw/tui/command_line.py",
+        "cli/defenseclaw/tui/screens/command_preview.py",
+        "cli/defenseclaw/tui/widgets/action_menu.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_command_line.py cli/tests/tui/test_registry_parity.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "mode_picker_and_connector_setup",
+      "go_oracle": [
+        "internal/tui/mode_picker.go",
+        "internal/tui/mode_picker_test.go",
+        "internal/tui/setup_scanner_gateway_test.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/screens/mode_picker.py",
+        "cli/defenseclaw/tui/panels/first_run.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "required",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_first_run_panel.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    },
+    {
+      "feature": "hint_engine_and_status_feedback",
+      "go_oracle": [
+        "internal/tui/hints.go",
+        "internal/tui/hints_test.go",
+        "internal/tui/statusbar.go"
+      ],
+      "python_targets": [
+        "cli/defenseclaw/tui/services/hint_engine.py",
+        "cli/defenseclaw/tui/widgets/hint_bar.py",
+        "cli/defenseclaw/tui/app.py"
+      ],
+      "required_tests": {
+        "go_oracle_reference": "required",
+        "unit_or_model_test": "required",
+        "textual_app_integration_test": "required",
+        "mouse_or_click_test_when_clickable": "not_applicable: hint text is passive; clickable controls are covered by owning feature gates",
+        "snapshot_test_when_visible": "required",
+        "agent_tty_test_when_pty_or_child_process": "required",
+        "negative_or_empty_state_test": "required",
+        "test_command": "required"
+      },
+      "test_command": "uv run pytest -q cli/tests/tui/test_hint_bar.py cli/tests/tui/test_app_shell.py cli/tests/tui/test_agent_tty_smoke.py -rxX",
+      "status": "active-gate"
+    }
+  ],
+  "entries": [
+    {
+      "go_path": "internal/tui/actionmenu.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/actionmenu.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/activity.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/activity.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/ai_discovery.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/ai_discovery.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/ai_usage.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/ai_usage.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/alerts.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/alerts.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/alerts_gateway.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/alerts_gateway.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/app.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/app.py"
+      ],
+      "status": "foundation-started"
+    },
+    {
+      "go_path": "internal/tui/audit.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/audit.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/click_box.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/click_box.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/command.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/registry.py",
+        "cli/defenseclaw/tui/registry_data.py",
+        "cli/defenseclaw/tui/command_line.py",
+        "cli/defenseclaw/tui/executor.py"
+      ],
+      "status": "ported-command-registry-foundation"
+    },
+    {
+      "go_path": "internal/tui/command_intent.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/command_intent.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/configedit.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/configedit.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/connector_label.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/connector_label.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/detail.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/detail.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/doctor_cache.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/doctor_cache.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/egress.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/egress.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/filter.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/filter.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/first_run.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/first_run.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/gateway_parse.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/gateway_parse.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/health.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/health.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/hints.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/widgets/hint_bar.py"
+      ],
+      "status": "foundation-started"
+    },
+    {
+      "go_path": "internal/tui/inventory.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/inventory.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/logs.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/logs.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/logs_redaction_indicator.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/logs_redaction_indicator.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/mcp_set_form.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/mcps.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/mcps.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/modals.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/modals.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/mode_modal.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/mode_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/notifications_modal.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/notifications_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/overview.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_stale.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/overview_doctor_stale.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/palette.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/palette.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/plugins.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/plugins.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/policy.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/policy.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/policy_create_form.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/policy_create_form.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/redaction_modal.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/redaction_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/refresh_hook.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/refresh_hook.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/registries.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/registries.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/secrets.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/secrets.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/setup.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_sinks.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/setup_sinks.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_state.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/setup_state.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/setup_webhooks.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/skills.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/skills.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/styles.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/styles.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/theme.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/theme.py"
+      ],
+      "status": "foundation-started"
+    },
+    {
+      "go_path": "internal/tui/toast.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/toast.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/tools.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/tools.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal.go",
+      "kind": "production",
+      "python_targets": [
+        "cli/defenseclaw/tui/panels/uninstall_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_actionmenu.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/activity_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_activity.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_ai_discovery.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_ai_usage.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_alerts_enrichment.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/alerts_subscribe_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_alerts_subscribe.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_app.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/cli_parity_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_cli_parity.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/command_intent_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_command_intent.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/command_resolve_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_command_resolve.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_command.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/configedit_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_configedit.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/connector_label_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_connector_label.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_detail_panels.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_doctor_cache.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/egress_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_egress.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/events_parser_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_events_parser.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/filter_telemetry_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_filter_telemetry.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/first_run_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_first_run.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/hints_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_hints.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_inventory_scope.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/judge_panel_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_judge_panel.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/logs_redaction_indicator_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_logs_redaction_indicator.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_mcp_set_form.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_mode_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/mouse_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_mouse.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/notifications_modal_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_notifications_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_overview_ai_discovery.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_stale_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_overview_doctor_stale.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_overview_doctor.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview_gateway_standalone_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_overview_gateway_standalone.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_overview_keys.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_overview_redaction.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/plugins_actions_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_plugins_actions.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_policy_form.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/redaction_modal_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_redaction_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/refresh_slo_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_refresh_slo.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_registries.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_actions_matrix_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_actions_matrix.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_audit_sinks_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_audit_sinks.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_config_version_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_config_version.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_connector_wizard_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_connector_wizard.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_inherit_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_guardrail_inherit.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_openshell_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_guardrail_openshell.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_hints_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_hints.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_llm_ciscoaidefense_firewall.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_observability.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_otel_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_otel.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_reveal_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_reveal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_save_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_save.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_scanner_gateway.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_sinks.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_state_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_state.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_webhook.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_setup_webhooks.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/skills_actions_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_skills_actions.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/skills_status_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_skills_status.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/theme_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_theme.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_tools.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/truncate_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_truncate.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_uninstall_modal.py"
+      ],
+      "status": "pending-port"
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "kind": "test",
+      "python_targets": [
+        "cli/tests/tui/test_verdicts.py"
+      ],
+      "status": "pending-port"
+    }
+  ],
+  "go_oracle": {
+    "command_registry_count": 224,
+    "command_registry_source": "internal/tui/command.go::BuildRegistry",
+    "production_file_count": 49,
+    "test_file_count": 62,
+    "test_function_count": 478
+  },
+  "migration": "python-textual-tui",
+  "python_foundation": {
+    "agent_tty_test": "cli/tests/tui/test_agent_tty_smoke.py",
+    "backend_env": "DEFENSECLAW_TUI_BACKEND",
+    "backend_option": "--backend",
+    "command_registry_data": "cli/defenseclaw/tui/registry_data.py",
+    "textual_launcher": "defenseclaw.tui.run_textual_tui"
+  },
+  "schema_version": 1,
+  "go_test_inventory": [
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestActionMenuVisibility",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestActionMenuCursorNavigation",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestActionMenuShowResetsCursor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestActionMenuViewHiddenReturnsEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestActionMenuViewVisibleNotEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestSkillActions",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestMCPActions",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/actionmenu_test.go",
+      "function": "TestPluginActions",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/activity_test.go",
+      "function": "TestActivityPanelEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/activity_test.go",
+      "function": "TestActivityPanelAddEntry",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/activity_test.go",
+      "function": "TestActivityPanelAppendOutput",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/activity_test.go",
+      "function": "TestActivityPanelFinishEntry",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/activity_test.go",
+      "function": "TestActivityPanelMultipleEntries",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/activity_test.go",
+      "function": "TestActivityPanelFinishEmptyNoOp",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_NoSnapshot_ShowsOfflinePlaceholder",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_DedupsSignalsByComponent",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_RenderShowsConfidenceColumns",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_FilterFiltersAndPersistsAcrossRefresh",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_FilterMatchesVendorAndDetector",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_DetailToggle_OpensAndClosesOverlay",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_DetailHeader_OmitsEmptyComponent",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_Header_CollapsesZeroChurn",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_Table_RowsAlignedWithHeader",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_Header_KeepsNonZeroChurn",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_DetailToggle_NoOpOnEmptyTable",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_NormalizesAcrossDetectors",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestAIDiscovery_CursorClampsOnFilter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestFormatConf_HandlesMissingHalves",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_discovery_test.go",
+      "function": "TestHumanizeAge_Compact",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "function": "TestFetchAIUsage_AuthorizationHeaderAndParse",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "function": "TestFetchAIUsage_DisabledPayload",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "function": "TestFetchAIUsage_Unauthorized",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "function": "TestFetchAIUsage_BadStatus",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "function": "TestFetchAIUsage_InvalidPort",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "function": "TestFetchAIUsage_AcceptHeaderSet",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/ai_usage_test.go",
+      "function": "TestFetchAIUsage_UsesHTTPNotHTTPS",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestHumanizeAlertDetails_EmptyAndPlain",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestHumanizeAlertDetails_HostPort",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestHumanizeAlertDetails_ModelSlashTail",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestHumanizeAlertDetails_DropsNoise",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestHumanizeAlertDetails_UnknownKVAndPlainTail",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestHumanizeAlertDetails_DuplicateKeyStable",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestAlertsPanel_DetailEnrichment_FindingsScanner",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestAlertsPanel_DetailEnrichment_HumanizedSummary",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_enrichment_test.go",
+      "function": "TestAlertsPanel_DetailEnrichment_HumanizedSuppressedWhenEqual",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/alerts_subscribe_test.go",
+      "function": "TestAlertsRefresh_IngestsScanFindingFromGatewayJSONL",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestModelInitDoesNotQueueAutoInit",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestHandleKeyAlertsDigitsStayLocal",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestHandleKeyInventoryDigitsStayLocal",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestHandleKeySlashStartsLogsSearch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestHandleAuditKeyExportsJSON",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestCommandDoneSetupReloadsConfigEditor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestGlobalQDoesNotQuit",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestCtrlCStillQuits",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestPanelExclusiveBlocksPanelSwitch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/app_test.go",
+      "function": "TestPolicyOverlayQClosesOverlay",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/cli_parity_test.go",
+      "function": "TestBuildRegistryParity",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/cli_parity_test.go",
+      "function": "TestAuditParityScriptShape",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_intent_test.go",
+      "function": "TestCommandIntentMasksSecretArgs",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_intent_test.go",
+      "function": "TestCommandIntentRiskInference",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_intent_test.go",
+      "function": "TestCommandIntentFromEntryRequiresArgs",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_intent_test.go",
+      "function": "TestCommandIntentNormalizedPreservesInteractive",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_resolve_test.go",
+      "function": "TestResolveDefenseclawBin_FallsBackToLiteral",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_resolve_test.go",
+      "function": "TestResolveDefenseclawBin_HonoursPATH",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_resolve_test.go",
+      "function": "TestResolveDefenseclawBin_PrefersSibling",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestBuildRegistry",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestBuildRegistryIncludesEnterpriseSetupSurfaces",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestBuildRegistryIncludesCLINativeAliases",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestMatchCommand",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestMatchCommandCLIMapping",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestBuildCLIArgsSplitsTailIntoArguments",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestBuildCLIArgsPreservesQuotedJSON",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestBuildRegistryAlertsAliasUsesPlainAlertsCommand",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestCommandExecutorInitialState",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestCommandRegistryCategories",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/command_test.go",
+      "function": "TestCommandRegistryNoPrefixInTUINames",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/configedit_test.go",
+      "function": "TestParseDurationOrSeconds",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/configedit_test.go",
+      "function": "TestFmtNotificationsDedupWindow",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/configedit_test.go",
+      "function": "TestApplyConfigField_NotificationsSection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/connector_label_test.go",
+      "function": "TestFriendlyConnectorNameCoversHookSurfaceConnectors",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/connector_label_test.go",
+      "function": "TestConnectorSourceLabelCoversHookSurfaceConnectors",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestSkillsPanelDetailToggle",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestSkillsPanelDetailHeightZeroWhenClosed",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestSkillsPanelDetailHeightOpenBounds",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestSkillsPanelListHeightAccountsForDetail",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestSkillsPanelGetDetailInfoNilWithNoItems",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestSkillsPanelDetailCacheInvalidation",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestMCPsPanelDetailToggle",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestMCPsPanelDetailHeightZeroWhenClosed",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestMCPsPanelGetDetailInfoNilWithNoItems",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestPluginsPanelDetailToggle",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestPluginsPanelScrollOffsetUsesListHeight",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestPluginsPanelGetDetailInfoNilWithNoItems",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestAuditPanelDetailToggle",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestAuditPanelListHeightFormula",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestAuditPanelScrollOffsetUsesListHeight",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestAuditPanelGetDetailInfoNilWithNoItems",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestInventoryPanelDetailToggle",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestInventoryPanelGetDetailInfoNilWithNoData",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/detail_panels_test.go",
+      "function": "TestInventoryPanelDetailCacheInvalidatesOnSubTab",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_IsEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_AgeAndStale",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_TopFailures_FailsFirst",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_SaveLoadRoundtrip",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_LoadNotExist_ReturnsNilNil",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_LoadNoDataDir_ReturnsNilNil",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_LoadMalformedJSON_ReturnsError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_SaveNoDataDir_Error",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_SaveNilCache_Error",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_SaveStampsCapturedAt",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_PythonCompatibleTimestamp",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_AtomicSave_NoPartialFile",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestParseDoctorJSON_Success",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestParseDoctorJSON_Malformed",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestFormatAge",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestSortChecksByStatus",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_SummaryLine",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCachePath",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_ConcurrentReadersSeeAtomicWrite",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_SaveReplacesExisting",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/doctor_cache_test.go",
+      "function": "TestDoctorCache_LoadCorruptFile_Soft",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/egress_test.go",
+      "function": "TestLoadGatewayEgress_MissingFile",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/egress_test.go",
+      "function": "TestLoadGatewayEgress_ParsesAndSorts",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/egress_test.go",
+      "function": "TestSyntheticEgressEvent_SeverityRules",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/egress_test.go",
+      "function": "TestCountRecentSilentBypass",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/events_parser_test.go",
+      "function": "TestParseGatewayEvent_Scan",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/events_parser_test.go",
+      "function": "TestParseGatewayEvent_ScanFinding",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/events_parser_test.go",
+      "function": "TestParseGatewayEvent_Activity",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/filter_telemetry_test.go",
+      "function": "TestEmitTUIFilter_TraceAndMetric",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/first_run_test.go",
+      "function": "TestFirstRunPanelArgsUseCanonicalInitBackend",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/first_run_test.go",
+      "function": "TestFirstRunPanelConnectorChoicesCoverBuiltinConnectors",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/first_run_test.go",
+      "function": "TestFirstRunPanelCtrlRAppliesInit",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/first_run_test.go",
+      "function": "TestNewWithoutConfigStartsFirstRunPanel",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/hints_test.go",
+      "function": "TestHintEngine",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/hints_test.go",
+      "function": "TestHintForPanelPriorityOrder",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/hints_test.go",
+      "function": "TestRotatingTipsNotEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_LoadCmdArgs_NoScope",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_LoadCmdArgs_WithScope",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_SetCategoryScope_FiltersUnknown",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_ToggleCategory",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_ToggleFastScan",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_ToggleFastScan_FromManualScope",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_IsFastScan_OrderIndependent",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_Categories_MatchCLI",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_FastPresetStability",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/inventory_scope_test.go",
+      "function": "TestInventory_LoadCmdArgs_OnlyFlagFormat",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/judge_panel_test.go",
+      "function": "TestJudgeResponsesDetailPairs_SurfacesCorrelationFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/judge_panel_test.go",
+      "function": "TestJudgeResponsesDetailPairs_MultipleRowsSeparated",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/judge_panel_test.go",
+      "function": "TestJudgeResponsesDetailPairs_OmitsEmptyOptionalFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/logs_redaction_indicator_test.go",
+      "function": "TestLogsPanel_RedactionBadge_VisibleWhenDisabled",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_NavigatesFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_InputAppends",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_NamedKeysAreNotAppended",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_BuildCommand_RequiresName",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_BuildCommand_ArgvShape",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_BuildCommand_EnvValidates",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_BuildCommand_SkipScanTruthy",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_EnterAdvancesThenSubmits",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestMCPSetForm_EscCloses",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestHandleMCPsKey_B_RoutesToCLI",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestHandleMCPsKey_A_RoutesToCLI_ForAllStatuses",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestHandleMCPsKey_N_OpensSetForm",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestHandleMCPsKey_FormOwnsKeyboard",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mcp_set_form_test.go",
+      "function": "TestExecuteActionMenuItem_MCPDispatch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestModePickerModal_DefaultsToCurrent",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestModePickerModal_HotkeysCoverEveryConnector",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestModePickerModal_CursorBoundsClamp",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestModePickerModal_PreviewMatchesSetupAliases",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestConnectorSetupCommandForMode",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestModePickerModal_HideClearsVisibility",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestModePickerModal_ViewMentionsAllChoices",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mode_modal_test.go",
+      "function": "TestModePickerModal_NotVisibleViewIsEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mouse_test.go",
+      "function": "TestMouseCommandPreviewButtons",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mouse_test.go",
+      "function": "TestMouseActionMenuRunsClickedRow",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mouse_test.go",
+      "function": "TestMousePaletteRowExecutesSelectedCommand",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mouse_test.go",
+      "function": "TestCommandInputCtrlCQuits",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mouse_test.go",
+      "function": "TestSetupMouseCredentialMatrixActions",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/mouse_test.go",
+      "function": "TestSetupMouseWizardFormFieldClick",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/notifications_modal_test.go",
+      "function": "TestNotificationsToggleModal_DesiredAction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/notifications_modal_test.go",
+      "function": "TestNotificationsToggleModal_View_OnBranch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/notifications_modal_test.go",
+      "function": "TestNotificationsToggleModal_View_OffBranch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/notifications_modal_test.go",
+      "function": "TestNotificationsToggleModal_View_HiddenWhenNotVisible",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestOverview_AIDiscoveryBox_Offline",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestOverview_AIDiscoveryBox_Disabled",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestOverview_AIDiscoveryBox_EnabledNoSignals",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestOverview_AIDiscoveryBox_RendersSignalsAndSortsNewFirst",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestOverview_AIDiscoveryBox_TruncatesAtCap",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestOverview_AIDiscoveryBox_GoneSortedLast",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestSortAIDiscoverySignalsForOverview_TieBreakers",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestDisplayAIDiscoveryName_FallbackChain",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestDisplayAIDiscoveryVendor_AnnotatesVersionAndConnector",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestFormatScanAge_Buckets",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_ai_discovery_test.go",
+      "function": "TestClampPercent_Bounds",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_stale_test.go",
+      "function": "TestLiveHealthContradicts_KnownLabels",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_stale_test.go",
+      "function": "TestOverview_DoctorBox_StaleFailureSuppressedByLiveHealth",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_stale_test.go",
+      "function": "TestOverview_DoctorBox_PartialContradiction_StillShowsRealFailures",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_DoctorBox_NoData",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_DoctorBox_AllGreen",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_DoctorBox_WithFailures",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_ZeroRequestNotice_CodexObservabilityUsesHookGuidance",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_ZeroRequestNotice_HookOnlyConnectorUsesHookGuidance",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_ZeroRequestNotice_OpenClawKeepsGatewayPortGuidance",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_DoctorBox_StaleCache",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_DoctorBox_StaleWithFailures_NoticeIsError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_DoctorBox_TopFailuresBounded",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_doctor_test.go",
+      "function": "TestOverview_SetDoctorCache_Getter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_gateway_standalone_test.go",
+      "function": "TestGatewayHealthIsBroken",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_gateway_standalone_test.go",
+      "function": "TestStringDetail",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_gateway_standalone_test.go",
+      "function": "TestOverview_StandaloneHint_FromHealthSnapshot",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_gateway_standalone_test.go",
+      "function": "TestOverview_BuildNotices_StandaloneSuppressesOfflineRed",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_gateway_standalone_test.go",
+      "function": "TestOverview_BuildNotices_BrokenStillRaisesOffline",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestDoctorCache_MissingRequiredCredentials",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestOverview_ScannersBox_KeysLine_AllSet",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestOverview_ScannersBox_KeysLine_Missing",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestOverview_ScannersBox_KeysLine_Overflow",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestOverview_ScannersBox_KeysLine_NoCache",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestOverview_TopNotice_MissingKeys",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestOverview_TopNotice_MissingKeys_Overflow",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestOverview_TopNotice_NoMissingKeys_NoNotice",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_keys_test.go",
+      "function": "TestKeysOverflowSuffix",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "function": "TestOverview_ConfigurationBox_RedactionStatus",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "function": "TestOverview_ConfigurationBox_RedactionStatusHonorsRuntimeOverride",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "function": "TestOverview_ConfigurationBox_RedactionStatusWithoutConfig",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "function": "TestOverview_ConfigurationBox_HILTStatus",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "function": "TestOverview_ConfigurationBox_HILTObserveInactive",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "function": "TestOverview_ConfigurationBox_PolicyPostureAndEnforcement",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/overview_redaction_test.go",
+      "function": "TestOverview_ConfigurationBox_HILTSupportByConnector",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/plugins_actions_test.go",
+      "function": "TestHandlePluginsKey_O_OpensActionMenuForSelection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/plugins_actions_test.go",
+      "function": "TestHandlePluginsKey_O_UsesIDWhenNameBlank",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/plugins_actions_test.go",
+      "function": "TestHandlePluginsKey_O_NoopWithoutSelection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/plugins_actions_test.go",
+      "function": "TestExecuteActionMenuItem_PluginDispatch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/plugins_actions_test.go",
+      "function": "TestExecuteActionMenuItem_PluginDispatch_NilSelectionSafe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_Navigation",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_InputAppends_UTF8Safe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_NamedKeysAreNotAppended",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_BuildCommand_RequiresName",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_BuildCommand_RejectsBadName",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_BuildCommand_ArgvShape",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_BuildCommand_BlankSeverityAllowed",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_BuildCommand_RejectsBadAction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_BuildCommand_RejectsBadPreset",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_EnterAdvancesThenSubmits",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyCreateForm_EscCloses",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestHandlePoliciesKey_NavigationAndCLIDispatch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestHandlePoliciesKey_NoSelection_Safe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestHandlePoliciesKey_N_OpensCreateForm",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestHandleOPAKey_T_RunsPolicyTest",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestHandleOPAKey_LowerT_StillToggles",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestLoadPolicies_ActiveMarker",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyPanelLoad_IncludesEmbeddedExfilJudgePrompt",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestOrderedJudgeNames_PreservesKnownOrderAndIncludesExtras",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestRuleDetailEdit_LaunchesEditorOnSourceFile",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestRuleDetailEdit_EmbeddedDefaultIsReadOnly",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestRuleFilePathAtCursor_FlatIndex",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyDetailOverlay_ClampsToViewport",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyDetailOverlay_ScrollAdvances",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestRuleDetailOverlay_ClampsAndFitsFooter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestPolicyDetailOverlay_HandleKey_ScrollAndClose",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/policy_form_test.go",
+      "function": "TestClampYAMLBody_SmallViewport",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/redaction_modal_test.go",
+      "function": "TestRedactionToggleModal_DesiredAction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/redaction_modal_test.go",
+      "function": "TestRedactionToggleModal_View_OffBranchSurfacesPrivacyWarning",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/redaction_modal_test.go",
+      "function": "TestRedactionToggleModal_View_OnBranchSkipsScaryWarning",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/redaction_modal_test.go",
+      "function": "TestRedactionToggleModal_View_HiddenWhenNotVisible",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/redaction_modal_test.go",
+      "function": "TestConfirmRedactionToggle_AppliesOverrideImmediately",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/refresh_slo_test.go",
+      "function": "TestRefreshMsg_RecordsTUIRefreshHistogram",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelLoadsSources",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelTabSwitchResetsCursor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelEntriesTabReadsIndex",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelApprovedFilter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelFocusEntry",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelHandleKeyTabs",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelHandleKeySync",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestRegistriesPanelHandleKeyApproveRequiresSelection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestLoadRegistryIndexRejectsUnsafeIDs",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/registries_test.go",
+      "function": "TestLoadRegistryIndexMissingFile",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_actions_matrix_test.go",
+      "function": "TestActionMatrixFields_ShapeIsConstant",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_actions_matrix_test.go",
+      "function": "TestActionMatrixFields_OptionSetsDifferPerColumn",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_actions_matrix_test.go",
+      "function": "TestActionMatrixFields_UnknownPrefixDegrades",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_actions_matrix_test.go",
+      "function": "TestApplyActionsField_RoundTrips",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_actions_matrix_test.go",
+      "function": "TestApplyActionsField_IgnoresMalformedKey",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_actions_matrix_test.go",
+      "function": "TestLoadSections_ActionsMatrixPresent",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_audit_sinks_test.go",
+      "function": "TestFmtOTelHeaders_EmptyReturnsNone",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_audit_sinks_test.go",
+      "function": "TestFmtOTelHeaders_RedactsValuesAndSortsKeys",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_audit_sinks_test.go",
+      "function": "TestAuditSinkSummaryFields_EmptyShowsStatusAndHint",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_audit_sinks_test.go",
+      "function": "TestAuditSinkSummaryFields_RendersEndpointPerKind",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_audit_sinks_test.go",
+      "function": "TestAuditSinkSummaryFields_OmitsEndpointWhenKindBlockIsNil",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_config_version_test.go",
+      "function": "TestFmtConfigVersion",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_config_version_test.go",
+      "function": "TestSetupSections_ConfigVersionIsReadOnly",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_config_version_test.go",
+      "function": "TestApplyConfigField_ConfigVersionNoOp",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_connector_wizard_test.go",
+      "function": "TestConnectorSetupWizardArgsCoverEveryConnector",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_connector_wizard_test.go",
+      "function": "TestConnectorSetupWizardArgsObservabilityOptions",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_connector_wizard_test.go",
+      "function": "TestCredentialsWizardSetRequiresEnvAndSecret",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_inherit_test.go",
+      "function": "TestGuardrailWizardFields_InheritFromUnifiedLLM",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_inherit_test.go",
+      "function": "TestGuardrailWizardFields_NoInheritWhenJudgeCustomised",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_inherit_test.go",
+      "function": "TestBuildWizardArgs_GuardrailInheritsWhenUntouched",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_inherit_test.go",
+      "function": "TestBuildWizardArgs_GuardrailSendsJudgeModelWhenChanged",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_inherit_test.go",
+      "function": "TestGuardrailWizardFields_ExposeAdvancedApprovalAndRedaction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_inherit_test.go",
+      "function": "TestBuildWizardArgs_GuardrailPassesAdvancedApprovalAndRedaction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_openshell_test.go",
+      "function": "TestApplyConfigField_GuardrailNewSurface",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_openshell_test.go",
+      "function": "TestSetupSections_GuardrailCoversNewRows",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_openshell_test.go",
+      "function": "TestParseTristateBool",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_openshell_test.go",
+      "function": "TestFmtTristateBool",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_openshell_test.go",
+      "function": "TestApplyConfigField_OpenShellTristates",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_guardrail_openshell_test.go",
+      "function": "TestSetupSections_OpenShellHasTristates",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_hints_test.go",
+      "function": "TestSetupSections_EveryInteractiveFieldHasHint",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_hints_test.go",
+      "function": "TestSetupSections_EverySectionHasSummary",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_hints_test.go",
+      "function": "TestSetupConfigSectionTabsWrapAndHitTest",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_hints_test.go",
+      "function": "TestApplyConfigField_GatewayExtraFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_hints_test.go",
+      "function": "TestSetupSections_GatewayExposesNewFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_hints_test.go",
+      "function": "TestWizardHowTo_AllPopulated",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "function": "TestApplyConfigField_UnifiedLLMFullSurface",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "function": "TestApplyConfigField_LegacyInspectLLMStillWrites",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "function": "TestSetupSections_UnifiedLLMEditable",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "function": "TestSetupSections_CiscoAIDefenseEditable",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "function": "TestSetupSections_CiscoAIDefenseAPIKeyUsesPasswordKind",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "function": "TestSetupSections_FirewallReadOnly",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_llm_ciscoaidefense_firewall_test.go",
+      "function": "TestApplyConfigField_CiscoAIDefenseWrites",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestObservabilityWizardFields_PresetRebuildsForm",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestObservabilityWizardFields_TokenIsPasswordKind",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestBuildWizardArgs_ObservabilityPresetIsPositional",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestBuildWizardArgs_ObservabilityAlwaysPassesDefaults",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestBuildWizardArgs_SplunkEnterpriseEndpointAndToken",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestBuildWizardArgs_SetupSplunkEnterpriseProbeSkip",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestBuildWizardArgs_NonObservabilityStillSkipsDefaults",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestSubmitWizardForm_BlocksOnMissingRequired",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestSubmitWizardForm_ProceedsWhenRequiredFilled",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_observability_test.go",
+      "function": "TestObservabilityPresets_MatchPythonRegistry",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_otel_test.go",
+      "function": "TestApplyConfigField_OTelFullSurface",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_otel_test.go",
+      "function": "TestSetupSections_OTelShape",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_otel_test.go",
+      "function": "TestFmtOTelResource",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_reveal_test.go",
+      "function": "TestSetupReveal_TogglesPasswordMask",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_reveal_test.go",
+      "function": "TestSetupReveal_NoOpWithoutPasswordField",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_reveal_test.go",
+      "function": "TestSetupReveal_ResetOnFormClose",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_reveal_test.go",
+      "function": "TestSetupReveal_ShortValueShowsBareMask",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_reveal_test.go",
+      "function": "TestSetupReveal_EmptyValueRendersEmptyMarker",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_save_test.go",
+      "function": "TestAuditLogActivityRegistryParity",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_save_test.go",
+      "function": "TestAuditActivityTempFileSkipsWhenNoChanges",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_save_test.go",
+      "function": "TestSetupRevertKeyStaysInSetup",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_save_test.go",
+      "function": "TestPanelSpecificRStaysPanelLocal",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_save_test.go",
+      "function": "TestPanelSpecificDigitsStayPanelLocal",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_save_test.go",
+      "function": "TestRenderVerdictLine_ScanTypes",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "function": "TestApplyConfigField_ScannersFullSurface",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "function": "TestApplyConfigField_GatewayWatcher",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "function": "TestApplyConfigField_GatewayWatcher_DirsClearToNil",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "function": "TestApplyConfigField_GatewayWatchdog",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "function": "TestSetupSections_ScannerShape",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "function": "TestSetupSections_WatcherAndWatchdogPresent",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_scanner_gateway_test.go",
+      "function": "TestSplitCSV",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_OpenLoadsRowsAndClearsError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_OpenSurfacesLoadError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_NavigationClampsBoundaries",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_EnableDisableShellOut",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_RemoveRequiresConfirmation",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_TestAction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_AddOpensObservabilityWizard",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_MigrateSplunkIsIdempotent",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_EscClosesEditor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_RefreshKeyReloadsList",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_DrainResumeOnlyOnce",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_NoSelectionIsSafe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestParseSinkListJSON_RoundTripSchema",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestParseSinkListJSON_EmptyReturnsNil",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestParseSinkListJSON_BadInput",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestTruncMid_PreservesHeadAndTail",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_ViewHighlightsCursor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_ViewEmptyRendersAddHint",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSetupPanel_EOpensSinkEditorOnAuditSinksSection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSetupPanel_EIgnoredOutsideAuditSinksSection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSetupPanel_SinkEditorEnableShellOutRoutesThroughWizardTerminal",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSetupPanel_SinkEditorResumesAfterCommand",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSetupPanel_SinkEditorAddOpensObservabilityWizard",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_SetListerAcceptsNilSafely",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_sinks_test.go",
+      "function": "TestSinkEditor_RefreshInvokesListerError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_state_test.go",
+      "function": "TestParseCredentialRowsAndMissing",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_state_test.go",
+      "function": "TestBuildReadinessChecksMissingCredential",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_state_test.go",
+      "function": "TestValidateConfigField",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_state_test.go",
+      "function": "TestConfigDiffAndAuditPayloadMaskSecrets",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "function": "TestWebhookWizardFields_TypeRebuildsForm",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "function": "TestWebhookWizardFields_URLIsRequired",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "function": "TestBuildWizardArgs_WebhookTypeIsPositional",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "function": "TestBuildWizardArgs_WebhookAlwaysPassesDefaults",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "function": "TestSubmitWebhookForm_BlocksOnMissingURL",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "function": "TestSubmitWebhookForm_WebexRequiresRoomID",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhook_test.go",
+      "function": "TestWebhookWizardCommands_MatchCLISurface",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestParseWebhookListJSON_Empty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestParseWebhookListJSON_Shape",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestParseWebhookListJSON_Bad",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestWebhookEditor_NavBounds",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestWebhookEditor_EnableDisableRemoveTestShow",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestWebhookEditor_EnableAlreadyEnabled",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestWebhookEditor_DisableAlreadyDisabled",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestWebhookEditor_AddTriggersWizard",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestWebhookEditor_CloseAndRefresh",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestWebhookEditor_ListError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/setup_webhooks_test.go",
+      "function": "TestSetupPanel_EOpensWebhookEditor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/skills_actions_test.go",
+      "function": "TestHandleSkillsKey_B_RoutesToCLI",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/skills_actions_test.go",
+      "function": "TestHandleSkillsKey_A_RoutesToCLI",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/skills_actions_test.go",
+      "function": "TestHandleSkillsKey_NoSelection_Safe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/skills_actions_test.go",
+      "function": "TestExecuteActionMenuItem_SkillDispatch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/skills_actions_test.go",
+      "function": "TestExecuteActionMenuItem_SkillDispatch_NilSelectionSafe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/skills_status_test.go",
+      "function": "TestSkillListToItem_StatusPrecedence",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/skills_status_test.go",
+      "function": "TestStatusBadge_KnownLabels",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/theme_test.go",
+      "function": "TestDefaultThemeNotNil",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/theme_test.go",
+      "function": "TestSeverityColor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/theme_test.go",
+      "function": "TestStateColor",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/theme_test.go",
+      "function": "TestStateDot",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestToolActions_BranchesByStatus",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestToolActions_NoScanOrEnable",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestHandleToolsKey_O_OpensActionMenuForSelection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestHandleToolsKey_O_GlobalScopeRendersPlaceholder",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestHandleToolsKey_O_NoopWithoutSelection",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestExecuteActionMenuItem_ToolDispatch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestExecuteActionMenuItem_ToolDispatch_ScopePreserved",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestExecuteActionMenuItem_ToolDispatch_NilSelectionSafe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestToolsPanel_BlockedCount",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestToolsPanel_CursorBounds",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestToolsPanel_View_EmptyShowsHint",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestHandleKey_TOpensToolsPanel",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/tools_test.go",
+      "function": "TestPanelTools_IsRegisteredBeforeSetup",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/truncate_test.go",
+      "function": "TestTruncate_ShortString_NoMutation",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/truncate_test.go",
+      "function": "TestTruncate_Ellipsis",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/truncate_test.go",
+      "function": "TestTruncate_SmallBudgets_NoPanic",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/truncate_test.go",
+      "function": "TestTruncate_UTF8Safe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal_test.go",
+      "function": "TestUninstallModal_DefaultsToDryRun",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal_test.go",
+      "function": "TestUninstallModal_ViewWarnsAboutDestructiveRows",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal_test.go",
+      "function": "TestUninstallArgsForOption",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal_test.go",
+      "function": "TestConfirmUninstallHidesModalAndRunsActivity",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal_test.go",
+      "function": "TestOverviewUninstallActionOpensModal",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/uninstall_modal_test.go",
+      "function": "TestOverviewQuickActionHitTestIncludesUninstall",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestParseVerdictRow_VerdictEventExtractsTypedFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestParseVerdictRow_JudgeEventFallsBackToJudgeAction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestParseVerdictRow_MalformedReturnsNotOK",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_ReadsAndFiltersByAction",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_ActionFilterKeepsMatchingJudgeRows",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_MissingFilePopulatesError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_RoutesOTELAndCodexRowsToOTELSource",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSelectedOTELRow_RespectsSearchFilter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestCycleVerdictAction_RotatesThroughAllThenWrapsToEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestCycleVerdictEventType_RotatesThroughAllThenWrapsToEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_EventTypeFilterHidesJudgeRowsWhenVerdictOnly",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_EventTypeAndActionFilterCombine",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSelectedVerdict_ReturnsNilOnWrongSource",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSelectedVerdict_ReturnsNilOnEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSelectedVerdict_ReturnsLastWhenCursorAtBottom",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSelectedVerdict_RespectsSearchFilter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSelectedVerdict_RespectsPresetFilter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSelectedVerdict_ReturnsNilWhenFilterHidesAll",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestFilteredVerdicts_LockstepWithFilteredLines",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestRenderVerdictLine_Verdict",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestRenderVerdictLine_JudgeAndLifecycleAndError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestTruncateVerdictReason",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestTruncateVerdictReason_UTF8Safe",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestNonEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_IncludesRequiredFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_OmitsKindAndReasonWhenEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestParseVerdictRow_CorrelationFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestParseVerdictRow_JudgeRichFields",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestParseVerdictRow_LifecycleAndErrorAndDiagnostic",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestRenderVerdictLine_StructuredLifecycleAndError",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestRenderVerdictLine_VerdictIncludesCategoriesAndLatency",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestTrimCategories_OverflowSignalsRemainder",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestCycleVerdictSeverity_RotatesThroughAllThenWrapsToEmpty",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_SeverityFilterExactMatch",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_SeverityFilterHighPlus",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestLoadVerdicts_DiagnosticRowsSurviveFilter",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestSeverityRank_KnownAndUnknown",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_IncludesCorrelationIDs",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_IncludesVerdictExtras",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_IncludesJudgeExtras",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_SuppressesRedundantJudgeSeverity",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_LifecycleDetailsOrderedAlphabetically",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictDetailPairs_IncludesErrorAndDiagnostic",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestRenderDetailsInline_StableAndCapped",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestRenderDetailsInline_EdgeCaps",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestTrimCategories_EdgeCaps",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestTrimCategories_DoesNotMutateCaller",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictEventTypeFiltersMatchSchema",
+      "status": "pending-port",
+      "python_tests": []
+    },
+    {
+      "go_path": "internal/tui/verdicts_test.go",
+      "function": "TestVerdictSeverityLabelsCoverFilters",
+      "status": "pending-port",
+      "python_tests": []
+    }
+  ]
+}

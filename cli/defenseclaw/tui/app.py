@@ -1,0 +1,5570 @@
+"""Initial Textual app shell for the Python TUI backend."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import shutil
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from time import monotonic
+from typing import Any
+
+from rich.console import Group, RenderableType
+from rich.errors import MarkupError
+from rich.markup import escape as rich_escape
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from textual import events, on
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
+from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
+
+from defenseclaw import __version__
+from defenseclaw.tui.command_line import CommandLineError, ParsedCommand, parse_command_line
+from defenseclaw.tui.executor import CommandAlreadyRunningError, CommandExecutor
+from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
+from defenseclaw.tui.panels.activity import ActivityPanelModel
+from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
+from defenseclaw.tui.panels.alerts import AlertEvent, AlertPanelAction, AlertsPanelModel
+from defenseclaw.tui.panels.audit import AuditPanelModel
+from defenseclaw.tui.panels.first_run import FirstRunPanelModel
+from defenseclaw.tui.panels.inventory import FAST_SCAN_CATEGORIES, InventoryPanelModel
+from defenseclaw.tui.panels.logs import FILTER_LABELS, FILTER_PRESETS, LOG_SOURCE_LABELS, LOG_SOURCES, LogsPanelModel
+from defenseclaw.tui.panels.mcps import MCPsPanelModel
+from defenseclaw.tui.panels.overview import (
+    DoctorCache,
+    DoctorCheck,
+    EnforcementCounts,
+    OverviewCommandIntent,
+    OverviewConfig,
+    OverviewPanelModel,
+)
+from defenseclaw.tui.panels.plugins import PluginsPanelModel
+from defenseclaw.tui.panels.policy import (
+    POLICY_TAB_JUDGE,
+    POLICY_TAB_NAMES,
+    POLICY_TAB_OPA,
+    POLICY_TAB_POLICIES,
+    POLICY_TAB_RULE_PACKS,
+    POLICY_TAB_SUPPRESSIONS,
+    PolicyPanelAction,
+    PolicyPanelModel,
+)
+from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
+from defenseclaw.tui.panels.setup import (
+    WIZARD_DESCRIPTIONS,
+    WIZARD_HOW_TO,
+    WIZARD_NAMES,
+    SetupPanelAction,
+    SetupPanelModel,
+    SetupWizard,
+    connector_setup_command_for_mode,
+    render_wizard_value,
+)
+from defenseclaw.tui.panels.skills import SkillsPanelModel
+from defenseclaw.tui.panels.tools import ToolsPanelModel
+from defenseclaw.tui.registry import CmdEntry, build_registry
+from defenseclaw.tui.screens.command_preview import CommandPreviewScreen
+from defenseclaw.tui.screens.config_diff import ConfigDiffScreen
+from defenseclaw.tui.screens.detail import DetailScreen
+from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
+from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
+from defenseclaw.tui.screens.mode_picker import ModePickerScreen
+from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
+from defenseclaw.tui.screens.redaction import RedactionToggleScreen
+from defenseclaw.tui.screens.setup_resource_editor import (
+    SetupResourceEditorScreen,
+    SetupResourceResult,
+    audit_sink_rows_from_config,
+    webhook_rows_from_config,
+)
+from defenseclaw.tui.screens.uninstall import UninstallScreen
+from defenseclaw.tui.services.catalog_state import (
+    CatalogCommandIntent,
+    CatalogListModel,
+    CatalogMenuAction,
+    CatalogPanelAction,
+    catalog_detail_text,
+)
+from defenseclaw.tui.services.overview_state import (
+    ConnectorHealth,
+    HealthSnapshot,
+    SubsystemHealth,
+)
+from defenseclaw.tui.services.setup_state import validate_config_field
+from defenseclaw.tui.services.tui_state import TUIStateStore
+from defenseclaw.tui.theme import DEFAULT_TOKENS, TEXTUAL_CSS, severity_color, state_color
+from defenseclaw.tui.widgets.action_menu import ActionMenuScreen, MenuAction
+from defenseclaw.tui.widgets.hint_bar import HintBar
+from defenseclaw.tui.widgets.native_metrics import MetricDatum, MetricTile, OverviewMetrics
+from defenseclaw.tui.widgets.status_strip import render_status_strip
+
+TOKENS = DEFAULT_TOKENS
+
+
+_DEFENSECLAW_LOGO = (
+    "    ____        ____                   ______\n"
+    "   / __ \\___   / __/__  ____  _____ _/ ____/ /__ _      __\n"
+    "  / / / / _ \\ / /_/ _ \\/ __ \\/ ___// __/ / / __ \\ | /| / /\n"
+    " / /_/ /  __// __/  __/ / / (__  )/ /___/ / /_/ / |/ |/ /\n"
+    "/_____/\\___//_/  \\___/_/ /_/____//_____/_/\\__,_/|__/|__/"
+)
+
+
+def _mini_bar(value: int, max_value: int, width: int = 14) -> str:
+    """Return a small block-glyph bar suitable for inline use in panels."""
+
+    if max_value <= 0:
+        return ""
+    ratio = max(0.0, min(1.0, value / max_value))
+    filled = int(round(ratio * width))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+PANELS = (
+    ("overview", "1", "Overview"),
+    ("alerts", "2", "Alerts"),
+    ("skills", "3", "Skills"),
+    ("mcps", "4", "MCPs"),
+    ("plugins", "5", "Plugins"),
+    ("inventory", "6", "Inventory"),
+    ("policy", "7", "Policy"),
+    ("logs", "8", "Logs"),
+    ("audit", "9", "Audit"),
+    ("activity", "A", "Activity"),
+    ("tools", "T", "Tools"),
+    ("ai", "V", "AI Discovery"),
+    ("registries", "R", "Registries"),
+    ("setup", "0", "Setup"),
+)
+
+PANEL_SHORTCUTS = {key.lower(): name for name, key, _label in PANELS}
+
+class DefenseClawTUI(App[None]):
+    """Textual TUI foundation.
+
+    This first slice intentionally implements shell, routing, command
+    input, Activity streaming, and placeholder panels. Full panel parity
+    is driven by the migration ledger and the design spec.
+    """
+
+    CSS = TEXTUAL_CSS + """
+    Screen {
+        background: TOKEN_SURFACE_BASE;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    #root {
+        height: 100%;
+        width: 100%;
+    }
+
+    #header {
+        height: 3;
+        padding: 0 1;
+        background: TOKEN_SURFACE_PANEL;
+        border-bottom: heavy TOKEN_BORDER_MUTED;
+    }
+
+    #title {
+        width: 28;
+        color: TOKEN_ACCENT_CYAN;
+        text-style: bold;
+    }
+
+    #tabs {
+        width: 1fr;
+        color: TOKEN_TEXT_SECONDARY;
+    }
+
+    #command-button,
+    #help-button {
+        width: 5;
+        min-width: 5;
+        height: 1;
+        margin: 0 0 0 1;
+        border: none;
+        background: TOKEN_SURFACE_RAISED;
+        color: TOKEN_ACCENT_CYAN;
+        text-style: bold;
+    }
+
+    #body-panel {
+        height: 1fr;
+        margin: 1 1 0 1;
+        padding: 1 2;
+        border: none;
+        background: TOKEN_SURFACE_BASE;
+    }
+
+    #body {
+        height: auto;
+        margin-bottom: 1;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    .panel-controls {
+        height: 3;
+        margin-bottom: 1;
+        padding: 0 1;
+        border: round TOKEN_BORDER_MUTED;
+        background: TOKEN_SURFACE_RAISED;
+    }
+
+    .panel-controls Button {
+        height: 1;
+        min-width: 8;
+        margin: 0 1 0 0;
+        border: none;
+        background: TOKEN_SURFACE_PANEL;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    .panel-controls Button.active-chip {
+        background: TOKEN_SURFACE_SELECTED;
+        color: TOKEN_ACCENT_CYAN;
+        text-style: bold;
+    }
+
+    .panel-controls Button.severity-critical {
+        color: TOKEN_ACCENT_RED;
+    }
+
+    .panel-controls Button.severity-high {
+        color: TOKEN_ACCENT_ORANGE;
+    }
+
+    .panel-controls Button.severity-medium {
+        color: TOKEN_ACCENT_AMBER;
+    }
+
+    .panel-controls Button.severity-low {
+        color: TOKEN_ACCENT_BLUE;
+    }
+
+    .panel-controls.hidden {
+        display: none;
+    }
+
+    #overview-metrics {
+        margin-bottom: 1;
+    }
+
+    .hidden {
+        display: none;
+    }
+
+    #panel-table {
+        height: 1fr;
+        border: none;
+        background: TOKEN_SURFACE_BASE;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    #panel-table > .datatable--header {
+        background: TOKEN_SURFACE_PANEL;
+        color: TOKEN_ACCENT_CYAN;
+        text-style: bold;
+    }
+
+    #panel-table > .datatable--odd-row,
+    #panel-table > .datatable--even-row {
+        color: TOKEN_TEXT_PRIMARY;
+        background: TOKEN_SURFACE_RAISED;
+    }
+
+    #panel-table > .datatable--cursor,
+    #panel-table:focus > .datatable--cursor {
+        color: TOKEN_TEXT_PRIMARY;
+        background: TOKEN_SURFACE_SELECTED;
+        text-style: bold;
+    }
+
+    #panel-table.hidden {
+        display: none;
+    }
+
+    #detail-panel {
+        height: auto;
+        max-height: 14;
+        margin-top: 1;
+        padding: 1 2;
+        border: round TOKEN_BORDER_ACTIVE;
+        background: TOKEN_SURFACE_RAISED;
+        color: TOKEN_TEXT_PRIMARY;
+    }
+
+    #detail-panel.hidden {
+        display: none;
+    }
+
+    #activity {
+        height: 11;
+        margin: 1;
+        padding: 0 1;
+        border: round TOKEN_BORDER_MUTED;
+        background: TOKEN_SURFACE_RAISED;
+    }
+
+    #activity.hidden {
+        display: none;
+    }
+
+    #command-input {
+        display: none;
+        margin: 0 1;
+        border: round TOKEN_BORDER_ACTIVE;
+        background: TOKEN_SURFACE_RAISED;
+    }
+
+    #command-input.open {
+        display: block;
+    }
+
+    #command-palette {
+        height: 9;
+        margin: 0 1 1 1;
+        border: round TOKEN_BORDER_ACTIVE;
+        background: TOKEN_SURFACE_PANEL;
+    }
+
+    #command-palette > .datatable--header {
+        background: TOKEN_SURFACE_RAISED;
+        color: TOKEN_ACCENT_CYAN;
+        text-style: bold;
+    }
+
+    #command-palette > .datatable--cursor,
+    #command-palette:focus > .datatable--cursor {
+        background: TOKEN_SURFACE_SELECTED;
+        color: TOKEN_TEXT_PRIMARY;
+        text-style: bold;
+    }
+
+    #command-palette.hidden {
+        display: none;
+    }
+
+    /* The command-progress strip is the single source of truth for
+       command lifecycle. Hidden when idle; only visible while running
+       or after a finish/rejection awaiting dismissal. Five rows tall
+       (2 borders + 3 content rows) so we can show: WHAT ran, WHAT it's
+       doing now, and WHAT to do next, without cramming. */
+    #command-progress {
+        height: 5;
+        margin: 0 1;
+        padding: 0 1;
+        border: round TOKEN_BORDER_MUTED;
+        background: TOKEN_SURFACE_RAISED;
+    }
+
+    #command-progress.hidden {
+        display: none;
+    }
+
+    #command-progress.running {
+        border: round TOKEN_ACCENT_AMBER;
+    }
+
+    #command-progress.success {
+        border: round TOKEN_ACCENT_GREEN;
+    }
+
+    #command-progress.failure {
+        border: round TOKEN_ACCENT_RED;
+    }
+
+    #command-progress.rejected {
+        border: round TOKEN_ACCENT_RED;
+    }
+
+    #command-progress-header {
+        height: 1;
+        width: 1fr;
+    }
+
+    #command-progress-icon {
+        width: 3;
+        content-align: left middle;
+    }
+
+    #command-progress-label {
+        width: 1fr;
+        content-align: left middle;
+        color: TOKEN_TEXT_PRIMARY;
+        text-style: bold;
+    }
+
+    #command-progress-duration {
+        width: auto;
+        min-width: 8;
+        margin-right: 1;
+        content-align: right middle;
+        color: TOKEN_TEXT_SECONDARY;
+    }
+
+    #command-progress-action {
+        width: auto;
+        min-width: 11;
+        height: 1;
+        margin: 0;
+        padding: 0 1;
+    }
+
+    #command-progress-snippet {
+        height: 1;
+        width: 1fr;
+        color: TOKEN_TEXT_SECONDARY;
+        text-style: italic;
+    }
+
+    #command-progress-hint {
+        height: 1;
+        width: 1fr;
+        color: TOKEN_TEXT_MUTED;
+    }
+
+    #status {
+        height: 1;
+        padding: 0 1;
+        background: TOKEN_SURFACE_RAISED;
+        color: TOKEN_TEXT_SECONDARY;
+    }
+
+    #hint {
+        height: 2;
+        padding: 0 1;
+        background: TOKEN_SURFACE_SELECTED;
+        color: TOKEN_TEXT_PRIMARY;
+        text-style: bold;
+    }
+
+    .success {
+        color: TOKEN_ACCENT_GREEN;
+    }
+
+    .failure {
+        color: TOKEN_ACCENT_RED;
+    }
+    """.replace("TOKEN_SURFACE_BASE", TOKENS.surface_base).replace(
+        "TOKEN_TEXT_PRIMARY", TOKENS.text_primary
+    ).replace("TOKEN_SURFACE_PANEL", TOKENS.surface_panel).replace(
+        "TOKEN_BORDER_MUTED", TOKENS.border_muted
+    ).replace("TOKEN_ACCENT_CYAN", TOKENS.accent_cyan).replace(
+        "TOKEN_TEXT_SECONDARY", TOKENS.text_secondary
+    ).replace(
+        "TOKEN_TEXT_MUTED", TOKENS.text_muted
+    ).replace("TOKEN_SURFACE_RAISED", TOKENS.surface_raised).replace(
+        "TOKEN_SURFACE_SELECTED", TOKENS.surface_selected
+    ).replace(
+        "TOKEN_BORDER_ACTIVE", TOKENS.border_active
+    ).replace("TOKEN_ACCENT_GREEN", TOKENS.accent_green).replace(
+        "TOKEN_ACCENT_RED", TOKENS.accent_red
+    ).replace("TOKEN_ACCENT_ORANGE", TOKENS.accent_orange).replace(
+        "TOKEN_ACCENT_BLUE", TOKENS.accent_blue
+    ).replace(
+        "TOKEN_ACCENT_AMBER", TOKENS.accent_amber
+    )
+
+    BINDINGS = [
+        Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit", priority=True),
+        Binding("q", "local_close", "Close", show=False),
+        Binding("?", "toggle_help", "Help"),
+        Binding(":", "open_command", "Command"),
+        Binding("ctrl+k", "open_command", "Command"),
+        Binding("tab", "next_panel", "Next"),
+        Binding("shift+tab", "previous_panel", "Previous"),
+    ]
+
+    def __init__(
+        self,
+        *,
+        config: object | None = None,
+        data_dir: str | Path | None = None,
+        alerts_model: AlertsPanelModel | None = None,
+        registries_model: RegistriesPanelModel | None = None,
+        skills_model: SkillsPanelModel | None = None,
+        mcps_model: MCPsPanelModel | None = None,
+        plugins_model: PluginsPanelModel | None = None,
+        tools_model: ToolsPanelModel | None = None,
+        logs_model: LogsPanelModel | None = None,
+        audit_model: AuditPanelModel | None = None,
+        overview_model: OverviewPanelModel | None = None,
+        inventory_model: InventoryPanelModel | None = None,
+        ai_discovery_model: AIDiscoveryPanelModel | None = None,
+        policy_model: PolicyPanelModel | None = None,
+        setup_model: SetupPanelModel | None = None,
+        first_run_model: FirstRunPanelModel | None = None,
+        first_run: bool = False,
+    ) -> None:
+        super().__init__()
+        self.first_run_model = first_run_model or FirstRunPanelModel(active=first_run)
+        self.executor = CommandExecutor()
+        self.config = config
+        self.data_dir = _resolve_data_dir(config, data_dir)
+        # Operator's persisted session preferences (active panel,
+        # palette MRU, per-panel "last seen" cursors, last filter).
+        # Stored in ``<data_dir>/tui-state.json`` mode 0600. Tokens
+        # never live here — only opaque panel/command names.
+        self.state_store = TUIStateStore(self.data_dir)
+        self.state = self.state_store.load()
+        if self.first_run_model.active:
+            self.active_panel = "setup"
+        else:
+            self.active_panel = self.state.active_panel or "overview"
+        self.help_open = False
+        self.activity_lines: list[str] = []
+        self.body_text = ""
+        self.detail_text = ""
+        self.status_text = ""
+        self.hint_text = ""
+        self.command_running = False
+        self.command_label = ""
+        self._command_started_at: float = 0.0
+        self.commands_run = 0
+        self.activity_model = ActivityPanelModel()
+        self.alerts_model = alerts_model or AlertsPanelModel(self.data_dir)
+        self.registries_model = registries_model or RegistriesPanelModel(config, data_dir=self.data_dir)
+        connector = _active_connector(config)
+        self.skills_model = skills_model or SkillsPanelModel(connector=connector)
+        self.mcps_model = mcps_model or MCPsPanelModel(connector=connector)
+        self.plugins_model = plugins_model or PluginsPanelModel(connector=connector)
+        self.tools_model = tools_model or ToolsPanelModel(_audit_store(config))
+        self.logs_model = logs_model or LogsPanelModel(self.data_dir)
+        self.audit_model = audit_model or AuditPanelModel(_audit_store(config))
+        self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
+        self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
+        self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
+        self.policy_model = policy_model or PolicyPanelModel(config)
+        self.setup_model = setup_model or SetupPanelModel(config)
+        self.catalog_models: dict[str, CatalogListModel[Any]] = {
+            "skills": self.skills_model,
+            "mcps": self.mcps_model,
+            "plugins": self.plugins_model,
+            "tools": self.tools_model,
+        }
+        self._table_columns: tuple[str, ...] = ()
+        self._table_rows: tuple[tuple[str, ...], ...] = ()
+        self._periodic_refresh_running = False
+        # Command-progress strip state machine. The strip is the single
+        # source of truth for command lifecycle messaging — what ran,
+        # what it's doing, and what to do next. ``idle`` means hidden;
+        # any other state keeps the strip on screen until the user
+        # explicitly dismisses it (success no longer auto-hides).
+        self._strip_state: str = "idle"
+        self._strip_label: str = ""
+        self._strip_started_at: float = 0.0
+        self._strip_frozen_duration: float | None = None
+        self._strip_last_output: str = ""
+        self._strip_summary: str = ""
+        self._strip_spinner_tick: int = 0
+        self._command_registry = build_registry()
+        self._command_palette_values: list[str] = []
+        self._last_table_click: tuple[str, int] | None = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="root"):
+            with Horizontal(id="header"):
+                yield Static(f"DefenseClaw {__version__}", id="title")
+                yield Tabs(
+                    *(Tab(f"{key} {label}", id=f"tab-{name}") for name, key, label in PANELS),
+                    active=f"tab-{self.active_panel}",
+                    id="tabs",
+                )
+                yield Button(":", id="command-button", compact=True, tooltip="Open command drawer")
+                yield Button("?", id="help-button", compact=True, tooltip="Open help")
+            with Vertical(id="body-panel"):
+                yield OverviewMetrics(self._overview_metric_data(), id="overview-metrics", classes="hidden")
+                yield Static("", id="body")
+                with Horizontal(id="overview-controls", classes="panel-controls hidden"):
+                    # Click-first quick-actions that mirror the broken
+                    # state of the overview. Each button is shown only
+                    # when it would actually do something useful so the
+                    # bar doesn't drown the user in disabled chrome.
+                    yield Button(
+                        "Start Gateway",
+                        id="overview-start-gateway",
+                        compact=True,
+                        variant="success",
+                        tooltip="Run `defenseclaw-gateway start`",
+                    )
+                    yield Button(
+                        "Restart Gateway",
+                        id="overview-restart-gateway",
+                        compact=True,
+                        tooltip="Run `defenseclaw-gateway restart`",
+                    )
+                    yield Button(
+                        "Run Doctor",
+                        id="overview-run-doctor",
+                        compact=True,
+                        tooltip="Run `defenseclaw doctor` to refresh health",
+                    )
+                    yield Button(
+                        "Enable AI Discovery",
+                        id="overview-enable-ai-discovery",
+                        compact=True,
+                        variant="success",
+                        tooltip="Run `defenseclaw agent discovery enable --yes`",
+                    )
+                    yield Button(
+                        "Scan AI Agents",
+                        id="overview-scan-ai-discovery",
+                        compact=True,
+                        tooltip="Run `defenseclaw agent discovery scan`",
+                    )
+                    yield Button(
+                        "Setup Connector",
+                        id="overview-setup-connector",
+                        compact=True,
+                        tooltip="Open the Connector Setup wizard",
+                    )
+                    yield Button(
+                        "Fill Missing Keys",
+                        id="overview-keys-fill",
+                        compact=True,
+                        tooltip="Run `defenseclaw keys fill-missing`",
+                    )
+                with Horizontal(id="alerts-controls", classes="panel-controls hidden"):
+                    yield Button("All", id="alerts-filter-all", compact=True)
+                    yield Button("Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
+                    yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
+                    yield Button("Medium", id="alerts-filter-medium", compact=True, classes="severity-medium")
+                    yield Button("Low", id="alerts-filter-low", compact=True, classes="severity-low")
+                    yield Button("Select all", id="alerts-select-all", compact=True)
+                    yield Button("Ack selected", id="alerts-ack-selected", compact=True)
+                    yield Button("Dismiss filtered", id="alerts-dismiss-filtered", compact=True, variant="warning")
+                    yield Button("Dismiss all", id="alerts-dismiss-all", compact=True, variant="error")
+                with Horizontal(id="audit-controls", classes="panel-controls hidden"):
+                    yield Button("All", id="audit-filter-all", compact=True)
+                    yield Button("Risk", id="audit-filter-risk", compact=True, classes="severity-high")
+                    yield Button("Blocks", id="audit-filter-blocks", compact=True, classes="severity-critical")
+                    yield Button("Scans", id="audit-filter-scans", compact=True, classes="severity-low")
+                    yield Button("Credentials", id="audit-filter-credentials", compact=True, classes="severity-medium")
+                    yield Button("Same target", id="audit-filter-target", compact=True)
+                    yield Button("Same run", id="audit-filter-run", compact=True)
+                    yield Button("Export", id="audit-export", compact=True)
+                with Horizontal(id="inventory-controls", classes="panel-controls hidden"):
+                    yield Button("Summary", id="inventory-tab-summary", compact=True)
+                    yield Button("Skills", id="inventory-tab-skills", compact=True)
+                    yield Button("Plugins", id="inventory-tab-plugins", compact=True)
+                    yield Button("MCPs", id="inventory-tab-mcp", compact=True)
+                    yield Button("Agents", id="inventory-tab-agents", compact=True)
+                    yield Button("Models", id="inventory-tab-models", compact=True)
+                    yield Button("Memory", id="inventory-tab-memory", compact=True)
+                    yield Button("All scope", id="inventory-scope-all", compact=True)
+                    yield Button("Fast", id="inventory-scope-fast", compact=True)
+                    yield Button("Refresh", id="inventory-refresh", compact=True)
+                with Horizontal(id="inventory-filter-controls", classes="panel-controls hidden"):
+                    yield Button("All", id="inventory-filter-all", compact=True)
+                    yield Button("Eligible", id="inventory-filter-eligible", compact=True, classes="severity-low")
+                    yield Button("Warning", id="inventory-filter-warning", compact=True, classes="severity-medium")
+                    yield Button("Blocked", id="inventory-filter-blocked", compact=True, classes="severity-critical")
+                    yield Button("Loaded", id="inventory-filter-loaded", compact=True, classes="severity-low")
+                    yield Button("Disabled", id="inventory-filter-disabled", compact=True)
+                with Horizontal(id="logs-controls", classes="panel-controls hidden"):
+                    yield Button("Gateway", id="logs-source-gateway", compact=True)
+                    yield Button("Verdicts", id="logs-source-verdicts", compact=True)
+                    yield Button("OTEL", id="logs-source-otel", compact=True)
+                    yield Button("Watchdog", id="logs-source-watchdog", compact=True)
+                    yield Button("Pause", id="logs-toggle-pause", compact=True)
+                    yield Button("Detail", id="logs-open-detail", compact=True)
+                    yield Button("Redaction", id="logs-redaction", compact=True)
+                    yield Button("Notify", id="logs-notifications", compact=True)
+                    yield Button("Judge", id="logs-judge-history", compact=True)
+                with Horizontal(id="logs-filter-controls", classes="panel-controls hidden"):
+                    yield Button("All", id="logs-filter-0", compact=True)
+                    yield Button("No Noise", id="logs-filter-1", compact=True)
+                    yield Button("Important", id="logs-filter-2", compact=True)
+                    yield Button("Errors", id="logs-filter-3", compact=True, classes="severity-critical")
+                    yield Button("Warnings+", id="logs-filter-4", compact=True, classes="severity-medium")
+                    yield Button("Scan", id="logs-filter-5", compact=True, classes="severity-low")
+                    yield Button("Drift", id="logs-filter-6", compact=True)
+                    yield Button("Guardrail", id="logs-filter-7", compact=True)
+                with Horizontal(id="registries-controls", classes="panel-controls hidden"):
+                    yield Button("Sources", id="registries-tab-sources", compact=True)
+                    yield Button("Entries", id="registries-tab-entries", compact=True)
+                    yield Button("Approved", id="registries-tab-approved", compact=True)
+                    yield Button("Refresh", id="registries-refresh", compact=True)
+                    yield Button("Sync", id="registries-sync-source", compact=True)
+                    yield Button("Sync all", id="registries-sync-all", compact=True)
+                    yield Button("Approve", id="registries-approve", compact=True)
+                    yield Button("Reject", id="registries-reject", compact=True)
+                    yield Button("Remove", id="registries-remove-source", compact=True, variant="error")
+                with Horizontal(id="policy-controls", classes="panel-controls hidden"):
+                    yield Button("Policies", id="policy-tab-0", compact=True)
+                    yield Button("Rule Packs", id="policy-tab-1", compact=True)
+                    yield Button("Judge", id="policy-tab-2", compact=True)
+                    yield Button("Suppressions", id="policy-tab-3", compact=True)
+                    yield Button("OPA", id="policy-tab-4", compact=True)
+                    yield Button("Refresh", id="policy-refresh", compact=True)
+                    yield Button("Validate", id="policy-validate", compact=True)
+                    yield Button("Test", id="policy-test", compact=True)
+                    yield Button("Edit", id="policy-edit", compact=True)
+                with Horizontal(id="setup-controls", classes="panel-controls hidden"):
+                    yield Button("Wizards", id="setup-mode-wizards", compact=True)
+                    yield Button("Config", id="setup-mode-config", compact=True)
+                    yield Button("Open", id="setup-open", compact=True)
+                    yield Button("Edit list", id="setup-edit-list", compact=True)
+                    yield Button("Save", id="setup-save", compact=True)
+                    yield Button("Revert", id="setup-revert", compact=True)
+                    yield Button("Restart", id="setup-restart", compact=True)
+                    yield Button("Clear restart", id="setup-clear-restart", compact=True)
+                    yield Button("Refresh keys", id="setup-refresh-credentials", compact=True)
+                yield DataTable(
+                    id="panel-table",
+                    classes="hidden",
+                    show_row_labels=False,
+                    show_cursor=True,
+                    cursor_type="row",
+                    zebra_stripes=True,
+                )
+                yield Static("", id="detail-panel", classes="hidden")
+            yield Input(
+                placeholder="Type defenseclaw version, doctor, or a TUI alias",
+                id="command-input",
+                disabled=True,
+            )
+            yield DataTable(
+                id="command-palette",
+                classes="hidden",
+                show_row_labels=False,
+                show_cursor=True,
+                cursor_type="row",
+                zebra_stripes=True,
+            )
+            with Vertical(id="command-progress", classes="hidden"):
+                with Horizontal(id="command-progress-header"):
+                    yield Static(" ", id="command-progress-icon", markup=True)
+                    yield Static("", id="command-progress-label", markup=True)
+                    yield Static("", id="command-progress-duration", markup=True)
+                    yield Button("✕ Cancel", id="command-progress-action", compact=True)
+                yield Static("", id="command-progress-snippet", markup=True)
+                yield Static("", id="command-progress-hint", markup=True)
+            yield RichLog(id="activity", wrap=True, markup=True, highlight=True)
+            yield HintBar(id="hint")
+            yield Static("", id="status")
+
+    def on_unmount(self) -> None:
+        # Signal background pollers to stop spawning fresh subprocess
+        # workers; without this guard our 30 s / 60 s tickers can fire
+        # during pytest teardown and leak "Event loop is closed"
+        # warnings that flake the visual snapshot suite.
+        self._app_shutting_down = True
+        # Best-effort final flush of session state so the next launch
+        # restores active panel + palette MRU + per-panel cursors.
+        try:
+            self.state_store.save()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def on_mount(self) -> None:
+        self._app_shutting_down = False
+        self._refresh_models_from_disk()
+        self.set_interval(0.25, self._tick_command_strip)
+        self.set_interval(2.0, self._periodic_refresh)
+        self.set_interval(30.0, self._schedule_ai_usage_poll)
+        # Mirror Go TUI: poll /health every 3s so the Overview SERVICES
+        # box reflects the actual sidecar state instead of "unknown".
+        # Run once immediately so the first render isn't blank, then
+        # let the interval keep it fresh.
+        self.set_interval(3.0, self._schedule_health_poll)
+        self._schedule_health_poll()
+        self._schedule_ai_usage_poll()
+        # Mirror Go's loadCredentialsCmd dispatched from Init(): load
+        # the credential snapshot once on mount (and again every 60 s)
+        # so Setup readiness rows and the Status strip "missing
+        # required credentials" warning are accurate without the
+        # operator having to hit 'r' first.
+        self.set_interval(60.0, self._schedule_credentials_refresh)
+        self._schedule_credentials_refresh()
+        # Mirror Go's slowRefreshMsg tick: every 60s re-run the load
+        # subprocess for any catalog (Skills/MCPs/Plugins/Tools) and
+        # the Inventory panel that the operator has already opened
+        # at least once. Panels never visited stay quiet so we don't
+        # spin up CLI processes for screens the operator doesn't care
+        # about.
+        self.set_interval(60.0, self._schedule_slow_refresh)
+        self._render_chrome()
+
+    def _schedule_slow_refresh(self) -> None:
+        """Reload catalogs and inventory that the operator has opened.
+
+        Mirrors Go's ``slowRefreshMsg`` ticker. We never refresh a
+        catalog the operator has not visited yet — auto-load handles
+        that on first visit — to keep the subprocess fan-out
+        proportional to actual UI usage.
+        """
+
+        if self.config is None or getattr(self, "_app_shutting_down", False):
+            return
+        for panel, model in self.catalog_models.items():
+            if not getattr(model, "loaded", False):
+                continue
+            self.run_worker(
+                self._load_catalog_model(panel),
+                exclusive=False,
+                thread=False,
+            )
+        if getattr(self.inventory_model, "loaded", False):
+            self.run_worker(
+                self._load_inventory_model(),
+                exclusive=False,
+                thread=False,
+            )
+        self._write_activity(
+            "[bold #22D3EE]Textual backend[/] ready. "
+            "Go backend remains available with --backend go."
+        )
+        if self.first_run_model.active:
+            self._write_activity("[#FBBF24]First-run setup[/] config is missing; embedded init flow is active.")
+
+    def on_key(self, event: events.Key) -> None:
+        if len(self.screen_stack) > 1:
+            return
+
+        command = self.query_one("#command-input", Input)
+        if command.has_class("open") or self.focused is command:
+            if self._handle_command_palette_key(event):
+                event.stop()
+            return
+
+        table = self.query_one("#panel-table", DataTable)
+        if self.focused is table and event.key in {"up", "down"} and not self._active_overlay_blocks_table():
+            return
+
+        if self._handle_active_panel_key(event):
+            event.stop()
+            return
+
+        panel = PANEL_SHORTCUTS.get(event.key.lower())
+        if panel is None:
+            return
+
+        self.action_switch_panel(panel)
+        event.stop()
+
+    def action_switch_panel(self, panel: str) -> None:
+        self.active_panel = panel
+        self.help_open = False
+        self._render_chrome()
+        # Persist the operator's last-active panel + clear the "unread"
+        # badge for the panel they just opened. Best-effort: a failed
+        # write must never block the UI.
+        try:
+            self.state_store.set_active_panel(panel)
+            self.state_store.mark_seen(panel)
+            self.state = self.state_store.state
+            self.state_store.save()
+        except Exception:  # noqa: BLE001 - persistence is cosmetic
+            pass
+        if panel == "ai" and self.ai_discovery_model.snapshot is None:
+            self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
+        # Mirror Go TUI: catalog + inventory panels auto-load on first
+        # visit so the operator sees "Loading…" then the rows, instead
+        # of an empty list with a small "press r to refresh" hint
+        # that's easy to miss. Subsequent visits stay quiet — the slow
+        # refresh loop keeps the data fresh from then on.
+        if panel in self.catalog_models:
+            model = self.catalog_models[panel]
+            if not getattr(model, "loaded", False):
+                self.run_worker(
+                    self._load_catalog_model(panel),
+                    exclusive=False,
+                    thread=False,
+                )
+        elif panel == "inventory" and not getattr(self.inventory_model, "loaded", False):
+            self.run_worker(
+                self._load_inventory_model(),
+                exclusive=False,
+                thread=False,
+            )
+
+    def action_next_panel(self) -> None:
+        names = [name for name, _key, _label in PANELS]
+        idx = names.index(self.active_panel)
+        self.action_switch_panel(names[(idx + 1) % len(names)])
+
+    def action_previous_panel(self) -> None:
+        names = [name for name, _key, _label in PANELS]
+        idx = names.index(self.active_panel)
+        self.action_switch_panel(names[(idx - 1) % len(names)])
+
+    def action_open_command(self) -> None:
+        # Refuse to open the palette while a subprocess is in flight.
+        # Otherwise an operator who hit `:` (or Ctrl+K) on top of an
+        # interactive ``defenseclaw setup`` ends up with the picker
+        # buried under the prompt, types something into the drawer,
+        # gets a confusing ``A command is already running`` error, and
+        # has no obvious way to forward ``3<Enter>`` to the live
+        # stdin. Bouncing them to Activity with explicit instructions
+        # is the only safe path that doesn't drop their keystrokes on
+        # the floor or fork a second subprocess.
+        if self.command_running:
+            label = self.command_label or "Previous command"
+            if self.active_panel != "activity":
+                self.action_switch_panel("activity")
+            self._set_status(
+                f"{label} is still running. Type its answer here (e.g. a number + Enter) "
+                "or press Ctrl+C to cancel before opening a new command."
+            )
+            return
+        command = self.query_one("#command-input", Input)
+        command.disabled = False
+        command.add_class("open")
+        command.display = True
+        command.value = ""
+        self._render_command_palette("")
+        command.focus()
+        # Don't carry stale finish/rejection state into a fresh command
+        # entry. Idle = strip is hidden, exactly what we want here.
+        self._strip_clear()
+        self._set_status("Command palette open. Type, use Up/Down, Tab complete, or click a row.")
+
+    def action_toggle_help(self) -> None:
+        self.help_open = not self.help_open
+        self._render_chrome()
+
+    @on(Tabs.TabActivated, "#tabs")
+    def _on_tab_activated(self, event: Tabs.TabActivated) -> None:
+        if event.tab.id is None:
+            return
+        panel = event.tab.id.removeprefix("tab-")
+        if panel == self.active_panel:
+            return
+        self.action_switch_panel(panel)
+
+    @on(Button.Pressed, "#command-button")
+    def _on_command_button_pressed(self) -> None:
+        self.action_open_command()
+
+    @on(Button.Pressed, "#help-button")
+    def _on_help_button_pressed(self) -> None:
+        self.action_toggle_help()
+
+    @on(Button.Pressed)
+    def _on_panel_control_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id or ""
+        if button_id.startswith("overview-"):
+            event.stop()
+            self._handle_overview_control(button_id)
+            return
+        if button_id.startswith("alerts-"):
+            event.stop()
+            self._handle_alert_control(button_id)
+            return
+        if button_id.startswith("audit-"):
+            event.stop()
+            self._handle_audit_control(button_id)
+            return
+        if button_id.startswith("inventory-"):
+            event.stop()
+            self._handle_inventory_control(button_id)
+            return
+        if button_id.startswith("logs-"):
+            event.stop()
+            self._handle_logs_control(button_id)
+            return
+        if button_id.startswith("registries-"):
+            event.stop()
+            self._handle_registries_control(button_id)
+            return
+        if button_id.startswith("policy-"):
+            event.stop()
+            self._handle_policy_control(button_id)
+            return
+        if button_id.startswith("setup-"):
+            event.stop()
+            self._handle_setup_control(button_id)
+            return
+
+    def action_local_close(self) -> None:
+        command = self.query_one("#command-input", Input)
+        if command.has_class("open"):
+            self._close_command_palette()
+            self._set_status("Command drawer closed.")
+            return
+        if self.help_open:
+            self.help_open = False
+            self._render_chrome()
+            return
+        # `q` doubles as the strip's keyboard dismiss. We intentionally
+        # never auto-hide on success per UX decision, so this is the
+        # primary way users return the strip to idle.
+        if self._strip_state != "idle" and self.active_panel != "activity":
+            self._strip_clear()
+            self._set_status("Cleared command status.")
+            return
+        self._set_status("q is local close/no-op. Press Ctrl+C to quit.")
+
+    def action_cancel_or_quit(self) -> None:
+        if self.command_running or self.executor.is_running:
+            self.run_worker(self._cancel_running_command(), exclusive=False, thread=False)
+            return
+        self.exit()
+
+    def _close_command_palette(self) -> None:
+        command = self.query_one("#command-input", Input)
+        command.remove_class("open")
+        command.disabled = True
+        command.display = False
+        palette = self.query_one("#command-palette", DataTable)
+        palette.add_class("hidden")
+        palette.clear(columns=True)
+        self._command_palette_values = []
+        self.set_focus(None)
+
+    def _handle_command_palette_key(self, event: events.Key) -> bool:
+        palette = self.query_one("#command-palette", DataTable)
+        command = self.query_one("#command-input", Input)
+        if event.key == "escape":
+            self._close_command_palette()
+            self._set_status("Command drawer closed.")
+            return True
+        if event.key in {"up", "down"} and self._command_palette_values:
+            delta = -1 if event.key == "up" else 1
+            target = max(0, min(palette.cursor_row + delta, len(self._command_palette_values) - 1))
+            palette.move_cursor(row=target, column=0, animate=False)
+            return True
+        if event.key == "tab" and self._command_palette_values:
+            selected = self._selected_palette_value()
+            if selected:
+                command.value = selected + " "
+                command.cursor_position = len(command.value)
+                self._render_command_palette(command.value)
+            return True
+        return False
+
+    def _render_command_palette(self, query: str) -> None:
+        palette = self.query_one("#command-palette", DataTable)
+        matches = self._palette_matches(query)
+        self._command_palette_values = [entry.tui_name for entry in matches]
+        palette.remove_class("hidden")
+        palette.clear(columns=True)
+        palette.add_columns("Command", "Category", "Description")
+        for index, entry in enumerate(matches):
+            palette.add_row(entry.tui_name, entry.category, entry.description, key=str(index))
+        if matches:
+            palette.move_cursor(row=0, column=0, animate=False)
+        else:
+            palette.add_row("No matching DefenseClaw command", "", "Keep typing or use raw defenseclaw ...")
+
+    def _palette_matches(self, query: str, *, limit: int = 9) -> tuple[CmdEntry, ...]:
+        normalized = query.strip().lower()
+        if normalized.startswith("defenseclaw "):
+            normalized = normalized.removeprefix("defenseclaw ").strip()
+        if normalized.startswith("defenseclaw-gateway "):
+            normalized = normalized.removeprefix("defenseclaw-gateway ").strip()
+        terms = tuple(term for term in normalized.split() if term)
+        if not terms:
+            preferred = ("doctor", "status", "alerts", "scan skill --all", "setup codex", "keys list")
+            by_name = {entry.tui_name: entry for entry in self._command_registry}
+            head = [by_name[name] for name in preferred if name in by_name]
+            return tuple((*head, *self._command_registry[: max(0, limit - len(head))]))[:limit]
+
+        def score(entry: CmdEntry) -> tuple[int, int, str] | None:
+            haystack = f"{entry.tui_name} {entry.description} {entry.category}".lower()
+            if not all(term in haystack for term in terms):
+                return None
+            if entry.tui_name.lower().startswith(normalized):
+                rank = 0
+            elif all(term in entry.tui_name.lower() for term in terms):
+                rank = 1
+            else:
+                rank = 2
+            return (rank, len(entry.tui_name), entry.tui_name)
+
+        scored = ((rank, entry) for entry in self._command_registry if (rank := score(entry)) is not None)
+        return tuple(entry for _rank, entry in sorted(scored, key=lambda item: item[0])[:limit])
+
+    def _selected_palette_value(self) -> str:
+        palette = self.query_one("#command-palette", DataTable)
+        return self._palette_value_at(palette.cursor_row)
+
+    def _palette_value_at(self, row: int) -> str:
+        if 0 <= row < len(self._command_palette_values):
+            return self._command_palette_values[row]
+        return ""
+
+    @on(Input.Submitted, "#command-input")
+    async def _on_command_submitted(self, event: Input.Submitted) -> None:
+        # If the operator highlighted a palette suggestion (via ↓ or
+        # by clicking a row), prefer that over the raw input text.
+        # Otherwise hitting Enter after pressing Down would just run
+        # whatever fragment was typed (e.g. ``agent discover`` would
+        # invoke ``defenseclaw agent discover enable`` with an extra
+        # positional and explode with "Got unexpected extra argument",
+        # which was the exact failure mode the user reported).
+        self._submit_command_text(self._effective_submit_text(event.value))
+
+    def _effective_submit_text(self, raw_value: str) -> str:
+        """Resolve the text to submit, preferring an autocompleted row.
+
+        When the palette is open and a suggestion is highlighted, the
+        intent is "run this suggestion" — autocomplete-shell muscle
+        memory (fzf, zsh menu-select, IDE pickers all behave this way).
+        We only override when the highlighted suggestion *extends* what
+        the user typed, so raw ``defenseclaw doctor``-style commands
+        still win over an unrelated palette row sitting at row 0.
+        """
+
+        typed = raw_value.strip()
+        try:
+            command = self.query_one("#command-input", Input)
+        except Exception:  # noqa: BLE001 - palette teardown can race
+            return raw_value
+        if not command.has_class("open"):
+            return raw_value
+        suggestion = self._selected_palette_value().strip()
+        if not suggestion or suggestion == typed:
+            return raw_value
+        # Only override when the suggestion is an extension of the
+        # filter typed so far. That covers the autocomplete intent
+        # ("agent discov" → highlighted "agent discovery enable")
+        # without silently overriding raw commands that happen to land
+        # in the palette by coincidence.
+        if typed and not suggestion.lower().startswith(typed.lower()):
+            return raw_value
+        return suggestion
+
+    @on(Input.Changed, "#command-input")
+    def _on_command_changed(self, event: Input.Changed) -> None:
+        command = self.query_one("#command-input", Input)
+        if command.has_class("open"):
+            self._render_command_palette(event.value)
+            command.focus()
+
+    @on(DataTable.RowSelected, "#command-palette")
+    def _on_command_palette_row_selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
+        selected = self._palette_value_at(event.cursor_row)
+        if selected:
+            self._submit_command_text(selected)
+
+    def _submit_command_text(self, value: str) -> None:
+        self._close_command_palette()
+        stripped = value.strip()
+        if not stripped:
+            # An empty Enter just dismisses the drawer — don't bother
+            # the user with a scary "Rejected: …" toast for nothing.
+            self._set_status("Command palette closed (nothing entered).")
+            return
+        try:
+            parsed = parse_command_line(value)
+        except CommandLineError as exc:
+            selected = self._selected_palette_value()
+            if selected and selected != stripped:
+                try:
+                    parsed = parse_command_line(selected)
+                except CommandLineError:
+                    selected = ""
+            if not selected or selected == stripped:
+                # Append an actionable hint instead of just echoing the
+                # parser's "Unknown TUI command: defen". Operators were
+                # hitting Enter mid-typing (e.g. ``defen``) and getting
+                # a bare rejection with no clue what to do next.
+                hint = (
+                    "type a full command like `defenseclaw doctor`, pick a "
+                    "highlighted palette row with Tab/Enter, or Esc to close"
+                )
+                self._write_activity(
+                    f"[#F87171]Rejected:[/] {exc}  [#9FB2CC]({hint})[/]"
+                )
+                self._strip_rejected(str(exc))
+                self._set_status(f"Command rejected — {hint}.")
+                return
+
+        # Bare ``defenseclaw setup`` (no subcommand) launches the
+        # interactive connector picker, which blocks on stdin and
+        # leaves the user stranded in front of a "Selection [3]:"
+        # prompt they can't easily answer from inside the TUI. Route
+        # those requests to the Connector Setup wizard form, which
+        # produces an equivalent non-interactive ``setup <connector>
+        # --yes …`` invocation. (The risk classifier still tags this
+        # as "setup" risk so the preview path covers any future caller
+        # that bypasses this shortcut.)
+        if (
+            parsed.binary == "defenseclaw"
+            and parsed.args == ("setup",)
+        ):
+            self.action_switch_panel("setup")
+            self.setup_model.active_wizard = SetupWizard.CONNECTOR_SETUP
+            self.setup_model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
+            self._render_chrome()
+            self._set_status(
+                "Opened Connector Setup wizard instead of launching the "
+                "interactive picker. Pick a connector with ←/→, press Ctrl+R to run."
+            )
+            return
+
+        if parsed.needs_preview:
+            self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
+            return
+
+        self.run_worker(
+            self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
+            exclusive=False,
+            thread=False,
+        )
+
+    @on(DataTable.RowHighlighted, "#panel-table")
+    def _on_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if self.active_panel == "alerts":
+            self.alerts_model.set_cursor(event.cursor_row)
+        elif self.active_panel == "registries":
+            self.registries_model.set_cursor(event.cursor_row)
+        elif self.active_panel in self.catalog_models:
+            self.catalog_models[self.active_panel].set_cursor(event.cursor_row)
+        elif self.active_panel == "logs":
+            self.logs_model.set_cursor(event.cursor_row)
+        elif self.active_panel == "audit":
+            self.audit_model.set_cursor(event.cursor_row)
+        elif self.active_panel == "inventory":
+            self.inventory_model.set_cursor(event.cursor_row)
+        elif self.active_panel == "ai":
+            self.ai_discovery_model.set_cursor(event.cursor_row)
+        elif self.active_panel == "policy":
+            self._set_policy_cursor(event.cursor_row)
+        elif self.active_panel == "setup":
+            self._set_setup_cursor(event.cursor_row)
+
+    @on(DataTable.RowSelected, "#panel-table")
+    def _on_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        repeated_click = self._last_table_click == (self.active_panel, event.cursor_row)
+        self._last_table_click = (self.active_panel, event.cursor_row)
+        if self.active_panel == "alerts":
+            self.alerts_model.set_cursor(event.cursor_row)
+            if repeated_click:
+                self._apply_alert_action(self.alerts_model.handle_key("enter"))
+            else:
+                self._update_body_only()
+        elif self.active_panel == "registries":
+            self.registries_model.set_cursor(event.cursor_row)
+            if repeated_click:
+                self._apply_registry_action(self.registries_model.handle_key("enter"))
+            else:
+                self._update_body_only()
+        elif self.active_panel in self.catalog_models:
+            self.catalog_models[self.active_panel].set_cursor(event.cursor_row)
+            if repeated_click:
+                action = self.catalog_models[self.active_panel].handle_key("enter")
+                self._apply_catalog_action(self.active_panel, action)
+            else:
+                self._update_body_only()
+        elif self.active_panel == "logs":
+            self.logs_model.set_cursor(event.cursor_row)
+            if self.logs_model.source in {"verdicts", "otel"} or repeated_click:
+                self._open_logs_detail()
+            else:
+                self._update_body_only()
+        elif self.active_panel == "audit":
+            self.audit_model.set_cursor(event.cursor_row)
+            if repeated_click:
+                self._apply_audit_action(self.audit_model.handle_key("enter"))
+            else:
+                self._update_body_only()
+        elif self.active_panel == "inventory":
+            self.inventory_model.set_cursor(event.cursor_row)
+            if repeated_click:
+                self._apply_inventory_action(self.inventory_model.handle_key("enter"))
+            else:
+                self._update_body_only()
+        elif self.active_panel == "ai":
+            self.ai_discovery_model.set_cursor(event.cursor_row)
+            if repeated_click:
+                self._apply_ai_discovery_action(self.ai_discovery_model.handle_key("enter"))
+            else:
+                self._update_body_only()
+        elif self.active_panel == "policy":
+            self._set_policy_cursor(event.cursor_row)
+            if repeated_click:
+                self._apply_policy_action(self.policy_model.handle_key("enter"))
+            else:
+                self._update_body_only()
+        elif self.active_panel == "setup":
+            self._set_setup_cursor(event.cursor_row)
+            if repeated_click:
+                self._apply_setup_action(self._handle_setup_key("enter"))
+            else:
+                self._update_body_only()
+
+    async def _run_command(
+        self,
+        binary: str,
+        args: tuple[str, ...],
+        *,
+        display_name: str | None = None,
+    ) -> None:
+        """Stream a command through the executor and reflect state in the UI.
+
+        ``display_name`` is the human-readable label surfaced in the
+        command-progress strip (the bordered box above the activity log).
+        Without it the user only ever saw ``exit 0 in 1.23s`` and could
+        not tell which command had finished — the strip looked like an
+        empty colored box. Falling back to ``<binary> <args[0]>`` keeps
+        the contract simple for callers that don't have a ParsedCommand.
+        """
+
+        label = display_name or _derive_command_label(binary, args)
+        try:
+            async for event in self.executor.run(binary, args):
+                if event.kind == "start":
+                    self.command_running = True
+                    self.command_label = label
+                    self._command_started_at = time.monotonic()
+                    self.commands_run += 1
+                    self.activity_model.add_entry(event.text)
+                    self._write_activity(f"[#FBBF24]running[/] {event.text}")
+                    # The strip is the single source of truth for command
+                    # lifecycle. Status text shows the ambient hint so we
+                    # don't double up on "running …" in two places.
+                    self._strip_running(label)
+                    self._refresh_hint()
+                elif event.kind == "output":
+                    self.activity_model.append_output(event.text)
+                    self._write_activity(event.text)
+                    # Surface a live tail so users on Overview can see the
+                    # wizard prompt or scanner progress without switching
+                    # panels. ``_strip_output`` filters whitespace.
+                    self._strip_output(event.text)
+                elif event.kind == "done":
+                    self.command_running = False
+                    self.command_label = ""
+                    self._command_started_at = 0.0
+                    self.activity_model.finish_entry(event.exit_code or 0)
+                    color = "#34D399" if event.exit_code == 0 else "#F87171"
+                    self._write_activity(f"[{color}]exit {event.exit_code}[/] in {event.duration:.2f}s")
+                    self._strip_finished(event.exit_code or 0, event.duration or 0.0)
+                    if event.exit_code == 0:
+                        await self._handle_successful_command(binary, args)
+                    elif binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+                        # A setup-family run failed (non-zero exit). Clear the
+                        # "running..." badge so the Setup panel reflects the
+                        # actual outcome and the user can retry without first
+                        # closing/reopening the wizard.
+                        self.setup_model.mark_wizard_complete(args, success=False)
+                    self._refresh_models_from_disk()
+                    self._render_chrome()
+                    self._refresh_hint()
+        except CommandAlreadyRunningError as exc:
+            # Be explicit about how to resolve the collision. The bare
+            # "A command is already running." toast was leaving people
+            # stranded in front of an interactive ``defenseclaw setup``
+            # picker with no idea how to either answer its prompt or
+            # cancel it before launching something else.
+            in_flight = self.command_label or "Previous command"
+            guidance = (
+                f"{in_flight} is still in flight — switch to Activity (press A) to "
+                "answer its prompt, or press Ctrl+C to cancel it before starting a "
+                "new one."
+            )
+            self._write_activity(f"[#FBBF24]{exc}[/]  [#9FB2CC]{guidance}[/]")
+            self._strip_rejected(f"{exc} — {guidance}")
+            # The submit code optimistically flagged the wizard row as
+            # "running..." before the executor rejected the new run; clear
+            # it so the panel doesn't show two spinning wizards forever.
+            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+                self.setup_model.mark_wizard_complete(args, success=False)
+            self._refresh_hint()
+        except Exception as exc:  # noqa: BLE001
+            # Any unexpected executor failure (process spawn error,
+            # asyncio cancellation, etc.) must still release the
+            # wizard's running badge so operators can retry instead of
+            # being stuck staring at a permanently spinning row.
+            self.command_running = False
+            self.command_label = ""
+            self._command_started_at = 0.0
+            self._write_activity(f"[#F87171]command crashed: {exc}[/]")
+            # Treat a crash as finished-but-failed: same dismissable strip,
+            # same "press A for full output" affordance. The label stays
+            # bound to the original command so users see what blew up.
+            self._strip_label = label
+            self._strip_last_output = str(exc)
+            self._strip_finished(exit_code=1, duration=0.0)
+            if binary == "defenseclaw" and args and args[0] in {"setup", "sandbox", "registry", "keys"}:
+                self.setup_model.mark_wizard_complete(args, success=False)
+            self._refresh_hint()
+
+    def _render_chrome(self) -> None:
+        self.query_one("#tabs", Tabs).active = f"tab-{self.active_panel}"
+        self.query_one("#activity", RichLog).set_class(self.active_panel != "activity", "hidden")
+        body_widget = self.query_one("#body", Static)
+        if self.active_panel == "overview" and not self.help_open:
+            renderable = self._overview_renderable()
+            body_widget.update(renderable)
+        else:
+            body_widget.update(self._safe_body_renderable(self._body_text()))
+        self._render_native_widgets()
+        self._render_panel_controls()
+        self._render_panel_table()
+        self._render_detail_panel()
+        # The strip's visibility depends on active_panel (it stays hidden
+        # on Activity since the live stream is right there), so any panel
+        # switch must re-render it.
+        self._render_command_strip()
+        self._set_status(self.status_text or self._status_text())
+        self._refresh_hint()
+
+    @staticmethod
+    def _safe_body_renderable(content: str) -> Text:
+        """Render a panel body string without ever crashing on markup.
+
+        Panels emit a mix of intentional Rich markup (e.g. the help
+        cheatsheet's ``[bold #22D3EE]…[/]`` styles) and untrusted
+        characters that happen to use square brackets — literal
+        keymap labels like ``[Esc]``, tab labels like ``[1] Commands``,
+        and streamed subprocess stdout that can contain *anything*
+        (think ``Selection [3]:`` from an interactive picker). The
+        latter routinely confuses Rich's markup parser, which then
+        raises ``MarkupError`` mid-frame and tears down the periodic
+        refresh — that's the crash the operator hit after clicking
+        a quick-action button on the overview.
+
+        We first try strict markup parsing (so the intentional styles
+        in help/overview keep working) and fall back to a plain-text
+        rendering with markup disabled when parsing fails. The
+        fallback path also escapes the brackets so downstream
+        consumers won't try to re-parse them.
+        """
+
+        try:
+            return Text.from_markup(content)
+        except MarkupError:
+            return Text(content, no_wrap=False)
+
+    def _body_text(self) -> str:
+        self._table_columns = ()
+        self._table_rows = ()
+        if self.help_open:
+            self.body_text = (
+                "[bold #22D3EE]DefenseClaw Keybindings[/]\n\n"
+                "Navigation: 1-9, 0, T, V, R, Tab, Shift+Tab\n"
+                "Commands: : or Ctrl+K\n"
+                "Close local surface: q\n"
+                "Quit: Ctrl+C\n\n"
+                "This Textual backend is behind --backend textual until all parity gates pass."
+            )
+            return self.body_text
+        label = next(label for name, _key, label in PANELS if name == self.active_panel)
+        if self.active_panel == "overview":
+            service_cards = self.overview_model.service_cards()
+            self.body_text = self._overview_body_text(service_cards)
+            return self.body_text
+        if self.active_panel == "activity":
+            self.body_text = self.activity_model.render_text()
+            return self.body_text
+        if self.active_panel == "alerts":
+            self._table_columns = self.alerts_model.data_table_columns()
+            self._table_rows = self.alerts_model.data_table_rows()
+            empty = self.alerts_model.empty_state()
+            suffix = f"\n\n{empty}" if empty else ""
+            self.body_text = self.alerts_model.summary_text() + suffix
+            return self.body_text
+        if self.active_panel == "registries":
+            self._table_columns = self.registries_model.data_table_columns()
+            self._table_rows = self.registries_model.data_table_rows()
+            tab = self.registries_model.current_tab.name.title()
+            empty = self.registries_model.empty_state()
+            suffix = f"\n\n{empty}" if empty else ""
+            self.body_text = (
+                f"[bold #22D3EE]Registries[/]  {tab}\n"
+                "Keys: 1 sources, 2 entries, 3 approved, r refresh, s sync source, S sync all, "
+                "a approve, x reject, d remove source."
+                f"{suffix}"
+            )
+            return self.body_text
+        if self.active_panel == "inventory":
+            self._table_columns = self.inventory_model.data_table_columns()
+            self._table_rows = self.inventory_model.data_table_rows()
+            empty = self.inventory_model.empty_state()
+            suffix = f"\n\n{empty}" if empty else ""
+            self.body_text = self._inventory_body_text() + suffix
+            return self.body_text
+        if self.active_panel == "ai":
+            self._table_columns = self.ai_discovery_model.data_table_columns()
+            self._table_rows = self.ai_discovery_model.data_table_rows()
+            detail = ""
+            if self.ai_discovery_model.detail_open:
+                detail = self._ai_discovery_detail_text()
+            empty = self.ai_discovery_model.empty_state()
+            header = ", ".join(self.ai_discovery_model.header_parts())
+            suffix = f"\n\n{detail}" if detail else f"\n\n{empty}" if empty else ""
+            self.body_text = (
+                f"[bold #22D3EE]AI Discovery[/]  {header}\n"
+                "Keys: r refresh usage, s scan, Enter detail, / filter."
+                f"{suffix}"
+            )
+            return self.body_text
+        if self.active_panel == "policy":
+            self._table_columns, self._table_rows = self._policy_table()
+            self.body_text = "[bold #22D3EE]Policy[/]\n" + self.policy_model.render_text(
+                width=max(self.size.width - 8, 80),
+                height=max(self.size.height - 18, 12),
+            )
+            return self.body_text
+        if self.active_panel == "setup":
+            self._table_columns, self._table_rows = self._setup_table()
+            self.body_text = self._setup_body_text()
+            return self.body_text
+        if self.active_panel in self.catalog_models:
+            model = self.catalog_models[self.active_panel]
+            if self.active_panel == "plugins" and not self.plugins_model.is_visible_for_connector():
+                self.body_text = f"[bold #22D3EE]Plugins[/]\n\n{self.plugins_model.openclaw_only_notice()}"
+                return self.body_text
+            self._table_columns = model.data_table_columns()
+            self._table_rows = model.data_table_rows()
+            detail = catalog_detail_text(model.selected()) if model.detail_open else ""
+            message = model.message or model.empty_state()
+            suffix = f"\n\n{message}" if message and not detail and not model.filtered else ""
+            self.body_text = model.summary_text(label) + suffix
+            return self.body_text
+        if self.active_panel == "logs":
+            self._table_columns = self.logs_model.data_table_columns()
+            self._table_rows = self.logs_model.data_table_rows()
+            self.body_text = self._logs_body_text()
+            return self.body_text
+        if self.active_panel == "audit":
+            self._table_columns = self.audit_model.data_table_columns()
+            self._table_rows = self.audit_model.data_table_rows()
+            self.body_text = self._audit_body_text()
+            return self.body_text
+        self.body_text = (
+            f"[bold #22D3EE]{label}[/]\n\n"
+            "Panel placeholder. This panel is reserved in the correct Go TUI order "
+            "and will be filled by its parity wave.\n"
+            "Keyboard routing, command drawer, Activity, theme, and status strip are already shared foundation."
+        )
+        return self.body_text
+
+    def _status_text(self) -> str:
+        return f"backend=textual  panel={self.active_panel}  hints=: command | ? help | q local close | Ctrl+C quit"
+
+    def _render_native_widgets(self) -> None:
+        metrics = self.query_one("#overview-metrics", OverviewMetrics)
+        metrics.refresh_metrics(self._overview_metric_data())
+        metrics.set_class(self.active_panel != "overview" or self.help_open, "hidden")
+
+    def _render_panel_controls(self) -> None:
+        overview = self.query_one("#overview-controls", Horizontal)
+        alerts = self.query_one("#alerts-controls", Horizontal)
+        audit = self.query_one("#audit-controls", Horizontal)
+        inventory = self.query_one("#inventory-controls", Horizontal)
+        inventory_filters = self.query_one("#inventory-filter-controls", Horizontal)
+        logs = self.query_one("#logs-controls", Horizontal)
+        logs_filters = self.query_one("#logs-filter-controls", Horizontal)
+        registries = self.query_one("#registries-controls", Horizontal)
+        policy = self.query_one("#policy-controls", Horizontal)
+        setup = self.query_one("#setup-controls", Horizontal)
+        overview.set_class(self.active_panel != "overview" or self.help_open, "hidden")
+        alerts.set_class(self.active_panel != "alerts" or self.help_open, "hidden")
+        audit.set_class(self.active_panel != "audit" or self.help_open, "hidden")
+        inventory.set_class(self.active_panel != "inventory" or self.help_open, "hidden")
+        inventory_filters.set_class(
+            self.active_panel != "inventory"
+            or self.help_open
+            or self.inventory_model.active_sub not in {"skills", "plugins"},
+            "hidden",
+        )
+        logs.set_class(self.active_panel != "logs" or self.help_open, "hidden")
+        logs_filters.set_class(self.active_panel != "logs" or self.help_open, "hidden")
+        registries.set_class(self.active_panel != "registries" or self.help_open, "hidden")
+        policy.set_class(self.active_panel != "policy" or self.help_open, "hidden")
+        setup.set_class(self.active_panel != "setup" or self.help_open, "hidden")
+        if self.active_panel == "overview" and not self.help_open:
+            self._sync_overview_controls()
+        if self.active_panel == "alerts" and not self.help_open:
+            self._sync_alert_controls()
+        if self.active_panel == "audit" and not self.help_open:
+            self._sync_audit_controls()
+        if self.active_panel == "inventory" and not self.help_open:
+            self._sync_inventory_controls()
+        if self.active_panel == "logs" and not self.help_open:
+            self._sync_logs_controls()
+        if self.active_panel == "registries" and not self.help_open:
+            self._sync_registries_controls()
+        if self.active_panel == "policy" and not self.help_open:
+            self._sync_policy_controls()
+        if self.active_panel == "setup" and not self.help_open:
+            self._sync_setup_controls()
+
+    def _sync_overview_controls(self) -> None:
+        """Light up the click-first quick actions for the Overview panel.
+
+        Each button is shown only when it would actually do something
+        useful right now (e.g. "Enable AI Discovery" appears only when
+        discovery is disabled or offline). Buttons that wouldn't make
+        sense for the current state are hidden so the bar doesn't read
+        like a static palette dump.
+        """
+
+        gateway_state = ""
+        cards = self.overview_model.service_cards()
+        for card in cards:
+            if card.name.lower() == "gateway":
+                gateway_state = (card.state or "").lower()
+                break
+        gateway_offline = gateway_state in {"", "unknown", "down", "stopped", "offline", "error", "failed"}
+        gateway_running = gateway_state in {"running", "ok", "healthy", "up"}
+
+        ai_box = self.overview_model.ai_discovery_box()
+        ai_status = (ai_box.status or "").lower()
+        ai_can_enable = ai_status in {"disabled", "offline"}
+        ai_can_scan = ai_status in {"empty", "ready"}
+
+        doctor = getattr(self.overview_model, "doctor", None)
+        doctor_failed = bool(doctor and getattr(doctor, "failed", 0))
+
+        connector_present = bool(self.overview_model.active_connector_name())
+
+        keys = self.overview_model.keys_status()
+        keys_missing = bool(getattr(keys, "missing", None))
+
+        self._set_button_visible("#overview-start-gateway", gateway_offline)
+        self._set_button_visible("#overview-restart-gateway", gateway_running)
+        self._set_button_visible("#overview-run-doctor", True)
+        self._set_button_active("#overview-run-doctor", doctor_failed)
+        self._set_button_visible("#overview-enable-ai-discovery", ai_can_enable)
+        self._set_button_visible("#overview-scan-ai-discovery", ai_can_scan)
+        self._set_button_visible("#overview-setup-connector", not connector_present)
+        self._set_button_visible("#overview-keys-fill", keys_missing)
+
+    def _set_button_visible(self, selector: str, visible: bool) -> None:
+        try:
+            button = self.query_one(selector, Button)
+        except Exception:  # noqa: BLE001 - button missing during teardown
+            return
+        button.set_class(not visible, "hidden")
+        # Disable hidden buttons too so they can't steal keyboard focus.
+        button.disabled = not visible
+
+    def _sync_alert_controls(self) -> None:
+        active = (self.alerts_model.severity_filter or "all").lower()
+        for key in ("all", "critical", "high", "medium", "low"):
+            self._set_button_active(f"#alerts-filter-{key}", active == key)
+        selected = len(self.alerts_model.selected_ids)
+        filtered = len(self.alerts_model.filtered_ids())
+        self.query_one("#alerts-ack-selected", Button).disabled = selected == 0
+        self.query_one("#alerts-dismiss-filtered", Button).disabled = filtered == 0
+        self.query_one("#alerts-dismiss-all", Button).disabled = not self.alerts_model.filtered
+
+    def _sync_audit_controls(self) -> None:
+        active = self.audit_model.common_filter or "all"
+        for key in ("all", "risk", "blocks", "scans", "credentials"):
+            self._set_button_active(f"#audit-filter-{key}", active == key)
+        self._set_button_active("#audit-filter-target", bool(self.audit_model.correlation_target))
+        self._set_button_active("#audit-filter-run", bool(self.audit_model.correlation_run_id))
+        selected = self.audit_model.selected()
+        self.query_one("#audit-filter-target", Button).disabled = selected is None or not bool(selected.target)
+        self.query_one("#audit-filter-run", Button).disabled = selected is None or not bool(selected.run_id)
+        self.query_one("#audit-export", Button).disabled = not bool(self.audit_model.filtered)
+
+    def _sync_inventory_controls(self) -> None:
+        for tab in self.inventory_model.subtab_info():
+            self._set_button_active(f"#inventory-tab-{tab.subtab}", tab.active)
+        self._set_button_active("#inventory-scope-all", not bool(self.inventory_model.category_scope))
+        self._set_button_active("#inventory-scope-fast", self.inventory_model.is_fast_scan())
+        active_filter = self.inventory_model.filter or "all"
+        for key in ("all", "eligible", "warning", "blocked", "loaded", "disabled"):
+            self._set_button_active(f"#inventory-filter-{key}", active_filter == key)
+        skills_mode = self.inventory_model.active_sub == "skills"
+        plugins_mode = self.inventory_model.active_sub == "plugins"
+        self.query_one("#inventory-filter-eligible", Button).disabled = not skills_mode
+        self.query_one("#inventory-filter-warning", Button).disabled = not skills_mode
+        self.query_one("#inventory-filter-loaded", Button).disabled = not plugins_mode
+        self.query_one("#inventory-filter-disabled", Button).disabled = not plugins_mode
+
+    def _sync_logs_controls(self) -> None:
+        for source in LOG_SOURCES:
+            self._set_button_active(f"#logs-source-{source}", self.logs_model.source == source)
+        self._set_button_active("#logs-toggle-pause", self.logs_model.paused)
+        self.query_one("#logs-judge-history", Button).disabled = self.logs_model.source != "verdicts"
+        for index, preset in enumerate(FILTER_PRESETS):
+            self._set_button_active(f"#logs-filter-{index}", self.logs_model.filter_mode == preset)
+
+    def _sync_registries_controls(self) -> None:
+        active = self.registries_model.current_tab.name.lower()
+        for key in ("sources", "entries", "approved"):
+            self._set_button_active(f"#registries-tab-{key}", active == key)
+        selected_source = self.registries_model.selected_source()
+        selected_entry = self.registries_model.selected_entry()
+        entry_tab = active in {"entries", "approved"}
+        self.query_one("#registries-sync-source", Button).disabled = not bool(selected_source or selected_entry)
+        self.query_one("#registries-approve", Button).disabled = not entry_tab or selected_entry is None
+        self.query_one("#registries-reject", Button).disabled = not entry_tab or selected_entry is None
+        self.query_one("#registries-remove-source", Button).disabled = active != "sources" or selected_source is None
+
+    def _sync_policy_controls(self) -> None:
+        for index, _name in enumerate(POLICY_TAB_NAMES):
+            self._set_button_active(f"#policy-tab-{index}", self.policy_model.active_tab == index)
+        opa = self.policy_model.active_tab == POLICY_TAB_OPA
+        self.query_one("#policy-test", Button).disabled = not opa
+        self.query_one("#policy-validate", Button).disabled = not opa
+
+    def _sync_setup_controls(self) -> None:
+        self._set_button_active("#setup-mode-wizards", self.setup_model.mode == "wizards")
+        self._set_button_active("#setup-mode-config", self.setup_model.mode == "config")
+        current = self.setup_model.current_section()
+        self.query_one("#setup-edit-list", Button).disabled = not (
+            self.setup_model.mode == "config"
+            and current is not None
+            and current.name in {"Audit Sinks", "Webhooks"}
+        )
+        self.query_one("#setup-save", Button).disabled = self.setup_model.mode != "config"
+        self.query_one("#setup-revert", Button).disabled = self.setup_model.mode != "config"
+        self.query_one("#setup-restart", Button).disabled = not self.setup_model.restart_queue.pending
+        self.query_one("#setup-clear-restart", Button).disabled = not self.setup_model.restart_queue.pending
+
+    def _set_button_active(self, selector: str, active: bool) -> None:
+        try:
+            self.query_one(selector, Button).set_class(active, "active-chip")
+        except NoMatches:
+            return
+
+    def _handle_overview_control(self, button_id: str) -> None:
+        """Route an Overview quick-action button to the matching command.
+
+        Each button is a thin wrapper around a single ``defenseclaw``
+        invocation — this hands off to the same drawer pipeline a
+        keystroke would use so preview gating, "already running"
+        guards, and Activity-panel output streaming all keep working.
+        """
+
+        # Gateway lifecycle.
+        if button_id == "overview-start-gateway":
+            self._submit_command_text("defenseclaw-gateway start")
+            return
+        if button_id == "overview-restart-gateway":
+            self._submit_command_text("defenseclaw-gateway restart")
+            return
+        # Diagnostics.
+        if button_id == "overview-run-doctor":
+            self._submit_command_text("defenseclaw doctor")
+            return
+        # AI Discovery quick actions — equivalent to the registry
+        # palette rows, but one click away from the overview itself.
+        if button_id == "overview-enable-ai-discovery":
+            self._submit_command_text("defenseclaw agent discovery enable --yes")
+            return
+        if button_id == "overview-scan-ai-discovery":
+            self._submit_command_text("defenseclaw agent discovery scan")
+            return
+        # Setup shortcuts: route to the in-TUI wizard, not the
+        # interactive picker subprocess.
+        if button_id == "overview-setup-connector":
+            self.action_switch_panel("setup")
+            self.setup_model.active_wizard = SetupWizard.CONNECTOR_SETUP
+            self.setup_model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
+            self._render_chrome()
+            self._set_status(
+                "Opened Connector Setup wizard — pick a connector with ←/→, "
+                "Tab between fields, Ctrl+R to run."
+            )
+            return
+        if button_id == "overview-keys-fill":
+            self._submit_command_text("defenseclaw keys fill-missing")
+            return
+
+    def _handle_alert_control(self, button_id: str) -> None:
+        severity_by_button = {
+            "alerts-filter-all": "",
+            "alerts-filter-critical": "CRITICAL",
+            "alerts-filter-high": "HIGH",
+            "alerts-filter-medium": "MEDIUM",
+            "alerts-filter-low": "LOW",
+        }
+        if button_id in severity_by_button:
+            self.alerts_model.set_severity_filter_exact(severity_by_button[button_id])  # type: ignore[arg-type]
+            self._set_status(self.alerts_model.active_filter_label() or "Showing all alerts.")
+            self._render_chrome()
+            return
+        key_by_button = {
+            "alerts-select-all": "a",
+            "alerts-ack-selected": "x",
+            "alerts-dismiss-filtered": "c",
+            "alerts-dismiss-all": "C",
+        }
+        if button_id in key_by_button:
+            self._apply_alert_action(self.alerts_model.handle_key(key_by_button[button_id]))
+
+    def _handle_audit_control(self, button_id: str) -> None:
+        preset_by_button = {
+            "audit-filter-all": "",
+            "audit-filter-risk": "risk",
+            "audit-filter-blocks": "blocks",
+            "audit-filter-scans": "scans",
+            "audit-filter-credentials": "credentials",
+        }
+        if button_id in preset_by_button:
+            self.audit_model.set_common_filter(preset_by_button[button_id])  # type: ignore[arg-type]
+            self._set_status(self.audit_model.active_filter_label() or "Showing all audit events.")
+            self._render_chrome()
+            return
+        key_by_button = {
+            "audit-filter-target": "t",
+            "audit-filter-run": "u",
+            "audit-export": "e",
+        }
+        if button_id in key_by_button:
+            self._apply_audit_action(self.audit_model.handle_key(key_by_button[button_id]))
+
+    def _handle_inventory_control(self, button_id: str) -> None:
+        tab_prefix = "inventory-tab-"
+        if button_id.startswith(tab_prefix):
+            self.inventory_model.set_active_subtab(button_id.removeprefix(tab_prefix))  # type: ignore[arg-type]
+            self._render_chrome()
+            return
+        if button_id == "inventory-scope-all":
+            self.inventory_model.set_category_scope(())
+            self._set_status("Inventory scope: all categories.")
+            self._render_chrome()
+            return
+        if button_id == "inventory-scope-fast":
+            if self.inventory_model.is_fast_scan():
+                self.inventory_model.set_category_scope(())
+            else:
+                self.inventory_model.set_category_scope(FAST_SCAN_CATEGORIES)
+            self._set_status(f"Inventory scope: {','.join(self.inventory_model.category_scope) or 'all'}.")
+            self._render_chrome()
+            return
+        if button_id == "inventory-refresh":
+            self._apply_inventory_action(self.inventory_model.handle_key("r"))
+            return
+        filter_by_button = {
+            "inventory-filter-all": "",
+            "inventory-filter-eligible": "eligible",
+            "inventory-filter-warning": "warning",
+            "inventory-filter-blocked": "blocked",
+            "inventory-filter-loaded": "loaded",
+            "inventory-filter-disabled": "disabled",
+        }
+        if button_id in filter_by_button:
+            self.inventory_model.set_filter(filter_by_button[button_id])  # type: ignore[arg-type]
+            self._set_status(f"Inventory filter: {self.inventory_model.filter or 'all'}.")
+            self._render_chrome()
+
+    def _handle_logs_control(self, button_id: str) -> None:
+        source_prefix = "logs-source-"
+        if button_id.startswith(source_prefix):
+            source = button_id.removeprefix(source_prefix)
+            self.logs_model.set_source(source)  # type: ignore[arg-type]
+            self._set_status(f"Logs source: {LOG_SOURCE_LABELS.get(source, source)}.")
+            self._render_chrome()
+            return
+        filter_prefix = "logs-filter-"
+        if button_id.startswith(filter_prefix):
+            try:
+                index = int(button_id.removeprefix(filter_prefix))
+            except ValueError:
+                return
+            if 0 <= index < len(FILTER_PRESETS):
+                self.logs_model.set_filter(FILTER_PRESETS[index])
+                label = FILTER_LABELS.get(FILTER_PRESETS[index], FILTER_PRESETS[index])
+                self._set_status(f"Logs filter: {label}.")
+                self._render_chrome()
+            return
+        if button_id == "logs-open-detail":
+            self._open_logs_detail()
+            return
+        key_by_button = {
+            "logs-toggle-pause": "space",
+            "logs-redaction": "R",
+            "logs-notifications": "N",
+            "logs-judge-history": "J",
+        }
+        if button_id in key_by_button:
+            self._apply_logs_action(self.logs_model.handle_key(key_by_button[button_id]))
+
+    def _handle_registries_control(self, button_id: str) -> None:
+        key_by_button = {
+            "registries-tab-sources": "1",
+            "registries-tab-entries": "2",
+            "registries-tab-approved": "3",
+            "registries-refresh": "r",
+            "registries-sync-source": "s",
+            "registries-sync-all": "S",
+            "registries-approve": "a",
+            "registries-reject": "x",
+            "registries-remove-source": "d",
+        }
+        key = key_by_button.get(button_id)
+        if key is not None:
+            self._apply_registry_action(self.registries_model.handle_key(key))
+
+    def _handle_policy_control(self, button_id: str) -> None:
+        tab_prefix = "policy-tab-"
+        if button_id.startswith(tab_prefix):
+            try:
+                index = int(button_id.removeprefix(tab_prefix))
+            except ValueError:
+                return
+            self.policy_model.set_sub_tab(index)
+            self.policy_model.reset_scrolls()
+            self._render_chrome()
+            return
+        key_by_button = {
+            "policy-refresh": "r",
+            "policy-validate": "v",
+            "policy-test": "T",
+            "policy-edit": "E",
+        }
+        key = key_by_button.get(button_id)
+        if key is not None:
+            self._apply_policy_action(self.policy_model.handle_key(key))
+
+    def _handle_setup_control(self, button_id: str) -> None:
+        if button_id == "setup-mode-wizards":
+            self.setup_model.mode = "wizards"
+            self._render_chrome()
+            return
+        if button_id == "setup-mode-config":
+            self.setup_model.mode = "config"
+            self.setup_model.active_line = self.setup_model.first_editable_line()
+            self._render_chrome()
+            return
+        key_by_button = {
+            "setup-open": "enter",
+            "setup-edit-list": "E",
+            "setup-save": "S",
+            "setup-revert": "R",
+            "setup-restart": "G",
+            "setup-clear-restart": "C",
+            "setup-refresh-credentials": "r",
+        }
+        key = key_by_button.get(button_id)
+        if key is not None:
+            self._apply_setup_action(self._handle_setup_key(key))
+
+    def _overview_metric_data(self) -> tuple[MetricDatum, ...]:
+        """Build the metric-tile row for the Overview header.
+
+        For hook-based connectors (claudecode / codex / openclaw) the
+        tiles surface what an operator actually wants to know about a
+        hook-style integration: how many tool calls have been seen, how
+        many were blocked, the severity breakdown of recent findings,
+        and the AI-agent count. For other connectors we fall back to
+        the generic alert / scan / guardrail / agent set.
+        """
+
+        counts = self.overview_model.enforcement
+        state_by_key = {
+            card.key: card.state.strip().lower()
+            for card in self.overview_model.service_cards()
+        }
+        guardrail_running = state_by_key.get("guardrail") in {"running", "enabled", "active"}
+        guardrail_enabled = bool(self.overview_model.cfg and self.overview_model.cfg.guardrail_enabled)
+        ai_box = self.overview_model.ai_discovery_box()
+        ai_count = len(ai_box.rows) + ai_box.overflow
+
+        connector = self.overview_model.active_connector_name()
+        connector_health = None
+        health = self.overview_model.health
+        if health is not None:
+            connector_health = health.connector
+        gateway_state = (health.gateway.state if health is not None else "").strip().lower()
+        gateway_online = gateway_state in {"running", "ready", "healthy", "ok"}
+
+        sev = self.alerts_model.severity_counts() if self.alerts_model else {
+            "CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0,
+        }
+        critical = sev.get("CRITICAL", 0)
+        high = sev.get("HIGH", 0)
+        medium = sev.get("MEDIUM", 0)
+        low = sev.get("LOW", 0)
+        total_findings = critical + high + medium + low
+
+        cfg = self.overview_model.cfg
+        guardrail_mode = (cfg.guardrail_mode if cfg else "") or "observe"
+        guardrail_active = guardrail_running or guardrail_enabled
+        guardrail_value_text = "ON" if guardrail_active else "OFF"
+        if guardrail_active:
+            guardrail_bits: list[str] = [
+                f"[{TOKENS.accent_green}]{guardrail_mode}[/]"
+            ]
+            if cfg and cfg.guardrail_port:
+                guardrail_bits.append(f":{cfg.guardrail_port}")
+            llm_label = self._compact_llm_provider(
+                cfg.llm_provider if cfg else "",
+                cfg.llm_model if cfg else "",
+            )
+            if llm_label:
+                guardrail_bits.append(f"[{TOKENS.accent_violet}]{llm_label}[/]")
+            extras: list[str] = []
+            if cfg and cfg.hilt_enabled:
+                extras.append(f"[{TOKENS.accent_amber}]HITL[/]")
+            if cfg and cfg.guardrail_judge_enabled:
+                extras.append(f"[{TOKENS.accent_blue}]judge[/]")
+            if cfg and not cfg.privacy_disable_redaction:
+                extras.append("redact")
+            if extras:
+                guardrail_bits.append("·".join(extras))
+            guardrail_detail = " · ".join(guardrail_bits)
+        else:
+            guardrail_detail = f"[{TOKENS.accent_amber}]press g to enable[/]"
+
+        ai_detail = self._ai_agents_metric_detail(ai_box)
+
+        is_hook_connector = (
+            self.overview_model.cfg is not None
+            and connector in {"claudecode", "codex", "openclaw"}
+        )
+
+        if is_hook_connector:
+            if connector_health is not None:
+                requests = connector_health.requests
+                inspections = connector_health.tool_inspections
+                errors = connector_health.errors
+                tool_blocks = connector_health.tool_blocks
+                subprocess_blocks = connector_health.subprocess_blocks
+            else:
+                requests = inspections = errors = tool_blocks = subprocess_blocks = 0
+            blocks_total = tool_blocks + subprocess_blocks
+            allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown()
+
+            call_detail_parts: list[str] = []
+            if allow_count or alert_count or block_decisions:
+                call_detail_parts.append(
+                    f"[{TOKENS.accent_green}]a{allow_count}[/] "
+                    f"[{TOKENS.accent_amber}]w{alert_count}[/] "
+                    f"[{TOKENS.accent_red}]b{block_decisions}[/]"
+                )
+                if top_hook:
+                    call_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{top_hook}[/]")
+            elif inspections or errors:
+                if inspections:
+                    call_detail_parts.append(f"[{TOKENS.accent_blue}]{inspections}[/] inspected")
+                if errors:
+                    call_detail_parts.append(f"[{TOKENS.accent_red}]{errors}[/] errors")
+            elif not gateway_online:
+                call_detail_parts.append(f"[{TOKENS.accent_amber}]gateway offline · press : then start[/]")
+            elif requests == 0:
+                call_detail_parts.append("waiting for tool calls")
+            else:
+                call_detail_parts.append("agent active")
+            calls_detail = " · ".join(call_detail_parts)
+
+            top_blocked_target, top_blocked_count = self._top_block_target()
+            block_detail_parts: list[str] = []
+            if tool_blocks:
+                block_detail_parts.append(f"[{TOKENS.accent_red}]{tool_blocks}[/] tool")
+            if subprocess_blocks:
+                block_detail_parts.append(f"[{TOKENS.accent_red}]{subprocess_blocks}[/] subprocess")
+            if top_blocked_target:
+                short_target = top_blocked_target if len(top_blocked_target) <= 22 else top_blocked_target[:21] + "…"
+                block_detail_parts.append(f"top: [{TOKENS.accent_cyan}]{short_target}[/] x{top_blocked_count}")
+            if not block_detail_parts:
+                if not gateway_online:
+                    block_detail_parts.append(f"[{TOKENS.text_muted}]no data — gateway offline[/]")
+                else:
+                    block_detail_parts.append("no blocks yet")
+            blocks_detail = " · ".join(block_detail_parts)
+
+            return (
+                MetricDatum(
+                    key="hook_calls",
+                    label=f"Hook Calls ({connector})",
+                    value=requests,
+                    progress=min(float(requests), 100.0),
+                    detail=calls_detail,
+                    trend=_metric_trend(requests),
+                    state="ok" if requests else ("error" if not gateway_online else "warn"),
+                    target_panel="activity",
+                ),
+                MetricDatum(
+                    key="blocks",
+                    label="Blocks",
+                    value=blocks_total,
+                    progress=min(float(blocks_total) * 5, 100.0),
+                    detail=blocks_detail,
+                    trend=_metric_trend(blocks_total, invert=blocks_total == 0),
+                    state="error" if blocks_total else ("ok" if requests else "warn"),
+                    target_panel="audit",
+                ),
+                MetricDatum(
+                    key="findings",
+                    label="Findings",
+                    value=total_findings,
+                    progress=min(float(total_findings) * 5, 100.0),
+                    detail=self._findings_metric_detail(critical, high, medium, low),
+                    trend=_metric_trend(total_findings, invert=total_findings == 0),
+                    state="error" if critical or high else ("warn" if medium else "ok"),
+                    target_panel="alerts",
+                ),
+                MetricDatum(
+                    key="guardrail",
+                    label="Guardrail",
+                    value=1 if guardrail_active else 0,
+                    progress=100.0 if guardrail_active else 0.0,
+                    detail=guardrail_detail,
+                    trend=(20, 40, 65, 80, 100) if guardrail_active else (0, 0, 8, 4, 0),
+                    state="ok" if guardrail_active else "warn",
+                    target_panel="policy",
+                    value_text=guardrail_value_text,
+                ),
+            )
+
+        return (
+            MetricDatum(
+                key="risk",
+                label="Alert Risk",
+                value=counts.active_alerts,
+                progress=min(float(counts.active_alerts), 100.0),
+                detail=self._findings_metric_detail(critical, high, medium, low),
+                trend=_metric_trend(counts.active_alerts, invert=counts.active_alerts == 0),
+                state="error" if (critical or high) else ("warn" if medium else "ok"),
+                target_panel="alerts",
+            ),
+            MetricDatum(
+                key="scans",
+                label="Scans",
+                value=counts.total_scans,
+                progress=min(float(counts.total_scans), 100.0),
+                detail=(
+                    "skill+mcp scans · "
+                    f"[{TOKENS.accent_red}]{counts.blocked_skills + counts.blocked_mcps}[/] blocked"
+                ),
+                trend=_metric_trend(counts.total_scans),
+                state="ok" if counts.total_scans else "warn",
+                target_panel="audit",
+            ),
+            MetricDatum(
+                key="guardrail",
+                label="Guardrail",
+                value=1 if guardrail_active else 0,
+                progress=100.0 if guardrail_active else 0.0,
+                detail=guardrail_detail,
+                trend=(20, 40, 65, 80, 100) if guardrail_active else (0, 0, 8, 4, 0),
+                state="ok" if guardrail_active else "warn",
+                target_panel="policy",
+                value_text=guardrail_value_text,
+            ),
+            MetricDatum(
+                key="ai",
+                label="AI Agents",
+                value=ai_count,
+                progress=min(float(ai_count * 12), 100.0),
+                detail=ai_detail,
+                trend=_metric_trend(ai_count),
+                state="ok" if ai_count else "warn",
+                target_panel="ai",
+            ),
+        )
+
+    def _findings_metric_detail(self, critical: int, high: int, medium: int, low: int) -> str:
+        """Severity breakdown plus the top severity event target (if any).
+
+        The breakdown is the primary signal; the top target gives one
+        more piece of context (e.g. ``top: skill:foo H``) so users can
+        glance at what kind of thing is firing alerts without opening
+        the Alerts panel.
+        """
+
+        breakdown = _severity_breakdown_markup(critical, high, medium, low)
+        target, severity_letter_src = self._top_finding_target()
+        if not target:
+            return breakdown
+        short_target = target if len(target) <= 18 else target[:17] + "…"
+        sev_letter = (severity_letter_src or "")[:1] or "·"
+        return f"{breakdown} · top: [{TOKENS.accent_cyan}]{short_target}[/] {sev_letter}"
+
+    def _ai_agents_metric_detail(self, ai_box: Any) -> str:
+        if not ai_box.rows:
+            return ai_box.message or "no agents detected"
+        vendors: dict[str, int] = {}
+        for row in ai_box.rows:
+            vendor = (row.vendor or "unknown").strip()
+            vendors[vendor] = vendors.get(vendor, 0) + 1
+        top_vendor, top_count = max(vendors.items(), key=lambda kv: kv[1])
+        if len(vendors) == 1:
+            return f"[{TOKENS.accent_violet}]{top_vendor}[/] · {top_count} agent" + ("s" if top_count != 1 else "")
+        return f"[{TOKENS.accent_violet}]{top_vendor}[/] x{top_count} · {len(vendors)} vendors"
+
+    def _connector_hook_breakdown(self) -> tuple[int, int, int, str]:
+        """Scan recent audit events for connector-hook action breakdown.
+
+        Returns ``(allow, alert, block, top_event_name)`` where the top
+        event is the most-frequent hook target (e.g. ``postToolUse``).
+        Counts are derived from the ``action=<x>`` token embedded in the
+        event details by ``logConnectorHookAudit``.
+        """
+
+        allow = alert = block = 0
+        events_by_target: dict[str, int] = {}
+        if self.audit_model is None:
+            return 0, 0, 0, ""
+        for event in self.audit_model.items[-200:]:
+            if event.action != "connector-hook":
+                continue
+            details = event.details or ""
+            decision = ""
+            for token in details.split():
+                if token.startswith("action="):
+                    decision = token[len("action="):].strip().lower()
+                    break
+            if decision == "allow":
+                allow += 1
+            elif decision == "alert" or decision == "warn":
+                alert += 1
+            elif decision in {"block", "deny"}:
+                block += 1
+            target = (event.target or "").strip()
+            if target:
+                events_by_target[target] = events_by_target.get(target, 0) + 1
+        top_event = ""
+        if events_by_target:
+            top_event, _ = max(events_by_target.items(), key=lambda kv: kv[1])
+        return allow, alert, block, top_event
+
+    def _top_block_target(self) -> tuple[str, int]:
+        """Most-frequently blocked audit target across recent events."""
+
+        if self.audit_model is None:
+            return "", 0
+        blocked: dict[str, int] = {}
+        for event in self.audit_model.items[-200:]:
+            action = (event.action or "").lower()
+            details = (event.details or "").lower()
+            is_block = (
+                action in {"block", "guardrail-block", "deny", "quarantine"}
+                or "action=block" in details
+                or "action=deny" in details
+            )
+            if not is_block:
+                continue
+            target = (event.target or "").strip() or "(unknown)"
+            blocked[target] = blocked.get(target, 0) + 1
+        if not blocked:
+            return "", 0
+        top, count = max(blocked.items(), key=lambda kv: kv[1])
+        return top, count
+
+    def _top_finding_target(self) -> tuple[str, str]:
+        """Highest-severity recent alert's target + severity letter."""
+
+        if self.alerts_model is None:
+            return "", ""
+        severity_rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+        best: tuple[int, str, str] = (0, "", "")
+        for event in self.alerts_model.audit_events[-200:]:
+            rank = severity_rank.get((event.severity or "").upper(), 0)
+            if rank <= best[0]:
+                continue
+            target = (event.target or "").strip() or "(unknown)"
+            best = (rank, target, (event.severity or "").upper())
+        return best[1], best[2]
+
+    @staticmethod
+    def _compact_llm_provider(provider: str, model: str) -> str:
+        """Short ``provider/model-tail`` label for tile details."""
+
+        provider = (provider or "").strip().lower()
+        model = (model or "").strip()
+        if not provider and not model:
+            return ""
+        if not model:
+            return provider
+        # Trim long vendor-prefixed model ids (e.g. ``us.anthropic.claude-3-5-haiku-20241022-v1:0``)
+        tail = model.split(".")[-1].split(":")[0]
+        if len(tail) > 18:
+            tail = tail[:18] + "…"
+        return f"{provider}·{tail}" if provider else tail
+
+    @on(MetricTile.Clicked)
+    def _on_metric_tile_clicked(self, event: MetricTile.Clicked) -> None:
+        """Drill into the panel that backs the clicked tile."""
+
+        event.stop()
+        target = event.target_panel
+        if not target:
+            return
+        if target == self.active_panel:
+            return
+        self.action_switch_panel(target)
+        self._set_status(f"Opened {target} (clicked {event.key} tile).")
+
+    # ------------------------------------------------------------------
+    # Command-progress strip — single source of truth for command lifecycle
+    # ------------------------------------------------------------------
+    #
+    # The strip is a 5-row Vertical with three lines of content:
+    #   row 1: <icon> <label>          <duration> [✕ Cancel]
+    #   row 2: live snippet / final summary / error reason
+    #   row 3: state-specific hint (press A · q to dismiss · Ctrl+C cancel)
+    #
+    # State transitions are driven by:
+    #   _strip_running(label)   on executor "start"
+    #   _strip_output(line)     on each non-empty stdout/stderr line
+    #   _strip_finished(...)    on executor "done"
+    #   _strip_rejected(reason) on parse-error or already-running
+    #   _strip_clear()          on q-dismiss
+    #
+    # Per user request:
+    #   * never auto-hide on success — user must explicitly press q
+    #   * snippet on success is a summary, not a raw last line
+    #   * strip is hidden when the user is on the Activity panel (live
+    #     stream is right there, the strip would be redundant)
+    #   * the action button doubles as Cancel during running and Dismiss
+    #     after a finish/rejection
+    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def _set_command_progress(self, state: str, label: str, *, progress: float | None = None) -> None:
+        """Compatibility shim for the legacy lifecycle entrypoint.
+
+        Older callers (and a couple of tests we haven't migrated yet)
+        still invoke ``_set_command_progress`` directly. Forward to the
+        state machine so we have one source of truth, ignoring the
+        ``progress`` arg — the strip no longer renders a fake percent.
+        """
+
+        del progress
+        normalized = state.lower().strip()
+        if normalized == "running":
+            self._strip_running(label)
+        elif normalized == "success":
+            self._strip_label = label or self._strip_label or "command"
+            self._strip_finished(exit_code=0, duration=self._strip_frozen_duration or 0.0)
+        elif normalized == "failure":
+            self._strip_label = label or self._strip_label or "command"
+            self._strip_finished(exit_code=1, duration=self._strip_frozen_duration or 0.0)
+        elif normalized == "rejected":
+            self._strip_rejected(label)
+        else:
+            self._strip_clear()
+
+    def _hide_command_progress(self, *, force: bool = False) -> None:
+        del force
+        self._strip_clear()
+
+    def _tick_command_strip(self) -> None:
+        """Periodic tick: advance spinner glyph + live elapsed timer.
+
+        Cheap no-op when the strip is idle. While a setup wizard is mid-run
+        we also refresh the panel table so the per-row "running 12s..."
+        badge counts up — `_periodic_refresh` is paused while a command
+        is running, and without this poke the timer would freeze and look
+        like a hang.
+        """
+
+        if self._strip_state != "running":
+            return
+        self._strip_spinner_tick = (self._strip_spinner_tick + 1) % len(self._SPINNER_FRAMES)
+        self._render_command_strip()
+        if (
+            self.active_panel == "setup"
+            and not self.first_run_model.active
+            and self.setup_model.any_wizard_running()
+        ):
+            self._render_panel_table()
+            self._refresh_hint()
+
+    def _strip_running(self, label: str) -> None:
+        """Enter the running state. Captures start time for live elapsed."""
+
+        self._strip_state = "running"
+        self._strip_label = label or "command"
+        self._strip_started_at = monotonic()
+        self._strip_frozen_duration = None
+        self._strip_last_output = ""
+        self._strip_summary = ""
+        self._strip_spinner_tick = 0
+        self._render_command_strip()
+
+    def _strip_output(self, line: str) -> None:
+        """Record the most recent meaningful output line for live snippet."""
+
+        text = _strip_ansi(line).strip()
+        if not text:
+            return
+        self._strip_last_output = text
+        if self._strip_state == "running":
+            self._render_command_strip()
+
+    def _strip_finished(self, exit_code: int, duration: float) -> None:
+        """Move running → success/failure. Strip stays until dismissed."""
+
+        self._strip_state = "success" if exit_code == 0 else "failure"
+        self._strip_frozen_duration = duration
+        # Build a one-line summary: for success use the last output line if
+        # it's short and looks like a result, otherwise just acknowledge
+        # exit code; for failure show the last (likely error) line so the
+        # user sees the actual reason without leaving the panel.
+        if self._strip_state == "success":
+            tail = self._strip_last_output
+            self._strip_summary = (
+                tail if (tail and len(tail) <= 120) else "exit 0 · finished cleanly"
+            )
+        else:
+            tail = self._strip_last_output
+            self._strip_summary = tail or f"exit {exit_code} · no output captured"
+        self._render_command_strip()
+
+    def _strip_rejected(self, reason: str) -> None:
+        """Strip enters rejected state for parse errors or busy-executor."""
+
+        self._strip_state = "rejected"
+        self._strip_label = "command rejected"
+        self._strip_frozen_duration = None
+        self._strip_last_output = ""
+        self._strip_summary = reason or "command did not parse"
+        self._render_command_strip()
+
+    def _strip_clear(self) -> None:
+        """Dismiss the strip and return to idle."""
+
+        self._strip_state = "idle"
+        self._strip_label = ""
+        self._strip_started_at = 0.0
+        self._strip_frozen_duration = None
+        self._strip_last_output = ""
+        self._strip_summary = ""
+        self._render_command_strip()
+
+    def _render_command_strip(self) -> None:
+        """Push current state into the DOM. Safe to call at any time.
+
+        Tolerates being invoked before the app is mounted (Textual raises
+        ``ScreenStackError`` from ``query_one`` when there's no screen
+        yet) and after the panel widget has been removed (``NoMatches``).
+        Both cases are non-fatal — we just skip the render.
+        """
+
+        try:
+            panel = self.query_one("#command-progress", Vertical)
+        except Exception:  # noqa: BLE001 - DOM not mounted / panel removed
+            return
+
+        # Hide entirely on idle, OR when the user is already on the
+        # Activity panel — the live stream there is the strip's content
+        # in a richer form, so the strip is just clutter.
+        hidden = self._strip_state == "idle" or self.active_panel == "activity"
+        panel.set_class(hidden, "hidden")
+        panel.display = not hidden
+        if hidden:
+            return
+
+        panel.set_class(self._strip_state == "running", "running")
+        panel.set_class(self._strip_state == "success", "success")
+        panel.set_class(self._strip_state == "failure", "failure")
+        panel.set_class(self._strip_state == "rejected", "rejected")
+
+        icon, icon_color, header_color = {
+            "running": (self._SPINNER_FRAMES[self._strip_spinner_tick], TOKENS.accent_amber, TOKENS.accent_amber),
+            "success": ("✓", TOKENS.accent_green, TOKENS.accent_green),
+            "failure": ("✗", TOKENS.accent_red, TOKENS.accent_red),
+            "rejected": ("✗", TOKENS.accent_red, TOKENS.accent_red),
+        }.get(self._strip_state, (" ", TOKENS.text_secondary, TOKENS.text_primary))
+
+        # The icon Static cycles through Unicode braille frames during
+        # ``running`` (more reliable than Textual's LoadingIndicator in
+        # cramped 1-row layouts) and shows a check/cross afterwards.
+        self.query_one("#command-progress-icon", Static).update(f"[{icon_color} bold]{icon}[/]")
+        self.query_one("#command-progress-label", Static).update(
+            f"[{header_color} bold]{self._strip_label}[/]"
+        )
+
+        # Elapsed-time tracker replaces the fake progress bar. The bar
+        # was meaningless because the executor doesn't emit percent
+        # complete; a live timer at least honestly tells the user how
+        # long they've been waiting.
+        if self._strip_state == "running":
+            elapsed = max(0.0, monotonic() - self._strip_started_at)
+            duration_text = _format_elapsed(elapsed)
+        elif self._strip_frozen_duration is not None:
+            duration_text = _format_elapsed(self._strip_frozen_duration)
+        else:
+            duration_text = ""
+        self.query_one("#command-progress-duration", Static).update(
+            f"[{TOKENS.text_secondary}]{duration_text}[/]" if duration_text else ""
+        )
+
+        action_button = self.query_one("#command-progress-action", Button)
+        if self._strip_state == "running":
+            action_button.label = "✕ Cancel"
+        else:
+            action_button.label = "✕ Dismiss"
+        action_button.display = True
+
+        # Snippet: live tail during running, summary afterwards.
+        if self._strip_state == "running":
+            snippet = self._strip_last_output or "started — waiting for output…"
+            snippet_color = TOKENS.text_secondary
+        elif self._strip_state == "success":
+            snippet = self._strip_summary
+            snippet_color = TOKENS.accent_green
+        else:
+            snippet = self._strip_summary
+            snippet_color = TOKENS.accent_red
+        truncated = _truncate_for_strip(snippet, panel.size.width or 120)
+        self.query_one("#command-progress-snippet", Static).update(
+            f"[{snippet_color}]{truncated}[/]"
+        )
+
+        hint = {
+            "running": "press A for live output  ·  Ctrl+C or click Cancel to stop",
+            "success": "press A for full output  ·  q or click Dismiss to clear",
+            "failure": "press A for full output  ·  q or click Dismiss to clear",
+            "rejected": "press : to retry  ·  q or click Dismiss to clear",
+        }.get(self._strip_state, "")
+        self.query_one("#command-progress-hint", Static).update(
+            f"[{TOKENS.text_muted}]{hint}[/]"
+        )
+
+    @on(Button.Pressed, "#command-progress-action")
+    def _on_command_strip_action(self, event: Button.Pressed) -> None:
+        """The strip's action button doubles as Cancel and Dismiss."""
+
+        event.stop()
+        if self._strip_state == "running":
+            self.action_cancel_or_quit()
+        else:
+            self._strip_clear()
+
+    def _overview_renderable(self) -> RenderableType:
+        """Build the multi-panel overview matching the Go TUI layout.
+
+        Renders the ASCII banner, attention notices, a two-column grid of
+        bordered Panels (Services + Configuration on the left; Enforcement,
+        Scanners, and Doctor on the right), a full-width Discovered AI Agents
+        panel, and a quick-action footer. Each panel uses its own accent color
+        so sections are visually distinct instead of one cyan wall of text.
+        ``self.body_text`` is still populated with the plain-text fallback so
+        existing tests that grep substrings out of it keep passing.
+        """
+
+        service_cards = self.overview_model.service_cards()
+        self.body_text = self._overview_body_text(service_cards)
+
+        notices = self.overview_model.build_notices()
+        doctor = self.overview_model.doctor_box()
+        ai_box = self.overview_model.ai_discovery_box()
+        cfg = self.overview_model.cfg
+        counts = self.overview_model.enforcement
+        health = self.overview_model.health
+        state_by_key = {card.key: card.state or "unknown" for card in service_cards}
+        detail_by_key = {card.key: card.detail or card.last_error for card in service_cards}
+
+        banner = Text(_DEFENSECLAW_LOGO, style=f"bold {TOKENS.accent_cyan}")
+        uptime_suffix = ""
+        if health is not None and health.uptime_ms:
+            uptime_suffix = f"  uptime={health.uptime_ms // 1000}s"
+        tagline = Text(
+            f"  Enterprise AI Governance  v{__version__}{uptime_suffix}",
+            style=f"italic {TOKENS.text_secondary}",
+        )
+
+        notice_block: list[Text] = []
+        for notice in notices[:3]:
+            if notice.level == "error":
+                icon, color = "[!]", TOKENS.accent_red
+            elif notice.level == "warn":
+                icon, color = "[*]", TOKENS.accent_amber
+            elif notice.level == "info":
+                icon, color = "[>]", TOKENS.accent_blue
+            else:
+                icon, color = "[-]", TOKENS.accent_green
+            notice_block.append(
+                Text.from_markup(f" [{color} bold]{icon}[/] {notice.message}")
+            )
+        if not notice_block:
+            notice_block.append(
+                Text.from_markup(
+                    f" [{TOKENS.accent_green} bold][OK][/] Runtime signals are quiet."
+                )
+            )
+
+        services_table = Table.grid(padding=(0, 1), expand=True)
+        services_table.add_column(no_wrap=True, width=2)
+        services_table.add_column(no_wrap=True, width=12)
+        services_table.add_column(no_wrap=True, width=10)
+        services_table.add_column(overflow="fold")
+        services_layout = (
+            ("Gateway", "gateway"),
+            ("Agent", "agent"),
+            ("Watchdog", "watcher"),
+            ("Guardrail", "guardrail"),
+            ("API", "api"),
+            ("Sinks", "sinks"),
+            ("Telemetry", "telemetry"),
+            ("AI Discovery", "ai_discovery"),
+            ("Sandbox", "sandbox"),
+        )
+        for display_name, key in services_layout:
+            state = state_by_key.get(key, "unknown")
+            color = state_color(state)
+            normalized = (state or "").strip().lower()
+            dot = "●" if normalized in {"running", "active", "enabled", "clean", "allowed"} else "○"
+            detail = detail_by_key.get(key, "") or ""
+            services_table.add_row(
+                Text(dot, style=color),
+                Text(display_name, style=TOKENS.text_primary),
+                Text(state or "unknown", style=color),
+                Text(detail, style=TOKENS.text_secondary),
+            )
+
+        cfg_table = Table.grid(padding=(0, 2), expand=True)
+        cfg_table.add_column(width=17, no_wrap=True)
+        cfg_table.add_column(overflow="fold")
+        cfg_rows: list[tuple[str, RenderableType]] = [
+            ("Agent", Text(self.overview_model.active_connector_name())),
+            (
+                "Redaction",
+                Text.from_markup(
+                    f"[{TOKENS.accent_green}]ON (redacted)[/]"
+                    if cfg and not cfg.privacy_disable_redaction
+                    else f"[{TOKENS.accent_red}]OFF (RAW)[/]"
+                ),
+            ),
+            ("Policy posture", Text(_policy_posture(cfg))),
+            ("Enforcement", Text(_enforcement_label(cfg))),
+            (
+                "Human approval",
+                Text.from_markup(
+                    f"[{TOKENS.accent_green}]ON[/] (min {cfg.hilt_min_severity or 'HIGH'})"
+                    if cfg and cfg.hilt_enabled
+                    else f"[{TOKENS.text_muted}]OFF[/]"
+                ),
+            ),
+            ("Environment", Text((cfg.environment if cfg else "") or "unknown")),
+            ("Policy dir", Text((cfg.policy_dir if cfg else "") or "—")),
+            ("Data dir", Text((cfg.data_dir if cfg else "") or "—")),
+        ]
+        llm_provider = (cfg.llm_provider if cfg else "") or (cfg.inspect_llm_provider if cfg else "")
+        llm_model = (cfg.llm_model if cfg else "") or (cfg.inspect_llm_model if cfg else "")
+        if llm_provider:
+            cfg_rows.append(("LLM provider", Text(llm_provider)))
+        if llm_model:
+            cfg_rows.append(("LLM model", Text(llm_model)))
+        if cfg and cfg.cisco_ai_defense_endpoint:
+            cfg_rows.append(("AI Defense", Text(cfg.cisco_ai_defense_endpoint)))
+        for label, value in cfg_rows:
+            cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
+
+        enf_table = Table.grid(padding=(0, 2), expand=True)
+        enf_table.add_column(width=12, no_wrap=True)
+        enf_table.add_column(overflow="fold")
+        alerts_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
+        enf_table.add_row(
+            Text("Alerts", style=TOKENS.text_secondary),
+            Text.from_markup(
+                f"[{alerts_color} bold]{counts.active_alerts:<3}[/] {_mini_bar(counts.active_alerts, 20)}"
+            ),
+        )
+        enf_table.add_row(
+            Text("Total scans", style=TOKENS.text_secondary),
+            Text.from_markup(f"[{TOKENS.accent_green}]{counts.total_scans}[/]"),
+        )
+        if self.overview_model.silent_bypass > 0:
+            enf_table.add_row(
+                Text("Silent bypass", style=TOKENS.accent_amber),
+                Text.from_markup(
+                    f"[{TOKENS.accent_red} bold]{self.overview_model.silent_bypass}[/] "
+                    f"[{TOKENS.text_muted}](see Alerts -> egress)[/]"
+                ),
+            )
+        enf_table.add_row(
+            Text("Skills", style=TOKENS.text_secondary),
+            Text.from_markup(
+                f"[{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
+                f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed"
+            ),
+        )
+        enf_table.add_row(
+            Text("MCPs", style=TOKENS.text_secondary),
+            Text.from_markup(
+                f"[{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
+                f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
+            ),
+        )
+
+        keys = self.overview_model.keys_status()
+        sc_table = Table.grid(padding=(0, 2), expand=True)
+        sc_table.add_column(width=2, no_wrap=True)
+        sc_table.add_column(width=14, no_wrap=True)
+        sc_table.add_column(overflow="fold")
+        # Mirror Go TUI: probe external scanners via PATH each render so
+        # an operator who runs `brew install skill-scanner` sees the row
+        # flip from "missing" to "installed" on the next 2 s refresh.
+        # Built-ins (aibom + codeguard) ship inside the CLI and are
+        # always available. Note: the field is named `aibom` (AI Bill
+        # Of Materials) — historic copies of this list spelled it
+        # "aibon", which is a typo.
+        skill_available = bool(shutil.which("skill-scanner"))
+        mcp_available = bool(shutil.which("mcp-scanner"))
+        scanner_rows: list[tuple[str, str, str, str]] = [
+            (
+                "skill-scanner",
+                "installed" if skill_available else "missing",
+                TOKENS.accent_green if skill_available else TOKENS.accent_red,
+                "●" if skill_available else "○",
+            ),
+            (
+                "mcp-scanner",
+                "installed" if mcp_available else "missing",
+                TOKENS.accent_green if mcp_available else TOKENS.accent_red,
+                "●" if mcp_available else "○",
+            ),
+            ("aibom", "built-in", TOKENS.text_secondary, "●"),
+            ("codeguard", "built-in", TOKENS.text_secondary, "●"),
+            (
+                "guardrail",
+                detail_by_key.get("guardrail", "") or (state_by_key.get("guardrail", "unknown")),
+                state_color(state_by_key.get("guardrail", "unknown")),
+                "●" if state_by_key.get("guardrail", "") == "running" else "○",
+            ),
+        ]
+        self.overview_model.set_skill_scanner_available(skill_available)
+        if keys.available:
+            keys_label = keys.label or "all required set"
+            keys_color = TOKENS.accent_green
+            keys_dot = "●"
+        else:
+            keys_label = keys.label or "not checked"
+            keys_color = TOKENS.accent_amber
+            keys_dot = "●"
+        scanner_rows.append(("keys", keys_label, keys_color, keys_dot))
+        for label, value, color, dot in scanner_rows:
+            sc_table.add_row(
+                Text(dot, style=color),
+                Text(label, style=TOKENS.text_primary),
+                Text(value, style=color),
+            )
+
+        if doctor.empty:
+            doctor_body: RenderableType = Text.from_markup(
+                f"[{TOKENS.text_secondary}]not yet run — press [/]"
+                f"[bold {TOKENS.accent_cyan}]d[/]"
+                f"[{TOKENS.text_secondary}] to run doctor.[/]"
+            )
+        else:
+            part_colors = {
+                "pass": TOKENS.accent_green,
+                "fail": TOKENS.accent_red,
+                "warn": TOKENS.accent_amber,
+                "stale": TOKENS.accent_blue,
+                "skip": TOKENS.text_muted,
+            }
+            colored_parts: list[str] = []
+            for part in doctor.summary_parts:
+                bits = part.split()
+                color = TOKENS.text_primary
+                if len(bits) == 2:
+                    color = part_colors.get(bits[1].lower(), TOKENS.text_primary)
+                    colored_parts.append(
+                        f"[{color} bold]{bits[0]}[/] [{TOKENS.text_secondary}]{bits[1]}[/]"
+                    )
+                else:
+                    colored_parts.append(f"[{color}]{part}[/]")
+            header_markup = "  ".join(colored_parts) if colored_parts else f"[{TOKENS.text_secondary}]no data[/]"
+            if doctor.age_label:
+                header_markup += f"  [{TOKENS.text_muted}]· {doctor.age_label}[/]"
+            if doctor.stale:
+                header_markup += (
+                    f"  [{TOKENS.accent_amber}](stale — [/]"
+                    f"[{TOKENS.accent_amber} bold]\\[d][/]"
+                    f"[{TOKENS.accent_amber}] to rerun)[/]"
+                )
+            doctor_lines: list[RenderableType] = [Text.from_markup(header_markup)]
+            if doctor.checks:
+                doctor_lines.append(
+                    Text("─" * 40, style=TOKENS.border_muted)
+                )
+            for check in doctor.checks[:3]:
+                if check.badge == "FAIL":
+                    badge_color = TOKENS.accent_red
+                elif check.badge == "WARN":
+                    badge_color = TOKENS.accent_amber
+                elif check.badge == "STALE":
+                    badge_color = TOKENS.accent_blue
+                else:
+                    badge_color = TOKENS.text_secondary
+                detail_text = rich_escape(check.detail) if check.detail else ""
+                detail = f"  [{TOKENS.text_muted}]{detail_text}[/]" if detail_text else ""
+                badge_text = rich_escape(check.badge)
+                label_text = rich_escape(check.label)
+                doctor_lines.append(
+                    Text.from_markup(
+                        f"[{badge_color} bold]\\[{badge_text}][/] "
+                        f"[{TOKENS.text_primary}]{label_text}[/]{detail}"
+                    )
+                )
+            if doctor.all_green and not doctor.checks:
+                doctor_lines.append(
+                    Text.from_markup(
+                        f"[{TOKENS.accent_green}]All checks passing — nothing to address.[/]"
+                    )
+                )
+            doctor_body = Group(*doctor_lines)
+
+        if ai_box.rows:
+            ai_table = Table.grid(padding=(0, 2), expand=True)
+            ai_table.add_column(width=4, no_wrap=True)
+            ai_table.add_column(width=26, no_wrap=True, overflow="ellipsis")
+            ai_table.add_column(width=20, no_wrap=True, overflow="ellipsis")
+            ai_table.add_column(width=8, no_wrap=True)
+            ai_table.add_column(overflow="ellipsis")
+            for row in ai_box.rows[:6]:
+                ai_table.add_row(
+                    Text(row.state_badge),
+                    Text(row.name, style=TOKENS.text_primary),
+                    Text(row.vendor, style=TOKENS.text_secondary),
+                    Text(row.confidence),
+                    Text(row.seen_label, style=TOKENS.text_muted),
+                )
+            if ai_box.overflow:
+                ai_table.add_row(
+                    Text(""),
+                    Text(f"+{ai_box.overflow} more", style=TOKENS.text_secondary),
+                    Text(""),
+                    Text(""),
+                    Text(""),
+                )
+            ai_body: RenderableType = ai_table
+        else:
+            ai_body = Text(
+                ai_box.message or "ai discovery offline — run: defenseclaw agent discovery status",
+                style=TOKENS.text_secondary,
+            )
+
+        services_panel = Panel(
+            services_table,
+            title=Text("SERVICES", style=f"bold {TOKENS.accent_cyan}"),
+            title_align="left",
+            border_style=TOKENS.accent_cyan,
+            padding=(0, 1),
+        )
+        cfg_panel = Panel(
+            cfg_table,
+            title=Text("CONFIGURATION", style=f"bold {TOKENS.accent_blue}"),
+            title_align="left",
+            border_style=TOKENS.accent_blue,
+            padding=(0, 1),
+        )
+        enf_panel = Panel(
+            enf_table,
+            title=Text("ENFORCEMENT", style=f"bold {TOKENS.accent_amber}"),
+            title_align="left",
+            border_style=TOKENS.accent_amber,
+            padding=(0, 1),
+        )
+        sc_panel = Panel(
+            sc_table,
+            title=Text("SCANNERS", style=f"bold {TOKENS.accent_orange}"),
+            title_align="left",
+            border_style=TOKENS.accent_orange,
+            padding=(0, 1),
+        )
+        doc_panel = Panel(
+            doctor_body,
+            title=Text("DOCTOR", style=f"bold {TOKENS.accent_pink}"),
+            title_align="left",
+            border_style=TOKENS.accent_pink,
+            padding=(0, 1),
+        )
+        ai_panel = Panel(
+            ai_body,
+            title=Text("DISCOVERED AI AGENTS", style=f"bold {TOKENS.accent_violet}"),
+            title_align="left",
+            border_style=TOKENS.accent_violet,
+            padding=(0, 1),
+        )
+
+        columns = Table.grid(expand=True, padding=(0, 1))
+        columns.add_column(ratio=1)
+        columns.add_column(ratio=1)
+        columns.add_row(Group(services_panel, cfg_panel), Group(enf_panel, sc_panel, doc_panel))
+
+        quick_actions = [
+            ("s", "Scan all"),
+            ("d", "Doctor"),
+            ("i", "Inventory"),
+            ("g", "Guardrail"),
+            ("m", "Mode"),
+            ("p", "Policy"),
+            ("l", "Logs"),
+            ("R", "Redaction"),
+            ("N", "Notify"),
+            ("u", "Upgrade"),
+            ("X", "Uninstall"),
+            ("?", "Help"),
+        ]
+        quick_text = Text()
+        for idx, (key, label) in enumerate(quick_actions):
+            if idx > 0:
+                quick_text.append("  ")
+            quick_text.append("[", style=TOKENS.text_secondary)
+            quick_text.append(key, style=f"bold {TOKENS.accent_cyan}")
+            quick_text.append("] ", style=TOKENS.text_secondary)
+            quick_text.append(label, style=TOKENS.text_primary)
+
+        footer_hint = Text(
+            "Use the tabs or number keys to drill into Alerts, Audit, Logs, Policy, and Setup.",
+            style=f"italic {TOKENS.text_muted}",
+        )
+
+        return Group(
+            banner,
+            tagline,
+            Text(""),
+            *notice_block,
+            Text(""),
+            columns,
+            Text(""),
+            ai_panel,
+            Text(""),
+            quick_text,
+            footer_hint,
+        )
+
+    def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
+        notices = self.overview_model.build_notices()
+        doctor = self.overview_model.doctor_box()
+        ai_box = self.overview_model.ai_discovery_box()
+        cfg = self.overview_model.cfg
+        counts = self.overview_model.enforcement
+        state_by_key = {card.key: card.state or "unknown" for card in service_cards}
+        detail_by_key = {card.key: card.detail or card.last_error for card in service_cards}
+        health = self.overview_model.health
+
+        notice_lines = []
+        for notice in notices[:3]:
+            color = TOKENS.accent_red if notice.level == "error" else TOKENS.accent_amber
+            if notice.level == "info":
+                color = TOKENS.accent_blue
+            notice_lines.append(f"[{color}][{notice.level.upper()}][/] {notice.message}")
+        if not notice_lines:
+            notice_lines.append(f"[{TOKENS.accent_green}][OK][/] Runtime signals are quiet.")
+
+        config_lines = [
+            ("Agent", self.overview_model.active_connector_name()),
+            (
+                "Redaction",
+                "ON - prompts and outputs are redacted" if cfg and not cfg.privacy_disable_redaction else "OFF",
+            ),
+            ("Policy posture", _policy_posture(cfg)),
+            ("Enforcement", _enforcement_label(cfg)),
+            ("Environment", (cfg.environment if cfg else "") or "unknown"),
+            ("LLM provider", (cfg.llm_provider if cfg else "") or "-"),
+            ("LLM model", (cfg.llm_model if cfg else "") or "-"),
+        ]
+        config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
+
+        scanner_lines = [
+            ("Gateway", state_by_key.get("gateway", "unknown"), detail_by_key.get("gateway", "")),
+            ("Watchdog", state_by_key.get("watcher", "unknown"), detail_by_key.get("watcher", "")),
+            ("Guardrail", state_by_key.get("guardrail", "unknown"), detail_by_key.get("guardrail", "")),
+            ("API", state_by_key.get("api", "unknown"), detail_by_key.get("api", "")),
+            ("Sinks", state_by_key.get("sinks", "unknown"), detail_by_key.get("sinks", "")),
+            ("Telemetry", state_by_key.get("telemetry", "unknown"), detail_by_key.get("telemetry", "")),
+            ("AI Discovery", state_by_key.get("ai_discovery", "unknown"), detail_by_key.get("ai_discovery", "")),
+        ]
+        services_text = "\n".join(_overview_state_line(name, state, detail) for name, state, detail in scanner_lines)
+
+        alert_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
+        enforcement_text = (
+            f"  Active alerts    [{alert_color} bold]{counts.active_alerts}[/]   "
+            f"Total scans [{TOKENS.accent_green}]{counts.total_scans}[/]\n"
+            + (
+                f"  Silent bypass   [{TOKENS.accent_red} bold]{self.overview_model.silent_bypass}[/] "
+                f"[{TOKENS.text_muted}](see Alerts -> egress)[/]\n"
+                if self.overview_model.silent_bypass > 0
+                else ""
+            )
+            + f"  Skills           [{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
+            f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed\n"
+            f"  MCPs             [{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
+            f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
+        )
+
+        doctor_summary = "not yet run"
+        doctor_lines: list[str] = []
+        if not doctor.empty:
+            doctor_summary = "  ".join(doctor.summary_parts) or "no data"
+            doctor_summary += f"  {doctor.age_label}"
+            if doctor.stale:
+                doctor_summary += " (stale)"
+            for check in doctor.checks[:2]:
+                color = TOKENS.accent_red if check.badge == "FAIL" else TOKENS.accent_amber
+                if check.badge == "STALE":
+                    color = TOKENS.accent_blue
+                doctor_lines.append(f"  [{color}][{check.badge}][/] {check.label} {check.detail}".rstrip())
+        if not doctor_lines:
+            doctor_lines.append("  Press d to run doctor.")
+
+        ai_lines: list[str] = []
+        if ai_box.rows:
+            ai_lines.extend(
+                f"  {row.state_badge} {row.name:<24} {row.vendor:<20} {row.confidence} {row.seen_label}"
+                for row in ai_box.rows[:4]
+            )
+            if ai_box.overflow:
+                ai_lines.append(f"  +{ai_box.overflow} more")
+        else:
+            ai_lines.append(f"  {ai_box.message or 'no AI agents detected yet'}")
+
+        uptime = ""
+        if health is not None and health.uptime_ms:
+            uptime = f"  uptime={health.uptime_ms // 1000}s"
+        keys = self.overview_model.keys_status()
+        if keys.available:
+            keys_line = keys.label or "all required set"
+        else:
+            keys_line = "not checked yet - press 0 for Setup, then r to refresh credentials"
+        quick = (
+            "[s] Scan all   [d] Doctor   [i] Inventory   [g] Guardrail   [m] Mode   "
+            "[p] Policy   [l] Logs   [R] Redaction"
+        )
+        return (
+            "[bold #22D3EE]Overview[/]  [#9FB2CC]Command center for live risk, setup health, and next actions.[/]\n"
+            f"[italic]DefenseClaw v{__version__}{uptime}[/]\n\n"
+            f"[bold {TOKENS.accent_green}]WHAT NEEDS ATTENTION[/]\n"
+            + "\n".join(notice_lines)
+            + "\n\n"
+            f"[bold {TOKENS.accent_blue}]SERVICES[/]\n{services_text}\n\n"
+            f"[bold {TOKENS.accent_amber}]ENFORCEMENT[/]\n{enforcement_text}\n\n"
+            f"[bold {TOKENS.accent_green}]CONFIGURATION[/]\n{config_text}\n\n"
+            f"[bold {TOKENS.accent_orange}]SCANNERS[/]\n"
+            f"  skill-scanner  {'installed' if self.overview_model.skill_scanner_available else 'missing'}\n"
+            f"  credentials    {keys_line}\n\n"
+            f"[bold {TOKENS.accent_pink}]DOCTOR[/]  {doctor_summary}\n" + "\n".join(doctor_lines) + "\n\n"
+            f"[bold {TOKENS.accent_cyan}]DISCOVERED AI AGENTS[/]\n" + "\n".join(ai_lines) + "\n\n"
+            f"[bold {TOKENS.text_primary}]ACTIONS[/]  {quick}\n"
+            "[#9FB2CC]Use the tabs or number keys to drill into Alerts, Audit, Logs, Policy, and Setup.[/]"
+        )
+
+    def _inventory_body_text(self) -> str:
+        tabs = "  ".join(
+            f"[{TOKENS.accent_violet} bold]{tab.display_label}[/]"
+            if tab.active
+            else f"[{TOKENS.text_secondary}]{tab.display_label}[/]"
+            for tab in self.inventory_model.subtab_info()
+        )
+        scope = self.inventory_model.scope_state()
+        chips = " ".join(
+            f"[{TOKENS.accent_violet} bold]{chip.label}[/]"
+            if chip.active
+            else f"[{TOKENS.text_muted}]{chip.label}[/]"
+            for chip in scope.chips
+        )
+        filter_text = f"  filter={self.inventory_model.filter or 'all'}"
+        return (
+            "[bold #22D3EE]Inventory[/]\n"
+            f"{tabs}\n"
+            f"{scope.label}: {chips} {scope.hint}{filter_text}\n"
+            "Keys: h/l sub-tabs, 1 all, 2/3/4 filter Skills or Plugins, r reload, o fast scope, Enter detail."
+        )
+
+    def _logs_body_text(self) -> str:
+        header = self.logs_model.header_state()
+        tabs = "  ".join(
+            f"[{TOKENS.accent_violet} bold]{index}:{tab.label}[/]"
+            if tab.active
+            else f"[{TOKENS.text_secondary}]{index} {tab.label}[/]"
+            for index, tab in enumerate(header.tabs, start=1)
+        )
+        status_color = TOKENS.accent_green if header.status.style_key == "live" else TOKENS.accent_amber
+        lines = [
+            "[bold #22D3EE]Logs[/]",
+            f"{tabs}  [{status_color} bold]{header.status.label}[/]  {header.line_count_label}",
+        ]
+        if header.search_label:
+            lines.append(f"[{TOKENS.accent_cyan}]{header.search_label}[/]")
+        if header.search_prompt:
+            lines.append(f"[{TOKENS.accent_cyan}]{header.search_prompt}[/]")
+        for group in self.logs_model.chip_groups():
+            chips = "  ".join(
+                f"[{TOKENS.accent_violet} bold]{chip.shortcut} {chip.label}[/]"
+                if chip.active
+                else f"[{TOKENS.text_secondary}]{chip.shortcut} {chip.label}[/]"
+                for chip in group.chips
+            )
+            lines.append(f"{group.label} {chips}")
+        lines.append(self.logs_model.hint_text())
+        return "\n".join(lines)
+
+    def _audit_body_text(self) -> str:
+        toolbar = self.audit_model.toolbar_state()
+        actions = "  ".join(f"[{action.key}] {action.label}" for action in toolbar.actions)
+        lines = [
+            "[bold #22D3EE]Audit Trail[/]  [#9FB2CC]Click common filters above, or search with field:value terms.[/]",
+            f"{toolbar.summary_label}  {actions}",
+        ]
+        if toolbar.filter_label:
+            lines.append(toolbar.filter_label)
+        if toolbar.search_prompt:
+            lines.append(f"[{TOKENS.accent_cyan}]{toolbar.search_prompt}[/]")
+        lines.append(
+            "Search examples: severity:HIGH action:block target:skill run:<id>. "
+            "Use Same target or Same run to correlate the selected event."
+        )
+        return "\n".join(lines)
+
+    def _set_status(self, text: str) -> None:
+        self.status_text = text
+        strip = render_status_strip(self._hint_status_model())
+        self.query_one("#status", Static).update(f"{text}  [#444444]│[/]  {strip}")
+
+    def _write_activity(self, text: str) -> None:
+        self.activity_lines.append(text)
+        self.query_one("#activity", RichLog).write(text)
+
+    def _export_audit(self, path: Path | None) -> Path:
+        target = path or Path("defenseclaw-audit-export.json")
+        if not target.is_absolute():
+            target = (self.data_dir or Path.cwd()) / target
+        rows = [
+            {
+                "id": event.id,
+                "timestamp": event.timestamp.isoformat(),
+                "action": event.action,
+                "target": event.target,
+                "actor": event.actor,
+                "details": event.details,
+                "severity": event.severity,
+                "run_id": event.run_id,
+            }
+            for event in self.audit_model.filtered
+        ]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        return target
+
+    def _refresh_hint(self) -> None:
+        hint = self.query_one("#hint", HintBar)
+        active_panel = (
+            "first-run" if self.active_panel == "setup" and self.first_run_model.active else self.active_panel
+        )
+        elapsed_secs = (
+            int(time.monotonic() - self._command_started_at)
+            if self.command_running and self._command_started_at
+            else 0
+        )
+        hint_state = HintState(
+            active_panel=active_panel,
+            filter_active=self._active_filter_label(),
+            critical_alerts=self.alerts_model.critical_count(),
+            total_alerts=sum(self.alerts_model.severity_counts().values()),
+            commands_run=self.commands_run,
+            command_running=self.command_running,
+            command_label=self.command_label,
+            command_elapsed_secs=elapsed_secs,
+            logs_paused=bool(self.logs_model.paused),
+            new_lines_since_pause=int(self.logs_model.new_lines_since_pause),
+        )
+        hint.refresh_hint(hint_state, self._hint_status_model())
+        self.hint_text = str(getattr(hint, "content", ""))
+
+    def _active_filter_label(self) -> str:
+        if self.active_panel == "alerts":
+            return self.alerts_model.active_filter_label()
+        if self.active_panel == "audit":
+            return self.audit_model.active_filter_label()
+        if self.active_panel == "logs":
+            return self.logs_model.search_text or self.logs_model.filter_mode
+        if self.active_panel == "inventory":
+            return self.inventory_model.filter
+        if self.active_panel == "ai":
+            return self.ai_discovery_model.filter_text
+        if self.active_panel in self.catalog_models:
+            return self.catalog_models[self.active_panel].filter_text
+        return ""
+
+    def _hint_status_model(self) -> StatusModel:
+        missing_required = ()
+        if not self.first_run_model.active:
+            snapshot = getattr(self.setup_model, "credential_snapshot", None)
+            missing_required = tuple(getattr(snapshot, "missing_required", ()) or ())
+        guardrail_state = self.overview_model.subsystem_state("guardrail")
+        guardrail_detail = self.overview_model.service_detail("guardrail")
+        guardrail = ServiceStatus("Guardrail", guardrail_state or "disabled", guardrail_detail)
+        if missing_required:
+            preview = ", ".join(row.env_name for row in missing_required[:2])
+            suffix = f" (+{len(missing_required) - 2} more)" if len(missing_required) > 2 else ""
+            guardrail = ServiceStatus("Guardrail", "error", f"missing required credentials: {preview}{suffix}")
+        # Mirror Go TUI: status strip Gateway tile uses the live
+        # /health subsystem state, not "running if config exists".
+        # The previous fabrication lit the tile green even when the
+        # gateway was offline, which contradicted the SERVICES box on
+        # the same screen.
+        gateway_state = self.overview_model.subsystem_state("gateway") or "unknown"
+        gateway_detail = self.overview_model.service_detail("gateway")
+        return StatusModel(
+            gateway=ServiceStatus("Gateway", gateway_state, gateway_detail),
+            watchdog=ServiceStatus("Watchdog", self.overview_model.subsystem_state("watcher")),
+            guardrail=guardrail,
+            active_alerts=self.alerts_model.critical_count() or self.overview_model.enforcement.active_alerts,
+            command_running=self.command_running,
+            version=__version__,
+        )
+
+    def _render_panel_table(self) -> None:
+        table = self.query_one("#panel-table", DataTable)
+        if not self._table_columns:
+            table.add_class("hidden")
+            table.clear(columns=True)
+            return
+
+        table.remove_class("hidden")
+        table.clear(columns=True)
+        table.add_columns(*self._table_columns)
+        for index, row in enumerate(self._table_rows):
+            cells = (
+                _styled_cell(column, value)
+                for column, value in zip(self._table_columns, row, strict=True)
+            )
+            table.add_row(*cells, key=str(index))
+
+        if self._table_rows:
+            row = self._active_table_cursor()
+            table.move_cursor(row=row, column=0, animate=False)
+            # Textual's DataTable binds left/right/enter to its own cursor
+            # actions, which silently swallows the keys the setup wizard
+            # form relies on (cycle choice, toggle bool, Ctrl+R submit).
+            # When the wizard form is open we keep the row cursor visible
+            # via the CSS rule on `.datatable--cursor` (no focus required)
+            # but defocus the table so the app-level key handler — and
+            # therefore `_handle_setup_form_key` — actually receives the
+            # arrow keys.
+            if self.active_panel == "setup" and self.setup_model.form_active:
+                if self.focused is table:
+                    self.set_focus(None)
+            else:
+                table.focus()
+
+    def _render_detail_panel(self) -> None:
+        panel = self.query_one("#detail-panel", Static)
+        detail = self._detail_text()
+        self.detail_text = detail
+        if not detail:
+            panel.add_class("hidden")
+            panel.update("")
+            return
+        panel.remove_class("hidden")
+        panel.update(detail)
+
+    def _detail_text(self) -> str:
+        if self.active_panel == "alerts":
+            return self.alerts_model.detail_text()
+        if self.active_panel == "registries" and self.registries_model.detail_open:
+            detail = self.registries_model.selected_detail_info()
+            if detail is None:
+                return ""
+            lines = [f"[bold #A78BFA]{detail.title}[/]"]
+            lines.extend(f"{key}: {value}" for key, value in detail.fields)
+            return "\n".join(lines)
+        if self.active_panel == "audit" and self.audit_model.detail_open:
+            pairs = self.audit_model.detail_pairs()
+            if not pairs:
+                return ""
+            return "[bold #A78BFA]EVENT[/]\n" + "\n".join(f"{key}: {value}" for key, value in pairs[:18])
+        if self.active_panel == "inventory" and self.inventory_model.detail_open:
+            detail = self.inventory_model.detail_info()
+            if detail is None:
+                return ""
+            lines = ["[bold #A78BFA]" + detail.title + "[/]"]
+            lines.extend(f"{key}: {value}" for key, value in detail.fields)
+            return "\n".join(lines)
+        if self.active_panel in self.catalog_models:
+            model = self.catalog_models[self.active_panel]
+            if model.detail_open:
+                return catalog_detail_text(model.selected())
+        if self.active_panel == "ai" and self.ai_discovery_model.detail_open:
+            return self._ai_discovery_detail_text()
+        if self.active_panel == "logs" and self.logs_model.source in {"verdicts", "otel"}:
+            pairs = self.logs_model.selected_detail_pairs()
+            if pairs:
+                return "[bold #A78BFA]LOG DETAIL[/]\n" + "\n".join(
+                    f"{key}: {value}" for key, value in pairs[:14]
+                )
+        return ""
+
+    def _ai_discovery_detail_text(self) -> str:
+        lines = [self.ai_discovery_model.detail_header(), *self.ai_discovery_model.detail_lines(limit=8)]
+        return "\n".join(line for line in lines if line)
+
+    def _update_body_only(self) -> None:
+        body_widget = self.query_one("#body", Static)
+        if self.active_panel == "overview" and not self.help_open:
+            body_widget.update(self._overview_renderable())
+        else:
+            body_widget.update(self._body_text())
+        self._render_panel_controls()
+        self._render_detail_panel()
+
+    def _active_table_cursor(self) -> int:
+        if self.active_panel == "alerts":
+            return self.alerts_model.cursor
+        if self.active_panel == "registries":
+            return self.registries_model.cursor
+        if self.active_panel in self.catalog_models:
+            return self.catalog_models[self.active_panel].cursor
+        if self.active_panel == "logs":
+            return self.logs_model.cursor[self.logs_model.source]
+        if self.active_panel == "audit":
+            return self.audit_model.cursor
+        if self.active_panel == "inventory":
+            return self.inventory_model.cursor
+        if self.active_panel == "ai":
+            return self.ai_discovery_model.cursor
+        if self.active_panel == "policy":
+            return self._policy_cursor()
+        if self.active_panel == "setup":
+            return self._setup_cursor()
+        return 0
+
+    def _handle_active_panel_key(self, event: events.Key) -> bool:
+        if self.help_open:
+            return False
+        key = _panel_key(event)
+        if self.active_panel == "alerts":
+            action = self.alerts_model.handle_key(key)
+            return self._apply_alert_action(action)
+        if self.active_panel == "registries":
+            action = self.registries_model.handle_key(key)
+            return self._apply_registry_action(action)
+        if self.active_panel in self.catalog_models:
+            action = self.catalog_models[self.active_panel].handle_key(_catalog_key(key))
+            return self._apply_catalog_action(self.active_panel, action)
+        if self.active_panel == "logs":
+            if key == "enter" and not self.logs_model.searching:
+                return self._open_logs_detail()
+            action = self.logs_model.handle_key(_vim_key(key))
+            return self._apply_logs_action(action)
+        if self.active_panel == "audit":
+            action = self.audit_model.handle_key(_vim_key(key))
+            return self._apply_audit_action(action)
+        if self.active_panel == "overview":
+            if key == "m":
+                self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+                return True
+            if key in {"i", "p", "l"}:
+                self.action_switch_panel({"i": "inventory", "p": "policy", "l": "logs"}[key])
+                return True
+            if key in {"R", "N", "X"}:
+                if key == "R":
+                    self.run_worker(self._open_redaction_toggle(), exclusive=False, thread=False)
+                elif key == "N":
+                    self.run_worker(self._open_notifications_toggle(), exclusive=False, thread=False)
+                else:
+                    self.run_worker(self._open_uninstall_modal(), exclusive=False, thread=False)
+                return True
+            intent = self.overview_model.action_intent(key)
+            if intent is None:
+                return False
+            self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
+            return True
+        if self.active_panel == "inventory":
+            action = self._handle_inventory_key(key)
+            return self._apply_inventory_action(action)
+        if self.active_panel == "ai":
+            action = self.ai_discovery_model.handle_key(_vim_key(key))
+            return self._apply_ai_discovery_action(action)
+        if self.active_panel == "activity":
+            return self._handle_activity_key(key)
+        if self.active_panel == "policy":
+            action = self.policy_model.handle_key(_vim_key(key))
+            return self._apply_policy_action(action)
+        if self.active_panel == "setup":
+            if self.first_run_model.active:
+                action = self.first_run_model.handle_key(_vim_key(key))
+                return self._apply_first_run_action(action)
+            action = self._handle_setup_key(_vim_key(key))
+            return self._apply_setup_action(action)
+        return False
+
+    def _apply_alert_action(self, action: AlertPanelAction) -> bool:
+        if not action.handled:
+            return False
+        if action.hint:
+            self._set_status(action.hint)
+        if action.intent is not None:
+            self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
+        self._render_chrome()
+        return True
+
+    def _apply_registry_action(self, action: RegistryPanelAction) -> bool:
+        if not action.handled:
+            return False
+        if action.hint:
+            self._set_status(action.hint)
+        if action.intent is not None:
+            self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
+        self._render_chrome()
+        return True
+
+    def _apply_catalog_action(self, panel: str, action: CatalogPanelAction) -> bool:
+        if not action.handled:
+            return False
+        if action.hint:
+            self._set_status(action.hint)
+        if action.registry_focus is not None:
+            focus = action.registry_focus
+            self.registries_model.focus_entry(focus.entry_type, focus.name)
+            self.action_switch_panel("registries")
+            self._set_status(f"Focused registry entry {focus.name}.")
+            return True
+        if action.open_mcp_set_form:
+            self.run_worker(self._open_mcp_set_form(), exclusive=False, thread=False)
+        elif action.open_action_menu:
+            self.run_worker(self._open_catalog_action_menu(panel), exclusive=False, thread=False)
+        elif action.reload_requested:
+            self.run_worker(self._load_catalog_model(panel), exclusive=False, thread=False)
+        elif action.intent is not None:
+            self._run_catalog_intent(action.intent)
+        self._render_chrome()
+        return True
+
+    def _apply_simple_action(self, action: Any) -> bool:
+        if not action.handled:
+            return False
+        if getattr(action, "hint", ""):
+            self._set_status(action.hint)
+        self._render_chrome()
+        return True
+
+    def _apply_logs_action(self, action: Any) -> bool:
+        if not action.handled:
+            return False
+        if getattr(action, "hint", ""):
+            self._set_status(action.hint)
+        modal = getattr(action, "modal", None)
+        if modal == "redaction":
+            self.run_worker(self._open_redaction_toggle(), exclusive=False, thread=False)
+        elif modal == "notifications":
+            self.run_worker(self._open_notifications_toggle(), exclusive=False, thread=False)
+        elif modal == "judge-history":
+            self.run_worker(self._open_judge_history_detail(), exclusive=False, thread=False)
+        self._render_chrome()
+        return True
+
+    def _open_logs_detail(self) -> bool:
+        pairs = self.logs_model.selected_detail_pairs()
+        if not pairs:
+            self._set_status("No log row selected.")
+            return True
+        title_by_source = {
+            "gateway": "Gateway log line",
+            "watchdog": "Watchdog log line",
+            "verdicts": "Gateway event",
+            "otel": "OTEL event",
+        }
+        self.run_worker(
+            self._open_detail_screen(title_by_source.get(self.logs_model.source, "Log detail"), pairs),
+            exclusive=False,
+            thread=False,
+        )
+        return True
+
+    def _apply_audit_action(self, action: Any) -> bool:
+        if not action.handled:
+            return False
+        if getattr(action, "intent", None) is not None and action.intent.kind == "export":
+            path = self._export_audit(action.intent.path)
+            self._render_chrome()
+            self._set_status(f"Audit exported to {path}.")
+            return True
+        if getattr(action, "hint", ""):
+            self._set_status(action.hint)
+        self._render_chrome()
+        return True
+
+    def _handle_inventory_key(self, key: str) -> Any:
+        return self.inventory_model.handle_key(_vim_key(key))
+
+    def _apply_inventory_action(self, action: Any) -> bool:
+        if not action.handled:
+            return False
+        if getattr(action, "hint", ""):
+            self._set_status(action.hint)
+        if getattr(action, "intent", None) is not None:
+            self.run_worker(self._load_inventory_model(), exclusive=False, thread=False)
+        self._render_chrome()
+        return True
+
+    def _apply_ai_discovery_action(self, action: Any) -> bool:
+        if not action.handled:
+            return False
+        if getattr(action, "hint", ""):
+            self._set_status(action.hint)
+        intent = getattr(action, "intent", None)
+        if intent is not None:
+            if tuple(intent.args) == ("agent", "usage", "--json"):
+                self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
+            else:
+                self.run_worker(
+                    self._run_command(
+                        intent.binary,
+                        intent.args,
+                        display_name=getattr(intent, "label", None),
+                    ),
+                    exclusive=False,
+                    thread=False,
+                )
+        self._render_chrome()
+        return True
+
+    def _apply_policy_action(self, action: PolicyPanelAction) -> bool:
+        if not action.handled:
+            return False
+        status_message = action.hint
+        if action.hint:
+            self._set_status(action.hint)
+        if action.reload_requested:
+            self.policy_model.reload_from_disk()
+        if action.intent is not None:
+            intent = action.intent
+            if intent.kind == "editor":
+                status_message = f"Editor intent prepared for {intent.editor_path or intent.label}."
+            elif intent.run_in_panel:
+                self.run_worker(self._run_policy_panel_intent(intent), exclusive=False, thread=False)
+            else:
+                self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
+        self._render_chrome()
+        if status_message:
+            self._set_status(status_message)
+        return True
+
+    def _apply_setup_action(self, action: SetupPanelAction) -> bool:
+        if not action.handled:
+            return False
+        status_message = action.hint
+        if action.hint:
+            self._set_status(action.hint)
+        if action.clear_restart_queue:
+            self.setup_model.clear_restart_queue()
+        if action.open_diff:
+            self.run_worker(self._open_config_diff(), exclusive=False, thread=False)
+        if action.open_resource_editor:
+            self.run_worker(
+                self._open_setup_resource_editor(action.open_resource_editor),
+                exclusive=False,
+                thread=False,
+            )
+        if action.refresh_credentials:
+            self.run_worker(self._load_setup_credentials(), exclusive=False, thread=False)
+        if action.intent is not None:
+            self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
+        self._render_chrome()
+        if status_message:
+            self._set_status(status_message)
+        return True
+
+    def _apply_first_run_action(self, action: Any) -> bool:
+        if not action.handled:
+            return False
+        if action.intent is not None:
+            self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
+        self._render_chrome()
+        return True
+
+    def _handle_activity_key(self, key: str) -> bool:
+        if self.command_running:
+            sent = self._forward_activity_stdin(key)
+            if sent:
+                return True
+        if key == "!":
+            last = self.activity_model.last_command
+            if not last:
+                self._set_status("No Activity command to rerun.")
+                return True
+            try:
+                parsed = parse_command_line(last)
+            except CommandLineError as exc:
+                self._set_status(f"Cannot rerun command: {exc}")
+                return True
+            if parsed.needs_preview:
+                self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
+            else:
+                self.run_worker(
+                    self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
+                    exclusive=False,
+                    thread=False,
+                )
+            return True
+        self.activity_model.handle_key(_vim_key(key))
+        self._render_chrome()
+        return key in {"1", "2", "up", "down", "j", "k", "enter", "t", "q", "esc"}
+
+    def _forward_activity_stdin(self, key: str) -> bool:
+        if key in {"up", "down", "j", "k", "esc", "q"}:
+            return False
+        if key == "enter":
+            self.executor.write_stdin("\n")
+        elif key == "backspace":
+            self.executor.write_stdin("\x7f")
+        elif key == "tab":
+            self.executor.write_stdin("\t")
+        elif key == "space":
+            self.executor.write_stdin(" ")
+        elif len(key) == 1:
+            self.executor.write_stdin(key)
+        else:
+            return False
+        self._set_status("Sent input to running command.")
+        return True
+
+    def _policy_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        if not self.policy_model.loaded:
+            self.policy_model.load()
+        if self.policy_model.active_tab == POLICY_TAB_POLICIES:
+            if not self.policy_model.policies_loaded:
+                self.policy_model.load_policies()
+            return (
+                ("Name", "Active", "Description"),
+                tuple(
+                    (policy.name, "yes" if policy.active else "", _truncate_display(policy.description, 96))
+                    for policy in self.policy_model.filtered_policies
+                ),
+            )
+        if self.policy_model.active_tab == POLICY_TAB_RULE_PACKS:
+            if self.policy_model.pack_detail:
+                rows = [
+                    (rule.id, rule.severity, rule_file.category, _truncate_display(rule.title, 72))
+                    for rule_file in self.policy_model.pack_rules
+                    for rule in rule_file.rules
+                ]
+                return ("Rule", "Severity", "Category", "Title"), tuple(rows)
+            rows = []
+            for name in self.policy_model.packs:
+                summary = self.policy_model.rule_pack_summary_for(name)
+                rows.append(
+                    (
+                        name,
+                        "yes" if name == self.policy_model.active_pack else "",
+                        str(summary.rule_count),
+                        str(summary.judge_count),
+                    )
+                )
+            return ("Pack", "Active", "Rules", "Judges"), tuple(rows)
+        if self.policy_model.active_tab == POLICY_TAB_JUDGE:
+            rows = []
+            for name in self.policy_model.judge_names:
+                judge = self.policy_model.judges.get(name)
+                rows.append(
+                    (
+                        name,
+                        "on" if judge and judge.enabled else "off",
+                        str(len(judge.categories) if judge else 0),
+                        judge.categories[0].effective_severity() if judge and judge.categories else "",
+                    )
+                )
+            return ("Judge", "Enabled", "Categories", "First Severity"), tuple(rows)
+        if self.policy_model.active_tab == POLICY_TAB_SUPPRESSIONS:
+            suppressions = self.policy_model.suppressions
+            rows: list[tuple[str, str, str]] = []
+            if suppressions is not None and self.policy_model.supp_section == 0:
+                rows = [
+                    (item.id, _truncate_display(item.pattern, 80), item.context)
+                    for item in suppressions.pre_judge_strips
+                ]
+            elif suppressions is not None and self.policy_model.supp_section == 1:
+                rows = [
+                    (item.id, _truncate_display(item.finding_pattern, 80), item.reason)
+                    for item in suppressions.finding_suppressions
+                ]
+            elif suppressions is not None:
+                rows = [
+                    (_truncate_display(item.tool_pattern, 42), ",".join(item.suppress_findings), item.reason)
+                    for item in suppressions.tool_suppressions
+                ]
+            return ("ID / Tool", "Pattern / Findings", "Reason"), tuple(rows)
+        rows = [
+            (Path(path).name, "test" if Path(path).name.endswith("_test.rego") else "module", path)
+            for path in self.policy_model.rego_files
+        ]
+        return ("File", "Kind", "Path"), tuple(rows)
+
+    def _policy_cursor(self) -> int:
+        if self.policy_model.active_tab == POLICY_TAB_POLICIES:
+            return self.policy_model.policy_cursor
+        if self.policy_model.active_tab == POLICY_TAB_RULE_PACKS:
+            return self.policy_model.rule_cursor if self.policy_model.pack_detail else self.policy_model.pack_cursor
+        if self.policy_model.active_tab == POLICY_TAB_JUDGE:
+            return self.policy_model.judge_cursor
+        if self.policy_model.active_tab == POLICY_TAB_SUPPRESSIONS:
+            return self.policy_model.supp_cursor
+        if self.policy_model.active_tab == POLICY_TAB_OPA:
+            return self.policy_model.rego_cursor
+        return 0
+
+    def _set_policy_cursor(self, row: int) -> None:
+        if row < 0:
+            return
+        if self.policy_model.active_tab == POLICY_TAB_POLICIES:
+            self.policy_model.policy_cursor = min(row, max(0, len(self.policy_model.filtered_policies) - 1))
+        elif self.policy_model.active_tab == POLICY_TAB_RULE_PACKS:
+            if self.policy_model.pack_detail:
+                self.policy_model.rule_cursor = row
+            else:
+                self.policy_model.pack_cursor = min(row, max(0, len(self.policy_model.packs) - 1))
+        elif self.policy_model.active_tab == POLICY_TAB_JUDGE:
+            self.policy_model.judge_cursor = min(row, max(0, len(self.policy_model.judge_names) - 1))
+            self.policy_model.judge_scroll = 0
+        elif self.policy_model.active_tab == POLICY_TAB_SUPPRESSIONS:
+            self.policy_model.supp_cursor = row
+        elif self.policy_model.active_tab == POLICY_TAB_OPA:
+            self.policy_model.rego_cursor = min(row, max(0, len(self.policy_model.rego_files) - 1))
+            self.policy_model.load_rego_source()
+
+    def _setup_table(self) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+        if self.first_run_model.active:
+            return (
+                ("Field", "Value", "Hint"),
+                tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
+            )
+        if self.setup_model.form_active:
+            return (
+                ("Field", "Value", "Kind", "Hint"),
+                tuple(
+                    (
+                        field.label,
+                        render_wizard_value(field, reveal=self.setup_model.form_reveal),
+                        str(field.kind),
+                        field.hint,
+                    )
+                    for field in self.setup_model.form_fields
+                ),
+            )
+        if self.setup_model.mode == "config":
+            if not self.setup_model.sections:
+                return ("Field", "Value", "Hint"), ()
+            section = self.setup_model.sections[self.setup_model.active_section]
+            return (
+                ("Field", "Value", "Validation", "Hint"),
+                tuple(
+                    (
+                        field.label,
+                        _config_display_value(field),
+                        _validation_label(field),
+                        field.hint,
+                    )
+                    for field in section.fields
+                ),
+            )
+        rows = []
+        for info in self.setup_model.wizard_infos():
+            rows.append((info.name, info.status, "defenseclaw " + " ".join(info.command), info.description))
+        return ("Wizard", "Status", "Command", "Description"), tuple(rows)
+
+    def _setup_body_text(self) -> str:
+        if self.first_run_model.active:
+            return (
+                "[bold #22D3EE]DefenseClaw first-run setup[/]\n"
+                f"{self.first_run_model.empty_state()}\n\n"
+                "Keys: up/down select, left/right change, Ctrl+R run init, 0 Setup.\n"
+                "This uses the canonical init backend and keeps the full setup wizard available."
+            )
+        if self.setup_model.form_active:
+            wizard_idx = int(self.setup_model.active_wizard)
+            wizard = WIZARD_NAMES[wizard_idx]
+            description = WIZARD_DESCRIPTIONS[wizard_idx]
+            how_to = WIZARD_HOW_TO[wizard_idx]
+            error = f"\n[#F87171]{self.setup_model.form_error}[/]" if self.setup_model.form_error else ""
+            focused = self.setup_model.focused_row_metadata()
+            reveal = "ON" if self.setup_model.form_reveal else "OFF"
+            preview = self.setup_model.wizard_command_preview()
+            missing = self.setup_model.missing_required_fields()
+            missing_line = (
+                f"\n[#FBBF24]Required fields still empty:[/] {', '.join(missing)}" if missing else ""
+            )
+            focused_line = (
+                f"[{TOKENS.accent_violet} bold]→ {focused.label}[/] "
+                f"[{TOKENS.text_secondary}]({focused.kind})[/]"
+            )
+            focused_action = (
+                f"  [{TOKENS.text_muted}]{focused.action.hotkey} {focused.action.description}[/]"
+                if focused.action
+                else ""
+            )
+            return (
+                f"[bold #22D3EE]Setup Wizard[/]  [bold]{wizard}[/]   "
+                f"[{TOKENS.text_muted}]{description}[/]\n"
+                f"[{TOKENS.text_secondary}]{how_to}[/]\n"
+                f"[bold]Will run:[/] [{TOKENS.accent_green}]$ {preview}[/]\n"
+                f"{focused_line}{focused_action}\n"
+                f"[{TOKENS.text_muted}]"
+                f"Keys: ↑/↓ move · ←/→ or space cycle choice · type to edit · "
+                f"Ctrl+T reveal={reveal} · [bold]Ctrl+R run[/] · Esc cancel"
+                f"[/]"
+                f"{missing_line}"
+                f"{focused.hint and chr(10) + '[' + TOKENS.text_secondary + ']' + focused.hint + '[/]' or ''}"
+                f"{error}"
+            )
+        if self.setup_model.mode == "config":
+            section = self.setup_model.sections[self.setup_model.active_section] if self.setup_model.sections else None
+            hints = self.setup_model.save_restart_hints()
+            focused = self.setup_model.focused_row_metadata()
+            sections = "  ".join(
+                f"[{TOKENS.accent_violet} bold]{label.name}[/]"
+                if label.active
+                else f"[{TOKENS.text_secondary}]{label.name}[/]"
+                for label in self.setup_model.section_labels()
+            )
+            return (
+                f"[bold #22D3EE]Setup Config[/]  {section.name if section else 'No sections'}\n"
+                f"{sections}\n"
+                f"Focused: {focused.label}  Key: {focused.key or '-'}  "
+                f"Validation: {focused.validation.severity}"
+                f"{' - ' + focused.validation.message if focused.validation.message else ''}\n"
+                f"{focused.hint}\n"
+                f"Changes: {hints.changes}  Validation: {len(hints.validation_errors)}  "
+                f"{hints.save_hint}\n"
+                f"{hints.restart_hint}\n"
+                f"{'  '.join(hints.action_bar)}\n"
+                "Keys: tab/shift+tab section, up/down field, enter/space cycle, type/backspace edit, "
+                "S save, R revert, w wizards."
+            ).strip()
+        readiness = "\n".join(
+            f"{check.status.upper()}: {check.title} - {check.detail}" for check in self.setup_model.readiness_checks[:8]
+        )
+        credentials = self.setup_model.credential_empty_state()
+        suffix = f"\n\n{credentials}" if credentials else ""
+        info = self.setup_model.active_wizard_info()
+        focused = self.setup_model.focused_row_metadata()
+        return (
+            "[bold #22D3EE]Setup Wizards[/]\n"
+            f"Active: {info.name} - {info.description}\n"
+            f"{info.how_to}\n"
+            f"Focused action: {focused.action.hotkey if focused.action else 'Enter'} "
+            f"{focused.action.description if focused.action else ''}\n"
+            "Keys: up/down select, Enter open form, c config editor, r refresh credentials, "
+            "credentials wizard: f fill missing, s set selected.\n\n"
+            f"{readiness}{suffix}"
+        )
+
+    def _setup_cursor(self) -> int:
+        if self.first_run_model.active:
+            return self.first_run_model.cursor
+        if self.setup_model.form_active:
+            return getattr(self.setup_model, "form_cursor", 0)
+        if self.setup_model.mode == "config":
+            return self.setup_model.active_line
+        return int(self.setup_model.active_wizard)
+
+    def _set_setup_cursor(self, row: int) -> None:
+        if row < 0:
+            return
+        if self.first_run_model.active:
+            self.first_run_model.cursor = min(row, max(0, len(self.first_run_model.fields) - 1))
+        elif self.setup_model.form_active:
+            self.setup_model.form_cursor = min(row, max(0, len(self.setup_model.form_fields) - 1))
+        elif self.setup_model.mode == "config":
+            if self.setup_model.sections:
+                section = self.setup_model.sections[self.setup_model.active_section]
+                self.setup_model.active_line = min(row, max(0, len(section.fields) - 1))
+        else:
+            self.setup_model.active_wizard = SetupWizard(min(row, len(WIZARD_NAMES) - 1))
+
+    def _move_setup_form_cursor(self, delta: int) -> None:
+        fields = self.setup_model.form_fields
+        if not fields:
+            self.setup_model.form_cursor = 0
+            return
+        cursor = getattr(self.setup_model, "form_cursor", 0)
+        for _ in fields:
+            cursor = (cursor + delta) % len(fields)
+            if fields[cursor].kind != "section":
+                self.setup_model.form_cursor = cursor
+                return
+        self.setup_model.form_cursor = cursor
+
+    def _replace_setup_form_value(self, index: int, value: str) -> None:
+        fields = self.setup_model.form_fields
+        if 0 <= index < len(fields):
+            fields[index] = fields[index].with_value(value)
+
+    def _move_setup_section(self, delta: int) -> None:
+        if not self.setup_model.sections:
+            return
+        self.setup_model.active_section = (self.setup_model.active_section + delta) % len(self.setup_model.sections)
+        self.setup_model.active_line = self.setup_model.first_editable_line()
+
+    def _cycle_setup_config_field(self, delta: int) -> bool:
+        field = self._current_setup_field()
+        if field is None or not field.interactive:
+            return False
+        if field.kind == "bool":
+            value = "false" if str(field.value).lower() == "true" else "true"
+            return self._set_setup_config_text(value)
+        if field.options:
+            return self._set_setup_config_text(_cycle_value(field.value, field.options, delta))
+        return False
+
+    def _append_setup_config_text(self, *, value: str = "", trim: bool = False) -> bool:
+        field = self._current_setup_field()
+        if field is None or not field.interactive or field.kind in {"bool", "choice", "header"}:
+            return False
+        next_value = field.value[:-1] if trim else field.value + value
+        return self._set_setup_config_text(next_value)
+
+    def _set_setup_config_text(self, value: str) -> bool:
+        if not self.setup_model.sections:
+            return False
+        section_index = self.setup_model.active_section
+        section = self.setup_model.sections[section_index]
+        field_index = self.setup_model.active_line
+        if not (0 <= field_index < len(section.fields)):
+            return False
+        field = section.fields[field_index]
+        if not field.interactive:
+            return False
+        fields = section.fields[:field_index] + (field.with_value(value),) + section.fields[field_index + 1 :]
+        new_section = section.__class__(section.name, fields, section.summary, section.help)
+        self.setup_model.sections = (
+            self.setup_model.sections[:section_index]
+            + (new_section,)
+            + self.setup_model.sections[section_index + 1 :]
+        )
+        return True
+
+    def _current_setup_field(self) -> Any | None:
+        if not self.setup_model.sections:
+            return None
+        section = self.setup_model.sections[self.setup_model.active_section]
+        if not (0 <= self.setup_model.active_line < len(section.fields)):
+            return None
+        return section.fields[self.setup_model.active_line]
+
+    def _active_overlay_blocks_table(self) -> bool:
+        if self.active_panel == "policy":
+            return self.policy_model.is_overlay_active()
+        if self.active_panel == "setup":
+            return self.setup_model.form_active
+        return False
+
+    def _handle_setup_key(self, key: str) -> SetupPanelAction:
+        if self.setup_model.form_active:
+            return self._handle_setup_form_key(key)
+        if key == "S":
+            return self.setup_model.review_save_action()
+        if key == "G":
+            intent = self.setup_model.restart_now_intent()
+            if intent is None:
+                return SetupPanelAction(True, hint="No gateway restart is queued.")
+            return SetupPanelAction(True, intent, hint="Restarting queued gateway.")
+        if key == "C":
+            if self.setup_model.restart_queue.pending:
+                return SetupPanelAction(True, hint="Restart queue cleared.", clear_restart_queue=True)
+            return SetupPanelAction(True, hint="No restart is queued.")
+        if key == "R":
+            self.setup_model.set_config(self.config)
+            return SetupPanelAction(True, hint="Config reverted from current runtime config.")
+        if self.setup_model.mode == "config":
+            return self._handle_setup_config_key(key)
+        return self._handle_setup_wizard_key(key)
+
+    def _handle_setup_wizard_key(self, key: str) -> SetupPanelAction:
+        if key in {"up", "k"}:
+            self.setup_model.active_wizard = SetupWizard(max(0, int(self.setup_model.active_wizard) - 1))
+            return SetupPanelAction(True)
+        if key in {"down", "j"}:
+            self.setup_model.active_wizard = SetupWizard(
+                min(len(WIZARD_NAMES) - 1, int(self.setup_model.active_wizard) + 1)
+            )
+            return SetupPanelAction(True)
+        if key in {"left", "["}:
+            self.setup_model.active_wizard = SetupWizard(
+                (int(self.setup_model.active_wizard) + len(WIZARD_NAMES) - 1) % len(WIZARD_NAMES)
+            )
+            return SetupPanelAction(True)
+        if key in {"right", "]"}:
+            self.setup_model.active_wizard = SetupWizard((int(self.setup_model.active_wizard) + 1) % len(WIZARD_NAMES))
+            return SetupPanelAction(True)
+        if key.isdigit():
+            value = int(key)
+            if value < len(WIZARD_NAMES):
+                self.setup_model.active_wizard = SetupWizard(value)
+                return SetupPanelAction(True)
+        if key in {"enter", "e", "space"}:
+            self.setup_model.open_wizard_form(self.setup_model.active_wizard)
+            return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
+        if key in {"c", "`"}:
+            self.setup_model.mode = "config"
+            self.setup_model.active_line = self.setup_model.first_editable_line()
+            return SetupPanelAction(True, hint="Config editor opened.")
+        if key == "r":
+            return SetupPanelAction(True, refresh_credentials=True, hint="Refreshing credential snapshot.")
+        if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
+            return self.setup_model.credential_action(key)
+        return SetupPanelAction(False)
+
+    def _handle_setup_form_key(self, key: str) -> SetupPanelAction:
+        fields = self.setup_model.form_fields
+        if not fields:
+            self.setup_model.close_wizard_form()
+            return SetupPanelAction(True)
+        cursor = _clamp_int(getattr(self.setup_model, "form_cursor", 0), 0, len(fields) - 1)
+        self.setup_model.form_cursor = cursor
+        if key in {"esc", "escape", "q"}:
+            self.setup_model.close_wizard_form()
+            return SetupPanelAction(True, hint="Setup wizard form closed.")
+        if key in {"tab", "down"}:
+            self._move_setup_form_cursor(1)
+            return SetupPanelAction(True)
+        if key in {"shift+tab", "up"}:
+            self._move_setup_form_cursor(-1)
+            return SetupPanelAction(True)
+        if key == "ctrl+u":
+            self._replace_setup_form_value(cursor, "")
+            return SetupPanelAction(True)
+        if key == "backspace":
+            self._replace_setup_form_value(cursor, fields[cursor].value[:-1])
+            return SetupPanelAction(True)
+        if key == "ctrl+t":
+            if self.setup_model.toggle_form_reveal():
+                return SetupPanelAction(True, hint="Secret reveal toggled.")
+            return SetupPanelAction(True, hint="No secret field in this setup form.")
+        if key == "ctrl+r":
+            return self.setup_model.submit_wizard_form()
+
+        field = fields[cursor]
+        if key in {"enter", "space", "left", "right"}:
+            if field.kind == "bool":
+                self._replace_setup_form_value(cursor, "no" if field.value == "yes" else "yes")
+                return SetupPanelAction(True)
+            if field.options:
+                delta = -1 if key == "left" else 1
+                self._replace_setup_form_value(cursor, _cycle_value(field.value, field.options, delta))
+                return SetupPanelAction(True)
+            if key == "enter":
+                return self.setup_model.submit_wizard_form()
+        if len(key) == 1 and field.kind not in {"section", "preset", "whtype", "regid"}:
+            self._replace_setup_form_value(cursor, field.value + key)
+            return SetupPanelAction(True)
+        return SetupPanelAction(True)
+
+    def _handle_setup_config_key(self, key: str) -> SetupPanelAction:
+        if key in {"w", "`"}:
+            self.setup_model.mode = "wizards"
+            return SetupPanelAction(True, hint="Setup wizards opened.")
+        if key in {"tab", "right", "]"}:
+            self._move_setup_section(1)
+            return SetupPanelAction(True)
+        if key in {"shift+tab", "left", "["}:
+            self._move_setup_section(-1)
+            return SetupPanelAction(True)
+        if key == "E":
+            section = self.setup_model.current_section()
+            if section is not None and section.name == "Audit Sinks":
+                return SetupPanelAction(True, hint="Opening Audit Sinks editor.", open_resource_editor="audit_sinks")
+            if section is not None and section.name == "Webhooks":
+                return SetupPanelAction(True, hint="Opening Webhooks editor.", open_resource_editor="webhooks")
+            return SetupPanelAction(True, hint="No list editor is available for this setup section.")
+        if key in {"up", "k"}:
+            self.setup_model.active_line = max(0, self.setup_model.active_line - 1)
+            return SetupPanelAction(True)
+        if key in {"down", "j"}:
+            section = self.setup_model.sections[self.setup_model.active_section]
+            self.setup_model.active_line = min(len(section.fields) - 1, self.setup_model.active_line + 1)
+            return SetupPanelAction(True)
+        if key in {"enter", "space"}:
+            self._cycle_setup_config_field(1)
+            return SetupPanelAction(True)
+        if key == "backspace":
+            self._append_setup_config_text(trim=True)
+            return SetupPanelAction(True)
+        if key == "ctrl+u":
+            self._set_setup_config_text("")
+            return SetupPanelAction(True)
+        if key == "s":
+            return self.setup_model.review_save_action()
+        if key == "r":
+            self.setup_model.set_config(self.config)
+            return SetupPanelAction(True, hint="Config edits reverted.")
+        if len(key) == 1:
+            changed = self._append_setup_config_text(value=key)
+            return SetupPanelAction(True, hint="" if changed else "This field is read-only.")
+        return SetupPanelAction(False)
+
+    def _save_setup_config(self, restart_reason: str = "config saved from Textual TUI") -> SetupPanelAction:
+        errors = self.setup_model.validation_errors()
+        if errors:
+            return SetupPanelAction(True, hint=f"Fix config validation: {errors[0]}")
+        if not self.setup_model.has_changes():
+            return SetupPanelAction(True, hint="No config changes to save.")
+        try:
+            self.setup_model.apply_changes_to_config()
+            save = getattr(self.config, "save", None)
+            if callable(save):
+                save()
+            self.setup_model.queue_restart(restart_reason)
+            self.setup_model.mark_saved()
+        except Exception as exc:  # noqa: BLE001 - user feedback belongs in status.
+            return SetupPanelAction(True, hint=f"Config save failed: {exc}")
+        return SetupPanelAction(True, hint="Config changes saved; restart queued if gateway is running.")
+
+    async def _open_config_diff(self) -> None:
+        result = await self.push_screen_wait(ConfigDiffScreen(self.setup_model.config_diff()))
+        if result is None:
+            self._set_status("Config save cancelled.")
+            return
+        action = self._save_setup_config(result.queue_restart_reason)
+        self._render_chrome()
+        if action.hint:
+            self._set_status(action.hint)
+
+    async def _open_mcp_set_form(self) -> None:
+        model = self.mcps_model
+        selected = model.selected()
+        initial_name = selected.name if selected is not None else ""
+        result = await self.push_screen_wait(MCPSetFormScreen(initial_name=initial_name))
+        if result is None:
+            self._set_status("MCP set cancelled.")
+            return
+        parsed = ParsedCommand(
+            binary=result.binary,
+            args=result.argv,
+            display_name=result.display_name,
+            category="enforce",
+            risk="mutation",
+            needs_preview=True,
+        )
+        await self._confirm_and_run_parsed(parsed)
+
+    async def _open_detail_screen(self, title: str, pairs: tuple[tuple[str, str], ...]) -> None:
+        await self.push_screen_wait(DetailScreen(title, pairs))
+
+    async def _open_judge_history_detail(self) -> None:
+        rows, error = self._judge_response_history()
+        await self.push_screen_wait(JudgeHistoryScreen(rows, error=error))
+
+    async def _open_setup_resource_editor(self, resource_kind: str) -> None:
+        if resource_kind == "audit_sinks":
+            rows = audit_sink_rows_from_config(self.config)
+            screen = SetupResourceEditorScreen("audit_sinks", rows)
+        elif resource_kind == "webhooks":
+            rows = webhook_rows_from_config(self.config)
+            screen = SetupResourceEditorScreen("webhooks", rows)
+        else:
+            self._set_status(f"Unknown setup editor: {resource_kind}")
+            return
+
+        result = await self.push_screen_wait(screen)
+        if result is None:
+            self._set_status("Setup editor closed.")
+            return
+        self._handle_setup_resource_result(result)
+
+    def _handle_setup_resource_result(self, result: SetupResourceResult) -> None:
+        if result.opens_wizard == "observability":
+            self.setup_model.mode = "wizards"
+            self.setup_model.open_wizard_form(SetupWizard.OBSERVABILITY)
+            self._render_chrome()
+            self._set_status(result.hint or "Observability setup wizard opened.")
+            return
+        if result.opens_wizard == "webhooks":
+            self.setup_model.mode = "wizards"
+            self.setup_model.open_wizard_form(SetupWizard.WEBHOOKS)
+            self._render_chrome()
+            self._set_status(result.hint or "Webhook setup wizard opened.")
+            return
+        if not result.args:
+            self._set_status(result.hint or "No setup editor command selected.")
+            return
+        parsed = ParsedCommand(
+            binary=result.binary,  # type: ignore[arg-type]
+            args=result.args,
+            display_name=result.display_name or " ".join(result.args),
+            category=result.category,
+            risk="setup",
+            needs_preview=True,
+        )
+        self.run_worker(self._confirm_and_run_parsed(parsed), exclusive=False, thread=False)
+
+    async def _run_policy_panel_intent(self, intent: Any) -> None:
+        self._set_status(intent.hint or f"running {intent.label}")
+        self._write_activity(f"[#FBBF24]running[/] {intent.label}")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                intent.binary,
+                *intent.args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+        except OSError as exc:
+            self.policy_model.apply_rego_test_result("", exc)
+            self._write_activity(f"[#F87171]{intent.label}: {exc}[/]")
+            self._render_chrome()
+            return
+
+        output = stdout.decode(errors="replace")
+        err_output = stderr.decode(errors="replace")
+        if process.returncode != 0:
+            self.policy_model.apply_rego_test_result(output or err_output, f"exit {process.returncode}")
+            self._write_activity(f"[#F87171]{intent.label} exit {process.returncode}[/]")
+        else:
+            self.policy_model.apply_rego_test_result(output or err_output)
+            self._write_activity(f"[#34D399]{intent.label} complete[/]")
+        self._render_chrome()
+
+    async def _cancel_running_command(self) -> None:
+        # Snapshot the running command before cancellation so we can
+        # release the matching wizard's "running…" badge if it was a
+        # setup-family run.
+        cancelled_label = self.command_label
+        await self.executor.cancel()
+        self.command_running = False
+        self.command_label = ""
+        self._command_started_at = 0.0
+        self.activity_model.finish_entry(130, cancelled=True)
+        self._write_activity("[#FBBF24]cancel requested[/]")
+        self._set_status("Cancel requested for running command.")
+        # Map back to argv if the label looks like one of the setup
+        # commands so the wizard table doesn't keep spinning after the
+        # user explicitly cancelled. The label is the same string built
+        # by _derive_command_label, e.g. "defenseclaw setup claudecode".
+        if cancelled_label.startswith("defenseclaw "):
+            argv = tuple(cancelled_label.split()[1:])
+            if argv and argv[0] in {"setup", "sandbox", "registry", "keys"}:
+                self.setup_model.mark_wizard_complete(argv, success=False)
+        self._refresh_hint()
+
+    async def _handle_successful_command(self, binary: str, args: tuple[str, ...]) -> None:
+        if binary != "defenseclaw" or not args:
+            return
+        command = args[0]
+        if command == "init":
+            self.first_run_model.active = False
+            self.active_panel = "overview"
+            self._refresh_cached_config()
+        elif command == "setup":
+            self._refresh_cached_config()
+            self.setup_model.clear_restart_queue()
+            self.setup_model.mark_wizard_complete(args, success=True)
+        elif command == "keys":
+            await self._load_setup_credentials()
+            self.setup_model.mark_wizard_complete(args, success=True)
+        elif command in {"sandbox", "registry"}:
+            self._refresh_cached_config()
+            self.setup_model.mark_wizard_complete(args, success=True)
+        elif command == "doctor":
+            self._load_doctor_cache()
+
+    def _refresh_cached_config(self) -> None:
+        """Full reload-from-disk after ``setup``/``init``/``sandbox``/``registry``.
+
+        Mirrors Go's ``reloadConfigAfterSetupCommand``
+        (``internal/tui/app.go::3800-3816``) line-for-line:
+
+        1. Re-read config from disk via ``defenseclaw.config.load()``
+           — the file the just-finished wizard wrote is the source of
+           truth, not the in-memory snapshot from start-up.
+        2. Push the fresh ``cfg`` into every panel that caches one
+           (overview, policy, setup, registries).
+        3. Re-bind ``data_dir`` on every panel that tails files
+           (logs, activity, alerts) so a setup-time relocation of
+           ``~/.defenseclaw/data`` doesn't strand the JSONL tail at
+           the old path.
+        4. Re-open the audit SQLite handle and inject it into the
+           alerts + audit panels — setup may have moved the DB to
+           a fresh path (e.g. on first-run install).
+        5. Re-apply the last known health snapshot so the SERVICES
+           tile doesn't briefly flip to "unknown" while waiting for
+           the next 3s poll.
+        6. Propagate the connector + registry attribution so the
+           catalog "Source: …" banners agree with the new cfg.
+        7. Run the standard refresh pipeline (alerts/logs/audit/
+           tools/doctor/silent-bypass/activity-mutations) and
+           rebuild Setup readiness so every row reflects the new
+           state immediately.
+
+        Falls back to the prior in-memory ``self.config`` if the
+        on-disk reload raises, so a malformed user edit doesn't
+        wedge the TUI mid-setup.
+        """
+
+        try:
+            from defenseclaw import config as config_module
+
+            new_cfg: object | None = config_module.load()
+        except Exception as exc:  # noqa: BLE001 — bad YAML must not crash the TUI.
+            self._write_activity(
+                f"[#FBBF24]config reload failed:[/] {exc}; keeping current snapshot."
+            )
+            new_cfg = self.config
+
+        self.config = new_cfg
+        new_data_dir = _resolve_data_dir(new_cfg, None)
+        if new_data_dir is not None:
+            self.data_dir = new_data_dir
+
+        # Panels that cache the config snapshot.
+        self.setup_model.set_config(new_cfg)
+        self.overview_model.set_cfg(_overview_config(new_cfg))
+        self.policy_model.set_config(new_cfg)
+        if hasattr(self.registries_model, "set_config"):
+            self.registries_model.set_config(new_cfg)
+
+        # Panels that tail files from data_dir.
+        if hasattr(self.logs_model, "set_data_dir"):
+            self.logs_model.set_data_dir(new_data_dir)
+        if hasattr(self.activity_model, "set_data_dir"):
+            self.activity_model.set_data_dir(new_data_dir)
+        if hasattr(self.alerts_model, "set_data_dir"):
+            self.alerts_model.set_data_dir(new_data_dir)
+
+        # Re-open audit store at the new path.
+        new_store = _audit_store(new_cfg)
+        if hasattr(self.alerts_model, "set_store"):
+            self.alerts_model.set_store(new_store)
+        if hasattr(self.audit_model, "set_store"):
+            self.audit_model.set_store(new_store)
+
+        # Re-apply the known health snapshot so subsystem state stays
+        # populated through the reload (next poll overwrites this in 3s).
+        self.overview_model.set_health(self.overview_model.health)
+        self._propagate_connector(self.overview_model.health)
+
+        # Run the standard refresh pipeline so every panel re-reads
+        # against the new paths in a single pass, then rebuild Setup
+        # readiness so rows flip on the same tick.
+        self._refresh_models_from_disk()
+        self._sync_setup_readiness()
+
+    def _schedule_credentials_refresh(self) -> None:
+        """Dispatch a credential refresh as a Textual worker.
+
+        Mirrors Go's mount-time + slow-tick ``loadCredentialsCmd``. We
+        skip the dispatch when the first-run flow is active, there's
+        no config, the app is shutting down, or the gateway has no
+        configured API port — the last guard keeps tests that stand
+        up a partial config (no ``gateway`` attribute) from spawning
+        ``defenseclaw keys list`` subprocesses that outlive the
+        Textual event loop and surface as "Event loop is closed"
+        flakes in CI.
+        """
+
+        if self.config is None or getattr(self, "_app_shutting_down", False):
+            return
+        if getattr(self, "first_run_model", None) and self.first_run_model.active:
+            return
+        if _gateway_api_port(self.config) <= 0:
+            return
+        self.run_worker(
+            self._load_setup_credentials(),
+            exclusive=False,
+            thread=False,
+        )
+
+    async def _load_setup_credentials(self) -> None:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "defenseclaw",
+                "keys",
+                "list",
+                "--json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+        except OSError as exc:
+            self.setup_model.set_credential_snapshot((), error=exc)
+            self._render_chrome()
+            return
+        if process.returncode != 0:
+            self.setup_model.set_credential_snapshot((), error=stderr.decode(errors="replace").strip())
+            self._render_chrome()
+            return
+        try:
+            from defenseclaw.tui.services.setup_state import parse_credential_rows
+
+            rows = parse_credential_rows(stdout)
+        except Exception as exc:  # noqa: BLE001 - parser failures should stay in-panel.
+            self.setup_model.set_credential_snapshot((), error=exc)
+            self._render_chrome()
+            return
+        self.setup_model.set_credential_snapshot(rows)
+        self._render_chrome()
+
+    async def _load_inventory_model(self) -> None:
+        intent = self.inventory_model.load_intent()
+        self._set_status(intent.hint or "Loading inventory...")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                intent.binary,
+                *intent.args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+        except OSError as exc:
+            self.inventory_model.apply_loaded(None, exc)
+            self._render_chrome()
+            return
+        if process.returncode != 0:
+            self.inventory_model.apply_loaded(
+                None,
+                stderr.decode(errors="replace").strip() or f"exit {process.returncode}",
+            )
+            self._render_chrome()
+            return
+        try:
+            self.inventory_model.apply_json(stdout.decode(errors="replace"))
+        except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
+            self.inventory_model.apply_loaded(None, exc)
+        self._render_chrome()
+
+    async def _load_ai_discovery_model(self) -> None:
+        intent = self.ai_discovery_model.load_intent()
+        self._set_status(intent.hint or "Loading AI discovery...")
+        await self._poll_ai_usage(force_render=True)
+
+    async def _open_catalog_action_menu(self, panel: str) -> None:
+        model = self.catalog_models[panel]
+        actions = model.menu_actions()
+        selected = model.selected()
+        subtitle = getattr(selected, "name", "") if selected is not None else ""
+        choice = await self.push_screen_wait(
+            ActionMenuScreen(
+                f"{panel.title()} Actions",
+                tuple(_menu_action(action) for action in actions),
+                subtitle=subtitle,
+            )
+        )
+        if choice is None:
+            self._set_status("Action cancelled.")
+            return
+        intent = model.action_intent(choice, origin="action-menu")
+        if intent is None:
+            self._set_status("No action available for this row.")
+            return
+        self._run_catalog_intent(intent)
+
+    async def _open_mode_picker(self) -> None:
+        choice = await self.push_screen_wait(ModePickerScreen(_active_connector(self.config)))
+        if choice is None:
+            self._set_status("Mode switch cancelled.")
+            return
+        args, display = connector_setup_command_for_mode(choice)
+        if not args:
+            self._set_status(f"No setup command available for connector {choice}.")
+            return
+        intent = OverviewCommandIntent(
+            label=display,
+            args=args,
+            binary="defenseclaw",
+            category="setup",
+            hint=f"Switch active connector to {choice}.",
+        )
+        await self._confirm_and_run_intent(intent)
+
+    async def _open_redaction_toggle(self) -> None:
+        currently_disabled = _redaction_currently_disabled(self.config)
+        action = await self.push_screen_wait(RedactionToggleScreen(currently_disabled))
+        if action is None:
+            self._set_status("Redaction toggle cancelled.")
+            return
+        command = action.command
+        if command is None:
+            self._set_status("Redaction toggle has no command.")
+            return
+        _set_redaction_disabled(self.config, command.args[2] == "off")
+        self.active_panel = "activity"
+        self._render_chrome()
+        self.run_worker(
+            self._run_command(
+                command.binary,
+                command.args,
+                display_name=getattr(command, "label", "redaction toggle"),
+            ),
+            exclusive=False,
+            thread=False,
+        )
+
+    async def _open_notifications_toggle(self) -> None:
+        currently_enabled = _notifications_currently_enabled(self.config)
+        action = await self.push_screen_wait(NotificationsToggleScreen(currently_enabled))
+        if action is None:
+            self._set_status("Notifications toggle cancelled.")
+            return
+        command = action.command
+        if command is None:
+            self._set_status("Notifications toggle has no command.")
+            return
+        _set_notifications_enabled(self.config, command.args[2] == "on")
+        self.active_panel = "activity"
+        self._render_chrome()
+        self.run_worker(
+            self._run_command(
+                command.binary,
+                command.args,
+                display_name=getattr(command, "label", "notifications toggle"),
+            ),
+            exclusive=False,
+            thread=False,
+        )
+
+    async def _open_uninstall_modal(self) -> None:
+        action = await self.push_screen_wait(UninstallScreen())
+        if action is None:
+            self._set_status("Uninstall cancelled.")
+            return
+        command = action.command
+        if command is None:
+            self._set_status("Uninstall action has no command.")
+            return
+        self.active_panel = "activity"
+        self._render_chrome()
+        self.run_worker(
+            self._run_command(
+                command.binary,
+                command.args,
+                display_name=getattr(command, "label", "uninstall"),
+            ),
+            exclusive=False,
+            thread=False,
+        )
+
+    def _run_catalog_intent(self, intent: CatalogCommandIntent) -> None:
+        if intent.category == "info":
+            self.run_worker(
+                self._run_command(
+                    intent.binary,
+                    intent.args,
+                    display_name=getattr(intent, "label", None),
+                ),
+                exclusive=False,
+                thread=False,
+            )
+        else:
+            self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
+
+    async def _load_catalog_model(self, panel: str) -> None:
+        model = self.catalog_models[panel]
+        intent = model.load_intent()
+        self._set_status(intent.hint or f"Loading {panel}...")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                intent.binary,
+                *intent.args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await process.communicate()
+        except OSError as exc:
+            model.apply_loaded([], exc)
+            self._render_chrome()
+            return
+
+        if process.returncode != 0:
+            model.apply_loaded([], stderr.decode(errors="replace").strip() or f"exit {process.returncode}")
+        else:
+            try:
+                model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
+                model.apply_loaded([], exc)
+        self._render_chrome()
+
+    async def _confirm_and_run_intent(self, intent: Any) -> None:
+        parsed = ParsedCommand(
+            binary=intent.binary,
+            args=tuple(intent.args),
+            display_name=intent.label,
+            category=intent.category,
+            risk=getattr(intent, "risk", "read-only"),
+            needs_preview=True,
+        )
+        await self._confirm_and_run_parsed(parsed)
+        # Setup wizards (currently the Registry wizard) can request
+        # follow-up commands that should run only after the primary
+        # command finishes. The follow-ups themselves are queued through
+        # the same confirm-and-run path so the user still sees the
+        # preview screen and live output.
+        for follow_up in getattr(intent, "follow_up", ()) or ():
+            await self._confirm_and_run_intent(follow_up)
+
+    async def _confirm_and_run_parsed(self, parsed: ParsedCommand) -> None:
+        confirmed = await self.push_screen_wait(CommandPreviewScreen(parsed))
+        if not confirmed:
+            self._write_activity(f"[#FBBF24]Cancelled:[/] {parsed.display_name}")
+            self._set_status("Command cancelled.")
+            return
+        # Any command that needed a preview is non-read-only (setup,
+        # mutation, destructive, …) — most of them are interactive
+        # wizards. The user just confirmed they want to run it, so jump
+        # to Activity where the live output and stdin prompts are visible.
+        # Without this jump the user sat on Overview staring at an empty
+        # yellow "running" strip with no clue the wizard was waiting on
+        # them.
+        if parsed.risk != "read-only" and self.active_panel != "activity":
+            self.action_switch_panel("activity")
+        self.run_worker(
+            self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
+            exclusive=False,
+            thread=False,
+        )
+
+    def _periodic_refresh(self) -> None:
+        if self._periodic_refresh_running or self.command_running or self.executor.is_running:
+            return
+        if len(self.screen_stack) > 1:
+            return
+        self._periodic_refresh_running = True
+        try:
+            self._refresh_models_from_disk()
+            try:
+                self._render_chrome()
+            except NoMatches:
+                return
+        finally:
+            self._periodic_refresh_running = False
+
+    def _refresh_models_from_disk(self) -> None:
+        self._refresh_alerts()
+        self.registries_model.refresh()
+        self.logs_model.refresh()
+        self.audit_model.refresh()
+        self.tools_model.refresh()
+        self._load_doctor_cache()
+        self._load_silent_bypass_count()
+        self._load_activity_mutations()
+
+    def _refresh_alerts(self) -> None:
+        """Single entry point for refreshing alerts from disk + audit DB.
+
+        Mirrors Go's ``alerts.Refresh(store, dataDir)`` which loads
+        gateway scan-blocks (file-backed) and audit alerts (sqlite)
+        in one call. Splitting these into two call sites caused at
+        least one regression where ``_load_audit_alerts`` was missed
+        after a setup-driven config swap; consolidating here keeps
+        every refresh path identical.
+        """
+
+        self.alerts_model.refresh()
+        self._load_audit_alerts()
+
+    def _load_silent_bypass_count(self) -> None:
+        """Surface the gateway's silent-bypass count on Overview.
+
+        Mirrors Go's ``LoadGatewayEgress`` + ``CountRecentSilentBypass``
+        called from ``app.go::refresh()``. Without this the Overview
+        AI Agents / enforcement tiles can't warn an operator when an
+        LLM-shaped request slipped past the guardrail's known-host
+        list, which is one of the highest-value early signals the
+        TUI exposes.
+        """
+
+        from defenseclaw.tui.services.gateway_events import (
+            count_recent_silent_bypass,
+            load_gateway_egress,
+        )
+
+        data_dir = self.data_dir or _data_dir_from_config(self.config)
+        if data_dir is None:
+            return
+        events = load_gateway_egress(data_dir / "gateway.jsonl")
+        if not events:
+            self.overview_model.set_silent_bypass_count(0)
+            return
+        self.overview_model.set_silent_bypass_count(
+            count_recent_silent_bypass(events, window_seconds=300)
+        )
+
+    def _load_activity_mutations(self) -> None:
+        """Hydrate the Activity panel's Mutations tab from gateway.jsonl.
+
+        Mirrors Go's ``activity.LoadMutations()`` called from ``refresh()``
+        every tick. Without this the tab is permanently stuck on
+        "No activity events in gateway.jsonl yet." even after the
+        gateway has logged dozens of mutation rows.
+        """
+
+        data_dir = self.data_dir or _data_dir_from_config(self.config)
+        if data_dir is None:
+            return
+        self.activity_model.set_data_dir(str(data_dir))
+        try:
+            self.activity_model.load_mutations()
+        except Exception as exc:  # noqa: BLE001 - degrade silently.
+            self._write_activity(f"[#FBBF24]mutations unavailable:[/] {exc}")
+
+    def _schedule_health_poll(self) -> None:
+        """Kick off a non-blocking ``/health`` fetch.
+
+        The Go TUI runs ``fetchHealth`` on a ticker (see
+        ``internal/tui/health.go`` + ``app.go`` ``pollHealth``) and
+        feeds the result into ``OverviewPanel.SetHealth``. Without an
+        equivalent loop the Python TUI's SERVICES box stays pinned at
+        "unknown" for every subsystem.
+
+        We dispatch the actual fetch to a worker thread so the 3s
+        HTTP timeout never blocks Textual's event loop, and we tolerate
+        the gateway being offline by simply leaving ``health=None`` so
+        the existing "Gateway is offline" notice continues to render.
+        """
+
+        if self.config is None or getattr(self, "_app_shutting_down", False):
+            return
+        api_port = _gateway_api_port(self.config)
+        if api_port <= 0:
+            return
+        self.run_worker(
+            self._poll_health(),
+            exclusive=False,
+            thread=False,
+        )
+
+    def _schedule_ai_usage_poll(self) -> None:
+        """Kick off a non-blocking ``/api/v1/ai-usage`` fetch."""
+
+        if self.config is None or getattr(self, "_app_shutting_down", False):
+            return
+        api_port = _gateway_api_port(self.config)
+        if api_port <= 0:
+            return
+        self.run_worker(
+            self._poll_ai_usage(force_render=False),
+            exclusive=False,
+            thread=False,
+        )
+
+    async def _poll_health(self) -> None:
+        # Use the configured token + host so a gateway that requires
+        # Authorization (the default when ``OPENCLAW_GATEWAY_TOKEN`` or
+        # ``gateway.token`` is set) doesn't 401 us into ``unknown``.
+        # The previous urllib fetcher couldn't attach the header and
+        # was the root cause of "I did everything but it still shows
+        # unknown" — the gateway was up, but the unauthenticated probe
+        # bounced.
+        snapshot = await asyncio.to_thread(_fetch_gateway_health, self.config)
+        # ``snapshot`` is None on connection refused / timeouts. We
+        # propagate that as ``set_health(None)`` so subsystem_state()
+        # returns "unknown" and the SERVICES rows clearly reflect
+        # "we don't know" instead of stale data from a previous run.
+        self.overview_model.set_health(snapshot)
+        self._propagate_connector(snapshot)
+        # Mirror Go: clear the queued-restart banner once the gateway
+        # has actually restarted (its StartedAt moved). Without this
+        # the banner sticks around forever even though the restart
+        # already finished, since we never call mark_restart_started.
+        self._mark_restart_if_gateway_restarted(snapshot)
+        # Rebuild Setup readiness now that we have a fresh health
+        # snapshot (the gateway/api/guardrail rows depend on it).
+        self._sync_setup_readiness()
+        # Only repaint the chrome when the Overview panel is actually
+        # being shown; otherwise we'd churn the screen for nothing.
+        if self.active_panel == "overview" and not self.help_open:
+            self._render_chrome()
+
+    async def _poll_ai_usage(self, *, force_render: bool) -> None:
+        snapshot = await asyncio.to_thread(_fetch_ai_usage, self.config)
+        if snapshot is None:
+            if self.ai_discovery_model.snapshot is None:
+                self.ai_discovery_model.message = "ai discovery offline or unauthorized"
+            if force_render or self.active_panel in {"overview", "ai"}:
+                self._render_chrome()
+            return
+        self.overview_model.set_ai_usage(snapshot)
+        self.ai_discovery_model.set_snapshot(snapshot)
+        self.ai_discovery_model.message = ""
+        if force_render or self.active_panel in {"overview", "ai"}:
+            self._render_chrome()
+
+    def _sync_setup_readiness(self) -> None:
+        """Rebuild the Setup readiness rows from current inputs.
+
+        Mirrors Go's ``syncSetupDerivedState``. Called from every
+        upstream change (mount, health poll, doctor load, credential
+        load, setup wizard completion) so the rows always reflect the
+        latest cfg/health/doctor/credentials in one place.
+        """
+
+        try:
+            self.setup_model.rebuild_readiness_checks(
+                health=self.overview_model.health,
+                doctor=self.overview_model.doctor,
+                credentials=tuple(
+                    getattr(self.setup_model.credential_snapshot, "rows", ()) or ()
+                ),
+            )
+        except AttributeError:
+            # Older SetupPanelModel — silently skip; the readiness
+            # rows will stay at their __init__ baseline.
+            pass
+
+    def _propagate_connector(self, snapshot: HealthSnapshot | None) -> None:
+        """Push the live connector name + registry attribution to every catalog model.
+
+        Mirrors Go's ``propagateConnector`` + ``propagateRegistryAttribution``
+        (``internal/tui/app.go::313-329, 412-455``). Without it the
+        Skills/MCPs/Plugins/Inventory panels keep showing the
+        connector name captured at TUI start — stale once the operator
+        switches connectors via Setup.
+        """
+
+        cfg = self.overview_model.cfg
+        mode = (cfg.claw_mode if cfg else "") or ""
+        connector_name = _resolve_active_connector(snapshot, mode)
+        for model in (
+            self.skills_model,
+            self.mcps_model,
+            self.plugins_model,
+            self.inventory_model,
+        ):
+            try:
+                model.set_connector(connector_name)
+            except AttributeError:
+                continue
+
+        skill_attr = _registry_attribution_from_config(self.config, "skill")
+        mcp_attr = _registry_attribution_from_config(self.config, "mcp")
+        if hasattr(self.skills_model, "set_registry_attribution"):
+            self.skills_model.set_registry_attribution(skill_attr)
+        if hasattr(self.mcps_model, "set_registry_attribution"):
+            self.mcps_model.set_registry_attribution(mcp_attr)
+
+    def _mark_restart_if_gateway_restarted(self, snapshot: HealthSnapshot | None) -> None:
+        """If the gateway's ``started_at`` advanced, clear the queued restart.
+
+        Mirrors Go's check in ``internal/tui/app.go::615-618`` where a
+        ``healthUpdateMsg`` whose ``StartedAt`` differs from the last
+        seen value resets the restart queue and posts a toast. Without
+        this the "Restart queued" banner persists across the actual
+        restart, confusing operators into clicking restart twice.
+        """
+
+        if snapshot is None or not snapshot.started_at:
+            return
+        last_seen = getattr(self, "_last_gateway_started_at", "")
+        if last_seen and snapshot.started_at != last_seen:
+            try:
+                self.setup_model.mark_restart_started()
+            except AttributeError:
+                # Older SetupPanelModel without this method — fall back
+                # to clearing the local queue directly.
+                if hasattr(self.setup_model, "clear_restart_queue"):
+                    self.setup_model.clear_restart_queue()
+        self._last_gateway_started_at = snapshot.started_at
+
+    def _load_doctor_cache(self) -> None:
+        """Hydrate the Overview DOCTOR box from the on-disk cache.
+
+        Mirrors ``internal/tui/doctor_cache.go``: ``defenseclaw doctor``
+        writes ``<data_dir>/doctor_cache.json`` after every run, and
+        the Go TUI reads it on startup so the dashboard shows a real
+        pass/fail/warn/skip summary plus the top failure instead of
+        "not yet run — press d to run doctor". Until this loader was
+        wired into ``_refresh_models_from_disk`` the panel stayed
+        empty even after the user had successfully run doctor.
+        """
+
+        data_dir = self.data_dir or _data_dir_from_config(self.config)
+        if data_dir is None:
+            return
+        path = data_dir / "doctor_cache.json"
+        if not path.exists():
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        captured_at = _parse_timestamp(raw.get("captured_at"))
+        checks = tuple(
+            DoctorCheck(
+                status=str(item.get("status") or ""),
+                label=str(item.get("label") or ""),
+                detail=str(item.get("detail") or ""),
+            )
+            for item in raw.get("checks", ())
+            if isinstance(item, dict)
+        )
+        self.overview_model.set_doctor_cache(
+            DoctorCache(
+                captured_at=captured_at,
+                passed=int(raw.get("passed") or 0),
+                failed=int(raw.get("failed") or 0),
+                warned=int(raw.get("warned") or 0),
+                skipped=int(raw.get("skipped") or 0),
+                checks=checks,
+            )
+        )
+        # Doctor results feed several readiness rows (credential
+        # presence, registry sync, sandbox check) so rebuild now.
+        self._sync_setup_readiness()
+
+    def _judge_response_history(self) -> tuple[tuple[object, ...], str]:
+        store = _audit_store(self.config)
+        if store is None:
+            return (), "Audit DB is unavailable; configure audit_db to view retained judge responses."
+        try:
+            if hasattr(store, "list_judge_responses"):
+                return tuple(store.list_judge_responses(20)), ""  # type: ignore[attr-defined]
+            db = getattr(store, "db", None)
+            if db is None:
+                return (), "Audit store does not expose a judge response reader."
+            columns = {row[1] for row in db.execute("PRAGMA table_info(judge_responses)").fetchall()}
+            if not columns:
+                return (), "judge_responses table is not initialized yet."
+            wanted = (
+                "timestamp",
+                "kind",
+                "direction",
+                "action",
+                "severity",
+                "latency_ms",
+                "inspected_model",
+                "model",
+                "request_id",
+                "trace_id",
+                "run_id",
+                "input_hash",
+                "confidence",
+                "fail_closed_applied",
+                "prompt_template_id",
+                "parse_error",
+                "raw",
+            )
+            selected = tuple(column for column in wanted if column in columns)
+            cursor = db.execute(
+                f"SELECT {', '.join(selected)} FROM judge_responses ORDER BY timestamp DESC LIMIT ?",
+                (20,),
+            )
+            rows = tuple(dict(zip(selected, row, strict=True)) for row in cursor.fetchall())
+            return rows, ""
+        except Exception as exc:  # noqa: BLE001 - error belongs in the modal.
+            return (), str(exc)
+
+    def _load_audit_alerts(self) -> None:
+        audit_db = str(getattr(self.config, "audit_db", "") or "")
+        if not audit_db or not Path(audit_db).exists():
+            return
+        try:
+            from defenseclaw.db import Store
+
+            store = Store(audit_db)
+            try:
+                self.alerts_model.set_events(
+                    [
+                        AlertEvent(
+                            id=event.id,
+                            severity=event.severity,
+                            action=event.action,
+                            target=event.target,
+                            details=event.details,
+                            timestamp=event.timestamp,
+                        )
+                        for event in store.list_alerts(500)
+                    ]
+                )
+                # Mirror Go TUI: Overview ENFORCEMENT counters come from
+                # the same audit Store on every refresh. Without this
+                # call the panel stays pinned at 0/0/0/0 even after
+                # real scans land in the DB. Reusing the already-open
+                # Store keeps this on the same I/O budget as the alerts
+                # query above.
+                try:
+                    counts = store.get_counts()
+                except Exception as count_exc:  # noqa: BLE001 - degraded counts must not break alerts.
+                    self._write_activity(
+                        f"[#FBBF24]enforcement counts unavailable:[/] {count_exc}"
+                    )
+                else:
+                    self.overview_model.set_enforcement_counts(
+                        EnforcementCounts(
+                            blocked_skills=counts.blocked_skills,
+                            allowed_skills=counts.allowed_skills,
+                            blocked_mcps=counts.blocked_mcps,
+                            allowed_mcps=counts.allowed_mcps,
+                            total_scans=counts.total_scans,
+                            active_alerts=counts.alerts,
+                        )
+                    )
+            finally:
+                store.close()
+        except Exception as exc:  # noqa: BLE001 - the TUI must still open when the audit DB is unavailable.
+            self._write_activity(f"[#FBBF24]alerts unavailable:[/] {exc}")
+
+
+def _resolve_active_connector(snapshot: HealthSnapshot | None, mode: str) -> str:
+    """Mirror Go's ``ActiveConnectorName``: live health wins, fall back to mode.
+
+    Kept as a thin module-level helper so the catalog auto-load path
+    and the health-poll callback both call the same resolver — the Go
+    side has a single ``ActiveConnectorName`` function for exactly the
+    same reason.
+    """
+
+    if snapshot is not None and snapshot.connector is not None:
+        name = snapshot.connector.name.strip()
+        if name:
+            return name
+    if mode and mode.strip():
+        return mode.strip()
+    return "openclaw"
+
+
+def _registry_attribution_from_config(config: object | None, kind: str) -> dict[str, str] | None:
+    """Build a ``name -> source-id`` map for registry-promoted assets.
+
+    Mirrors Go's ``registryAttributionFromRules`` (``internal/tui/app.go:439``).
+    Only rules whose ``reason`` looks like ``registry:<id>`` count —
+    operator-authored entries are skipped so the badge surfaces *only*
+    assets promoted by a registry sync. Returns ``None`` (not an empty
+    dict) when there's nothing to attribute so callers can pass the
+    result straight to ``set_registry_attribution``.
+    """
+
+    asset_policy = getattr(config, "asset_policy", None)
+    if asset_policy is None:
+        return None
+    bucket = getattr(asset_policy, kind, None)
+    if bucket is None:
+        return None
+    rules = getattr(bucket, "registry", None) or ()
+    out: dict[str, str] = {}
+    for rule in rules:
+        reason = (getattr(rule, "reason", "") or "").strip()
+        name = (getattr(rule, "name", "") or "").strip()
+        if not reason or not name or not reason.startswith("registry:"):
+            continue
+        source_id = reason[len("registry:") :].strip()
+        if source_id:
+            out[name] = source_id
+    return out or None
+
+
+def _gateway_api_port(config: object | None) -> int:
+    """Return the sidecar API port from config, with the Go default.
+
+    The Go TUI falls back to 9090 in ``pollHealth`` if the config is
+    missing, but the Python CLI's ``setup gateway`` defaults to 18970.
+    We honor whatever the operator has actually configured; if there
+    is no config (very early startup), 0 disables the poll until one
+    arrives.
+    """
+
+    gw = getattr(config, "gateway", None)
+    if gw is None:
+        return 0
+    try:
+        port = int(getattr(gw, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return port if port > 0 else 0
+
+
+def _fetch_gateway_health(config: object | None) -> HealthSnapshot | None:
+    """Blocking ``/health`` fetcher, intended for ``asyncio.to_thread``.
+
+    Uses :class:`OrchestratorClient` so the configured token, host, and
+    port all flow through automatically — that matters because a gateway
+    started with ``OPENCLAW_GATEWAY_TOKEN`` set will 401 any probe that
+    forgets the ``Authorization: Bearer …`` header, and the operator's
+    SERVICES box would silently stay at ``unknown``.
+
+    Any exception (connection refused, DNS failure, malformed JSON,
+    401/403) collapses to ``None`` so the caller can render "unknown"
+    without crashing the panel.
+    """
+
+    if config is None:
+        return None
+    gateway_cfg = getattr(config, "gateway", None)
+    if gateway_cfg is None:
+        return None
+    try:
+        port = int(getattr(gateway_cfg, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if port <= 0:
+        return None
+    host = str(getattr(gateway_cfg, "host", "") or "127.0.0.1") or "127.0.0.1"
+    # The gateway's API server binds 127.0.0.1 by default; ``0.0.0.0`` /
+    # empty values would resolve fine over the wire but make the client
+    # round-trip needlessly slow on macOS. Normalize to loopback.
+    if host in ("", "0.0.0.0"):
+        host = "127.0.0.1"
+    resolve_token = getattr(gateway_cfg, "resolved_token", None)
+    token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+
+    try:
+        from defenseclaw.gateway import OrchestratorClient
+    except Exception:  # noqa: BLE001 — never let a bad import kill the TUI
+        return None
+
+    client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+    try:
+        payload = client.health()
+    except Exception:  # noqa: BLE001 — offline / unauthenticated gateway is normal
+        return None
+    return _health_snapshot_from_mapping(payload)
+
+
+def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
+    """Blocking ``/api/v1/ai-usage`` fetcher for Overview + AI Discovery.
+
+    This mirrors the Go TUI's ``fetchAIUsage`` path: use the configured
+    gateway API port and resolved bearer token, request JSON over loopback,
+    and return ``None`` on transient gateway/auth failures so the previous
+    good snapshot is not cleared during restarts.
+    """
+
+    if config is None:
+        return None
+    gateway_cfg = getattr(config, "gateway", None)
+    if gateway_cfg is None:
+        return None
+    try:
+        port = int(getattr(gateway_cfg, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if port <= 0:
+        return None
+    host = str(getattr(gateway_cfg, "host", "") or "127.0.0.1") or "127.0.0.1"
+    if host in ("", "0.0.0.0"):
+        host = "127.0.0.1"
+    resolve_token = getattr(gateway_cfg, "resolved_token", None)
+    token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+
+    try:
+        from defenseclaw.gateway import OrchestratorClient
+    except Exception:  # noqa: BLE001
+        return None
+
+    client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+    client._session.headers["Accept"] = "application/json"  # noqa: SLF001 - mirrors Go fetchAIUsage.
+    try:
+        payload = client.ai_usage()
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload = dict(payload)
+    payload.setdefault("fetched_at", datetime.now(timezone.utc).isoformat())
+    try:
+        return AIUsageSnapshot.from_mapping(payload)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _resolve_data_dir(config: object | None, data_dir: str | Path | None) -> Path | None:
+    if data_dir is not None:
+        return Path(data_dir)
+    return _data_dir_from_config(config)
+
+
+def _data_dir_from_config(config: object | None) -> Path | None:
+    value = getattr(config, "data_dir", "")
+    return Path(value) if value else None
+
+
+def _parse_timestamp(value: object) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _active_connector(config: object | None) -> str:
+    if config is None:
+        return "openclaw"
+    active = getattr(config, "active_connector", None)
+    if callable(active):
+        try:
+            return str(active())
+        except Exception:  # noqa: BLE001 - connector name is cosmetic in the shell.
+            return "openclaw"
+    guardrail = getattr(config, "guardrail", None)
+    connector = str(getattr(guardrail, "connector", "") or "").strip()
+    if connector:
+        return connector
+    claw = getattr(config, "claw", None)
+    return str(getattr(claw, "mode", "") or "openclaw").strip() or "openclaw"
+
+
+def _redaction_currently_disabled(config: object | None) -> bool:
+    if isinstance(config, dict):
+        privacy = config.get("privacy")
+        if isinstance(privacy, dict):
+            return bool(privacy.get("disable_redaction"))
+        return False
+    privacy = getattr(config, "privacy", None)
+    return bool(getattr(privacy, "disable_redaction", False))
+
+
+def _set_redaction_disabled(config: object | None, disabled: bool) -> None:
+    if isinstance(config, dict):
+        privacy = config.setdefault("privacy", {})
+        if isinstance(privacy, dict):
+            privacy["disable_redaction"] = disabled
+        return
+    privacy = getattr(config, "privacy", None)
+    if privacy is not None and hasattr(privacy, "disable_redaction"):
+        setattr(privacy, "disable_redaction", disabled)
+
+
+def _notifications_currently_enabled(config: object | None) -> bool:
+    if isinstance(config, dict):
+        notifications = config.get("notifications")
+        if isinstance(notifications, dict):
+            return bool(notifications.get("enabled"))
+        return False
+    notifications = getattr(config, "notifications", None)
+    return bool(getattr(notifications, "enabled", False))
+
+
+def _set_notifications_enabled(config: object | None, enabled: bool) -> None:
+    if isinstance(config, dict):
+        notifications = config.setdefault("notifications", {})
+        if isinstance(notifications, dict):
+            notifications["enabled"] = enabled
+        return
+    notifications = getattr(config, "notifications", None)
+    if notifications is not None and hasattr(notifications, "enabled"):
+        setattr(notifications, "enabled", enabled)
+
+
+def _audit_store(config: object | None) -> object | None:
+    if isinstance(config, dict):
+        audit_db = str(config.get("audit_db", "") or "")
+    else:
+        audit_db = str(getattr(config, "audit_db", "") or "")
+    if not audit_db or not Path(audit_db).exists():
+        return None
+    try:
+        from defenseclaw.db import Store
+
+        return Store(audit_db)
+    except Exception:  # noqa: BLE001 - panels render empty state when audit is unavailable.
+        return None
+
+
+def _overview_config(config: object | None) -> OverviewConfig | None:
+    if config is None:
+        return None
+    claw = getattr(config, "claw", None)
+    guardrail = getattr(config, "guardrail", None)
+    llm = getattr(config, "llm", None)
+    inspect_llm = getattr(config, "inspect_llm", None)
+    cisco = getattr(config, "cisco_ai_defense", None)
+    privacy = getattr(config, "privacy", None)
+    hilt = getattr(guardrail, "hilt", None)
+    return OverviewConfig(
+        data_dir=str(getattr(config, "data_dir", "") or ""),
+        environment=str(getattr(config, "environment", "") or ""),
+        policy_dir=str(getattr(config, "policy_dir", "") or ""),
+        claw_mode=str(getattr(claw, "mode", "") or "openclaw"),
+        guardrail_enabled=bool(getattr(guardrail, "enabled", False)),
+        guardrail_connector=str(getattr(guardrail, "connector", "") or ""),
+        guardrail_mode=str(getattr(guardrail, "mode", "") or "observe"),
+        guardrail_rule_pack_dir=str(getattr(guardrail, "rule_pack_dir", "") or ""),
+        guardrail_port=int(getattr(guardrail, "port", 0) or 0),
+        guardrail_model=str(getattr(guardrail, "model", "") or ""),
+        guardrail_strategy=str(getattr(guardrail, "strategy", "") or "default"),
+        guardrail_judge_enabled=bool(getattr(guardrail, "judge_enabled", False)),
+        guardrail_judge_model=str(getattr(guardrail, "judge_model", "") or ""),
+        hilt_enabled=bool(getattr(hilt, "enabled", False)),
+        hilt_min_severity=str(getattr(hilt, "min_severity", "") or ""),
+        privacy_disable_redaction=bool(getattr(privacy, "disable_redaction", False)),
+        llm_provider=str(getattr(llm, "provider", "") or ""),
+        llm_model=str(getattr(llm, "model", "") or ""),
+        inspect_llm_provider=str(getattr(inspect_llm, "provider", "") or ""),
+        inspect_llm_model=str(getattr(inspect_llm, "model", "") or ""),
+        cisco_ai_defense_endpoint=str(getattr(cisco, "endpoint", "") or ""),
+    )
+
+
+class _HandledAction:
+    def __init__(self, handled: bool, hint: str = "") -> None:
+        self.handled = handled
+        self.hint = hint
+
+
+def _menu_action(action: CatalogMenuAction) -> MenuAction:
+    return MenuAction(
+        action_id=action.key,
+        label=action.label,
+        description=action.description,
+        disabled=action.disabled,
+    )
+
+
+def _panel_key(event: events.Key) -> str:
+    if event.key == "space":
+        return "space"
+    if event.key == "enter":
+        return "enter"
+    if event.key == "escape":
+        return "escape"
+    if event.key in {"up", "down"}:
+        return event.key
+    if event.character:
+        if event.character in {"A", "C", "E", "G", "J", "N", "R", "S", "T", "V", "X"}:
+            return event.character
+        return event.character.lower()
+    return event.key
+
+
+def _catalog_key(key: str) -> str:
+    return "esc" if key == "escape" else key
+
+
+def _vim_key(key: str) -> str:
+    return "esc" if key == "escape" else key
+
+
+def _truncate_display(value: str, width: int) -> str:
+    if len(value) <= width:
+        return value
+    if width <= 3:
+        return value[:width]
+    return value[: width - 3] + "..."
+
+
+def _styled_cell(column: str, value: str) -> Text:
+    text = Text(value)
+    normalized = value.strip().lower()
+    column_key = column.strip().lower()
+    if column_key in {"state", "status", "active", "enabled"} or normalized in {
+        "active",
+        "allowed",
+        "blocked",
+        "clean",
+        "disabled",
+        "enabled",
+        "error",
+        "offline",
+        "rejected",
+        "running",
+        "stopped",
+        "unknown",
+        "warn",
+        "warning",
+    }:
+        text.stylize(state_color(value))
+        if normalized in {"running", "active", "enabled", "allowed", "blocked", "error", "stopped"}:
+            text.stylize("bold")
+    elif column_key == "severity" or normalized in {"critical", "high", "medium", "low", "info"}:
+        text.stylize(severity_color(value))
+        if normalized in {"critical", "high"}:
+            text.stylize("bold")
+    elif column_key in {"sel", "selected"} and value.strip():
+        text.stylize(TOKENS.accent_violet)
+        text.stylize("bold")
+    return text
+
+
+def _overview_state_line(name: str, state: str, detail: str) -> str:
+    normalized = state.strip().lower() or "unknown"
+    dot = "●" if normalized in {"running", "active", "enabled"} else "○"
+    color = state_color(normalized)
+    suffix = f" {detail}" if detail else ""
+    return f"  [{color}]{dot}[/] {name:<12} [{color}]{state or 'unknown'}[/]{suffix}"
+
+
+def _coerce_str(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _coerce_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subsystem_from_mapping(raw: Any) -> SubsystemHealth:
+    """Build a SubsystemHealth from a permissive dict payload.
+
+    The gateway's ``/health`` JSON sometimes returns ``null`` for a
+    subsystem when it hasn't started yet; we treat that as the default
+    empty state instead of raising so the Overview can render a
+    consistent table.
+    """
+
+    if not isinstance(raw, dict):
+        return SubsystemHealth()
+    details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+    return SubsystemHealth(
+        state=_coerce_str(raw.get("state")),
+        since=_coerce_str(raw.get("since")),
+        last_error=_coerce_str(raw.get("last_error") or raw.get("lastError")),
+        details=dict(details),
+    )
+
+
+def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
+    if not isinstance(raw, dict):
+        return None
+    return ConnectorHealth(
+        name=_coerce_str(raw.get("name")),
+        state=_coerce_str(raw.get("state")),
+        since=_coerce_str(raw.get("since")),
+        tool_inspection_mode=_coerce_str(
+            raw.get("tool_inspection_mode") or raw.get("toolInspectionMode")
+        ),
+        subprocess_policy=_coerce_str(
+            raw.get("subprocess_policy") or raw.get("subprocessPolicy")
+        ),
+        requests=_coerce_int(raw.get("requests")),
+        errors=_coerce_int(raw.get("errors")),
+        tool_inspections=_coerce_int(
+            raw.get("tool_inspections") or raw.get("toolInspections")
+        ),
+        tool_blocks=_coerce_int(raw.get("tool_blocks") or raw.get("toolBlocks")),
+        subprocess_blocks=_coerce_int(
+            raw.get("subprocess_blocks") or raw.get("subprocessBlocks")
+        ),
+    )
+
+
+def _health_snapshot_from_mapping(raw: Any) -> HealthSnapshot | None:
+    """Convert a ``/health`` JSON payload into a ``HealthSnapshot``.
+
+    Returns ``None`` when the response is unusable. The mapper is
+    deliberately tolerant of missing / camelCased fields so a gateway
+    that's slightly out of sync with the Python schema still feeds
+    *something* into the Overview instead of leaving every row as
+    ``unknown``.
+    """
+
+    if not isinstance(raw, dict):
+        return None
+    sandbox_raw = raw.get("sandbox")
+    sandbox = _subsystem_from_mapping(sandbox_raw) if isinstance(sandbox_raw, dict) else None
+    return HealthSnapshot(
+        started_at=_coerce_str(raw.get("started_at") or raw.get("startedAt")),
+        uptime_ms=_coerce_int(raw.get("uptime_ms") or raw.get("uptimeMs")),
+        gateway=_subsystem_from_mapping(raw.get("gateway")),
+        watcher=_subsystem_from_mapping(raw.get("watcher")),
+        api=_subsystem_from_mapping(raw.get("api")),
+        guardrail=_subsystem_from_mapping(raw.get("guardrail")),
+        telemetry=_subsystem_from_mapping(raw.get("telemetry")),
+        ai_discovery=_subsystem_from_mapping(raw.get("ai_discovery") or raw.get("aiDiscovery")),
+        sinks=_subsystem_from_mapping(raw.get("sinks")),
+        sandbox=sandbox,
+        connector=_connector_from_mapping(raw.get("connector")),
+    )
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(value: str) -> str:
+    return _ANSI_RE.sub("", value)
+
+
+def _format_elapsed(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, remaining = divmod(int(seconds), 60)
+    return f"{minutes}m{remaining:02d}s"
+
+
+def _truncate_for_strip(value: str, width: int) -> str:
+    limit = max(24, width - 38)
+    cleaned = value.replace("\n", " ").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(0, limit - 3)] + "..."
+
+
+def _derive_command_label(binary: str, args: tuple[str, ...]) -> str:
+    """Best-effort display label for a (binary, args) tuple.
+
+    Used when a caller doesn't supply ``display_name`` to ``_run_command``.
+    We trim the binary down to its basename and join the first two
+    non-flag args, which is enough for users to recognize what just ran
+    (e.g. ``defenseclaw scan all``).
+    """
+
+    head = Path(binary).name or binary or "command"
+    parts = [head]
+    for arg in args:
+        if arg.startswith("-"):
+            continue
+        parts.append(arg)
+        if len(parts) >= 3:
+            break
+    return " ".join(parts)
+
+
+def _severity_breakdown_markup(critical: int, high: int, medium: int, low: int) -> str:
+    """Render a compact ``C0 H3 M5 L2`` breakdown in colored markup.
+
+    Used in metric-tile detail rows so users can see severity context at
+    a glance without opening the Alerts panel. Zero counts are dimmed so
+    only non-zero values draw the eye.
+    """
+
+    def cell(letter: str, count: int, accent: str) -> str:
+        if count <= 0:
+            return f"[{TOKENS.text_muted}]{letter}0[/]"
+        return f"[{accent} bold]{letter}{count}[/]"
+
+    return " ".join(
+        (
+            cell("C", critical, TOKENS.accent_red),
+            cell("H", high, TOKENS.accent_orange),
+            cell("M", medium, TOKENS.accent_amber),
+            cell("L", low, TOKENS.accent_blue),
+        )
+    )
+
+
+def _metric_trend(value: int, *, invert: bool = False) -> tuple[float, ...]:
+    bounded = max(0, min(value, 100))
+    if bounded == 0:
+        return (2, 1, 3, 2, 1) if invert else (0, 0, 0, 0, 0)
+    steps = (0.2, 0.35, 0.5, 0.7, 1.0)
+    return tuple(max(1.0, bounded * step) for step in steps)
+
+
+def _policy_posture(cfg: OverviewConfig | None) -> str:
+    if cfg is None:
+        return "unknown"
+    mode = cfg.guardrail_mode or "observe"
+    scanner = cfg.guardrail_strategy or "default"
+    if mode == "action":
+        return f"action: block CRIT, alert MED+ ({scanner})"
+    return f"balanced: block CRIT, alert MED+ ({scanner})"
+
+
+def _enforcement_label(cfg: OverviewConfig | None) -> str:
+    if cfg is None:
+        return "not configured"
+    connector = cfg.guardrail_connector or cfg.claw_mode or "openclaw"
+    mode = cfg.guardrail_mode or "observe"
+    if connector in {"openclaw", "zeptoclaw"}:
+        return f"{connector} proxy guardrail ({mode})"
+    return f"{connector} hook observability ({mode})"
+
+
+def _cycle_value(current: str, options: tuple[str, ...], delta: int) -> str:
+    if not options:
+        return current
+    try:
+        index = options.index(current)
+    except ValueError:
+        index = 0
+    return options[(index + delta) % len(options)]
+
+
+def _clamp_int(value: int, lower: int, upper: int) -> int:
+    if upper < lower:
+        return lower
+    return max(lower, min(value, upper))
+
+
+def _config_display_value(field: Any) -> str:
+    value = str(getattr(field, "value", "") or "")
+    if getattr(field, "kind", "") == "password":
+        return "(empty)" if not value else "****"
+    return value
+
+
+def _validation_label(field: Any) -> str:
+    result = validate_config_field(field)
+    if result.message:
+        return f"{result.severity}: {result.message}"
+    return result.severity

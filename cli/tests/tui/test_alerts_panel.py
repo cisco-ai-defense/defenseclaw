@@ -1,0 +1,280 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Alerts panel parity tests."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from defenseclaw.tui.panels.alerts import AlertEvent, AlertFinding, AlertsPanelModel, humanize_alert_details
+from defenseclaw.tui.services.gateway_events import count_recent_silent_bypass, load_gateway_egress
+
+
+def test_humanize_alert_details_fast_paths_and_host_port() -> None:
+    assert humanize_alert_details("") == ""
+    assert humanize_alert_details("scanner failed on upload") == "scanner failed on upload"
+    assert humanize_alert_details("host=api.example.com port=443 mode=strict") == "api.example.com:443 strict"
+    assert humanize_alert_details("port=443 mode=strict") == ":443 strict"
+    assert humanize_alert_details("host=api.example.com mode=strict") == "api.example.com strict"
+
+
+def test_humanize_alert_details_model_noise_and_duplicate_stability() -> None:
+    assert humanize_alert_details("model=openai/gpt-4o-mini mode=strict") == "strict gpt-4o-mini"
+    assert humanize_alert_details("model=openai/") == "openai/"
+    assert humanize_alert_details("host=h port=1 mode=x scanner=skill findings=3 max_severity=HIGH") == "h:1 x"
+    assert humanize_alert_details("host=h port=1 extra=thing tail") == "h:1 extra=thing tail"
+    assert humanize_alert_details("mode=first mode=second") == "first"
+
+
+def test_alerts_filter_selection_and_counts() -> None:
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one", details="token"),
+            AlertEvent(id="a2", severity="LOW", action="proxy", target="gateway", details="safe"),
+        ]
+    )
+
+    assert model.severity_counts()["HIGH"] == 1
+    model.set_severity_filter("HIGH")
+    assert [row.event.id for row in model.filtered] == ["a1"]
+    model.toggle_select()
+    assert model.selected_ids == {"a1"}
+    model.select_all()
+    assert model.selected_ids == {"a1"}
+    model.deselect_all()
+    assert model.selected_ids == set()
+
+    action = model.handle_key("2")
+    assert action.filter_change is not None
+    assert action.filter_change.panel == "alerts"
+    assert action.filter_change.filter_type == "severity"
+    assert action.filter_change.new == "CRITICAL"
+
+
+def test_alerts_slash_search_and_exact_severity_filter() -> None:
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one", details="token"),
+            AlertEvent(id="a2", severity="MEDIUM", action="proxy", target="gateway", details="rate limit"),
+        ]
+    )
+
+    assert model.handle_key("/").handled is True
+    assert model.filtering is True
+    for char in "token":
+        model.handle_key(char)
+    assert [row.event.id for row in model.filtered] == ["a1"]
+    assert model.active_filter_label() == "search 'token'"
+
+    assert model.handle_key("enter").handled is True
+    assert model.filtering is False
+    model.set_severity_filter_exact("MEDIUM")
+    assert [row.event.id for row in model.filtered] == []
+    assert model.active_filter_label() == "Medium, search 'token'"
+
+    assert model.handle_key("escape").handled is True
+    assert model.filter_text == ""
+    assert model.filtered
+
+
+def test_alerts_refresh_ingests_scan_finding_from_gateway_jsonl(tmp_path) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan_finding","severity":"HIGH",'
+            '"scan_finding":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
+            '"rule_id":"R9","line_number":3,"title":"x"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.refresh_gateway_scans()
+    model.expanded.add("sid1")
+    model.apply_filter()
+
+    assert any(row.kind == "scan_finding" and row.event.action == "scan-finding" for row in model.filtered)
+    finding = next(row for row in model.filtered if row.kind == "scan_finding")
+    assert "R9" in finding.event.details
+    assert "line=3" in finding.event.details
+
+
+def test_alerts_refresh_ingests_gateway_egress_and_filters_warning_as_medium(tmp_path) -> None:
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(minutes=10)
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"'
+            + now.isoformat().replace("+00:00", "Z")
+            + '","event_type":"egress","egress":{"target_host":"api.x.test",'
+            '"target_path":"/v1/messages","body_shape":"messages","looks_like_llm":true,'
+            '"branch":"shape","decision":"allow","reason":"shape-match","source":"ts"}}\n'
+            '{"ts":"'
+            + old.isoformat().replace("+00:00", "Z")
+            + '","event_type":"egress","egress":{"target_host":"api.known.test",'
+            '"target_path":"/v1/messages","body_shape":"messages","looks_like_llm":true,'
+            '"branch":"known","decision":"allow","source":"ts"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.refresh_gateway_scans()
+
+    egress_rows = [row for row in model.filtered if row.kind == "egress"]
+    assert len(egress_rows) == 2
+    warning = next(row for row in egress_rows if row.event.target == "api.x.test")
+    assert warning.event.severity == "WARNING"
+    assert warning.event.action == "egress"
+    assert "looks_like_llm=true" in warning.event.details
+    assert model.severity_counts()["MEDIUM"] == 1
+
+    model.set_severity_filter_exact("MEDIUM")
+    assert [row.event.target for row in model.filtered] == ["api.x.test"]
+    table_row = model.data_table_row_models()[0]
+    assert table_row.selectable is False
+    assert table_row.opens_detail is True
+    assert table_row.key.startswith("egress:gw:egress:")
+
+    egress = load_gateway_egress(tmp_path / "gateway.jsonl")
+    assert count_recent_silent_bypass(egress, window_seconds=300) == 1
+
+
+def test_alerts_enter_expands_scan_parent_and_toggles_detail_for_child(tmp_path) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
+            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
+            '"verdict":"warn","duration_ms":42,"severity_max":"HIGH"}}\n'
+            '{"ts":"2026-04-20T12:00:01Z","event_type":"scan_finding","severity":"HIGH",'
+            '"scan_finding":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
+            '"rule_id":"R9","line_number":3,"title":"x"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.refresh_gateway_scans()
+    model.toggle_expand_or_detail()
+    assert "sid1" in model.expanded
+
+    child_index = next(index for index, row in enumerate(model.filtered) if row.kind == "scan_finding")
+    model.set_cursor(child_index)
+    model.toggle_expand_or_detail()
+    assert model.detail_open is True
+
+
+def test_alerts_expanded_findings_stay_under_scan_parent(tmp_path) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
+            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"old.py",'
+            '"verdict":"warn","duration_ms":42,"severity_max":"HIGH"}}\n'
+            '{"ts":"2026-04-20T12:00:05Z","event_type":"scan_finding","severity":"HIGH",'
+            '"scan_finding":{"scan_id":"sid1","scanner":"skill-scanner","target":"old.py",'
+            '"rule_id":"R9","line_number":3,"title":"x"}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.set_events([AlertEvent(id="newer", severity="LOW", action="proxy", target="gateway")])
+    model.refresh_gateway_scans()
+    model.expanded.add("sid1")
+    model.apply_filter()
+
+    rows = [(row.kind, row.scan_id or row.event.id) for row in model.filtered]
+    assert ("scan", "sid1") in rows
+    parent_index = rows.index(("scan", "sid1"))
+    assert rows[parent_index + 1] == ("scan_finding", "sid1")
+
+
+def test_alerts_detail_pairs_copy_text_and_store_enrichment() -> None:
+    selected = AlertEvent(
+        id="a1",
+        severity="HIGH",
+        action="proxy",
+        target="gateway",
+        details="host=api port=443 mode=strict model=openai/gpt-4o",
+        run_id="run-1",
+        trace_id="trace-1",
+        request_id="req-1",
+        session_id="sess-1",
+    )
+
+    class FakeStore:
+        def list_findings_by_run_id(self, run_id: str) -> list[AlertFinding]:
+            assert run_id == "run-1"
+            return [
+                AlertFinding(
+                    id="f1",
+                    scan_id="run-1",
+                    severity="HIGH",
+                    title="Hardcoded credential",
+                    location="main.py:42",
+                    remediation="Load from keychain",
+                    scanner="skill-scanner",
+                )
+            ]
+
+        def list_events_by_target(self, target: str, limit: int) -> list[AlertEvent]:
+            assert target == "gateway"
+            assert limit == 10
+            return [
+                selected,
+                AlertEvent(id="a0", severity="LOW", action="allow", target="gateway"),
+            ]
+
+    model = AlertsPanelModel(store=FakeStore())
+    model.set_events([selected])
+    model.toggle_expand_or_detail()
+
+    pairs = dict(model.detail_pairs())
+    assert pairs["Summary"] == "api:443 strict gpt-4o"
+    assert pairs["Details"] == "host=api port=443 mode=strict model=openai/gpt-4o"
+    assert pairs["Run ID"] == "run-1"
+    assert pairs["Trace ID"] == "trace-1"
+    assert pairs["Request ID"] == "req-1"
+    assert "Hardcoded credential" in pairs["Finding 1"]
+    assert pairs["Remediation 1"] == "Load from keychain"
+    assert "allow" in pairs["History 1"]
+
+    copied = model.handle_key("y")
+    assert copied.copy_text
+    assert "Severity: HIGH" in copied.copy_text
+    assert "Summary: api:443 strict gpt-4o" in copied.copy_text
+    assert "Request ID: req-1" in copied.copy_text
+
+
+def test_alerts_table_metadata_marks_scan_rows_non_selectable(tmp_path) -> None:
+    (tmp_path / "gateway.jsonl").write_text(
+        (
+            '{"ts":"2026-04-20T12:00:00Z","event_type":"scan","severity":"HIGH",'
+            '"scan":{"scan_id":"sid1","scanner":"skill-scanner","target":"t.py",'
+            '"verdict":"warn","duration_ms":42,"severity_max":"HIGH",'
+            '"total_count":2,"counts":{"HIGH":1,"LOW":1}}}\n'
+        ),
+        encoding="utf-8",
+    )
+    model = AlertsPanelModel(tmp_path)
+    model.set_events([AlertEvent(id="a1", severity="LOW", action="proxy", target="gateway")])
+    model.refresh_gateway_scans()
+
+    table_rows = model.data_table_row_models()
+    audit_row = next(row for row in table_rows if row.kind == "audit")
+    scan_row = next(row for row in table_rows if row.kind == "scan")
+
+    assert audit_row.key == "audit:a1"
+    assert audit_row.selectable is True
+    assert audit_row.opens_detail is True
+    assert scan_row.key == "scan:sid1"
+    assert scan_row.selectable is False
+    assert scan_row.expands is True
+    scan_details = next(row.event.details for row in model.filtered if row.kind == "scan")
+    assert "total=2" in scan_details
+    assert "counts=HIGH=1,LOW=1" in scan_details
