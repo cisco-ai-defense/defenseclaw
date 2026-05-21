@@ -17,6 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from defenseclaw.tui.panels.audit import (
+    parse_kv_details,
+    structured_detail_rows,
+)
 from defenseclaw.tui.services.gateway_events import (
     EgressEvent,
     ScanBlock,
@@ -538,13 +542,15 @@ class AlertsPanelModel:
                 marker = "+" if row.scan_id not in self.expanded else "-"
             if row.kind == "scan_finding":
                 marker = ">"
+            target_cell = _alert_target_label(event)
+            details_cell = _alert_details_label(event)
             cells = (
                 marker,
                 event.severity,
                 event.timestamp.strftime("%b %d %H:%M"),
                 event.action,
-                _truncate(event.target, 42),
-                _truncate(humanize_alert_details(event.details) or event.details, 58),
+                target_cell,
+                details_cell,
             )
             rows.append(
                 AlertTableRow(
@@ -577,16 +583,25 @@ class AlertsPanelModel:
         if info is None:
             return ""
         event = info.event
-        lines = [
-            f"[bold #22D3EE]{event.severity} {event.action}[/]",
-            f"Target: {event.target}",
-            f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
-        ]
-        if event.details:
-            human = humanize_alert_details(event.details)
-            if human and human != event.details:
-                lines.append(f"Summary: {human}")
-            lines.append(f"Details: {event.details}")
+        # Connector-hook rows are nearly identical without enrichment
+        # (every row says ``INFO connector-hook`` with the same
+        # ``preToolUse``/``postToolUse`` target), so we promote the
+        # connector + hook phase into the title and split the kv
+        # ``details`` blob into discrete labelled lines. Other alert
+        # kinds keep the legacy two-line Summary/Details rendering.
+        if _is_hook_event(event):
+            lines = _hook_detail_lines(event)
+        else:
+            lines = [
+                f"[bold #22D3EE]{event.severity} {event.action}[/]",
+                f"Target: {event.target}",
+                f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
+            ]
+            if event.details:
+                human = humanize_alert_details(event.details)
+                if human and human != event.details:
+                    lines.append(f"Summary: {human}")
+                lines.append(f"Details: {event.details}")
         if event.run_id:
             lines.append(f"RunID: {event.run_id}")
         if event.trace_id:
@@ -636,7 +651,15 @@ class AlertsPanelModel:
         )
 
     def detail_pairs(self) -> tuple[tuple[str, str], ...]:
-        """Return ordered detail rows for shared detail rendering."""
+        """Return ordered detail rows for shared detail rendering.
+
+        Connector-hook events expand the kv-shaped ``details`` blob
+        into discrete labelled rows (Connector, Decision, Enforcement
+        mode, Elapsed, …) the same way the Audit panel does. Other
+        kinds (scan, egress, generic audit) keep the legacy
+        ``Summary``/``Details`` rows so existing callers and tests
+        depending on those labels still work.
+        """
 
         info = self.get_detail_info()
         if info is None:
@@ -648,11 +671,18 @@ class AlertsPanelModel:
             ("Target", event.target),
             ("Timestamp", event.timestamp.isoformat()),
         ]
-        human = humanize_alert_details(event.details)
-        if human and human != event.details:
-            pairs.append(("Summary", human))
-        if event.details:
-            pairs.append(("Details", event.details))
+        if _is_hook_event(event):
+            structured = structured_detail_rows(event.details)
+            if structured:
+                pairs.extend(structured)
+            elif event.details:
+                pairs.append(("Details", event.details))
+        else:
+            human = humanize_alert_details(event.details)
+            if human and human != event.details:
+                pairs.append(("Summary", human))
+            if event.details:
+                pairs.append(("Details", event.details))
         for label, value in (
             ("Run ID", event.run_id),
             ("Trace ID", event.trace_id),
@@ -692,11 +722,19 @@ class AlertsPanelModel:
             f"Target: {event.target}",
             f"Timestamp: {event.timestamp.isoformat()}",
         ]
-        human = humanize_alert_details(event.details)
-        if human and human != event.details:
-            lines.append(f"Summary: {human}")
-        if event.details:
-            lines.append(f"Details: {event.details}")
+        if _is_hook_event(event):
+            structured = structured_detail_rows(event.details)
+            if structured:
+                for label, value in structured:
+                    lines.append(f"{label}: {value}")
+            elif event.details:
+                lines.append(f"Details: {event.details}")
+        else:
+            human = humanize_alert_details(event.details)
+            if human and human != event.details:
+                lines.append(f"Summary: {human}")
+            if event.details:
+                lines.append(f"Details: {event.details}")
         for label, value in (
             ("Run ID", event.run_id),
             ("Trace ID", event.trace_id),
@@ -940,3 +978,97 @@ def _event_attr(event: object, *names: str) -> object:
         if isinstance(event, dict) and name in event:
             return event[name]
     return ""
+
+
+def _is_hook_event(event: AlertEvent) -> bool:
+    return event.action == "connector-hook"
+
+
+def _alert_target_label(event: AlertEvent) -> str:
+    """Pretty TARGET cell text.
+
+    For connector-hook rows the audit ``target`` field holds only the
+    hook phase (``preToolUse``); the connector name lives buried in
+    the kv ``details`` blob. Surfacing both as
+    ``claudecode · preToolUse`` makes the row self-describing without
+    forcing the user into the detail pane. Other alert kinds keep the
+    existing 42-char target truncation so the proxy/scan/egress
+    layout is untouched.
+    """
+
+    if _is_hook_event(event):
+        parsed = parse_kv_details(event.details)
+        connector = parsed.get("connector", "")
+        phase = event.target or ""
+        if connector and phase:
+            return _truncate(f"{connector} · {phase}", 42)
+        if connector:
+            return _truncate(connector, 42)
+        if phase:
+            return _truncate(phase, 42)
+    return _truncate(event.target, 42)
+
+
+def _alert_details_label(event: AlertEvent) -> str:
+    """Pretty DETAILS cell text.
+
+    Connector-hook details look like
+    ``connector=claudecode action=allow severity=NONE mode=observe …``;
+    truncating that to 58 chars yields a useless prefix. Pull the
+    high-signal pieces (decision, severity if elevated, elapsed) into
+    a compact ``allow · 320ms`` summary instead. All other kinds run
+    through the legacy host/port/mode humanizer so the existing
+    proxy/scan/egress rendering and its tests still pass.
+    """
+
+    if _is_hook_event(event):
+        parsed = parse_kv_details(event.details)
+        decision = parsed.get("action", "") or parsed.get("decision", "")
+        severity = parsed.get("severity", "")
+        elapsed = parsed.get("elapsed", "") or parsed.get("duration_ms", "")
+        parts: list[str] = []
+        if decision:
+            parts.append(decision)
+        if severity and severity.upper() not in {"", "NONE"}:
+            parts.append(severity.upper())
+        if elapsed:
+            parts.append(elapsed)
+        if parts:
+            return _truncate(" · ".join(parts), 58)
+    return _truncate(humanize_alert_details(event.details) or event.details, 58)
+
+
+def _hook_detail_lines(event: AlertEvent) -> list[str]:
+    """Hook-aware top section of the detail pane.
+
+    Replaces the generic ``INFO connector-hook`` title with
+    ``CLAUDECODE preToolUse`` and renders each kv field on its own
+    line via :func:`structured_detail_rows`. Empty details fall back
+    to the legacy two-line title so we never silently drop the raw
+    body.
+    """
+
+    parsed = parse_kv_details(event.details)
+    connector = parsed.get("connector", "")
+    phase = event.target or ""
+    if connector and phase:
+        title = f"[bold #22D3EE]{connector} {phase}[/]"
+    elif connector:
+        title = f"[bold #22D3EE]{connector} hook[/]"
+    elif phase:
+        title = f"[bold #22D3EE]{phase}[/]"
+    else:
+        title = f"[bold #22D3EE]{event.severity} {event.action}[/]"
+    lines = [
+        title,
+        f"Time: {event.timestamp.strftime('%Y-%m-%d %H:%M:%S')}",
+    ]
+    if event.severity and event.severity.upper() not in {"", "NONE", "INFO"}:
+        lines.append(f"Severity: {event.severity}")
+    rows = structured_detail_rows(event.details)
+    if rows:
+        for label, value in rows:
+            lines.append(f"{label}: {value}")
+    elif event.details:
+        lines.append(f"Details: {event.details}")
+    return lines
