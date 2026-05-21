@@ -89,6 +89,7 @@ from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
+from defenseclaw.tui.screens.quick_start import QuickStartScreen
 from defenseclaw.tui.screens.redaction import RedactionToggleScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
     SetupResourceEditorScreen,
@@ -263,6 +264,18 @@ class DefenseClawTUI(App[None]):
 
     .panel-controls.hidden {
         display: none;
+    }
+
+    /* Catalog filter Input widgets need an explicit narrow width or
+       they greedily consume the whole row and push every action
+       button off the right edge. 24 cells fits "Filter MCPs by name"
+       comfortably while leaving room for the seven-to-ten button
+       chips that follow. */
+    .panel-controls Input {
+        width: 24;
+        min-width: 16;
+        height: 1;
+        margin: 0 1 0 0;
     }
 
     /* Stdin pipe shown only while a command is actually running so
@@ -601,6 +614,18 @@ class DefenseClawTUI(App[None]):
         self._table_columns: tuple[str, ...] = ()
         self._table_rows: tuple[tuple[str, ...], ...] = ()
         self._periodic_refresh_running = False
+        # Fingerprints of the last payload pushed into the body and
+        # detail ``Static`` widgets. Textual's ``Static.update`` forces
+        # a layout pass even when the content is byte-for-byte
+        # identical, so without these guards the 2 s
+        # ``_periodic_refresh`` ticker tore the panel body down and
+        # rebuilt it every tick — operators saw it as the panel
+        # flickering and "switching between Activity and Logs". A
+        # ``None`` sentinel means "force a repaint next render"
+        # (used after the overview panel, whose renderable is a fresh
+        # Rich ``Group`` we cannot fingerprint reliably).
+        self._last_body_signature: tuple[object, ...] | None = None
+        self._last_detail_signature: tuple[object, ...] | None = None
         # Command-progress strip state machine. The strip is the single
         # source of truth for command lifecycle messaging — what ran,
         # what it's doing, and what to do next. ``idle`` means hidden;
@@ -904,6 +929,201 @@ class DefenseClawTUI(App[None]):
                         id="ai-export",
                         compact=True,
                         tooltip="Save the AI usage snapshot to disk",
+                    )
+                # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
+                # All four panels share ``CatalogListModel`` semantics, so the
+                # bars below all map button-id → key → ``handle_key()`` and
+                # route through ``_apply_catalog_action``. Each bar carries a
+                # visible filter ``Input`` so mouse-only operators get the
+                # same ``/ filter`` reach the keyboard flow has. ``j/k``
+                # navigation is omitted from the buttons because the
+                # underlying ``DataTable`` already handles row clicks +
+                # scroll; the bar focuses on the actions that have no
+                # equivalent mouse affordance (Scan, Block, Allow, etc.).
+                with Horizontal(id="skills-controls", classes="panel-controls hidden"):
+                    yield Input(
+                        placeholder="Filter skills…",
+                        id="skills-filter",
+                        compact=True,
+                    )
+                    yield Button(
+                        "Clear",
+                        id="skills-filter-clear",
+                        compact=True,
+                        tooltip="Clear the active filter (same as Esc on the filter prompt)",
+                    )
+                    yield Button(
+                        "Refresh",
+                        id="skills-refresh",
+                        compact=True,
+                        tooltip="Reload skills via `defenseclaw skill list --json` (r)",
+                    )
+                    yield Button(
+                        "Detail",
+                        id="skills-detail",
+                        compact=True,
+                        tooltip="Open detail for the highlighted row (Enter)",
+                    )
+                    yield Button(
+                        "Menu",
+                        id="skills-menu",
+                        compact=True,
+                        tooltip="Open the per-row action menu (o)",
+                    )
+                    yield Button(
+                        "Scan",
+                        id="skills-scan",
+                        compact=True,
+                        tooltip="Run `defenseclaw skill scan <name>` for the highlighted skill (s)",
+                    )
+                    yield Button(
+                        "Block",
+                        id="skills-block",
+                        compact=True,
+                        variant="error",
+                        tooltip="Block the highlighted skill (b)",
+                    )
+                    yield Button(
+                        "Allow",
+                        id="skills-allow",
+                        compact=True,
+                        variant="success",
+                        tooltip="Allow the highlighted skill (a)",
+                    )
+                    yield Button(
+                        "Registry",
+                        id="skills-reveal",
+                        compact=True,
+                        tooltip="Jump to this skill's entry on the Registries panel (R)",
+                    )
+                with Horizontal(id="mcps-controls", classes="panel-controls hidden"):
+                    yield Input(
+                        placeholder="Filter MCPs…",
+                        id="mcps-filter",
+                        compact=True,
+                    )
+                    yield Button(
+                        "Clear",
+                        id="mcps-filter-clear",
+                        compact=True,
+                        tooltip="Clear the active filter",
+                    )
+                    yield Button(
+                        "Refresh",
+                        id="mcps-refresh",
+                        compact=True,
+                        tooltip="Reload MCPs (r)",
+                    )
+                    yield Button(
+                        "Detail",
+                        id="mcps-detail",
+                        compact=True,
+                        tooltip="Open detail for the highlighted row (Enter)",
+                    )
+                    yield Button(
+                        "Menu",
+                        id="mcps-menu",
+                        compact=True,
+                        tooltip="Open the per-row action menu (o)",
+                    )
+                    yield Button(
+                        "Scan",
+                        id="mcps-scan",
+                        compact=True,
+                        tooltip="Scan the highlighted MCP (s)",
+                    )
+                    yield Button(
+                        "Block",
+                        id="mcps-block",
+                        compact=True,
+                        variant="error",
+                        tooltip="Block the highlighted MCP (b)",
+                    )
+                    yield Button(
+                        "Allow",
+                        id="mcps-allow",
+                        compact=True,
+                        variant="success",
+                        tooltip="Allow the highlighted MCP (a)",
+                    )
+                    yield Button(
+                        "Add",
+                        id="mcps-add",
+                        compact=True,
+                        variant="primary",
+                        tooltip="Open the `mcp set` form to add a new server (n)",
+                    )
+                    yield Button(
+                        "Registry",
+                        id="mcps-reveal",
+                        compact=True,
+                        tooltip="Jump to this MCP's entry on the Registries panel (R)",
+                    )
+                with Horizontal(id="plugins-controls", classes="panel-controls hidden"):
+                    yield Input(
+                        placeholder="Filter plugins…",
+                        id="plugins-filter",
+                        compact=True,
+                    )
+                    yield Button(
+                        "Clear",
+                        id="plugins-filter-clear",
+                        compact=True,
+                        tooltip="Clear the active filter",
+                    )
+                    yield Button(
+                        "Refresh",
+                        id="plugins-refresh",
+                        compact=True,
+                        tooltip="Reload plugins via `defenseclaw plugin list --json` (r)",
+                    )
+                    yield Button(
+                        "Detail",
+                        id="plugins-detail",
+                        compact=True,
+                        tooltip="Open detail for the highlighted row (Enter)",
+                    )
+                    yield Button(
+                        "Menu",
+                        id="plugins-menu",
+                        compact=True,
+                        tooltip="Open the per-row action menu (o)",
+                    )
+                    yield Button(
+                        "Scan",
+                        id="plugins-scan",
+                        compact=True,
+                        tooltip="Scan the highlighted plugin (s)",
+                    )
+                with Horizontal(id="tools-controls", classes="panel-controls hidden"):
+                    yield Input(
+                        placeholder="Filter tools…",
+                        id="tools-filter",
+                        compact=True,
+                    )
+                    yield Button(
+                        "Clear",
+                        id="tools-filter-clear",
+                        compact=True,
+                        tooltip="Clear the active filter",
+                    )
+                    yield Button(
+                        "Refresh",
+                        id="tools-refresh",
+                        compact=True,
+                        tooltip="Reload tools from the audit store (r)",
+                    )
+                    yield Button(
+                        "Detail",
+                        id="tools-detail",
+                        compact=True,
+                        tooltip="Open detail for the highlighted row (Enter)",
+                    )
+                    yield Button(
+                        "Menu",
+                        id="tools-menu",
+                        compact=True,
+                        tooltip="Open the per-row action menu (o)",
                     )
                 yield DataTable(
                     id="panel-table",
@@ -1377,6 +1597,27 @@ class DefenseClawTUI(App[None]):
             event.stop()
             self._handle_ai_control(button_id)
             return
+        # All four catalog panels share ``CatalogListModel`` and the
+        # ``_apply_catalog_action`` dispatcher, so the button-id →
+        # handle_key mapping is uniform. Routing each prefix into its
+        # own dispatcher keeps the per-panel intent clear (e.g. mcps
+        # has an extra "Add server" key that the others don't).
+        if button_id.startswith("skills-"):
+            event.stop()
+            self._handle_catalog_control("skills", button_id)
+            return
+        if button_id.startswith("mcps-"):
+            event.stop()
+            self._handle_catalog_control("mcps", button_id)
+            return
+        if button_id.startswith("plugins-"):
+            event.stop()
+            self._handle_catalog_control("plugins", button_id)
+            return
+        if button_id.startswith("tools-"):
+            event.stop()
+            self._handle_catalog_control("tools", button_id)
+            return
 
     def action_local_close(self) -> None:
         command = self.query_one("#command-input", Input)
@@ -1585,6 +1826,27 @@ class DefenseClawTUI(App[None]):
         if command.has_class("open"):
             self._render_command_palette(event.value)
             command.focus()
+
+    # Catalog filter Input widgets — keep them all in one place so the
+    # pattern (live filter on every keystroke, no Enter required) is
+    # uniform across Skills / MCPs / Plugins / Tools. Each handler is a
+    # one-line shim because all the panel-specific work lives in
+    # ``_on_catalog_filter_input_changed``.
+    @on(Input.Changed, "#skills-filter")
+    def _on_skills_filter_changed(self, event: Input.Changed) -> None:
+        self._on_catalog_filter_input_changed("skills", event.value)
+
+    @on(Input.Changed, "#mcps-filter")
+    def _on_mcps_filter_changed(self, event: Input.Changed) -> None:
+        self._on_catalog_filter_input_changed("mcps", event.value)
+
+    @on(Input.Changed, "#plugins-filter")
+    def _on_plugins_filter_changed(self, event: Input.Changed) -> None:
+        self._on_catalog_filter_input_changed("plugins", event.value)
+
+    @on(Input.Changed, "#tools-filter")
+    def _on_tools_filter_changed(self, event: Input.Changed) -> None:
+        self._on_catalog_filter_input_changed("tools", event.value)
 
     @on(DataTable.RowSelected, "#command-palette")
     def _on_command_palette_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -1914,8 +2176,28 @@ class DefenseClawTUI(App[None]):
         if self.active_panel == "overview" and not self.help_open:
             renderable = self._overview_renderable()
             body_widget.update(renderable)
+            # The overview renderable is a freshly composed Rich
+            # ``Group`` every call (banner + notices + service cards),
+            # so equality comparisons aren't reliable. Bust the cache
+            # so the next text-body panel always paints, and accept
+            # that overview itself paints every tick (cheap; no
+            # DataTable underneath it).
+            self._last_body_signature = None
         else:
-            body_widget.update(self._safe_body_renderable(self._body_text()))
+            text = self._body_text()
+            # Skip the layout-triggering ``Static.update`` when the body
+            # content is byte-for-byte unchanged. Logs panel bodies
+            # were the worst offender — 5000 lines of streaming text
+            # being re-encoded into a Rich ``Text`` and pushed into
+            # ``#body`` every 2 s tick is what operators saw as the
+            # panel flickering and "switching between Activity and
+            # Logs". The fingerprint includes ``help_open`` because
+            # toggling the help overlay swaps to a different body
+            # without changing ``active_panel``.
+            body_signature = (self.active_panel, self.help_open, text)
+            if body_signature != self._last_body_signature:
+                body_widget.update(self._safe_body_renderable(text))
+                self._last_body_signature = body_signature
         self._render_native_widgets()
         self._render_panel_controls()
         self._render_panel_table()
@@ -2268,6 +2550,16 @@ class DefenseClawTUI(App[None]):
         setup_wizard = self.query_one("#setup-wizard-controls", Horizontal)
         activity = self.query_one("#activity-controls", Horizontal)
         ai = self.query_one("#ai-controls", Horizontal)
+        # Catalog control bars — Skills/MCPs/Plugins/Tools are independent
+        # ``Horizontal`` containers (rather than one shared bar keyed on
+        # active_panel) so each panel can advertise the action keys it
+        # actually exposes — MCPs has "Add server", Tools omits Scan,
+        # etc. Visibility flips identically; per-button availability is
+        # handled in ``_sync_catalog_controls``.
+        skills = self.query_one("#skills-controls", Horizontal)
+        mcps = self.query_one("#mcps-controls", Horizontal)
+        plugins = self.query_one("#plugins-controls", Horizontal)
+        tools = self.query_one("#tools-controls", Horizontal)
         overview.set_class(self.active_panel != "overview" or self.help_open, "hidden")
         alerts.set_class(self.active_panel != "alerts" or self.help_open, "hidden")
         audit.set_class(self.active_panel != "audit" or self.help_open, "hidden")
@@ -2295,6 +2587,18 @@ class DefenseClawTUI(App[None]):
         )
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
+        skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
+        mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
+        # ``plugins`` is hidden when the connector doesn't expose
+        # plugins (Codex / Claude). The body shows an explanatory
+        # "openclaw-only" notice; the bar would just dangle.
+        plugins_visible = (
+            self.active_panel == "plugins"
+            and not self.help_open
+            and self.plugins_model.is_visible_for_connector()
+        )
+        plugins.set_class(not plugins_visible, "hidden")
+        tools.set_class(self.active_panel != "tools" or self.help_open, "hidden")
         # Stdin pipe is panel-scoped to Activity but command-state-scoped
         # to "executor is busy" — handle it after the per-panel sync so
         # the visibility check sees the freshest state.
@@ -2321,6 +2625,8 @@ class DefenseClawTUI(App[None]):
             self._sync_activity_controls()
         if self.active_panel == "ai" and not self.help_open:
             self._sync_ai_controls()
+        if self.active_panel in self.catalog_models and not self.help_open:
+            self._sync_catalog_controls(self.active_panel)
 
     def _sync_overview_controls(self) -> None:
         """Light up the click-first quick actions for the Overview panel.
@@ -2567,6 +2873,139 @@ class DefenseClawTUI(App[None]):
         self.query_one("#ai-open-detail", Button).disabled = self.ai_discovery_model.selected() is None
         # Export needs an actual snapshot.
         self.query_one("#ai-export", Button).disabled = snapshot is None
+
+    # Per-catalog-panel button-id → key map. Each catalog panel routes
+    # its action bar through ``handle_key`` so the click flow is
+    # byte-for-byte equivalent to the keystroke flow (preview gating,
+    # already-running guards, action-menu opening, etc. all share the
+    # same code path). Buttons that don't have a key equivalent
+    # (e.g. ``Detail`` opens a row instead of toggling the model's
+    # filter prompt) are routed through ``_apply_catalog_action`` as
+    # if they were the corresponding key. ``filter-clear`` is special-
+    # cased because it has no key shortcut — it directly calls
+    # ``CatalogListModel.clear_filter()``.
+    _CATALOG_BUTTON_KEYS: dict[str, dict[str, str]] = {
+        "skills": {
+            "refresh": "r",
+            "detail": "enter",
+            "menu": "o",
+            "scan": "s",
+            "block": "b",
+            "allow": "a",
+            "reveal": "R",
+        },
+        "mcps": {
+            "refresh": "r",
+            "detail": "enter",
+            "menu": "o",
+            "scan": "s",
+            "block": "b",
+            "allow": "a",
+            "add": "n",
+            "reveal": "R",
+        },
+        "plugins": {
+            "refresh": "r",
+            "detail": "enter",
+            "menu": "o",
+            "scan": "s",
+        },
+        "tools": {
+            "refresh": "r",
+            "detail": "enter",
+            "menu": "o",
+        },
+    }
+
+    def _handle_catalog_control(self, panel: str, button_id: str) -> None:
+        """Translate a catalog control-bar click into a model key dispatch.
+
+        Mirrors how ``_handle_logs_control`` works for the Logs panel —
+        the bar is just a click-first façade over the same
+        ``handle_key`` surface the keyboard uses, so any action a user
+        runs from the bar also lands in Activity, also obeys the
+        preview gate, and also rolls into Audit identically.
+        """
+
+        keys = self._CATALOG_BUTTON_KEYS.get(panel, {})
+        prefix = f"{panel}-"
+        suffix = button_id.removeprefix(prefix)
+        # "filter-clear" has no key shortcut on the catalog model — wipe
+        # the filter text directly so the body and table both repaint.
+        if suffix == "filter-clear":
+            model = self.catalog_models.get(panel)
+            if model is None:
+                return
+            model.clear_filter()
+            try:
+                self.query_one(f"#{panel}-filter", Input).value = ""
+            except NoMatches:
+                pass
+            self._set_status(f"{panel.title()} filter cleared.")
+            self._render_chrome()
+            return
+        key = keys.get(suffix)
+        if key is None:
+            return
+        model = self.catalog_models.get(panel)
+        if model is None:
+            return
+        action = model.handle_key(key)
+        self._apply_catalog_action(panel, action)
+
+    def _sync_catalog_controls(self, panel: str) -> None:
+        """Toggle catalog control-bar buttons to match panel state.
+
+        Buttons that require a highlighted row (``Detail``, ``Scan``,
+        ``Block``, ``Allow``, ``Reveal``) are greyed when the table is
+        empty so a click can't fall into a silent ``(no skill selected)``
+        no-op. The filter ``Clear`` button is greyed when no filter is
+        active so the bar honestly advertises "nothing to clear".
+        """
+
+        model = self.catalog_models.get(panel)
+        if model is None:
+            return
+        has_row = model.selected() is not None
+        has_filter = bool(model.filter_text)
+        # Common controls present on every catalog bar.
+        row_only_suffixes = ("detail", "menu", "scan", "block", "allow", "reveal")
+        for suffix in row_only_suffixes:
+            try:
+                button = self.query_one(f"#{panel}-{suffix}", Button)
+            except NoMatches:
+                continue
+            button.disabled = not has_row
+        # Filter-clear depends on whether a filter is set, not on row
+        # selection.
+        try:
+            self.query_one(f"#{panel}-filter-clear", Button).disabled = not has_filter
+        except NoMatches:
+            pass
+        # Keep the Input widget's value in sync with the model so an
+        # external mutation (e.g. ``/`` keyboard flow or a filter
+        # cleared programatically) shows up in the box.
+        try:
+            filter_input = self.query_one(f"#{panel}-filter", Input)
+        except NoMatches:
+            return
+        if filter_input.value != model.filter_text:
+            filter_input.value = model.filter_text
+
+    def _on_catalog_filter_input_changed(self, panel: str, value: str) -> None:
+        """Live-filter the catalog model as the user types in the Input.
+
+        We treat the Input as the canonical source of truth while it's
+        focused; the model's ``set_filter`` re-applies the filter and
+        re-clamps the cursor, which makes the body text + table reflect
+        the typed query without the operator pressing Enter.
+        """
+
+        model = self.catalog_models.get(panel)
+        if model is None:
+            return
+        model.set_filter(value)
+        self._render_chrome()
 
     def _set_button_active(self, selector: str, active: bool) -> None:
         try:
@@ -4690,18 +5129,28 @@ class DefenseClawTUI(App[None]):
         detail = self._detail_text()
         self.detail_text = detail
         if not detail:
-            panel.add_class("hidden")
-            panel.update("")
+            if not panel.has_class("hidden"):
+                panel.add_class("hidden")
+                panel.update("")
+            self._last_detail_signature = None
             return
         panel.remove_class("hidden")
-        # Detail strings can contain hostile-looking markup the same
-        # way bodies do — judge history rows prefix labels with
-        # ``[1] Timestamp`` and webhook summaries say
-        # ``[enabled] https://…`` — both of which Rich would try to
-        # parse as styles ``1`` / ``enabled`` and crash on render.
-        # Route every detail update through the same safety wrapper
-        # the body uses so a bogus span never tears down the TUI.
-        panel.update(self._safe_body_renderable(detail))
+        # Same idempotence guard as the body widget. Detail panes are
+        # rendered identically every tick when nothing changed (e.g.
+        # an alert row is selected and Activity is streaming); the
+        # ``Static.update`` was the visible flicker source.
+        detail_signature = (self.active_panel, detail)
+        if detail_signature != self._last_detail_signature:
+            # Detail strings can contain hostile-looking markup the
+            # same way bodies do — judge history rows prefix labels
+            # with ``[1] Timestamp`` and webhook summaries say
+            # ``[enabled] https://…`` — both of which Rich would try
+            # to parse as styles ``1`` / ``enabled`` and crash on
+            # render. Route every detail update through the same
+            # safety wrapper the body uses so a bogus span never
+            # tears down the TUI.
+            panel.update(self._safe_body_renderable(detail))
+            self._last_detail_signature = detail_signature
 
     def _detail_text(self) -> str:
         if self.active_panel == "alerts":
@@ -4747,13 +5196,18 @@ class DefenseClawTUI(App[None]):
         body_widget = self.query_one("#body", Static)
         if self.active_panel == "overview" and not self.help_open:
             body_widget.update(self._overview_renderable())
+            self._last_body_signature = None
         else:
             # Same defense-in-depth as ``_render_chrome`` — any panel's
             # body string can contain malformed markup (the audit
             # toolbar's ``[e] export`` was the canonical case) and we
             # must never let a single bad span crash the renderer
             # mid-frame and tear down the TUI.
-            body_widget.update(self._safe_body_renderable(self._body_text()))
+            text = self._body_text()
+            body_signature = (self.active_panel, self.help_open, text)
+            if body_signature != self._last_body_signature:
+                body_widget.update(self._safe_body_renderable(text))
+                self._last_body_signature = body_signature
         self._render_panel_controls()
         self._render_detail_panel()
 
@@ -4996,6 +5450,17 @@ class DefenseClawTUI(App[None]):
             self._set_status(action.hint)
         if action.reload_requested:
             self.policy_model.reload_from_disk()
+        if action.open_quick_start:
+            # Pushing modal screens is async - we cannot await inline
+            # because callers are sync key/click handlers. Run the
+            # ``push_screen_wait`` call inside a worker; the worker
+            # owns the post-dismiss save flow so the UI stays
+            # responsive while the operator interacts with the wizard.
+            self.run_worker(
+                self._launch_quick_start_wizard(),
+                exclusive=True,
+                thread=False,
+            )
         if action.intent is not None:
             intent = action.intent
             if intent.kind == "editor":
@@ -5008,6 +5473,46 @@ class DefenseClawTUI(App[None]):
         if status_message:
             self._set_status(status_message)
         return True
+
+    async def _launch_quick_start_wizard(self) -> None:
+        """Push :class:`QuickStartScreen`, write the resulting policy
+        YAML on Save, and refresh the policy list. ``None`` from
+        ``dismiss`` means the operator cancelled - we just clear the
+        status line and leave the panel untouched.
+        """
+
+        result = await self.push_screen_wait(QuickStartScreen())
+        if result is None:
+            self._set_status("Quick Start cancelled.")
+            return
+        try:
+            written = self._save_wizard_policy(result)
+        except (OSError, ValueError) as exc:
+            self._set_status(f"Quick Start save failed: {exc}")
+            return
+        self.policy_model.reload_from_disk()
+        self._render_chrome()
+        self._set_status(f"Saved policy to {written}.")
+
+    def _save_wizard_policy(self, policy: object) -> Path:
+        """Serialize a :class:`Policy` produced by the Quick Start
+        wizard to ``<policy_dir>/<name>.yaml``. Uses the gateway YAML
+        schema so the file is loadable by ``defenseclaw policy
+        activate`` without any post-processing.
+        """
+
+        from defenseclaw.tui.creator.emit import policy_to_gateway_yaml
+
+        policy_dir = self.policy_model.policy_dir
+        if policy_dir is None:
+            raise ValueError("policy_dir is not configured")
+        policy_dir.mkdir(parents=True, exist_ok=True)
+        name = (getattr(policy, "name", "") or "").strip()
+        if not name:
+            raise ValueError("policy name is required")
+        target = policy_dir / f"{name}.yaml"
+        target.write_text(policy_to_gateway_yaml(policy), encoding="utf-8")
+        return target
 
     def _apply_setup_action(self, action: SetupPanelAction) -> bool:
         if not action.handled:
