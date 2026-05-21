@@ -3632,7 +3632,14 @@ class DefenseClawTUI(App[None]):
             color = TOKENS.accent_red if notice.level == "error" else TOKENS.accent_amber
             if notice.level == "info":
                 color = TOKENS.accent_blue
-            notice_lines.append(f"[{color}][{notice.level.upper()}][/] {notice.message}")
+            # Escape ``notice.message``: notice strings are operator-
+            # facing prose (``press [g] to set up``) that may contain
+            # bracketed tokens. Without the escape Rich parses them as
+            # style tags and silently drops the bracketed text from
+            # the rendered overview body.
+            notice_lines.append(
+                f"[{color}][{notice.level.upper()}][/] {rich_escape(notice.message)}"
+            )
         if not notice_lines:
             notice_lines.append(f"[{TOKENS.accent_green}][OK][/] Runtime signals are quiet.")
 
