@@ -32,6 +32,7 @@ from defenseclaw import config as config_module
 from defenseclaw.tui.command_line import (
     CommandLineError,
     ParsedCommand,
+    infer_command_risk,
     parse_command_line,
     suggested_next_action,
 )
@@ -354,7 +355,7 @@ class DefenseClawTUI(App[None]):
     }
 
     #command-palette {
-        height: 9;
+        height: 14;
         margin: 0 1 1 1;
         border: round TOKEN_BORDER_ACTIVE;
         background: TOKEN_SURFACE_PANEL;
@@ -1395,15 +1396,33 @@ class DefenseClawTUI(App[None]):
         self._command_palette_values = [entry.tui_name for entry in matches]
         palette.remove_class("hidden")
         palette.clear(columns=True)
-        palette.add_columns("Command", "Category", "Description")
+        # New 4-column layout: command | cat/risk badge | argv preview
+        # | hint. Mirrors the Go TUI's palette so operators get the
+        # full "what would actually run" picture before pressing Enter.
+        palette.add_columns("Command", "Risk", "Would run", "Needs")
         for index, entry in enumerate(matches):
-            palette.add_row(entry.tui_name, entry.category, entry.description, key=str(index))
+            risk = infer_command_risk(entry.category, entry.cli_args)
+            badge = f"[{entry.category}/{risk}]"
+            preview = f"{entry.cli_binary} " + " ".join(entry.cli_args)
+            hint = entry.arg_hint if entry.needs_arg else ""
+            palette.add_row(
+                entry.tui_name,
+                badge,
+                preview,
+                hint,
+                key=str(index),
+            )
         if matches:
             palette.move_cursor(row=0, column=0, animate=False)
         else:
-            palette.add_row("No matching DefenseClaw command", "", "Keep typing or use raw defenseclaw ...")
+            palette.add_row(
+                "No matching DefenseClaw command",
+                "",
+                "",
+                "Keep typing or use raw defenseclaw ...",
+            )
 
-    def _palette_matches(self, query: str, *, limit: int = 9) -> tuple[CmdEntry, ...]:
+    def _palette_matches(self, query: str, *, limit: int = 12) -> tuple[CmdEntry, ...]:
         normalized = query.strip().lower()
         if normalized.startswith("defenseclaw "):
             normalized = normalized.removeprefix("defenseclaw ").strip()
@@ -1411,10 +1430,23 @@ class DefenseClawTUI(App[None]):
             normalized = normalized.removeprefix("defenseclaw-gateway ").strip()
         terms = tuple(term for term in normalized.split() if term)
         if not terms:
+            # Empty query → MRU first, then a small "starter pack" of
+            # high-value commands, then the registry tail. MRU lookup
+            # is best-effort: a missing palette_mru attribute (e.g. in
+            # tests that bypass the state store) falls back to the
+            # legacy hardcoded preferred set.
+            mru = tuple(getattr(self.state, "palette_mru", ()) or ())
             preferred = ("doctor", "status", "alerts", "scan skill --all", "setup codex", "keys list")
             by_name = {entry.tui_name: entry for entry in self._command_registry}
-            head = [by_name[name] for name in preferred if name in by_name]
-            return tuple((*head, *self._command_registry[: max(0, limit - len(head))]))[:limit]
+            seen: set[str] = set()
+            head: list[CmdEntry] = []
+            for name in (*mru, *preferred):
+                if name in seen or name not in by_name:
+                    continue
+                head.append(by_name[name])
+                seen.add(name)
+            tail = [entry for entry in self._command_registry if entry.tui_name not in seen]
+            return tuple((*head, *tail))[:limit]
 
         def score(entry: CmdEntry) -> tuple[int, int, str] | None:
             haystack = f"{entry.tui_name} {entry.description} {entry.category}".lower()
@@ -5729,6 +5761,17 @@ class DefenseClawTUI(App[None]):
         # them.
         if parsed.risk != "read-only" and self.active_panel != "activity":
             self.action_switch_panel("activity")
+        # Record the TUI alias in the palette MRU so the next time the
+        # operator opens the palette without a query, the things they
+        # actually use float to the top. Best-effort: persistence
+        # failures (read-only home, missing data dir) never block the
+        # actual command.
+        try:
+            self.state_store.record_command(parsed.display_name)
+            self.state = self.state_store.state
+            self.state_store.save()
+        except Exception:  # noqa: BLE001 - palette MRU is cosmetic
+            pass
         self.run_worker(
             self._run_command(parsed.binary, parsed.args, display_name=parsed.display_name),
             exclusive=False,
