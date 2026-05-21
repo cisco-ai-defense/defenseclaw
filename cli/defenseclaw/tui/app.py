@@ -1876,18 +1876,186 @@ class DefenseClawTUI(App[None]):
             return Text(content, no_wrap=False)
         return text
 
+    def _help_sections(self) -> list[tuple[str, list[tuple[str, str]]]]:
+        """Return the (section title, [(key, description), …]) layout
+        for the ``?`` help overlay.
+
+        Sections in display order:
+          1. Global — always-available shortcuts (panel switching,
+             command drawer, help toggle, quit).
+          2. Active panel — context-specific hints for the panel the
+             operator is currently looking at. Mirrors what would
+             otherwise live in a per-panel inline cheat sheet.
+          3. While command running — the small set of keys that work
+             only while ``executor.is_running`` is true (e.g. cancel,
+             yank output, save log). Showing them in a fixed slot
+             means operators don't have to remember which keys "wake
+             up" during a subprocess.
+        """
+
+        global_section: list[tuple[str, str]] = [
+            ("1-9 / 0 / T V R A", "Switch panel by hotkey"),
+            ("Tab / Shift+Tab", "Next / previous panel"),
+            (": or Ctrl+K", "Open command palette"),
+            ("Ctrl+P", "Fuzzy panel jumper"),
+            ("?", "Toggle this help overlay"),
+            ("Ctrl+C", "Cancel running command (or quit when idle)"),
+        ]
+
+        # Per-active-panel cheat sheets. Anything we don't have a
+        # tailored block for falls through to a "no extra shortcuts"
+        # placeholder so the overlay never goes blank on weird panels.
+        panel_sheets: dict[str, list[tuple[str, str]]] = {
+            "overview": [
+                ("s", "Scan all skills"),
+                ("d", "Run doctor"),
+                ("g", "Setup guardrail"),
+                ("m", "Switch connector mode"),
+                ("R", "Toggle redaction"),
+                ("p / i / l", "Jump to Policy / Inventory / Logs"),
+            ],
+            "alerts": [
+                ("j/k or Up/Down", "Navigate alerts"),
+                ("Enter", "Toggle detail pane"),
+                ("1-5", "Filter by severity (1=All 2=Crit 3=High 4=Med 5=Low)"),
+                ("Space", "Toggle select current alert"),
+                ("a / A or X", "Select all filtered / deselect all"),
+                ("x", "Acknowledge selected alerts"),
+                ("c / C", "Clear filtered / Clear ALL alerts"),
+                ("y", "Copy alert details to clipboard"),
+            ],
+            "skills": [
+                ("j/k or Up/Down", "Navigate items"),
+                ("/", "Filter"),
+                ("r", "Refresh"),
+                ("s / b / a", "Scan / block / allow selected"),
+                ("o", "Open action menu"),
+            ],
+            "mcps": [
+                ("j/k or Up/Down", "Navigate items"),
+                ("/", "Filter"),
+                ("r", "Refresh"),
+                ("s / b / a", "Scan / block / allow selected"),
+                ("o", "Open action menu"),
+            ],
+            "plugins": [
+                ("j/k or Up/Down", "Navigate items"),
+                ("/", "Filter"),
+                ("r", "Refresh"),
+                ("s / b / a", "Scan / block / allow selected"),
+            ],
+            "tools": [
+                ("j/k or Up/Down", "Navigate items"),
+                ("/", "Filter"),
+                ("r", "Refresh"),
+            ],
+            "inventory": [
+                ("j/k or Up/Down", "Navigate items"),
+                ("/", "Filter"),
+                ("r", "Refresh"),
+            ],
+            "policy": [
+                ("Tab / Shift+Tab", "Switch sub-tab"),
+                ("j/k or Up/Down", "Navigate items"),
+                ("Enter", "Activate pack / drill into rules"),
+                ("Esc", "Back from rule detail"),
+                ("d", "Delete suppression (Suppressions tab)"),
+                ("v / T / r", "Validate / test / reload (OPA tab)"),
+                ("t", "Toggle test files (OPA tab)"),
+            ],
+            "logs": [
+                ("Space", "Pause / resume auto-scroll"),
+                ("/", "Search"),
+                ("e", "Errors only"),
+                ("w", "Warnings+"),
+                ("R", "Toggle redaction"),
+                ("G / g", "Jump to end / start"),
+            ],
+            "audit": [
+                ("j/k or Up/Down", "Navigate entries"),
+                ("/", "Filter"),
+                ("e", "Export to JSON"),
+                ("Enter", "Open detail"),
+            ],
+            "activity": [
+                ("j/k or Up/Down", "Navigate entries"),
+                ("Enter", "Expand / collapse output"),
+                ("!", "Rerun last command"),
+                ("Y", "Copy selected output"),
+                ("Ctrl+S", "Save selected output to file"),
+            ],
+            "ai": [
+                ("j/k or Up/Down", "Navigate agents"),
+                ("r", "Refresh discovery"),
+                ("e", "Export snapshot"),
+            ],
+            "registries": [
+                ("j/k or Up/Down", "Navigate registries"),
+                ("r", "Refresh"),
+            ],
+            "setup": [
+                ("Enter", "Run wizard / step"),
+                ("r", "Refresh setup state"),
+            ],
+        }
+        active_keys = panel_sheets.get(
+            self.active_panel,
+            [("(no panel-specific shortcuts)", "")],
+        )
+        panel_label = next(
+            (label for name, _key, label in PANELS if name == self.active_panel),
+            self.active_panel.title(),
+        )
+
+        running_section: list[tuple[str, str]] = [
+            ("Ctrl+C", "Send SIGINT to the running subprocess"),
+            ("!", "Rerun the most recent command"),
+            ("Y", "Copy current output to clipboard"),
+            ("Ctrl+S", "Save current output to ~/.defenseclaw/tui/last-run.log"),
+            ("D", "Run defenseclaw doctor in the background"),
+        ]
+
+        return [
+            ("Global", global_section),
+            (f"Active panel — {panel_label}", active_keys),
+            ("While a command is running", running_section),
+        ]
+
+    def _render_help_body(self) -> str:
+        """Compose the ``?`` help overlay as Rich-markup text.
+
+        Keep the renderer separate from the data so the section list
+        can be unit-tested without spinning up the Textual app shell.
+        """
+
+        lines: list[str] = [
+            "[bold #22D3EE]DefenseClaw  Keybindings[/]",
+            "[#475569]" + ("─" * 48) + "[/]",
+            "",
+        ]
+        for title, entries in self._help_sections():
+            lines.append(f"[bold #FBBF24]{title}[/]")
+            for key, desc in entries:
+                # Pad the key column to 22 chars so descriptions
+                # line up vertically and the cheat sheet stays
+                # scannable at a glance.
+                key_text = key.ljust(22)
+                if desc:
+                    lines.append(f"  [#22D3EE]{key_text}[/] {desc}")
+                else:
+                    lines.append(f"  {key_text}")
+            lines.append("")
+        lines.append(
+            "[#94A3B8]Press [bold]?[/bold] again to close · "
+            "[bold]Esc[/bold] also closes overlays.[/]"
+        )
+        return "\n".join(lines)
+
     def _body_text(self) -> str:
         self._table_columns = ()
         self._table_rows = ()
         if self.help_open:
-            self.body_text = (
-                "[bold #22D3EE]DefenseClaw Keybindings[/]\n\n"
-                "Navigation: 1-9, 0, T, V, R, Tab, Shift+Tab\n"
-                "Commands: : or Ctrl+K\n"
-                "Close local surface: q\n"
-                "Quit: Ctrl+C\n\n"
-                "This Textual backend is behind --backend textual until all parity gates pass."
-            )
+            self.body_text = self._render_help_body()
             return self.body_text
         label = next(label for name, _key, label in PANELS if name == self.active_panel)
         if self.active_panel == "overview":
