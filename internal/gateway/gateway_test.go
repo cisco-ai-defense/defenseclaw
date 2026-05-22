@@ -290,6 +290,7 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
 		{"openhands_observability", &stubConnector{name: "openhands"}, false},
+		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, true},

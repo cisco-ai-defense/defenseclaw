@@ -483,7 +483,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"} {
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -812,7 +812,7 @@ func (a *APIServer) connectorModeSummary() map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
 		mode = "observability"
 		intercept = false
 		telemetry = []string{"hooks"}

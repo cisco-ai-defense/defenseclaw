@@ -62,6 +62,7 @@ from defenseclaw.paths import (
             "geminicli",
             "copilot",
             "openhands",
+            "antigravity",
         ],
         case_sensitive=False,
     ),

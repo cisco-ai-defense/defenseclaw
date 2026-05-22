@@ -70,7 +70,7 @@
     },
     "defenseclaw.claw.mode": {
       "type": "string",
-      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", ""],
+      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", ""],
       "description": "Active agent framework connector. Matches Connector.Name() in internal/gateway/connector. Empty string is permitted while no connector has been picked yet (fresh install before `defenseclaw setup connector`). Legacy values 'nemoclaw' and 'opencode' were never emitted by a released gateway; they were placeholders that became 'zeptoclaw' and 'claudecode' respectively, and have been dropped from the enum."
     },
     "defenseclaw.claw.home_dir": {

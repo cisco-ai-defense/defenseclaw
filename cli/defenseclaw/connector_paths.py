@@ -73,6 +73,7 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "geminicli",
     "copilot",
     "openhands",
+    "antigravity",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -91,6 +92,7 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
         "geminicli",
         "copilot",
         "openhands",
+        "antigravity",
     }
 )
 """Connectors added through lifecycle hook surfaces.
@@ -228,6 +230,24 @@ def connector_home(
         if root:
             return os.path.join(root, ".openhands")
         return os.path.join(home, ".openhands")
+    if name == "antigravity":
+        # Antigravity (`agy`) is global-only by design: agy v1.0.x
+        # merges every discovered hooks.json (global, project,
+        # legacy ~/.gemini/hooks.json), so DefenseClaw deliberately
+        # does NOT honor workspace_dir — multiple writes cause
+        # duplicate firings.
+        #
+        # NOTE: agy *advertises* ~/.gemini/antigravity-cli/ in its
+        # --help output, but empirically it reads PreToolUse hooks
+        # only from ~/.gemini/config/hooks.json (see
+        # internal/gateway/connector/hook_only.go ::
+        # antigravityHooksPath for the smoke-test evidence). We
+        # report the marketing-facing dir here as the "connector
+        # home" because it's the agy-owned directory operators
+        # know about; the actual hooks file path comes back via
+        # connector_config_files() below, which points at the
+        # path agy actually evaluates.
+        return os.path.join(home, ".gemini", "antigravity-cli")
     if name == "cursor":
         return os.path.join(home, ".cursor")
     if name == "windsurf":
@@ -292,6 +312,23 @@ def connector_config_files(
             os.path.join(home, ".openhands", "mcp.json"),
             _workspace_path(workspace_dir, ".openhands", "hooks.json"),
         ]
+    elif name == "antigravity":
+        # Global only — agy merges hooks files from all discovered
+        # locations, so listing the workspace path here would
+        # mislead operators into thinking DefenseClaw might patch it.
+        #
+        # The canonical path is ~/.gemini/config/hooks.json — that
+        # is the only path agy v1.0.x actually evaluates at
+        # runtime, even though `agy --help` still advertises
+        # ~/.gemini/antigravity-cli/ as the install location. The
+        # legacy path is also listed (best-effort) so doctor /
+        # inventory can surface stale defenseclaw-managed entries
+        # left behind from pre-v0.5.0 installs that wrote to the
+        # wrong file.
+        paths = [
+            os.path.join(home, ".gemini", "config", "hooks.json"),
+            os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"),
+        ]
     elif name == "cursor":
         paths = [
             os.path.join(home, ".cursor", "mcp.json"),
@@ -351,6 +388,10 @@ def skill_dirs(
         return _copilot_skill_dirs(workspace_dir)
     if name == "openhands":
         return _openhands_skill_dirs(workspace_dir)
+    if name == "antigravity":
+        # Antigravity v1 publishes only the hooks surface; no
+        # documented skills install/discovery path yet.
+        return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -387,6 +428,8 @@ def plugin_dirs(
     if name == "copilot":
         return []
     if name == "openhands":
+        return []
+    if name == "antigravity":
         return []
     return _openclaw_plugin_dirs(openclaw_home)
 
@@ -433,6 +476,10 @@ def mcp_servers(
         return _copilot_mcp_servers(workspace_dir)
     if name == "openhands":
         return _openhands_mcp_servers()
+    if name == "antigravity":
+        # Antigravity does not expose a documented MCP install
+        # surface; nothing to discover.
+        return []
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -1115,6 +1162,12 @@ def set_mcp_server(
         path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
+    if name_n == "antigravity":
+        raise MCPWriteUnsupportedError(
+            "antigravity does not publish a documented MCP install "
+            "surface in agy v1.0.0. DefenseClaw will pick this up via "
+            "a contract bump once Google ships an MCP install path.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -1201,6 +1254,11 @@ def unset_mcp_server(
         path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
         _atomic_json_delete(path, ("mcpServers", name))
         return
+    if name_n == "antigravity":
+        raise MCPWriteUnsupportedError(
+            "antigravity does not publish a documented MCP install "
+            "surface in agy v1.0.0; nothing to remove.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. Remove the server inside the ZeptoClaw UI.",

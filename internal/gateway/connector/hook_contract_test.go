@@ -74,7 +74,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)

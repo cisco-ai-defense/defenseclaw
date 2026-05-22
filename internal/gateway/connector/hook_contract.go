@@ -364,6 +364,54 @@ var builtinHookContracts = map[string][]HookContract{
 			"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
 		},
 	}},
+	"antigravity": {{
+		Connector:               "antigravity",
+		ContractID:              "antigravity-hooks-v2",
+		MinAgentVersion:         "1.0.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v7",
+		HookConfigPathTemplates: []string{"~/.gemini/config/hooks.json"},
+		ResponseFieldName:       "hook_output",
+		// Antigravity 2.0 lifecycle events per the published spec.
+		// Order matches chronological lifecycle order so the contract
+		// reads as a sequence: PreInvocation → PreToolUse →
+		// PostToolUse → PostInvocation → Stop.
+		Events: []string{
+			"PreInvocation",
+			"PreToolUse",
+			"PostToolUse",
+			"PostInvocation",
+			"Stop",
+		},
+		// AIDSurfaces covers the inspection target categories
+		// DefenseClaw exposes for this connector. PreInvocation
+		// inspects the prompt; PreToolUse inspects the tool call;
+		// PostToolUse + PostInvocation inspect tool / model results.
+		// Stop has no inspection target (audit-only).
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: true,
+			// Ask is meaningful only on Pre* events — by the time
+			// Post* events fire, the action / response has already
+			// happened and prompting the user adds no value.
+			AskEvents: []string{"PreInvocation", "PreToolUse"},
+			// Block on Stop is the spec's "block-terminating the
+			// agent if validation checks fail" use case (Stop hooks
+			// can prevent loop termination). Block on Post* is
+			// excluded — the inspected action has already executed.
+			BlockEvents:        []string{"PreInvocation", "PreToolUse", "Stop"},
+			SupportsFailClosed: false,
+			Scope:              "user",
+		},
+		SupportsTraceparent: true,
+		Notes: []string{
+			"Hooks v2 expands to all five Antigravity 2.0 lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) per the published spec; v1 covered PreToolUse only. PreToolUse remains the only event empirically verified against agy v1.0.1 — the other four event branches are spec-conformant but gated on upstream agy implementation parity.",
+			"agy returning decision=ask bypasses --dangerously-skip-permissions, which is the strongest user-prompt primitive any DefenseClaw connector currently exposes. AskEvents covers PreInvocation and PreToolUse; agy does not recognize a literal \"force_ask\" decision so DefenseClaw emits \"ask\".",
+			"Stop's wire decision verb is \"block\" (matching agy's Claude-Code lineage) rather than the \"deny\" verb used by Pre* events; this aligns with the spec's \"block-terminating the agent if validation checks fail\" phrasing. PostToolUse and PostInvocation NEVER block — findings surface as additionalContext for next-turn ingestion.",
+			"Setup writes only the global ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). agy merges all discovered hooks files (global, project, legacy ~/.gemini/hooks.json), so multiple writes cause duplicate firing. Doctor warns when defenseclaw-managed entries appear in more than one merged location, and separately warns when the legacy antigravity-cli path still holds defenseclaw-managed entries from a pre-v0.5.0 install.",
+		},
+	}},
 	"openhands": {{
 		Connector:               "openhands",
 		ContractID:              "openhands-hooks-v1",

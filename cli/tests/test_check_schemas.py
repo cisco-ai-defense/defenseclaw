@@ -61,6 +61,7 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "geminicli",
                 "copilot",
                 "openhands",
+                "antigravity",
                 "",
             },
             "drift in defenseclaw.claw.mode enum — update Connector.Name() "

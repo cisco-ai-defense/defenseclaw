@@ -1841,7 +1841,15 @@ func isGenericToolInspectionEvent(event string) bool {
 func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt",
-		"prellmcall", "beforeagent", "beforemodel":
+		"prellmcall", "beforeagent", "beforemodel",
+		// Antigravity 2.0 spec: PreInvocation fires just before the
+		// agent makes an invocation (call) to the LLM. Best used for
+		// dynamically injecting context, modifying system instructions,
+		// or feeding custom workspace rules to the model right before
+		// it generates a response. Routes through inspectMessageContent
+		// with direction=prompt so prompt-content rules see the user
+		// prompt and transcript before they reach Gemini.
+		"preinvocation":
 		return true
 	default:
 		return false
@@ -1853,7 +1861,17 @@ func isResultLikeEvent(event string) bool {
 	case "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall",
 		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
 		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
-		"afteragentresponse", "afteragentthought", "afteragent", "aftermodel":
+		"afteragentresponse", "afteragentthought", "afteragent", "aftermodel",
+		// Antigravity 2.0 spec: PostInvocation fires after the LLM
+		// invocation completes and all associated tool calls have
+		// finished running. Best used for post-processing outputs,
+		// executing clean-ups, or triggering follow-up agent cycles.
+		// Routes through inspectMessageContent with
+		// direction=tool_result so response-content rules see the
+		// generated text + final state. Note: PostToolUse (per-tool)
+		// is already classified above via the canonical "posttooluse"
+		// entry; PostInvocation is the per-turn equivalent.
+		"postinvocation":
 		return true
 	default:
 		return false

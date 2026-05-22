@@ -37,6 +37,7 @@ CONNECTORS = (
     "geminicli",
     "copilot",
     "openhands",
+    "antigravity",
 )
 
 

@@ -159,6 +159,23 @@
       "notes": "Global ~/.openhands/hooks.json native hook schema by default; optional repo-local .openhands/hooks.json with --workspace; MCP lives in ~/.openhands/mcp.json; skills include user installs and ~/.openhands/cache/skills/public-skills/skills."
     },
     {
+      "id": "antigravity",
+      "label": "Antigravity",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["PreInvocation", "PreToolUse"],
+        "blockEvents": ["PreInvocation", "PreToolUse", "Stop"],
+        "supportsFailClosed": false,
+        "scope": "user"
+      },
+      "hilt": "Antigravity is the only DefenseClaw connector with an unbypassable native ask: returning decision=ask from a PreInvocation or PreToolUse hook overrides agy's --dangerously-skip-permissions flag. The literal force_ask string is not recognized by agy v1.0.0 and is preserved internally as raw_action only.",
+      "notes": "Hooks v2 covers the full Antigravity 2.0 lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) registered as separate DefenseClaw-owned keys in ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). PreToolUse is empirically verified on agy v1.0.1; the other four events are spec-conformant and gated on upstream agy parity. agy merges all discovered hooks files; multi-file writes cause duplicate firings. MCP / skills / rules / plugins are unsupported until agy publishes contracts."
+    },
+    {
       "id": "windsurf",
       "label": "Windsurf",
       "family": "hooks",

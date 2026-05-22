@@ -264,7 +264,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -1416,6 +1416,12 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			hookScript: "openhands-hook.sh",
 			hookAPI:    "/api/v1/openhands/hook",
 			setup:      hookOnlySetup(".json", NewOpenHandsConnector, &OpenHandsHooksPathOverride),
+		},
+		{
+			name:       "antigravity",
+			hookScript: "antigravity-hook.sh",
+			hookAPI:    "/api/v1/antigravity/hook",
+			setup:      hookOnlySetup(".json", NewAntigravityConnector, &AntigravityHooksPathOverride),
 		},
 	}
 
@@ -3673,8 +3679,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 12 {
-		t.Errorf("HookScripts() returned %d scripts, want 12", len(scripts))
+	if len(scripts) != 13 {
+		t.Errorf("HookScripts() returned %d scripts, want 13", len(scripts))
 	}
 }
 
@@ -4114,8 +4120,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 10 {
-		t.Errorf("expected 10 built-in connectors, got %d", r.Len())
+	if r.Len() != 11 {
+		t.Errorf("expected 11 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -5839,6 +5845,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
 		{func() Connector { return NewOpenHandsConnector() }, "openhands", withVendor("openhands-hook.sh")},
+		{func() Connector { return NewAntigravityConnector() }, "antigravity", withVendor("antigravity-hook.sh")},
 	}
 
 	for _, tc := range cases {
@@ -6125,6 +6132,7 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, []string{"openhands-hook.sh"}},
+		{"antigravity", func() Connector { return NewAntigravityConnector() }, []string{"antigravity-hook.sh"}},
 		{"openclaw", func() Connector { return NewOpenClawConnector() }, nil},
 		{"zeptoclaw", func() Connector { return NewZeptoClawConnector() }, nil},
 	}

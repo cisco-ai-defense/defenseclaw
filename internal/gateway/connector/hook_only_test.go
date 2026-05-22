@@ -43,6 +43,7 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 		{NewGeminiCLIConnector(), false, true, "user", "settings.json"},
 		{NewCopilotConnector(), true, false, "user,workspace", "defenseclaw.json"},
 		{NewOpenHandsConnector(), false, true, "user,workspace", "hooks.json"},
+		{NewAntigravityConnector(), true, false, "user", "hooks.json"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {
@@ -73,24 +74,30 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 		codeGuardTargets []string
 		nativeOTLP       bool
 		pluginsSupported bool
+		// mcpSupported is true for connectors that expose a
+		// documented MCP install surface. Antigravity v1 publishes
+		// only the hooks surface, so MCP is unsupported there until
+		// Google ships an install contract.
+		mcpSupported bool
 	}{
 		// Plugins.Supported is FALSE on every hook-only connector
 		// because DefenseClaw plugins are an OpenClaw-only concept
 		// (G4). The TUI Plugins panel hides itself for these
 		// connectors and `defenseclaw plugin list` prints an
 		// OpenClaw-only notice.
-		{NewHermesConnector(), []string{"skill"}, false, false},
-		{NewCursorConnector(), []string{"skill", "rule"}, false, false},
-		{NewWindsurfConnector(), []string{"rule"}, false, false},
-		{NewGeminiCLIConnector(), []string{"skill"}, true, false},
-		{NewCopilotConnector(), []string{"skill", "rule"}, true, false},
-		{NewOpenHandsConnector(), []string{"skill"}, false, false},
+		{NewHermesConnector(), []string{"skill"}, false, false, true},
+		{NewCursorConnector(), []string{"skill", "rule"}, false, false, true},
+		{NewWindsurfConnector(), []string{"rule"}, false, false, true},
+		{NewGeminiCLIConnector(), []string{"skill"}, true, false, true},
+		{NewCopilotConnector(), []string{"skill", "rule"}, true, false, true},
+		{NewOpenHandsConnector(), []string{"skill"}, false, false, true},
+		{NewAntigravityConnector(), nil, false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {
 			caps := tc.conn.Capabilities(opts)
-			if !caps.MCP.Supported {
-				t.Fatal("MCP.Supported = false, want true")
+			if caps.MCP.Supported != tc.mcpSupported {
+				t.Fatalf("MCP.Supported = %v, want %v", caps.MCP.Supported, tc.mcpSupported)
 			}
 			if caps.CodeGuard.Supported != (len(tc.codeGuardTargets) > 0) {
 				t.Fatalf("CodeGuard.Supported = %v", caps.CodeGuard.Supported)
@@ -115,12 +122,13 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 	dir := t.TempDir()
 	configDir := t.TempDir()
 	overrides := map[string]*string{
-		"hermes":    &HermesConfigPathOverride,
-		"cursor":    &CursorHooksPathOverride,
-		"windsurf":  &WindsurfHooksPathOverride,
-		"geminicli": &GeminiSettingsPathOverride,
-		"copilot":   &CopilotHooksPathOverride,
-		"openhands": &OpenHandsHooksPathOverride,
+		"hermes":      &HermesConfigPathOverride,
+		"cursor":      &CursorHooksPathOverride,
+		"windsurf":    &WindsurfHooksPathOverride,
+		"geminicli":   &GeminiSettingsPathOverride,
+		"copilot":     &CopilotHooksPathOverride,
+		"openhands":   &OpenHandsHooksPathOverride,
+		"antigravity": &AntigravityHooksPathOverride,
 	}
 	connectors := []*hookOnlyConnector{
 		NewHermesConnector(),
@@ -129,6 +137,7 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 		NewGeminiCLIConnector(),
 		NewCopilotConnector(),
 		NewOpenHandsConnector(),
+		NewAntigravityConnector(),
 	}
 	for _, conn := range connectors {
 		t.Run(conn.Name(), func(t *testing.T) {
@@ -163,6 +172,187 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 				t.Fatalf("stat config after teardown: %v", err)
 			}
 		})
+	}
+}
+
+// TestAntigravitySetup_WritesClaudeCodeNestedSchema pins the
+// hooks.json shape that agy v1.0.x actually evaluates and is the
+// regression guard for two cumulative empirical findings from the
+// v0.5.0 smoke test:
+//
+//  1. **Nested schema, not flat.** An earlier draft wrote a flat
+//     {event, matcher, command, description} object per top-level
+//     key. agy never evaluated those entries — neither tracer hooks
+//     nor DefenseClaw hooks fired. Replacing the file with a
+//     Claude-Code-style nested schema (top-level key →
+//     {<EventName>: [{matcher, hooks: [{type, command}]}]}) caused
+//     agy to invoke the configured command on every tool call. agy
+//     binary `strings` confirms only the nested shape is parsed.
+//
+//  2. **No embedded quotes in command.** Empirical D3 of the smoke
+//     test (D1=bare-path-OK, D2=sh -c-OK, D3=direct-exec-FAILS-127)
+//     proved agy invokes the configured command via direct exec()
+//     not through a shell, so any '/" added by shellWord() would
+//     become literal path bytes and the hook would silently
+//     no-fire.
+//
+// Combined assertions:
+//
+//   - top-level key "defenseclaw-antigravity-pretooluse" exists
+//   - its value is a map with key "PreToolUse"
+//   - "PreToolUse" is a list with exactly one entry
+//   - that entry has matcher="*" and hooks=[{type="command",
+//     command=<bare absolute path to antigravity-hook.sh>}]
+//   - the inner command field has no quote characters and no
+//     surrounding whitespace
+//
+// If a future agy release pivots back to a flat schema, OR adds
+// shell invocation, OR moves the hooks file again, this test must
+// be updated in lockstep with patchAntigravityHooks /
+// antigravityHooksPath. Until then this test pins the contract.
+func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".gemini", "config", "hooks.json")
+	prev := AntigravityHooksPathOverride
+	AntigravityHooksPathOverride = cfgPath
+	t.Cleanup(func() { AntigravityHooksPathOverride = prev })
+
+	conn := NewAntigravityConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read antigravity hooks.json: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("antigravity hooks.json is not valid JSON: %v\n%s", err, string(data))
+	}
+
+	entry, ok := cfg["defenseclaw-antigravity-pretooluse"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("defenseclaw-antigravity-pretooluse missing or wrong shape: %#v", cfg)
+	}
+
+	preToolUse, ok := entry["PreToolUse"].([]interface{})
+	if !ok {
+		t.Fatalf("PreToolUse is not an array: %#v\nfull entry: %#v", entry["PreToolUse"], entry)
+	}
+	if len(preToolUse) != 1 {
+		t.Fatalf("PreToolUse must hold exactly one matcher group, got %d:\n%#v", len(preToolUse), preToolUse)
+	}
+
+	group, ok := preToolUse[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("PreToolUse[0] is not an object: %#v", preToolUse[0])
+	}
+	if group["matcher"] != "*" {
+		t.Fatalf("matcher=%#v want *", group["matcher"])
+	}
+
+	hooks, ok := group["hooks"].([]interface{})
+	if !ok {
+		t.Fatalf("hooks is not an array: %#v", group["hooks"])
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("hooks must hold exactly one entry, got %d:\n%#v", len(hooks), hooks)
+	}
+
+	hook, ok := hooks[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks[0] is not an object: %#v", hooks[0])
+	}
+	if hook["type"] != "command" {
+		t.Fatalf("hook type=%#v want command", hook["type"])
+	}
+	command, isString := hook["command"].(string)
+	if !isString {
+		t.Fatalf("command field is not a string: %#v", hook["command"])
+	}
+
+	// Primary assertion: no quote characters at all. agy v1.0.x
+	// exec()s the command directly, so any '/" would become a
+	// literal byte in the path and the hook would silently
+	// no-fire.
+	if strings.ContainsAny(command, `'"`) {
+		t.Fatalf(
+			"antigravity command field contains quote characters %q — "+
+				"agy v1.0.x exec()s this directly so the quotes become "+
+				"literal path bytes. Did shellWord() get re-introduced?",
+			command,
+		)
+	}
+	// Secondary: the path resolves cleanly to a file ending in
+	// antigravity-hook.sh. Defends against accidentally writing a
+	// relative path or a different script name.
+	if !strings.HasSuffix(command, "antigravity-hook.sh") {
+		t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
+	}
+	if !filepath.IsAbs(command) {
+		t.Fatalf("command=%q is not an absolute path", command)
+	}
+	// Tertiary: no surrounding whitespace either.
+	if command != strings.TrimSpace(command) {
+		t.Fatalf("command=%q has surrounding whitespace", command)
+	}
+
+	// Quaternary: all five Antigravity 2.0 lifecycle events are
+	// registered under their own DefenseClaw-owned outer keys, with
+	// the same nested Claude-Code-derived schema. Spec source:
+	// Antigravity 2.0 hook docs (PreInvocation, PreToolUse,
+	// PostToolUse, PostInvocation, Stop). PreToolUse is the only
+	// event empirically verified against agy v1.0.1; the other four
+	// keys are registered for spec parity so DefenseClaw is ready
+	// when agy starts emitting them upstream — see
+	// patchAntigravityHooks docs in hook_only.go for the rationale.
+	for _, event := range []string{"PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"} {
+		outerKey := "defenseclaw-antigravity-" + strings.ToLower(event)
+		eventEntry, ok := cfg[outerKey].(map[string]interface{})
+		if !ok {
+			t.Errorf("%s missing or wrong shape: %#v", outerKey, cfg[outerKey])
+			continue
+		}
+		eventList, ok := eventEntry[event].([]interface{})
+		if !ok {
+			t.Errorf("%s[%q] is not an array: %#v", outerKey, event, eventEntry[event])
+			continue
+		}
+		if len(eventList) != 1 {
+			t.Errorf("%s[%q] must hold exactly one matcher group, got %d", outerKey, event, len(eventList))
+			continue
+		}
+		matcherGroup, ok := eventList[0].(map[string]interface{})
+		if !ok {
+			t.Errorf("%s[%q][0] is not an object: %#v", outerKey, event, eventList[0])
+			continue
+		}
+		if matcherGroup["matcher"] != "*" {
+			t.Errorf("%s[%q][0].matcher=%#v want *", outerKey, event, matcherGroup["matcher"])
+		}
+		hookList, ok := matcherGroup["hooks"].([]interface{})
+		if !ok || len(hookList) != 1 {
+			t.Errorf("%s[%q][0].hooks not a single-entry array: %#v", outerKey, event, matcherGroup["hooks"])
+			continue
+		}
+		hookEntry, ok := hookList[0].(map[string]interface{})
+		if !ok {
+			t.Errorf("%s[%q][0].hooks[0] is not an object: %#v", outerKey, event, hookList[0])
+			continue
+		}
+		if hookEntry["type"] != "command" {
+			t.Errorf("%s[%q][0].hooks[0].type=%#v want command", outerKey, event, hookEntry["type"])
+		}
+		eventCommand, ok := hookEntry["command"].(string)
+		if !ok || !strings.HasSuffix(eventCommand, "antigravity-hook.sh") {
+			t.Errorf("%s[%q][0].hooks[0].command=%#v want absolute path ending antigravity-hook.sh", outerKey, event, hookEntry["command"])
+		}
 	}
 }
 

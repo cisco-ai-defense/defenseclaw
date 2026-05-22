@@ -87,6 +87,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "geminicli",
     "copilot",
     "openhands",
+    "antigravity",
 )
 
 
@@ -142,6 +143,21 @@ _SPECS: dict[str, _AgentSpec] = {
     ),
     "openhands": _AgentSpec(
         (".openhands/hooks.json", ".openhands", "~/.openhands/mcp.json"), "openhands", ("--version",)
+    ),
+    "antigravity": _AgentSpec(
+        # agy v1.0.x reads PreToolUse hooks from ~/.gemini/config/
+        # hooks.json (the canonical runtime path). The legacy
+        # ~/.gemini/antigravity-cli/ directory is still listed
+        # because `agy --help` advertises it and pre-v0.5.0
+        # installs put files there — discovery should pick up
+        # either signal.
+        (
+            "~/.gemini/config/hooks.json",
+            "~/.gemini/antigravity-cli/hooks.json",
+            "~/.gemini/antigravity-cli",
+        ),
+        "agy",
+        ("--version",),
     ),
 }
 

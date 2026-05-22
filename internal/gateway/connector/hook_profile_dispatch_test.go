@@ -41,6 +41,11 @@ func TestHookProfile_HasDispatchCallbacks(t *testing.T) {
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, false, true, true},
 		{"copilot", func() Connector { return NewCopilotConnector() }, false, true, true},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, false, true, true},
+		// Antigravity is the only generic hook-only connector that
+		// SETS Decode, because agy v1 ships a nested `toolCall`
+		// wire shape that the generic normalizer can't read. See
+		// antigravity_hook_profile.go.
+		{"antigravity", func() Connector { return NewAntigravityConnector() }, true, true, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -336,6 +341,134 @@ func TestClaudeCodeProfileRespond_Parity(t *testing.T) {
 			})
 			if out.FieldName != "claude_code_output" {
 				t.Errorf("FieldName=%q want claude_code_output", out.FieldName)
+			}
+			if !reflect.DeepEqual(out.Output, tc.expected) {
+				t.Errorf("Output mismatch\n got: %#v\nwant: %#v", out.Output, tc.expected)
+			}
+		})
+	}
+}
+
+// TestAntigravityProfileRespond_Parity mirrors
+// TestCodexProfileRespond_Parity / TestClaudeCodeProfileRespond_Parity:
+// representative cases pinning the antigravity branch of
+// hookOnlyProfileRespond across the five Antigravity 2.0 lifecycle
+// events. Antigravity is wired through the shared
+// hookOnlyProfileRespond (its connector-package profile file only
+// adds Decode), so this table exercises hookOnlyProfileRespond with
+// ConnectorName="antigravity" parameterised on event name.
+//
+// Wire-shape contract per event:
+//
+//	PreInvocation  + PreToolUse → block→{decision:deny}, confirm→{decision:ask}, alert→{systemMessage}
+//	Stop                        → block→{decision:block} (spec-distinct verb)
+//	PostToolUse + PostInvocation → alert→{additionalContext} only (no block)
+//
+// observe_mode_block intentionally expects nil — agy v1.0.1 does
+// not render any PreToolUse field inline for observe-mode
+// demoted-allow findings; visibility ships via gateway.log + OTel
+// until agy adds a render channel (see the antigravity case in
+// hook_only_profile.go for the empirical history).
+func TestAntigravityProfileRespond_Parity(t *testing.T) {
+	const alertMsg = "DefenseClaw observed a MEDIUM antigravity hook finding: matched: SOFT-WARN-RULE"
+	cases := []struct {
+		name       string
+		event      string
+		action     string
+		raw        string
+		reason     string
+		additional string
+		expected   map[string]interface{}
+	}{
+		// PreToolUse: full action-matrix (block/alert/observe).
+		{
+			name:       "PreToolUse_observe_mode_block_finding_returns_nil",
+			event:      "PreToolUse",
+			action:     "allow",
+			raw:        "block",
+			additional: "DefenseClaw would block this in action mode a HIGH antigravity hook finding: matched policy",
+			expected:   nil,
+		},
+		{
+			name:   "PreToolUse_action_mode_block_renders_decision_deny",
+			event:  "PreToolUse",
+			action: "block",
+			raw:    "block",
+			reason: "matched policy: deny-rm-rf",
+			expected: map[string]interface{}{
+				"decision": "deny",
+				"reason":   "matched policy: deny-rm-rf",
+			},
+		},
+		{
+			name:       "PreToolUse_action_mode_alert_renders_systemMessage",
+			event:      "PreToolUse",
+			action:     "alert",
+			raw:        "alert",
+			additional: alertMsg,
+			expected:   map[string]interface{}{"systemMessage": alertMsg},
+		},
+		// PreInvocation: same wire shape as PreToolUse — block emits
+		// decision:deny, prompt-content rules can deny harmful prompts
+		// before they reach the LLM.
+		{
+			name:   "PreInvocation_action_mode_block_renders_decision_deny",
+			event:  "PreInvocation",
+			action: "block",
+			raw:    "block",
+			reason: "prompt contains exfiltration intent",
+			expected: map[string]interface{}{
+				"decision": "deny",
+				"reason":   "prompt contains exfiltration intent",
+			},
+		},
+		// Stop: spec-distinct verb. block emits decision:"block" (not
+		// "deny"), matching the spec's "block-terminating the agent
+		// if validation checks fail" phrasing.
+		{
+			name:   "Stop_action_mode_block_renders_decision_block",
+			event:  "Stop",
+			action: "block",
+			raw:    "block",
+			reason: "validation checks failed; agent must keep running",
+			expected: map[string]interface{}{
+				"decision": "block",
+				"reason":   "validation checks failed; agent must keep running",
+			},
+		},
+		// PostToolUse: cannot block (tool already ran). Alert findings
+		// surface as additionalContext for next-turn ingestion.
+		{
+			name:       "PostToolUse_alert_renders_additionalContext_only",
+			event:      "PostToolUse",
+			action:     "alert",
+			raw:        "alert",
+			additional: "Tool output contained API_KEY=sk-...",
+			expected:   map[string]interface{}{"additionalContext": "Tool output contained API_KEY=sk-..."},
+		},
+		// PostInvocation: same as PostToolUse — cannot block, alert
+		// surfaces as additionalContext.
+		{
+			name:       "PostInvocation_alert_renders_additionalContext_only",
+			event:      "PostInvocation",
+			action:     "alert",
+			raw:        "alert",
+			additional: "Model response leaked PII",
+			expected:   map[string]interface{}{"additionalContext": "Model response leaked PII"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := hookOnlyProfileRespond(HookRespondInput{
+				Req:               HookProfileRequest{ConnectorName: "antigravity", HookEventName: tc.event},
+				Action:            tc.action,
+				RawAction:         tc.raw,
+				Reason:            tc.reason,
+				AdditionalContext: tc.additional,
+				Caps:              HookCapability{CanAskNative: true, AskEvents: []string{"PreInvocation", "PreToolUse"}},
+			})
+			if out.FieldName != "hook_output" {
+				t.Errorf("FieldName=%q want hook_output", out.FieldName)
 			}
 			if !reflect.DeepEqual(out.Output, tc.expected) {
 				t.Errorf("Output mismatch\n got: %#v\nwant: %#v", out.Output, tc.expected)

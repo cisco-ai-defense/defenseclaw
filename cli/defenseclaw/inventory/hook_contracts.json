@@ -434,6 +434,62 @@
         }
       ]
     },
+    "antigravity": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "agy --version",
+      "contracts": [
+        {
+          "contract_id": "antigravity-hooks-v2",
+          "agent_version": {
+            "min_inclusive": "1.0.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v7",
+          "hook_script": "antigravity-hook.sh",
+          "hook_config_path_templates": [
+            "~/.gemini/config/hooks.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "PreInvocation",
+            "PreToolUse",
+            "PostToolUse",
+            "PostInvocation",
+            "Stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "PreInvocation",
+              "PreToolUse"
+            ],
+            "block_events": [
+              "PreInvocation",
+              "PreToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": false,
+            "scope": "user"
+          },
+          "notes": [
+            "Hooks v2 expands to all five Antigravity 2.0 lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) per the published spec; v1 covered PreToolUse only. PreToolUse remains the only event empirically verified against agy v1.0.1 \u2014 the other four event branches are spec-conformant but gated on upstream agy implementation parity.",
+            "agy returning decision=ask bypasses --dangerously-skip-permissions, which is the strongest user-prompt primitive any DefenseClaw connector currently exposes. AskEvents covers PreInvocation and PreToolUse; agy does not recognize a literal \"force_ask\" decision so DefenseClaw emits \"ask\".",
+            "Stop's wire decision verb is \"block\" (matching agy's Claude-Code lineage) rather than the \"deny\" verb used by Pre* events; this aligns with the spec's \"block-terminating the agent if validation checks fail\" phrasing. PostToolUse and PostInvocation NEVER block \u2014 findings surface as additionalContext for next-turn ingestion.",
+            "Setup writes only the global ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). agy merges all discovered hooks files (global, project, legacy ~/.gemini/hooks.json), so multiple writes cause duplicate firing. Doctor warns when defenseclaw-managed entries appear in more than one merged location, and separately warns when the legacy antigravity-cli path still holds defenseclaw-managed entries from a pre-v0.5.0 install."
+          ]
+        }
+      ]
+    },
     "openhands": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",

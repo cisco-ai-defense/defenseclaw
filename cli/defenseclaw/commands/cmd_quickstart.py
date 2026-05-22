@@ -117,6 +117,7 @@ import click
             "geminicli",
             "copilot",
             "openhands",
+            "antigravity",
         ],
         case_sensitive=False,
     ),

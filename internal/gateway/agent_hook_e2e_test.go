@@ -121,6 +121,13 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},
+		{
+			connector:      "antigravity",
+			event:          "PreToolUse",
+			toolName:       "run_command",
+			topLevelOutput: "hook_output",
+			expectAction:   "block",
+		},
 	}
 
 	// Set up a real in-memory tracer so we can assert that the

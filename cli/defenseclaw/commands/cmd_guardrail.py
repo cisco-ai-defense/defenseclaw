@@ -65,6 +65,7 @@ _CONNECTOR_LABELS = {
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
+    "antigravity": "Antigravity",
 }
 
 
