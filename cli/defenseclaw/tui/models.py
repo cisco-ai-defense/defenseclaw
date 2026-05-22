@@ -82,6 +82,24 @@ class StatusModel:
     focused: bool = True
     last_refresh: datetime | None = None
     stale_after: timedelta = timedelta(seconds=15)
+    # ---- Context pills ----
+    # Missing required credential env vars surface here so the
+    # status strip can render a dedicated "Keys" pill instead of
+    # hijacking the Guardrail tile. The Guardrail subsystem can be
+    # live even while a Gateway-side token (e.g.
+    # ``OPENCLAW_GATEWAY_TOKEN``) is absent; overlaying the missing
+    # credential on Guardrail contradicted the SERVICES box in
+    # Overview, which correctly showed Guardrail green.
+    missing_keys: tuple[str, ...] = ()
+    # Active connector friendly name (codex / openclaw / ...).
+    connector: str = ""
+    # Redaction posture label (``Redaction ON`` / ``Redaction OFF``).
+    redaction_label: str = ""
+    redaction_on: bool = True
+    # Short policy posture string (``policy enforce`` / ``policy observe``).
+    policy_posture: str = ""
+    # Total commands the user has run this session.
+    commands_run: int = 0
 
     @property
     def is_stale(self) -> bool:

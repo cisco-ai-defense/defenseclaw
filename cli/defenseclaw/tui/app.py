@@ -4934,28 +4934,56 @@ class DefenseClawTUI(App[None]):
         return ""
 
     def _hint_status_model(self) -> StatusModel:
-        missing_required = ()
+        # Missing required credentials surface on a dedicated "Keys"
+        # pill instead of being overlaid onto Guardrail. The previous
+        # design lit Guardrail red while the SERVICES box showed
+        # Guardrail green, because Guardrail can be live even when
+        # the gateway-side ``OPENCLAW_GATEWAY_TOKEN`` is absent. The
+        # two pills now report distinct, non-conflicting facts.
+        missing_keys: tuple[str, ...] = ()
         if not self.first_run_model.active:
             snapshot = getattr(self.setup_model, "credential_snapshot", None)
             missing_required = tuple(getattr(snapshot, "missing_required", ()) or ())
-        guardrail_state = self.overview_model.subsystem_state("guardrail")
+            missing_keys = tuple(row.env_name for row in missing_required if row.env_name)
+
+        guardrail_state = self.overview_model.subsystem_state("guardrail") or "disabled"
         guardrail_detail = self.overview_model.service_detail("guardrail")
-        guardrail = ServiceStatus("Guardrail", guardrail_state or "disabled", guardrail_detail)
-        if missing_required:
-            preview = ", ".join(row.env_name for row in missing_required[:2])
-            suffix = f" (+{len(missing_required) - 2} more)" if len(missing_required) > 2 else ""
-            guardrail = ServiceStatus("Guardrail", "error", f"missing required credentials: {preview}{suffix}")
-        # Mirror Go TUI: status strip Gateway tile uses the live
-        # /health subsystem state, not "running if config exists".
-        # The previous fabrication lit the tile green even when the
-        # gateway was offline, which contradicted the SERVICES box on
-        # the same screen.
+        guardrail = ServiceStatus("Guardrail", guardrail_state, guardrail_detail)
+
+        # Gateway / Watchdog mirror the live /health subsystem state
+        # so the strip and the SERVICES box agree.
         gateway_state = self.overview_model.subsystem_state("gateway") or "unknown"
         gateway_detail = self.overview_model.service_detail("gateway")
+
+        # Context pills (connector / redaction / policy) only render
+        # when we have a loaded configuration to draw from. Before
+        # config is loaded ``cfg`` is None, and claiming "Redaction
+        # ON" or a policy posture in that window would be a lie — so
+        # we suppress those pills entirely and let the operator see
+        # the bare subsystem strip until config loads.
+        cfg = self.overview_model.cfg
+        connector_name = ""
+        redaction_label = ""
+        redaction_on = True
+        policy_posture = ""
+        if cfg is not None:
+            connector_name = self.overview_model.active_connector_name() or (cfg.claw_mode or "").strip()
+            redaction_on = not bool(cfg.privacy_disable_redaction)
+            redaction_label = "Redaction ON" if redaction_on else "Redaction OFF"
+            mode = (cfg.guardrail_mode or "").strip().lower()
+            if mode:
+                policy_posture = f"policy {mode}"
+
         return StatusModel(
             gateway=ServiceStatus("Gateway", gateway_state, gateway_detail),
             watchdog=ServiceStatus("Watchdog", self.overview_model.subsystem_state("watcher")),
             guardrail=guardrail,
+            missing_keys=missing_keys,
+            connector=connector_name,
+            redaction_label=redaction_label,
+            redaction_on=redaction_on,
+            policy_posture=policy_posture,
+            commands_run=int(self.commands_run),
             active_alerts=self.alerts_model.critical_count() or self.overview_model.enforcement.active_alerts,
             command_running=self.command_running,
             version=__version__,

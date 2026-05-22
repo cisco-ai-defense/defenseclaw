@@ -56,15 +56,57 @@ class StatusSegment:
 
 
 def status_segments(model: StatusModel) -> list[StatusSegment]:
-    """Build the parity status-strip segments for shell state."""
+    """Build the status-strip segments for shell state.
 
-    alert_state = "error" if model.active_alerts > 0 else "running"
-    segments = [
+    Ordered for at-a-glance scanning: subsystem health first
+    (Gateway / Watchdog / Guardrail), then anything that needs
+    operator attention (missing keys, alerts), then ambient context
+    (connector, redaction posture, command counters, version).
+    """
+
+    segments: list[StatusSegment] = [
         StatusSegment.from_service(model.gateway),
         StatusSegment.from_service(model.watchdog),
+        # Guardrail pill mirrors the SERVICES box in Overview — it
+        # reports the live subsystem state, NOT a hijacked overlay
+        # for missing credentials. Surfacing missing keys on the
+        # Guardrail tile contradicted the Services box (Guardrail
+        # could be running yet show red) and pointed operators at
+        # the wrong subsystem.
         StatusSegment.from_service(model.guardrail),
-        StatusSegment(f"{model.active_alerts} alerts", alert_state),
     ]
+
+    # Dedicated Keys pill: surfaces missing required credentials as
+    # its own segment so the Guardrail tile stays honest.
+    if model.missing_keys:
+        preview = ", ".join(model.missing_keys[:2])
+        suffix = f" (+{len(model.missing_keys) - 2} more)" if len(model.missing_keys) > 2 else ""
+        segments.append(
+            StatusSegment("Keys", "error", f"missing {preview}{suffix}")
+        )
+
+    alert_state = "error" if model.active_alerts > 0 else "running"
+    segments.append(StatusSegment(f"{model.active_alerts} alerts", alert_state))
+
+    # Ambient context — connector + redaction + counters help
+    # operators answer "what am I actually working on?" without
+    # context-switching to Overview.
+    if model.connector:
+        segments.append(StatusSegment(model.connector, "active"))
+    if model.redaction_label:
+        # Redaction OFF is a privacy posture the operator should
+        # see at all times; ON renders green, OFF/RAW renders
+        # warning so it's visually distinct without conflicting
+        # with the alerts / Keys error states.
+        red_state = "running" if model.redaction_on else "warning"
+        segments.append(StatusSegment(model.redaction_label, red_state))
+    if model.policy_posture:
+        segments.append(StatusSegment(model.policy_posture, "active"))
+    if model.commands_run:
+        plural = "" if model.commands_run == 1 else "s"
+        segments.append(
+            StatusSegment(f"{model.commands_run} cmd{plural}", "disabled")
+        )
     if model.command_running:
         segments.append(StatusSegment("running", "starting"))
     if model.is_stale:
