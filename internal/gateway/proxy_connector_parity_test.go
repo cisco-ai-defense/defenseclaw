@@ -196,6 +196,12 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// Copilot's Setup refuses any WorkspaceDir nested inside
+			// DataDir (audit DB / gateway config / secrets must not
+			// be reachable from the workspace tree). Use a sibling
+			// temp dir so every connector in the matrix gets a
+			// hermetic, validation-clean workspace.
+			workspaceDir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Plan E1 / round-3 follow-up: when the gateway binary
@@ -244,7 +250,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 					ProxyAddr:    "127.0.0.1:4000",
 					APIAddr:      "127.0.0.1:18970",
 					APIToken:     "tok",
-					WorkspaceDir: filepath.Join(dir, "workspace"),
+					WorkspaceDir: workspaceDir,
 				},
 				health: NewSidecarHealth(),
 			}
@@ -285,6 +291,11 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// See note in TestSwitchConnector_PerConnectorPersistsState:
+			// keep WorkspaceDir outside DataDir so copilot's Setup
+			// validation (and any future connector with the same
+			// guard) does not roll the switch back to codex.
+			workspaceDir := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Same OpenClaw extension probe as
@@ -322,7 +333,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 					ProxyAddr:    "127.0.0.1:4000",
 					APIAddr:      "127.0.0.1:18970",
 					APIToken:     "tok",
-					WorkspaceDir: filepath.Join(dir, "workspace"),
+					WorkspaceDir: workspaceDir,
 				},
 				health:    NewSidecarHealth(),
 				inspector: NewGuardrailInspector("local", nil, nil, ""),
