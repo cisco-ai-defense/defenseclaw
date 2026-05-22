@@ -234,13 +234,22 @@ async def test_catalog_row_only_buttons_disabled_when_no_row(panel: str) -> None
         await pilot.pause()
         app.action_switch_panel(panel)
         await pilot.pause()
+        # ``action_switch_panel`` schedules a background
+        # ``_load_catalog_model`` worker the first time a catalog
+        # panel is visited, which repopulates ``model.items`` from
+        # disk. On slower runners (Linux CI) that worker can land
+        # AFTER we zero the model below and BEFORE the assertion,
+        # re-enabling the row-only buttons via the rerendered
+        # ``_sync_catalog_controls``. Drain workers first so the
+        # empty-state mutation is the last thing the model sees.
+        app.workers.cancel_all()
+        await pilot.pause()
         model = app.catalog_models[panel]
         # Force the model into an empty state so ``selected()`` is None.
         model.items = ()
         model.filtered = ()
         model.cursor = 0
         app._sync_catalog_controls(panel)  # noqa: SLF001
-        await pilot.pause()
         # Every catalog bar has at least these row-only suffixes.
         for suffix in ("detail", "menu"):
             btn = app.query_one(f"#{panel}-{suffix}", Button)
