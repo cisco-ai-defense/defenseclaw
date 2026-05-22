@@ -253,7 +253,11 @@ QUICK_ACTIONS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("N", "Notify", ("setup", "notifications")),
     ("u", "Upgrade", ("upgrade",)),
     ("X", "Uninstall", ("uninstall",)),
-    ("?", "Help", ("help",)),
+    # NOTE: ``?`` is intentionally NOT mapped here. Routing ``?``
+    # through ``defenseclaw help`` (which is not a Click subcommand)
+    # produced "No such command 'help'" and silently broke the
+    # help key. ``?`` belongs to the App-level ``action_toggle_help``
+    # binding that opens the structured in-TUI help overlay.
 )
 
 

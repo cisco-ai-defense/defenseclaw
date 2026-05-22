@@ -99,6 +99,19 @@ class HintEngine:
     def _missing_credentials_hint(self, status: StatusModel | None) -> str:
         if status is None:
             return ""
+        # Prefer the explicit ``missing_keys`` field, set by
+        # ``_hint_status_model`` from the live credential snapshot.
+        # The previous fallback string-matched on Guardrail's detail
+        # to detect missing creds, which (a) lit Guardrail red even
+        # though the guardrail subsystem itself was running, and
+        # (b) silently broke whenever Guardrail switched to the new
+        # dedicated Keys pill. ``missing_keys`` is the source of
+        # truth; the legacy string-match remains as a fallback for
+        # callers that haven't been updated yet.
+        if status.missing_keys:
+            return (
+                "Required credentials are missing. Open Credentials setup, press f to fill missing, or r refresh."
+            )
         segments = (status.gateway, status.watchdog, status.guardrail)
         for segment in segments:
             text = f"{segment.state} {segment.detail}".lower()
