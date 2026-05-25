@@ -116,10 +116,10 @@ override-dependencies = [
     # CVE-2026-34513..34520, CVE-2026-34525). litellm 1.83.10's
     # transitive pin floats aiohttp downward without this override.
     "aiohttp>=3.13.4",
-    # PYSEC-2026-161 fixed in starlette 1.0.1. Cap below 1.1 because
-    # starlette 1.1 removed Router(on_startup=...) which breaks the
-    # fastapi version pinned by mcpscanner.
+    # PYSEC-2026-161 fixed in starlette 1.0.1. fastapi must be bumped
+    # to >=0.133.0 (first release supporting starlette 1.x).
     "starlette>=1.0.1,<1.1",
+    "fastapi>=0.133.0",
 ]
 
 [tool.ruff]
