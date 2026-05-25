@@ -175,7 +175,7 @@ DefenseClaw Sidecar Health
   Uptime:   25s
 
   Gateway:   RUNNING (since 2026-03-30T12:44:28-07:00)
-             protocol: 3
+             protocol: 4
 
   Watcher:   RUNNING (since 2026-03-30T12:44:28-07:00)
 
