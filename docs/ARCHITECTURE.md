@@ -31,7 +31,7 @@ enforcement, and auditing across existing tools without replacing any component.
 │  │  │ REST API  │ │ Audit /   │ │ Policy   │ │ OpenClaw WS     │       │    │
 │  │  │ Server    │ │ SIEM      │ │ Engine   │ │ Client          │       │    │
 │  │  │           │ │ Emitter   │ │          │ │                 │       │    │
-│  │  │ Accepts   │ │           │ │ Block /  │ │ WS protocol v3  │       │    │
+│  │  │ Accepts   │ │           │ │ Block /  │ │ WS protocol 3-4 │       │    │
 │  │  │ requests  │ │ Splunk    │ │ Allow /  │ │ Subscribes to   │       │    │
 │  │  │ from CLI  │ │ HEC, CSV  │ │ Scan     │ │ all events,     │       │    │
 │  │  │ & plugins │ │ export    │ │ gate     │ │ sends commands  │       │    │
@@ -154,7 +154,7 @@ only component with direct access to all subsystems.
 |----------------|--------|
 | REST API server (`:18970`) | Accepts requests from CLI and plugins; CSRF-protected, localhost-bound |
 | Guardrail proxy (`:4000`) | HTTP reverse proxy that inspects all LLM traffic; rate-limited (100/s, burst 200) |
-| OpenClaw WebSocket client | Connects via protocol v3, HMAC-SHA256 challenge-response auth, sequence tracking |
+| OpenClaw WebSocket client | Connects with a protocol v3-v4 range, Ed25519 device challenge-response auth, sequence tracking |
 | Event router | Dispatches WebSocket events (`tool_call`, `tool_result`, `exec.approval.requested`, `session.message`, `agent`) with judge semaphore (cap 16) |
 | Command dispatch | Sends RPC commands to OpenClaw: `exec.approval.resolve`, `skills.update`, `config.get`, `config.patch`, `tools.catalog`, `sessions.list` |
 | Enforcement engine | Manages block/allow lists in SQLite (`internal/enforce/`) — separate from OPA |
@@ -321,7 +321,7 @@ requires only a new case in `internal/config/claw.go`.
 ## Component Communication Summary
 
 ```
-┌─────────┐    REST     ┌──────────────┐    WS (v3)    ┌──────────────┐
+┌─────────┐    REST     ┌──────────────┐   WS (v3-v4)  ┌──────────────┐
 │   CLI   │───────────▶│  DefenseClaw │──────────────▶│   OpenClaw   │
 │ (Python)│            │   Gateway    │               │   Gateway    │
 └─────────┘            │   (Go)       │◀──────────────│              │
