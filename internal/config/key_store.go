@@ -4,8 +4,8 @@ import "sync"
 
 // keyStore holds in-memory API keys injected at startup by the enterprise
 // token hydration layer. Keys stored here take priority over os.Getenv
-// in ResolvedAPIKey() so that secrets fetched from OpenBao never touch
-// the process environment.
+// in ResolvedAPIKey() so that secrets fetched from an external vault
+// never touch the process environment.
 var (
 	keyStoreMu  sync.RWMutex
 	keyStoreMap = make(map[string]string)
