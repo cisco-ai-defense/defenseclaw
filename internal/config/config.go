@@ -329,12 +329,18 @@ type LLMConfig struct {
 // these stay in lock-step.
 func (l LLMConfig) ResolvedAPIKey() string {
 	if l.APIKeyEnv != "" {
+		if v, ok := GetKey(l.APIKeyEnv); ok && strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
 		if v := strings.TrimSpace(os.Getenv(l.APIKeyEnv)); v != "" {
 			return v
 		}
 	}
 	if l.APIKey != "" {
 		return l.APIKey
+	}
+	if v, ok := GetKey(DefenseClawLLMKeyEnv); ok && strings.TrimSpace(v) != "" {
+		return strings.TrimSpace(v)
 	}
 	return strings.TrimSpace(os.Getenv(DefenseClawLLMKeyEnv))
 }
@@ -949,9 +955,12 @@ func (c *CiscoAIDefenseConfig) HookSurfaceEnabled() bool {
 	return *c.ScanHookSurface
 }
 
-// ResolvedAPIKey returns the API key from the env var (if set) or the direct value.
+// ResolvedAPIKey returns the API key from the key store, env var, or inline value.
 func (c *CiscoAIDefenseConfig) ResolvedAPIKey() string {
 	if c.APIKeyEnv != "" {
+		if v, ok := GetKey(c.APIKeyEnv); ok && v != "" {
+			return v
+		}
 		if v := os.Getenv(c.APIKeyEnv); v != "" {
 			return v
 		}
