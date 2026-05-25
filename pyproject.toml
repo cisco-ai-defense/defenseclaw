@@ -116,6 +116,7 @@ override-dependencies = [
     # CVE-2026-34513..34520, CVE-2026-34525). litellm 1.83.10's
     # transitive pin floats aiohttp downward without this override.
     "aiohttp>=3.13.4",
+    "starlette>=1.0.1",         # PYSEC-2026-161 fixed in 1.0.1
 ]
 
 [tool.ruff]

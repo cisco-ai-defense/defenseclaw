@@ -7,7 +7,7 @@ import "sync"
 // in ResolvedAPIKey() so that secrets fetched from OpenBao never touch
 // the process environment.
 var (
-	keyStoreMu sync.RWMutex
+	keyStoreMu  sync.RWMutex
 	keyStoreMap = make(map[string]string)
 )
 
