@@ -396,9 +396,9 @@ field, and runs
 [`_check_llm_reachable`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_doctor.py)
 to send a one-shot `max_tokens=1` ping through the resolved route.
 
-## Reachability test (`--test`)
+## Reachability ping (`--ping`)
 
-Pair any `setup llm` invocation with `--test` to issue an immediate
+Pair any `setup llm` invocation with `--ping` to issue an immediate
 `llm.ping` after save. It returns `(ok, message)` and never raises,
 so the wizard stays usable when the network is flaky:
 
@@ -407,7 +407,7 @@ defenseclaw setup llm \
   --provider anthropic \
   --model claude-sonnet-4-5 \
   --api-key-env DEFENSECLAW_LLM_KEY \
-  --non-interactive --test
+  --non-interactive --ping
 ```
 
 ```

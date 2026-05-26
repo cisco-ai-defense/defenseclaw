@@ -465,13 +465,6 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     help="After saving, send a one-shot 'ping' request via LiteLLM to verify reachability.",
 )
 @click.option(
-    "--test/--no-test",
-    "run_ping_legacy",
-    default=None,
-    hidden=True,
-    help="Deprecated alias for --ping/--no-ping.",
-)
-@click.option(
     "--non-interactive",
     "--accept-defaults",
     is_flag=True,
@@ -513,7 +506,6 @@ def setup_llm(
     tls_ca_cert_file: str | None,
     insecure_skip_verify: bool,
     run_ping: bool,
-    run_ping_legacy: bool | None,
     non_interactive: bool,
 ) -> None:
     """Configure the unified top-level ``llm:`` block.
@@ -530,9 +522,6 @@ def setup_llm(
     ``scripts/setup-llm.sh`` and the LLM section of ``defenseclaw init``.
     """
     cfg = app.cfg
-
-    if run_ping_legacy is not None:
-        run_ping = run_ping_legacy
 
     target_path = _role_to_target_path(role)
     llm = _target_llm_block(cfg, target_path)

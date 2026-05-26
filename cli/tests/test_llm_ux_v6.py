@@ -377,9 +377,9 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
             "us.anthropic.claude-sonnet-4-6",
         )
 
-    def test_ping_flag_aliases_test_flag(self) -> None:
-        """Both ``--ping`` and the legacy ``--test`` must trigger the
-        post-save ping. We patch ``_run_llm_ping`` to count invocations.
+    def test_ping_flag_triggers_post_save_ping(self) -> None:
+        """``--ping`` must trigger the post-save reachability ping. We
+        patch ``_run_llm_ping`` to count invocations.
         """
         from defenseclaw.commands import cmd_setup
 
@@ -399,21 +399,25 @@ class TestSetupLLMNonInteractiveFlags(unittest.TestCase):
             self.assertEqual(res.exit_code, 0, res.output)
             patched.assert_called_once()
 
-        with mock.patch.object(cmd_setup, "_run_llm_ping") as patched:
-            res = self.runner.invoke(
-                setup,
-                [
-                    "llm",
-                    "--non-interactive",
-                    "--provider", "anthropic",
-                    "--model", "claude-sonnet-4-5",
-                    "--test",
-                ],
-                obj=self.app,
-                catch_exceptions=False,
-            )
-            self.assertEqual(res.exit_code, 0, res.output)
-            patched.assert_called_once()
+    def test_legacy_test_flag_is_rejected(self) -> None:
+        """The legacy ``--test`` alias for ``--ping`` was removed.
+        ``click`` must surface a usage error and exit non-zero so any
+        script still passing ``--test`` fails loudly instead of
+        silently skipping the ping.
+        """
+        res = self.runner.invoke(
+            setup,
+            [
+                "llm",
+                "--non-interactive",
+                "--provider", "anthropic",
+                "--model", "claude-sonnet-4-5",
+                "--test",
+            ],
+            obj=self.app,
+        )
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("No such option", res.output)
 
     def test_auth_mode_maps_to_provider_typed_flag(self) -> None:
         res = self.runner.invoke(
