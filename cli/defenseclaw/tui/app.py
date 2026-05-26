@@ -80,13 +80,13 @@ from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
 from defenseclaw.tui.screens.redaction import RedactionToggleScreen
-from defenseclaw.tui.screens.theme_picker import ThemePickerScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
     SetupResourceEditorScreen,
     SetupResourceResult,
     audit_sink_rows_from_config,
     webhook_rows_from_config,
 )
+from defenseclaw.tui.screens.theme_picker import ThemePickerScreen
 from defenseclaw.tui.screens.uninstall import UninstallScreen
 from defenseclaw.tui.services.catalog_state import (
     CatalogCommandIntent,
