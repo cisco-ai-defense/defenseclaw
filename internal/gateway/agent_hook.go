@@ -426,6 +426,17 @@ func renderAgentHookResponseForProfile(profile connector.HookProfile, resp agent
 		}
 		out[fieldName] = resp.HookOutput
 	}
+	// Surface the unified-pipeline correlation keys so hook scripts
+	// + downstream tooling can pivot HTTP responses on the same
+	// evaluation_id used by gateway.jsonl + the audit DB. Both
+	// fields are additive — pre-existing hook scripts that ignore
+	// unknown keys continue to parse the same shape.
+	if resp.EvaluationID != "" {
+		out["evaluation_id"] = resp.EvaluationID
+	}
+	if len(resp.RuleIDs) > 0 {
+		out["rule_ids"] = resp.RuleIDs
+	}
 	return out
 }
 
