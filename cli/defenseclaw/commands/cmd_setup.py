@@ -1684,7 +1684,11 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.openhands/hooks.json hooks by default",
         "<workspace>/.openhands/hooks.json hooks only when --workspace is provided",
         "~/.openhands/mcp.json MCP entries when configured explicitly",
-        "~/.agents/skills install surface and ~/.openhands/cache/skills/public-skills/skills discovery by default; workspace .agents/skills only when --workspace is provided",
+        (
+            "~/.agents/skills install surface and "
+            "~/.openhands/cache/skills/public-skills/skills discovery by default; "
+            "workspace .agents/skills only when --workspace is provided"
+        ),
         "~/.defenseclaw/hooks/openhands-hook.sh",
     ),
 }
