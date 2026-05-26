@@ -231,6 +231,21 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
+	// Isolate HOME so the real user's ~/.codex/config.toml (which may
+	// register global MCP servers like playwright) doesn't leak into
+	// the assertion below — Codex layers the global TOML table with
+	// the project-local ./.mcp.json we wrote above.
+	t.Setenv("HOME", tmp)
+
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
 	cfg := &Config{}
 	cfg.Guardrail.Connector = "codex"
 	cfg.Claw.WorkspaceDir = tmp

@@ -2067,6 +2067,21 @@ def _resolve_gateway_target(
     gateway_port: int | None,
     gateway_token_env: str | None,
 ) -> tuple[str, int, str]:
+    """Resolve (host, port, token) for sidecar/orchestrator calls.
+
+    Token precedence mirrors :meth:`GatewayConfig.resolved_token`
+    (Phase 1) so the CLI and the config object can never disagree on
+    where credentials come from:
+
+    1. ``--gateway-token-env`` CLI override → ``os.environ[<that>]``.
+    2. Falls through to ``cfg.gateway.resolved_token()`` which itself
+       checks ``cfg.gateway.token_env`` → ``DEFENSECLAW_GATEWAY_TOKEN``
+       → ``OPENCLAW_GATEWAY_TOKEN`` → ``cfg.gateway.token`` literal.
+
+    Returns the empty string for the token component when nothing is
+    reachable; callers turn that into a friendly ClickException with
+    remediation text (see ``_usage_client``).
+    """
     host = gateway_host or "127.0.0.1"
     port = gateway_port or 18970
     token = os.environ.get(gateway_token_env or "", "") if gateway_token_env else ""
@@ -2088,6 +2103,16 @@ def _resolve_gateway_target(
             if not token and hasattr(gw, "resolved_token"):
                 token = gw.resolved_token()
 
+    # Last-resort safety net: even when no Config object is reachable
+    # (e.g. early-boot smoke tests, doctor pre-config) we still want
+    # `defenseclaw agent usage` to succeed if the Go gateway has
+    # written its token to the environment. Mirrors the auto-detect
+    # ladder in GatewayConfig.resolved_token so the two stay in sync.
+    if not token:
+        token = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    if not token:
+        token = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+
     return host, port, token
 
 
@@ -2105,8 +2130,49 @@ def _usage_client(
         gateway_token_env=gateway_token_env,
     )
     if not token:
-        raise click.ClickException("gateway token unavailable")
+        raise click.ClickException(_format_missing_token_error(app))
     return OrchestratorClient(host=host, port=port, token=token, timeout=5)
+
+
+def _format_missing_token_error(app: AppContext) -> str:
+    """Build the operator-facing 'gateway token unavailable' message.
+
+    The pre-fix error was a 3-word string with zero remediation; this
+    builds a 3-line message that tells the operator exactly which
+    var to set, where it should live, and which one-liner generates
+    or persists it. Mirrors the Go gateway's first-boot flow so the
+    advice never drifts from what the gateway is actually doing.
+
+    Why include the configured ``cfg.gateway.token_env``: helps the
+    operator confirm whether the resolver is looking at the right var
+    name. If it points at a custom var they don't recognise, that's
+    a signal to re-check ``defenseclaw setup gateway``.
+
+    Pulled into its own helper so Phase 5's regression test can lock
+    the wording (presence of remediation hints) without bringing the
+    whole click.ClickException raise path into the assertion.
+    """
+    configured_env = ""
+    cfg = getattr(app, "cfg", None)
+    gw = getattr(cfg, "gateway", None) if cfg is not None else None
+    if gw is not None:
+        configured_env = getattr(gw, "token_env", "") or ""
+
+    configured_clause = (
+        f" (cfg.gateway.token_env={configured_env!r})"
+        if configured_env
+        else ""
+    )
+    return (
+        "gateway token unavailable — the sidecar API requires "
+        f"DEFENSECLAW_GATEWAY_TOKEN{configured_clause}.\n"
+        "Fix: run `defenseclaw-gateway start` (auto-generates the token "
+        "on first boot, persisted to ~/.defenseclaw/.env), OR run "
+        "`defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN <token>` to "
+        "set it manually.\n"
+        "Then re-run this command. See `defenseclaw doctor` for a "
+        "deeper diagnostic if it still fails."
+    )
 
 
 # State weight for stable, "what's new first" sort order in both summary

@@ -23,6 +23,10 @@ dependencies = [
 dev = [
     "pytest==9.0.3",
     "pytest-cov==7.1.0",
+    "pytest-asyncio==1.3.0",
+    "pytest-textual-snapshot==1.1.0",
+    "hypothesis==6.140.4",
+    "freezegun==1.5.5",
     "jsonschema>=4.23.0",
     "ruff==0.15.7",
     "opentelemetry-api>=1.28.0",
@@ -121,6 +125,13 @@ override-dependencies = [
     # to >=0.133.0 (first release supporting starlette 1.x).
     "starlette>=1.0.1,<1.1",
     "fastapi>=0.133.0",
+    # ``pytest-textual-snapshot==1.1.0`` transitively pins
+    # ``syrupy==4.8.0``, which in turn pins ``pytest>=7,<9``. We are on
+    # pytest 9.x project-wide, so override to a syrupy version that
+    # supports pytest 9. Verified locally that the snapshot plugin runs
+    # against this newer syrupy without API breakage (the only surface
+    # used is SerializerFactory + SnapshotSession).
+    "syrupy>=4.9.1",
 ]
 
 [tool.ruff]
@@ -130,5 +141,36 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP"]
 
+[tool.ruff.lint.per-file-ignores]
+# Test suites lean on conventions ruff dislikes by default: descriptive
+# CapWords_Suffix class names, ``MockScanner`` / ``MockPE`` mock locals,
+# short ``C`` aliases for credential modules, deliberately-unused
+# binding placeholders, and ``sys.path``-bootstrap imports above
+# top-of-file. None of these are bugs and rewriting them all carries
+# no review benefit, so silence the ruff codes there.
+"cli/tests/**" = ["E501", "E402", "E702", "F841", "N801", "N803", "N806", "N812"]
+# Hand-written migrations occasionally need slightly-long error lines
+# for grep-friendly messages.
+"cli/defenseclaw/migrations.py" = ["E501"]
+# TUI panels embed wide ASCII tables / banner strings that we want
+# kept on one line for readability.
+"cli/defenseclaw/tui/**" = ["E501"]
+# JSON-mirror fields in policy-creator TypedDicts must preserve the
+# upstream camelCase keys (``basedOn``, ``sensitiveTools``).
+"cli/defenseclaw/tui/creator/types.py" = ["N815"]
+
 [tool.pytest.ini_options]
 testpaths = ["cli/tests"]
+# Every `async def test_*` in the TUI suite needs `pytest-asyncio` to
+# actually be awaited; ``auto`` mode lets us drop the per-test
+# ``@pytest.mark.asyncio`` decorations the codebase has 100+ of today.
+asyncio_mode = "auto"
+markers = [
+    "tui_snapshot: marks SVG snapshot tests (slow on first run)",
+    "tui_property: marks Hypothesis-driven invariant tests",
+    "allow_subprocess: opts test out of the autouse subprocess ban (use only for executor.py integration tests)",
+    "agent_tty: marks tests that spawn an interactive agent under a PTY (legacy marker)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:textual.*",
+]

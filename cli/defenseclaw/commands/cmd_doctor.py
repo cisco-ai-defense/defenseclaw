@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import urllib.error
 import urllib.request
 
@@ -435,6 +436,306 @@ def _check_openclaw_gateway(cfg, r: _DoctorResult) -> None:
         _emit("pass", "OpenClaw gateway", f"{cfg.gateway.host}:{cfg.gateway.port}", r=r)
     else:
         _emit("fail", "OpenClaw gateway", f"not reachable at {cfg.gateway.host}:{cfg.gateway.port}", r=r)
+
+
+def _check_gateway_token_env_alignment(cfg, r: _DoctorResult) -> None:
+    """Detect the OPENCLAW_/DEFENSECLAW_ token-env drift the user hit.
+
+    This is the doctor surface for the rebranding fix
+    (cmd_agent/_resolve_gateway_target + config/GatewayConfig). The
+    auto-detect ladder in Phase 1-2 already MASKS the misconfig at
+    runtime — `agent usage` works either way — but doctor should
+    still flag the stale ``token_env`` so operators can clean it up
+    via `--fix` and rely on the explicit (faster, no-fallthrough)
+    path going forward.
+
+    Triggers when ALL of these hold:
+
+    * ``cfg.gateway.token_env`` is set to a non-empty string.
+    * That env var is empty in ``os.environ``.
+    * The CANONICAL var (``DEFENSECLAW_GATEWAY_TOKEN``) IS populated.
+
+    "fail" tag (not "warn") is intentional — without the auto-detect
+    fall-through, this exact config would fail every `agent usage`
+    call. The fall-through is a safety net, not the design.
+    """
+    gw = getattr(cfg, "gateway", None)
+    if gw is None:
+        return
+
+    configured_env = getattr(gw, "token_env", "") or ""
+    if not configured_env:
+        # No env var configured at all — handled by other checks
+        # (e.g. _check_sidecar's auth probe). Not our concern here.
+        return
+
+    configured_val = os.environ.get(configured_env, "")
+    if configured_val:
+        # Configured var IS populated — happy path. Nothing to flag.
+        _emit("pass", "Gateway token env", f"{configured_env} is set", r=r)
+        return
+
+    # Stale token_env: configured var is empty. Check whether the
+    # canonical DEFENSECLAW_ var is populated instead — that's the
+    # drift case worth fixing.
+    canonical = os.environ.get("DEFENSECLAW_GATEWAY_TOKEN", "")
+    if canonical:
+        _emit(
+            "fail",
+            "Gateway token env",
+            f"cfg.gateway.token_env={configured_env!r} is empty in env, "
+            "but DEFENSECLAW_GATEWAY_TOKEN is set. Run `defenseclaw doctor "
+            "--fix` to repoint token_env at the canonical var.",
+            r=r,
+        )
+        return
+
+    legacy = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "")
+    if legacy and configured_env != "OPENCLAW_GATEWAY_TOKEN":
+        # Custom token_env that's empty, but legacy OPENCLAW_ has a
+        # value. Rare; flag as warn so the operator can decide.
+        _emit(
+            "warn",
+            "Gateway token env",
+            f"cfg.gateway.token_env={configured_env!r} is empty, but "
+            "OPENCLAW_GATEWAY_TOKEN has a legacy value. Migrate via "
+            "`defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN <value>`.",
+            r=r,
+        )
+        return
+
+    # Both vars empty — no token configured anywhere. Other checks
+    # (sidecar /health probe) will catch the downstream effect; we
+    # just report the local config state.
+    _emit(
+        "warn",
+        "Gateway token env",
+        f"{configured_env} is empty and no DEFENSECLAW_GATEWAY_TOKEN "
+        "fallback is present. Start the gateway (auto-generates a "
+        "token) or run `defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN`.",
+        r=r,
+    )
+
+
+def _read_pid_from_file(pid_file: str) -> int:
+    """Return the live PID recorded in ``gateway.pid``, or 0.
+
+    Tolerates both the legacy plain-integer format and the current
+    ``{"pid": N, ...}`` JSON envelope. Returns 0 on any read/parse
+    error or when the PID is not actually alive — callers treat 0 as
+    "no live sidecar to inspect".
+    """
+    if not os.path.isfile(pid_file):
+        return 0
+    try:
+        with open(pid_file, encoding="utf-8") as fh:
+            raw = fh.read().strip()
+    except OSError:
+        return 0
+    try:
+        pid = int(raw)
+    except ValueError:
+        try:
+            pid = int(json.loads(raw).get("pid", 0))
+        except (json.JSONDecodeError, ValueError, TypeError, AttributeError):
+            return 0
+    if pid <= 0:
+        return 0
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return 0
+    return pid
+
+
+def _read_process_env_var(pid: int, var_name: str) -> str | None:
+    """Return the named env var's value from a running process's env.
+
+    Tries ``/proc/<pid>/environ`` first (Linux fast path; no
+    subprocess), falls back to ``ps eww -p <pid>`` (macOS / BSD where
+    /proc isn't a thing, plus a backup path if /proc read fails).
+    The fallback parses the FIRST line of ps output (the env line)
+    and matches ``VAR=`` tokens; it intentionally does NOT shell out
+    to grep so this works with hostile env values (which can contain
+    spaces, single quotes, equals signs).
+
+    Returns:
+      * The env-var value (possibly empty string "") on success.
+      * ``None`` when the process is gone, the env is unreadable
+        (perms — common on macOS for processes owned by other users),
+        or the var is genuinely not in the process env. ``None`` is
+        the "I don't know" sentinel; callers MUST treat it as
+        "can't detect drift" not "drift confirmed". Conflating the
+        two would turn a permissions blip into a false alarm that
+        nags the operator to restart a healthy sidecar.
+    """
+    if pid <= 0 or not var_name:
+        return None
+
+    # Linux fast path: /proc/<pid>/environ is null-separated KEY=VALUE.
+    proc_environ = f"/proc/{pid}/environ"
+    if os.path.isfile(proc_environ):
+        try:
+            with open(proc_environ, "rb") as fh:
+                blob = fh.read()
+        except (OSError, PermissionError):
+            blob = b""
+        if blob:
+            for entry in blob.split(b"\x00"):
+                if not entry:
+                    continue
+                key, sep, value = entry.partition(b"=")
+                if sep and key.decode("utf-8", errors="replace") == var_name:
+                    return value.decode("utf-8", errors="replace")
+            # /proc was readable but the var isn't there — definitive
+            # absence.
+            return ""
+
+    # macOS / fallback: ps eww -p <pid> prints "PID TTY STAT TIME CMD ENV...".
+    # We ask for just the args (the env appears inline on macOS).
+    try:
+        proc = subprocess.run(
+            ["ps", "eww", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+
+    # ps output: header line, then one or more lines for the process.
+    # The env tokens are space-separated VAR=VALUE pairs. Iterate
+    # tokens and pick the first one whose key matches; this handles
+    # multi-line output and values that don't contain unescaped spaces.
+    needle = var_name + "="
+    for line in proc.stdout.splitlines()[1:]:
+        for token in line.split():
+            if token.startswith(needle):
+                return token[len(needle):]
+    # We could parse, but the var wasn't there — definitive absence.
+    return ""
+
+
+def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
+    """Detect a stale-sidecar-token vs current-.env-token mismatch.
+
+    Failure mode this closes: the sidecar caches its auth token at
+    startup (from env / dotenv). If anything later rewrites
+    ``~/.defenseclaw/.env`` — Phase 4 migration, a fresh
+    ``EnsureGatewayToken`` run, manual ``defenseclaw keys set``, an
+    install script that touches the dotenv — the running sidecar
+    keeps using the OLD token while the CLI reads the NEW one. Every
+    subsequent ``defenseclaw agent usage`` (and any other auth'd API
+    call) returns HTTP 401 with no hint of the root cause.
+
+    Triggers when ALL of these hold:
+
+    * ``gateway.pid`` exists and the recorded PID is alive.
+    * The sidecar process's ``DEFENSECLAW_GATEWAY_TOKEN`` env var is
+      readable and non-empty.
+    * The current ``.env``'s ``DEFENSECLAW_GATEWAY_TOKEN`` is non-empty.
+    * The two differ.
+
+    "fail" tag is intentional — this configuration is BROKEN at
+    runtime (every API call returns 401), not just suboptimal.
+    Operators need to know this, not a soft "warn".
+
+    Permission-denied / process-gone cases emit ``"skip"`` rather
+    than ``"warn"`` — those aren't drift, just "can't tell". Nagging
+    on indeterminacy would erode trust in the check.
+    """
+    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    pid = _read_pid_from_file(pid_file)
+    if pid == 0:
+        # No running sidecar — nothing to compare against. Other
+        # checks (e.g. _check_sidecar) handle the "sidecar down"
+        # case; this one is exclusively about drift between live
+        # process and on-disk dotenv.
+        return
+
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    dotenv_token = ""
+    if os.path.isfile(dotenv_path):
+        try:
+            with open(dotenv_path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
+                        value = line[len("DEFENSECLAW_GATEWAY_TOKEN="):]
+                        # Strip optional surrounding quotes the same
+                        # way config._load_dotenv_into_os does, so
+                        # the comparison matches the value the CLI
+                        # would actually send.
+                        if (
+                            len(value) >= 2
+                            and value[0] == value[-1]
+                            and value[0] in ('"', "'")
+                        ):
+                            value = value[1:-1]
+                        dotenv_token = value
+                        break
+        except OSError:
+            return
+    if not dotenv_token:
+        # No token in .env to compare against. _check_sidecar /
+        # _check_gateway_token_env_alignment surface the upstream
+        # "no token configured" state; nothing to report here.
+        return
+
+    process_token = _read_process_env_var(pid, "DEFENSECLAW_GATEWAY_TOKEN")
+    if process_token is None:
+        # Couldn't read the process env — permissions or process
+        # raced away. Skip silently rather than warn; "can't tell"
+        # is not drift.
+        _emit(
+            "skip",
+            "Gateway token drift",
+            f"could not inspect sidecar (pid {pid}) env — permissions?",
+            r=r,
+        )
+        return
+    if not process_token:
+        # Sidecar started with no DEFENSECLAW_GATEWAY_TOKEN in env.
+        # Either it's an older binary that read the dotenv directly,
+        # or the user started it manually without sourcing the
+        # dotenv. The check below would falsely flag "drift" here;
+        # treat this as inconclusive and let _check_sidecar surface
+        # the auth issue if one exists.
+        _emit(
+            "skip",
+            "Gateway token drift",
+            f"sidecar (pid {pid}) has no DEFENSECLAW_GATEWAY_TOKEN in env; "
+            "comparing dotenv to process not meaningful",
+            r=r,
+        )
+        return
+
+    if process_token == dotenv_token:
+        _emit(
+            "pass",
+            "Gateway token drift",
+            f"sidecar (pid {pid}) token matches ~/.defenseclaw/.env",
+            r=r,
+        )
+        return
+
+    # Mismatch confirmed. Show only first 8 chars of each so the
+    # operator can confirm with their eyes without leaking the full
+    # secret into stdout / log / screenshot.
+    proc_prefix = process_token[:8] + "…" if len(process_token) >= 8 else "<too short>"
+    env_prefix = dotenv_token[:8] + "…" if len(dotenv_token) >= 8 else "<too short>"
+    _emit(
+        "fail",
+        "Gateway token drift",
+        f"sidecar (pid {pid}) is running with token {proc_prefix} but "
+        f"~/.defenseclaw/.env has {env_prefix}. Every API call will "
+        "return HTTP 401. Run `defenseclaw doctor --fix` (or "
+        "`defenseclaw-gateway restart`) to reconcile.",
+        r=r,
+    )
 
 
 def _check_claudecode_hooks(cfg, r: _DoctorResult) -> None:
@@ -1418,8 +1719,24 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
 @click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
 @click.option("--fix", "do_fix", is_flag=True, help="Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.)")
 @click.option("--yes", "assume_yes", is_flag=True, help="When used with --fix, apply fixes without prompting")
+@click.option(
+    "--dry-run",
+    "dry_run",
+    is_flag=True,
+    help=(
+        "When used with --fix, list the fixers that would run without "
+        "mutating anything on disk. Useful as a preview step before "
+        "approving a real ``--fix --yes`` run from a TUI/CI wrapper."
+    ),
+)
 @pass_ctx
-def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> None:
+def doctor(
+    app: AppContext,
+    json_out: bool,
+    do_fix: bool,
+    assume_yes: bool,
+    dry_run: bool,
+) -> None:
     """Verify credentials, endpoints, and connectivity.
 
     Runs a series of checks against every configured service and API key
@@ -1472,6 +1789,8 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     if not json_out:
         _doctor_subsection("Services")
     _check_sidecar(cfg, r)
+    _check_gateway_token_env_alignment(cfg, r)
+    _check_gateway_token_drift(cfg, r)
     if active_connector == "openclaw":
         _check_openclaw_gateway(cfg, r)
     elif active_connector == "claudecode":
@@ -1501,8 +1820,14 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 
     if do_fix:
         if not json_out:
-            _doctor_subsection("Auto-fix")
-        _run_fixers(cfg, r, assume_yes=assume_yes, json_out=json_out)
+            _doctor_subsection("Auto-fix" + (" (dry-run)" if dry_run else ""))
+        _run_fixers(
+            cfg,
+            r,
+            assume_yes=assume_yes,
+            json_out=json_out,
+            dry_run=dry_run,
+        )
 
     # Persist the cached snapshot before exit so the Go TUI (and any
     # other cron-style caller) can pick it up without re-probing. We
@@ -1585,28 +1910,44 @@ def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
 # --fix auto-repair
 # ---------------------------------------------------------------------------
 
-
-def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> None:
+def _run_fixers(
+    cfg,
+    r: _DoctorResult,
+    *,
+    assume_yes: bool,
+    json_out: bool,
+    dry_run: bool = False,
+) -> None:
     """Run each fixer in sequence, narrating what changed.
 
     Fixers are intentionally *small* and independent — none of them
     restart the sidecar or mutate connector configs beyond what setup
     already would. Anything that needs a full re-patch is deferred to
     the human.
+
+    With ``dry_run=True`` we *list* each fixer instead of invoking it.
+    The reported tag is always ``"skip"`` and the detail explains the
+    fixer would run; this lets a TUI / CI caller render a preview
+    before granting an explicit ``--yes`` to mutate anything.
     """
     fixers = [
         ("stale gateway PID file", _fix_stale_pid),
         ("gateway token", _fix_gateway_token),
+        ("gateway token_env", _fix_gateway_token_env),
+        ("gateway token drift", _fix_gateway_token_drift),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
         ("pristine config backup", _fix_pristine_backup),
         ("connector residue", _fix_connector_residue),
     ]
 
     for title, fn in fixers:
-        try:
-            outcome = fn(cfg, assume_yes=assume_yes)
-        except Exception as exc:  # defensive — one fixer shouldn't abort the rest
-            outcome = ("error", f"{type(exc).__name__}: {exc}")
+        if dry_run:
+            outcome = ("skip", "would run (dry-run; no changes made)")
+        else:
+            try:
+                outcome = fn(cfg, assume_yes=assume_yes)
+            except Exception as exc:  # defensive — one fixer shouldn't abort the rest
+                outcome = ("error", f"{type(exc).__name__}: {exc}")
 
         tag, detail = outcome
         if json_out:
@@ -1988,6 +2329,163 @@ def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if current:
         return ("skip", f"{env_var} already set")
     return ("skip", f"connector {active_connector} — set {env_var} manually if needed")
+
+
+def _fix_gateway_token_env(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Repoint ``cfg.gateway.token_env`` at the canonical var when stale.
+
+    Companion to :func:`_check_gateway_token_env_alignment`. The check
+    just flags drift; this fixer actually rewrites
+    ``cfg.gateway.token_env`` from the legacy ``OPENCLAW_GATEWAY_TOKEN``
+    (or any other empty-in-env value) to ``DEFENSECLAW_GATEWAY_TOKEN``
+    when the latter is populated. Saves config.yaml in place.
+
+    Returns ``("skip", ...)`` when no fix is needed (config already
+    aligned, or no canonical token to repoint AT), ``("pass", ...)``
+    when the rewrite lands successfully, ``("fail", ...)`` on write
+    error.
+
+    Why ``cfg.save()`` and not a surgical YAML patch: ``GatewayConfig``
+    is a small dataclass and the save round-trips through the
+    canonical writer — this guarantees the field is serialized the
+    same way as anywhere else in the codebase. Surgical patching
+    would diverge from the live config schema if a future field is
+    added between writes.
+    """
+    gw = getattr(cfg, "gateway", None)
+    if gw is None:
+        return ("skip", "no gateway config")
+
+    configured_env = getattr(gw, "token_env", "") or ""
+    canonical = "DEFENSECLAW_GATEWAY_TOKEN"
+
+    # Already on the canonical name — nothing to do, regardless of
+    # whether the var is actually populated. Other fixers handle the
+    # missing-value case.
+    if configured_env == canonical:
+        return ("skip", f"token_env already set to {canonical}")
+
+    # Don't touch a custom operator override. Only auto-repoint the
+    # legacy OPENCLAW_ default.
+    if configured_env and configured_env != "OPENCLAW_GATEWAY_TOKEN":
+        return (
+            "skip",
+            f"token_env={configured_env!r} is a custom override; not auto-rewriting",
+        )
+
+    # Only proceed when the canonical var is actually populated —
+    # otherwise we'd be repointing at another empty var, which buys
+    # nothing and obscures the underlying "no token anywhere" state.
+    if not os.environ.get(canonical, ""):
+        return ("skip", f"{canonical} is not set; nothing to repoint at")
+
+    if not assume_yes and not click.confirm(
+        f"    Repoint cfg.gateway.token_env from {configured_env!r} "
+        f"to {canonical!r} in config.yaml?",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        gw.token_env = canonical
+        cfg.save()
+    except (OSError, AttributeError) as exc:
+        return ("fail", f"could not save config: {type(exc).__name__}: {exc}")
+
+    return ("pass", f"token_env repointed to {canonical}")
+
+
+def _fix_gateway_token_drift(cfg, *, assume_yes: bool) -> tuple[str, str]:
+    """Restart the sidecar when its in-memory token != current .env.
+
+    Companion to :func:`_check_gateway_token_drift`. The check just
+    flags the drift; this fixer offers to bounce the sidecar so it
+    re-reads the dotenv and starts serving the current token. We
+    deliberately do NOT touch the dotenv itself — the operator's
+    intent is preserved.
+
+    Why a restart and not an in-place token reload: the sidecar
+    holds the token in memory in a dozen places (auth middleware,
+    connector credentials, hook scripts cached on disk). A
+    SIGHUP-style reload would have to walk all of those; a clean
+    restart is the only honest fix.
+
+    Returns ``("skip", ...)`` when there's nothing to fix (no drift
+    detected, no live sidecar, can't introspect), ``("pass", ...)``
+    on successful restart, ``("fail", ...)`` when the restart
+    invocation errors out.
+    """
+    pid_file = os.path.join(cfg.data_dir, "gateway.pid")
+    pid = _read_pid_from_file(pid_file)
+    if pid == 0:
+        return ("skip", "no live sidecar to restart")
+
+    dotenv_path = os.path.join(cfg.data_dir, ".env")
+    if not os.path.isfile(dotenv_path):
+        return ("skip", "no .env file to compare against")
+
+    dotenv_token = ""
+    try:
+        with open(dotenv_path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("DEFENSECLAW_GATEWAY_TOKEN="):
+                    value = line[len("DEFENSECLAW_GATEWAY_TOKEN="):]
+                    if (
+                        len(value) >= 2
+                        and value[0] == value[-1]
+                        and value[0] in ('"', "'")
+                    ):
+                        value = value[1:-1]
+                    dotenv_token = value
+                    break
+    except OSError as exc:
+        return ("warn", f"could not read {dotenv_path}: {exc}")
+    if not dotenv_token:
+        return ("skip", "no DEFENSECLAW_GATEWAY_TOKEN in .env to reconcile")
+
+    process_token = _read_process_env_var(pid, "DEFENSECLAW_GATEWAY_TOKEN")
+    if process_token is None:
+        return ("skip", f"could not inspect sidecar pid {pid} env")
+    if not process_token:
+        return ("skip", f"sidecar pid {pid} has no DEFENSECLAW_GATEWAY_TOKEN in env")
+    if process_token == dotenv_token:
+        return ("skip", "sidecar token already matches .env")
+
+    # Drift confirmed. Find the gateway binary and offer to restart.
+    gw_binary = shutil.which("defenseclaw-gateway")
+    if not gw_binary:
+        return (
+            "warn",
+            "drift detected but defenseclaw-gateway not on PATH; "
+            "restart the sidecar manually to reconcile",
+        )
+
+    if not assume_yes and not click.confirm(
+        f"    Restart sidecar (pid {pid}) to pick up the current "
+        ".env token? In-flight requests will be interrupted.",
+        default=True,
+    ):
+        return ("skip", "declined by user")
+
+    try:
+        result = subprocess.run(
+            [gw_binary, "restart"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return ("fail", "restart command timed out after 30s")
+    except OSError as exc:
+        return ("fail", f"could not invoke restart: {exc}")
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
+        return ("fail", detail[0] if detail else "restart failed")
+
+    return ("pass", f"sidecar restarted; will now serve token from {dotenv_path}")
 
 
 def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:

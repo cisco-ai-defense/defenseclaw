@@ -122,13 +122,13 @@ def build_manifest() -> dict[str, Any]:
     version = current_version()
     migrations = migration_versions()
     current_t = _ver_tuple(version)
-    future = [migration for migration in migrations if _ver_tuple(migration) > current_t]
-    if future:
-        raise RuntimeError(
-            "migration registry contains versions newer than the package version "
-            f"{version}: {', '.join(future)}. Bump the release version first."
-        )
-
+    # Future-keyed migrations are dropped from ``required`` instead of
+    # raising: the registry frequently carries placeholders for the
+    # next release (e.g. ``0.6.2`` while the package is still on
+    # ``0.5.0``) so that re-keying at merge time touches only the
+    # registry tuple, not unrelated CI. Release gating (refuse to ship
+    # a manifest that omits a registered migration) lives in
+    # :func:`validate_release_manifest`.
     required = [migration for migration in migrations if _ver_tuple(migration) <= current_t]
     return {
         "schema_version": 1,
@@ -140,6 +140,27 @@ def build_manifest() -> dict[str, Any]:
     }
 
 
+def validate_release_manifest() -> None:
+    """Release-discipline gate: every registered migration must be
+    at or below the package version.
+
+    Called from the ``--check`` path so CI on a release branch refuses
+    to ship a manifest that silently drops a registered migration.
+    Day-to-day :func:`build_manifest` callers (and the test suite)
+    skip this check because development branches deliberately register
+    forward-looking migrations.
+    """
+    version = current_version()
+    migrations = migration_versions()
+    current_t = _ver_tuple(version)
+    future = [migration for migration in migrations if _ver_tuple(migration) > current_t]
+    if future:
+        raise RuntimeError(
+            "migration registry contains versions newer than the package version "
+            f"{version}: {', '.join(future)}. Bump the release version first."
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, help="write manifest JSON to this path")
@@ -148,10 +169,22 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="validate the manifest contract without writing an artifact",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "release-discipline gate: refuse to emit if the migrations "
+            "registry contains forward-keyed versions. The release "
+            "manager runs this on the release branch; dev/PR CI leaves "
+            "it off so placeholder migrations don't block merges."
+        ),
+    )
     args = parser.parse_args(argv)
 
     try:
         manifest = build_manifest()
+        if args.strict:
+            validate_release_manifest()
     except Exception as exc:  # noqa: BLE001 - print concise CI diagnostics
         print(f"upgrade manifest check failed: {exc}", file=sys.stderr)
         return 1

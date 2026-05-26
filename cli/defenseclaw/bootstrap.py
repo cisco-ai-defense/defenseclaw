@@ -1020,11 +1020,25 @@ def _seed_splunk_bridge(data_dir: str, report: BootstrapReport) -> None:
 
 
 def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
-    """Sync gateway host/port/token from ``openclaw.json``.
+    """Sync gateway host/port/token from ``openclaw.json`` and dotenv.
 
-    Returns True when an OPENCLAW_GATEWAY_TOKEN was detected and
-    written to ``~/.defenseclaw/.env``. Mirrors the production logic
-    in ``cmd_init._setup_gateway_defaults`` without the UI chatter.
+    Returns True when a gateway token was detected (either from
+    OpenClaw's config or from ``~/.defenseclaw/.env``). Mirrors the
+    production logic in ``cmd_init._setup_gateway_defaults`` without
+    the UI chatter.
+
+    Token-env naming policy:
+
+    * If we copy a token OUT of ``openclaw.json``, we persist it as
+      ``OPENCLAW_GATEWAY_TOKEN`` because that's its origin — keeps
+      ``defenseclaw setup`` UX honest about where the secret came
+      from and avoids confusing operators who have both stacks.
+    * Otherwise (the common case: standalone defenseclaw install with
+      no OpenClaw node nearby), default ``token_env`` to the canonical
+      ``DEFENSECLAW_GATEWAY_TOKEN``. This is what the Go gateway
+      auto-generates on first boot, so the Python and Go halves now
+      agree out of the box instead of needing Phase 4's migration to
+      reconcile them.
     """
     from defenseclaw.commands.cmd_init import (
         _ensure_device_key,
@@ -1045,7 +1059,12 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
         token_configured = True
     else:
-        cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
+        # Standalone defenseclaw install — point at the env var the
+        # Go gateway writes on first boot. resolved_token() will still
+        # auto-detect either DEFENSECLAW_ or legacy OPENCLAW_, so an
+        # upgrader whose dotenv only has OPENCLAW_ keeps working
+        # without any operator action.
+        cfg.gateway.token_env = "DEFENSECLAW_GATEWAY_TOKEN"
         token_configured = bool(cfg.gateway.resolved_token())
 
     if not cfg.gateway.device_key_file:
