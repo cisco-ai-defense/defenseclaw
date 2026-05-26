@@ -805,7 +805,10 @@ def _provider_add_interactive() -> dict[str, Any]:
     "--domain",
     "domains",
     multiple=True,
-    help="Domain to recognise as LLM traffic (repeatable). Accepts full URLs; scheme and path are stripped. Optional when --base-url is set.",
+    help=(
+        "Domain to recognise as LLM traffic (repeatable). Accepts full URLs; "
+        "scheme and path are stripped. Optional when --base-url is set."
+    ),
 )
 @click.option(
     "--env-key",

@@ -685,7 +685,8 @@ def summary_panel(
         rows.append(("azure.endpoint", llm.azure.endpoint))
         rows.append(("azure.api_version", llm.azure.api_version))
         if llm.azure.deployment_aliases:
-            rows.append(("azure.deployment_aliases", ", ".join(f"{k}={v}" for k, v in llm.azure.deployment_aliases.items())))
+            aliases = ", ".join(f"{k}={v}" for k, v in llm.azure.deployment_aliases.items())
+            rows.append(("azure.deployment_aliases", aliases))
     if llm.tls and (llm.tls.ca_cert_pem or llm.tls.insecure_skip_verify):
         # Render PEM contents as a length summary so the wizard
         # output stays one line per field. Operators verifying the

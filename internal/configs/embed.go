@@ -28,7 +28,7 @@ var providersJSON []byte
 // auth-profiles.json profile ID used to look up the API key.
 //
 // Custom-provider extensions (all optional, zero-valued for built-in
-// entries) let operator overlays in ``~/.defenseclaw/custom-providers.json``
+// entries) let operator overlays in “~/.defenseclaw/custom-providers.json“
 // declare internal/self-hosted endpoints with their own upstream
 // adapter, base URL, TLS posture, and request-path overrides. The
 // guardrail Bifrost adapter consults these fields at runtime via

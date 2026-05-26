@@ -242,13 +242,13 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvid
 
 // NewProviderForInstance constructs a provider by resolving a
 // custom-providers.json overlay entry by name. The overlay's
-// ``base_provider_type``, ``base_url``, and per-instance TLS settings
-// take precedence over the value inferred from ``model``; ``apiKey``
+// “base_provider_type“, “base_url“, and per-instance TLS settings
+// take precedence over the value inferred from “model“; “apiKey“
 // still flows from the resolved :class:`LLMConfig` (whose
-// ``resolved_api_key()`` reads the overlay's env_keys list).
+// “resolved_api_key()“ reads the overlay's env_keys list).
 //
-// Returns an ``ErrCustomProviderInstanceNotFound``-style error when
-// ``name`` is non-empty but no overlay entry matches, so callers can
+// Returns an “ErrCustomProviderInstanceNotFound“-style error when
+// “name“ is non-empty but no overlay entry matches, so callers can
 // fall back to :func:`NewProviderWithBase` without silently routing to
 // the wrong endpoint.
 func NewProviderForInstance(name, model, apiKey string, providers *configs.ProvidersConfig) (LLMProvider, error) {
@@ -310,14 +310,14 @@ func NewProviderForInstance(name, model, apiKey string, providers *configs.Provi
 // :type:`config.LLMConfig` to an :type:`LLMProvider`. It picks one of
 // three paths in order:
 //
-//  1. ``InstanceName != ""`` AND a matching overlay entry exists →
+//  1. “InstanceName != ""“ AND a matching overlay entry exists →
 //     :func:`NewProviderForInstance` (applies the overlay's
 //     base_url, base_provider_type, TLS).
-//  2. ``BaseURL != ""`` → :func:`NewProviderWithBase` (legacy custom
+//  2. “BaseURL != ""“ → :func:`NewProviderWithBase` (legacy custom
 //     endpoint, no overlay required).
 //  3. otherwise :func:`NewProvider` with the model-derived provider.
 //
-// ``providers`` may be nil; in that case the function silently degrades
+// “providers“ may be nil; in that case the function silently degrades
 // to path 2/3 so a bootstrap that fails to load the overlay still gets
 // a usable provider rather than crashing the gateway.
 func NewProviderForLLMConfig(model, apiKey, baseURL, instanceName string, providers *configs.ProvidersConfig) (LLMProvider, error) {

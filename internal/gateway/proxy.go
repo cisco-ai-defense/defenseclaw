@@ -1542,8 +1542,8 @@ func inferProviderFromURL(targetURL string) string {
 // configured with "defenseclaw" as a custom provider and sends requests straight
 // to the guardrail proxy without the fetch interceptor setting X-DC-Target-URL.
 //
-// When ``cfg.llm.instance_name`` is set, the resolution honors the overlay
-// entry in ``~/.defenseclaw/custom-providers.json`` for base_url, base
+// When “cfg.llm.instance_name“ is set, the resolution honors the overlay
+// entry in “~/.defenseclaw/custom-providers.json“ for base_url, base
 // provider type, and TLS — see :func:`NewProviderForLLMConfig`.
 func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider {
 	cfgModel := p.cfg.Model

@@ -327,7 +327,10 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
     "--provider",
     type=click.Choice(_WIZARD_LLM_PROVIDERS + ["custom"], case_sensitive=False),
     default=None,
-    help="LLM provider to write non-interactively. Use 'custom' with --instance-name to bind a custom-providers.json instance.",
+    help=(
+        "LLM provider to write non-interactively. Use 'custom' with "
+        "--instance-name to bind a custom-providers.json instance."
+    ),
 )
 @click.option("--model", default=None, help="LLM model id to write non-interactively.")
 @click.option(
@@ -2536,7 +2539,10 @@ def _apply_guardrail_extra_options(
 @click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
 @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key")
 @click.option("--judge-provider", default=None,
-              help="Judge LLM provider (e.g. anthropic, bedrock, vertex_ai). Persisted to guardrail.judge.llm.provider.")
+              help=(
+                  "Judge LLM provider (e.g. anthropic, bedrock, vertex_ai). "
+                  "Persisted to guardrail.judge.llm.provider."
+              ))
 @click.option("--judge-region", default=None,
               help="Judge regional provider region (Bedrock/Vertex). Persisted to guardrail.judge.llm.region.")
 @click.option("--judge-instance-name", default=None,

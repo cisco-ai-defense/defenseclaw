@@ -51,7 +51,7 @@ type bifrostProvider struct {
 // the same provider with different keys or base URLs could race so that the
 // Bifrost client executed request A using tenant B's credentials.
 //
-// ``tlsID`` is a sha256 of the TLS posture (insecure_skip_verify || ca_cert_pem)
+// “tlsID“ is a sha256 of the TLS posture (insecure_skip_verify || ca_cert_pem)
 // so two custom-provider instances with the same base URL but different TLS
 // trust stores get distinct clients and cannot share connections.
 type tenantKey struct {
@@ -62,7 +62,7 @@ type tenantKey struct {
 }
 
 // tlsOverrides bundles the per-instance TLS knobs from a custom-providers
-// overlay. Both fields are forwarded to the Bifrost ``NetworkConfig`` which
+// overlay. Both fields are forwarded to the Bifrost “NetworkConfig“ which
 // already supports custom CA bundles and TLS-skip; this type just keeps the
 // API on our side cohesive.
 type tlsOverrides struct {

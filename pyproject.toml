@@ -139,7 +139,13 @@ override-dependencies = [
     # PYSEC-2026-161 fixed in starlette 1.0.1. fastapi must be bumped
     # to >=0.133.0 (first release supporting starlette 1.x).
     "starlette>=1.0.1,<1.1",
-    "fastapi>=0.133.0",
+    # MAL-2026-4750: fastapi 0.136.3 ships an undocumented `fastar`
+    # dependency injected via pyproject.toml/PKG-INFO. The Amazon
+    # Inspector advisory flags this as a dependency-confusion vector
+    # because `pip install "fastapi[standard]"` silently pulls
+    # `fastar` from PyPI. Pin away from 0.136.3 until an upstream
+    # patch release ships.
+    "fastapi>=0.133.0,!=0.136.3",
 ]
 
 [tool.ruff]
