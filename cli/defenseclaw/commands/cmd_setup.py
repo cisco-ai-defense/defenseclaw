@@ -5020,7 +5020,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 }
 
 
-@setup.command("splunk")
+@click.group("splunk", invoke_without_command=True)
+@click.pass_context
 @click.option(
     "--o11y",
     "enable_o11y",
