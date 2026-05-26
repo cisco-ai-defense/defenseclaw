@@ -206,12 +206,27 @@ def _classify_llm_exception(exc: BaseException) -> str:
     return "internal"
 
 
-# LiteLLM provider → optional pip extra that pulls the cloud SDK in.
-# Keep in lockstep with ``[project.optional-dependencies]`` in pyproject.toml.
-_PROVIDER_TO_EXTRA: dict[str, tuple[str, str]] = {
-    # provider prefix : (extra name, missing module name LiteLLM raises)
-    "bedrock": ("bedrock", "boto3"),
-    "vertex_ai": ("vertex", "google.cloud.aiplatform"),
+# LiteLLM provider → install hint when its lazy cloud SDK import fails.
+#
+# Bedrock (``boto3``) is bundled in the base install — see
+# ``[project].dependencies`` in pyproject.toml. The entry is kept here
+# as a defensive net for the (rare) case where an operator has
+# manually uninstalled boto3 or is running off a stripped image; the
+# hint then tells them exactly what to put back.
+#
+# Vertex AI keeps the ``[vertex]`` extras gate because the SDK pulls
+# ~286 MB of transitive deps and most operators never touch Vertex.
+#
+# Each entry: provider prefix → (install hint, missing module pattern)
+_PROVIDER_INSTALL_HINT: dict[str, tuple[str, str]] = {
+    "bedrock": (
+        "pip install boto3 (bundled by default; reinstall if removed)",
+        "boto3",
+    ),
+    "vertex_ai": (
+        "pip install 'defenseclaw[vertex]'",
+        "google.cloud.aiplatform",
+    ),
 }
 
 
@@ -228,20 +243,14 @@ def _missing_cloud_sdk(exc: BaseException, provider: str) -> str | None:
     if "No module named" not in text:
         return None
     prov = (provider or "").strip().lower()
-    extra_for_prov = _PROVIDER_TO_EXTRA.get(prov)
-    if extra_for_prov is not None:
-        extra_name, _module = extra_for_prov
-        return (
-            f"{prov} support requires an extra dependency. "
-            f"Install with: pip install 'defenseclaw[{extra_name}]'"
-        )
+    hint_for_prov = _PROVIDER_INSTALL_HINT.get(prov)
+    if hint_for_prov is not None:
+        install_cmd, _module = hint_for_prov
+        return f"{prov} support requires an extra dependency. {install_cmd}"
     # Provider unknown but module pattern matched — surface a generic hint.
-    for extra_name, module_name in _PROVIDER_TO_EXTRA.values():
+    for install_cmd, module_name in _PROVIDER_INSTALL_HINT.values():
         if f"'{module_name.split('.')[0]}'" in text:
-            return (
-                f"missing cloud SDK ({module_name}). "
-                f"Install with: pip install 'defenseclaw[{extra_name}]'"
-            )
+            return f"missing cloud SDK ({module_name}). {install_cmd}"
     return None
 
 

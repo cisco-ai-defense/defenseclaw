@@ -12,6 +12,15 @@ dependencies = [
     "rich>=13.0",
     "cisco-ai-skill-scanner==2.0.8",
     "cisco-ai-mcp-scanner>=4.3; python_version>='3.11'",
+    # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
+    # SigV4 (iam_credentials / profile / instance_role) and for the
+    # Anthropic-on-Bedrock route used by ABSK bearer tokens. Bundling
+    # it costs ~30 MB on top of the existing 428 MB base install
+    # (~7%) and removes a recurring first-run failure for the largest
+    # enterprise LLM provider in the matrix. Vertex AI's SDK is ~286
+    # MB and kept as an opt-in extra (see ``[vertex]``) — flip there
+    # if usage analytics ever justify the disk cost.
+    "boto3>=1.34",
 ]
 
 # P3-#20: the legacy Textual TUI (`defenseclaw alerts --tui`) was
@@ -20,19 +29,14 @@ dependencies = [
 # renders a plain Rich table.
 
 [project.optional-dependencies]
-# Bedrock auth (SigV4 for iam_credentials/profile/instance_role and the
-# Anthropic on-Bedrock route used by LiteLLM under the hood). Only required
-# when ``llm.provider == "bedrock"``; openai/anthropic/vertex/etc. operators
-# do not need this. Install with ``pip install defenseclaw[bedrock]``.
-bedrock = ["boto3>=1.34"]
-
-# Vertex AI auth (service-account JSON, ADC, workload identity). LiteLLM
-# imports ``google-auth`` and ``google-cloud-aiplatform`` lazily for this
-# route. Install with ``pip install defenseclaw[vertex]``.
+# Vertex AI auth (service-account JSON, ADC, workload identity).
+# LiteLLM lazy-imports ``google-cloud-aiplatform`` for this route, and
+# the SDK pulls ~286 MB of transitive deps (BigQuery, Cloud Storage,
+# Cloud Resource Manager, gRPC, protobuf). That nearly doubles the
+# base install, so we keep it opt-in. Install with
+# ``pip install 'defenseclaw[vertex]'``. Bedrock is bundled by
+# default — see the ``boto3`` entry under ``[project].dependencies``.
 vertex = ["google-cloud-aiplatform>=1.60", "google-auth>=2.30"]
-
-# Convenience: every cloud LLM extra at once.
-clouds = ["boto3>=1.34", "google-cloud-aiplatform>=1.60", "google-auth>=2.30"]
 
 [dependency-groups]
 dev = [
