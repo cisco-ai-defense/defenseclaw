@@ -273,7 +273,7 @@ func (l *Logger) ForwardGatewayEventToSinks(ctx context.Context, ev gatewaylog.E
 	l.forwardSinkEventCtx(sinkCtx, sinksMgr, sinks.Event{
 		ID:                uuid.NewString(),
 		Timestamp:         ev.Timestamp,
-		Action:            "gatewaylog." + string(ev.EventType),
+		Action:            string(gatewaylogActionFor(ev.EventType)),
 		Target:            "gatewaylog",
 		Actor:             "defenseclaw",
 		Details:           fmt.Sprintf("event_type=%s", ev.EventType),
@@ -313,6 +313,29 @@ func gatewayEventForwardedToSinks(eventType gatewaylog.EventType) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// gatewaylogActionFor maps a forwarded gatewaylog.EventType to the
+// matching audit Action constant. Kept in lockstep with
+// gatewayEventForwardedToSinks: any EventType that returns true
+// there must have a constant here. The default arm is unreachable
+// for callers that already filtered through that gate, but we still
+// return a safe fallback so a future EventType added to the gate
+// without a matching constant produces a recognizable string at the
+// sink rather than an empty Action.
+func gatewaylogActionFor(eventType gatewaylog.EventType) Action {
+	switch eventType {
+	case gatewaylog.EventVerdict:
+		return ActionGatewaylogVerdict
+	case gatewaylog.EventLLMPrompt:
+		return ActionGatewaylogLLMPrompt
+	case gatewaylog.EventLLMResponse:
+		return ActionGatewaylogLLMResponse
+	case gatewaylog.EventToolInvocation:
+		return ActionGatewaylogToolInvocation
+	default:
+		return Action("gatewaylog." + string(eventType))
 	}
 }
 

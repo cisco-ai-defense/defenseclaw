@@ -127,6 +127,18 @@ const (
 	ActionCodexNotifyAgentTurnComplete Action = "codex.notify.agent-turn-complete"
 	ActionCodexNotifyMalformed         Action = "codex.notify.malformed"
 
+	// Gateway native event mirror. ForwardGatewayEventToSinks copies
+	// the four SIEM-relevant gatewaylog event types into the audit
+	// sink fan-out so Splunk/HEC consumers see canonical
+	// defenseclaw:json rows. The mirrored Action is gatewaylog.<type>
+	// where <type> is the gatewaylog.EventType. Only the four types
+	// listed below ever appear; gatewayEventForwardedToSinks() filters
+	// the rest.
+	ActionGatewaylogVerdict        Action = "gatewaylog.verdict"
+	ActionGatewaylogLLMPrompt      Action = "gatewaylog.llm_prompt"
+	ActionGatewaylogLLMResponse    Action = "gatewaylog.llm_response"
+	ActionGatewaylogToolInvocation Action = "gatewaylog.tool_invocation"
+
 	// Sidecar lifecycle and bootstrap instrumentation. These actions
 	// describe gateway-side startup, shutdown, WebSocket connectivity,
 	// and watcher decisions that are proxied through the sidecar.

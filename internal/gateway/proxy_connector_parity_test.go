@@ -196,6 +196,11 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// Workspace must live outside DataDir — copilot's
+			// patchConfig refuses a workspace nested inside
+			// DataDir to keep `defenseclaw/.github/hooks/...`
+			// from masking a real repo's hooks.
+			workspace := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Plan E1 / round-3 follow-up: when the gateway binary
@@ -244,7 +249,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 					ProxyAddr:    "127.0.0.1:4000",
 					APIAddr:      "127.0.0.1:18970",
 					APIToken:     "tok",
-					WorkspaceDir: filepath.Join(dir, "workspace"),
+					WorkspaceDir: workspace,
 				},
 				health: NewSidecarHealth(),
 			}
@@ -285,6 +290,13 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
+			// Copilot's hook_only.patchConfig refuses to write into
+			// a workspace path nested inside DataDir to keep
+			// `defenseclaw/.github/hooks/...` from masking a real
+			// repo's hooks. Use a sibling tempdir as the workspace
+			// so the runtime check passes on Linux CI (where macOS
+			// /private/var symlink expansion does not shield us).
+			workspace := t.TempDir()
 			reg := connector.NewDefaultRegistry()
 
 			// Same OpenClaw extension probe as
@@ -322,7 +334,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 					ProxyAddr:    "127.0.0.1:4000",
 					APIAddr:      "127.0.0.1:18970",
 					APIToken:     "tok",
-					WorkspaceDir: filepath.Join(dir, "workspace"),
+					WorkspaceDir: workspace,
 				},
 				health:    NewSidecarHealth(),
 				inspector: NewGuardrailInspector("local", nil, nil, ""),

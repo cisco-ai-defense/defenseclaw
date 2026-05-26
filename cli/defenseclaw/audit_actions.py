@@ -111,6 +111,14 @@ ACTION_CODEX_NOTIFY: Final[str]                     = "codex.notify"
 ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE: Final[str] = "codex.notify.agent-turn-complete"
 ACTION_CODEX_NOTIFY_MALFORMED: Final[str]           = "codex.notify.malformed"
 
+# Gateway native event mirror. ForwardGatewayEventToSinks copies the
+# four SIEM-relevant gatewaylog event types into the audit sink fan-out
+# so Splunk/HEC consumers see canonical defenseclaw:json rows.
+ACTION_GATEWAYLOG_VERDICT: Final[str]         = "gatewaylog.verdict"
+ACTION_GATEWAYLOG_LLM_PROMPT: Final[str]      = "gatewaylog.llm_prompt"
+ACTION_GATEWAYLOG_LLM_RESPONSE: Final[str]    = "gatewaylog.llm_response"
+ACTION_GATEWAYLOG_TOOL_INVOCATION: Final[str] = "gatewaylog.tool_invocation"
+
 # Sidecar lifecycle and bootstrap instrumentation.
 ACTION_SIDECAR_START: Final[str] = "sidecar-start"
 ACTION_SIDECAR_STOP: Final[str] = "sidecar-stop"
@@ -302,6 +310,10 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,
+    ACTION_GATEWAYLOG_VERDICT,
+    ACTION_GATEWAYLOG_LLM_PROMPT,
+    ACTION_GATEWAYLOG_LLM_RESPONSE,
+    ACTION_GATEWAYLOG_TOOL_INVOCATION,
     ACTION_SIDECAR_START,
     ACTION_SIDECAR_STOP,
     ACTION_SIDECAR_CONNECTED,
