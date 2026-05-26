@@ -130,6 +130,8 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		WouldBlock:        resp.WouldBlock,
 		AdditionalContext: resp.AdditionalContext,
 		HookOutput:        resp.ClaudeCodeOutput,
+		EvaluationID:      resp.EvaluationID,
+		RuleIDs:           resp.RuleIDs,
 	}
 }
 
@@ -144,5 +146,7 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		WouldBlock:        resp.WouldBlock,
 		AdditionalContext: resp.AdditionalContext,
 		HookOutput:        resp.CodexOutput,
+		EvaluationID:      resp.EvaluationID,
+		RuleIDs:           resp.RuleIDs,
 	}
 }

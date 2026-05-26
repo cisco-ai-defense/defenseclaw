@@ -68,6 +68,16 @@ class CredentialSpec:
     This lets the registry track the real env var the user wired up
     (e.g. ``MY_CUSTOM_JUDGE_KEY``) instead of pretending the canonical
     one is expected.
+
+    ``bound_endpoint`` lets the registry attach the URL/host the
+    credential is paired with in ``config.yaml`` (e.g. AI Defense
+    region endpoint, Splunk HEC URL, judge LLM base URL). UX layers
+    (``keys set`` / ``keys fill-missing`` / doctor) can then render a
+    "↪ bound to <url>" hint right after the secret is saved or
+    probed, which is the primary signal an operator gets that a
+    fresh key is being paired with the wrong region/host. Returns
+    ``""`` when the credential has no paired endpoint or when the
+    config doesn't expose one.
     """
 
     env_name: str
@@ -76,6 +86,7 @@ class CredentialSpec:
     required: Callable[[Config], Requirement]
     auto_detected: bool = False
     effective_env_name: Callable[[Config], str] | None = None
+    bound_endpoint: Callable[[Config], str] | None = None
 
     def resolve_env_name(self, cfg: Config) -> str:
         """Return the env var name currently in effect for *cfg*."""
@@ -84,6 +95,19 @@ class CredentialSpec:
             if override:
                 return override
         return self.env_name
+
+    def resolve_bound_endpoint(self, cfg: Config) -> str:
+        """Return the paired endpoint URL/host for *cfg*, or ``""``.
+
+        Never raises — UX callers depend on a stable empty-string
+        sentinel so they can branch on truthiness without try/except.
+        """
+        if self.bound_endpoint is None:
+            return ""
+        try:
+            return self.bound_endpoint(cfg) or ""
+        except Exception:
+            return ""
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +275,20 @@ def _cisco_env(cfg: Config) -> str:
     return cad.api_key_env if cad is not None else ""
 
 
+def _cisco_endpoint(cfg: Config) -> str:
+    """Return the configured AI Defense region endpoint.
+
+    The single biggest source of "valid key looks invalid" reports is
+    a key issued for one regional deployment (us / eu / preview)
+    pasted into a config pointed at another. All three regions reply
+    with the same opaque ``401 invalid api key`` body, so the caller
+    can't tell auth from regional mismatch by status alone — the
+    only durable signal is "here's the URL we're sending it to".
+    """
+    cad = getattr(cfg, "cisco_ai_defense", None)
+    return getattr(cad, "endpoint", "") if cad is not None else ""
+
+
 def _virustotal_env(cfg: Config) -> str:
     sc = getattr(cfg, "scanners", None)
     if sc is None:
@@ -317,6 +355,7 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         description="API key for Cisco AI Defense remote scanner (scanner_mode=remote|both)",
         required=_cisco_ai_defense_key,
         effective_env_name=_cisco_env,
+        bound_endpoint=_cisco_endpoint,
     ),
     CredentialSpec(
         env_name="VIRUSTOTAL_API_KEY",

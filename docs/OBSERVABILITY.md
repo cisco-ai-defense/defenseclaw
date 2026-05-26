@@ -89,6 +89,88 @@ standard `OTEL_*` environment variables. There is **no** Splunk-specific
 coupling in the telemetry stack; operators who need a Splunk access
 token put it in `otel.headers` or `OTEL_EXPORTER_OTLP_HEADERS`.
 
+### 1.4 Unified finding pipeline
+
+Every runtime detection — whether it originates from a hook-based
+connector, an inspect HTTP endpoint, the proxy guardrail, a tool-call
+inspection, a mid-stream check, an asset-policy evaluation, or a
+rescan drift comparison — goes through the same `scanner.EmitScanResult`
+choke point as classic skill/MCP scans. There is exactly one finding
+pipeline, regardless of source. Practically, this means every finding
+is guaranteed to land on **all** of the following surfaces:
+
+1. `gateway.jsonl` (and every fanned-out audit sink) — one `EventScan`
+   row plus one `EventScanFinding` row per finding.
+2. `audit.sqlite` — one `scan_results` row plus one `scan_findings`
+   row per finding.
+3. Prometheus / OTel — `defenseclaw_scan_findings_by_rule_total`
+   (per-rule), `defenseclaw_scan_findings_total` (per-severity),
+   `defenseclaw_scan_count_total`, and `defenseclaw_scan_duration_*`.
+4. Correlator inputs — multi-step attack patterns see every finding,
+   not just those from CLI scans.
+
+The runtime origin is encoded on the `scanner` label, so dashboards can
+slice findings by source without changing the query shape:
+
+| `scanner=` value     | Origin                                                |
+|----------------------|-------------------------------------------------------|
+| `skill`              | Classic skill scanner (CLI / install / watcher)       |
+| `mcp`                | Classic MCP scanner (CLI / install / watcher)         |
+| `hook-rules`         | Hook-based connector rule engine (claudecode, codex, cursor, windsurf, geminicli, copilot, hermes) |
+| `inspect-http`       | `/api/v1/inspect/{request,response,tool-response,tool}` |
+| `guardrail-llm`      | Proxy guardrail final-stage verdict                   |
+| `mid-stream`         | Mid-stream guardrail re-check                         |
+| `tool-call-inspect`  | Inline tool-call guardrail check during proxy flow    |
+| `asset-policy`       | Runtime asset-policy enforcement (skills/MCP install) |
+| `drift`              | Rescan drift detection (new/removed/changed findings) |
+
+#### `evaluation_id` — the runtime join key
+
+For runtime sources (everything except classic `skill`/`mcp`), every
+emission carries an `evaluation_id` (UUID) generated at the entry
+point and propagated through the entire fan-out. It surfaces as:
+
+- `scan.evaluation_id` on the aggregate `EventScan` row.
+- `scan_finding.evaluation_id` on every child `EventScanFinding` row.
+- `verdict.evaluation_id` on the corresponding `EventVerdict` (proxy
+  guardrail / hook / inspect flows).
+- `error.evaluation_id` on schema-violation `EventError` rows when the
+  dropped payload was attributable to an evaluation (so a malformed
+  finding does not become an anonymous infrastructure error).
+- `evaluation_id` column on the `scan_results` and `scan_findings`
+  audit DB tables.
+- Audit log `details` for hook / HILT / asset-policy decisions, as
+  `evaluation_id=<uuid> rule_ids=<id1,id2,...>`.
+
+#### Pivot examples
+
+```text
+# All findings that fired during one proxy request:
+gateway.jsonl: event_type=scan_finding evaluation_id="eval-…"
+
+# Aggregate scan row + every child finding + the verdict that gated
+# the request, joined on evaluation_id:
+SELECT * FROM scan_results    WHERE evaluation_id = 'eval-…';
+SELECT * FROM scan_findings   WHERE evaluation_id = 'eval-…';
+SELECT * FROM judge_responses WHERE evaluation_id = 'eval-…';
+
+# Prometheus: how many findings did rule X fire across all surfaces
+# in the last hour, regardless of whether they came from a hook, the
+# proxy, or a CLI scan?
+sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id="…"}[1h]))
+```
+
+#### Connectors that emit findings
+
+All hook-based connectors — Claude Code (`claudecode`), Codex
+(`codex`), Cursor (`cursor`), Windsurf (`windsurf`), Gemini CLI
+(`geminicli`), Copilot (`copilot`), Hermes (`hermes`) — emit per-rule
+findings through this pipeline. The HTTP hook response keeps the
+existing `findings: []string` field (backward-compatible) and adds an
+opt-in `detailed_findings: []RuleFinding` block plus top-level
+`evaluation_id` and `rule_ids` fields. Clients that don't read the
+new fields are unaffected.
+
 ---
 
 ## 2. Migration from v3 → v4

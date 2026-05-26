@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Rule-level findings detail. Driven by $rule_id, $scanner, $severity. Combines the Prometheus per-rule counter (defenseclaw_scan_findings_by_rule_total) with the Loki scan_finding event stream so operators can rank rules, map first/last-seen, and pivot into target attribution and finding\u2192verdict correlation.",
+  "description": "Rule-level findings detail. Driven by $rule_id, $scanner, $severity. Combines the Prometheus per-rule counter (defenseclaw_scan_findings_by_rule_total) with the Loki scan_finding event stream so operators can rank rules, map first/last-seen, and pivot into target attribution and finding\u2192verdict correlation. The $scanner dropdown is populated dynamically and covers the full unified finding pipeline: classic (skill, mcp), hook-rules (claudecode/codex/cursor/windsurf/copilot/geminicli/hermes), inspect-http, guardrail-llm, mid-stream, tool-call-inspect, asset-policy, and drift (rescan). Pivot from any per-rule row into the originating evaluation via the evaluation_id label.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,

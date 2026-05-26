@@ -23,4 +23,13 @@ type AgentIdentity struct {
 	RequestID string
 	SessionID string
 	TraceID   string
+
+	// EvaluationID is an optional join key set by runtime
+	// finding emitters (hook handlers, /api/v1/inspect/*, proxy
+	// guardrail, mid-stream, tool-call-inspect, watcher rescan)
+	// so the per-finding rows produced by EmitScanResult can be
+	// correlated back to the upstream evaluation row. Classic
+	// scanner-invocation paths (skill, mcp, plugin, aibom,
+	// codeguard CLI/file scans) leave it empty.
+	EvaluationID string
 }

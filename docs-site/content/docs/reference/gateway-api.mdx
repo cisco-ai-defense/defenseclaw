@@ -235,7 +235,9 @@ The four `/api/v1/inspect/*` endpoints return a [`ToolInspectVerdict`](https://g
   ],
   "mode":       "action | observe",
   "would_block": true,
-  "approval_timeout_ms": 0
+  "approval_timeout_ms": 0,
+  "evaluation_id": "eval-7f3a…",
+  "rule_ids":      ["shell.dangerous-rm"]
 }
 ```
 
@@ -243,8 +245,30 @@ Notable behaviours:
 
 - **`action` is the *effective* verdict, not the raw policy decision.** `applyMode()` downgrades `block` / `confirm` / `alert` to `allow` when the gateway is in `observe` mode, but preserves the raw verdict in `raw_action` and the would-have-blocked signal in `would_block`. This is how observe-mode dry-runs work without touching the rule pack.
 - **`confirm` is the in-process HITL signal.** The gateway resolves the operator approval inline (via the in-process `HILTApprovalManager` it constructs in `SetHILTApprovalManager()`) before returning. There is **no** HTTP HITL surface — every HITL decision happens in-process and the verdict is downgraded to `allow` or `block` before the response is written. The TUI reads HITL state from the audit DB, not from a `/v1/hilt/*` endpoint.
+- **`evaluation_id` is the runtime join key.** For every `/api/v1/inspect/*` call and every connector hook (`/api/v1/{claude-code,codex,cursor,windsurf,geminicli,copilot,hermes}/hook`), the gateway mints a UUID and stamps it on (a) the structured `EventScan` / `EventScanFinding` / `EventVerdict` rows in `gateway.jsonl`, (b) the matching `scan_results.evaluation_id` / `scan_findings.evaluation_id` / `judge_responses.evaluation_id` columns in the audit DB, and (c) the `evaluation_id` and `rule_ids` fields in this response. SIEM dashboards keyed on `evaluation_id` can pivot from any per-finding row back to the aggregate evaluation and the verdict that gated it. See [Observability §1.4](/docs/observability) for the full per-surface contract.
+- **`detailed_findings` and `findings` are both populated** for backward compatibility. Existing clients that only read `findings: []string` are unaffected by the new structured field.
 
 Other endpoints return their own shapes — `/v1/skill/scan` returns a scanner-specific envelope, `/audit/event` returns `{"status": "stored", "id": "..."}`, `/skill/disable` returns `{"status": "disabled", "skillKey": "..."}`. Always confirm against the handler code before assuming a shape.
+
+## Connector hook responses
+
+Every connector hook response (`/api/v1/{claude-code,codex,cursor,...}/hook`) carries the same correlation triplet as the inspect verdict so SIEM joins work uniformly across both surfaces:
+
+```json
+{
+  "action":        "allow | block | deny | …",
+  "reason":        "rule X fired",
+  "findings":      ["rule.id.one", "rule.id.two"],
+  "detailed_findings": [
+    { "rule_id": "rule.id.one", "title": "…", "severity": "HIGH",
+      "confidence": 0.88, "evidence": "…", "tags": [] }
+  ],
+  "evaluation_id": "eval-c1d0…",
+  "rule_ids":      ["rule.id.one", "rule.id.two"]
+}
+```
+
+`detailed_findings` is opt-in (gated by an `X-DefenseClaw-Reveal-Findings: 1` header so existing string-only clients don't get a payload change), and `findings` continues to ship by default. `evaluation_id` and `rule_ids` are always populated when at least one rule fired.
 
 ## Headers
 

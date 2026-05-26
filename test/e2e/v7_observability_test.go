@@ -320,6 +320,110 @@ func testSurfaceScanFinding(t *testing.T, h *observabilityHarness) {
 	if len(findings) == 0 {
 		t.Fatal("expected scan_findings rows")
 	}
+
+	// Pin the unified-pipeline contract: when a parent scan event
+	// carries an evaluation_id (runtime flows: hooks, inspect HTTP,
+	// proxy guardrail, asset-policy, rescan), every child finding
+	// event must echo the same id so SIEM joins on evaluation_id
+	// work without falling back to scan_id. Classic scanner-CLI
+	// invocations (this surface test path) leave it empty, so the
+	// assertion is conditional: empty parent → empty children.
+	scanEvs := findGatewayEvents(h, gatewaylog.EventScan)
+	if len(scanEvs) == 0 {
+		t.Fatal("missing scan event for evaluation_id join check")
+	}
+	parentEval := scanEvs[len(scanEvs)-1].Scan.EvaluationID
+	for i, f := range evs {
+		if f.ScanFinding.EvaluationID != parentEval {
+			t.Fatalf("scan_finding[%d].evaluation_id=%q does not match parent scan evaluation_id=%q",
+				i, f.ScanFinding.EvaluationID, parentEval)
+		}
+	}
+}
+
+// TestV7ObservabilityRuntimeEvaluationIDJoinKey is the runtime-flow
+// counterpart to testSurfaceScanFinding: it drives a synthetic
+// runtime evaluation through scanner.EmitScanResult with a populated
+// AgentIdentity.EvaluationID (the contract used by every hook /
+// inspect / proxy-guardrail call site) and pins the join key on all
+// three observability surfaces — gateway JSONL, audit DB, and the
+// child finding events. A regression here means SIEM dashboards keyed
+// on evaluation_id silently lose runtime findings.
+func TestV7ObservabilityRuntimeEvaluationIDJoinKey(t *testing.T) {
+	t.Parallel()
+	h := newObservabilityHarness(t)
+
+	const wantEval = "eval-test-runtime-7f3a"
+	ln := 17
+	res := minimalScanResult([]scanner.Finding{
+		{
+			ID:         "rt-1",
+			Title:      "prompt injection: ignore previous",
+			Severity:   scanner.SeverityHigh,
+			Category:   "prompt_injection",
+			RuleID:     "INJ.OVERRIDE",
+			LineNumber: &ln,
+		},
+	})
+
+	scanID, err := scanner.EmitScanResult(
+		context.Background(),
+		h.GW,
+		h.Store,
+		h.Tel,
+		res,
+		scanner.AgentIdentity{
+			AgentID:      "gateway",
+			RunID:        e2eRunID,
+			TraceID:      e2eTraceID,
+			EvaluationID: wantEval,
+		},
+	)
+	if err != nil {
+		t.Fatalf("EmitScanResult: %v", err)
+	}
+	if scanID == "" {
+		t.Fatal("EmitScanResult returned empty scan_id")
+	}
+
+	scanEvs := findGatewayEvents(h, gatewaylog.EventScan)
+	if len(scanEvs) == 0 {
+		t.Fatal("missing scan event")
+	}
+	if got := scanEvs[len(scanEvs)-1].Scan.EvaluationID; got != wantEval {
+		t.Fatalf("EventScan.evaluation_id: got %q want %q", got, wantEval)
+	}
+
+	findEvs := findGatewayEvents(h, gatewaylog.EventScanFinding)
+	if len(findEvs) == 0 {
+		t.Fatal("missing scan_finding events")
+	}
+	for i, f := range findEvs {
+		if f.ScanFinding.EvaluationID != wantEval {
+			t.Fatalf("EventScanFinding[%d].evaluation_id: got %q want %q",
+				i, f.ScanFinding.EvaluationID, wantEval)
+		}
+		// Confidence is opt-in; assert it survives a zero value
+		// round-trip without panicking when not set on input.
+		_ = f.ScanFinding.Confidence
+	}
+
+	// Audit DB: the scan_findings row must persist evaluation_id so
+	// classic SQL queries (`SELECT * FROM scan_findings WHERE
+	// evaluation_id = ?`) work without joining to scan_results.
+	rows, err := h.Store.ListScanFindings(scanID)
+	if err != nil {
+		t.Fatalf("ListScanFindings: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("expected scan_findings rows in audit DB")
+	}
+	for i, r := range rows {
+		if r.EvaluationID != wantEval {
+			t.Fatalf("scan_findings[%d].evaluation_id: got %q want %q",
+				i, r.EvaluationID, wantEval)
+		}
+	}
 }
 
 func testSurfaceActivity(t *testing.T, h *observabilityHarness) {

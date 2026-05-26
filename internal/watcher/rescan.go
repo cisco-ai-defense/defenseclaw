@@ -34,6 +34,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
@@ -58,6 +59,13 @@ type DriftDelta struct {
 	Description string    `json:"description"`
 	Previous    string    `json:"previous,omitempty"`
 	Current     string    `json:"current,omitempty"`
+	// RuleID is the underlying detection rule that triggered this
+	// drift delta. Populated for finding-driven deltas
+	// (new_finding, resolved_finding, severity_escalation on a
+	// specific finding) so SIEM queries can join drift events back
+	// to the scan_findings rows they reference. Empty for content /
+	// dependency / endpoint deltas that don't map to a single rule.
+	RuleID string `json:"rule_id,omitempty"`
 }
 
 // rescanLoop runs periodic re-scans of all installed skills, plugins, and MCPs,
@@ -225,7 +233,7 @@ func (w *InstallWatcher) storeBaseline(ctx context.Context, evt InstallEvent, sn
 
 		result, err := s.Scan(scanCtx, w.scanTargetFor(evt))
 		if err == nil && result != nil {
-			scanID = w.persistScanResult(result)
+			scanID = w.emitRescanResult(scanCtx, result)
 		}
 	}
 
@@ -291,6 +299,14 @@ func (w *InstallWatcher) compareScanResults(ctx context.Context, evt InstallEven
 			Current:     curMax,
 		})
 	}
+
+	// Also run the current scan through EmitScanResult so the
+	// rescan-time per-rule findings are visible alongside the drift
+	// summary — without this hook, only the *baseline* scan is
+	// emitted via scan_findings rows, and intermediate rescans that
+	// don't qualify as "new baseline" are invisible to SIEM finding
+	// queries.
+	_ = w.emitRescanResult(scanCtx, current)
 
 	return deltas
 }
@@ -469,6 +485,7 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 				Severity:    string(f.Severity),
 				Description: fmt.Sprintf("new finding: %s (%s)", findingLabel(f), f.Severity),
 				Current:     findingLabel(f),
+				RuleID:      f.RuleID,
 			})
 			continue
 		}
@@ -483,6 +500,7 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 				Description: fmt.Sprintf("finding severity changed: %s (%s -> %s)", findingLabel(f), prevFinding.Severity, f.Severity),
 				Previous:    string(prevFinding.Severity),
 				Current:     string(f.Severity),
+				RuleID:      f.RuleID,
 			})
 		}
 	}
@@ -494,11 +512,41 @@ func diffFindings(prev, curr []scanner.Finding) []DriftDelta {
 				Severity:    "INFO",
 				Description: fmt.Sprintf("finding resolved: %s (was %s)", findingLabel(f), f.Severity),
 				Previous:    findingLabel(f),
+				RuleID:      f.RuleID,
 			})
 		}
 	}
 
 	return deltas
+}
+
+// driftRuleIDs collects the distinct rule identifiers from a set
+// of drift deltas, preserving discovery order and capping the
+// result at max entries. Empty rule IDs are skipped so the
+// `rule_ids=` suffix never carries empty tokens. The cap matches
+// the convention used by every other emission surface in the
+// gateway (hook handlers, proxy guardrail, inspect HTTP) so SIEM
+// dashboards can rely on a uniform fanout budget.
+func driftRuleIDs(deltas []DriftDelta, max int) []string {
+	if max <= 0 || len(deltas) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(deltas))
+	out := make([]string, 0, len(deltas))
+	for _, d := range deltas {
+		if d.RuleID == "" {
+			continue
+		}
+		if seen[d.RuleID] {
+			continue
+		}
+		seen[d.RuleID] = true
+		out = append(out, d.RuleID)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out
 }
 
 // emitDriftAlerts logs drift deltas as alert events in the audit store.
@@ -515,12 +563,23 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 
 	fmt.Fprintf(os.Stderr, "[rescan] drift detected in %s %s: %s\n", evt.Type, evt.Name, summary)
 
+	// Surface the drift's distinct underlying rule identifiers
+	// alongside the structured JSON details so SIEM queries can
+	// pivot on `rule_ids` consistently with hook + proxy + inspect
+	// emissions. The JSON details remain the source of truth for
+	// per-delta info; the string suffix is the SIEM-friendly view.
+	ruleIDs := driftRuleIDs(deltas, 8)
+	details := string(detailsJSON)
+	if len(ruleIDs) > 0 {
+		details += " rule_ids=" + strings.Join(ruleIDs, ",")
+	}
+
 	event := audit.Event{
 		Timestamp: time.Now().UTC(),
 		Action:    string(audit.ActionDrift),
 		Target:    evt.Path,
 		Actor:     "defenseclaw-rescan",
-		Details:   string(detailsJSON),
+		Details:   details,
 		Severity:  maxSev,
 	}
 	if err := w.logger.LogEvent(event); err != nil {
@@ -622,20 +681,62 @@ func (w *InstallWatcher) scanTargetFor(evt InstallEvent) string {
 	return entry.Name
 }
 
-// persistScanResult stores a scan result in the audit DB and returns the generated scan ID.
-func (w *InstallWatcher) persistScanResult(result *scanner.ScanResult) string {
+// emitRescanResult fans a watcher rescan result through the
+// unified scan emission pipeline so the rescan's per-rule findings
+// land on every observability surface: scan_results + scan_findings
+// DB rows, EventScan + EventScanFinding gateway.jsonl lines,
+// defenseclaw_scan_findings_by_rule_total metrics, and the
+// sliding-window correlator. Previously this path called
+// audit.Store.InsertScanResult directly which wrote only the
+// aggregate row and dropped every per-rule detection on the floor
+// — making periodic rescans invisible to SIEM finding queries.
+//
+// Returns the generated scan ID so storeBaseline can persist it as
+// the snapshot's baseline reference. On emission failure (writer or
+// persistence error) returns the empty string and lets the
+// snapshot store fall back to "" — matching the prior behavior of
+// persistScanResult so callers don't see new failure modes.
+func (w *InstallWatcher) emitRescanResult(ctx context.Context, result *scanner.ScanResult) string {
 	if result == nil {
 		return ""
 	}
-	scanID := uuid.New().String()
-	raw, _ := result.JSON()
-	err := w.store.InsertScanResult(
-		scanID, result.Scanner, result.Target, result.Timestamp,
-		result.Duration.Milliseconds(), len(result.Findings),
-		string(result.MaxSeverity()), string(raw),
-	)
+	var pers scanner.ScanPersistence
+	if w.store != nil {
+		pers = w.store
+	}
+	var tel scanner.ScanTelemetry
+	if w.otel != nil {
+		tel = w.otel
+	}
+	gw := w.gatewayLogWriter()
+
+	agent := scanner.AgentIdentity{
+		RunID: rescanRunID(),
+	}
+	scanID, err := scanner.EmitScanResult(ctx, gw, pers, tel, result, agent)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "[rescan] emit scan result for %s: %v\n", result.Target, err)
 		return ""
 	}
 	return scanID
+}
+
+// gatewayLogWriter returns the gateway.jsonl writer wired into the
+// watcher's audit logger, or nil when the logger has no writer
+// attached (test harnesses, sidecar-less CLI invocations).
+func (w *InstallWatcher) gatewayLogWriter() *gatewaylog.Writer {
+	if w == nil || w.logger == nil {
+		return nil
+	}
+	return w.logger.GatewayLogWriter()
+}
+
+// rescanRunID returns a fresh run ID for each rescan emission so
+// the emitted scan rows are attributable to a specific cycle, and
+// downstream correlator joins can scope findings to one rescan
+// rather than blending cycles. Watchers don't carry a request_id
+// (there's no HTTP request to correlate against), so the run_id is
+// the only correlation key available — making it required.
+func rescanRunID() string {
+	return "rescan-" + uuid.New().String()
 }

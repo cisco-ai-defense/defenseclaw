@@ -31,8 +31,9 @@ INSERT INTO scan_results (
   id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id,
   verdict, exit_code, error,
   schema_version, content_hash, generation, binary_version,
-  agent_id, agent_instance_id, sidecar_instance_id, session_id, request_id, trace_id
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  agent_id, agent_instance_id, sidecar_instance_id, session_id, request_id, trace_id,
+  evaluation_id
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.ScanID,
 		p.Scanner,
 		p.Target,
@@ -55,6 +56,7 @@ INSERT INTO scan_results (
 		nullStr(p.SessionID),
 		nullStr(p.RequestID),
 		nullStr(p.TraceID),
+		nullStr(p.EvaluationID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert scan summary: %w", err)
@@ -100,6 +102,11 @@ func (s *Store) InsertScanFindings(scanID, target string, findings []scanner.Fin
 			decisionPath = string(f.DecisionPath)
 		}
 
+		var confidence interface{}
+		if f.Confidence > 0 {
+			confidence = f.Confidence
+		}
+
 		id := uuid.New().String()
 		_, err := s.db.Exec(`
 INSERT INTO scan_findings (
@@ -107,8 +114,9 @@ INSERT INTO scan_findings (
   remediation, tags, timestamp,
   run_id, request_id, session_id, agent_id, agent_instance_id, sidecar_instance_id,
   schema_version, content_hash, generation, binary_version,
-  data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, decision_path
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, decision_path,
+  confidence, evaluation_id
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			id,
 			scanID,
 			f.Scanner,
@@ -139,6 +147,8 @@ INSERT INTO scan_findings (
 			nullStr(f.ExternalEndpoint),
 			turnID,
 			decisionPath,
+			confidence,
+			nullStr(meta.EvaluationID),
 		)
 		if err != nil {
 			return fmt.Errorf("audit: insert scan finding: %w", err)
@@ -162,12 +172,22 @@ type ScanFindingRow struct {
 	LineNumber  sql.NullInt64
 	Remediation sql.NullString
 	Tags        sql.NullString
+	// Confidence is the per-finding model/heuristic score (0.0-1.0).
+	// Populated for runtime detections (hooks, inspect, proxy
+	// guardrail, mid-stream); zero for classic scanner CLIs that
+	// don't emit a confidence channel.
+	Confidence float64
+	// EvaluationID is the join key back to the upstream runtime
+	// evaluation (hook handler, /api/v1/inspect/*, proxy guardrail,
+	// rescan). Empty for classic scanner-CLI invocations.
+	EvaluationID string
 }
 
 // ListScanFindings returns persisted findings for a scan_id.
 func (s *Store) ListScanFindings(scanID string) ([]ScanFindingRow, error) {
 	rows, err := s.db.Query(`
-SELECT id, scan_id, scanner, target, rule_id, category, severity, title, description, location, line_number, remediation, tags
+SELECT id, scan_id, scanner, target, rule_id, category, severity, title, description, location, line_number,
+       remediation, tags, confidence, evaluation_id
 FROM scan_findings WHERE scan_id = ? ORDER BY severity`, scanID)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list scan findings: %w", err)
@@ -177,11 +197,20 @@ FROM scan_findings WHERE scan_id = ? ORDER BY severity`, scanID)
 	var out []ScanFindingRow
 	for rows.Next() {
 		var r ScanFindingRow
+		var confidence sql.NullFloat64
+		var evaluationID sql.NullString
 		if err := rows.Scan(
 			&r.ID, &r.ScanID, &r.Scanner, &r.Target, &r.RuleID, &r.Category,
 			&r.Severity, &r.Title, &r.Description, &r.Location, &r.LineNumber, &r.Remediation, &r.Tags,
+			&confidence, &evaluationID,
 		); err != nil {
 			return nil, fmt.Errorf("audit: scan finding row: %w", err)
+		}
+		if confidence.Valid {
+			r.Confidence = confidence.Float64
+		}
+		if evaluationID.Valid {
+			r.EvaluationID = evaluationID.String
 		}
 		out = append(out, r)
 	}

@@ -105,6 +105,20 @@ type BlockEvent struct {
 	Connector string
 	Event     string
 	WouldAsk  bool
+	// EvaluationID joins this block notification to the
+	// scan_findings rows produced by the detection that caused it,
+	// so SIEM correlations (block toast → underlying rule_id
+	// matches) work without rebuilding the join from free-form
+	// Reason text. Empty when the upstream verdict produced no
+	// structured findings (e.g. blocklist denials).
+	EvaluationID string
+	// RuleIDs lists the top detection rule identifiers that drove
+	// this block, capped at the same fan-out budget used by
+	// hooks / proxy / inspect emissions (8). Operators can
+	// dedupe / group notifications by rule_id without parsing
+	// Reason. Empty when no rule-based detection produced this
+	// block (manual blocklist, schema-gate failure, etc.).
+	RuleIDs []string
 }
 
 // ApprovalEvent describes a HITL/confirm prompt that is now waiting
@@ -125,6 +139,11 @@ type ApprovalEvent struct {
 	Source    Source
 	Connector string
 	Event     string
+	// EvaluationID + RuleIDs carry the same join key + rule list
+	// as BlockEvent so HILT approval prompts and the block toasts
+	// they replace share a single SIEM-pivotable shape.
+	EvaluationID string
+	RuleIDs      []string
 }
 
 // Dispatcher is the single fan-in point for OS notifications.

@@ -91,7 +91,9 @@
         "action":     { "type": "string", "enum": ["allow", "warn", "alert", "confirm", "block"] },
         "reason":     { "type": ["string", "null"] },
         "categories": { "type": ["array", "null"], "items": { "type": "string" } },
-        "latency_ms": { "type": ["integer", "null"] }
+        "latency_ms": { "type": ["integer", "null"] },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this verdict to its per-finding scan_findings rows / EventScanFinding fan-out." },
+        "rule_ids":   { "type": ["array", "null"], "items": { "type": "string" }, "description": "Top detection rule identifiers that drove this verdict (capped at 8). Quick SIEM-pivot key." }
       }
     },
     "JudgePayload": {
@@ -122,10 +124,12 @@
       "type": "object",
       "required": ["subsystem", "message"],
       "properties": {
-        "subsystem": { "type": "string" },
-        "code":      { "type": ["string", "null"] },
-        "message":   { "type": "string" },
-        "cause":     { "type": ["string", "null"] }
+        "subsystem":     { "type": "string" },
+        "code":          { "type": ["string", "null"] },
+        "message":       { "type": "string" },
+        "cause":         { "type": ["string", "null"] },
+        "rule_id":       { "type": ["string", "null"], "description": "Optional rule identifier this error is attributable to (schema-gate violations on finding events, verdict-failure errors)." },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this error to the evaluation that produced the broken event (matches ScanPayload.evaluation_id / VerdictPayload.evaluation_id)." }
       }
     },
     "DiagnosticPayload": {

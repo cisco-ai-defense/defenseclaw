@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw import credentials as C
 from defenseclaw.config import (
+    CiscoAIDefenseConfig,
     Config,
     GatewayConfig,
     GuardrailConfig,
@@ -201,6 +202,67 @@ class EffectiveEnvNameTests(unittest.TestCase):
         self.assertIsNotNone(spec)
         resolved = spec.resolve_env_name(cfg)
         self.assertIn(resolved, ("SPLUNK_ACCESS_TOKEN", ""))
+
+
+class BoundEndpointTests(unittest.TestCase):
+    """``CredentialSpec.bound_endpoint`` lets the registry attach the
+    URL/host a credential is paired with (e.g. AI Defense regional
+    endpoint). UX surfaces consume it via ``resolve_bound_endpoint``;
+    the contract is "non-empty string or empty string", never raise.
+    """
+
+    def test_cisco_aid_returns_configured_endpoint(self):
+        cfg = _make_cfg(
+            "/tmp/dc-test",
+            cisco_ai_defense=CiscoAIDefenseConfig(
+                endpoint="https://eu.api.inspect.aidefense.security.cisco.com",
+            ),
+        )
+        spec = C.lookup("CISCO_AI_DEFENSE_API_KEY")
+        self.assertIsNotNone(spec)
+        self.assertEqual(
+            spec.resolve_bound_endpoint(cfg),
+            "https://eu.api.inspect.aidefense.security.cisco.com",
+        )
+
+    def test_cisco_aid_default_endpoint_when_unset(self):
+        """No explicit override → returns the compiled-in US default
+        rather than empty. UX wants to render *something* so the
+        operator sees which region they're talking to even before
+        running setup."""
+        cfg = _make_cfg("/tmp/dc-test")
+        spec = C.lookup("CISCO_AI_DEFENSE_API_KEY")
+        self.assertIsNotNone(spec)
+        self.assertEqual(
+            spec.resolve_bound_endpoint(cfg),
+            "https://us.api.inspect.aidefense.security.cisco.com",
+        )
+
+    def test_no_bound_endpoint_returns_empty_string(self):
+        """Specs without a paired endpoint (e.g. VirusTotal API key)
+        must answer with ``""`` so callers can branch on truthiness
+        without try/except."""
+        cfg = _make_cfg("/tmp/dc-test")
+        spec = C.lookup("VIRUSTOTAL_API_KEY")
+        self.assertIsNotNone(spec)
+        self.assertEqual(spec.resolve_bound_endpoint(cfg), "")
+
+    def test_resolve_bound_endpoint_swallows_resolver_errors(self):
+        """If a future resolver raises (e.g. config refactor changes
+        an attribute name), the UX must still render — the hint is
+        advisory, not load-bearing."""
+        def boom(_cfg):
+            raise RuntimeError("synthetic")
+
+        cfg = _make_cfg("/tmp/dc-test")
+        spec = C.CredentialSpec(
+            env_name="X",
+            feature="x",
+            description="x",
+            required=lambda _c: C.Requirement.OPTIONAL,
+            bound_endpoint=boom,
+        )
+        self.assertEqual(spec.resolve_bound_endpoint(cfg), "")
 
 
 class ResolveTests(unittest.TestCase):

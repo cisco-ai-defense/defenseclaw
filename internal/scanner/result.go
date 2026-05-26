@@ -55,6 +55,10 @@ type Finding struct {
 	Category string `json:"category,omitempty"`
 	// LineNumber is 1-based when applicable; nil means unknown / N/A.
 	LineNumber *int `json:"line_number,omitempty"`
+	// Confidence is the detector's self-reported certainty in [0,1].
+	// Populated by regex/judge/AID detectors; 0 (omitted) for binary
+	// match-or-miss scanners.
+	Confidence float64 `json:"confidence,omitempty"`
 
 	// --- Multi-step correlation fields (see internal/guardrail/correlator.go) ---
 

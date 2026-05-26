@@ -75,20 +75,28 @@ type codexHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	CodexOutput       map[string]interface{} `json:"codex_output,omitempty"`
+	// EvaluationID + RuleIDs join this hook response to the
+	// matching scan_findings rows / audit row. Additive — older
+	// connector hook scripts ignore the fields.
+	EvaluationID string   `json:"evaluation_id,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
 }
 
-// handleCodexHook + enrichCodexHookContext were deleted in PR #284.
-// Codex hook traffic now flows through the unified pipeline at
-// handleAgentHook("codex"); the typed evaluator (evaluateCodexHook,
-// kept below) is invoked through the HookProfile runtime registry.
-// Codex-specific span enrichment (turn_id, gen_ai.tool.call.id, model)
-// is preserved by the runtime callback immediately before
-// evaluateCodexHook runs.
+// handleCodexHook + enrichCodexHookContext were deleted in the
+// unified hook collector refactor. Codex hook traffic now flows
+// through the unified pipeline at handleAgentHook("codex"); the
+// typed evaluator (evaluateCodexHook, kept below) is invoked through
+// the HookProfile runtime registry. Codex-specific span enrichment
+// (turn_id, gen_ai.tool.call.id, model) is preserved by the runtime
+// callback immediately before evaluateCodexHook runs.
 //
 // The unified pipeline owns shared concerns (audit envelope refresh,
 // dispatch metric, dedup, trace propagation, OTel emissions) in
 // exactly one place now. See agent_hook.go and hook_profile_runtime.go
-// for the registry and shared-pipeline rationale.
+// for the registry and shared-pipeline rationale. The evaluator
+// stamps the unified-pipeline correlation keys (resp.EvaluationID /
+// resp.RuleIDs) on its return value so downstream tooling and the
+// audit envelope receive them.
 
 func enrichCodexHookSpan(ctx context.Context, req codexHookRequest) {
 	span := trace.SpanFromContext(ctx)
@@ -132,6 +140,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	if a.scannerCfg != nil && !a.codexEnabled() {
 		return codexResponseFor(req.HookEventName, "allow", "allow", "NONE", "", nil, mode, false)
 	}
+	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -210,10 +219,20 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			wouldBlock = true
 		}
 	}
+	// Emit per-rule findings FIRST so the notification + audit
+	// rows produced below can carry the resulting evaluation_id
+	// and top rule_ids — keeping the SIEM pivot key identical
+	// across audit log, gateway.jsonl, OS notification, and the
+	// HTTP response body.
+	evalCtx := a.emitHookRuleFindings(ctx, "codex", req.HookEventName, verdict,
+		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock)
+		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
 	}
-	return codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp.EvaluationID = evalCtx.EvaluationID
+	resp.RuleIDs = evalCtx.RuleIDs
+	return resp
 }
 
 // dispatchCodexHookNotification mirrors the Claude Code path —
@@ -222,7 +241,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 // dispatchCodexHookNotification follows the same routing contract
 // documented on dispatchAgentHookNotification. See that comment for
 // the rationale behind WouldAsk routing through OnWouldBlock.
-func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
+func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -232,12 +251,14 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 	}
 	safeReason := string(redaction.ForSinkReason(reason))
 	base := notifier.BlockEvent{
-		Source:    notifier.SourceHook,
-		Target:    target,
-		Reason:    safeReason,
-		Severity:  severity,
-		Connector: "codex",
-		Event:     req.HookEventName,
+		Source:       notifier.SourceHook,
+		Target:       target,
+		Reason:       safeReason,
+		Severity:     severity,
+		Connector:    "codex",
+		Event:        req.HookEventName,
+		EvaluationID: evalCtx.EvaluationID,
+		RuleIDs:      evalCtx.RuleIDs,
 	}
 	switch {
 	case action == "block":
@@ -246,12 +267,14 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 		a.notifier.OnWouldBlock(base)
 	case action == "confirm":
 		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
-			Subject:   fmt.Sprintf("%s (%s)", target, req.HookEventName),
-			Reason:    safeReason,
-			Severity:  severity,
-			Source:    notifier.SourceHook,
-			Connector: "codex",
-			Event:     req.HookEventName,
+			Subject:      fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:       safeReason,
+			Severity:     severity,
+			Source:       notifier.SourceHook,
+			Connector:    "codex",
+			Event:        req.HookEventName,
+			EvaluationID: evalCtx.EvaluationID,
+			RuleIDs:      evalCtx.RuleIDs,
 		})
 	case rawAction == "confirm":
 		evt := base

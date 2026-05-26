@@ -163,12 +163,14 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 			"would_block":         fmt.Sprintf("%t", decision.WouldBlock),
 		})
 	}
+	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "mcp", connector, hookEvent)
 	if a.logger != nil {
-		a.logAssetPolicyAudit(ctx, "mcp:"+decision.TargetName,
-			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
-				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason))
+		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
+			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason)
+		details = appendHookEvaluationDetails(details, evalCtx)
+		a.logAssetPolicyAudit(ctx, "mcp:"+decision.TargetName, details)
 	}
-	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent)
+	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
 	return decision, true
 }
 
@@ -217,12 +219,14 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		}
 		a.otel.EmitPolicyDecision("asset-policy", decision.Action, decision.TargetName, "skill", decision.Reason, attrs)
 	}
+	evalCtx := a.emitAssetPolicyDecisionFindings(ctx, decision, "skill", connector, hookEvent)
 	if a.logger != nil {
-		a.logAssetPolicyAudit(ctx, "skill:"+decision.TargetName,
-			fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
-				decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason))
+		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
+			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
+		details = appendHookEvaluationDetails(details, evalCtx)
+		a.logAssetPolicyAudit(ctx, "skill:"+decision.TargetName, details)
 	}
-	a.dispatchAssetPolicyNotification(decision, "skill", connector, hookEvent)
+	a.dispatchAssetPolicyNotification(decision, "skill", connector, hookEvent, evalCtx)
 	return decision, true
 }
 
@@ -248,9 +252,13 @@ func hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets string, assetDec
 // for parity with the hook / proxy / HILT helpers — the toast is
 // rendered locally but a screenshot or screen recording is still a
 // data-exfil surface.
-func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyDecision, targetKind, connectorName, hookEvent string) {
+func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyDecision, targetKind, connectorName, hookEvent string, evalCtx ...hookEvaluationContext) {
 	if a == nil || a.notifier == nil {
 		return
+	}
+	var ec hookEvaluationContext
+	if len(evalCtx) > 0 {
+		ec = evalCtx[0]
 	}
 	target := strings.TrimSpace(decision.TargetName)
 	if target == "" {
@@ -259,12 +267,14 @@ func (a *APIServer) dispatchAssetPolicyNotification(decision config.AssetPolicyD
 		target = strings.ToLower(strings.TrimSpace(targetKind)) + ":" + target
 	}
 	ev := notifier.BlockEvent{
-		Source:    notifier.SourceAssetPolicy,
-		Target:    target,
-		Reason:    string(redaction.ForSinkReason(decision.Reason)),
-		Severity:  "HIGH",
-		Connector: connectorName,
-		Event:     hookEvent,
+		Source:       notifier.SourceAssetPolicy,
+		Target:       target,
+		Reason:       string(redaction.ForSinkReason(decision.Reason)),
+		Severity:     "HIGH",
+		Connector:    connectorName,
+		Event:        hookEvent,
+		EvaluationID: ec.EvaluationID,
+		RuleIDs:      ec.RuleIDs,
 	}
 	if decision.Action == "block" {
 		a.notifier.OnBlock(ev)

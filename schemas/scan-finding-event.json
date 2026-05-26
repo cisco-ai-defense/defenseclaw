@@ -9,7 +9,15 @@
       "required": ["scan_id", "scanner", "target"],
       "properties": {
         "scan_id":     { "type": "string" },
-        "scanner":     { "type": "string", "enum": ["skill", "mcp", "plugin", "aibom", "codeguard"] },
+        "scanner":     {
+          "type": "string",
+          "description": "Source of the finding. Classic scanner invocations use skill|mcp|plugin|aibom|codeguard. Runtime finding emitters fanned out via EmitInspectFindings use hook-rules|inline-codeguard|ai-defense|asset-policy|tool-call-inspect|inspect-http|guardrail-llm|mid-stream|rescan.",
+          "enum": [
+            "skill", "mcp", "plugin", "aibom", "codeguard",
+            "hook-rules", "inline-codeguard", "ai-defense", "asset-policy",
+            "tool-call-inspect", "inspect-http", "guardrail-llm", "mid-stream", "rescan"
+          ]
+        },
         "target":      { "type": "string" },
         "finding_id":  { "type": ["string", "null"] },
         "rule_id":     { "type": ["string", "null"], "description": "Stable detection rule identifier. Preferred group-by for SIEM; never display-string." },
@@ -20,7 +28,9 @@
         "location":    { "type": ["string", "null"], "description": "Redacted path + line." },
         "line_number": { "type": ["integer", "null"], "minimum": 0 },
         "remediation": { "type": ["string", "null"] },
-        "tags":        { "type": ["array", "null"], "items": { "type": "string" } }
+        "tags":        { "type": ["array", "null"], "items": { "type": "string" } },
+        "confidence":  { "type": ["number", "null"], "minimum": 0, "maximum": 1, "description": "Detector self-reported certainty in [0,1]. Omitted by binary scanners." },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key matching the parent ScanPayload.evaluation_id." }
       }
     }
   },

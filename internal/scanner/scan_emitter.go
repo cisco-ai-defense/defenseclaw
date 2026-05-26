@@ -83,6 +83,11 @@ type ScanSummaryParams struct {
 	SessionID         string
 	RequestID         string
 	TraceID           string
+	// EvaluationID joins this scan to the upstream runtime
+	// evaluation (hook handler, /api/v1/inspect/*, proxy guardrail,
+	// mid-stream, tool-call-inspect). Empty for classic scanner
+	// invocations.
+	EvaluationID string
 }
 
 // ScanFindingMeta stamps correlation + provenance on scan_findings rows.
@@ -100,6 +105,10 @@ type ScanFindingMeta struct {
 	ContentHash       string
 	Generation        uint64
 	BinaryVersion     string
+	// EvaluationID matches ScanSummaryParams.EvaluationID; copied
+	// onto every scan_findings row so SIEM queries can pivot on it
+	// without joining to scan_results.
+	EvaluationID string
 }
 
 // EmitScanResult fans out one EventScan + N EventScanFinding events (when w
@@ -164,6 +173,7 @@ func EmitScanResult(
 		ContentHash:       prov.ContentHash,
 		Generation:        prov.Generation,
 		BinaryVersion:     prov.BinaryVersion,
+		EvaluationID:      agent.EvaluationID,
 	}
 
 	if pers != nil {
@@ -195,6 +205,7 @@ func EmitScanResult(
 			AgentName:         agent.AgentName,
 			AgentInstanceID:   agent.AgentInstanceID,
 			SidecarInstanceID: agent.SidecarInstanceID,
+			EvaluationID:      agent.EvaluationID,
 		}
 		if err := pers.InsertScanSummary(sum); err != nil {
 			return scanID, err
@@ -227,17 +238,18 @@ func EmitScanResult(
 			AgentInstanceID:   agent.AgentInstanceID,
 			SidecarInstanceID: agent.SidecarInstanceID,
 			Scan: &gatewaylog.ScanPayload{
-				ScanID:      scanID,
-				Scanner:     scannerEnum,
-				Target:      result.Target,
-				TargetType:  targetTypeEnum,
-				Verdict:     verdictEnum,
-				DurationMs:  result.Duration.Milliseconds(),
-				SeverityMax: maxSev,
-				Counts:      counts,
-				TotalCount:  len(result.Findings),
-				ExitCode:    result.ExitCode,
-				Error:       result.ScanError,
+				ScanID:       scanID,
+				Scanner:      scannerEnum,
+				Target:       result.Target,
+				TargetType:   targetTypeEnum,
+				Verdict:      verdictEnum,
+				DurationMs:   result.Duration.Milliseconds(),
+				SeverityMax:  maxSev,
+				Counts:       counts,
+				TotalCount:   len(result.Findings),
+				ExitCode:     result.ExitCode,
+				Error:        result.ScanError,
+				EvaluationID: agent.EvaluationID,
 			},
 		})
 		for i := range result.Findings {
@@ -259,19 +271,21 @@ func EmitScanResult(
 				AgentInstanceID:   agent.AgentInstanceID,
 				SidecarInstanceID: agent.SidecarInstanceID,
 				ScanFinding: &gatewaylog.ScanFindingPayload{
-					ScanID:      scanID,
-					Scanner:     scannerEnum,
-					Target:      result.Target,
-					FindingID:   f.ID,
-					RuleID:      f.RuleID,
-					Category:    f.Category,
-					Title:       f.Title,
-					Description: f.Description,
-					Severity:    toGatewaySeverity(f.Severity),
-					Location:    f.Location,
-					LineNumber:  ln,
-					Remediation: f.Remediation,
-					Tags:        f.Tags,
+					ScanID:       scanID,
+					Scanner:      scannerEnum,
+					Target:       result.Target,
+					FindingID:    f.ID,
+					RuleID:       f.RuleID,
+					Category:     f.Category,
+					Title:        f.Title,
+					Description:  f.Description,
+					Severity:     toGatewaySeverity(f.Severity),
+					Location:     f.Location,
+					LineNumber:   ln,
+					Remediation:  f.Remediation,
+					Tags:         f.Tags,
+					Confidence:   f.Confidence,
+					EvaluationID: agent.EvaluationID,
 				},
 			})
 		}

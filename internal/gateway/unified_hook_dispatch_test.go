@@ -191,6 +191,113 @@ func jsonKeys(m map[string]interface{}) []string {
 	return out
 }
 
+// TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs pins the
+// HTTP-response contract for the unified runtime-finding
+// observability pipeline: when the evaluator stamps an
+// evaluation_id + rule_ids on the agentHookResponse,
+// renderAgentHookResponseForProfile MUST project them onto the
+// JSON output map so hook scripts (and any downstream consumer
+// of the HTTP response body) can pivot on the same join key
+// surfaced via gateway.jsonl, scan_findings, and the audit DB
+// structured envelope.
+//
+// Regression guard: the original render projection built a
+// hardcoded subset map that silently dropped the new fields. The
+// JSONL / audit DB surfaces still carried the join key, but
+// callers consuming only the HTTP body were left orphaned — the
+// "absolute observability" contract said every surface, so an
+// in-test assertion is the only way to keep that promise.
+//
+// Negative half: when the evaluator emits an allow/no-findings
+// response (the empty hookEvaluationContext path), neither
+// evaluation_id nor rule_ids should appear in the wire shape —
+// older hook scripts must continue parsing the same minimal
+// envelope.
+func TestUnifiedDispatch_SurfacesEvaluationIDAndRuleIDs(t *testing.T) {
+	t.Run("populated", func(t *testing.T) {
+		resp := agentHookResponse{
+			Action:       "allow",
+			RawAction:    "block",
+			Severity:     "CRITICAL",
+			Mode:         "observe",
+			WouldBlock:   true,
+			EvaluationID: "eval-fixture-uuid-1234",
+			RuleIDs:      []string{"SEC-ANTHROPIC", "SEC-AWS-KEY"},
+		}
+		for _, connectorName := range []string{"codex", "claudecode", "hermes"} {
+			out := renderAgentHookResponse(connectorName, resp)
+			if got, ok := out["evaluation_id"].(string); !ok || got != "eval-fixture-uuid-1234" {
+				t.Errorf("connector %s: evaluation_id = %v, want %q", connectorName, out["evaluation_id"], "eval-fixture-uuid-1234")
+			}
+			ids, ok := out["rule_ids"].([]string)
+			if !ok || len(ids) != 2 || ids[0] != "SEC-ANTHROPIC" || ids[1] != "SEC-AWS-KEY" {
+				t.Errorf("connector %s: rule_ids = %v, want [SEC-ANTHROPIC SEC-AWS-KEY]", connectorName, out["rule_ids"])
+			}
+		}
+	})
+
+	t.Run("empty_context_omits_fields", func(t *testing.T) {
+		resp := agentHookResponse{
+			Action:     "allow",
+			Severity:   "NONE",
+			Mode:       "observe",
+			WouldBlock: false,
+		}
+		out := renderAgentHookResponse("codex", resp)
+		if _, ok := out["evaluation_id"]; ok {
+			t.Errorf("no-findings path must omit evaluation_id; got keys=%v", jsonKeys(out))
+		}
+		if _, ok := out["rule_ids"]; ok {
+			t.Errorf("no-findings path must omit rule_ids; got keys=%v", jsonKeys(out))
+		}
+	})
+}
+
+// TestCodexResponseToAgentHookResponse_CarriesCorrelationIDs and
+// TestClaudeCodeResponseToAgentHookResponse_CarriesCorrelationIDs
+// guard the adapter layer that bridges codex/claudecode bespoke
+// response structs into the unified agentHookResponse. The
+// previous adapter dropped the EvaluationID + RuleIDs fields, so
+// the codex_hook.go / claude_code_hook.go evaluators happily
+// stamped them on the bespoke struct but they evaporated before
+// the render projection ever saw them. These two tests pin the
+// adapter contract so the regression cannot resurface.
+func TestCodexResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
+	src := codexHookResponse{
+		Action:       "allow",
+		RawAction:    "block",
+		Severity:     "CRITICAL",
+		Mode:         "observe",
+		EvaluationID: "eval-codex-fixture",
+		RuleIDs:      []string{"SEC-ANTHROPIC"},
+	}
+	out := codexResponseToAgentHookResponse(src)
+	if out.EvaluationID != "eval-codex-fixture" {
+		t.Errorf("EvaluationID = %q, want eval-codex-fixture", out.EvaluationID)
+	}
+	if len(out.RuleIDs) != 1 || out.RuleIDs[0] != "SEC-ANTHROPIC" {
+		t.Errorf("RuleIDs = %v, want [SEC-ANTHROPIC]", out.RuleIDs)
+	}
+}
+
+func TestClaudeCodeResponseToAgentHookResponse_CarriesCorrelationIDs(t *testing.T) {
+	src := claudeCodeHookResponse{
+		Action:       "allow",
+		RawAction:    "block",
+		Severity:     "CRITICAL",
+		Mode:         "observe",
+		EvaluationID: "eval-claude-fixture",
+		RuleIDs:      []string{"SEC-AWS-KEY", "SEC-GITHUB-TOKEN"},
+	}
+	out := claudeCodeResponseToAgentHookResponse(src)
+	if out.EvaluationID != "eval-claude-fixture" {
+		t.Errorf("EvaluationID = %q, want eval-claude-fixture", out.EvaluationID)
+	}
+	if len(out.RuleIDs) != 2 {
+		t.Errorf("RuleIDs len = %d, want 2", len(out.RuleIDs))
+	}
+}
+
 // runHookHandler invokes a hook handler with the supplied JSON body
 // and returns the response body. We cannot use httptest.NewServer
 // because that would require a fully wired APIServer with audit +

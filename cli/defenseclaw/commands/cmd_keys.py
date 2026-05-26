@@ -35,12 +35,31 @@ from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_CONFIG_UPDATE
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.credentials import (
+    CredentialSpec,
     CredentialStatus,
     Requirement,
     classify,
     lookup,
     mask,
 )
+
+
+def _emit_bound_endpoint_hint(spec: CredentialSpec | None, cfg, *, indent: str) -> None:
+    """Print a "↪ bound to <url>" hint after a credential is saved.
+
+    Surfaces the operator's *current* paired endpoint so a key that
+    was issued for a different region/host is caught at save time
+    rather than at the next failed probe. No-op when the spec has no
+    bound endpoint (most credentials), so this is safe to call
+    unconditionally on every save.
+    """
+    if spec is None:
+        return
+    endpoint = spec.resolve_bound_endpoint(cfg)
+    if not endpoint:
+        return
+    click.echo(f"{indent}{ux.dim('↪ bound to ' + endpoint)}")
+    click.echo(f"{indent}{ux.dim('  change region/host: defenseclaw setup')}")
 
 
 @click.group("keys")
@@ -142,6 +161,7 @@ def keys_set(app: AppContext, env_name: str, value: str | None) -> None:
             ],
         )
     ux.ok(f"Saved {env_name} = {mask(value)} to {app.cfg.data_dir}/.env", indent="  ")
+    _emit_bound_endpoint_hint(spec, app.cfg, indent="    ")
 
 
 @keys_cmd.command("fill-missing")
@@ -183,6 +203,7 @@ def keys_fill_missing(app: AppContext, yes: bool) -> None:
             continue
         _save_secret_to_dotenv(s.resolution.env_name, value, app.cfg.data_dir)
         ux.ok(f"saved ({mask(value)})", indent="      ")
+        _emit_bound_endpoint_hint(s.spec, app.cfg, indent="        ")
         saved += 1
 
     click.echo()

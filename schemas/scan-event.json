@@ -9,9 +9,24 @@
       "required": ["scan_id", "scanner", "target"],
       "properties": {
         "scan_id":     { "type": "string", "description": "Correlation id shared by the roll-up EventScan and all child EventScanFinding events." },
-        "scanner":     { "type": "string", "enum": ["skill", "mcp", "plugin", "aibom", "codeguard"] },
-        "target":      { "type": "string", "description": "File path | skill name | server URL. Redacted when scanner contract requires." },
-        "target_type": { "type": ["string", "null"], "enum": ["file", "skill", "mcp", "plugin", "aibom", null] },
+        "scanner":     {
+          "type": "string",
+          "description": "Source of the finding. Classic scanner invocations use skill|mcp|plugin|aibom|codeguard. Runtime finding emitters fanned out via EmitInspectFindings use hook-rules|inline-codeguard|ai-defense|asset-policy|tool-call-inspect|inspect-http|guardrail-llm|mid-stream|rescan.",
+          "enum": [
+            "skill", "mcp", "plugin", "aibom", "codeguard",
+            "hook-rules", "inline-codeguard", "ai-defense", "asset-policy",
+            "tool-call-inspect", "inspect-http", "guardrail-llm", "mid-stream", "rescan"
+          ]
+        },
+        "target":      { "type": "string", "description": "File path | skill name | server URL | tool name | message surface. Redacted when scanner contract requires." },
+        "target_type": {
+          "type": ["string", "null"],
+          "enum": [
+            "file", "skill", "mcp", "plugin", "aibom",
+            "tool_call", "prompt", "completion", "tool_response", "inspect",
+            null
+          ]
+        },
         "verdict":     { "type": ["string", "null"], "enum": ["clean", "warn", "block", null] },
         "duration_ms": { "type": ["integer", "null"] },
         "severity_max":{ "type": ["string", "null"], "enum": ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO", null] },
@@ -22,7 +37,8 @@
         },
         "total_count": { "type": ["integer", "null"], "minimum": 0 },
         "exit_code":   { "type": ["integer", "null"] },
-        "error":       { "type": ["string", "null"], "description": "Scanner execution error. Present only when the wrapper failed (timeout, non-zero exit)." }
+        "error":       { "type": ["string", "null"], "description": "Scanner execution error. Present only when the wrapper failed (timeout, non-zero exit)." },
+        "evaluation_id": { "type": ["string", "null"], "description": "Optional join key linking this scan to its upstream runtime evaluation (hook handler, /api/v1/inspect/*, proxy guardrail, mid-stream, tool-call-inspect, watcher rescan). Empty for classic scanner-invocation paths." }
       }
     }
   },

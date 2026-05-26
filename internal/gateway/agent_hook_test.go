@@ -325,7 +325,7 @@ func TestAgentHookDispatch_BlockFiresOnBlock(t *testing.T) {
 		ToolName:      "Bash",
 	}
 	api.dispatchAgentHookNotification(req, "block", "block", "HIGH",
-		"matched policy: deny-rm-rf", false)
+		"matched policy: deny-rm-rf", false, hookEvaluationContext{})
 
 	got := rec.WaitFor(t, 1)
 	if !strings.Contains(strings.ToLower(got[0].Title), "block") {
@@ -349,6 +349,7 @@ func TestAgentHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 	api.dispatchAgentHookNotification(
 		agentHookRequest{ConnectorName: "geminicli", HookEventName: "BeforeTool", ToolName: "Read"},
 		"allow", "block", "MEDIUM", "observe-mode", true,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if !strings.Contains(strings.ToLower(got[0].Title), "would") {
@@ -376,6 +377,7 @@ func TestAgentHookDispatch_ConfirmCarriesConnectorAndEvent(t *testing.T) {
 			ToolName:      "shell",
 		},
 		"confirm", "confirm", "HIGH", "matched: deny-rm-rf", false,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if !strings.Contains(got[0].Title, "Approval needed") {
@@ -421,6 +423,7 @@ func TestAgentHookDispatch_ConfirmDowngradedRewordsToast(t *testing.T) {
 		// the surface action to "alert" because beforeReadFile is
 		// not in cursor's AskEvents.
 		"alert", "confirm", "HIGH", "matched: gateway.json access", false,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(got[0].Subtitle, "reply in chat") {
@@ -464,6 +467,7 @@ func TestAgentHookDispatch_ObserveModeConfirmRoutesThroughWouldBlock(t *testing.
 			ToolName:      "Shell",
 		},
 		"allow", "confirm", "HIGH", "matched: rm -rf /", false,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(strings.ToLower(got[0].Title), "approval needed") {
@@ -493,6 +497,7 @@ func TestAgentHookDispatch_RedactsReason(t *testing.T) {
 		agentHookRequest{ConnectorName: "copilot", HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH",
 		"prompt contained AKIAIOSFODNN7EXAMPLE", false,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(got[0].Body, "AKIAIOSFODNN7EXAMPLE") {
