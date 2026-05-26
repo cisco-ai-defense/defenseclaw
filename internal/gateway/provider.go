@@ -3,10 +3,13 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 )
 
 // ChatMessage is the OpenAI-compatible message format used as the canonical
@@ -235,6 +238,106 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvid
 		apiKey:      apiKey,
 		baseURL:     baseURL,
 	}, nil
+}
+
+// NewProviderForInstance constructs a provider by resolving a
+// custom-providers.json overlay entry by name. The overlay's
+// ``base_provider_type``, ``base_url``, and per-instance TLS settings
+// take precedence over the value inferred from ``model``; ``apiKey``
+// still flows from the resolved :class:`LLMConfig` (whose
+// ``resolved_api_key()`` reads the overlay's env_keys list).
+//
+// Returns an ``ErrCustomProviderInstanceNotFound``-style error when
+// ``name`` is non-empty but no overlay entry matches, so callers can
+// fall back to :func:`NewProviderWithBase` without silently routing to
+// the wrong endpoint.
+func NewProviderForInstance(name, model, apiKey string, providers *configs.ProvidersConfig) (LLMProvider, error) {
+	if providers == nil {
+		return nil, fmt.Errorf("gateway: NewProviderForInstance: providers registry is nil")
+	}
+	clean := strings.ToLower(strings.TrimSpace(name))
+	if clean == "" {
+		return nil, fmt.Errorf("gateway: NewProviderForInstance: instance name is empty")
+	}
+	var inst *configs.Provider
+	for i := range providers.Providers {
+		if strings.ToLower(providers.Providers[i].Name) == clean {
+			inst = &providers.Providers[i]
+			break
+		}
+	}
+	if inst == nil {
+		return nil, fmt.Errorf("gateway: custom-provider instance %q not found in overlay", name)
+	}
+
+	providerType := inst.BaseProviderType
+	if providerType == "" {
+		// Fall back to the model prefix when the overlay didn't pin a
+		// base type (older overlays predate the field).
+		if p, _ := splitModel(model); p != "" {
+			providerType = p
+		} else {
+			providerType = inferProvider(model, apiKey)
+		}
+	}
+	providerKey, err := mapProviderKey(providerType)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: custom-provider %q has unsupported base_provider_type %q: %w", name, providerType, err)
+	}
+
+	_, modelID := splitModel(model)
+	if modelID == "" {
+		modelID = model
+	}
+	baseURL := strings.TrimRight(inst.BaseURL, "/")
+	var tls tlsOverrides
+	if inst.TLS != nil {
+		tls = tlsOverrides{
+			CACertPEM:          inst.TLS.CACertPEM,
+			InsecureSkipVerify: inst.TLS.InsecureSkipVerify,
+		}
+	}
+	return &bifrostProvider{
+		providerKey: providerKey,
+		model:       modelID,
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		tls:         tls,
+	}, nil
+}
+
+// NewProviderForLLMConfig is the canonical adapter from a resolved
+// :type:`config.LLMConfig` to an :type:`LLMProvider`. It picks one of
+// three paths in order:
+//
+//  1. ``InstanceName != ""`` AND a matching overlay entry exists →
+//     :func:`NewProviderForInstance` (applies the overlay's
+//     base_url, base_provider_type, TLS).
+//  2. ``BaseURL != ""`` → :func:`NewProviderWithBase` (legacy custom
+//     endpoint, no overlay required).
+//  3. otherwise :func:`NewProvider` with the model-derived provider.
+//
+// ``providers`` may be nil; in that case the function silently degrades
+// to path 2/3 so a bootstrap that fails to load the overlay still gets
+// a usable provider rather than crashing the gateway.
+func NewProviderForLLMConfig(model, apiKey, baseURL, instanceName string, providers *configs.ProvidersConfig) (LLMProvider, error) {
+	name := strings.TrimSpace(instanceName)
+	if name != "" && providers != nil {
+		p, err := NewProviderForInstance(name, model, apiKey, providers)
+		if err == nil {
+			return p, nil
+		}
+		// Fall back to the generic path so a typo in instance_name
+		// surfaces in `defenseclaw doctor` (via
+		// _check_custom_provider_overlay) rather than taking the
+		// gateway offline. The error is logged so operators can
+		// trace silent fallbacks in real time.
+		fmt.Fprintf(os.Stderr, "[gateway] instance %q lookup failed, falling back: %v\n", name, err)
+	}
+	if strings.TrimSpace(baseURL) != "" {
+		return NewProviderWithBase(model, apiKey, baseURL)
+	}
+	return NewProvider(model, apiKey)
 }
 
 // knownProviders lists provider prefixes recognized in "provider/model" strings.

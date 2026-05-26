@@ -649,6 +649,185 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         )
 
 
+def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
+    """One-shot ``llm.ping`` against the guardrail's resolved LLM.
+
+    Complements :func:`_check_llm_api_key`: where that probe asserts the
+    key is *plausible* against provider-specific introspection endpoints,
+    this probe sends a single ``max_tokens=1`` chat to LiteLLM with the
+    full resolved provider routing — exactly the path the gateway and
+    scanners exercise at runtime. Skipped when the guardrail is off or
+    the model is unset because there's nothing meaningful to ping.
+
+    Implementation detail: ``defenseclaw.llm.ping`` returns
+    ``(ok, message)`` and never raises, so the doctor can render the
+    outcome without catching exceptions itself.
+    """
+    gc = cfg.guardrail
+    if not gc.enabled:
+        _emit("skip", "LLM reachable", "guardrail disabled", r=r)
+        return
+    llm = cfg.resolve_llm("guardrail")
+    if not (llm.model or "").strip():
+        _emit("skip", "LLM reachable", "no model configured", r=r)
+        return
+    try:
+        from defenseclaw import llm as _llm
+    except Exception as exc:
+        _emit("warn", "LLM reachable", f"llm.ping unavailable: {exc}", r=r)
+        return
+    ok, msg = _llm.ping(llm, timeout=5)
+    if ok:
+        _emit("pass", "LLM reachable", msg, r=r)
+    else:
+        _emit("warn", "LLM reachable", msg, r=r)
+
+
+def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
+    """Sanity-check provider-typed sub-blocks on the resolved LLM.
+
+    Bedrock requires a region; Vertex requires both ``project_id`` and
+    a region; Azure requires an ``endpoint`` and an ``api_version``.
+    We emit ``fail`` when the structured block is in use but missing a
+    required field — the runtime would otherwise reject every call with
+    a cryptic upstream error. When the structured block is absent we
+    skip silently so non-regional setups don't see noise.
+    """
+    if not cfg.guardrail.enabled:
+        _emit("skip", "Regional provider", "guardrail disabled", r=r)
+        return
+    llm = cfg.resolve_llm("guardrail")
+    label = "Regional provider"
+    provider = (llm.provider or "").strip().lower()
+    if provider in ("bedrock", "amazon-bedrock") and llm.bedrock is not None:
+        b = llm.bedrock
+        region = (b.region or llm.region or "").strip()
+        if not region:
+            _emit("fail", label, "bedrock configured without a region", r=r)
+            return
+        mode = (b.auth_mode or "").strip().lower() or "api_key"
+        if mode == "iam_credentials" and not (b.access_key_env and b.secret_key_env):
+            _emit(
+                "warn",
+                label,
+                "bedrock auth_mode=iam_credentials requires access/secret key env names",
+                r=r,
+            )
+            return
+        if mode == "profile" and not b.profile_name:
+            _emit("warn", label, "bedrock auth_mode=profile requires profile_name", r=r)
+            return
+        _emit("pass", label, f"bedrock region={region} auth_mode={mode}", r=r)
+        return
+    if provider == "vertex_ai" and llm.vertex is not None:
+        v = llm.vertex
+        if not (v.project_id or "").strip():
+            _emit("fail", label, "vertex_ai configured without project_id", r=r)
+            return
+        if not (v.region or llm.region or "").strip():
+            _emit("fail", label, "vertex_ai configured without region", r=r)
+            return
+        mode = (v.auth_mode or "").strip().lower() or "service_account"
+        if mode == "service_account" and not (v.service_account_json_env or "").strip():
+            _emit(
+                "warn",
+                label,
+                "vertex_ai auth_mode=service_account requires service_account_json_env",
+                r=r,
+            )
+            return
+        _emit("pass", label, f"vertex_ai project={v.project_id} region={v.region or llm.region}", r=r)
+        return
+    if provider == "azure" and llm.azure is not None:
+        a = llm.azure
+        if not (a.endpoint or "").strip():
+            _emit("fail", label, "azure configured without endpoint", r=r)
+            return
+        if not (a.api_version or "").strip():
+            _emit("warn", label, "azure configured without api_version", r=r)
+            return
+        _emit(
+            "pass",
+            label,
+            f"azure endpoint={a.endpoint} api_version={a.api_version}",
+            r=r,
+        )
+        return
+    _emit("skip", label, "no regional provider in use", r=r)
+
+
+def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
+    """Validate ``~/.defenseclaw/custom-providers.json`` consistency.
+
+    Checks:
+
+    * The overlay file parses (anything else is silently treated as
+      empty by ``LoadProviders`` on the Go side, but here we surface
+      the parse error so the operator can fix it).
+    * Any ``instance_name`` referenced in a resolved LLM block points
+      at an actual overlay entry. A typo here would route requests
+      through the default provider instead of the operator's custom
+      endpoint — a silent fallback that's hard to debug later.
+    * Per-instance TLS settings declare exactly one of
+      ``ca_cert_pem`` or ``insecure_skip_verify``; declaring both is
+      almost always a misconfiguration (we accept it on the Go side,
+      but the warning matches the CLI's own validation).
+    """
+    label = "Custom-provider overlay"
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        _emit("skip", label, "no data_dir configured", r=r)
+        return
+    path = os.path.join(data_dir, "custom-providers.json")
+    if not os.path.isfile(path):
+        _emit("skip", label, "no overlay configured", r=r)
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        _emit("fail", label, f"cannot parse {path}: {exc}", r=r)
+        return
+    providers = payload.get("providers") or []
+    if not isinstance(providers, list):
+        _emit("fail", label, "providers field must be a list", r=r)
+        return
+    names: set[str] = set()
+    for entry in providers:
+        if isinstance(entry, dict) and entry.get("name"):
+            names.add(str(entry["name"]).strip().lower())
+    missing: list[tuple[str, str]] = []
+    for component in ("", "guardrail", "guardrail.judge", "scanners.skill", "scanners.mcp", "scanners.plugin"):
+        try:
+            resolved = cfg.resolve_llm(component)
+        except Exception:
+            continue
+        name = (getattr(resolved, "instance_name", "") or "").strip().lower()
+        if name and name not in names:
+            missing.append((component or "llm", name))
+    if missing:
+        rows = ", ".join(f"{c}->{n}" for c, n in missing)
+        _emit("fail", label, f"instance_name not found in overlay: {rows}", r=r)
+        return
+    tls_warns: list[str] = []
+    for entry in providers:
+        tls = (entry or {}).get("tls") or {}
+        if not isinstance(tls, dict):
+            continue
+        if tls.get("ca_cert_pem") and tls.get("insecure_skip_verify"):
+            tls_warns.append(str(entry.get("name") or "?"))
+    if tls_warns:
+        _emit(
+            "warn",
+            label,
+            "instances declare both ca_cert_pem and insecure_skip_verify: "
+            + ", ".join(tls_warns),
+            r=r,
+        )
+        return
+    _emit("pass", label, f"{len(providers)} overlay entries OK", r=r)
+
+
 # Default model used for the Anthropic auth probe when the configured model
 # is not an Anthropic model. The probe sends max_tokens=1 so cost is
 # negligible; any valid model id accepted by the account works. We pick a
@@ -1382,6 +1561,9 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     if not json_out:
         _doctor_subsection("Credentials")
     _check_llm_api_key(cfg, r)
+    _check_llm_reachable(cfg, r)
+    _check_regional_provider_config(cfg, r)
+    _check_custom_provider_overlay(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
     _check_registry_credentials(cfg, r)

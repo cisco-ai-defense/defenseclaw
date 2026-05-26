@@ -26,11 +26,59 @@ var providersJSON []byte
 // Provider describes a single LLM provider: its canonical name, the domain
 // substrings used to identify outbound requests, and the OpenClaw
 // auth-profiles.json profile ID used to look up the API key.
+//
+// Custom-provider extensions (all optional, zero-valued for built-in
+// entries) let operator overlays in ``~/.defenseclaw/custom-providers.json``
+// declare internal/self-hosted endpoints with their own upstream
+// adapter, base URL, TLS posture, and request-path overrides. The
+// guardrail Bifrost adapter consults these fields at runtime via
+// :func:`provider_bifrost.ResolveCustomInstance` so a single overlay
+// entry can rebind judge/LLM-agent traffic without code changes.
 type Provider struct {
 	Name      string   `json:"name"`
 	Domains   []string `json:"domains"`
 	ProfileID *string  `json:"profile_id"` // nil when no auth-profile exists (e.g. bedrock)
 	EnvKeys   []string `json:"env_keys"`   // env var names for the API key, checked in order
+
+	// BaseProviderType selects the Bifrost adapter family for this
+	// instance ("openai" / "bedrock" / "vertex_ai" / "azure" / ...).
+	// Empty for built-in providers (the adapter is inferred from Name).
+	BaseProviderType string `json:"base_provider_type,omitempty"`
+
+	// BaseURL is the HTTP(S) origin for the custom endpoint, e.g.
+	// "https://llm.internal:8443". The Bifrost client appends standard
+	// route paths unless overridden by RequestPathOverrides.
+	BaseURL string `json:"base_url,omitempty"`
+
+	// AllowedRequests restricts the instance to listed request types
+	// (chat / completion / embedding / rerank / image / audio / responses).
+	// Empty means "all".
+	AllowedRequests []string `json:"allowed_requests,omitempty"`
+
+	// AvailableModels enumerates model ids served by this endpoint.
+	// Surfaced to the wizard's model picker; not enforced by the
+	// gateway (Bifrost rejects unknown models on its own).
+	AvailableModels []string `json:"available_models,omitempty"`
+
+	// RequestPathOverrides remaps Bifrost's default route paths. Keys
+	// match AllowedRequests; values are absolute URL paths beginning
+	// with "/" (e.g. {"chat": "/openai/v1/chat/completions"}).
+	RequestPathOverrides map[string]string `json:"request_path_overrides,omitempty"`
+
+	// TLS holds per-instance TLS settings for self-signed labs.
+	TLS *ProviderTLS `json:"tls,omitempty"`
+}
+
+// ProviderTLS describes how the gateway should validate the provider's
+// TLS certificate. Mirrors LLMConfig.tls on the Python side so the
+// custom-providers.json overlay can carry both.
+type ProviderTLS struct {
+	// CACertPEM is an inline PEM bundle trusted for this endpoint.
+	// Empty means "use the system root store".
+	CACertPEM string `json:"ca_cert_pem,omitempty"`
+	// InsecureSkipVerify disables certificate validation entirely.
+	// Mutually exclusive with CACertPEM; lab use only.
+	InsecureSkipVerify bool `json:"insecure_skip_verify,omitempty"`
 }
 
 // ProvidersConfig is the top-level structure of providers.json.
@@ -155,6 +203,37 @@ func applyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 			// ProfileID: overlay wins if set.
 			if op.ProfileID != nil {
 				base.Providers[idx].ProfileID = op.ProfileID
+			}
+			// Custom-provider fields: overlay wins for scalars, unions for
+			// list fields so an operator can incrementally extend the
+			// allowed-request set or model list without losing what was
+			// already declared.
+			if op.BaseProviderType != "" {
+				base.Providers[idx].BaseProviderType = op.BaseProviderType
+			}
+			if op.BaseURL != "" {
+				base.Providers[idx].BaseURL = op.BaseURL
+			}
+			if len(op.AllowedRequests) > 0 {
+				base.Providers[idx].AllowedRequests = unionStrings(
+					base.Providers[idx].AllowedRequests, op.AllowedRequests,
+				)
+			}
+			if len(op.AvailableModels) > 0 {
+				base.Providers[idx].AvailableModels = unionStrings(
+					base.Providers[idx].AvailableModels, op.AvailableModels,
+				)
+			}
+			if len(op.RequestPathOverrides) > 0 {
+				if base.Providers[idx].RequestPathOverrides == nil {
+					base.Providers[idx].RequestPathOverrides = make(map[string]string, len(op.RequestPathOverrides))
+				}
+				for k, v := range op.RequestPathOverrides {
+					base.Providers[idx].RequestPathOverrides[k] = v
+				}
+			}
+			if op.TLS != nil {
+				base.Providers[idx].TLS = op.TLS
 			}
 		} else {
 			base.Providers = append(base.Providers, op)

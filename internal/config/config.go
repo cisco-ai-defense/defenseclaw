@@ -310,6 +310,12 @@ type LLMConfig struct {
 	// MaxRetries bounds upstream retry attempts. 0 picks a sensible
 	// default (defaultLLMMaxRetries).
 	MaxRetries int `mapstructure:"max_retries" yaml:"max_retries,omitempty"`
+	// InstanceName points at a named entry in
+	// ~/.defenseclaw/custom-providers.json. When set, the gateway
+	// resolves base_url / TLS / base_provider_type from the overlay
+	// rather than from this struct. Mirrors the Python-side
+	// LLMConfig.instance_name field.
+	InstanceName string `mapstructure:"instance_name" yaml:"instance_name,omitempty"`
 }
 
 // ResolvedAPIKey returns the API key from the env var first, then the

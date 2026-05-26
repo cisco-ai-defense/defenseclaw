@@ -514,14 +514,298 @@ def provider() -> None:
     """
 
 
+_ALLOWED_BASE_PROVIDER_TYPES = (
+    "openai",
+    "anthropic",
+    "bedrock",
+    "azure",
+    "vertex_ai",
+    "gemini",
+    "gemini-openai",
+    "groq",
+    "mistral",
+    "cohere",
+    "deepseek",
+    "xai",
+    "fireworks_ai",
+    "perplexity",
+    "huggingface",
+    "replicate",
+    "openrouter",
+    "together_ai",
+    "cerebras",
+    "ollama",
+    "vllm",
+    "lm_studio",
+)
+
+_ALLOWED_REQUEST_TYPES = (
+    "chat",
+    "completion",
+    "embedding",
+    "rerank",
+    "image",
+    "audio",
+    "responses",
+)
+
+
+def _validate_request_path_override(raw: str) -> tuple[str, str]:
+    """Parse ``--request-path-override key=value``.
+
+    ``key`` is one of :data:`_ALLOWED_REQUEST_TYPES`; ``value`` is a
+    relative URL path that begins with ``/``.
+    """
+    if "=" not in raw:
+        raise click.BadParameter(
+            f"--request-path-override expects ``key=value`` (got {raw!r})"
+        )
+    key, _, value = raw.partition("=")
+    key = key.strip().lower()
+    value = value.strip()
+    if key not in _ALLOWED_REQUEST_TYPES:
+        raise click.BadParameter(
+            f"--request-path-override key {key!r} not one of {list(_ALLOWED_REQUEST_TYPES)}"
+        )
+    if not value:
+        raise click.BadParameter(
+            f"--request-path-override value cannot be empty (key={key!r})"
+        )
+    if not value.startswith("/"):
+        raise click.BadParameter(
+            f"--request-path-override {key!r} value must start with '/' (got {value!r})"
+        )
+    return (key, value)
+
+
+def _read_ca_cert_file(path: str) -> str:
+    """Read a PEM-encoded CA bundle from disk.
+
+    Performs minimal validation so a typo (passing the private key by
+    mistake) surfaces immediately rather than at gateway boot.
+    """
+    if not path:
+        return ""
+    if not os.path.isfile(path):
+        raise click.BadParameter(f"--ca-cert-file: not found: {path!r}")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = f.read()
+    except OSError as exc:
+        raise click.BadParameter(f"--ca-cert-file: cannot read {path!r}: {exc}") from exc
+    head = data.strip().splitlines()[0] if data.strip() else ""
+    if "BEGIN CERTIFICATE" not in head:
+        raise click.BadParameter(
+            f"--ca-cert-file: {path!r} does not start with a -----BEGIN CERTIFICATE----- block "
+            f"(saw {head!r})"
+        )
+    return data
+
+
+_NAME_VALIDATION_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _provider_add_interactive() -> dict[str, Any]:
+    """Walk the operator through a single ``provider add`` entry.
+
+    Returns a dict whose keys mirror the CLI flag names. The caller
+    merges the dict with any flag values supplied alongside the
+    wizard (flag values always win) before writing the overlay.
+    """
+    click.echo()
+    ux.section("Add a custom LLM provider")
+    ux.subhead(
+        "This walkthrough writes a new entry to "
+        "~/.defenseclaw/custom-providers.json. Every prompt accepts a "
+        "blank line to skip optional fields."
+    )
+    click.echo()
+
+    while True:
+        raw_name = click.prompt(
+            "  Provider name (alphanumerics, ``_``/``-``)",
+        ).strip()
+        if _NAME_VALIDATION_RE.match(raw_name):
+            break
+        click.echo("    Invalid name — use only A-Z a-z 0-9 _ -")
+
+    base_provider_type = click.prompt(
+        "  Base provider type (which Bifrost adapter to use)",
+        type=click.Choice(_ALLOWED_BASE_PROVIDER_TYPES, case_sensitive=False),
+        default="openai",
+        show_default=True,
+    ).strip().lower()
+
+    while True:
+        base_url = click.prompt(
+            "  Base URL (https://internal.example/v1)",
+            default="",
+            show_default=False,
+        ).strip()
+        if not base_url:
+            break
+        if "://" in base_url:
+            break
+        click.echo("    Base URL must include a scheme (https://...).")
+
+    click.echo()
+    click.echo("  Allowed request types (default: chat completions):")
+    for r in _ALLOWED_REQUEST_TYPES:
+        click.echo(f"    - {r}")
+    raw_allowed = click.prompt(
+        "  Comma-separated list (blank = allow all)",
+        default="",
+        show_default=False,
+    ).strip()
+    allowed_requests: list[str] = []
+    if raw_allowed:
+        for tok in raw_allowed.split(","):
+            tok = tok.strip().lower()
+            if tok and tok in _ALLOWED_REQUEST_TYPES:
+                allowed_requests.append(tok)
+
+    available_models: list[str] = []
+    click.echo()
+    ux.subhead("Available models (blank line ends the loop):")
+    while True:
+        m = click.prompt("  Model id", default="", show_default=False).strip()
+        if not m:
+            break
+        available_models.append(m)
+
+    request_path_overrides: list[str] = []
+    click.echo()
+    ux.subhead("Request-path overrides (key=value, blank ends):")
+    while True:
+        rpo = click.prompt(
+            "  key=value (e.g. chat=/openai/v1/chat/completions)",
+            default="",
+            show_default=False,
+        ).strip()
+        if not rpo:
+            break
+        if "=" not in rpo:
+            click.echo("    Expected key=value — skipping.")
+            continue
+        request_path_overrides.append(rpo)
+
+    click.echo()
+    ux.subhead("TLS overrides (optional):")
+    ca_cert_file = ""
+    insecure_skip_verify = False
+    tls_choice = click.prompt(
+        "  TLS mode  [n]one / [c]a-cert-file / [s]kip-verify (lab-only)",
+        type=click.Choice(["n", "c", "s"]),
+        default="n",
+        show_default=True,
+    ).strip().lower()
+    if tls_choice == "c":
+        ca_cert_file = click.prompt(
+            "  Path to PEM CA bundle",
+        ).strip()
+    elif tls_choice == "s":
+        ux.warn(
+            "Setting insecure_skip_verify=true means the gateway will "
+            "trust ANY certificate from this endpoint."
+        )
+        insecure_skip_verify = click.confirm("  Confirm insecure skip-verify?", default=False)
+
+    env_keys: list[str] = []
+    click.echo()
+    ux.subhead("API-key env vars (blank ends):")
+    while True:
+        e = click.prompt("  Env var name", default="", show_default=False).strip()
+        if not e:
+            break
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", e):
+            click.echo("    Invalid env var name — skipping.")
+            continue
+        env_keys.append(e)
+
+    domains: list[str] = []
+    click.echo()
+    ux.subhead("Additional traffic-match domains (optional, blank ends):")
+    while True:
+        d = click.prompt("  Domain", default="", show_default=False).strip()
+        if not d:
+            break
+        domains.append(d)
+
+    profile_id = click.prompt(
+        "  Auth profile id (optional, leave blank to skip)",
+        default="",
+        show_default=False,
+    ).strip()
+
+    ollama_ports: list[int] = []
+    click.echo()
+    raw_ports = click.prompt(
+        "  Ollama loopback ports (comma-separated ints, optional)",
+        default="",
+        show_default=False,
+    ).strip()
+    if raw_ports:
+        for tok in raw_ports.split(","):
+            try:
+                ollama_ports.append(int(tok.strip()))
+            except ValueError:
+                continue
+
+    # Summary + confirm.
+    click.echo()
+    ux.section("Confirm")
+    rows = [
+        ("name", raw_name),
+        ("base_provider_type", base_provider_type),
+        ("base_url", base_url or "(none)"),
+        ("allowed_requests", ", ".join(allowed_requests) or "(all)"),
+        ("available_models", ", ".join(available_models) or "(none)"),
+        ("request_path_overrides", ", ".join(request_path_overrides) or "(none)"),
+        ("env_keys", ", ".join(env_keys) or "(none)"),
+        ("domains", ", ".join(domains) or "(none)"),
+        ("ollama_ports", ", ".join(str(p) for p in ollama_ports) or "(none)"),
+        ("profile_id", profile_id or "(none)"),
+        ("tls.ca_cert_file", ca_cert_file or "(none)"),
+        ("tls.insecure_skip_verify", str(insecure_skip_verify).lower()),
+    ]
+    width = max(len(k) for k, _ in rows)
+    for k, v in rows:
+        click.echo(f"    {k + ':':<{width + 1}} {v}")
+    click.echo()
+    if not click.confirm("  Write provider entry?", default=True):
+        raise click.Abort()
+
+    return {
+        "name": raw_name,
+        "domains": domains,
+        "env_keys": env_keys,
+        "profile_id": profile_id,
+        "ollama_ports": ollama_ports,
+        "base_provider_type": base_provider_type,
+        "base_url": base_url,
+        "allowed_requests": allowed_requests,
+        "available_models": available_models,
+        "request_path_overrides": request_path_overrides,
+        "ca_cert_file": ca_cert_file,
+        "insecure_skip_verify": insecure_skip_verify,
+    }
+
+
 @provider.command("add")
-@click.option("--name", required=True, help="Canonical provider name (case-insensitive match against built-ins).")
+@click.option(
+    "--name",
+    default=None,
+    help=(
+        "Canonical provider name (case-insensitive match against built-ins). "
+        "When omitted and stdin is a tty, an interactive wizard prompts for "
+        "every field. Under --non-interactive this becomes a hard error."
+    ),
+)
 @click.option(
     "--domain",
     "domains",
     multiple=True,
-    required=True,
-    help="Domain to recognise as LLM traffic (repeatable). Accepts full URLs; scheme and path are stripped.",
+    help="Domain to recognise as LLM traffic (repeatable). Accepts full URLs; scheme and path are stripped. Optional when --base-url is set.",
 )
 @click.option(
     "--env-key",
@@ -545,6 +829,59 @@ def provider() -> None:
     help="Additional Ollama-style loopback port. Repeatable. Optional.",
 )
 @click.option(
+    "--base-provider-type",
+    "base_provider_type",
+    default=None,
+    type=click.Choice(_ALLOWED_BASE_PROVIDER_TYPES, case_sensitive=False),
+    help=(
+        "Upstream provider family this instance speaks "
+        "(openai / bedrock / vertex_ai / azure / ollama / ...). "
+        "Routes the gateway to the matching Bifrost adapter."
+    ),
+)
+@click.option(
+    "--base-url",
+    "base_url",
+    default=None,
+    help="HTTP(S) base URL for the custom endpoint (e.g. https://llm.internal:8443).",
+)
+@click.option(
+    "--allowed-request",
+    "allowed_requests",
+    multiple=True,
+    type=click.Choice(_ALLOWED_REQUEST_TYPES, case_sensitive=False),
+    help="Restrict the instance to listed request types (repeatable). Empty = allow all.",
+)
+@click.option(
+    "--available-model",
+    "available_models",
+    multiple=True,
+    help="Model id served by this instance (repeatable). Used by the wizard's model picker.",
+)
+@click.option(
+    "--request-path-override",
+    "request_path_overrides",
+    multiple=True,
+    help=(
+        "Per-route path override formatted ``key=value`` "
+        "(e.g. chat=/openai/v1/chat/completions). Repeatable."
+    ),
+)
+@click.option(
+    "--ca-cert-file",
+    "ca_cert_file",
+    default=None,
+    type=click.Path(exists=False, dir_okay=False),
+    help="Path to a PEM-encoded CA bundle for self-signed instance certs.",
+)
+@click.option(
+    "--insecure-skip-verify",
+    "insecure_skip_verify",
+    is_flag=True,
+    default=False,
+    help="Disable TLS verification for this instance. Use only in trusted labs.",
+)
+@click.option(
     "--no-reload",
     is_flag=True,
     default=False,
@@ -553,11 +890,18 @@ def provider() -> None:
 @pass_ctx
 def provider_add(
     app: AppContext,
-    name: str,
+    name: str | None,
     domains: tuple[str, ...],
     env_keys: tuple[str, ...],
     profile_id: str | None,
     ollama_ports: tuple[int, ...],
+    base_provider_type: str | None,
+    base_url: str | None,
+    allowed_requests: tuple[str, ...],
+    available_models: tuple[str, ...],
+    request_path_overrides: tuple[str, ...],
+    ca_cert_file: str | None,
+    insecure_skip_verify: bool,
     no_reload: bool,
 ) -> None:
     """Add a provider entry to the operator overlay.
@@ -566,13 +910,89 @@ def provider_add(
     and EnvKeys are unioned; duplicates are collapsed so repeated
     ``add`` calls are idempotent.
     """
-    clean_name = name.strip()
+    if not name:
+        # When stdin is a tty and no --name was supplied, walk the
+        # operator through every overlay field. Scripts that forget
+        # --name still fail loudly because click.prompt aborts on a
+        # closed stdin.
+        wiz = _provider_add_interactive()
+        name = wiz["name"]
+        if not domains:
+            domains = tuple(wiz["domains"])
+        if not env_keys:
+            env_keys = tuple(wiz["env_keys"])
+        if profile_id is None:
+            profile_id = wiz["profile_id"] or None
+        if not ollama_ports:
+            ollama_ports = tuple(wiz["ollama_ports"])
+        if not base_provider_type:
+            base_provider_type = wiz["base_provider_type"] or None
+        if not base_url:
+            base_url = wiz["base_url"] or None
+        if not allowed_requests:
+            allowed_requests = tuple(wiz["allowed_requests"])
+        if not available_models:
+            available_models = tuple(wiz["available_models"])
+        if not request_path_overrides:
+            request_path_overrides = tuple(wiz["request_path_overrides"])
+        if not ca_cert_file:
+            ca_cert_file = wiz["ca_cert_file"] or None
+        if not insecure_skip_verify:
+            insecure_skip_verify = wiz["insecure_skip_verify"]
+
+    clean_name = (name or "").strip()
     if not clean_name:
         raise click.BadParameter("--name cannot be empty")
+
+    if not domains and not (base_url or "").strip():
+        raise click.BadParameter(
+            "supply at least one --domain (LLM allow-list entry) or --base-url "
+            "(custom-provider endpoint). Without either, the gateway has no "
+            "host to match against."
+        )
 
     clean_domains = [_normalize_domain(d) for d in domains]
     clean_env = _validate_env_keys(list(env_keys))
     clean_ports = sorted({int(p) for p in ollama_ports if int(p) > 0})
+
+    clean_base_url = (base_url or "").strip()
+    if clean_base_url and "://" not in clean_base_url:
+        raise click.BadParameter(
+            f"--base-url must include scheme (e.g. https://) — got {clean_base_url!r}"
+        )
+
+    clean_allowed = sorted({a.lower() for a in allowed_requests if a})
+    clean_models = _dedupe_preserve([m.strip() for m in available_models if m and m.strip()])
+    clean_path_overrides: dict[str, str] = {}
+    for raw in request_path_overrides:
+        key, val = _validate_request_path_override(raw)
+        clean_path_overrides[key] = val
+
+    tls_block: dict[str, Any] = {}
+    if insecure_skip_verify and ca_cert_file:
+        raise click.BadParameter(
+            "--insecure-skip-verify and --ca-cert-file are mutually exclusive."
+        )
+    if ca_cert_file:
+        tls_block["ca_cert_pem"] = _read_ca_cert_file(ca_cert_file)
+    if insecure_skip_verify:
+        tls_block["insecure_skip_verify"] = True
+        if app and getattr(app, "logger", None):
+            try:
+                app.logger.log_action(
+                    "setup-provider",
+                    "warning",
+                    f"insecure_skip_verify=true for {clean_name!r}",
+                )
+            except Exception:
+                pass
+        ux.warn(
+            f"--insecure-skip-verify enabled for {clean_name!r}; the gateway "
+            "will accept ANY certificate from this endpoint. Use only in trusted labs."
+        )
+
+    if base_provider_type:
+        base_provider_type = base_provider_type.strip().lower()
 
     path = _overlay_path(app)
     # Serialize concurrent add/remove so a parallel wizard run cannot
@@ -600,6 +1020,28 @@ def provider_add(
         if profile_id is not None:
             entry["profile_id"] = profile_id.strip() or None
 
+        if base_provider_type:
+            entry["base_provider_type"] = base_provider_type
+        if clean_base_url:
+            entry["base_url"] = clean_base_url
+        if clean_allowed:
+            entry["allowed_requests"] = clean_allowed
+        if clean_models:
+            existing_models = [
+                str(m) for m in entry.get("available_models") or []
+            ]
+            entry["available_models"] = _dedupe_preserve(existing_models + clean_models)
+        if clean_path_overrides:
+            existing_overrides: dict[str, str] = {
+                str(k): str(v) for k, v in (entry.get("request_path_overrides") or {}).items()
+            }
+            existing_overrides.update(clean_path_overrides)
+            entry["request_path_overrides"] = existing_overrides
+        if tls_block:
+            merged_tls: dict[str, Any] = dict(entry.get("tls") or {})
+            merged_tls.update(tls_block)
+            entry["tls"] = merged_tls
+
         if clean_ports:
             overlay.ollama_ports = sorted(
                 {*overlay.ollama_ports, *clean_ports}
@@ -609,11 +1051,34 @@ def provider_add(
 
     click.echo()
     ux.ok(f"provider {clean_name!r} written to {path}")
-    click.echo(f"  {ux.dim('domains:')} {', '.join(entry['domains'])}")
+    if entry.get("domains"):
+        click.echo(f"  {ux.dim('domains:')} {', '.join(entry['domains'])}")
     if entry.get("env_keys"):
         click.echo(f"  {ux.dim('env_keys:')} {', '.join(entry['env_keys'])}")
     if entry.get("profile_id"):
         click.echo(f"  {ux.dim('profile_id:')} {entry['profile_id']}")
+    if entry.get("base_provider_type"):
+        click.echo(f"  {ux.dim('base_provider_type:')} {entry['base_provider_type']}")
+    if entry.get("base_url"):
+        click.echo(f"  {ux.dim('base_url:')} {entry['base_url']}")
+    if entry.get("allowed_requests"):
+        click.echo(f"  {ux.dim('allowed_requests:')} {', '.join(entry['allowed_requests'])}")
+    if entry.get("available_models"):
+        click.echo(f"  {ux.dim('available_models:')} {', '.join(entry['available_models'])}")
+    if entry.get("request_path_overrides"):
+        click.echo(
+            f"  {ux.dim('request_path_overrides:')} "
+            f"{', '.join(f'{k}={v}' for k, v in entry['request_path_overrides'].items())}"
+        )
+    if entry.get("tls"):
+        tls_info = entry["tls"]
+        bits: list[str] = []
+        if tls_info.get("ca_cert_pem"):
+            bits.append("ca_cert_pem=<inline>")
+        if tls_info.get("insecure_skip_verify"):
+            bits.append("insecure_skip_verify=true")
+        if bits:
+            click.echo(f"  {ux.dim('tls:')} {', '.join(bits)}")
 
     if no_reload:
         ux.subhead("sidecar reload skipped (--no-reload).")

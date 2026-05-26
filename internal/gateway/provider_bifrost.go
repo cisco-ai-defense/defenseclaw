@@ -31,27 +31,61 @@ import (
 )
 
 // bifrostProvider implements LLMProvider by delegating to the Bifrost Go SDK.
-// Each distinct (providerKey, apiKey, baseURL) tuple gets its own dedicated
-// Bifrost client with an immutable Account, so credentials and endpoints for
-// one tenant are isolated from other in-flight requests.
+// Each distinct (providerKey, apiKey, baseURL, tls) tuple gets its own
+// dedicated Bifrost client with an immutable Account, so credentials,
+// endpoints, and TLS posture for one tenant are isolated from other
+// in-flight requests.
 type bifrostProvider struct {
 	providerKey schemas.ModelProvider
 	model       string
 	apiKey      string
 	baseURL     string
+	tls         tlsOverrides
 }
 
-// tenantKey identifies a unique (provider, api-key, base-url) tuple. Each
-// tuple gets its own dedicated Bifrost client + frozen Account so that
+// tenantKey identifies a unique (provider, api-key, base-url, tls) tuple.
+// Each tuple gets its own dedicated Bifrost client + frozen Account so that
 // credentials and endpoints for one tenant can never leak into an in-flight
 // request for another. Previously a single package-level client + mutable
 // account map was shared across all tenants: two concurrent requests hitting
 // the same provider with different keys or base URLs could race so that the
 // Bifrost client executed request A using tenant B's credentials.
+//
+// ``tlsID`` is a sha256 of the TLS posture (insecure_skip_verify || ca_cert_pem)
+// so two custom-provider instances with the same base URL but different TLS
+// trust stores get distinct clients and cannot share connections.
 type tenantKey struct {
 	provider schemas.ModelProvider
 	keyID    string // sha256 of apiKey — the raw key is never in the map key.
 	baseURL  string
+	tlsID    string // sha256 of tls posture; empty when no per-instance TLS overrides.
+}
+
+// tlsOverrides bundles the per-instance TLS knobs from a custom-providers
+// overlay. Both fields are forwarded to the Bifrost ``NetworkConfig`` which
+// already supports custom CA bundles and TLS-skip; this type just keeps the
+// API on our side cohesive.
+type tlsOverrides struct {
+	CACertPEM          string
+	InsecureSkipVerify bool
+}
+
+func (t tlsOverrides) isZero() bool {
+	return !t.InsecureSkipVerify && t.CACertPEM == ""
+}
+
+func (t tlsOverrides) id() string {
+	if t.isZero() {
+		return ""
+	}
+	h := sha256.New()
+	if t.InsecureSkipVerify {
+		_, _ = h.Write([]byte("insecure;"))
+	}
+	_, _ = h.Write([]byte("ca="))
+	_, _ = h.Write([]byte(t.CACertPEM))
+	sum := h.Sum(nil)
+	return "tls:sha256:" + hex.EncodeToString(sum[:8])
 }
 
 var (
@@ -86,7 +120,7 @@ func (a *tenantAccount) GetConfigForProvider(providerKey schemas.ModelProvider) 
 	return a.config, nil
 }
 
-func newTenantAccount(providerKey schemas.ModelProvider, apiKey, keyID, baseURL string) *tenantAccount {
+func newTenantAccount(providerKey schemas.ModelProvider, apiKey, keyID, baseURL string, tls tlsOverrides) *tenantAccount {
 	key := schemas.Key{
 		ID:     keyID,
 		Name:   string(providerKey) + "-key",
@@ -99,6 +133,12 @@ func newTenantAccount(providerKey schemas.ModelProvider, apiKey, keyID, baseURL 
 	}
 	if baseURL != "" {
 		nc.BaseURL = baseURL
+	}
+	if tls.InsecureSkipVerify {
+		nc.InsecureSkipVerify = true
+	}
+	if tls.CACertPEM != "" {
+		nc.CACertPEM = tls.CACertPEM
 	}
 	return &tenantAccount{
 		provider: providerKey,
@@ -121,15 +161,17 @@ func bifrostKeyID(providerKey schemas.ModelProvider, apiKey string) string {
 }
 
 // getBifrostClient returns a Bifrost client dedicated to the given
-// (provider, apiKey, baseURL) tuple. Distinct tuples get distinct clients;
-// identical tuples share a cached client. The returned client's Account is
-// immutable for the tuple's lifetime, so a concurrent call with different
-// credentials cannot change what this client uses mid-request.
-func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string) (*bifrost.Bifrost, error) {
+// (provider, apiKey, baseURL, tls) tuple. Distinct tuples get distinct
+// clients; identical tuples share a cached client. The returned client's
+// Account is immutable for the tuple's lifetime, so a concurrent call
+// with different credentials cannot change what this client uses
+// mid-request.
+func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string, tls tlsOverrides) (*bifrost.Bifrost, error) {
 	tk := tenantKey{
 		provider: providerKey,
 		keyID:    bifrostKeyID(providerKey, apiKey),
 		baseURL:  baseURL,
+		tlsID:    tls.id(),
 	}
 
 	bifrostTenantsMu.RLock()
@@ -145,7 +187,7 @@ func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string)
 		return c, nil
 	}
 
-	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL)
+	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, tls)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
@@ -203,7 +245,7 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 }
 
 func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +261,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 }
 
 func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls)
 	if err != nil {
 		return nil, err
 	}

@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 )
 
 func TestSplitModelKnownPrefixes(t *testing.T) {
@@ -144,5 +146,74 @@ func TestNewProviderWithBase_BifrostType(t *testing.T) {
 	}
 	if bp.baseURL != "http://localhost:8080/v1" {
 		t.Errorf("baseURL = %q", bp.baseURL)
+	}
+}
+
+// TestNewProviderForLLMConfig_InstanceName routes a config that pins
+// an instance_name through NewProviderForInstance and asserts the
+// overlay's base_url + TLS bundle end up on the bifrostProvider.
+func TestNewProviderForLLMConfig_InstanceName(t *testing.T) {
+	registry := &configs.ProvidersConfig{
+		Providers: []configs.Provider{
+			{
+				Name:             "acme-internal",
+				BaseProviderType: "openai",
+				BaseURL:          "https://llm.internal:8443",
+				EnvKeys:          []string{"ACME_KEY"},
+				TLS: &configs.ProviderTLS{
+					CACertPEM:          "-----BEGIN CERTIFICATE-----\nMIIB...\n-----END CERTIFICATE-----\n",
+					InsecureSkipVerify: true,
+				},
+			},
+		},
+	}
+	p, err := NewProviderForLLMConfig(
+		"acme-internal/some-model",
+		"key-1",
+		"",
+		"acme-internal",
+		registry,
+	)
+	if err != nil {
+		t.Fatalf("NewProviderForLLMConfig: %v", err)
+	}
+	bp, ok := p.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", p)
+	}
+	if bp.baseURL != "https://llm.internal:8443" {
+		t.Errorf("baseURL = %q; want overlay value", bp.baseURL)
+	}
+	if !bp.tls.InsecureSkipVerify {
+		t.Error("InsecureSkipVerify did not propagate from overlay")
+	}
+}
+
+// TestNewProviderForLLMConfig_FallbackOnMiss verifies a typo'd
+// instance_name silently falls back to BaseURL / NewProvider rather
+// than failing the call — the gateway should surface the misconfig
+// via `defenseclaw doctor` rather than going offline.
+func TestNewProviderForLLMConfig_FallbackOnMiss(t *testing.T) {
+	registry := &configs.ProvidersConfig{
+		Providers: []configs.Provider{
+			{Name: "acme-internal", BaseProviderType: "openai", BaseURL: "https://llm.internal"},
+		},
+	}
+	p, err := NewProviderForLLMConfig(
+		"openai/gpt-4",
+		"test-key",
+		"http://fallback:8080",
+		"typo-instance",
+		registry,
+	)
+	if err != nil {
+		t.Fatalf("NewProviderForLLMConfig: %v", err)
+	}
+	bp, ok := p.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", p)
+	}
+	if bp.baseURL != "http://fallback:8080" {
+		t.Errorf("expected fallback to BaseURL on miss; got %q", bp.baseURL)
 	}
 }

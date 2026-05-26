@@ -206,6 +206,45 @@ def _classify_llm_exception(exc: BaseException) -> str:
     return "internal"
 
 
+# LiteLLM provider → optional pip extra that pulls the cloud SDK in.
+# Keep in lockstep with ``[project.optional-dependencies]`` in pyproject.toml.
+_PROVIDER_TO_EXTRA: dict[str, tuple[str, str]] = {
+    # provider prefix : (extra name, missing module name LiteLLM raises)
+    "bedrock": ("bedrock", "boto3"),
+    "vertex_ai": ("vertex", "google.cloud.aiplatform"),
+}
+
+
+def _missing_cloud_sdk(exc: BaseException, provider: str) -> str | None:
+    """Return an install-hint message if the exception is a missing cloud
+    SDK we know how to repair, otherwise ``None``.
+
+    Looks for the ``No module named 'X'`` shape that LiteLLM surfaces when
+    its lazy ``import boto3`` / ``import google.cloud.aiplatform`` fails.
+    The message is short enough to display in a wizard or doctor row and
+    tells the operator exactly which ``pip install`` to run.
+    """
+    text = str(exc)
+    if "No module named" not in text:
+        return None
+    prov = (provider or "").strip().lower()
+    extra_for_prov = _PROVIDER_TO_EXTRA.get(prov)
+    if extra_for_prov is not None:
+        extra_name, _module = extra_for_prov
+        return (
+            f"{prov} support requires an extra dependency. "
+            f"Install with: pip install 'defenseclaw[{extra_name}]'"
+        )
+    # Provider unknown but module pattern matched — surface a generic hint.
+    for extra_name, module_name in _PROVIDER_TO_EXTRA.values():
+        if f"'{module_name.split('.')[0]}'" in text:
+            return (
+                f"missing cloud SDK ({module_name}). "
+                f"Install with: pip install 'defenseclaw[{extra_name}]'"
+            )
+    return None
+
+
 def _load_plugin_llm_config() -> dict[str, Any]:
     """Best-effort load of the plugin-scoped unified LLM config.
 
@@ -435,6 +474,84 @@ def call_llm(request: dict) -> dict:
 # ``call_llm``. Keep the name live so upgrading DefenseClaw doesn't
 # break a pinned plugin version.
 call_litellm = call_llm
+
+
+def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
+    """One-shot reachability probe for a resolved :class:`LLMConfig`.
+
+    Sends ``messages=[{role:"user", content:"ping"}]`` with
+    ``max_tokens=1`` to the configured provider via LiteLLM. Designed
+    for the post-save wizard step and ``defenseclaw doctor``: short
+    timeout, no retries, never raises.
+
+    Returns ``(ok, message)``:
+
+    * ``(True,  "...")`` — provider answered with a non-empty payload.
+    * ``(False, "...")`` — auth failure, network failure, configuration
+      gap, or unexpected error. ``message`` is safe to render verbatim
+      (no secrets, no stack trace).
+
+    The function reads ``provider``, ``model``, ``base_url``,
+    ``resolved_api_key()``, and the provider-typed sub-blocks when
+    present. Local providers (ollama/vllm/lm_studio) with no API key
+    are accepted; an unset model id returns ``(False, ...)`` because
+    LiteLLM cannot route a blank model.
+    """
+    try:
+        import litellm  # noqa: PLC0415
+    except ImportError:
+        return (False, "litellm not installed — install defenseclaw with the cli extra")
+
+    model = (getattr(llm_config, "model", "") or "").strip()
+    if not model:
+        return (False, "no model configured (set llm.model or pass --model)")
+    provider = (getattr(llm_config, "provider", "") or "").strip().lower()
+    if provider and "/" not in model:
+        model = f"{provider}/{model}"
+    api_key = ""
+    if hasattr(llm_config, "resolved_api_key"):
+        try:
+            api_key = llm_config.resolved_api_key() or ""
+        except Exception:
+            api_key = ""
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "max_tokens": 1,
+        "temperature": 0.0,
+        "timeout": max(1, int(timeout or 5)),
+        "num_retries": 0,
+    }
+    base_url = getattr(llm_config, "base_url", "") or ""
+    if base_url:
+        kwargs["api_base"] = base_url
+    if api_key:
+        kwargs["api_key"] = api_key
+
+    try:
+        resp = litellm.completion(**kwargs)
+    except Exception as exc:
+        # LiteLLM lazy-imports cloud SDKs (boto3 for Bedrock SigV4 +
+        # bearer routing, google-cloud-aiplatform for Vertex). When the
+        # operator picks one of those providers without installing the
+        # matching extra, the failure surfaces as a generic
+        # ``APIConnectionError: No module named 'boto3'`` which buries
+        # the actual fix. Detect that shape and replace the message
+        # with a one-line install hint.
+        missing = _missing_cloud_sdk(exc, provider)
+        if missing is not None:
+            return (False, missing)
+        st = _classify_llm_exception(exc)
+        return (False, f"{st}: {type(exc).__name__}: {exc}".strip().splitlines()[0][:240])
+
+    try:
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            return (False, "provider returned empty choices")
+    except Exception as exc:
+        return (False, f"malformed response: {exc}")
+    return (True, f"ok ({model})")
 
 
 def main() -> None:
