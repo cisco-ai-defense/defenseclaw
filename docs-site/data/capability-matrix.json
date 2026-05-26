@@ -1,6 +1,6 @@
 {
-  "_source": "Hand-curated from internal/gateway/connector/{hook_only,claudecode,codex,openclaw,zeptoclaw}.go and cli/defenseclaw/commands/cmd_setup.py (_CONNECTOR_META, _hilt_support_note). Re-extract on every connector change.",
-  "_lastVerified": "2026-05-08",
+  "_source": "Hand-curated from internal/gateway/connector hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
+  "_lastVerified": "2026-05-19",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {
@@ -77,7 +77,7 @@
         "scope": "user"
       },
       "hilt": "Cursor supports native ask only on documented ask-capable hook events (beforeShellExecution, beforeMCPExecution).",
-      "notes": "hooks.json under ~/.cursor; MCP / skills / rules surfaces are workspace-scoped."
+      "notes": "hooks.json under ~/.cursor; user-global MCP / skills / rules discovery by default, with workspace overlays only when pinned."
     },
     {
       "id": "hermes",
@@ -136,10 +136,27 @@
           "PostToolUseFailure"
         ],
         "supportsFailClosed": false,
-        "scope": "workspace"
+        "scope": "user,workspace"
       },
       "hilt": "Copilot CLI supports native ask on documented preToolUse hooks.",
-      "notes": "Workspace-scoped hooks under <workspace>/.github/hooks/."
+      "notes": "Global hooks under ~/.copilot/hooks by default; optional workspace hooks under <workspace>/.github/hooks."
+    },
+    {
+      "id": "openhands",
+      "label": "OpenHands",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["pre_tool_use", "user_prompt_submit", "stop"],
+        "supportsFailClosed": true,
+        "scope": "user,workspace"
+      },
+      "hilt": "OpenHands has no native ask surface in the documented hook contract; confirm verdicts are downgraded with raw_action preserved and optional additionalContext returned to the agent.",
+      "notes": "Global ~/.openhands/hooks.json native hook schema by default; optional repo-local .openhands/hooks.json with --workspace; MCP lives in ~/.openhands/mcp.json; skills include user installs and ~/.openhands/cache/skills/public-skills/skills."
     },
     {
       "id": "windsurf",

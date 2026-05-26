@@ -78,6 +78,7 @@
             "windsurf",
             "geminicli",
             "copilot",
+            "openhands",
             "unknown"
           ],
           "description": "Connector that produced the event. `unknown` is used when an older client omits the source header."

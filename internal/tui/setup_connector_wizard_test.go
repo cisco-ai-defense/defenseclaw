@@ -31,13 +31,14 @@ func TestConnectorSetupWizardArgsCoverEveryConnector(t *testing.T) {
 	}{
 		{"openclaw", []string{"setup", "openclaw", "--yes", "--mode", "observe", "--scanner-mode", "local"}},
 		{"zeptoclaw", []string{"setup", "zeptoclaw", "--yes", "--mode", "observe", "--scanner-mode", "local"}},
-		{"codex", []string{"setup", "codex", "--yes"}},
-		{"claudecode", []string{"setup", "claude-code", "--yes"}},
-		{"hermes", []string{"setup", "hermes", "--yes"}},
-		{"cursor", []string{"setup", "cursor", "--yes"}},
-		{"windsurf", []string{"setup", "windsurf", "--yes"}},
-		{"geminicli", []string{"setup", "geminicli", "--yes"}},
-		{"copilot", []string{"setup", "copilot", "--yes"}},
+		{"codex", []string{"setup", "codex", "--yes", "--mode", "observe"}},
+		{"claudecode", []string{"setup", "claude-code", "--yes", "--mode", "observe"}},
+		{"hermes", []string{"setup", "hermes", "--yes", "--mode", "observe"}},
+		{"cursor", []string{"setup", "cursor", "--yes", "--mode", "observe"}},
+		{"windsurf", []string{"setup", "windsurf", "--yes", "--mode", "observe"}},
+		{"geminicli", []string{"setup", "geminicli", "--yes", "--mode", "observe"}},
+		{"copilot", []string{"setup", "copilot", "--yes", "--mode", "observe"}},
+		{"openhands", []string{"setup", "openhands", "--yes", "--mode", "observe"}},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -71,14 +72,36 @@ func TestConnectorSetupWizardArgsObservabilityOptions(t *testing.T) {
 			p.wizFormFields[i].Value = "codex"
 		case "Restart Gateway":
 			p.wizFormFields[i].Value = "no"
+		case "Guardrail Mode":
+			p.wizFormFields[i].Value = "action"
 		case "Local Stack":
 			p.wizFormFields[i].Value = "yes"
 		}
 	}
 	got := p.buildWizardArgs(wizardConnectorSetup)
-	want := []string{"setup", "codex", "--yes", "--no-restart", "--with-local-stack"}
+	want := []string{"setup", "codex", "--yes", "--mode", "action", "--no-restart", "--with-local-stack"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Fatalf("observability args=%v want=%v", got, want)
+	}
+}
+
+func TestConnectorSetupWizardArgsWorkspaceOption(t *testing.T) {
+	t.Parallel()
+	p := NewSetupPanel(nil, &config.Config{}, nil)
+	p.wizFormFields = p.connectorSetupWizardFields()
+	for i := range p.wizFormFields {
+		switch p.wizFormFields[i].Label {
+		case "Connector":
+			p.wizFormFields[i].Value = "openhands"
+		case "Workspace Dir":
+			p.wizFormFields[i].Value = "/tmp/defenseclaw-workspace"
+		}
+	}
+
+	got := p.buildWizardArgs(wizardConnectorSetup)
+	want := []string{"setup", "openhands", "--yes", "--workspace", "/tmp/defenseclaw-workspace", "--mode", "observe"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("workspace args=%v want=%v", got, want)
 	}
 }
 

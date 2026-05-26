@@ -35,15 +35,15 @@ import (
 )
 
 type Event struct {
-	ID        string    `json:"id"`
-	Timestamp time.Time `json:"timestamp"`
-	Action    string    `json:"action"`
-	Target    string    `json:"target"`
-	Actor     string    `json:"actor"`
-	Details   string    `json:"details"`
-	Severity  string    `json:"severity"`
-	RunID     string    `json:"run_id,omitempty"`
-	TraceID   string    `json:"trace_id,omitempty"`
+	ID         string         `json:"id"`
+	Timestamp  time.Time      `json:"timestamp"`
+	Action     string         `json:"action"`
+	Target     string         `json:"target"`
+	Actor      string         `json:"actor"`
+	Details    string         `json:"details"`
+	Severity   string         `json:"severity"`
+	RunID      string         `json:"run_id,omitempty"`
+	TraceID    string         `json:"trace_id,omitempty"`
 	// RequestID is the per-request correlation key minted at the
 	// top of every proxy path. Populated in Phase 5 via the
 	// gateway context threading; older call sites may leave it
@@ -56,6 +56,11 @@ type Event struct {
 	// so downstream consumers can fold tool-call, approval,
 	// and verdict events into one row per session.
 	SessionID string `json:"session_id,omitempty"`
+
+	// TurnID identifies a single agent turn inside a session. It is
+	// currently sink-only for audit events; gatewaylog events persist it
+	// directly in the canonical JSON envelope.
+	TurnID string `json:"turn_id,omitempty"`
 
 	// AgentName is the logical name of the agent producing the
 	// event (e.g. "openclaw", "nemoclaw", or a caller-supplied
@@ -99,6 +104,11 @@ type Event struct {
 	BinaryVersion     string `json:"binary_version,omitempty"`
 	AgentID           string `json:"agent_id,omitempty"`
 	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+
+	// Structured carries sanitized machine-readable data for sink fanout.
+	// It is intentionally not persisted in SQLite audit_events; callers that
+	// need durable structured records should use their native table/log path.
+	Structured map[string]any `json:"structured,omitempty"`
 }
 
 // ActionState tracks enforcement state across three independent dimensions.
@@ -241,6 +251,7 @@ var migrations = []migration{
 				target TEXT,
 				actor TEXT NOT NULL DEFAULT 'defenseclaw',
 				details TEXT,
+				structured_json TEXT,
 				severity TEXT,
 				run_id TEXT
 			);
@@ -893,6 +904,34 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// First-class structured audit payloads. Hook outcomes used
+		// to expose their JSON envelope only as an escaped
+		// details_json= token inside the legacy details string. The
+		// details column remains for backwards compatibility, but
+		// structured_json is now the machine-readable contract for
+		// audit sinks and export.
+		description: "audit: add structured_json payload column",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "audit_events")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			exists, err := hasColumnDB(ex, "audit_events", "structured_json")
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err := ex.Exec(`ALTER TABLE audit_events ADD COLUMN structured_json TEXT`); err != nil {
+					return fmt.Errorf("alter audit_events.structured_json: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1083,14 +1122,19 @@ func (s *Store) LogEvent(e Event) error {
 		e.SidecarInstanceID = ProcessAgentInstanceID()
 	}
 
+	structuredJSON, err := encodeStructuredPayload(e.Structured)
+	if err != nil {
+		return fmt.Errorf("audit: marshal structured payload: %w", err)
+	}
+
 	ts := e.Timestamp.Format(time.RFC3339Nano)
-	_, err := s.execDB(context.Background(), "audit",
-		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, severity,
+	_, err = s.execDB(context.Background(), "audit",
+		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json, severity,
 			run_id, trace_id, request_id,
 			session_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
 			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, e.Severity,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, structuredJSON, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 		nullStr(e.SessionID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
 		nullStr(e.PolicyID), nullStr(e.DestinationApp), nullStr(e.ToolName), nullStr(e.ToolID),
@@ -1205,8 +1249,8 @@ func (s *Store) InsertSinkHealth(h SinkHealthInput) error {
 		h.SinkName, h.SinkKind, h.Outcome,
 		status, h.LatencyMs, h.BatchSize, anyString(h.Error),
 		nullInt(h.QueueDepth), nullInt(h.DroppedCount),
-		nullInt(h.SchemaVersion), nullStr(h.ContentHash).String, nullUint64(h.Generation),
-		nullStr(h.BinaryVersion).String, nullStr(h.SidecarInstanceID).String,
+		nullInt(h.SchemaVersion), nullStr(h.ContentHash), nullUint64(h.Generation),
+		nullStr(h.BinaryVersion), nullStr(h.SidecarInstanceID),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: insert sink health: %w", err)
@@ -1372,7 +1416,7 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		nullStr(e.PromptTemplateID),
 		nullInt(e.SchemaVersion),
 		nullStr(e.ContentHash),
-		int64(e.Generation),
+		nullUint64(e.Generation),
 		nullStr(e.BinaryVersion),
 		nullStr(e.AgentID),
 		nullStr(e.AgentInstanceID),
@@ -1539,7 +1583,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, severity,
+		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
 		        run_id, trace_id, request_id,
 		        session_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
@@ -1571,7 +1615,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 func scanAuditEventRow(rows rowScanner) (Event, error) {
 	var e Event
 	var (
-		target, details, severity                       sql.NullString
+		target, details, structuredJSON, severity       sql.NullString
 		runID, traceID, requestID                       sql.NullString
 		sessionID, agentName, agentInstanceID, policyID sql.NullString
 		destinationApp, toolName, toolID                sql.NullString
@@ -1581,7 +1625,7 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 		agentID, sidecarInst                            sql.NullString
 	)
 	if err := rows.Scan(
-		&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity,
+		&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity,
 		&runID, &traceID, &requestID,
 		&sessionID, &agentName, &agentInstanceID, &policyID,
 		&destinationApp, &toolName, &toolID,
@@ -1592,6 +1636,11 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 	}
 	e.Target = target.String
 	e.Details = details.String
+	structured, err := decodeStructuredPayload(structuredJSON)
+	if err != nil {
+		return Event{}, err
+	}
+	e.Structured = structured
 	e.Severity = severity.String
 	e.RunID = runID.String
 	e.TraceID = traceID.String
@@ -1845,6 +1894,28 @@ func nullStr(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: true}
 }
 
+func encodeStructuredPayload(payload map[string]any) (sql.NullString, error) {
+	if len(payload) == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+func decodeStructuredPayload(raw sql.NullString) (map[string]any, error) {
+	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
+		return nil, nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw.String), &payload); err != nil {
+		return nil, fmt.Errorf("audit: decode structured payload: %w", err)
+	}
+	return payload, nil
+}
+
 func nullInt(v int) sql.NullInt64 {
 	if v == 0 {
 		return sql.NullInt64{}
@@ -1922,7 +1993,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		limit = 100
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, severity, run_id, trace_id, request_id
+		`SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id, trace_id, request_id
 		 FROM audit_events
 		 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
 		   AND action NOT LIKE 'dismiss%'
@@ -1936,12 +2007,17 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, severity, runID, traceID, requestID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &severity, &runID, &traceID, &requestID); err != nil {
+		var target, details, structuredJSON, severity, runID, traceID, requestID sql.NullString
+		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity, &runID, &traceID, &requestID); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
 		e.Details = details.String
+		structured, err := decodeStructuredPayload(structuredJSON)
+		if err != nil {
+			return nil, err
+		}
+		e.Structured = structured
 		e.Severity = severity.String
 		e.RunID = runID.String
 		e.TraceID = traceID.String
@@ -1971,7 +2047,7 @@ func (s *Store) AcknowledgeAlerts(severityFilter string) (int64, error) {
 	n, _ := res.RowsAffected()
 
 	_ = s.LogEvent(Event{
-		Action:   "acknowledge-alerts",
+		Action:   string(ActionAckAlerts),
 		Target:   severityFilter,
 		Details:  fmt.Sprintf("acknowledged %d alerts", n),
 		Severity: "ACK",
@@ -2001,7 +2077,7 @@ func (s *Store) AcknowledgeByIDs(ids []string) (int64, error) {
 	n, _ := res.RowsAffected()
 
 	_ = s.LogEvent(Event{
-		Action:   "acknowledge-alerts",
+		Action:   string(ActionAckAlerts),
 		Details:  fmt.Sprintf("acknowledged %d selected alerts", n),
 		Severity: "ACK",
 	})
@@ -2015,7 +2091,7 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 		limit = 20
 	}
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, severity,
+		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
 		        run_id, trace_id, request_id,
 		        session_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,

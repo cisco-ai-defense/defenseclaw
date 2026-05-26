@@ -19,7 +19,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -38,7 +41,8 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 		{NewCursorConnector(), true, true, "user", "hooks.json"},
 		{NewWindsurfConnector(), false, false, "user", "hooks.json"},
 		{NewGeminiCLIConnector(), false, true, "user", "settings.json"},
-		{NewCopilotConnector(), true, false, "workspace", "defenseclaw.json"},
+		{NewCopilotConnector(), true, false, "user,workspace", "defenseclaw.json"},
+		{NewOpenHandsConnector(), false, true, "user,workspace", "hooks.json"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {
@@ -80,6 +84,7 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 		{NewWindsurfConnector(), []string{"rule"}, false, false},
 		{NewGeminiCLIConnector(), []string{"skill"}, true, false},
 		{NewCopilotConnector(), []string{"skill", "rule"}, true, false},
+		{NewOpenHandsConnector(), []string{"skill"}, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {
@@ -115,6 +120,7 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 		"windsurf":  &WindsurfHooksPathOverride,
 		"geminicli": &GeminiSettingsPathOverride,
 		"copilot":   &CopilotHooksPathOverride,
+		"openhands": &OpenHandsHooksPathOverride,
 	}
 	connectors := []*hookOnlyConnector{
 		NewHermesConnector(),
@@ -122,6 +128,7 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 		NewWindsurfConnector(),
 		NewGeminiCLIConnector(),
 		NewCopilotConnector(),
+		NewOpenHandsConnector(),
 	}
 	for _, conn := range connectors {
 		t.Run(conn.Name(), func(t *testing.T) {
@@ -156,6 +163,62 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 				t.Fatalf("stat config after teardown: %v", err)
 			}
 		})
+	}
+}
+
+func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".openhands", "hooks.json")
+	prev := OpenHandsHooksPathOverride
+	OpenHandsHooksPathOverride = cfgPath
+	t.Cleanup(func() { OpenHandsHooksPathOverride = prev })
+
+	conn := NewOpenHandsConnector()
+	opts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		WorkspaceDir: dir,
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read OpenHands hooks.json: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("OpenHands hooks.json is not valid JSON: %v\n%s", err, string(data))
+	}
+	raw, ok := cfg["pre_tool_use"].([]interface{})
+	if !ok || len(raw) == 0 {
+		t.Fatalf("pre_tool_use missing from native top-level OpenHands hook schema: %#v", cfg)
+	}
+	group, ok := raw[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("pre_tool_use[0] = %#v, want object", raw[0])
+	}
+	if group["matcher"] != "*" {
+		t.Fatalf("matcher=%#v want *", group["matcher"])
+	}
+	hooks, ok := group["hooks"].([]interface{})
+	if !ok || len(hooks) == 0 {
+		t.Fatalf("hooks missing from OpenHands group: %#v", group)
+	}
+	hook, ok := hooks[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("hooks[0] = %#v, want object", hooks[0])
+	}
+	if hook["type"] != "command" {
+		t.Fatalf("hook type=%#v want command", hook["type"])
+	}
+	command, _ := hook["command"].(string)
+	if !strings.Contains(command, "openhands-hook.sh") {
+		t.Fatalf("command=%q does not reference openhands-hook.sh", command)
+	}
+	if _, wrapped := cfg["hooks"]; wrapped {
+		t.Fatalf("OpenHands native schema should not add Claude-compatible top-level hooks wrapper: %#v", cfg["hooks"])
 	}
 }
 
@@ -378,6 +441,93 @@ func TestHookOnlyTeardown_UsesBackedUpConfigPathWhenWorkspaceChanges(t *testing.
 	}
 }
 
+func TestOpenHandsWorkspaceRootFallsBackToHomeWhenDaemonCwdIsDataDir(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	t.Setenv("HOME", home)
+
+	prevHooks := OpenHandsHooksPathOverride
+	prevWorkspace := OpenHandsWorkspaceDirOverride
+	OpenHandsHooksPathOverride = ""
+	OpenHandsWorkspaceDirOverride = ""
+	t.Cleanup(func() {
+		OpenHandsHooksPathOverride = prevHooks
+		OpenHandsWorkspaceDirOverride = prevWorkspace
+	})
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dataDir); err != nil {
+		t.Fatalf("chdir data dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	got := openhandsHooksPath(SetupOpts{DataDir: dataDir})
+	want := filepath.Join(home, ".openhands", "hooks.json")
+	if got != want {
+		t.Fatalf("OpenHands hooks path = %q, want SDK-reachable home fallback %q", got, want)
+	}
+}
+
+func TestCopilotSetupDefaultsToGlobalWhenDaemonCwdIsDataDir(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	dataDir := filepath.Join(dir, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	t.Setenv("HOME", home)
+
+	prevHooks := CopilotHooksPathOverride
+	prevWorkspace := CopilotWorkspaceDirOverride
+	CopilotHooksPathOverride = ""
+	CopilotWorkspaceDirOverride = ""
+	t.Cleanup(func() {
+		CopilotHooksPathOverride = prevHooks
+		CopilotWorkspaceDirOverride = prevWorkspace
+	})
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(dataDir); err != nil {
+		t.Fatalf("chdir data dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(wd) })
+
+	err = NewCopilotConnector().Setup(context.Background(), SetupOpts{
+		DataDir:  dataDir,
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	if err != nil {
+		t.Fatalf("Copilot setup with global home path failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".copilot", "hooks", "defenseclaw.json")); err != nil {
+		t.Fatalf("stat global copilot hook config: %v", err)
+	}
+
+	err = NewCopilotConnector().Setup(context.Background(), SetupOpts{
+		DataDir:      dataDir,
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		WorkspaceDir: dataDir,
+	})
+	if err == nil {
+		t.Fatal("Copilot setup succeeded with explicit data dir as workspace")
+	}
+	if !strings.Contains(err.Error(), "workspace must be outside DefenseClaw data dir") {
+		t.Fatalf("Copilot setup error = %v, want clear workspace error", err)
+	}
+}
+
 func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")
@@ -412,6 +562,7 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 	}{
 		{name: "cursor_supports_fail_closed", connector: NewCursorConnector(), wantFailMode: "closed"},
 		{name: "geminicli_supports_fail_closed", connector: NewGeminiCLIConnector(), wantFailMode: "closed"},
+		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
 		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},
 		{name: "copilot_downgrades_to_fail_open", connector: NewCopilotConnector(), wantFailMode: "open"},
 	}
@@ -438,5 +589,38 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 				t.Fatalf("hook script missing %s:\n%s", want, string(body))
 			}
 		})
+	}
+}
+
+func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/openhands/hook" {
+			t.Fatalf("path=%s want /api/v1/openhands/hook", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"hook_output":{"decision":"deny","reason":"policy denied"}}`))
+	}))
+	defer server.Close()
+	addr := strings.TrimPrefix(server.URL, "http://")
+	dir := t.TempDir()
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, SetupOpts{APIAddr: addr, APIToken: "tok-test", HookFailMode: "closed"}, NewOpenHandsConnector()); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+	home := t.TempDir()
+	cmd := exec.Command("bash", filepath.Join(dir, "openhands-hook.sh"))
+	cmd.Stdin = strings.NewReader(`{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"cat /etc/shadow"}}`)
+	cmd.Env = append(os.Environ(), "DEFENSECLAW_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("OpenHands deny hook exited 0, want exit 2; output=%s", string(out))
+	}
+	if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 2 {
+		t.Fatalf("OpenHands deny hook exit=%v want code 2; output=%s", err, string(out))
+	}
+	if !strings.Contains(string(out), `"decision":"deny"`) {
+		t.Fatalf("OpenHands deny hook did not print decision JSON; output=%s", string(out))
 	}
 }

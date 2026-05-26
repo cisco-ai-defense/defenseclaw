@@ -353,7 +353,7 @@ func (p *AlertsPanel) Dismiss() string {
 	}
 	if p.store != nil {
 		_ = p.store.LogEvent(audit.Event{
-			Action:   "dismiss-alert",
+			Action:   string(audit.ActionDismissAlert),
 			Target:   sel.Target,
 			Details:  fmt.Sprintf("dismissed alert %s", sel.ID),
 			Severity: "INFO",

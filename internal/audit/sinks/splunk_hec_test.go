@@ -58,6 +58,8 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 	_ = sink.Forward(context.Background(),
 		Event{ID: "verdict-1", Action: "skill-scan",
 			Severity: "HIGH", Timestamp: time.Unix(1700000000, 0).UTC(),
+			SchemaVersion: 7, BinaryVersion: "unit-test",
+			SessionID: "sess-1", TurnID: "turn-1",
 			Structured: map[string]any{"stage": "guardrail", "action": "block"}})
 
 	mu.Lock()
@@ -80,10 +82,14 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 		Source     string  `json:"source"`
 		SourceType string  `json:"sourcetype"`
 		Event      struct {
-			ID         string         `json:"id"`
-			Action     string         `json:"action"`
-			Severity   string         `json:"severity"`
-			Structured map[string]any `json:"structured"`
+			ID            string         `json:"id"`
+			Action        string         `json:"action"`
+			Severity      string         `json:"severity"`
+			SchemaVersion int            `json:"schema_version"`
+			BinaryVersion string         `json:"binary_version"`
+			SessionID     string         `json:"session_id"`
+			TurnID        string         `json:"turn_id"`
+			Structured    map[string]any `json:"structured"`
 		} `json:"event"`
 	}
 	if err := json.Unmarshal(r.body, &envelope); err != nil {
@@ -97,6 +103,15 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 	}
 	if envelope.Event.ID != "verdict-1" || envelope.Event.Action != "skill-scan" {
 		t.Fatalf("inner event wrong: %+v", envelope.Event)
+	}
+	if envelope.Event.SchemaVersion != 7 {
+		t.Fatalf("schema_version = %d, want 7", envelope.Event.SchemaVersion)
+	}
+	if envelope.Event.BinaryVersion != "unit-test" {
+		t.Fatalf("binary_version = %q, want unit-test", envelope.Event.BinaryVersion)
+	}
+	if envelope.Event.SessionID != "sess-1" || envelope.Event.TurnID != "turn-1" {
+		t.Fatalf("correlation fields wrong: %+v", envelope.Event)
 	}
 	if envelope.Event.Structured["stage"] != "guardrail" {
 		t.Fatalf("structured dropped: %+v", envelope.Event.Structured)
@@ -226,6 +241,107 @@ func TestSplunkHECSink_SourceTypeOverride_Defaults(t *testing.T) {
 	}
 }
 
+func TestSplunkHECSink_EmitsStructuredExtraHECEvents(t *testing.T) {
+	testSplunkHECSinkEmitsStructuredExtraHECEvents(t, []map[string]any{
+		{
+			"time":       float64(1700000001),
+			"source":     "otel",
+			"sourcetype": "otel:log",
+			"index":      "defenseclaw_local",
+			"event": map[string]any{
+				"session_id": "sess-1",
+				"action":     "codex.user_prompt",
+			},
+		},
+	})
+}
+
+func TestSplunkHECSink_EmitsStructuredExtraHECEventsAfterJSONClone(t *testing.T) {
+	testSplunkHECSinkEmitsStructuredExtraHECEvents(t, []any{
+		map[string]any{
+			"time":       float64(1700000001),
+			"source":     "otel",
+			"sourcetype": "otel:log",
+			"index":      "defenseclaw_local",
+			"event": map[string]any{
+				"session_id": "sess-1",
+				"action":     "codex.user_prompt",
+			},
+		},
+	})
+}
+
+func testSplunkHECSinkEmitsStructuredExtraHECEvents(t *testing.T, extraEvents any) {
+	t.Helper()
+	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
+	sink, err := NewSplunkHECSink(SplunkHECConfig{
+		Endpoint:       srv.URL,
+		Token:          "t",
+		BatchSize:      2,
+		FlushIntervalS: 60,
+	})
+	if err != nil {
+		t.Fatalf("NewSplunkHECSink err=%v", err)
+	}
+	defer sink.Close()
+
+	err = sink.Forward(context.Background(), Event{
+		ID:        "summary",
+		Action:    "otel.ingest.logs",
+		Severity:  "INFO",
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+		Structured: map[string]any{
+			"summary":                    "kept",
+			structuredSplunkHECEventsKey: extraEvents,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Forward: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*records) != 1 {
+		t.Fatalf("records=%d want 1", len(*records))
+	}
+	dec := json.NewDecoder(strings.NewReader(string((*records)[0].body)))
+	var summary struct {
+		SourceType string `json:"sourcetype"`
+		Event      struct {
+			Action     string         `json:"action"`
+			Structured map[string]any `json:"structured"`
+		} `json:"event"`
+	}
+	if err := dec.Decode(&summary); err != nil {
+		t.Fatalf("decode summary: %v", err)
+	}
+	if summary.SourceType != "_json" || summary.Event.Action != "otel.ingest.logs" {
+		t.Fatalf("summary event wrong: %+v", summary)
+	}
+	if _, exists := summary.Event.Structured[structuredSplunkHECEventsKey]; exists {
+		t.Fatalf("control extra-events key leaked into summary structured payload")
+	}
+
+	var logEvent struct {
+		Source     string `json:"source"`
+		SourceType string `json:"sourcetype"`
+		Index      string `json:"index"`
+		Event      struct {
+			SessionID string `json:"session_id"`
+			Action    string `json:"action"`
+		} `json:"event"`
+	}
+	if err := dec.Decode(&logEvent); err != nil {
+		t.Fatalf("decode otel log event: %v", err)
+	}
+	if logEvent.Source != "otel" || logEvent.SourceType != "otel:log" || logEvent.Index != "defenseclaw_local" {
+		t.Fatalf("otel HEC envelope wrong: %+v", logEvent)
+	}
+	if logEvent.Event.SessionID != "sess-1" || logEvent.Event.Action != "codex.user_prompt" {
+		t.Fatalf("otel HEC payload wrong: %+v", logEvent.Event)
+	}
+}
+
 // TestSplunkHECSink_SourceTypeOverride_OperatorWins confirms that an
 // operator-supplied override map overrides the defaults rather than
 // being replaced by them. A customer who already standardised on
@@ -252,7 +368,7 @@ func TestSplunkHECSink_SourceTypeOverride_OperatorWins(t *testing.T) {
 		Timestamp: time.Unix(1700000000, 0).UTC(),
 	})
 
-	// The defaults that the operator didn't override must still apply
+    // The defaults that the operator didn't override must still apply
 	// (Phase 3 plan: defaults win unless explicitly overridden).
 	_ = sink.Forward(context.Background(), Event{
 		ID: "v1", Action: "guardrail-verdict", Severity: "HIGH",

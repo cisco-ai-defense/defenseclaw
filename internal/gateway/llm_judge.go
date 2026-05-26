@@ -602,7 +602,7 @@ func SetRetainJudgeBodies(v bool) {
 	retainJudgeBodies.Store(v)
 }
 
-// judgeTel optionally wires OTel for judge spans + histograms (Track 3).
+// judgeTel optionally wires OTel for judge spans + histograms.
 var judgeTel atomic.Pointer[telemetry.Provider]
 
 // SetJudgeTelemetryProvider installs the shared OTel provider for judge
@@ -618,7 +618,7 @@ func judgeTelemetry() *telemetry.Provider {
 // verdictCache is an optional process-local TTL cache for judge results.
 var verdictCache atomic.Pointer[guardrail.VerdictCache]
 
-// SetJudgeVerdictCache wires the verdict cache (Track 3). Nil disables.
+// SetJudgeVerdictCache wires the verdict cache. Nil disables caching.
 func SetJudgeVerdictCache(c *guardrail.VerdictCache) {
 	verdictCache.Store(c)
 }

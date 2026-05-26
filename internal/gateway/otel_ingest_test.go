@@ -13,12 +13,14 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
@@ -72,6 +74,70 @@ func TestOTLPIngest_Logs_AcceptsValidPayload(t *testing.T) {
 	}
 	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+func TestOTLPLogRecordsForSplunkHEC_FlattensCodexLogRecord(t *testing.T) {
+	body := []byte(`{
+		"resourceLogs": [{
+			"resource": {"attributes": [
+				{"key": "service.name", "value": {"stringValue": "codex-app-server"}},
+				{"key": "host.name", "value": {"stringValue": "ADIAGNE-M-H9T4"}}
+			]},
+			"scopeLogs": [{"logRecords": [{
+				"timeUnixNano": "0",
+				"observedTimeUnixNano": "1778152115531514000",
+				"severityNumber": 9,
+				"severityText": "INFO",
+				"traceId": "trace-1",
+				"spanId": "span-1",
+				"body": {"stringValue": "raw prompt body"},
+				"attributes": [
+					{"key": "event.name", "value": {"stringValue": "codex.user_prompt"}},
+					{"key": "conversation.id", "value": {"stringValue": "sess-1"}},
+					{"key": "model", "value": {"stringValue": "gpt-5.4"}},
+					{"key": "prompt", "value": {"stringValue": "summarize a secret customer note"}},
+					{"key": "user.email", "value": {"stringValue": "user@example.com"}}
+				]
+			}]}]
+		}]
+	}`)
+
+	events := otlpLogRecordsForSplunkHEC(body, "codex", time.Unix(1700000000, 0).UTC())
+	if len(events) != 1 {
+		t.Fatalf("events=%d want 1", len(events))
+	}
+	if got := events[0]["sourcetype"]; got != "otel:log" {
+		t.Fatalf("sourcetype=%v want otel:log", got)
+	}
+	if got := events[0]["source"]; got != "otel" {
+		t.Fatalf("source=%v want otel", got)
+	}
+	event, ok := events[0]["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("event payload missing: %+v", events[0])
+	}
+	if got := event["session_id"]; got != "sess-1" {
+		t.Fatalf("session_id=%v want sess-1", got)
+	}
+	if got := event["action"]; got != "codex.user_prompt" {
+		t.Fatalf("action=%v want codex.user_prompt", got)
+	}
+	if got := event["request_model"]; got != "gpt-5.4" {
+		t.Fatalf("request_model=%v want gpt-5.4", got)
+	}
+	if got := event["timestamp"]; got != "2026-05-07T11:08:35.531514Z" {
+		t.Fatalf("timestamp=%v", got)
+	}
+	if got := event["body"]; got != "raw prompt body" {
+		t.Fatalf("body=%v want raw prompt body", got)
+	}
+	attrs := event["attributes"].(map[string]interface{})
+	if got := attrs["prompt"]; got != "summarize a secret customer note" {
+		t.Fatalf("prompt=%v want raw prompt", got)
+	}
+	if got := attrs["user.email"]; got != "user@example.com" {
+		t.Fatalf("user.email=%v want raw email", got)
 	}
 }
 
@@ -188,6 +254,8 @@ func TestOTLPIngest_Logs_DecodesProtobufSessionAndPromotesTokens(t *testing.T) {
 						otlpStringKV("event.name", "copilot.sse_event"),
 						otlpStringKV("event.kind", "response.completed"),
 						otlpStringKV("conversation.id", "session-protobuf"),
+						otlpStringKV("gen_ai.operation.name", "chat.completions.with.user-supplied-suffix"),
+						otlpStringKV("gen_ai.provider.name", "attacker-controlled-provider-name"),
 						otlpStringKV("model", "gpt-5"),
 						otlpStringKV("gen_ai.agent.name", "copilot"),
 						otlpIntKV("input_tokens", 17),
@@ -240,17 +308,27 @@ func TestOTLPIngest_Logs_DecodesProtobufSessionAndPromotesTokens(t *testing.T) {
 	}
 	got := map[string]float64{}
 	for _, dp := range tokenHist.DataPoints {
-		var tokenType, agentName string
+		var tokenType, agentName, operationName, providerName, model string
 		for _, attr := range dp.Attributes.ToSlice() {
 			switch string(attr.Key) {
 			case "gen_ai.token.type":
 				tokenType = attr.Value.AsString()
 			case "gen_ai.agent.name":
 				agentName = attr.Value.AsString()
+			case "gen_ai.operation.name":
+				operationName = attr.Value.AsString()
+			case "gen_ai.provider.name":
+				providerName = attr.Value.AsString()
+			case "gen_ai.request.model":
+				model = attr.Value.AsString()
 			}
 		}
 		if agentName != "copilot" {
 			t.Fatalf("gen_ai.agent.name = %q, want copilot", agentName)
+		}
+		if operationName != "other" || providerName != "other" || model != "gpt-5" {
+			t.Fatalf("promoted gen_ai labels = operation=%q provider=%q model=%q, want other/other/gpt-5",
+				operationName, providerName, model)
 		}
 		got[tokenType] = dp.Sum
 	}
@@ -274,6 +352,42 @@ func otlpIntKV(key string, value int64) *commonpb.KeyValue {
 		Value: &commonpb.AnyValue{
 			Value: &commonpb.AnyValue_IntValue{IntValue: value},
 		},
+	}
+}
+
+func TestDecodeOTLPAnyValue_DepthCap(t *testing.T) {
+	shallow := decodeOTLPAnyValue(json.RawMessage(`{"kvlistValue":{"values":[{"key":"k","value":{"stringValue":"leaf"}}]}}`))
+	if got := shallow.(map[string]interface{})["k"]; got != "leaf" {
+		t.Fatalf("shallow kvlist decode = %#v, want leaf", shallow)
+	}
+
+	raw := json.RawMessage(`{"stringValue":"leaf"}`)
+	for i := 0; i < maxOTLPAnyValueDepth+3; i++ {
+		raw = json.RawMessage(`{"kvlistValue":{"values":[{"key":"k","value":` + string(raw) + `}]}}`)
+	}
+	got := decodeOTLPAnyValue(raw)
+	var containsCappedNil func(interface{}) bool
+	containsCappedNil = func(v interface{}) bool {
+		switch x := v.(type) {
+		case nil:
+			return true
+		case map[string]interface{}:
+			for _, child := range x {
+				if containsCappedNil(child) {
+					return true
+				}
+			}
+		case []interface{}:
+			for _, child := range x {
+				if containsCappedNil(child) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if !containsCappedNil(got) {
+		t.Fatalf("deep kvlist decode did not hit depth cap: %#v", got)
 	}
 }
 
@@ -835,6 +949,103 @@ func TestCodexNotify_AcceptsValidPayload(t *testing.T) {
 	}
 }
 
+func TestCodexNotify_EmitsFirstClassLLMEvents(t *testing.T) {
+	redaction.SetDisableAll(true)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+	events := captureGatewayEvents(t)
+	a := &APIServer{}
+
+	body := `{
+		"type": "agent-turn-complete",
+		"thread-id": "thread-123",
+		"turn-id": "turn-abc",
+		"model": "gpt-5",
+		"status": "success",
+		"input-messages": ["first prompt", "second prompt"],
+		"last-assistant-message": "assistant response",
+		"finish-reason": "stop"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	a.handleCodexNotify(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%q", w.Code, w.Body.String())
+	}
+	if len(*events) != 2 {
+		t.Fatalf("events=%d want 2: %+v", len(*events), *events)
+	}
+	prompt := (*events)[0]
+	if prompt.EventType != gatewaylog.EventLLMPrompt || prompt.LLMPrompt == nil {
+		t.Fatalf("first event = %+v, want llm_prompt", prompt)
+	}
+	if prompt.SessionID != "thread-123" || prompt.Model != "gpt-5" || prompt.AgentName != "codex" || prompt.AgentType != "codex" {
+		t.Fatalf("prompt envelope wrong: %+v", prompt)
+	}
+	if prompt.LLMPrompt.TurnID != "turn-abc" || prompt.LLMPrompt.Prompt != "second prompt" {
+		t.Fatalf("prompt payload wrong: %+v", prompt.LLMPrompt)
+	}
+	if prompt.LLMPrompt.Source != codexNotifyTurnCompleteSource {
+		t.Fatalf("prompt source=%q want %q", prompt.LLMPrompt.Source, codexNotifyTurnCompleteSource)
+	}
+	if prompt.LLMPrompt.RawRequestBody != "" {
+		t.Fatalf("notify llm_prompt should not duplicate raw body: %q", prompt.LLMPrompt.RawRequestBody)
+	}
+
+	response := (*events)[1]
+	if response.EventType != gatewaylog.EventLLMResponse || response.LLMResponse == nil {
+		t.Fatalf("second event = %+v, want llm_response", response)
+	}
+	if response.SessionID != "thread-123" || response.Model != "gpt-5" || response.AgentName != "codex" || response.AgentType != "codex" {
+		t.Fatalf("response envelope wrong: %+v", response)
+	}
+	if response.LLMResponse.TurnID != "turn-abc" || response.LLMResponse.Response != "assistant response" {
+		t.Fatalf("response payload wrong: %+v", response.LLMResponse)
+	}
+	if response.LLMResponse.ReplyToPromptID == "" || response.LLMResponse.ReplyToPromptID != prompt.LLMPrompt.PromptID {
+		t.Fatalf("response did not link to prompt: response=%+v prompt=%+v", response.LLMResponse, prompt.LLMPrompt)
+	}
+	if response.LLMResponse.RawResponseBody != "" {
+		t.Fatalf("notify llm_response should not duplicate raw body: %q", response.LLMResponse.RawResponseBody)
+	}
+	if got := response.LLMResponse.FinishReasons; len(got) != 1 || got[0] != "stop" {
+		t.Fatalf("finish_reasons=%v want [stop]", got)
+	}
+}
+
+func TestCodexNotify_LLMEventsUseRedactionPath(t *testing.T) {
+	redaction.SetDisableAll(false)
+	t.Cleanup(func() { redaction.SetDisableAll(false) })
+	events := captureGatewayEvents(t)
+	a := &APIServer{}
+
+	body := `{
+		"type": "agent-turn-complete",
+		"thread-id": "thread-secret",
+		"turn-id": "turn-secret",
+		"model": "gpt-5",
+		"input-messages": ["please leak sk-secret-token"],
+		"last-assistant-message": "secret response"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	a.handleCodexNotify(w, req)
+
+	if len(*events) != 2 {
+		t.Fatalf("events=%d want 2", len(*events))
+	}
+	if got := (*events)[0].LLMPrompt.Prompt; strings.Contains(got, "sk-secret-token") || strings.Contains(got, "please leak") {
+		t.Fatalf("prompt bypassed redaction: %q", got)
+	}
+	if got := (*events)[1].LLMResponse.Response; strings.Contains(got, "secret response") {
+		t.Fatalf("response bypassed redaction: %q", got)
+	}
+}
+
 // TestCodexNotify_RejectsNonJSONContentType pins the 415 contract.
 // The notify bridge always sets Content-Type: application/json; a
 // bypass attempt with form-encoded or text/plain must be rejected
@@ -986,6 +1197,12 @@ func TestOTLPIngest_MalformedPersistsTypedAuditAction(t *testing.T) {
 // codex.notify.agent-turn-complete explicitly; everything else
 // must still pass IsKnownActionPrefix so future codex notify types
 // don't get rejected by audit-event validators.
+//
+// The unified hook collector always synthesizes a parallel Stop
+// event for the notify payload, so this test also asserts the
+// presence of exactly one connector-hook-synthetic row alongside
+// the canonical notify row. SIEM rules pinned on
+// `action LIKE 'codex.notify%'` continue to see a single match.
 func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 	store, logger := newOTLPIngestTestStore(t)
 	a := &APIServer{store: store, logger: logger}
@@ -993,6 +1210,13 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 	body := `{"type": "agent-turn-complete", "turn-id": "turn-abc", "model": "gpt-5", "status": "success"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(audit.ContextWithEnvelope(req.Context(), audit.CorrelationEnvelope{
+		TraceID:        "trace-123",
+		RequestID:      "req-123",
+		RunID:          "run-123",
+		PolicyID:       "policy-123",
+		DestinationApp: "codex",
+	}))
 	w := httptest.NewRecorder()
 	a.handleCodexNotify(w, req)
 	logger.Close()
@@ -1003,30 +1227,47 @@ func TestCodexNotify_PersistsDynamicSuffixAction(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	rows, err := store.ListEvents(10)
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
+	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	if len(canonical) != 1 {
+		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
 	}
-	if len(rows) != 1 {
-		t.Fatalf("rows=%d want 1", len(rows))
+	if len(synthetic) != 1 {
+		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
 	}
-	if got, want := rows[0].Action, "codex.notify.agent-turn-complete"; got != want {
+	if got, want := canonical[0].Action, "codex.notify.agent-turn-complete"; got != want {
 		t.Errorf("Action = %q, want %q", got, want)
 	}
 	// Must satisfy *either* the static enum OR the prefix matcher.
 	// audit-event.json validators in downstream SIEMs use the same
 	// disjunction.
-	if !audit.IsKnownAction(rows[0].Action) && !audit.IsKnownActionPrefix(rows[0].Action) {
-		t.Errorf("audit Action %q matches neither IsKnownAction nor IsKnownActionPrefix", rows[0].Action)
+	if !audit.IsKnownAction(canonical[0].Action) && !audit.IsKnownActionPrefix(canonical[0].Action) {
+		t.Errorf("audit Action %q matches neither IsKnownAction nor IsKnownActionPrefix", canonical[0].Action)
 	}
-	if rows[0].SessionID != "turn-abc" {
-		t.Errorf("SessionID = %q, want %q (codex notify rows must fall back to turn-id when thread-id is absent)", rows[0].SessionID, "turn-abc")
+	if canonical[0].SessionID != "turn-abc" {
+		t.Errorf("SessionID = %q, want %q (codex notify rows must fall back to turn-id when thread-id is absent)", canonical[0].SessionID, "turn-abc")
 	}
-	if strings.Contains(rows[0].Details, body) {
-		t.Fatalf("Details stored raw notify body: %q", rows[0].Details)
+	if canonical[0].TraceID != "trace-123" || canonical[0].RequestID != "req-123" ||
+		canonical[0].RunID != "run-123" || canonical[0].PolicyID != "policy-123" ||
+		canonical[0].DestinationApp != "codex" {
+		t.Errorf("canonical notify row missing correlation envelope: trace=%q request=%q run=%q policy=%q destination=%q",
+			canonical[0].TraceID, canonical[0].RequestID, canonical[0].RunID, canonical[0].PolicyID, canonical[0].DestinationApp)
 	}
-	if !strings.Contains(rows[0].Details, "body_sha256") || !strings.Contains(rows[0].Details, "body_len") {
-		t.Fatalf("Details missing redacted notify summary fields: %q", rows[0].Details)
+	// F2: synthetic row must carry the same SessionID as the
+	// canonical row so SIEM joins on session_id correlate the
+	// pair. The synthetic row used to drop session_id because
+	// CorrelationMiddleware only sees the inbound HTTP headers
+	// (no X-DefenseClaw-Session-Id from notify-bridge.sh) and the
+	// payload-derived value was never threaded into the audit
+	// envelope. enrichAgentHookContext now refreshes the envelope
+	// so this assertion passes.
+	if synthetic[0].SessionID != "turn-abc" {
+		t.Errorf("synthetic row SessionID = %q, want %q (F2: must inherit from req.SessionID)", synthetic[0].SessionID, "turn-abc")
+	}
+	if strings.Contains(canonical[0].Details, body) {
+		t.Fatalf("Details stored raw notify body: %q", canonical[0].Details)
+	}
+	if !strings.Contains(canonical[0].Details, "body_sha256") || !strings.Contains(canonical[0].Details, "body_len") {
+		t.Fatalf("Details missing redacted notify summary fields: %q", canonical[0].Details)
 	}
 }
 
@@ -1085,14 +1326,14 @@ func TestCodexNotify_NoTypePersistsBareAction(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	rows, err := store.ListEvents(10)
-	if err != nil {
-		t.Fatalf("ListEvents: %v", err)
+	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	if len(canonical) != 1 {
+		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
 	}
-	if len(rows) != 1 {
-		t.Fatalf("rows=%d want 1", len(rows))
+	if len(synthetic) != 1 {
+		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
 	}
-	if got, want := rows[0].Action, string(audit.ActionCodexNotify); got != want {
+	if got, want := canonical[0].Action, string(audit.ActionCodexNotify); got != want {
 		t.Errorf("Action = %q, want %q (no type → bare codex.notify)", got, want)
 	}
 }
@@ -1114,20 +1355,161 @@ func TestCodexNotify_PrefersThreadIDForSessionCorrelation(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
+	canonical, synthetic := splitCodexNotifyAuditRows(t, store)
+	if len(canonical) != 1 {
+		t.Fatalf("codex.notify rows=%d want 1", len(canonical))
+	}
+	if len(synthetic) != 1 {
+		t.Fatalf("connector-hook-synthetic rows=%d want 1", len(synthetic))
+	}
+	if got, want := canonical[0].SessionID, "thread-123"; got != want {
+		t.Fatalf("SessionID = %q, want %q", got, want)
+	}
+	// F2: synthetic row must carry the SAME session id as the
+	// canonical row, even when thread-id is preferred over
+	// turn-id. enrichAgentHookContext reads req.SessionID which
+	// codexNotifyToAgentHookRequest set from codexNotifySessionID,
+	// so the two rows MUST agree.
+	if got, want := synthetic[0].SessionID, "thread-123"; got != want {
+		t.Fatalf("synthetic row SessionID = %q, want %q (F2)", got, want)
+	}
+	if !strings.Contains(canonical[0].Details, "thread_id=") {
+		t.Fatalf("Details missing thread_id summary: %q", canonical[0].Details)
+	}
+	if !strings.Contains(canonical[0].Details, "turn_id=") {
+		t.Fatalf("Details missing turn_id summary: %q", canonical[0].Details)
+	}
+}
+
+// splitCodexNotifyAuditRows fetches the audit-store contents and
+// partitions them into the two row classes the codex notify
+// pipeline produces:
+//
+//   - canonical: action == "codex.notify[.suffix]" — the row the
+//     SIEM has always seen, one per inbound notify;
+//   - synthetic: action == ActionConnectorHookSynthetic — the
+//     visibility row written by the unified hook collector when it
+//     synthesizes a Stop event from the same payload.
+//
+// Centralizing the split in a helper means every test asserting
+// the contract reads the same way and a future SIEM rule writer
+// can grep for one symbol to discover the row taxonomy.
+func splitCodexNotifyAuditRows(t *testing.T, store *audit.Store) (canonical, synthetic []audit.Event) {
+	t.Helper()
 	rows, err := store.ListEvents(10)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("rows=%d want 1", len(rows))
+	for _, r := range rows {
+		switch {
+		case strings.HasPrefix(r.Action, string(audit.ActionCodexNotify)):
+			canonical = append(canonical, r)
+		case r.Action == string(audit.ActionConnectorHookSynthetic):
+			synthetic = append(synthetic, r)
+		default:
+			t.Fatalf("unexpected audit Action=%q (test fixture should only produce codex.notify* + %s)",
+				r.Action, audit.ActionConnectorHookSynthetic)
+		}
 	}
-	if got, want := rows[0].SessionID, "thread-123"; got != want {
-		t.Fatalf("SessionID = %q, want %q", got, want)
+	return canonical, synthetic
+}
+
+// TestSanitizeCodexNotifySpanString_StripsAndCaps pins the contract
+// codex notify span enrichment depends on: control / CR / LF / ANSI
+// runes are stripped before stamping onto span attributes, and
+// oversized inputs are truncated on a UTF-8 rune boundary so the
+// resulting attribute is always valid UTF-8 (OTLP exporters drop
+// spans with invalid-UTF-8 string attributes).
+//
+// The UTF-8 truncation case is the regression guard: a naive
+// `value[:maxLen]` would have split the trailing 3-byte rune
+// mid-sequence, producing 0xE0 0xA4 with no continuation byte and
+// breaking the OTLP wire encoding.
+func TestSanitizeCodexNotifySpanString_StripsAndCaps(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		maxLen int
+		want   string
+	}{
+		{name: "empty", in: "", maxLen: 128, want: ""},
+		{name: "trims whitespace", in: "  gpt-5  ", maxLen: 128, want: "gpt-5"},
+		{name: "strips CRLF", in: "gpt-5\r\nclaude", maxLen: 128, want: "gpt-5  claude"},
+		{name: "strips ANSI ESC", in: "gpt-5\x1b[31mRED", maxLen: 128, want: "gpt-5 [31mRED"},
+		{name: "strips other control runes", in: "gpt-5\x00\x07\x08", maxLen: 128, want: "gpt-5   "},
+		{name: "preserves tab", in: "gpt-5\tturbo", maxLen: 128, want: "gpt-5\tturbo"},
+		{name: "strips 0x7F", in: "gpt-5\x7f", maxLen: 128, want: "gpt-5 "},
+		{name: "byte-cap respected", in: strings.Repeat("a", 200), maxLen: 64, want: strings.Repeat("a", 64)},
+		// "नमस्ते" is 18 bytes (six 3-byte runes). A naive
+		// value[:16] would split the 6th rune mid-sequence and
+		// emit invalid UTF-8. truncateToRuneBoundary lands on the
+		// 6th rune's leader at offset 15, sees a 3-byte rune won't
+		// fit in 16 bytes, and returns the 5-rune (15-byte) prefix.
+		{name: "utf8 boundary truncate", in: "नमस्ते", maxLen: 16, want: "नमस्त"},
 	}
-	if !strings.Contains(rows[0].Details, "thread_id=") {
-		t.Fatalf("Details missing thread_id summary: %q", rows[0].Details)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeCodexNotifySpanString(tc.in, tc.maxLen)
+			if got != tc.want {
+				t.Fatalf("sanitizeCodexNotifySpanString(%q, %d) = %q, want %q", tc.in, tc.maxLen, got, tc.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("sanitizeCodexNotifySpanString returned invalid UTF-8: %q", got)
+			}
+		})
 	}
-	if !strings.Contains(rows[0].Details, "turn_id=") {
-		t.Fatalf("Details missing turn_id summary: %q", rows[0].Details)
+}
+
+// TestEnrichCodexNotifySpan_SanitizesAttributes proves a hostile
+// codex notify payload (CRLF + ANSI in Status, oversized Model)
+// reaches the active span as sanitized + length-capped attributes
+// rather than as raw user-controlled bytes. This is the regression
+// guard for the log-injection / span-storage-DoS surface: an OTel
+// trace viewer rendering raw span attributes from this code path
+// would otherwise see attacker-supplied terminal escapes.
+func TestEnrichCodexNotifySpan_SanitizesAttributes(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSyncer(exp),
+	)
+	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
+
+	tracer := tp.Tracer("test")
+	ctx, span := tracer.Start(context.Background(), "codex.notify")
+
+	p := codexNotifyPayload{
+		Status: "ok\r\n\x1b[31mFAKE-ALERT",
+		Model:  strings.Repeat("m", 256),
+	}
+	enrichCodexNotifySpan(ctx, p, "agent-turn-complete", "ok")
+	span.End()
+
+	spans := exp.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("spans=%d want 1", len(spans))
+	}
+	attrs := map[string]string{}
+	for _, kv := range spans[0].Attributes {
+		attrs[string(kv.Key)] = kv.Value.AsString()
+	}
+
+	statusAttr := attrs["defenseclaw.codex.notify.status"]
+	if statusAttr == "" {
+		t.Fatalf("missing defenseclaw.codex.notify.status; attrs=%v", attrs)
+	}
+	if strings.ContainsAny(statusAttr, "\r\n\x1b") {
+		t.Fatalf("status attr leaks CR/LF/ESC: %q", statusAttr)
+	}
+
+	modelAttr := attrs["gen_ai.response.model"]
+	if modelAttr == "" {
+		t.Fatalf("missing gen_ai.response.model; attrs=%v", attrs)
+	}
+	if len(modelAttr) > 128 {
+		t.Fatalf("model attr not capped: len=%d", len(modelAttr))
+	}
+	if !utf8.ValidString(modelAttr) {
+		t.Fatalf("model attr is invalid UTF-8: %q", modelAttr)
 	}
 }

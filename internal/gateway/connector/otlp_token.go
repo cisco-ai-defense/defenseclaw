@@ -20,11 +20,13 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 )
 
 // OTLPPathTokenScope identifies a connector-bound OTLP token used in
@@ -75,6 +77,10 @@ var otlpScopeRE = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 // least equivalent to the master token; the loopback + /otlp/<scope>/
 // constraints reduce the blast radius further.
 const otlpTokenLen = 32
+
+const otlpPathTokenMaxReadBytes = 4096
+
+var otlpTokenHexRE = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // otlpTokenMu serializes EnsureOTLPPathToken across goroutines. The
 // guard is per-process; each token file is independently atomic via
@@ -129,7 +135,7 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 		return "", err
 	}
 
-	if existing, err := readTrimmedFile(tokenPath); err == nil && existing != "" {
+	if existing, err := readSecureOTLPPathTokenFile(dataDir, tokenPath); err == nil && existing != "" {
 		return existing, nil
 	} else if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("read OTLP path-token %s: %w", tokenPath, err)
@@ -146,7 +152,24 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	tok := hex.EncodeToString(buf)
 
 	tmp := tokenPath + ".tmp"
-	if err := os.WriteFile(tmp, []byte(tok+"\n"), 0o600); err != nil {
+	_ = os.Remove(tmp)
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if nofollow := syscall.O_NOFOLLOW; nofollow != 0 {
+		flags |= nofollow
+	}
+	f, err := os.OpenFile(tmp, flags, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("write OTLP path-token: %w", err)
+	}
+	_, err = f.WriteString(tok + "\n")
+	if syncErr := f.Sync(); err == nil {
+		err = syncErr
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
 		return "", fmt.Errorf("write OTLP path-token: %w", err)
 	}
 	if err := os.Chmod(tmp, 0o600); err != nil {
@@ -172,7 +195,7 @@ func LoadOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, error)
 	if err != nil {
 		return "", err
 	}
-	tok, err := readTrimmedFile(tokenPath)
+	tok, err := readSecureOTLPPathTokenFile(dataDir, tokenPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
@@ -201,6 +224,16 @@ func LoadAllOTLPPathTokens(dataDir string) (map[OTLPPathTokenScope]string, error
 	return out, nil
 }
 
+// IsValidOTLPScope reports whether scope is in the closed allow-list of
+// known per-source OTLP scopes. Exposed so the gateway's lazy reload path
+// (api.go lookupOTLPPathToken) can decline disk I/O for arbitrary path
+// segments — the OTLP receiver receives the source segment straight from
+// the URL, so we MUST refuse to touch disk for typos, fuzzing probes, or
+// random scope strings.
+func IsValidOTLPScope(scope OTLPPathTokenScope) bool {
+	return validOTLPScope(scope)
+}
+
 func validOTLPScope(scope OTLPPathTokenScope) bool {
 	if !otlpScopeRE.MatchString(string(scope)) {
 		return false
@@ -213,10 +246,83 @@ func validOTLPScope(scope OTLPPathTokenScope) bool {
 	return false
 }
 
-func readTrimmedFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
+	if err := validateOTLPPathTokenLocation(dataDir, path); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(data)), nil
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("OTLP path-token %s is a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("OTLP path-token %s is not a regular file", path)
+	}
+	if mode := info.Mode().Perm(); mode != 0o600 {
+		return "", fmt.Errorf("OTLP path-token %s has mode %o, want 600", path, mode)
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		if int(stat.Uid) != os.Getuid() {
+			return "", fmt.Errorf("OTLP path-token %s uid %d does not match current uid %d", path, stat.Uid, os.Getuid())
+		}
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	limited := io.LimitReader(f, otlpPathTokenMaxReadBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return "", err
+	}
+	if len(data) > otlpPathTokenMaxReadBytes {
+		return "", fmt.Errorf("OTLP path-token %s exceeds %d bytes", path, otlpPathTokenMaxReadBytes)
+	}
+	tok := strings.TrimSpace(string(data))
+	if !otlpTokenHexRE.MatchString(tok) {
+		return "", fmt.Errorf("OTLP path-token %s is not a 64-character lowercase hex token", path)
+	}
+	return tok, nil
+}
+
+func validateOTLPPathTokenLocation(dataDir, path string) error {
+	if dataDir == "" {
+		return fmt.Errorf("OTLP path-token location: empty dataDir")
+	}
+	hooksDir := filepath.Join(dataDir, "hooks")
+	cleanHooks := filepath.Clean(hooksDir)
+	cleanPath := filepath.Clean(path)
+	rel, err := filepath.Rel(cleanHooks, cleanPath)
+	if err != nil {
+		return err
+	}
+	if rel == "." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return fmt.Errorf("OTLP path-token %s escapes hooks dir %s", path, hooksDir)
+	}
+	evalDataDir, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	evalTokenDir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	evalHooksDir := filepath.Join(evalDataDir, "hooks")
+	rel, err = filepath.Rel(evalHooksDir, evalTokenDir)
+	if err != nil {
+		return err
+	}
+	if rel == "." || (!strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)) {
+		return nil
+	}
+	return fmt.Errorf("OTLP path-token dir %s escapes hooks dir %s", filepath.Dir(path), hooksDir)
 }

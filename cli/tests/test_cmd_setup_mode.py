@@ -101,6 +101,9 @@ class _ModeBase(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_setup._write_picked_connector_hint",
             return_value=None,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
         ):
             return _invoke(["mode", target, *extra], self.app)
 
@@ -305,6 +308,21 @@ class TestSetupMode_NoOp(_ModeBase):
         self.assertEqual(gc.mode, "action")
         # Friendly no-op message visible in stdout.
         self.assertIn("Already on OpenClaw", result.output)
+
+    def test_already_on_hook_connector_refreshes_workspace_hooks(self):
+        gc = self.app.cfg.guardrail
+        self.app.cfg.claw.mode = "openhands"
+        gc.connector = "openhands"
+        gc.mode = "action"
+
+        result = self._run("openhands", "--no-restart")
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.save_calls, 1)
+        self.assertEqual(self.app.cfg.claw.workspace_dir, "")
+        self.assertEqual(self.app.cfg.claw.mode, "openhands")
+        self.assertEqual(gc.mode, "action")
+        self.assertIn("refreshing hook wiring", result.output)
 
 
 class TestSetupMode_InvalidArguments(_ModeBase):

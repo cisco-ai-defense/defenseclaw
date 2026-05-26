@@ -251,9 +251,9 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	}
 }
 
-// emitAgentHookLLMEvent is the LLM-event emitter for the five
+// emitAgentHookLLMEvent is the LLM-event emitter for the six
 // hook-only connectors (hermes, cursor, windsurf, geminicli,
-// copilot). It mirrors emitClaudeCodeHookLLMEvent /
+// copilot, openhands). It mirrors emitClaudeCodeHookLLMEvent /
 // emitCodexHookLLMEvent so a "give me every prompt and tool call"
 // query against the gateway log returns the same shape regardless
 // of which framework the operator is running.
@@ -294,7 +294,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = req.TurnID
+		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "call", req.ToolName, stringFromJSONRaw(req.ToolArgs), "", nil)
 	case isResultLikeEvent(req.HookEventName):
@@ -303,7 +303,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			a.lastHookPromptID(source, req.SessionID),
 			promptIDForTurn(source, req.SessionID, req.TurnID),
 		)
-		meta.ToolID = req.TurnID
+		meta.ToolID = firstNonEmpty(firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId"), req.TurnID)
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), req.ToolName)
 		emitToolInvocationEvent(ctx, meta, "result", req.ToolName, "", req.Content, nil)
 	}

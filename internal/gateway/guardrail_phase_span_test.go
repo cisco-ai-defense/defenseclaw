@@ -133,6 +133,26 @@ func TestSetPhaseTracerFunc_DetachPreservesStage(t *testing.T) {
 	}
 }
 
+func TestSetPanicRecorderFunc_IndependentFromTracing(t *testing.T) {
+	g := NewGuardrailInspector("local", nil, nil, "")
+	calls := 0
+	g.SetPanicRecorderFunc(func(context.Context) {
+		calls++
+	})
+
+	g.SetTracerFunc(nil)
+	g.SetPhaseTracerFunc(nil)
+	g.recordRecoveredPanic(context.Background())
+	if calls != 1 {
+		t.Fatalf("panic recorder calls = %d, want 1", calls)
+	}
+
+	g.SetPanicRecorderFunc(nil)
+	if g.tracer != nil {
+		t.Fatalf("tracer should be nil after detaching only panic recorder")
+	}
+}
+
 func TestPhaseHelpers_HandleNilAndNone(t *testing.T) {
 	if got := phaseAction(nil); got != "" {
 		t.Errorf("phaseAction(nil) = %q, want empty", got)

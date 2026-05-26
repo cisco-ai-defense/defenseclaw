@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // sanitizeEvent rewrites free-form, PII-bearing fields on a copy of the
@@ -51,6 +52,63 @@ import (
 func sanitizeEvent(e Event) Event {
 	e.Details = redaction.ForSinkReason(e.Details)
 	return e
+}
+
+func cloneStructuredPayload(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	buf, err := json.Marshal(in)
+	if err == nil {
+		var out map[string]any
+		if err := json.Unmarshal(buf, &out); err == nil {
+			return out
+		}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// stampAuditEventEnvelope fills the envelope fields that must be identical
+// across SQLite, audit sinks, OTel, and the structured gateway bridge.
+// Store.LogEvent also stamps these fields before INSERT, but it receives
+// events by value; stamping here keeps the fan-out copy in lockstep with the
+// persisted row.
+func stampAuditEventEnvelope(e *Event) {
+	if e == nil {
+		return
+	}
+	if e.ID == "" {
+		e.ID = uuid.New().String()
+	}
+	if e.Timestamp.IsZero() {
+		e.Timestamp = time.Now().UTC()
+	}
+	if e.Actor == "" {
+		e.Actor = "defenseclaw"
+	}
+	if e.RunID == "" {
+		e.RunID = currentRunID()
+	}
+	if e.SidecarInstanceID == "" {
+		e.SidecarInstanceID = ProcessAgentInstanceID()
+	}
+	prov := version.Current()
+	if e.SchemaVersion == 0 {
+		e.SchemaVersion = prov.SchemaVersion
+	}
+	if e.ContentHash == "" {
+		e.ContentHash = prov.ContentHash
+	}
+	if e.Generation == 0 {
+		e.Generation = prov.Generation
+	}
+	if e.BinaryVersion == "" {
+		e.BinaryVersion = prov.BinaryVersion
+	}
 }
 
 // StructuredEmitter receives every audit Event that flows through the
@@ -99,6 +157,8 @@ type Logger struct {
 	// EventScanFinding rows through the gateway JSONL choke point.
 	gwWriter *gatewaylog.Writer
 }
+
+const gatewaySplunkHECEventsKey = "_splunk_hec_events"
 
 func NewLogger(store *Store) *Logger {
 	return &Logger{store: store}
@@ -175,6 +235,124 @@ func (l *Logger) emitGatewaySnapshot(emitter StructuredEmitter, ev gatewaylog.Ev
 		return
 	}
 	emitter.EmitGatewayEvent(ev)
+}
+
+// ForwardGatewayEventToSinks mirrors native gatewaylog events that are
+// semantically useful to SIEM consumers into the audit sink fan-out. The
+// gatewaylog writer is the source of truth for these events; this method only
+// packages the already-redacted event as a first-class HEC row so the Splunk
+// local bridge exports canonical `defenseclaw:json` records with top-level
+// `event_type` values.
+func (l *Logger) ForwardGatewayEventToSinks(ctx context.Context, ev gatewaylog.Event) {
+	if l == nil || !gatewayEventForwardedToSinks(ev.EventType) {
+		return
+	}
+	sinksMgr, _, _ := l.snapshot()
+	if sinksMgr == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ev.Timestamp.IsZero() {
+		ev.Timestamp = time.Now().UTC()
+	}
+	if ev.Severity == "" {
+		ev.Severity = gatewaylog.SeverityInfo
+	}
+	stampGatewayEnvelope(&ev)
+	ev = sanitizeGatewayLogEvent(ev)
+
+	event, err := gatewayLogEventMap(ev)
+	if err != nil {
+		return
+	}
+
+	sinkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	l.forwardSinkEventCtx(sinkCtx, sinksMgr, sinks.Event{
+		ID:                uuid.NewString(),
+		Timestamp:         ev.Timestamp,
+		Action:            "gatewaylog." + string(ev.EventType),
+		Target:            "gatewaylog",
+		Actor:             "defenseclaw",
+		Details:           fmt.Sprintf("event_type=%s", ev.EventType),
+		Severity:          string(ev.Severity),
+		RunID:             ev.RunID,
+		TraceID:           ev.TraceID,
+		RequestID:         ev.RequestID,
+		SessionID:         ev.SessionID,
+		TurnID:            ev.TurnID,
+		AgentName:         ev.AgentName,
+		AgentID:           ev.AgentID,
+		AgentInstanceID:   ev.AgentInstanceID,
+		SidecarInstanceID: ev.SidecarInstanceID,
+		PolicyID:          ev.PolicyID,
+		DestinationApp:    ev.DestinationApp,
+		ToolName:          ev.ToolName,
+		ToolID:            ev.ToolID,
+		Structured: map[string]any{
+			gatewaySplunkHECEventsKey: []map[string]any{
+				{
+					"time":       float64(ev.Timestamp.Unix()) + float64(ev.Timestamp.Nanosecond())/1e9,
+					"source":     "defenseclaw",
+					"sourcetype": "defenseclaw:json",
+					"event":      event,
+				},
+			},
+		},
+	})
+}
+
+func gatewayEventForwardedToSinks(eventType gatewaylog.EventType) bool {
+	switch eventType {
+	case gatewaylog.EventVerdict,
+		gatewaylog.EventLLMPrompt,
+		gatewaylog.EventLLMResponse,
+		gatewaylog.EventToolInvocation:
+		return true
+	default:
+		return false
+	}
+}
+
+func sanitizeGatewayLogEvent(ev gatewaylog.Event) gatewaylog.Event {
+	if v := ev.Verdict; v != nil {
+		cp := *v
+		cp.Reason = redaction.ForSinkReason(cp.Reason)
+		ev.Verdict = &cp
+	}
+	if p := ev.LLMPrompt; p != nil {
+		cp := *p
+		cp.Prompt = redaction.ForSinkMessageContent(cp.Prompt)
+		cp.RawRequestBody = redaction.ForSinkMessageContent(cp.RawRequestBody)
+		ev.LLMPrompt = &cp
+	}
+	if r := ev.LLMResponse; r != nil {
+		cp := *r
+		cp.Response = redaction.ForSinkMessageContent(cp.Response)
+		cp.RawResponseBody = redaction.ForSinkMessageContent(cp.RawResponseBody)
+		ev.LLMResponse = &cp
+	}
+	if t := ev.Tool; t != nil {
+		cp := *t
+		cp.ToolInput = redaction.ForSinkMessageContent(cp.ToolInput)
+		cp.ToolOutput = redaction.ForSinkMessageContent(cp.ToolOutput)
+		ev.Tool = &cp
+	}
+	return ev
+}
+
+func gatewayLogEventMap(ev gatewaylog.Event) (map[string]any, error) {
+	raw, err := json.Marshal(ev)
+	if err != nil {
+		return nil, err
+	}
+	var event map[string]any
+	if err := json.Unmarshal(raw, &event); err != nil {
+		return nil, err
+	}
+	return event, nil
 }
 
 // stampGatewayEnvelope fills the v7 correlation + identity envelope
@@ -301,7 +479,7 @@ func (l *Logger) LogScanWithCorrelation(
 	event := sanitizeEvent(Event{
 		ID:        uuid.New().String(),
 		Timestamp: time.Now().UTC(),
-		Action:    "scan",
+		Action:    string(ActionScan),
 		Target:    result.Target,
 		Actor:     "defenseclaw",
 		Details: fmt.Sprintf("scanner=%s findings=%d max_severity=%s duration=%s",
@@ -316,6 +494,7 @@ func (l *Logger) LogScanWithCorrelation(
 		AgentInstanceID:   corr.AgentInstanceID,
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	})
+	stampAuditEventEnvelope(&event)
 
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -403,6 +582,7 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		SidecarInstanceID: ProcessAgentInstanceID(),
 	}
 	applyEnvelope(&event, env)
+	stampAuditEventEnvelope(&event)
 	event = sanitizeEvent(event)
 	storeErr := l.store.LogEvent(event)
 	if storeErr != nil {
@@ -469,7 +649,7 @@ func mustPersistAction(action string) bool {
 // "install", "file", "runtime", "source_path".
 func (l *Logger) LogActionWithEnforcement(action, target, details string, enforcement map[string]string) error {
 	sinksMgr, otel, structured := l.snapshot()
-	event := sanitizeEvent(Event{
+	event := Event{
 		ID:                uuid.New().String(),
 		Timestamp:         time.Now().UTC(),
 		Action:            action,
@@ -479,7 +659,9 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		Severity:          "INFO",
 		RunID:             currentRunID(),
 		SidecarInstanceID: ProcessAgentInstanceID(),
-	})
+	}
+	stampAuditEventEnvelope(&event)
+	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
 			otel.RecordAuditDBError(context.Background(), "insert_event")
@@ -523,15 +705,6 @@ func (l *Logger) LogEventCtx(ctx context.Context, event Event) error {
 // control severity or other fields that LogAction hardcodes.
 func (l *Logger) LogEvent(event Event) error {
 	sinksMgr, otel, structured := l.snapshot()
-	if event.ID == "" {
-		event.ID = uuid.New().String()
-	}
-	if event.Timestamp.IsZero() {
-		event.Timestamp = time.Now().UTC()
-	}
-	if event.RunID == "" {
-		event.RunID = currentRunID()
-	}
 	// v7 clean break: AgentInstanceID is per-SESSION. Callers that
 	// carry a session context (the router, proxy session resolver)
 	// stamp it explicitly. Absence is meaningful — "no session
@@ -539,9 +712,7 @@ func (l *Logger) LogEvent(event Event) error {
 	// The process-scoped identifier lives on SidecarInstanceID;
 	// we auto-fill that one so every row has a stable sidecar
 	// identity without burdening callers.
-	if event.SidecarInstanceID == "" {
-		event.SidecarInstanceID = ProcessAgentInstanceID()
-	}
+	stampAuditEventEnvelope(&event)
 	event = sanitizeEvent(event)
 	if err := l.store.LogEvent(event); err != nil {
 		if otel != nil {
@@ -585,6 +756,7 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		TraceID:           e.TraceID,
 		RequestID:         e.RequestID,
 		SessionID:         e.SessionID,
+		TurnID:            e.TurnID,
 		AgentName:         e.AgentName,
 		AgentID:           e.AgentID,
 		AgentInstanceID:   e.AgentInstanceID,
@@ -593,6 +765,11 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		DestinationApp:    e.DestinationApp,
 		ToolName:          e.ToolName,
 		ToolID:            e.ToolID,
+		SchemaVersion:     e.SchemaVersion,
+		ContentHash:       e.ContentHash,
+		Generation:        e.Generation,
+		BinaryVersion:     e.BinaryVersion,
+		Structured:        cloneStructuredPayload(e.Structured),
 	})
 }
 
@@ -722,6 +899,7 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 		TraceID:         env.TraceID,
 		RequestID:       env.RequestID,
 		SessionID:       env.SessionID,
+		TurnID:          env.TurnID,
 		AgentID:         env.AgentID,
 		AgentName:       env.AgentName,
 		AgentInstanceID: env.AgentInstanceID,

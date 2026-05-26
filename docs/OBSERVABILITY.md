@@ -815,15 +815,18 @@ modifying the agent traffic plane unless the connector explicitly supports it.
 
 ### 9.2 SIEM consumer guidance
 
-Audit events emitted from the new ingest paths carry the same envelope
-shape as every other audit row but expose three new top-level
-attributes worth indexing in your SIEM:
+Audit events emitted from connector ingest paths carry the same v7
+envelope shape as every other audit row and sink event. The most useful
+fields to index are:
 
-| Field           | Type   | Meaning                                                                 |
-|-----------------|--------|-------------------------------------------------------------------------|
-| `action`        | enum   | One of `connector-hook`, `asset-policy`, `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum *and* the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
-| `actor`         | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
-| `details`       | string | Structured one-line summary: `signal=logs size=4096 bytes resources=2 logRecords=14 services=[codex=1,claudecode=1]`. |
+| Field | Type | Meaning |
+|--------|------|---------|
+| `schema_version` | integer | Required audit contract version. v7 events include provenance and three-tier agent identity. |
+| `action` | enum | One of `connector-hook`, `connector-hook-synthetic`, `asset-policy`, `otel.ingest.{logs,metrics,traces,malformed}`, `codex.notify`, `codex.notify.<type>`, or `codex.notify.malformed`. Validators MUST accept the full enum and the `^codex\.notify\.[a-z0-9._-]{1,64}$` prefix family. |
+| `actor` | string | Authenticated connector source from the `x-defenseclaw-source` header or the Gemini path token. Examples: `codex`, `claudecode`, `copilot`, `geminicli`, `unknown`. |
+| `structured` | object | Machine-readable payload when the row has one. Connector hook rows use `schema="defenseclaw.hook.v1"` from `schemas/hook-audit-envelope.json`. |
+| `details` | string | Legacy redacted summary. Connector-hook rows keep a quoted `details_json=` mirror during migration; new consumers should prefer `structured`. |
+| `content_hash`, `generation`, `binary_version` | string/integer | Provenance for deterministic replay and dashboard bucketing. |
 
 The matching OTel connector log contract
 (`schemas/otel/connector-telemetry-event.schema.json`) carries
@@ -888,13 +891,13 @@ Provisioned in `bundles/local_observability_stack/`:
 
 ### 9.4 Hook-only enforcement
 
-The Codex and Claude Code connectors are hook-only. There is no
-LLM-proxy data path — those agents talk directly to their native
-upstreams (`api.openai.com`, `api.anthropic.com`, the ChatGPT
-backend) and DefenseClaw observes / enforces via the `PreToolUse`
-and `UserPromptSubmit` hooks. There is no proxy listener to enable
-for Codex or Claude Code; tool-call decisions are surfaced through
-the hook's deny verdict.
+The Codex, Claude Code, Hermes, Cursor, Windsurf, Gemini CLI, Copilot
+CLI, and OpenHands connectors are hook-only. There is no LLM-proxy
+data path — those agents talk directly to their native upstreams and
+DefenseClaw observes / enforces via each connector's documented hook
+bus. There is no proxy listener to enable for hook connectors; in
+`guardrail.mode=action`, tool-call decisions are surfaced through the
+hook's deny verdict.
 
 For connectors that still bind the proxy (OpenClaw, ZeptoClaw), set
 `guardrail.mode=action` and restart the gateway.
@@ -902,10 +905,11 @@ For connectors that still bind the proxy (OpenClaw, ZeptoClaw), set
 ### 9.5 One-shot setup aliases
 
 For operators who only want telemetry (no enforcement, no proxy
-listener), DefenseClaw exposes dedicated setup paths that wrap the
-observability-only branch of `setup guardrail` and additionally pin
-`claw.mode` so the rest of the CLI/TUI surfaces the matching
-connector's source-of-truth files.
+listener), DefenseClaw exposes dedicated setup paths that default to
+`guardrail.mode=observe` and additionally pin `claw.mode` so the rest
+of the CLI/TUI surfaces the matching connector's source-of-truth
+files. The same aliases also accept `--mode action` for hook-native
+blocking without inserting a proxy.
 
 ```bash
 # Codex: hooks + native OTel + notify-bridge.sh
@@ -920,6 +924,10 @@ defenseclaw setup cursor --yes
 defenseclaw setup windsurf --yes
 defenseclaw setup geminicli --yes
 defenseclaw setup copilot --yes
+defenseclaw setup openhands --yes
+
+# Hook-native blocking, still no proxy:
+defenseclaw setup openhands --yes --mode action
 
 # Optionally bring up the bundled Prom/Loki/Tempo/Grafana stack in
 # the same step:
@@ -933,7 +941,7 @@ Both aliases persist:
 | `claw.mode`                                   | selected connector | TUI / scanners read from the connector's documented local surfaces instead of the OpenClaw layout. |
 | `guardrail.connector`                         | selected connector | Drives `Config.activeConnector()` (Go) and `Config.active_connector()` (Python). |
 | `guardrail.enabled`                           | `true`            | Required so the gateway's `Connector.Setup()` runs and wires hooks + OTel + notify. |
-| `guardrail.mode`                              | `observe`         | Default mode for hook-only connectors.                                 |
+| `guardrail.mode`                              | `observe` by default, `action` with `--mode action` | Default mode for hook-only connectors is observability-only; action mode blocks through the hook. |
 | `<data_dir>/picked_connector`                 | selected connector | So `defenseclaw setup guardrail`, `init`, and quickstart default to the same connector on subsequent runs. |
 
 After both aliases run, the gateway is restarted (unless `--no-restart`

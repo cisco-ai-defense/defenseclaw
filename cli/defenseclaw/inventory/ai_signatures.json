@@ -390,6 +390,54 @@
       "local_endpoints": []
     },
     {
+      "id": "openhands",
+      "name": "OpenHands",
+      "vendor": "All Hands AI",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "openhands",
+      "binary_names": [
+        "openhands"
+      ],
+      "process_names": [
+        "openhands",
+        "OpenHands"
+      ],
+      "config_paths": [
+        ".openhands/hooks.json",
+        "~/.openhands/agent_settings.json",
+        "~/.openhands/cli_config.json",
+        "~/.openhands/mcp.json",
+        ".agents/skills",
+        ".openhands/skills",
+        ".openhands/microagents",
+        "~/.openhands/skills/installed",
+        "~/.openhands/cache/skills/public-skills/skills",
+        "AGENTS.md"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.openhands/mcp.json"
+      ],
+      "package_names": [
+        "openhands-ai",
+        "openhands"
+      ],
+      "env_var_names": [
+        "OPENHANDS_API_KEY",
+        "OPENHANDS_CONFIG_FILE"
+      ],
+      "domain_patterns": [
+        "openhands.dev"
+      ],
+      "history_patterns": [
+        "openhands",
+        "open hands"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
       "id": "aider",
       "name": "Aider",
       "vendor": "Aider",
@@ -1013,44 +1061,6 @@
         "qwen code",
         "qwen mcp",
         "qwen-code"
-      ],
-      "local_endpoints": []
-    },
-    {
-      "id": "openhands",
-      "name": "OpenHands",
-      "vendor": "OpenHands",
-      "category": "ai_cli",
-      "confidence": 0.88,
-      "supported_connector": "",
-      "binary_names": [
-        "openhands"
-      ],
-      "process_names": [
-        "openhands"
-      ],
-      "application_names": [],
-      "config_paths": [
-        "~/.openhands/agent_settings.json",
-        "~/.openhands/cli_config.json",
-        "~/.openhands/mcp.json"
-      ],
-      "extension_ids": [],
-      "mcp_paths": [
-        "~/.openhands/mcp.json"
-      ],
-      "package_names": [
-        "openhands-ai",
-        "openhands"
-      ],
-      "env_var_names": [
-        "OPENHANDS_CONFIG_FILE"
-      ],
-      "domain_patterns": [
-        "openhands.dev"
-      ],
-      "history_patterns": [
-        "openhands"
       ],
       "local_endpoints": []
     },

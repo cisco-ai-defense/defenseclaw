@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
@@ -377,6 +378,20 @@ func TestEmit_StampsCorrelationFromContext(t *testing.T) {
 		AgentInstanceID:   "agent-inst-7",
 		SidecarInstanceID: "sidecar-9",
 	})
+	ctx = audit.ContextWithEnvelope(ctx, audit.MergeEnvelope(
+		audit.EnvelopeFromContext(ctx),
+		audit.CorrelationEnvelope{
+			RunID:          "run-from-env",
+			RequestID:      "req-from-env",
+			SessionID:      "sess-from-env",
+			TraceID:        "trace-from-env",
+			TurnID:         "turn-from-env",
+			PolicyID:       "policy-from-env",
+			DestinationApp: "builtin",
+			ToolName:       "tool-from-env",
+			ToolID:         "call-from-env",
+		},
+	))
 
 	emitVerdict(ctx, "regex", gatewaylog.DirectionPrompt, "claude",
 		"allow", "no-op", gatewaylog.SeverityInfo, nil, 1)
@@ -396,6 +411,9 @@ func TestEmit_StampsCorrelationFromContext(t *testing.T) {
 		if e.SessionID != "sess-xyz" {
 			t.Errorf("event[%d] SessionID=%q want %q (type=%s)", i, e.SessionID, "sess-xyz", e.EventType)
 		}
+		if e.TurnID != "turn-from-env" {
+			t.Errorf("event[%d] TurnID=%q want %q (type=%s)", i, e.TurnID, "turn-from-env", e.EventType)
+		}
 		if e.AgentID != "agent-1" {
 			t.Errorf("event[%d] AgentID=%q want %q (type=%s)", i, e.AgentID, "agent-1", e.EventType)
 		}
@@ -407,6 +425,12 @@ func TestEmit_StampsCorrelationFromContext(t *testing.T) {
 		}
 		if e.SidecarInstanceID != "sidecar-9" {
 			t.Errorf("event[%d] SidecarInstanceID=%q want %q (type=%s)", i, e.SidecarInstanceID, "sidecar-9", e.EventType)
+		}
+		if e.PolicyID != "policy-from-env" {
+			t.Errorf("event[%d] PolicyID=%q want %q (type=%s)", i, e.PolicyID, "policy-from-env", e.EventType)
+		}
+		if e.DestinationApp != "builtin" {
+			t.Errorf("event[%d] DestinationApp=%q want %q (type=%s)", i, e.DestinationApp, "builtin", e.EventType)
 		}
 	}
 }

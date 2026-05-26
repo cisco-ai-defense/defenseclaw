@@ -2795,7 +2795,11 @@ func (m Model) confirmModePicker() (tea.Model, tea.Cmd) {
 	if wire == "" {
 		return m, nil
 	}
-	args, displayName := connectorSetupCommandForMode(wire)
+	mode := "observe"
+	if m.cfg != nil && strings.EqualFold(strings.TrimSpace(m.cfg.Guardrail.Mode), "action") {
+		mode = "action"
+	}
+	args, displayName := connectorSetupCommandForModeWithGuardrailMode(wire, mode)
 	if len(args) == 0 {
 		return m, nil
 	}

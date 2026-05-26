@@ -91,6 +91,7 @@ def status(app: AppContext) -> None:
     _status_row("Data dir", cfg.data_dir)
     _status_row("Config", f"{cfg.data_dir}/config.yaml")
     _status_row("Audit DB", cfg.audit_db)
+    _status_row("Scope", _connector_scope_text(cfg))
     click.echo()
 
     # Sandbox
@@ -146,6 +147,7 @@ def status(app: AppContext) -> None:
     # Sidecar status
     click.echo()
     from defenseclaw.gateway import OrchestratorClient
+
     bind = "127.0.0.1"
     if cfg.openshell.is_standalone() and cfg.guardrail.host not in ("", "localhost", "127.0.0.1"):
         bind = cfg.guardrail.host
@@ -155,6 +157,7 @@ def status(app: AppContext) -> None:
         token=cfg.gateway.resolved_token(),
     )
     from defenseclaw.commands import hint
+
     if client.is_running():
         _status_row("Sidecar", ux._style("running", fg="green"))
         _print_connected_agent(bind, cfg.gateway.api_port)
@@ -169,8 +172,7 @@ def status(app: AppContext) -> None:
         configured = cfg.active_connector() if hasattr(cfg, "active_connector") else (cfg.claw.mode or "openclaw")
         _status_row(
             "Agent",
-            f"{_friendly_connector_name(configured)} ({configured})"
-            + ux.dim(" — configured, not connected"),
+            f"{_friendly_connector_name(configured)} ({configured})" + ux.dim(" — configured, not connected"),
         )
         hint("Start sidecar:  defenseclaw-gateway start")
 
@@ -185,6 +187,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "windsurf": "Windsurf",
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
+    "openhands": "OpenHands",
 }
 
 
@@ -200,6 +203,21 @@ def _friendly_connector_name(name: str | None) -> str:
     if name in _FRIENDLY_CONNECTOR_NAMES:
         return _FRIENDLY_CONNECTOR_NAMES[name]
     return name[:1].upper() + name[1:]
+
+
+def _connector_scope_text(cfg) -> str:
+    workspace = ""
+    resolver = getattr(cfg, "connector_workspace_dir", None)
+    if callable(resolver):
+        try:
+            workspace = resolver()
+        except Exception:
+            workspace = ""
+    if not workspace:
+        workspace = (getattr(getattr(cfg, "claw", None), "workspace_dir", "") or "").strip()
+    if workspace:
+        return f"workspace ({workspace})"
+    return "global user config"
 
 
 def _print_connected_agent(host: str, port: int) -> None:
@@ -257,15 +275,9 @@ def _print_connected_agent(host: str, port: int) -> None:
     tool_blocks = int(conn.get("tool_blocks") or 0)
     sub_blocks = int(conn.get("subprocess_blocks") or 0)
     # Errors get colored when non-zero so eyes catch them first.
-    err_text = (
-        ux._style(f"errors: {errors}", fg="red", bold=True)
-        if errors
-        else ux.dim(f"errors: {errors}")
-    )
+    err_text = ux._style(f"errors: {errors}", fg="red", bold=True) if errors else ux.dim(f"errors: {errors}")
     block_text_tool = (
-        ux._style(f"tool blocks: {tool_blocks}", fg="yellow")
-        if tool_blocks
-        else ux.dim(f"tool blocks: {tool_blocks}")
+        ux._style(f"tool blocks: {tool_blocks}", fg="yellow") if tool_blocks else ux.dim(f"tool blocks: {tool_blocks}")
     )
     block_text_sub = (
         ux._style(f"subprocess blocks: {sub_blocks}", fg="yellow")
@@ -303,31 +315,19 @@ def _print_observability_status(cfg) -> None:
     ux.section("Observability")
 
     if not destinations:
-        click.echo(
-            "    "
-            + ux.dim("(none configured — run `defenseclaw setup observability add <preset>`)")
-        )
+        click.echo("    " + ux.dim("(none configured — run `defenseclaw setup observability add <preset>`)"))
         return
 
     for d in destinations:
         label = PRESETS[d.preset_id].display_name if d.preset_id in PRESETS else d.kind
-        state = (
-            ux._style("enabled", fg="green")
-            if d.enabled
-            else ux._style("disabled", fg="bright_black")
-        )
+        state = ux._style("enabled", fg="green") if d.enabled else ux._style("disabled", fg="bright_black")
         target_tag = "otel" if d.target == "otel" else "sink"
-        click.echo(
-            f"    {ux.bold(f'{d.name:<26s}')}{ux.dim(f'[{target_tag}]')} {state}"
-            f"  {ux.dim('—')} {label}"
-        )
+        click.echo(f"    {ux.bold(f'{d.name:<26s}')}{ux.dim(f'[{target_tag}]')} {state}  {ux.dim('—')} {label}")
 
         if d.target == "otel" and d.enabled:
             enabled_signals = [s for s, on in d.signals.items() if on]
             if enabled_signals:
-                click.echo(
-                    f"      {ux.dim('signals:')} {', '.join(sorted(enabled_signals))}"
-                )
+                click.echo(f"      {ux.dim('signals:')} {', '.join(sorted(enabled_signals))}")
             if d.endpoint:
                 click.echo(f"      {ux.dim('endpoint:')} {d.endpoint}")
         elif d.enabled and d.endpoint:

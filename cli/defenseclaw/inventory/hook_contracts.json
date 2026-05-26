@@ -1,0 +1,494 @@
+{
+  "schema_version": 1,
+  "defenseclaw_version": "0.5.0",
+  "runtime_lock_file": "hook_contract_lock.json",
+  "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to.",
+  "connectors": {
+    "openclaw": {
+      "kind": "proxy",
+      "compatibility_gate": "not-gated",
+      "version_probe": "openclaw --version",
+      "contracts": [],
+      "notes": [
+        "OpenClaw is proxy-backed; hook contract pinning does not gate setup."
+      ]
+    },
+    "zeptoclaw": {
+      "kind": "proxy",
+      "compatibility_gate": "not-gated",
+      "version_probe": "zeptoclaw --version",
+      "contracts": [],
+      "notes": [
+        "ZeptoClaw is proxy-backed; hook contract pinning does not gate setup."
+      ]
+    },
+    "codex": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "codex --version",
+      "contracts": [
+        {
+          "contract_id": "codex-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "0.124.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "Stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex hooks were made stable in 0.124.0. DefenseClaw leaves the upper bound open until upstream publishes a breaking hook change.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        }
+      ]
+    },
+    "claudecode": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "claude --version",
+      "contracts": [
+        {
+          "contract_id": "claudecode-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "2.1.144",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "claude-code-hook.sh",
+          "hook_config_path_templates": [
+            "~/.claude/settings.json"
+          ],
+          "response_field": "claude_code_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "UserPromptExpansion",
+            "PreToolUse",
+            "PermissionRequest",
+            "PermissionDenied",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PostToolBatch",
+            "Stop",
+            "SubagentStop",
+            "SessionEnd",
+            "InstructionsLoaded",
+            "ConfigChange",
+            "FileChanged",
+            "TaskCreated",
+            "TaskCompleted",
+            "TeammateIdle",
+            "PreCompact",
+            "PostCompact",
+            "Elicitation",
+            "ElicitationResult",
+            "Notification"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result",
+            "event_content"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "PreToolUse"
+            ],
+            "block_events": [
+              "UserPromptSubmit",
+              "UserPromptExpansion",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "PostToolBatch",
+              "TaskCreated",
+              "TaskCompleted",
+              "TeammateIdle",
+              "Stop",
+              "SubagentStop",
+              "PreCompact",
+              "Elicitation",
+              "ElicitationResult"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Pinned to the current documented Claude Code hook surface as of 2.1.144; older Claude Code releases exposed smaller hook event sets.",
+            "Claude Code PreToolUse supports native HITL via permissionDecision=ask."
+          ]
+        }
+      ]
+    },
+    "hermes": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "hermes --version",
+      "contracts": [
+        {
+          "contract_id": "hermes-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "0.11.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "hermes-hook.sh",
+          "hook_config_path_templates": [
+            "~/.hermes/config.yaml"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "pre_tool_call"
+          ],
+          "aid_surfaces": [
+            "tool_call"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "pre_tool_call"
+            ],
+            "supports_fail_closed": false,
+            "scope": "user"
+          },
+          "notes": [
+            "Hermes Agent 0.11.0 introduced shell hooks for pre_tool_call and related lifecycle callbacks."
+          ]
+        }
+      ]
+    },
+    "cursor": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "cursor --version",
+      "contracts": [
+        {
+          "contract_id": "cursor-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "1.7.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "cursor-hook.sh",
+          "hook_config_path_templates": [
+            "~/.cursor/hooks.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "preToolUse",
+            "beforeShellExecution",
+            "beforeMCPExecution",
+            "beforeReadFile",
+            "beforeTabFileRead",
+            "beforeSubmitPrompt",
+            "stop"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "beforeShellExecution",
+              "beforeMCPExecution"
+            ],
+            "block_events": [
+              "preToolUse",
+              "beforeShellExecution",
+              "beforeMCPExecution",
+              "beforeReadFile",
+              "beforeTabFileRead",
+              "beforeSubmitPrompt",
+              "stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Cursor 1.7 introduced beta hooks for the agent loop.",
+            "Cursor native ask is limited to beforeShellExecution and beforeMCPExecution."
+          ]
+        }
+      ]
+    },
+    "windsurf": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "windsurf --version",
+      "contracts": [
+        {
+          "contract_id": "windsurf-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "1.12.41",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "windsurf-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codeium/windsurf/hooks.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "pre_user_prompt",
+            "pre_read_code",
+            "pre_write_code",
+            "pre_run_command",
+            "pre_mcp_tool_use"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "pre_user_prompt",
+              "pre_read_code",
+              "pre_write_code",
+              "pre_run_command",
+              "pre_mcp_tool_use"
+            ],
+            "supports_fail_closed": false,
+            "scope": "user"
+          },
+          "notes": [
+            "Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract."
+          ]
+        }
+      ]
+    },
+    "geminicli": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "gemini --version",
+      "contracts": [
+        {
+          "contract_id": "geminicli-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "0.26.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "geminicli-hook.sh",
+          "hook_config_path_templates": [
+            "~/.gemini/settings.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "BeforeAgent",
+            "BeforeModel",
+            "BeforeTool",
+            "AfterTool",
+            "AfterAgent"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "BeforeAgent",
+              "BeforeModel",
+              "BeforeTool",
+              "AfterTool",
+              "AfterAgent"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Gemini CLI 0.26.0 enabled hooks by default."
+          ]
+        }
+      ]
+    },
+    "copilot": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "copilot version",
+      "contracts": [
+        {
+          "contract_id": "copilot-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "1.0.18",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "copilot-hook.sh",
+          "hook_config_path_templates": [
+            "~/.copilot/hooks/defenseclaw.json",
+            "<workspace>/.github/hooks/defenseclaw.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "preToolUse",
+            "PreToolUse",
+            "permissionRequest",
+            "PermissionRequest",
+            "agentStop",
+            "Stop",
+            "subagentStop",
+            "SubagentStop",
+            "postToolUseFailure",
+            "PostToolUseFailure",
+            "notification",
+            "Notification"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "preToolUse",
+              "PreToolUse"
+            ],
+            "block_events": [
+              "preToolUse",
+              "PreToolUse",
+              "permissionRequest",
+              "PermissionRequest",
+              "agentStop",
+              "Stop",
+              "subagentStop",
+              "SubagentStop",
+              "postToolUseFailure",
+              "PostToolUseFailure"
+            ],
+            "supports_fail_closed": false,
+            "scope": "user,workspace"
+          },
+          "notes": [
+            "GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
+            "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks."
+          ]
+        }
+      ]
+    },
+    "openhands": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "openhands --version",
+      "docs_url": "https://docs.openhands.dev/openhands/usage/customization/hooks",
+      "contracts": [
+        {
+          "contract_id": "openhands-hooks-v1",
+          "agent_version": {
+            "min_inclusive": "0.0.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "openhands-hook.sh",
+          "hook_config_path_templates": [
+            "~/.openhands/hooks.json",
+            "<workspace>/.openhands/hooks.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "pre_tool_use",
+            "post_tool_use",
+            "user_prompt_submit",
+            "stop",
+            "session_start",
+            "session_end"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result",
+            "event_content"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "pre_tool_use",
+              "user_prompt_submit",
+              "stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user,workspace"
+          },
+          "notes": [
+            "OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
+            "Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
+            "OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask/permission prompt surface is documented, so confirm verdicts are downgraded to additionalContext alerts."
+          ]
+        }
+      ]
+    }
+  }
+}

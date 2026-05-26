@@ -37,6 +37,20 @@ func TestOverview_ConfigurationBox_RedactionStatus(t *testing.T) {
 	}
 }
 
+func TestOverview_ConfigurationBox_ConnectorScope(t *testing.T) {
+	p := newOverviewForTest()
+	out := stripANSI(p.View(120, 40))
+	if !strings.Contains(out, "Scope") || !strings.Contains(out, "global user config") {
+		t.Fatalf("expected Overview to show global connector scope, got:\n%s", out)
+	}
+
+	p.cfg.Claw.WorkspaceDir = "/tmp/defenseclaw-workspace"
+	out = stripANSI(p.View(140, 44))
+	if !strings.Contains(out, "workspace (/tmp/defenseclaw-workspace)") {
+		t.Fatalf("expected Overview to show workspace connector scope, got:\n%s", out)
+	}
+}
+
 func TestOverview_ConfigurationBox_RedactionStatusHonorsRuntimeOverride(t *testing.T) {
 	t.Cleanup(func() { redaction.SetDisableAll(false) })
 	redaction.SetDisableAll(true)
@@ -164,5 +178,11 @@ func TestOverview_ConfigurationBox_HILTSupportByConnector(t *testing.T) {
 	out = stripANSI(p.View(132, 44))
 	if !strings.Contains(out, "no native ask: alert fallback") {
 		t.Fatalf("expected Gemini CLI fallback HILT support in Overview, got:\n%s", out)
+	}
+
+	p.cfg.Guardrail.Connector = "openhands"
+	out = stripANSI(p.View(132, 44))
+	if !strings.Contains(out, "no native ask: alert fallback") {
+		t.Fatalf("expected OpenHands fallback HILT support in Overview, got:\n%s", out)
 	}
 }

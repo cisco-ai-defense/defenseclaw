@@ -354,10 +354,29 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 			route = r.Pattern
 		}
 		spanName := r.Method + " " + route
-		ctx, span := tracer.Start(r.Context(), spanName,
+		// Pull the W3C traceparent header from the request so the
+		// hook span links back to the agent's parent span.
+		// extractIncomingTraceContext returns r.Context() unchanged
+		// for routes other than /api/v1/<connector>/hook and
+		// /api/v1/codex/notify; see shouldExtractHookTrace for the
+		// security justification.
+		parentCtx := extractIncomingTraceContext(r.Context(), r)
+		ctx, span := tracer.Start(parentCtx, spanName,
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attribute.String("defenseclaw.http.server", serverName)),
 		)
+		// Deferred span.End so a panic deeper in the handler stack
+		// (e.g. an evaluator that did not yet pick up the
+		// safeEvaluateHook recover) still finalises the server
+		// span. Without this defer, a panic between Start and End
+		// would leak an unfinalised span at the trace backend and
+		// hide the failure from tracing dashboards. Status
+		// attributes that depend on the response (status code,
+		// query) are recorded BEFORE the panic could re-trigger,
+		// so the only thing that may be missing on the panic path
+		// is the response-status attribute set — which is the
+		// correct signal that the request did not complete cleanly.
+		defer span.End()
 		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(sw, r.WithContext(ctx))
 		status := sw.status
@@ -386,7 +405,6 @@ func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler
 		if q != "" {
 			span.SetAttributes(semconv.URLQuery(sanitizeQueryForSpan(q)))
 		}
-		span.End()
 	})
 }
 

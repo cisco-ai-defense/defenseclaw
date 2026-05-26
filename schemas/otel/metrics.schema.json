@@ -2,7 +2,723 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.dev/schemas/otel/metrics.schema.json",
   "title": "DefenseClaw OTEL Metrics",
-  "description": "All OTEL metrics emitted by DefenseClaw. Defines metric names, types, units, and attribute dimensions for Splunk Infrastructure Monitoring dashboards and detectors.",
+  "description": "DefenseClaw OTel metric contract. The x-emitted-metrics catalog is exhaustive for instruments declared by internal/telemetry/metrics.go; grouped properties below carry curated dashboard metadata and attribute dimensions for the primary public surfaces.",
+  "x-emitted-metrics": [
+    {
+      "name": "defenseclaw.activity.diff_entries",
+      "type": "histogram",
+      "unit": "{entry}",
+      "description": "Number of diff entries per EventActivity"
+    },
+    {
+      "name": "defenseclaw.activity.total",
+      "type": "counter",
+      "unit": "{activity}",
+      "description": "Operator mutations recorded (EventActivity)"
+    },
+    {
+      "name": "defenseclaw.admission.decisions",
+      "type": "counter",
+      "unit": "{decision}",
+      "description": "Admission gate decisions"
+    },
+    {
+      "name": "defenseclaw.agent.discovery.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Wall-clock duration of the CLI local agent discovery scan."
+    },
+    {
+      "name": "defenseclaw.agent.discovery.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Version probe or discovery errors by connector and bounded reason."
+    },
+    {
+      "name": "defenseclaw.agent.discovery.installed",
+      "type": "gauge",
+      "unit": "1",
+      "description": "Latest discovered installed state for each connector (1 installed, 0 not installed)."
+    },
+    {
+      "name": "defenseclaw.agent.discovery.runs",
+      "type": "counter",
+      "unit": "{run}",
+      "description": "On-demand local agent discovery reports accepted by the sidecar, by source/cache/result."
+    },
+    {
+      "name": "defenseclaw.agent.discovery.signals",
+      "type": "counter",
+      "unit": "{signal}",
+      "description": "Per-connector install signals reported by agent discovery."
+    },
+    {
+      "name": "defenseclaw.ai.components.installs",
+      "type": "gauge",
+      "unit": "{install}",
+      "description": "Distinct install evidences per component as of the last scan."
+    },
+    {
+      "name": "defenseclaw.ai.components.observations",
+      "type": "counter",
+      "unit": "{observation}",
+      "description": "Per-(ecosystem,name) confidence emissions; one increment per scan that produced a component rollup."
+    },
+    {
+      "name": "defenseclaw.ai.components.workspaces",
+      "type": "gauge",
+      "unit": "{workspace}",
+      "description": "Distinct workspaces a component appears in as of the last scan."
+    },
+    {
+      "name": "defenseclaw.ai.confidence.identity_score",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Two-axis Bayesian engine identity score in [0,1] per component, per scan."
+    },
+    {
+      "name": "defenseclaw.ai.confidence.presence_score",
+      "type": "histogram",
+      "unit": "1",
+      "description": "Two-axis Bayesian engine presence score in [0,1] per component, per scan."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.active_signals",
+      "type": "gauge",
+      "unit": "{signal}",
+      "description": "Latest active AI usage signal count."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.dedupe_suppressed",
+      "type": "counter",
+      "unit": "{signal}",
+      "description": "Duplicate AI discovery signals suppressed within a scan."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Wall-clock duration of continuous AI discovery scans."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Continuous AI discovery detector errors by bounded detector/reason."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.files_scanned",
+      "type": "counter",
+      "unit": "{file}",
+      "description": "Package manifest and shell history files inspected by continuous AI discovery."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.gone_signals",
+      "type": "counter",
+      "unit": "{signal}",
+      "description": "AI usage signals that disappeared from a full scan."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.new_signals",
+      "type": "counter",
+      "unit": "{signal}",
+      "description": "New or changed AI usage signals discovered."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.runs",
+      "type": "counter",
+      "unit": "{run}",
+      "description": "Continuous AI discovery scans completed by the sidecar."
+    },
+    {
+      "name": "defenseclaw.ai.discovery.signals",
+      "type": "counter",
+      "unit": "{signal}",
+      "description": "AI usage signals observed by category/vendor/product/state."
+    },
+    {
+      "name": "defenseclaw.alert.count",
+      "type": "counter",
+      "unit": "{alert}",
+      "description": "Total runtime alerts emitted"
+    },
+    {
+      "name": "defenseclaw.approval.count",
+      "type": "counter",
+      "unit": "{request}",
+      "description": "Exec approval requests processed"
+    },
+    {
+      "name": "defenseclaw.audit.db.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "SQLite audit store operation failures"
+    },
+    {
+      "name": "defenseclaw.audit.events.total",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Total audit events persisted"
+    },
+    {
+      "name": "defenseclaw.audit.sink.batches.delivered",
+      "type": "counter",
+      "unit": "{batch}",
+      "description": "Audit sink batches acknowledged by remote"
+    },
+    {
+      "name": "defenseclaw.audit.sink.batches.dropped",
+      "type": "counter",
+      "unit": "{batch}",
+      "description": "Audit sink batches dropped due to queue or circuit breaker"
+    },
+    {
+      "name": "defenseclaw.audit.sink.circuit.state",
+      "type": "updowncounter",
+      "unit": "1",
+      "description": "Audit sink circuit breaker state (0=closed, 1=open, 2=half-open)"
+    },
+    {
+      "name": "defenseclaw.audit.sink.delivery.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Audit sink per-batch delivery latency"
+    },
+    {
+      "name": "defenseclaw.audit.sink.failures",
+      "type": "counter",
+      "unit": "{failure}",
+      "description": "Audit sink send failures by sink kind"
+    },
+    {
+      "name": "defenseclaw.audit.sink.queue.depth",
+      "type": "updowncounter",
+      "unit": "{event}",
+      "description": "Audit sink in-memory queue depth"
+    },
+    {
+      "name": "defenseclaw.cisco.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Cisco AI Defense inspect errors by code"
+    },
+    {
+      "name": "defenseclaw.cisco_inspect.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Cisco AI Defense HTTP inspect round-trip latency"
+    },
+    {
+      "name": "defenseclaw.codex.notify",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Codex notify events received via the notify-bridge shim, labelled by type/status"
+    },
+    {
+      "name": "defenseclaw.codex.notify.malformed",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Codex notify payloads that failed to parse"
+    },
+    {
+      "name": "defenseclaw.config.load.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Configuration load or validation errors"
+    },
+    {
+      "name": "defenseclaw.connector.hook.invocations",
+      "type": "counter",
+      "unit": "{hook}",
+      "description": "Connector hook invocations observed by the gateway."
+    },
+    {
+      "name": "defenseclaw.connector.hook.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Connector hook handler latency."
+    },
+    {
+      "name": "defenseclaw.connector.hook.outcome",
+      "type": "counter",
+      "unit": "{decision}",
+      "description": "Connector hook outcomes labelled by action, severity, and would_block."
+    },
+    {
+      "name": "defenseclaw.connector.hook.tokens",
+      "type": "counter",
+      "unit": "{token}",
+      "description": "Token usage attributable to connector hook invocations. Split by kind=prompt|completion|total."
+    },
+    {
+      "name": "defenseclaw.connector.hook.unified_dispatch",
+      "type": "counter",
+      "unit": "{invocation}",
+      "description": "Count of hook invocations routed through the unified hook collector, by connector."
+    },
+    {
+      "name": "defenseclaw.egress.events",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Egress requests classified by Layer 1 shape detection (branch=known|shape|passthrough)"
+    },
+    {
+      "name": "defenseclaw.gateway.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Structured gateway errors by subsystem/code"
+    },
+    {
+      "name": "defenseclaw.gateway.events.emitted",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Gateway events written through the writer choke point"
+    },
+    {
+      "name": "defenseclaw.gateway.judge.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "LLM judge errors (provider, parse, or empty response)"
+    },
+    {
+      "name": "defenseclaw.gateway.judge.invocations",
+      "type": "counter",
+      "unit": "{invocation}",
+      "description": "LLM judge invocations by kind/action"
+    },
+    {
+      "name": "defenseclaw.gateway.judge.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "LLM judge invocation latency"
+    },
+    {
+      "name": "defenseclaw.gateway.verdicts",
+      "type": "counter",
+      "unit": "{verdict}",
+      "description": "Guardrail verdicts emitted per stage/action/severity"
+    },
+    {
+      "name": "defenseclaw.guardrail.cache.hits",
+      "type": "counter",
+      "unit": "{hit}",
+      "description": "Verdict cache hits by scanner/verdict/TTL bucket"
+    },
+    {
+      "name": "defenseclaw.guardrail.cache.misses",
+      "type": "counter",
+      "unit": "{miss}",
+      "description": "Verdict cache misses by scanner/verdict/TTL bucket"
+    },
+    {
+      "name": "defenseclaw.guardrail.evaluations",
+      "type": "counter",
+      "unit": "{evaluation}",
+      "description": "Total guardrail evaluations performed"
+    },
+    {
+      "name": "defenseclaw.guardrail.judge.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "LLM judge invocation latency (cache miss path includes model round-trip)"
+    },
+    {
+      "name": "defenseclaw.guardrail.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Guardrail evaluation latency distribution"
+    },
+    {
+      "name": "defenseclaw.http.auth.failures",
+      "type": "counter",
+      "unit": "{failure}",
+      "description": "HTTP authentication failures by route + reason"
+    },
+    {
+      "name": "defenseclaw.http.rate_limit.breaches",
+      "type": "counter",
+      "unit": "{breach}",
+      "description": "HTTP rate limit breaches by route"
+    },
+    {
+      "name": "defenseclaw.http.request.count",
+      "type": "counter",
+      "unit": "{request}",
+      "description": "Total HTTP requests to the sidecar API"
+    },
+    {
+      "name": "defenseclaw.http.request.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "HTTP request duration distribution"
+    },
+    {
+      "name": "defenseclaw.inspect.evaluations",
+      "type": "counter",
+      "unit": "{evaluation}",
+      "description": "Tool/message inspect evaluations"
+    },
+    {
+      "name": "defenseclaw.inspect.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Tool/message inspect latency distribution"
+    },
+    {
+      "name": "defenseclaw.judge.semaphore.depth",
+      "type": "updowncounter",
+      "unit": "{slot}",
+      "description": "Judge concurrency semaphore: slots currently held"
+    },
+    {
+      "name": "defenseclaw.judge.semaphore.drops",
+      "type": "counter",
+      "unit": "{drop}",
+      "description": "Judge semaphore drops (queue full)"
+    },
+    {
+      "name": "defenseclaw.llm_bridge.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "LiteLLM bridge call latency (Python subprocess)"
+    },
+    {
+      "name": "defenseclaw.openshell.exit",
+      "type": "counter",
+      "unit": "{exit}",
+      "description": "OpenShell subprocess exits by command and exit code"
+    },
+    {
+      "name": "defenseclaw.otel.ingest.bytes",
+      "type": "counter",
+      "unit": "By",
+      "description": "Total OTLP body bytes received by the connector ingest receiver, by signal/source"
+    },
+    {
+      "name": "defenseclaw.otel.ingest.last_seen_ts",
+      "type": "gauge",
+      "unit": "s",
+      "description": "Unix-seconds timestamp of the most recent OTLP-HTTP batch accepted from a given source/signal. Used by the ConnectorTelemetrySilent alert."
+    },
+    {
+      "name": "defenseclaw.otel.ingest.malformed",
+      "type": "counter",
+      "unit": "{request}",
+      "description": "OTLP-JSON bodies that failed to parse, by signal/source"
+    },
+    {
+      "name": "defenseclaw.otel.ingest.records",
+      "type": "counter",
+      "unit": "{record}",
+      "description": "Leaf records (logRecords|dataPoints|spans) extracted from inbound OTLP-JSON batches by signal/source"
+    },
+    {
+      "name": "defenseclaw.otel.ingest.requests",
+      "type": "counter",
+      "unit": "{request}",
+      "description": "OTLP-HTTP requests accepted by the connector ingest receiver, by signal/source/result"
+    },
+    {
+      "name": "defenseclaw.panics.total",
+      "type": "counter",
+      "unit": "{panic}",
+      "description": "Recovered panics by subsystem"
+    },
+    {
+      "name": "defenseclaw.policy.evaluations",
+      "type": "counter",
+      "unit": "{evaluation}",
+      "description": "Total OPA policy evaluations per domain"
+    },
+    {
+      "name": "defenseclaw.policy.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "OPA policy evaluation latency distribution"
+    },
+    {
+      "name": "defenseclaw.policy.reloads",
+      "type": "counter",
+      "unit": "{reload}",
+      "description": "Total OPA policy reload events"
+    },
+    {
+      "name": "defenseclaw.process.uptime_seconds",
+      "type": "gauge",
+      "unit": "s",
+      "description": "Sidecar process uptime"
+    },
+    {
+      "name": "defenseclaw.provenance.bumps",
+      "type": "counter",
+      "unit": "{bump}",
+      "description": "Monotonic provenance generation bumps"
+    },
+    {
+      "name": "defenseclaw.quarantine.actions",
+      "type": "counter",
+      "unit": "{action}",
+      "description": "Filesystem quarantine and restore operations"
+    },
+    {
+      "name": "defenseclaw.queue.depth",
+      "type": "gauge",
+      "unit": "{item}",
+      "description": "Current depth of a buffered queue"
+    },
+    {
+      "name": "defenseclaw.queue.drops",
+      "type": "counter",
+      "unit": "{drop}",
+      "description": "Events dropped due to full queue or backpressure"
+    },
+    {
+      "name": "defenseclaw.redaction.applied",
+      "type": "counter",
+      "unit": "{redaction}",
+      "description": "Guardrail/egress redactions applied by detector/field"
+    },
+    {
+      "name": "defenseclaw.runtime.fd.in_use",
+      "type": "gauge",
+      "unit": "{fd}",
+      "description": "File descriptors currently held by the sidecar"
+    },
+    {
+      "name": "defenseclaw.runtime.gc.pause",
+      "type": "histogram",
+      "unit": "ns",
+      "description": "Go GC pause sample (P99 of recent pauses per tick)"
+    },
+    {
+      "name": "defenseclaw.runtime.goroutines",
+      "type": "gauge",
+      "unit": "{goroutine}",
+      "description": "Current goroutine count"
+    },
+    {
+      "name": "defenseclaw.runtime.heap.alloc",
+      "type": "gauge",
+      "unit": "By",
+      "description": "Current heap allocation in bytes"
+    },
+    {
+      "name": "defenseclaw.runtime.heap.objects",
+      "type": "gauge",
+      "unit": "{object}",
+      "description": "Live heap objects (runtime.MemStats.HeapObjects)"
+    },
+    {
+      "name": "defenseclaw.scan.count",
+      "type": "counter",
+      "unit": "{scan}",
+      "description": "Total number of scans completed"
+    },
+    {
+      "name": "defenseclaw.scan.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Scan duration distribution"
+    },
+    {
+      "name": "defenseclaw.scan.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Scanner invocations that failed (crash, timeout, not found)"
+    },
+    {
+      "name": "defenseclaw.scan.findings",
+      "type": "counter",
+      "unit": "{finding}",
+      "description": "Total findings across all scans"
+    },
+    {
+      "name": "defenseclaw.scan.findings.by_rule",
+      "type": "counter",
+      "unit": "{finding}",
+      "description": "Findings grouped by scanner + rule_id + severity"
+    },
+    {
+      "name": "defenseclaw.scan.findings.gauge",
+      "type": "updowncounter",
+      "unit": "{finding}",
+      "description": "Current open finding count"
+    },
+    {
+      "name": "defenseclaw.scanner.queue.depth",
+      "type": "updowncounter",
+      "unit": "{scan}",
+      "description": "Pending scanner jobs queued ahead of execution"
+    },
+    {
+      "name": "defenseclaw.schema.violations",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Gateway events dropped by the runtime JSON-schema gate (v7)"
+    },
+    {
+      "name": "defenseclaw.slo.block.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Admission-block enforcement latency (SLO target: < 2000ms)"
+    },
+    {
+      "name": "defenseclaw.slo.tui.refresh",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "TUI panel refresh latency (SLO target: < 5000ms)"
+    },
+    {
+      "name": "defenseclaw.sqlite.busy_retries",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "SQLite SQLITE_BUSY events by operation"
+    },
+    {
+      "name": "defenseclaw.sqlite.checkpoint.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "SQLite PRAGMA wal_checkpoint(PASSIVE) duration"
+    },
+    {
+      "name": "defenseclaw.sqlite.db.bytes",
+      "type": "gauge",
+      "unit": "By",
+      "description": "SQLite main database file size"
+    },
+    {
+      "name": "defenseclaw.sqlite.freelist_count",
+      "type": "gauge",
+      "unit": "{page}",
+      "description": "SQLite PRAGMA freelist_count"
+    },
+    {
+      "name": "defenseclaw.sqlite.page_count",
+      "type": "gauge",
+      "unit": "{page}",
+      "description": "SQLite PRAGMA page_count"
+    },
+    {
+      "name": "defenseclaw.sqlite.wal.bytes",
+      "type": "gauge",
+      "unit": "By",
+      "description": "SQLite WAL file size"
+    },
+    {
+      "name": "defenseclaw.stream.bytes_sent",
+      "type": "histogram",
+      "unit": "By",
+      "description": "Bytes sent on an SSE/stream before close"
+    },
+    {
+      "name": "defenseclaw.stream.duration_ms",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Wall-clock duration of an SSE/stream from open to close"
+    },
+    {
+      "name": "defenseclaw.stream.lifecycle",
+      "type": "counter",
+      "unit": "{transition}",
+      "description": "SSE/stream lifecycle transitions (open/close) per route/outcome"
+    },
+    {
+      "name": "defenseclaw.telemetry.exporter.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "OTel exporter or SDK errors by signal"
+    },
+    {
+      "name": "defenseclaw.telemetry.exporter.last_export_ts",
+      "type": "gauge",
+      "unit": "s",
+      "description": "Unix seconds of last successful metric export"
+    },
+    {
+      "name": "defenseclaw.tool.calls",
+      "type": "counter",
+      "unit": "{call}",
+      "description": "Total tool calls observed"
+    },
+    {
+      "name": "defenseclaw.tool.duration",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Tool call duration distribution"
+    },
+    {
+      "name": "defenseclaw.tool.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Tool calls that returned non-zero exit codes"
+    },
+    {
+      "name": "defenseclaw.tui.filter.applied",
+      "type": "counter",
+      "unit": "{filter}",
+      "description": "TUI panel filter applications (operator changed a filter chip or search)"
+    },
+    {
+      "name": "defenseclaw.watcher.errors",
+      "type": "counter",
+      "unit": "{error}",
+      "description": "Filesystem watcher errors"
+    },
+    {
+      "name": "defenseclaw.watcher.events",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Filesystem watcher events observed"
+    },
+    {
+      "name": "defenseclaw.watcher.restarts",
+      "type": "counter",
+      "unit": "{restart}",
+      "description": "Watcher or gateway reconnection events"
+    },
+    {
+      "name": "defenseclaw.webhook.circuit_breaker",
+      "type": "counter",
+      "unit": "{transition}",
+      "description": "Webhook circuit breaker open/close transitions"
+    },
+    {
+      "name": "defenseclaw.webhook.cooldown.suppressed",
+      "type": "counter",
+      "unit": "{event}",
+      "description": "Webhook dispatches suppressed by per-endpoint cooldown"
+    },
+    {
+      "name": "defenseclaw.webhook.dispatches",
+      "type": "counter",
+      "unit": "{dispatch}",
+      "description": "Webhook dispatches attempted by webhook kind"
+    },
+    {
+      "name": "defenseclaw.webhook.failures",
+      "type": "counter",
+      "unit": "{failure}",
+      "description": "Webhook dispatch failures by webhook kind + reason"
+    },
+    {
+      "name": "defenseclaw.webhook.latency",
+      "type": "histogram",
+      "unit": "ms",
+      "description": "Webhook dispatch latency distribution"
+    },
+    {
+      "name": "gen_ai.client.operation.duration",
+      "type": "histogram",
+      "unit": "s",
+      "description": "GenAI operation duration."
+    },
+    {
+      "name": "gen_ai.client.token.usage",
+      "type": "histogram",
+      "unit": "{token}",
+      "description": "Number of input and output tokens used."
+    }
+  ],
   "type": "object",
   "properties": {
     "scan_metrics": {
@@ -156,11 +872,11 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
             },
-            "event_type": { "type": "string" },
-            "result": { "type": "string", "enum": ["ok", "rejected", "unknown"] },
-            "reason": { "type": "string" }
+            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
+            "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
+            "reason": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] }
           }
         },
         {
@@ -171,11 +887,53 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
             },
-            "event_type": { "type": "string" },
-            "result": { "type": "string", "enum": ["ok", "rejected", "unknown"] },
-            "reason": { "type": "string" }
+            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
+            "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
+            "reason": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] }
+          }
+        },
+        {
+          "name": "defenseclaw.connector.hook.tokens",
+          "type": "counter",
+          "unit": "{token}",
+          "description": "Token usage attributable to connector hook invocations.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+            },
+            "model": { "type": "string" },
+            "kind": { "type": "string", "enum": ["prompt", "completion", "total"] }
+          }
+        },
+        {
+          "name": "defenseclaw.connector.hook.outcome",
+          "type": "counter",
+          "unit": "{decision}",
+          "description": "Connector hook outcomes labelled by bounded event/action/severity dimensions.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+            },
+            "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
+            "action": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] },
+            "severity": { "type": "string" },
+            "would_block": { "type": "boolean" }
+          }
+        },
+        {
+          "name": "defenseclaw.connector.hook.unified_dispatch",
+          "type": "counter",
+          "unit": "{invocation}",
+          "description": "Connector hook invocations routed through the unified hook collector.",
+          "attributes": {
+            "connector": {
+              "type": "string",
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+            }
           }
         },
         {
@@ -187,7 +945,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
             },
             "result": { "type": "string", "enum": ["ok", "malformed"] }
           }
@@ -201,7 +959,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
             }
           }
         },
@@ -214,7 +972,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
             }
           }
         },
@@ -227,7 +985,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
             }
           }
         },
@@ -240,7 +998,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
             }
           }
         },
@@ -353,6 +1111,22 @@
               "enum": ["success", "failed"],
               "description": "Outcome of the reload operation."
             }
+          }
+        }
+      ]
+    },
+    "process_metrics": {
+      "type": "array",
+      "description": "Metrics related to gateway process health and recovered failure paths.",
+      "items": { "$ref": "#/$defs/metricDef" },
+      "default": [
+        {
+          "name": "defenseclaw.panics.total",
+          "type": "counter",
+          "unit": "{panic}",
+          "description": "Recovered panics by subsystem.",
+          "attributes": {
+            "subsystem": { "type": "string" }
           }
         }
       ]

@@ -49,10 +49,22 @@ from defenseclaw.paths import (
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
 @click.option(
     "--connector",
-    type=click.Choice([
-        "codex", "claudecode", "claude-code", "zeptoclaw", "openclaw",
-        "hermes", "cursor", "windsurf", "geminicli", "copilot",
-    ], case_sensitive=False),
+    type=click.Choice(
+        [
+            "codex",
+            "claudecode",
+            "claude-code",
+            "zeptoclaw",
+            "openclaw",
+            "hermes",
+            "cursor",
+            "windsurf",
+            "geminicli",
+            "copilot",
+            "openhands",
+        ],
+        case_sensitive=False,
+    ),
     default=None,
     help="Agent connector to configure.",
 )
@@ -223,6 +235,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     ux.banner("Environment")
 
     from defenseclaw import __version__
+
     click.echo(f"  DefenseClaw:   {ux.bold('v' + __version__)}")
     gw_version = _get_gateway_version()
     if gw_version:
@@ -247,8 +260,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"  Claw home:     {cfg.claw_home_dir()}")
 
     dirs = [
-        cfg.data_dir, cfg.quarantine_dir,
-        cfg.plugin_dir, cfg.policy_dir,
+        cfg.data_dir,
+        cfg.quarantine_dir,
+        cfg.plugin_dir,
+        cfg.policy_dir,
     ]
 
     data_dir_real = os.path.realpath(cfg.data_dir)
@@ -299,7 +314,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     ux.banner("Notifications")
     _onboard_notifications(
-        cfg, logger,
+        cfg,
+        logger,
         non_interactive=non_interactive,
         yes=yes,
         is_new_config=is_new_config,
@@ -307,7 +323,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     ux.banner("Notifications")
     _onboard_notifications(
-        cfg, logger,
+        cfg,
+        logger,
         non_interactive=non_interactive,
         yes=yes,
         is_new_config=is_new_config,
@@ -328,17 +345,27 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         else:
             ux.banner("Sandbox")
             from defenseclaw.commands.cmd_init_sandbox import _init_sandbox
+
             sandbox_ok = _init_sandbox(cfg, logger)
 
             if sandbox_ok:
                 ux.banner("Sandbox Networking")
                 from defenseclaw.commands.cmd_setup_sandbox import setup_sandbox
+
                 app.cfg = cfg
                 ctx = click.Context(setup_sandbox, parent=click.get_current_context())
-                ctx.invoke(setup_sandbox, sandbox_ip="10.200.0.2", host_ip="10.200.0.1",
-                           sandbox_home=None, openclaw_port=18789, dns="8.8.8.8,1.1.1.1",
-                           policy="default", no_auto_pair=False, disable=False,
-                           non_interactive=True)
+                ctx.invoke(
+                    setup_sandbox,
+                    sandbox_ip="10.200.0.2",
+                    host_ip="10.200.0.1",
+                    sandbox_home=None,
+                    openclaw_port=18789,
+                    dns="8.8.8.8,1.1.1.1",
+                    policy="default",
+                    no_auto_pair=False,
+                    disable=False,
+                    non_interactive=True,
+                )
 
     sidecar_started = False
     if not sandbox:
@@ -360,36 +387,15 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo()
     click.echo("  " + ux.bold("Next steps:"))
     if sandbox and not guardrail_ok:
-        click.echo(
-            f"    {ux.accent('defenseclaw setup guardrail')}   "
-            + ux.dim("Enable LLM traffic inspection")
-        )
+        click.echo(f"    {ux.accent('defenseclaw setup guardrail')}   " + ux.dim("Enable LLM traffic inspection"))
     elif not guardrail_ok:
-        click.echo(
-            f"    {ux.accent('defenseclaw setup guardrail')}   "
-            + ux.dim("Enable LLM traffic inspection")
-        )
+        click.echo(f"    {ux.accent('defenseclaw setup guardrail')}   " + ux.dim("Enable LLM traffic inspection"))
     if not sidecar_started and not sandbox:
-        click.echo(
-            f"    {ux.accent('defenseclaw-gateway start')}     "
-            + ux.dim("Start the sidecar")
-        )
-    click.echo(
-        f"    {ux.accent('defenseclaw setup')}            "
-        + ux.dim("Customize scanners and policies")
-    )
-    click.echo(
-        f"    {ux.accent('defenseclaw doctor')}           "
-        + ux.dim("Verify connectivity and credentials")
-    )
-    click.echo(
-        f"    {ux.accent('defenseclaw skill scan all')}   "
-        + ux.dim("Scan installed agent skills")
-    )
-    click.echo(
-        f"    {ux.accent('defenseclaw mcp scan --all')}   "
-        + ux.dim("Scan configured MCP servers")
-    )
+        click.echo(f"    {ux.accent('defenseclaw-gateway start')}     " + ux.dim("Start the sidecar"))
+    click.echo(f"    {ux.accent('defenseclaw setup')}            " + ux.dim("Customize scanners and policies"))
+    click.echo(f"    {ux.accent('defenseclaw doctor')}           " + ux.dim("Verify connectivity and credentials"))
+    click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
+    click.echo(f"    {ux.accent('defenseclaw mcp scan --all')}   " + ux.dim("Scan configured MCP servers"))
 
     store.close()
 
@@ -602,8 +608,7 @@ def _prompt_first_run(
             "What hooks do when the gateway returns 4xx, malformed JSON, or no action.",
         )
         ux.subhead(
-            "Transport failures (gateway down / 5xx) ALWAYS allow unless "
-            "DEFENSECLAW_STRICT_AVAILABILITY=1.",
+            "Transport failures (gateway down / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1.",
         )
         fail_mode = click.prompt(
             "  " + ux.bold("Fail mode"),
@@ -624,8 +629,7 @@ def _prompt_first_run(
             "Action mode can pause risky tool calls and ask you to approve them.",
         )
         ux.subhead(
-            "CRITICAL findings always block — HITL covers the lower severities you "
-            "want to review first.",
+            "CRITICAL findings always block — HITL covers the lower severities you want to review first.",
         )
         human_approval = click.confirm(
             "  " + ux.bold("Require human approval for risky actions?"),
@@ -800,9 +804,7 @@ def _seed_local_observability_stack(data_dir: str) -> None:
     _ensure_observability_stack_executables(dest)
     if refreshed:
         joined = ", ".join(sorted(refreshed))
-        click.echo(
-            f"  Observability stack: preserved existing ({dest}); refreshed {joined}"
-        )
+        click.echo(f"  Observability stack: preserved existing ({dest}); refreshed {joined}")
     else:
         click.echo(f"  Observability stack: preserved existing ({dest})")
 
@@ -920,12 +922,9 @@ def _ensure_device_key(path: str) -> None:
         serialization.NoEncryption(),
     )
     import base64
+
     b64_seed = base64.b64encode(seed).decode()
-    pem_data = (
-        "-----BEGIN ED25519 PRIVATE KEY-----\n"
-        f"{b64_seed}\n"
-        "-----END ED25519 PRIVATE KEY-----\n"
-    )
+    pem_data = f"-----BEGIN ED25519 PRIVATE KEY-----\n{b64_seed}\n-----END ED25519 PRIVATE KEY-----\n"
     # Create the file with 0o600 atomically so the key is never
     # world-readable, even for the brief window between open() and
     # the previous chmod(). ``O_EXCL`` ensures we don't overwrite a
@@ -1022,12 +1021,14 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
 
     if connector == "openclaw" and gw_info["token"]:
         from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+
         _save_secret_to_dotenv("OPENCLAW_GATEWAY_TOKEN", gw_info["token"], cfg.data_dir)
         cfg.gateway.token = ""
         cfg.gateway.token_env = "OPENCLAW_GATEWAY_TOKEN"
         token_configured = True
     elif gw_info["token"]:
         from defenseclaw.commands.cmd_setup import _save_secret_to_dotenv
+
         env_name = f"{connector.upper()}_GATEWAY_TOKEN"
         _save_secret_to_dotenv(env_name, gw_info["token"], cfg.data_dir)
         cfg.gateway.token = ""
@@ -1046,27 +1047,26 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     # Plan B2 / S0.2: the sidecar synthesizes a CSPRNG token on first
     # boot and persists it to ~/.defenseclaw/.env (mode 0600). The
     # "none" branch is now an instruction, not a security mode.
-    token_status = (
-        "configured"
-        if token_configured
-        else "auto-generated on first boot (~/.defenseclaw/.env)"
-    )
+    token_status = "configured" if token_configured else "auto-generated on first boot (~/.defenseclaw/.env)"
     click.echo(f"  Token:         {token_status}")
     click.echo(f"  API port:      {cfg.gateway.api_port}")
     click.echo(f"  Watcher:       enabled={cfg.gateway.watcher.enabled}")
     click.echo(f"  AI discovery:  enabled={cfg.ai_discovery.enabled}, mode={cfg.ai_discovery.mode}")
-    click.echo(f"  Skill watch:   enabled={cfg.gateway.watcher.skill.enabled}, "
-               f"take_action={cfg.gateway.watcher.skill.take_action}")
+    click.echo(
+        f"  Skill watch:   enabled={cfg.gateway.watcher.skill.enabled}, "
+        f"take_action={cfg.gateway.watcher.skill.take_action}"
+    )
     plugin_dirs = cfg.gateway.watcher.plugin.dirs or cfg.plugin_dirs()
-    click.echo(f"  Plugin watch:  enabled={cfg.gateway.watcher.plugin.enabled}, "
-               f"take_action={cfg.gateway.watcher.plugin.take_action}")
+    click.echo(
+        f"  Plugin watch:  enabled={cfg.gateway.watcher.plugin.enabled}, "
+        f"take_action={cfg.gateway.watcher.plugin.take_action}"
+    )
     click.echo(f"  Plugin dirs:   {', '.join(plugin_dirs)}")
     click.echo(f"  Device key:    {cfg.gateway.device_key_file}")
     click.echo()
     click.echo("  Run 'defenseclaw setup gateway' to customize.")
 
-    logger.log_action("init-gateway", "config",
-                       f"host={cfg.gateway.host} port={cfg.gateway.port}")
+    logger.log_action("init-gateway", "config", f"host={cfg.gateway.host} port={cfg.gateway.port}")
 
 
 def _install_guardrail(cfg, logger, skip: bool) -> None:
@@ -1087,7 +1087,8 @@ def _ensure_uv() -> None:
     try:
         subprocess.run(
             ["sh", "-c", "curl -LsSf https://astral.sh/uv/install.sh | sh"],
-            capture_output=True, check=True,
+            capture_output=True,
+            check=True,
         )
         _add_uv_to_path()
         click.echo(" done")
@@ -1111,7 +1112,8 @@ def _install_with_uv(pkg: str) -> bool:
     try:
         result = subprocess.run(
             [uv, "tool", "install", "--python", "3.13", pkg],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if result.returncode == 0 or "already installed" in result.stderr:
             return True
@@ -1168,17 +1170,13 @@ def _onboard_notifications(
         # rule is: ask only at first-install. Operators flip the
         # toggle later via ``defenseclaw setup notifications``.
         state = "ON" if nc.enabled else "OFF"
-        click.echo(
-            f"  Notifications: {ux.dim('preserving current setting')} ({state})"
-        )
+        click.echo(f"  Notifications: {ux.dim('preserving current setting')} ({state})")
         click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
         return
 
     if non_interactive or yes or not _stdin_is_tty():
         state = "ON" if nc.enabled else "OFF"
-        click.echo(
-            f"  Notifications: {ux.dim('platform default')} ({state})"
-        )
+        click.echo(f"  Notifications: {ux.dim('platform default')} ({state})")
         click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
         return
 
@@ -1189,8 +1187,7 @@ def _onboard_notifications(
 
     if desired == bool(nc.enabled):
         state = "ON" if desired else "OFF"
-        click.echo("  Notifications: " + ux._style(state, fg="green") +
-                   ux.dim(" (unchanged)"))
+        click.echo("  Notifications: " + ux._style(state, fg="green") + ux.dim(" (unchanged)"))
         return
 
     nc.enabled = desired
@@ -1213,6 +1210,7 @@ def _stdin_is_tty() -> bool:
     redirected stdin.
     """
     import sys
+
     try:
         return sys.stdin.isatty()
     except (AttributeError, ValueError, OSError):
@@ -1260,17 +1258,13 @@ def _onboard_notifications(
         # rule is: ask only at first-install. Operators flip the
         # toggle later via ``defenseclaw setup notifications``.
         state = "ON" if nc.enabled else "OFF"
-        click.echo(
-            f"  Notifications: {ux.dim('preserving current setting')} ({state})"
-        )
+        click.echo(f"  Notifications: {ux.dim('preserving current setting')} ({state})")
         click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
         return
 
     if non_interactive or yes or not _stdin_is_tty():
         state = "ON" if nc.enabled else "OFF"
-        click.echo(
-            f"  Notifications: {ux.dim('platform default')} ({state})"
-        )
+        click.echo(f"  Notifications: {ux.dim('platform default')} ({state})")
         click.echo("  " + ux.dim("Toggle later with: defenseclaw setup notifications"))
         return
 
@@ -1281,8 +1275,7 @@ def _onboard_notifications(
 
     if desired == bool(nc.enabled):
         state = "ON" if desired else "OFF"
-        click.echo("  Notifications: " + ux._style(state, fg="green") +
-                   ux.dim(" (unchanged)"))
+        click.echo("  Notifications: " + ux._style(state, fg="green") + ux.dim(" (unchanged)"))
         return
 
     nc.enabled = desired
@@ -1305,6 +1298,7 @@ def _stdin_is_tty() -> bool:
     redirected stdin.
     """
     import sys
+
     try:
         return sys.stdin.isatty()
     except (AttributeError, ValueError, OSError):
@@ -1353,7 +1347,8 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
         )
         click.echo("  To disable:    " + ux.accent("defenseclaw setup guardrail --disable"))
         logger.log_action(
-            "init-guardrail", "config",
+            "init-guardrail",
+            "config",
             f"mode={gc.mode} scanner_mode={gc.scanner_mode} port={gc.port} model={gc.model}",
         )
 
@@ -1379,7 +1374,9 @@ def _start_gateway(cfg, logger) -> None:
     try:
         result = subprocess.run(
             ["defenseclaw-gateway", "start"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode == 0:
             click.echo(" " + ux._style("✓", fg="green", bold=True))
@@ -1415,7 +1412,10 @@ def _get_gateway_version() -> str | None:
         return None
     try:
         result = subprocess.run(
-            [gw, "--version"], capture_output=True, text=True, timeout=5,
+            [gw, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip().split()[-1] if result.stdout.strip() else None
@@ -1431,7 +1431,10 @@ def _restart_gateway_quiet() -> None:
         return
     try:
         subprocess.run(
-            [gw, "restart"], capture_output=True, text=True, timeout=15,
+            [gw, "restart"],
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         pass
@@ -1458,6 +1461,7 @@ def _read_pid(pid_file: str) -> int | None:
             return int(raw)
         except ValueError:
             import json
+
             return json.loads(raw)["pid"]
     except (FileNotFoundError, ValueError, KeyError, OSError):
         return None

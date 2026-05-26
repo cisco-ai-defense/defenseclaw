@@ -189,6 +189,8 @@ func applyConfigField(c *config.Config, key, val string) {
 	// Claw
 	case "claw.mode":
 		c.Claw.Mode = config.ClawMode(val)
+	case "claw.workspace_dir":
+		c.Claw.WorkspaceDir = val
 	case "claw.home_dir":
 		c.Claw.HomeDir = val
 	case "claw.config_file":

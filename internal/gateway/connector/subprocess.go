@@ -136,6 +136,7 @@ var connectorHookScripts = map[string][]string{
 	"cursor":     {"cursor-hook.sh"},
 	"geminicli":  {"geminicli-hook.sh"},
 	"hermes":     {"hermes-hook.sh"},
+	"openhands":  {"openhands-hook.sh"},
 	"windsurf":   {"windsurf-hook.sh"},
 }
 

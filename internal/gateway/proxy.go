@@ -360,6 +360,11 @@ func NewGuardrailProxy(
 	// over `data.guardrail.hilt` (the data path is preserved as a fallback
 	// for non-gateway callers like direct `opa eval` runs).
 	inspector.SetHILTConfig(cfg.HILT.Enabled, cfg.HILT.MinSeverity)
+	if otel != nil {
+		inspector.SetPanicRecorderFunc(func(ctx context.Context) {
+			otel.RecordPanic(ctx, gatewaylog.SubsystemGuardrail)
+		})
+	}
 	// Wire OTel span emission when telemetry is enabled. The
 	// inspector only sees a closure, so the telemetry dep stays
 	// localized to the proxy wiring layer.
@@ -497,7 +502,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	})
 	fmt.Fprintf(os.Stderr, "[guardrail] starting proxy (addr=%s mode=%s model=%s)\n",
 		addr, p.mode, p.cfg.ModelName)
-	_ = p.logger.LogAction("guardrail-start", "",
+	_ = p.logger.LogAction(string(audit.ActionGuardrailStart), "",
 		fmt.Sprintf("port=%d mode=%s model=%s", p.cfg.Port, p.mode, p.cfg.ModelName))
 	emitLifecycle(ctx, "guardrail", "start", map[string]string{
 		"port":  fmt.Sprintf("%d", p.cfg.Port),
@@ -523,7 +528,7 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 			"addr": addr,
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on %s\n", addr)
-		_ = p.logger.LogAction("guardrail-healthy", "", fmt.Sprintf("port=%d", p.cfg.Port))
+		_ = p.logger.LogAction(string(audit.ActionGuardrailHealthy), "", fmt.Sprintf("port=%d", p.cfg.Port))
 		emitLifecycle(ctx, "guardrail", "ready", map[string]string{
 			"port": fmt.Sprintf("%d", p.cfg.Port),
 		})
@@ -952,7 +957,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		fmt.Fprintf(os.Stderr, "[guardrail] laundered %d DefenseClaw block turn(s) from passthrough history (path=%s)\n", stripped, r.URL.Path)
 		body = []byte(launderedBody)
 		if p.logger != nil {
-			_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
+			_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailLaunder), r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from request history", stripped))
 		}
 	}
 
@@ -973,7 +978,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 				fmt.Fprintf(os.Stderr, "[guardrail] injecting security notification into passthrough request (site=%s path=%s)\n", site, r.URL.Path)
 				body = []byte(patched)
 				if p.logger != nil {
-					_ = p.logger.LogActionCtx(r.Context(), "guardrail-notify-inject", site, "injected security notification into passthrough LLM request")
+					_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailNotifyInject), site, "injected security notification into passthrough LLM request")
 				}
 			} else {
 				// Not a failure: some provider surfaces (Anthropic,
@@ -1767,7 +1772,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				req.Messages = rebuilt.Messages
 			}
 			if p.logger != nil {
-				_ = p.logger.LogActionCtx(r.Context(), "guardrail-launder", r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from chat-completions request", stripped))
+				_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailLaunder), r.URL.Path, fmt.Sprintf("stripped %d stale DefenseClaw block turn(s) from chat-completions request", stripped))
 			}
 		}
 	}
@@ -1790,7 +1795,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				req.Messages = append([]ChatMessage{notification}, req.Messages...)
 			}
 			if p.logger != nil {
-				_ = p.logger.LogActionCtx(r.Context(), "guardrail-notify-inject", "", "injected security notification into LLM request")
+				_ = p.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailNotifyInject), "", "injected security notification into LLM request")
 			}
 		}
 	}
@@ -3522,7 +3527,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// used to be silently dropped on the SQLite row even when
 		// the matching gateway.jsonl row had them. See review
 		// finding C1 for the coverage-gap writeup.
-		_ = p.logger.LogActionCtx(ctx, "guardrail-verdict", model, details)
+		_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailVerdict), model, details)
 	}
 	if p.store != nil {
 		// guardrail-inspection is the SQLite-only twin row the
@@ -3545,7 +3550,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		// unredacted form to whichever forwarder reads from
 		// audit.Store.
 		evt := audit.Event{
-			Action:    "guardrail-inspection",
+			Action:    string(audit.ActionGuardrailInspection),
 			Target:    model,
 			Severity:  verdict.Severity,
 			Details:   redaction.ForSinkReason(details),
@@ -3557,10 +3562,10 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 	}
 
 	if p.logger != nil {
-		_ = p.logger.LogActionWithCorrelation("guardrail-verdict", model, details, "", requestID)
+		_ = p.logger.LogActionWithCorrelation(string(audit.ActionGuardrailVerdict), model, details, "", requestID)
 	}
 	_ = persistAuditEvent(p.logger, p.store, audit.Event{
-		Action:    "guardrail-inspection",
+		Action:    string(audit.ActionGuardrailInspection),
 		Target:    model,
 		Severity:  verdict.Severity,
 		Details:   details,
@@ -3590,7 +3595,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		event := audit.Event{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now().UTC(),
-			Action:    "guardrail-block",
+			Action:    string(audit.ActionGuardrailBlock),
 			Target:    model,
 			Actor:     "defenseclaw-guardrail",
 			Details:   details,
@@ -3953,7 +3958,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	if err := json.Unmarshal(toolCallsJSON, &toolCalls); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT parse error (blocking): %v\n", err)
 		if p.logger != nil {
-			_ = p.logger.LogActionCtx(ctx, "guardrail-tool-call-parse-error", "", err.Error())
+			_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailToolCallParseError), "", err.Error())
 		}
 		return &ScanVerdict{
 			Action:         "block",
@@ -4000,7 +4005,7 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 
 	if p.logger != nil {
 		for _, tc := range toolCalls {
-			_ = p.logger.LogActionCtx(ctx, "guardrail-tool-call-inspect", tc.Function.Name,
+			_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailToolCallInspect), tc.Function.Name,
 				fmt.Sprintf("action=%s severity=%s confidence=%.2f", action, severity, confidence))
 		}
 	}

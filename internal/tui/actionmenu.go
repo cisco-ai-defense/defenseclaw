@@ -398,6 +398,8 @@ func mcpUnsetTargetForConnector(connector string) string {
 		return "~/.gemini/settings.json"
 	case "copilot":
 		return "./.github/mcp.json"
+	case "openhands":
+		return "~/.openhands/mcp.json"
 	default:
 		return "OpenClaw config"
 	}

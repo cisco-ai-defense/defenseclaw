@@ -29,27 +29,29 @@ import os
 from pathlib import Path
 
 import pytest
-
 from defenseclaw import connector_paths
 from defenseclaw.connector_paths import MCPServerEntry
-
 
 # ---------------------------------------------------------------------------
 # normalize / is_known
 # ---------------------------------------------------------------------------
 
+
 class TestNormalize:
-    @pytest.mark.parametrize("inp,expected", [
-        (None, "openclaw"),
-        ("", "openclaw"),
-        ("   ", "openclaw"),
-        ("openclaw", "openclaw"),
-        ("OpenClaw", "openclaw"),
-        ("  CODEX  ", "codex"),
-        ("Claudecode", "claudecode"),
-        ("zeptoclaw", "zeptoclaw"),
-        ("future-connector", "future-connector"),
-    ])
+    @pytest.mark.parametrize(
+        "inp,expected",
+        [
+            (None, "openclaw"),
+            ("", "openclaw"),
+            ("   ", "openclaw"),
+            ("openclaw", "openclaw"),
+            ("OpenClaw", "openclaw"),
+            ("  CODEX  ", "codex"),
+            ("Claudecode", "claudecode"),
+            ("zeptoclaw", "zeptoclaw"),
+            ("future-connector", "future-connector"),
+        ],
+    )
     def test_normalizes(self, inp, expected):
         assert connector_paths.normalize(inp) == expected
 
@@ -76,13 +78,16 @@ class TestIsKnown:
 # skill_dirs
 # ---------------------------------------------------------------------------
 
+
 class TestSkillDirs:
     def test_claudecode(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         dirs = connector_paths.skill_dirs("claudecode")
         home = str(Path.home())
         assert os.path.join(home, ".claude", "skills") in dirs
-        assert os.path.join(str(tmp_path), ".claude", "skills") in dirs
+        assert os.path.join(str(tmp_path), ".claude", "skills") not in dirs
+        workspace_dirs = connector_paths.skill_dirs("claudecode", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".claude", "skills") in workspace_dirs
 
     def test_codex(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -102,10 +107,44 @@ class TestSkillDirs:
         assert connector_paths.skill_dirs("hermes") == [
             os.path.join(str(tmp_path / "home"), ".hermes", "skills"),
         ]
-        assert os.path.join(str(tmp_path), ".cursor", "skills") in connector_paths.skill_dirs("cursor")
+        assert os.path.join(str(tmp_path / "home"), ".cursor", "skills") in connector_paths.skill_dirs("cursor")
+        assert os.path.join(str(tmp_path), ".cursor", "skills") in connector_paths.skill_dirs(
+            "cursor",
+            workspace_dir=str(tmp_path),
+        )
         assert connector_paths.skill_dirs("windsurf") == []
-        assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
-        assert os.path.join(str(tmp_path), ".github", "skills") in connector_paths.skill_dirs("copilot")
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
+        assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs(
+            "geminicli",
+            workspace_dir=str(tmp_path),
+        )
+        assert os.path.join(str(tmp_path / "home"), ".copilot", "skills") in connector_paths.skill_dirs("copilot")
+        assert os.path.join(str(tmp_path), ".github", "skills") in connector_paths.skill_dirs(
+            "copilot",
+            workspace_dir=str(tmp_path),
+        )
+        openhands = connector_paths.skill_dirs("openhands")
+        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in openhands
+        assert os.path.join(str(tmp_path / "home"), ".openhands", "skills") in openhands
+        assert os.path.join(str(tmp_path / "home"), ".openhands", "microagents") in openhands
+        assert os.path.join(str(tmp_path / "home"), ".openhands", "skills", "installed") in openhands
+        assert os.path.join(
+            str(tmp_path / "home"), ".openhands", "cache", "skills", "public-skills", "skills"
+        ) in openhands
+
+    def test_openhands_skill_dirs_honor_workspace_override(self, tmp_path, monkeypatch):
+        outside = tmp_path / "outside"
+        workspace = tmp_path / "repo"
+        outside.mkdir()
+        workspace.mkdir()
+        monkeypatch.chdir(outside)
+
+        openhands = connector_paths.skill_dirs("openhands", workspace_dir=str(workspace))
+
+        assert os.path.join(str(workspace), ".agents", "skills") in openhands
+        assert os.path.join(str(workspace), ".openhands", "skills") in openhands
+        assert os.path.join(str(workspace), ".openhands", "microagents") in openhands
+        assert all(str(outside) not in path for path in openhands)
 
     def test_openclaw_default_paths(self, tmp_path):
         dirs = connector_paths.skill_dirs(
@@ -120,10 +159,14 @@ class TestSkillDirs:
 
     def test_openclaw_honors_extra_dirs(self, tmp_path):
         cfg_path = tmp_path / "openclaw.json"
-        cfg_path.write_text(json.dumps({
-            "agents": {"defaults": {"workspace": str(tmp_path / "ws")}},
-            "skills": {"load": {"extraDirs": [str(tmp_path / "extra1")]}},
-        }))
+        cfg_path.write_text(
+            json.dumps(
+                {
+                    "agents": {"defaults": {"workspace": str(tmp_path / "ws")}},
+                    "skills": {"load": {"extraDirs": [str(tmp_path / "extra1")]}},
+                }
+            )
+        )
         dirs = connector_paths.skill_dirs(
             "openclaw",
             openclaw_home=str(tmp_path),
@@ -149,6 +192,7 @@ class TestSkillDirs:
 # plugin_dirs
 # ---------------------------------------------------------------------------
 
+
 class TestPluginDirs:
     def test_claudecode(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -169,7 +213,8 @@ class TestPluginDirs:
 
     def test_openclaw(self, tmp_path):
         dirs = connector_paths.plugin_dirs(
-            "openclaw", openclaw_home=str(tmp_path),
+            "openclaw",
+            openclaw_home=str(tmp_path),
         )
         assert dirs == [os.path.join(str(tmp_path), "extensions")]
 
@@ -179,8 +224,15 @@ class TestPluginDirs:
         assert os.path.join(str(tmp_path / "home"), ".hermes", "plugins") in connector_paths.plugin_dirs("hermes")
         assert connector_paths.plugin_dirs("cursor") == []
         assert connector_paths.plugin_dirs("windsurf") == []
-        assert os.path.join(str(tmp_path), ".gemini", "extensions") in connector_paths.plugin_dirs("geminicli")
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "extensions") in connector_paths.plugin_dirs(
+            "geminicli"
+        )
+        assert os.path.join(str(tmp_path), ".gemini", "extensions") in connector_paths.plugin_dirs(
+            "geminicli",
+            workspace_dir=str(tmp_path),
+        )
         assert connector_paths.plugin_dirs("copilot") == []
+        assert connector_paths.plugin_dirs("openhands") == []
 
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
@@ -198,6 +250,7 @@ class TestPluginDirs:
 # mcp_servers
 # ---------------------------------------------------------------------------
 
+
 class TestMCPServers:
     def _write_mcp_json(self, dirpath: Path, servers: dict) -> Path:
         path = dirpath / ".mcp.json"
@@ -211,10 +264,13 @@ class TestMCPServers:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        self._write_mcp_json(tmp_path, {
-            "github": {"command": "gh", "args": ["mcp"]},
-        })
-        entries = connector_paths.mcp_servers("codex")
+        self._write_mcp_json(
+            tmp_path,
+            {
+                "github": {"command": "gh", "args": ["mcp"]},
+            },
+        )
+        entries = connector_paths.mcp_servers("codex", workspace_dir=str(tmp_path))
         assert [e.name for e in entries] == ["github"]
         assert entries[0].command == "gh"
         assert entries[0].args == ["mcp"]
@@ -225,6 +281,7 @@ class TestMCPServers:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
         assert connector_paths.mcp_servers("codex") == []
+        assert connector_paths.mcp_servers("codex", workspace_dir=str(tmp_path)) == []
 
     def test_new_connector_mcp_readers(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -240,7 +297,7 @@ class TestMCPServers:
         cursor = tmp_path / ".cursor" / "mcp.json"
         cursor.parent.mkdir(parents=True)
         cursor.write_text(json.dumps({"mcpServers": {"c": {"command": "cursor-mcp"}}}))
-        assert connector_paths.mcp_servers("cursor")[0].command == "cursor-mcp"
+        assert connector_paths.mcp_servers("cursor", workspace_dir=str(tmp_path))[0].command == "cursor-mcp"
 
         gemini = fake_home / ".gemini" / "settings.json"
         gemini.parent.mkdir(parents=True)
@@ -250,7 +307,12 @@ class TestMCPServers:
         copilot = tmp_path / ".github" / "mcp.json"
         copilot.parent.mkdir(parents=True)
         copilot.write_text(json.dumps({"mcpServers": {"p": {"command": "copilot-mcp"}}}))
-        assert connector_paths.mcp_servers("copilot")[0].command == "copilot-mcp"
+        assert connector_paths.mcp_servers("copilot", workspace_dir=str(tmp_path))[0].command == "copilot-mcp"
+
+        openhands = fake_home / ".openhands" / "mcp.json"
+        openhands.parent.mkdir(parents=True)
+        openhands.write_text(json.dumps({"mcpServers": {"o": {"command": "openhands-mcp"}}}))
+        assert connector_paths.mcp_servers("openhands")[0].command == "openhands-mcp"
 
     def test_codex_reads_global_config_toml(self, tmp_path, monkeypatch):
         """Bug fix regression: pre-S5.x ``defenseclaw mcp list`` only
@@ -273,37 +335,41 @@ class TestMCPServers:
         cwd.mkdir()
         monkeypatch.chdir(cwd)
 
-        entries = connector_paths.mcp_servers("codex")
+        entries = connector_paths.mcp_servers("codex", workspace_dir=str(cwd))
         assert [e.name for e in entries] == ["global-fs"]
         assert entries[0].command == "node"
         assert entries[0].args == ["/opt/fs.js"]
         assert entries[0].env == {"TOKEN": "redacted"}
 
     def test_codex_merges_global_toml_and_local_dotmcp(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         fake_home = tmp_path / "home"
         codex_dir = fake_home / ".codex"
         codex_dir.mkdir(parents=True)
-        (codex_dir / "config.toml").write_text(
-            "[mcp_servers.global-fs]\n"
-            'command = "node"\n'
-        )
+        (codex_dir / "config.toml").write_text('[mcp_servers.global-fs]\ncommand = "node"\n')
         monkeypatch.setenv("HOME", str(fake_home))
 
         cwd = tmp_path / "project"
         cwd.mkdir()
-        self._write_mcp_json(cwd, {
-            "local-search": {"command": "search-mcp"},
-        })
+        self._write_mcp_json(
+            cwd,
+            {
+                "local-search": {"command": "search-mcp"},
+            },
+        )
         monkeypatch.chdir(cwd)
 
-        entries = connector_paths.mcp_servers("codex")
+        entries = connector_paths.mcp_servers("codex", workspace_dir=str(cwd))
         names = sorted(e.name for e in entries)
         assert names == ["global-fs", "local-search"]
 
     def test_codex_malformed_config_toml_falls_back_to_dotmcp(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         fake_home = tmp_path / "home"
         codex_dir = fake_home / ".codex"
@@ -313,40 +379,52 @@ class TestMCPServers:
 
         cwd = tmp_path / "project"
         cwd.mkdir()
-        self._write_mcp_json(cwd, {
-            "local-search": {"command": "search-mcp"},
-        })
+        self._write_mcp_json(
+            cwd,
+            {
+                "local-search": {"command": "search-mcp"},
+            },
+        )
         monkeypatch.chdir(cwd)
 
         # Malformed TOML must NOT raise — we soft-fall-back to the
         # project-local file. This keeps `defenseclaw mcp list`
         # usable when an operator hand-edits config.toml and breaks
         # it; the next save will fix it without us crashing.
-        entries = connector_paths.mcp_servers("codex")
+        entries = connector_paths.mcp_servers("codex", workspace_dir=str(cwd))
         assert [e.name for e in entries] == ["local-search"]
 
     def test_claudecode_merges_settings_and_dotmcp(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         # Override $HOME so we can write a fake .claude/settings.json
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         (fake_home / ".claude").mkdir()
-        (fake_home / ".claude" / "settings.json").write_text(json.dumps({
-            "mcpServers": {
-                "from-settings": {"command": "x"},
-            },
-        }))
+        (fake_home / ".claude" / "settings.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "from-settings": {"command": "x"},
+                    },
+                }
+            )
+        )
         monkeypatch.setenv("HOME", str(fake_home))
 
         cwd = tmp_path / "project"
         cwd.mkdir()
-        self._write_mcp_json(cwd, {
-            "from-mcp-json": {"command": "y"},
-        })
+        self._write_mcp_json(
+            cwd,
+            {
+                "from-mcp-json": {"command": "y"},
+            },
+        )
         monkeypatch.chdir(cwd)
 
-        entries = connector_paths.mcp_servers("claudecode")
+        entries = connector_paths.mcp_servers("claudecode", workspace_dir=str(cwd))
         names = [e.name for e in entries]
         assert "from-settings" in names
         assert "from-mcp-json" in names
@@ -354,11 +432,17 @@ class TestMCPServers:
     def test_zeptoclaw_reads_config_json(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
         (fake_home / ".zeptoclaw").mkdir(parents=True)
-        (fake_home / ".zeptoclaw" / "config.json").write_text(json.dumps({
-            "mcp": {"servers": {
-                "zepto-srv": {"command": "z", "transport": "stdio"},
-            }},
-        }))
+        (fake_home / ".zeptoclaw" / "config.json").write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "servers": {
+                            "zepto-srv": {"command": "z", "transport": "stdio"},
+                        }
+                    },
+                }
+            )
+        )
         monkeypatch.setenv("HOME", str(fake_home))
         monkeypatch.chdir(tmp_path)
 
@@ -369,15 +453,23 @@ class TestMCPServers:
         assert srv.transport == "stdio"
 
     def test_zeptoclaw_dedups_when_dotmcp_repeats_name(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         fake_home = tmp_path / "home"
         (fake_home / ".zeptoclaw").mkdir(parents=True)
-        (fake_home / ".zeptoclaw" / "config.json").write_text(json.dumps({
-            "mcp": {"servers": {
-                "shared": {"command": "from-config"},
-            }},
-        }))
+        (fake_home / ".zeptoclaw" / "config.json").write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "servers": {
+                            "shared": {"command": "from-config"},
+                        }
+                    },
+                }
+            )
+        )
         monkeypatch.setenv("HOME", str(fake_home))
         cwd = tmp_path / "p"
         cwd.mkdir()
@@ -390,14 +482,22 @@ class TestMCPServers:
         assert entries[0].command == "from-config"
 
     def test_openclaw_reads_openclaw_json_when_cli_unavailable(
-        self, tmp_path, monkeypatch,
+        self,
+        tmp_path,
+        monkeypatch,
     ):
         oc_path = tmp_path / "openclaw.json"
-        oc_path.write_text(json.dumps({
-            "mcp": {"servers": {
-                "oc-srv": {"command": "openclaw-mcp"},
-            }},
-        }))
+        oc_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "servers": {
+                            "oc-srv": {"command": "openclaw-mcp"},
+                        }
+                    },
+                }
+            )
+        )
 
         # Force the CLI helper to return None (=> fallback to file).
         monkeypatch.setattr(
@@ -407,7 +507,8 @@ class TestMCPServers:
         )
 
         entries = connector_paths.mcp_servers(
-            "openclaw", openclaw_config=str(oc_path),
+            "openclaw",
+            openclaw_config=str(oc_path),
         )
         assert [e.name for e in entries] == ["oc-srv"]
 
@@ -415,6 +516,7 @@ class TestMCPServers:
 # ---------------------------------------------------------------------------
 # Round-trip via Config.skill_dirs / plugin_dirs / mcp_servers
 # ---------------------------------------------------------------------------
+
 
 class TestConfigDispatch:
     def test_config_skill_dirs_uses_active_connector(self):
@@ -457,7 +559,9 @@ class TestConfigDispatch:
 # defenseclaw.config so downstream callers (cmd_mcp, tests) don't break.
 # ---------------------------------------------------------------------------
 
+
 class TestMCPServerEntryReExport:
     def test_importable_from_config(self):
         from defenseclaw.config import MCPServerEntry as MCPFromConfig
+
         assert MCPFromConfig is MCPServerEntry

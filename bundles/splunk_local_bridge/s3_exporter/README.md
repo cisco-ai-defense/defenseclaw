@@ -8,6 +8,9 @@ The existing local bridge behavior remains unchanged:
 - The Splunk app remains `defenseclaw_local_mode`.
 - HEC remains on port `8088` with the local bridge token from `splunk/default.yml`.
 - The exporter talks to local Splunk management at `https://splunk:8089` inside the compose network.
+- The exporter searches these local signal families when present:
+  `defenseclaw:json`, `openclaw:gateway:json`,
+  `openclaw:diagnostics:json`, `otel:log`, `otel:metric`, and `otel:trace`.
 
 ## How It Works
 

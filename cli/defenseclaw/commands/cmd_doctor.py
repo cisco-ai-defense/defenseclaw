@@ -31,6 +31,7 @@ import urllib.request
 import click
 
 from defenseclaw import ux
+from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.webhooks import list_webhooks, validate_webhook_url
 
@@ -58,14 +59,7 @@ def _doctor_subsection(title: str) -> None:
     """
     click.echo()
     if ux._color_enabled():
-        click.echo(
-            "  "
-            + ux.dim("──")
-            + " "
-            + ux._style(title, fg="cyan", bold=True)
-            + " "
-            + ux.dim("──")
-        )
+        click.echo("  " + ux.dim("──") + " " + ux._style(title, fg="cyan", bold=True) + " " + ux.dim("──"))
     else:
         click.echo(f"  ── {title} ──")
 
@@ -85,9 +79,7 @@ def _doctor_marker(tag: str) -> str:
         return ux._style(glyph, fg=fg, bold=True)
     # Plain mode → legacy "[VERB]" so existing log pattern matchers
     # (and any cron job that splits on `[FAIL]`) keep matching.
-    verb = {"pass": "PASS", "fail": "FAIL", "warn": "WARN", "skip": "SKIP"}.get(
-        tag, tag.upper()
-    )
+    verb = {"pass": "PASS", "fail": "FAIL", "warn": "WARN", "skip": "SKIP"}.get(tag, tag.upper())
     return f"[{verb}]"
 
 
@@ -151,9 +143,8 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
     # CLI and TUI runs.
     import datetime as _dt
     import tempfile
-    payload["captured_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(
-        timespec="seconds"
-    ).replace("+00:00", "Z")
+
+    payload["captured_at"] = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     tmp_path = ""
     try:
         os.makedirs(data_dir, exist_ok=True)
@@ -236,8 +227,9 @@ def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     return ""
 
 
-def _http_probe(url: str, *, method: str = "GET", headers: dict | None = None,
-                body: bytes | None = None, timeout: float = 10.0) -> tuple[int, str]:
+def _http_probe(
+    url: str, *, method: str = "GET", headers: dict | None = None, body: bytes | None = None, timeout: float = 10.0
+) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure."""
     req = urllib.request.Request(url, method=method, headers=headers or {}, data=body)
     try:
@@ -257,6 +249,7 @@ def _http_probe(url: str, *, method: str = "GET", headers: dict | None = None,
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+
 
 def _check_config(cfg, r: _DoctorResult) -> None:
     if os.path.isfile(os.path.join(cfg.data_dir, "config.yaml")):
@@ -288,19 +281,22 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("warn", "Human approval", "Cursor ask is supported only on documented ask-capable hook events", r=r)
     elif connector == "codex":
         _emit(
-            "warn", "Human approval",
+            "warn",
+            "Human approval",
             "Codex has no native ask surface here; confirm verdicts alert with raw_action preserved",
             r=r,
         )
     elif connector == "zeptoclaw":
         _emit(
-            "warn", "Human approval",
+            "warn",
+            "Human approval",
             "ZeptoClaw has no native ask surface; confirm verdicts alert with raw_action preserved",
             r=r,
         )
-    elif connector in {"hermes", "windsurf", "geminicli"}:
+    elif connector in {"hermes", "windsurf", "geminicli", "openhands"}:
         _emit(
-            "warn", "Human approval",
+            "warn",
+            "Human approval",
             f"{connector} can block supported hook events but has no native human approval surface",
             r=r,
         )
@@ -393,8 +389,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                         _emit(
                             "warn",
                             f"  └─ {sub}",
-                            "disabled (reported by sidecar) but enabled in config "
-                            "— sidecar is stale, restart it",
+                            "disabled (reported by sidecar) but enabled in config — sidecar is stale, restart it",
                             r=r,
                         )
                         if not stale_hint_printed:
@@ -423,11 +418,7 @@ def _check_sidecar(cfg, r: _DoctorResult) -> None:
                             raw = details_obj.get("summary")
                             if isinstance(raw, str):
                                 summary = raw.strip()
-                        detail_msg = (
-                            f"disabled — {summary}"
-                            if summary
-                            else "disabled (reported by sidecar)"
-                        )
+                        detail_msg = f"disabled — {summary}" if summary else "disabled (reported by sidecar)"
                         _emit("skip", f"  └─ {sub}", detail_msg, r=r)
                 else:
                     _emit("fail", f"  └─ {sub}", state, r=r)
@@ -486,6 +477,110 @@ def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
 
 
+def _workspace_dir(cfg) -> str:
+    resolver = getattr(cfg, "connector_workspace_dir", None)
+    if callable(resolver):
+        try:
+            return resolver()
+        except Exception:
+            pass
+    claw = getattr(cfg, "claw", None)
+    raw = (getattr(claw, "workspace_dir", "") or "").strip()
+    if not raw:
+        return ""
+    return os.path.abspath(os.path.expanduser(raw))
+
+
+def _path_is_inside(path: str, parent: str) -> bool:
+    if not path or not parent:
+        return False
+    try:
+        path_abs = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+        parent_abs = os.path.realpath(os.path.abspath(os.path.expanduser(parent)))
+        return os.path.commonpath([path_abs, parent_abs]) == parent_abs
+    except (OSError, ValueError):
+        return False
+
+
+def _hook_json_references(path: str, script_name: str) -> bool:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (json.JSONDecodeError, OSError):
+        return False
+
+    stack = [raw]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key in ("command", "bash", "cmd"):
+                value = current.get(key)
+                if isinstance(value, str) and ("defenseclaw" in value or script_name in value):
+                    return True
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
+    return False
+
+
+def _check_openhands_hooks(cfg, r: _DoctorResult) -> None:
+    workspace = _workspace_dir(cfg)
+    home = os.path.expanduser("~")
+    candidates = [os.path.join(home, ".openhands", "hooks.json")]
+    if workspace:
+        candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
+    present = [path for path in candidates if os.path.isfile(path)]
+    if not present:
+        _emit(
+            "fail",
+            "OpenHands hooks",
+            "not found in OpenHands SDK search paths: " + ", ".join(candidates),
+            r=r,
+        )
+        return
+    for path in present:
+        if _hook_json_references(path, "openhands-hook.sh"):
+            _emit("pass", "OpenHands hooks", f"reachable at {path}", r=r)
+            return
+    _emit(
+        "fail",
+        "OpenHands hooks",
+        "hooks.json exists but does not reference DefenseClaw hook script: " + ", ".join(present),
+        r=r,
+    )
+
+
+def _check_copilot_hooks(cfg, r: _DoctorResult) -> None:
+    workspace = _workspace_dir(cfg)
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not workspace:
+        path = os.path.join(os.path.expanduser("~"), ".copilot", "hooks", "defenseclaw.json")
+        if not os.path.isfile(path):
+            _emit("fail", "Copilot hooks", f"{path} not found", r=r)
+            return
+        if _hook_json_references(path, "copilot-hook.sh"):
+            _emit("pass", "Copilot hooks", f"reachable at {path}", r=r)
+            return
+        _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
+        return
+    if _path_is_inside(workspace, data_dir):
+        _emit(
+            "fail",
+            "Copilot hooks",
+            f"workspace_dir points inside DefenseClaw data dir ({workspace}); run setup from the target repository",
+            r=r,
+        )
+        return
+    path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
+    if not os.path.isfile(path):
+        _emit("fail", "Copilot hooks", f"{path} not found", r=r)
+        return
+    if _hook_json_references(path, "copilot-hook.sh"):
+        _emit("pass", "Copilot hooks", f"reachable at {path}", r=r)
+    else:
+        _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
+
+
 def _check_zeptoclaw_config(cfg, r: _DoctorResult) -> None:
     config_path = os.path.expanduser("~/.zeptoclaw/config.json")
     if not os.path.isfile(config_path):
@@ -523,7 +618,8 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 
     if not cfg.guardrail.model:
         _emit(
-            "warn", "Guardrail proxy",
+            "warn",
+            "Guardrail proxy",
             "guardrail.model is empty — relying on fetch-interceptor routing",
             r=r,
         )
@@ -550,17 +646,11 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """
     connector = _active_connector(cfg)
     gc = cfg.guardrail
-    if connector in {"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}:
+    if connector in {"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"}:
         mode = (getattr(gc, "mode", "") or "observe").strip().lower()
         if mode == "action":
-            return (
-                f"hook-enforced for {connector} (mode=action via PreToolUse deny) — "
-                "proxy port intentionally closed"
-            )
-        return (
-            f"hook-driven for {connector} (mode=observe) — proxy port "
-            "intentionally closed"
-        )
+            return f"hook-enforced for {connector} (mode=action via PreToolUse deny) — proxy port intentionally closed"
+        return f"hook-driven for {connector} (mode=observe) — proxy port intentionally closed"
     return ""
 
 
@@ -592,13 +682,15 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         base = llm.base_url or "(default)"
         if not model:
             _emit(
-                "warn", "LLM API key",
+                "warn",
+                "LLM API key",
                 f"local provider '{llm.provider}' configured (base_url={base}) but no model set",
                 r=r,
             )
         else:
             _emit(
-                "skip", "LLM API key",
+                "skip",
+                "LLM API key",
                 f"local provider '{llm.provider}' needs no key (base_url={base}, model={model})",
                 r=r,
             )
@@ -644,8 +736,10 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
         _verify_bedrock(api_key, r)
     else:
         _emit(
-            "pass", "LLM API key",
-            f"{env_name} is set (cannot verify provider '{provider or model}')", r=r,
+            "pass",
+            "LLM API key",
+            f"{env_name} is set (cannot verify provider '{provider or model}')",
+            r=r,
         )
 
 
@@ -669,6 +763,7 @@ def _anthropic_probe_model(configured_model: str) -> str:
         return override
     return _ANTHROPIC_DEFAULT_PROBE_MODEL
 
+
 # Default model used for the Anthropic auth probe when the configured model
 # is not an Anthropic model. The probe sends max_tokens=1 so cost is
 # negligible; any valid model id accepted by the account works. We pick a
@@ -677,13 +772,16 @@ def _anthropic_probe_model(configured_model: str) -> str:
 # DEFENSECLAW_ANTHROPIC_PROBE_MODEL.
 _ANTHROPIC_DEFAULT_PROBE_MODEL = "claude-3-5-haiku-latest"
 
+
 def _verify_anthropic(api_key: str, r: _DoctorResult, configured_model: str = "") -> None:
     probe_model = _anthropic_probe_model(configured_model)
-    payload = json.dumps({
-        "model": probe_model,
-        "max_tokens": 1,
-        "messages": [{"role": "user", "content": "ping"}],
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": probe_model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}],
+        }
+    ).encode()
     code, body = _http_probe(
         "https://api.anthropic.com/v1/messages",
         method="POST",
@@ -773,17 +871,17 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
     """
     if api_key.startswith("AKIA") or api_key.startswith("ASIA"):
         _emit(
-            "warn", "LLM API key (Bedrock)",
-            "AWS SigV4 credentials detected — doctor skips signed probes; "
-            "run 'aws sts get-caller-identity' to verify.",
+            "warn",
+            "LLM API key (Bedrock)",
+            "AWS SigV4 credentials detected — doctor skips signed probes; run 'aws sts get-caller-identity' to verify.",
             r=r,
         )
         return
     if not api_key.startswith("ABSK"):
         _emit(
-            "pass", "LLM API key (Bedrock)",
-            f"key is set ({len(api_key)} chars) but shape not recognized; "
-            "assuming operator knows what they're doing.",
+            "pass",
+            "LLM API key (Bedrock)",
+            f"key is set ({len(api_key)} chars) but shape not recognized; assuming operator knows what they're doing.",
             r=r,
         )
         return
@@ -806,14 +904,15 @@ def _verify_bedrock(api_key: str, r: _DoctorResult) -> None:
         # so the scan still runs (the scanner uses InvokeModel, which
         # may be permitted even when List is not).
         _emit(
-            "warn", "LLM API key (Bedrock)",
-            "403 Forbidden — key authenticates but lacks "
-            "bedrock:ListFoundationModels; InvokeModel may still work.",
+            "warn",
+            "LLM API key (Bedrock)",
+            "403 Forbidden — key authenticates but lacks bedrock:ListFoundationModels; InvokeModel may still work.",
             r=r,
         )
     elif code == 0:
         _emit(
-            "warn", "LLM API key (Bedrock)",
+            "warn",
+            "LLM API key (Bedrock)",
             f"could not reach bedrock.{region}.amazonaws.com: {body}",
             r=r,
         )
@@ -966,15 +1065,15 @@ def _probe_otel_destination(cfg, d, r: _DoctorResult) -> None:
 # actionable diagnostics instead of the raw HTTP status code.
 # Source: https://help.splunk.com/en/splunk-enterprise/get-started/get-data-in/10.2/get-data-with-http-event-collector/troubleshoot-http-event-collector
 _HEC_CODES = {
-    0:  "success",
-    1:  "token is disabled — enable it in Splunk HEC settings",
-    2:  "no authorization — token is required",
-    3:  "invalid authorization header format",
-    4:  "invalid token — check the token value in your config",
-    5:  "no data in request",
-    6:  "invalid data format",
-    7:  "incorrect index — the index does not exist in Splunk",
-    9:  "server busy — Splunk HEC is overloaded",
+    0: "success",
+    1: "token is disabled — enable it in Splunk HEC settings",
+    2: "no authorization — token is required",
+    3: "invalid authorization header format",
+    4: "invalid token — check the token value in your config",
+    5: "no data in request",
+    6: "invalid data format",
+    7: "incorrect index — the index does not exist in Splunk",
+    9: "server busy — Splunk HEC is overloaded",
     10: "data channel missing",
     11: "invalid data channel",
     12: "event field is required",
@@ -1092,6 +1191,7 @@ def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
     import os
 
     from defenseclaw.observability.writer import CONFIG_FILE_NAME, _load_yaml
+
     try:
         doc = _load_yaml(os.path.join(cfg.data_dir, CONFIG_FILE_NAME))
     except Exception:
@@ -1110,6 +1210,7 @@ def _check_splunk_token_posture(cfg, d, label: str, r: _DoctorResult) -> None:
                 r=r,
             )
         return
+
 
 def _destination_label_kind(d, presets) -> str:
     if d.kind == "splunk_hec":
@@ -1312,6 +1413,7 @@ def _check_virustotal(cfg, r: _DoctorResult) -> None:
 # Main command
 # ---------------------------------------------------------------------------
 
+
 @click.command()
 @click.option("--json-output", "json_out", is_flag=True, help="Output results as JSON")
 @click.option("--fix", "do_fix", is_flag=True, help="Auto-repair safe issues (stale PIDs, OpenClaw token drift, etc.)")
@@ -1354,6 +1456,7 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
         _doctor_subsection("Connector")
     active_connector = _active_connector(cfg)
     _check_connector_inventory(cfg, active_connector, r)
+    _check_hook_contract_lock(cfg, active_connector, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
     # operators who switch connectors via 'defenseclaw setup guardrail
@@ -1377,6 +1480,10 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
         _check_codex_hooks(cfg, r)
     elif active_connector == "zeptoclaw":
         _check_zeptoclaw_config(cfg, r)
+    elif active_connector == "copilot":
+        _check_copilot_hooks(cfg, r)
+    elif active_connector == "openhands":
+        _check_openhands_hooks(cfg, r)
     _check_hilt_support(cfg, active_connector, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
@@ -1432,7 +1539,8 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 
     if app.logger:
         app.logger.log_action(
-            "doctor", "health-check",
+            ACTION_DOCTOR,
+            "health-check",
             f"passed={r.passed} failed={r.failed} warned={r.warned} skipped={r.skipped}",
         )
 
@@ -1448,6 +1556,7 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
 # ---------------------------------------------------------------------------
 # Registry-driven credentials check
 # ---------------------------------------------------------------------------
+
 
 def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
     """Report any REQUIRED credential the current config needs but is unset.
@@ -1467,7 +1576,7 @@ def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
                 "fail",
                 f"credential {status.resolution.env_name}",
                 detail=f"required by {status.spec.feature} — "
-                       f"set with 'defenseclaw keys set {status.resolution.env_name}'",
+                f"set with 'defenseclaw keys set {status.resolution.env_name}'",
                 r=r,
             )
 
@@ -1475,6 +1584,7 @@ def _check_registry_credentials(cfg, r: _DoctorResult) -> None:
 # ---------------------------------------------------------------------------
 # --fix auto-repair
 # ---------------------------------------------------------------------------
+
 
 def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> None:
     """Run each fixer in sequence, narrating what changed.
@@ -1485,11 +1595,11 @@ def _run_fixers(cfg, r: _DoctorResult, *, assume_yes: bool, json_out: bool) -> N
     the human.
     """
     fixers = [
-        ("stale gateway PID file",   _fix_stale_pid),
-        ("gateway token",            _fix_gateway_token),
+        ("stale gateway PID file", _fix_stale_pid),
+        ("gateway token", _fix_gateway_token),
         ("defenseclaw dotenv perms", _fix_dotenv_perms),
-        ("pristine config backup",   _fix_pristine_backup),
-        ("connector residue",        _fix_connector_residue),
+        ("pristine config backup", _fix_pristine_backup),
+        ("connector residue", _fix_connector_residue),
     ]
 
     for title, fn in fixers:
@@ -1519,8 +1629,7 @@ def _active_connector(cfg) -> str:
             return (cfg.active_connector() or "openclaw").lower()
         except Exception:
             pass
-    return (getattr(getattr(cfg, "guardrail", None), "connector", "")
-            or "openclaw").lower()
+    return (getattr(getattr(cfg, "guardrail", None), "connector", "") or "openclaw").lower()
 
 
 _CONNECTOR_LABELS = {
@@ -1533,6 +1642,7 @@ _CONNECTOR_LABELS = {
     "windsurf": "Windsurf",
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
+    "openhands": "OpenHands",
 }
 
 
@@ -1549,13 +1659,19 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
     label = _CONNECTOR_LABELS.get(connector, connector)
     if connector not in _CONNECTOR_LABELS:
         _emit(
-            "warn", "Active connector",
-            f"unknown connector {connector!r} — known: "
-            + ", ".join(sorted(_CONNECTOR_LABELS)),
+            "warn",
+            "Active connector",
+            f"unknown connector {connector!r} — known: " + ", ".join(sorted(_CONNECTOR_LABELS)),
             r=r,
         )
     else:
         _emit("pass", "Active connector", label, r=r)
+
+    workspace = _workspace_dir(cfg)
+    if workspace:
+        _emit("pass", "Connector scope", f"workspace ({workspace})", r=r)
+    else:
+        _emit("pass", "Connector scope", "global user config", r=r)
 
     # Skill dirs.
     try:
@@ -1604,6 +1720,75 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
 
+def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
+    if connector in {"openclaw", "zeptoclaw"}:
+        _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
+        return
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    lock_path = os.path.join(data_dir, "hook_contract_lock.json")
+    try:
+        with open(lock_path, encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except FileNotFoundError:
+        _emit("warn", "Hook contract", "no hook_contract_lock.json yet — restart gateway after setup", r=r)
+        return
+    except Exception as exc:
+        _emit("fail", "Hook contract", f"cannot read {lock_path}: {exc}", r=r)
+        return
+
+    entry = (lock.get("connectors") or {}).get(connector) or {}
+    if not entry:
+        _emit("warn", "Hook contract", f"no lock entry for active connector {connector}", r=r)
+        return
+
+    status = str(entry.get("compatibility_status") or "")
+    contract = str(entry.get("contract_id") or "")
+    raw_version = str(entry.get("raw_agent_version") or "")
+    normalized = str(entry.get("normalized_agent_version") or "")
+    script_version = str(entry.get("hook_script_version") or "")
+    detail = f"contract={contract or '?'} status={status or '?'}"
+    if raw_version:
+        detail += f" agent={raw_version}"
+    if normalized:
+        detail += f" normalized={normalized}"
+    if script_version:
+        detail += f" script={script_version}"
+    locations = entry.get("locations") or {}
+    if isinstance(locations, dict):
+        workspace_dir = str(locations.get("workspace_dir") or "").strip()
+        hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
+        if workspace_dir:
+            detail += f" workspace={workspace_dir}"
+        if hook_paths:
+            detail += f" hook_path={hook_paths[0]}"
+
+    current_version = _discovered_agent_version(data_dir, connector)
+    if current_version and raw_version and current_version != raw_version:
+        _emit(
+            "fail",
+            "Hook contract",
+            f"drift: lock has {raw_version!r}, discovery now reports {current_version!r}",
+            r=r,
+        )
+        return
+    if status == "unknown":
+        _emit("fail", "Hook contract", detail, r=r)
+    elif status in {"known", "unversioned"}:
+        _emit("pass", "Hook contract", detail, r=r)
+    else:
+        _emit("warn", "Hook contract", detail, r=r)
+
+
+def _discovered_agent_version(data_dir: str, connector: str) -> str:
+    try:
+        with open(os.path.join(data_dir, "agent_discovery.json"), encoding="utf-8") as fh:
+            disc = json.load(fh)
+    except Exception:
+        return ""
+    signal = (disc.get("agents") or {}).get(connector) or {}
+    return str(signal.get("version") or "").strip()
+
+
 # Maps connector name → list of *expected* artifact filenames (relative
 # to data_dir) that Connector.Setup writes. When the active connector
 # is X but data_dir contains Y's artifacts, that's residue from a prior
@@ -1627,9 +1812,7 @@ _CONNECTOR_RESIDUE_ARTIFACTS: dict[str, tuple[str, ...]] = {
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
     ),
 }
-_OPENCLAW_RESIDUE_ARTIFACTS: tuple[str, ...] = (
-    os.path.join("connector_backups", "openclaw", "openclaw.json.json"),
-)
+_OPENCLAW_RESIDUE_ARTIFACTS: tuple[str, ...] = (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),)
 
 
 def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
@@ -1655,10 +1838,7 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
 
     # Build the inactive set explicitly so unknown active connectors
     # (plugins) don't accidentally suppress residue detection.
-    inactive = [
-        name for name in _CONNECTOR_RESIDUE_ARTIFACTS
-        if name != active.lower()
-    ]
+    inactive = [name for name in _CONNECTOR_RESIDUE_ARTIFACTS if name != active.lower()]
 
     found: list[tuple[str, str]] = []  # (connector_name, full_path)
     for name in inactive:
@@ -1684,8 +1864,10 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
 
     if not found:
         _emit(
-            "pass", "Connector residue",
-            "no leftover artifacts from inactive connectors", r=r,
+            "pass",
+            "Connector residue",
+            "no leftover artifacts from inactive connectors",
+            r=r,
         )
         return
 
@@ -1699,9 +1881,7 @@ def _check_connector_residue(cfg, active: str, r: _DoctorResult) -> None:
         paths = ", ".join(by_conn[name])
         parts.append(f"{name}: {paths}")
     detail = (
-        "found residue from inactive connectors — "
-        + "; ".join(parts)
-        + ". Run 'defenseclaw doctor --fix' to invoke "
+        "found residue from inactive connectors — " + "; ".join(parts) + ". Run 'defenseclaw doctor --fix' to invoke "
         "'defenseclaw-gateway connector teardown' for each, or "
         "'defenseclaw uninstall --keep-openclaw' for a manual sweep."
     )
@@ -1723,12 +1903,15 @@ def _check_scan_coverage(cfg, r: _DoctorResult) -> None:
     for component in _scan_ui.supported_components():
         cats = _scan_ui.categories_for(component)
         label = _scan_ui._COMPONENT_LABELS.get(  # type: ignore[attr-defined]
-            component, (component, component + "s"),
+            component,
+            (component, component + "s"),
         )[0]
         if cats:
             _emit(
-                "pass", f"Scanner coverage ({label})",
-                "; ".join(cats), r=r,
+                "pass",
+                f"Scanner coverage ({label})",
+                "; ".join(cats),
+                r=r,
             )
         else:
             _emit("skip", f"Scanner coverage ({label})", "no categories registered", r=r)
@@ -1762,9 +1945,7 @@ def _fix_stale_pid(cfg, *, assume_yes: bool) -> tuple[str, str]:
     except (ProcessLookupError, PermissionError, OSError):
         pass
 
-    if not assume_yes and not click.confirm(
-        f"    Remove stale pid file {pid_file}?", default=True
-    ):
+    if not assume_yes and not click.confirm(f"    Remove stale pid file {pid_file}?", default=True):
         return ("skip", "declined by user")
 
     try:
@@ -1783,6 +1964,7 @@ def _fix_gateway_token(cfg, *, assume_yes: bool) -> tuple[str, str]:
             _detect_openclaw_gateway_token,
             _save_secret_to_dotenv,
         )
+
         token = _detect_openclaw_gateway_token(cfg.claw.config_file)
         if not token:
             return ("skip", "no token in openclaw.json")
@@ -1822,9 +2004,7 @@ def _fix_dotenv_perms(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if mode == 0o600:
         return ("skip", "permissions already 0600")
 
-    if not assume_yes and not click.confirm(
-        f"    Tighten {path} permissions from {mode:04o} to 0600?", default=True
-    ):
+    if not assume_yes and not click.confirm(f"    Tighten {path} permissions from {mode:04o} to 0600?", default=True):
         return ("skip", "declined by user")
 
     try:
@@ -1850,6 +2030,7 @@ def _fix_pristine_backup(cfg, *, assume_yes: bool) -> tuple[str, str]:
             pristine_backup_path,
             record_pristine_backup,
         )
+
         oc_path = cfg.claw.config_file
         if not oc_path:
             return ("skip", "no openclaw.json configured")
@@ -1912,25 +2093,26 @@ def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
     inactive_residue = sorted(set(inactive_residue))
 
     if not assume_yes and not click.confirm(
-        f"    Run 'defenseclaw-gateway connector teardown' for "
-        f"{', '.join(inactive_residue)}?",
+        f"    Run 'defenseclaw-gateway connector teardown' for {', '.join(inactive_residue)}?",
         default=True,
     ):
         return ("skip", "declined by user")
 
     gw = shutil.which("defenseclaw-gateway")
     if not gw:
-        return ("warn",
-                "defenseclaw-gateway not on PATH — install the binary and re-run")
+        return ("warn", "defenseclaw-gateway not on PATH — install the binary and re-run")
 
     cleaned: list[str] = []
     failed: list[str] = []
     import subprocess as _sub
+
     for name in inactive_residue:
         try:
             proc = _sub.run(
                 [gw, "connector", "teardown", "--connector", name],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True,
+                text=True,
+                timeout=60,
             )
         except (OSError, _sub.TimeoutExpired) as exc:
             failed.append(f"{name}: {exc}")
@@ -1945,6 +2127,5 @@ def _fix_connector_residue(cfg, *, assume_yes: bool) -> tuple[str, str]:
     if cleaned and not failed:
         return ("pass", f"teardown ran for: {', '.join(cleaned)}")
     if cleaned and failed:
-        return ("warn",
-                f"partial: cleaned={','.join(cleaned)}; failed={'; '.join(failed)}")
+        return ("warn", f"partial: cleaned={','.join(cleaned)}; failed={'; '.join(failed)}")
     return ("warn", f"teardown failed: {'; '.join(failed)}")

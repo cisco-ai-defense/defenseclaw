@@ -205,6 +205,8 @@ class _SplunkForwarder:
                 "source": "defenseclaw",
             },
         }
+        if event.structured:
+            payload["event"]["structured"] = event.structured
 
         try:
             req = urllib.request.Request(

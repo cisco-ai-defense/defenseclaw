@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -48,6 +49,12 @@ func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
 	action, wouldBlock = mapHookAction("confirm", "action", "preToolUse", cursor)
 	if action != "alert" || wouldBlock {
 		t.Fatalf("cursor preToolUse confirm = (%q,%v), want alert because ask is not documented for that surface", action, wouldBlock)
+	}
+
+	openhands := connector.NewOpenHandsConnector().HookCapabilities(connector.SetupOpts{})
+	action, wouldBlock = mapHookAction("confirm", "action", "pre_tool_use", openhands)
+	if action != "alert" || wouldBlock {
+		t.Fatalf("openhands confirm = (%q,%v), want alert because OpenHands has no native ask surface", action, wouldBlock)
 	}
 }
 
@@ -121,7 +128,7 @@ func TestHandleAgentHook_EnrichesHTTPSpanWithAgentIdentity(t *testing.T) {
 		"gen_ai.agent.type":      "copilot-cli",
 		"gen_ai.agent.id":        "github-copilot-cli",
 		"defenseclaw.connector":  "copilot",
-		"defenseclaw.hook.event": "PreToolUse",
+		"defenseclaw.hook.event": "tool_call",
 	} {
 		got, ok := attrByKey(spans[0].Attributes, key)
 		if !ok || got.AsString() != want {
@@ -173,6 +180,9 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 
 		// geminicli -- decision="deny" + reason on block.
 		{connector: "geminicli", event: "BeforeTool", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
+
+		// openhands -- decision="deny" + exit 2 in the shell hook on block.
+		{connector: "openhands", event: "pre_tool_use", action: "block", rawAction: "block", expectedKey: "decision", expectedValue: "deny"},
 
 		// copilot PreToolUse -- ask + deny on permissionDecision.
 		{connector: "copilot", event: "PreToolUse", action: "block", rawAction: "block", expectedKey: "permissionDecision", expectedValue: "deny"},
@@ -232,6 +242,8 @@ func capsForConnector(name string) connector.HookCapability {
 		return connector.NewGeminiCLIConnector().HookCapabilities(connector.SetupOpts{})
 	case "copilot":
 		return connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
+	case "openhands":
+		return connector.NewOpenHandsConnector().HookCapabilities(connector.SetupOpts{})
 	default:
 		return connector.HookCapability{}
 	}
@@ -485,6 +497,235 @@ func TestAgentHookDispatch_RedactsReason(t *testing.T) {
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(got[0].Body, "AKIAIOSFODNN7EXAMPLE") {
 		t.Errorf("toast body must not contain raw AWS-key-shaped secret; got %q", got[0].Body)
+	}
+}
+
+// TestRefreshAuditEnvelopeFromHook_PropagatesPayloadCorrelation is the
+// focused F2 unit test. The CorrelationMiddleware can only stamp
+// fields the inbound request carries in headers, but hook payloads
+// carry session_id / agent_id in the JSON body — every audit row
+// written by logConnectorHookAuditEnvelope therefore dropped those
+// fields. The helper introduced for F2 refreshes the audit envelope
+// from req.SessionID + the resolved identity so downstream rows
+// correlate.
+func TestRefreshAuditEnvelopeFromHook_PropagatesPayloadCorrelation(t *testing.T) {
+	// Header-derived envelope simulates CorrelationMiddleware
+	// running first: it sees the trace/run/request ids the
+	// gateway is willing to expose but no session/agent because
+	// the hook scripts don't set X-DefenseClaw-Session-Id.
+	headerEnv := audit.CorrelationEnvelope{
+		RunID:     "run-abc",
+		TraceID:   "trace-def",
+		RequestID: "req-ghi",
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), headerEnv)
+
+	req := agentHookRequest{
+		ConnectorName: "codex",
+		HookEventName: "Stop",
+		SessionID:     "thread-123",
+		AgentID:       "agent-001",
+		AgentName:     "codex",
+	}
+	identity := AgentIdentity{
+		AgentID:         "agent-001",
+		AgentName:       "codex",
+		AgentInstanceID: "agent-instance-zzz",
+	}
+
+	got := audit.EnvelopeFromContext(refreshAuditEnvelopeFromHook(ctx, req, identity))
+
+	// Payload-derived fields must land on the envelope.
+	if got.SessionID != "thread-123" {
+		t.Errorf("SessionID = %q, want %q (payload-derived)", got.SessionID, "thread-123")
+	}
+	if got.AgentID != "agent-001" {
+		t.Errorf("AgentID = %q, want %q (identity-resolved)", got.AgentID, "agent-001")
+	}
+	if got.AgentName != "codex" {
+		t.Errorf("AgentName = %q, want %q", got.AgentName, "codex")
+	}
+	if got.AgentInstanceID != "agent-instance-zzz" {
+		t.Errorf("AgentInstanceID = %q, want %q", got.AgentInstanceID, "agent-instance-zzz")
+	}
+
+	// Header-derived fields must NOT be clobbered.
+	if got.RunID != "run-abc" {
+		t.Errorf("RunID = %q, want %q (refresh must not drop header-derived)", got.RunID, "run-abc")
+	}
+	if got.TraceID != "trace-def" {
+		t.Errorf("TraceID = %q, want %q", got.TraceID, "trace-def")
+	}
+	if got.RequestID != "req-ghi" {
+		t.Errorf("RequestID = %q, want %q", got.RequestID, "req-ghi")
+	}
+}
+
+// TestRefreshAuditEnvelopeFromHook_EmptyPayloadIsNoOp guards the
+// inverse path: when the hook payload has nothing to add (an inbound
+// header already populated everything, or the connector simply
+// doesn't expose those fields), the helper must not zero out the
+// envelope.
+func TestRefreshAuditEnvelopeFromHook_EmptyPayloadIsNoOp(t *testing.T) {
+	headerEnv := audit.CorrelationEnvelope{
+		SessionID: "session-from-header",
+		AgentID:   "agent-from-header",
+		AgentName: "agent-name-from-header",
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), headerEnv)
+
+	got := audit.EnvelopeFromContext(refreshAuditEnvelopeFromHook(
+		ctx,
+		agentHookRequest{ConnectorName: "codex"}, // no SessionID
+		AgentIdentity{},                          // no AgentID
+	))
+
+	if got.SessionID != "session-from-header" {
+		t.Errorf("SessionID = %q, want preserved %q", got.SessionID, "session-from-header")
+	}
+	if got.AgentID != "agent-from-header" {
+		t.Errorf("AgentID = %q, want preserved %q", got.AgentID, "agent-from-header")
+	}
+}
+
+// TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale guards the
+// synthetic-row case: when the inbound HTTP request carried a stale
+// session id (or no session id) and the payload supplies a fresher
+// one, the payload wins. This is what makes the connector-hook-
+// synthetic row track the canonical codex.notify.* row by session.
+func TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale(t *testing.T) {
+	headerEnv := audit.CorrelationEnvelope{
+		SessionID: "stale-session",
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), headerEnv)
+
+	got := audit.EnvelopeFromContext(refreshAuditEnvelopeFromHook(
+		ctx,
+		agentHookRequest{ConnectorName: "codex", SessionID: "thread-123"},
+		AgentIdentity{},
+	))
+
+	if got.SessionID != "thread-123" {
+		t.Errorf("SessionID = %q, want %q (payload must override stale header value)", got.SessionID, "thread-123")
+	}
+}
+
+// TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity guards the
+// follow-up fix that wires the F2 envelope refresh into the bespoke
+// claudecode + codex handlers (handleClaudeCodeHook /
+// enrichCodexHookContext). The original F2 patch only covered the
+// unified handleAgentHook path; live Splunk verification proved that
+// every connector-hook audit row written by Claude Code — by far the
+// most common connector in operator deployments — still landed with
+// session_id=NULL and agent_id=NULL because the bespoke handler ran on
+// a bare r.Context(). This test exercises the helper directly with
+// the same shape the bespoke handlers feed it.
+func TestRefreshAuditEnvelopeFromIdentity_BespokeHandlerParity(t *testing.T) {
+	headerEnv := audit.CorrelationEnvelope{
+		RunID:     "run-from-header",
+		TraceID:   "trace-from-header",
+		RequestID: "req-from-header",
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), headerEnv)
+
+	identity := AgentIdentity{
+		AgentID:         "agent-claude-001",
+		AgentName:       "claudecode",
+		AgentInstanceID: "instance-zzz",
+	}
+
+	got := audit.EnvelopeFromContext(
+		refreshAuditEnvelopeFromIdentity(ctx, "session-from-payload", identity),
+	)
+
+	if got.SessionID != "session-from-payload" {
+		t.Errorf("SessionID = %q, want %q (bespoke handler envelope refresh broken)", got.SessionID, "session-from-payload")
+	}
+	if got.AgentID != "agent-claude-001" {
+		t.Errorf("AgentID = %q, want %q", got.AgentID, "agent-claude-001")
+	}
+	if got.AgentName != "claudecode" {
+		t.Errorf("AgentName = %q, want %q", got.AgentName, "claudecode")
+	}
+	if got.AgentInstanceID != "instance-zzz" {
+		t.Errorf("AgentInstanceID = %q, want %q", got.AgentInstanceID, "instance-zzz")
+	}
+	// Header-derived correlation must survive.
+	if got.RunID != "run-from-header" {
+		t.Errorf("RunID = %q, want %q (refresh must preserve header)", got.RunID, "run-from-header")
+	}
+	if got.TraceID != "trace-from-header" {
+		t.Errorf("TraceID = %q, want %q", got.TraceID, "trace-from-header")
+	}
+	if got.RequestID != "req-from-header" {
+		t.Errorf("RequestID = %q, want %q", got.RequestID, "req-from-header")
+	}
+}
+
+// TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope replaces
+// the legacy TestEnrichClaudeCodeHookContext_RefreshesEnvelope from
+// the bespoke per-connector pipeline. After deleting
+// handleClaudeCodeHook + enrichClaudeCodeHookContext, the audit
+// envelope refresh for Claude Code traffic now happens inside
+// enrichAgentHookContext (the unified pipeline). This test pins
+// that behaviour for the connector name "claudecode" so we notice
+// immediately if a future refactor drops claudecode's correlation
+// again.
+//
+// Splunk verification of an earlier iteration caught the original
+// gap when 4 PreToolUse/PostToolUse/UserPromptSubmit rows arrived
+// with session_id=NULL while the synthetic codex.notify row in the
+// same test run carried session_id correctly — proving the envelope
+// refresh only covered the unified path. We now verify the unified
+// path IS that "covering" path for every connector.
+func TestEnrichAgentHookContext_ClaudeCodeRefreshesEnvelope(t *testing.T) {
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+		RunID: "run-keep",
+	})
+	req := agentHookRequest{
+		ConnectorName: "claudecode",
+		HookEventName: "PreToolUse",
+		SessionID:     "cc-session-xyz",
+		AgentID:       "agent-cc-001",
+		AgentType:     "claudecode",
+	}
+	got := audit.EnvelopeFromContext(enrichAgentHookContext(ctx, req))
+	if got.SessionID != "cc-session-xyz" {
+		t.Errorf("SessionID = %q, want %q (envelope refresh missing for claudecode)", got.SessionID, "cc-session-xyz")
+	}
+	if got.AgentID != "agent-cc-001" {
+		t.Errorf("AgentID = %q, want %q", got.AgentID, "agent-cc-001")
+	}
+	if got.AgentName != "claudecode" {
+		t.Errorf("AgentName = %q, want %q (default claudecode fallback)", got.AgentName, "claudecode")
+	}
+	if got.RunID != "run-keep" {
+		t.Errorf("RunID = %q, want preserved %q (envelope refresh must not clobber base correlation)", got.RunID, "run-keep")
+	}
+}
+
+// TestEnrichAgentHookContext_CodexRefreshesEnvelope guards the codex
+// side of the same fix. Replaces the legacy
+// TestEnrichCodexHookContext_RefreshesEnvelope from the bespoke
+// per-connector pipeline.
+func TestEnrichAgentHookContext_CodexRefreshesEnvelope(t *testing.T) {
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{})
+	req := agentHookRequest{
+		ConnectorName: "codex",
+		HookEventName: "pre-tool-use",
+		SessionID:     "codex-session-abc",
+		AgentID:       "agent-cdx-001",
+		AgentType:     "codex",
+	}
+	got := audit.EnvelopeFromContext(enrichAgentHookContext(ctx, req))
+	if got.SessionID != "codex-session-abc" {
+		t.Errorf("SessionID = %q, want %q (envelope refresh missing for codex)", got.SessionID, "codex-session-abc")
+	}
+	if got.AgentID != "agent-cdx-001" {
+		t.Errorf("AgentID = %q, want %q", got.AgentID, "agent-cdx-001")
+	}
+	if got.AgentName != "codex" {
+		t.Errorf("AgentName = %q, want default %q", got.AgentName, "codex")
 	}
 }
 

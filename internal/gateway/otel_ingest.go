@@ -261,6 +261,13 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		AgentName: source,
 		SessionID: sessionID,
 	}
+	if signal == otelSignalLogs {
+		if events := otlpLogRecordsForSplunkHEC(body, source, ev.Timestamp); len(events) > 0 {
+			ev.Structured = map[string]any{
+				"_splunk_hec_events": events,
+			}
+		}
+	}
 	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
 		// Best-effort: failing to persist must NOT cause the
 		// exporter to retry — telemetry storms during DB outages
@@ -321,6 +328,110 @@ func decorateOTLPIngestSummary(summary, payloadFormat string, wireBytes, normali
 	return fmt.Sprintf("format=protobuf wire_size=%d bytes normalized_json_size=%d bytes %s", wireBytes, normalizedBytes, summary)
 }
 
+func otlpLogRecordsForSplunkHEC(body []byte, source string, receivedAt time.Time) []map[string]any {
+	var envelope struct {
+		ResourceLogs []struct {
+			Resource struct {
+				Attributes []otlpAttribute `json:"attributes"`
+			} `json:"resource"`
+			ScopeLogs []struct {
+				LogRecords []struct {
+					TimeUnixNano         json.RawMessage `json:"timeUnixNano"`
+					ObservedTimeUnixNano json.RawMessage `json:"observedTimeUnixNano"`
+					SeverityNumber       int             `json:"severityNumber"`
+					SeverityText         string          `json:"severityText"`
+					Body                 json.RawMessage `json:"body"`
+					Attributes           []otlpAttribute `json:"attributes"`
+					TraceID              string          `json:"traceId"`
+					SpanID               string          `json:"spanId"`
+				} `json:"logRecords"`
+			} `json:"scopeLogs"`
+		} `json:"resourceLogs"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil
+	}
+
+	events := []map[string]any{}
+	for _, resourceLog := range envelope.ResourceLogs {
+		resourceAttrs := otlpAttributesToMap(resourceLog.Resource.Attributes)
+		for _, scopeLog := range resourceLog.ScopeLogs {
+			for _, rec := range scopeLog.LogRecords {
+				recordAttrs := otlpAttributesToMap(rec.Attributes)
+				mergedAttrs := make(map[string]interface{}, len(resourceAttrs)+len(recordAttrs))
+				for k, v := range resourceAttrs {
+					mergedAttrs[k] = v
+				}
+				for k, v := range recordAttrs {
+					mergedAttrs[k] = v
+				}
+				eventTime := otlpLogRecordTime(rec.TimeUnixNano, rec.ObservedTimeUnixNano, receivedAt)
+				event := map[string]any{
+					"signal_family":      "log",
+					"timestamp":          eventTime.UTC().Format(time.RFC3339Nano),
+					"observed_timestamp": otlpNanosISO(rec.ObservedTimeUnixNano),
+					"severity":           firstNonEmpty(rec.SeverityText, "INFO"),
+					"severity_text":      rec.SeverityText,
+					"severity_number":    rec.SeverityNumber,
+					"body":               decodeOTLPAnyValue(rec.Body),
+					"trace_id":           rec.TraceID,
+					"span_id":            rec.SpanID,
+					"resource":           resourceAttrs,
+					"attributes":         recordAttrs,
+					"source":             "otel",
+					"source_system":      "defenseclaw",
+					"event_name":         otlpString(mergedAttrs, "event.name"),
+					"action":             firstNonEmpty(otlpString(mergedAttrs, "action"), otlpString(mergedAttrs, "event.name")),
+					"run_id":             otlpString(mergedAttrs, "run_id"),
+					"session_id":         otlpSessionID(mergedAttrs),
+					"request_id":         otlpString(mergedAttrs, "request_id"),
+					"agent_name":         firstNonEmpty(otlpString(mergedAttrs, "gen_ai.agent.name"), source),
+					"agent_type":         otlpString(mergedAttrs, "gen_ai.agent.type"),
+					"tool_name":          firstNonEmpty(otlpString(mergedAttrs, "tool_name"), otlpString(mergedAttrs, "gen_ai.tool.name")),
+					"destination_app":    firstNonEmpty(otlpString(mergedAttrs, "destination_app"), otlpString(mergedAttrs, "defenseclaw.destination_app")),
+					"provider_name":      firstNonEmpty(otlpString(mergedAttrs, "gen_ai.provider.name"), source),
+					"request_model":      firstNonEmpty(otlpString(mergedAttrs, "gen_ai.request.model"), otlpString(mergedAttrs, "model")),
+					"response_model":     otlpString(mergedAttrs, "gen_ai.response.model"),
+				}
+				events = append(events, map[string]any{
+					"time":       float64(eventTime.Unix()) + float64(eventTime.Nanosecond())/1e9,
+					"host":       firstNonEmpty(otlpString(resourceAttrs, "host.name"), "defenseclaw-local"),
+					"source":     "otel",
+					"sourcetype": "otel:log",
+					"event":      event,
+				})
+			}
+		}
+	}
+	return events
+}
+
+func otlpLogRecordTime(timeRaw, observedRaw json.RawMessage, fallback time.Time) time.Time {
+	if t, ok := otlpNanosTime(timeRaw); ok && !t.IsZero() {
+		return t
+	}
+	if t, ok := otlpNanosTime(observedRaw); ok && !t.IsZero() {
+		return t
+	}
+	return fallback
+}
+
+func otlpNanosISO(raw json.RawMessage) string {
+	t, ok := otlpNanosTime(raw)
+	if !ok || t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func otlpNanosTime(raw json.RawMessage) (time.Time, bool) {
+	nanos := parseOTLPNumber(raw)
+	if nanos <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(0, nanos).UTC(), true
+}
+
 func agentIdentityForOTLPSource(source string) AgentIdentity {
 	source = strings.ToLower(strings.TrimSpace(source))
 	if source == "" || source == "unknown" {
@@ -341,7 +452,7 @@ func agentIdentityForOTLPSource(source string) AgentIdentity {
 
 func normalizeConnectorTelemetrySource(source string) string {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot":
+	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
 		return strings.ToLower(strings.TrimSpace(source))
 	case "claude-code", "claude_code":
 		return "claudecode"
@@ -814,17 +925,30 @@ type otlpAttribute struct {
 }
 
 func otlpAttributesToMap(attrs []otlpAttribute) map[string]interface{} {
+	return otlpAttributesToMapDepth(attrs, 0)
+}
+
+const maxOTLPAnyValueDepth = 16
+
+func otlpAttributesToMapDepth(attrs []otlpAttribute, depth int) map[string]interface{} {
 	out := make(map[string]interface{}, len(attrs))
 	for _, attr := range attrs {
 		if attr.Key == "" {
 			continue
 		}
-		out[attr.Key] = decodeOTLPAnyValue(attr.Value)
+		out[attr.Key] = decodeOTLPAnyValueDepth(attr.Value, depth+1)
 	}
 	return out
 }
 
 func decodeOTLPAnyValue(raw json.RawMessage) interface{} {
+	return decodeOTLPAnyValueDepth(raw, 0)
+}
+
+func decodeOTLPAnyValueDepth(raw json.RawMessage, depth int) interface{} {
+	if depth > maxOTLPAnyValueDepth {
+		return nil
+	}
 	var v struct {
 		StringValue *string      `json:"stringValue"`
 		IntValue    *json.Number `json:"intValue"`
@@ -855,11 +979,11 @@ func decodeOTLPAnyValue(raw json.RawMessage) interface{} {
 	case v.BoolValue != nil:
 		return *v.BoolValue
 	case v.KvListValue != nil:
-		return otlpAttributesToMap(v.KvListValue.Values)
+		return otlpAttributesToMapDepth(v.KvListValue.Values, depth+1)
 	case v.ArrayValue != nil:
 		out := make([]interface{}, 0, len(v.ArrayValue.Values))
 		for _, item := range v.ArrayValue.Values {
-			out = append(out, decodeOTLPAnyValue(item))
+			out = append(out, decodeOTLPAnyValueDepth(item, depth+1))
 		}
 		return out
 	default:
@@ -1407,6 +1531,8 @@ func extractServiceName(resourceRaw json.RawMessage) string {
 	return ""
 }
 
+const codexNotifyTurnCompleteSource = "codex.notify.agent-turn-complete"
+
 // codexNotifyPayload mirrors the documented codex notify JSON shape
 // (https://developers.openai.com/codex/config-advanced). We capture
 // the fields the SIEM rollup and session correlation need (type,
@@ -1434,6 +1560,8 @@ type codexNotifyPayload struct {
 //     are summarized by length + hash rather than stored raw.
 //  3. Persist as an INFO audit event with action="codex.notify.<type>"
 //     and Actor="codex" so the SIEM rollup can group by turn.
+//  4. For agent-turn-complete, emit first-class llm_prompt /
+//     llm_response events from the semantic notify fields.
 //
 // Failures are logged but always return 200 so the bridge doesn't
 // retry — codex's turn-complete is a fire-and-forget telemetry
@@ -1459,6 +1587,10 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 
 	var p codexNotifyPayload
 	parseErr := json.Unmarshal(body, &p)
+	var payload map[string]any
+	if parseErr == nil {
+		payload = normalizeCodexNotifyPayloadAliases(&p, body)
+	}
 
 	action := string(audit.ActionCodexNotify)
 	severity := "INFO"
@@ -1480,6 +1612,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 
 	details := codexNotifyAuditDetails(p, body, kind, result, parseErr)
 	sessionID := codexNotifySessionID(p)
+	ctx := ContextWithSessionID(r.Context(), sessionID)
 
 	ev := audit.Event{
 		Timestamp: time.Now().UTC(),
@@ -1491,8 +1624,11 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 		AgentName: "codex",
 		SessionID: sessionID,
 	}
-	if err := persistAuditEvent(a.logger, a.store, ev); err != nil {
+	if err := persistAuditEventCtx(r.Context(), a.logger, a.store, ev); err != nil {
 		fmt.Fprintf(otelIngestLogSink(), "[codex-notify] persist failed: %v\n", err)
+	}
+	if parseErr == nil && kind == "agent-turn-complete" {
+		a.emitCodexNotifyTurnCompleteLLMEvents(ctx, r, p, payload)
 	}
 
 	// Surface the same event as a Prometheus counter and an OTel log
@@ -1504,15 +1640,77 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 	// sanitization a hostile / verbose client could blow up the
 	// `codex_notify_status` series.
 	statusLabel := sanitizeNotifyType(p.Status)
-	ctx := ContextWithSessionID(r.Context(), sessionID)
+	// by sanitizeNotifyType (max 64 chars, [a-z0-9._-]).
 	enrichHTTPSpanFromContext(ctx)
 	enrichCodexNotifySpan(ctx, p, kind, result)
 	a.otel.RecordCodexNotify(ctx, kind, statusLabel, result)
 	a.otel.EmitCodexNotifyLog(ctx, kind, statusLabel, result, p.TurnID, p.Model)
 
+	// Fold the notify event into the unified hook collector as a
+	// synthetic Stop event. The native codex CLI emits
+	// "agent-turn-complete" notifications outside the PreToolUse /
+	// PostToolUse stream, so without this fold the unified hook
+	// collector would have no visibility into them — breaking the
+	// "every connector emits the same hook metric set" invariant
+	// that downstream dashboards (defenseclaw.connector.hook.*) rely
+	// on for codex.
+	//
+	// The synthetic translation runs only when the parse succeeded
+	// (parseErr == nil) — a malformed payload should not invent a
+	// Stop event; the existing audit + metric path already captured
+	// the malformed marker above.
+	//
+	// handleAgentHookSynthetic emits a separate audit row under
+	// audit.ActionConnectorHookSynthetic so the canonical
+	// `codex.notify.<sanitized-type>` row count (one per inbound
+	// notify) is preserved — see the function godoc and
+	// TestCodexNotify_PersistsDynamicSuffixAction.
+	if parseErr == nil {
+		synthetic := codexNotifyToAgentHookRequest(p, body)
+		a.handleAgentHookSynthetic(ctx, "codex", synthetic, body)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("{}"))
+}
+
+// codexNotifyToAgentHookRequest translates a codexNotifyPayload into
+// a generic agentHookRequest carrying a synthetic HookEventName=Stop.
+// The translation preserves the codex notify fields in
+// req.Payload so a downstream consumer (hook profile evaluator,
+// audit envelope renderer) can still recover the type / status /
+// model values that the codex schema provides.
+//
+// PR 7 cleanup deletes codexNotifyPayload entirely once every
+// downstream that reads Type / Status / Model has switched to
+// pulling them out of req.Payload directly via firstString.
+func codexNotifyToAgentHookRequest(p codexNotifyPayload, raw []byte) agentHookRequest {
+	payload := map[string]interface{}{
+		"hook_event_name": "Stop",
+		"session_id":      codexNotifySessionID(p),
+		"turn_id":         p.TurnID,
+		"model":           p.Model,
+		"agent_id":        "codex",
+		"agent_type":      "codex",
+		"codex_notify": map[string]interface{}{
+			"type":   p.Type,
+			"status": p.Status,
+		},
+		"raw_notify_body_len": len(raw),
+	}
+	return agentHookRequest{
+		ConnectorName: "codex",
+		HookEventName: "Stop",
+		SessionID:     codexNotifySessionID(p),
+		TurnID:        p.TurnID,
+		AgentID:       "codex",
+		AgentName:     "codex",
+		AgentType:     "codex",
+		ToolName:      "codex-notify",
+		Direction:     "tool_result",
+		Payload:       payload,
+	}
 }
 
 func codexNotifySessionID(p codexNotifyPayload) string {
@@ -1520,6 +1718,158 @@ func codexNotifySessionID(p codexNotifyPayload) string {
 		return p.ThreadID
 	}
 	return p.TurnID
+}
+
+func normalizeCodexNotifyPayloadAliases(p *codexNotifyPayload, body []byte) map[string]any {
+	payload := map[string]any{}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil
+	}
+	if p == nil {
+		return payload
+	}
+	if p.ThreadID == "" {
+		p.ThreadID = codexNotifyString(payload, "thread-id", "thread_id", "threadID")
+	}
+	if p.TurnID == "" {
+		p.TurnID = codexNotifyString(payload, "turn-id", "turn_id", "turnID")
+	}
+	if p.Model == "" {
+		p.Model = codexNotifyString(payload, "model", "request_model", "response_model")
+	}
+	if p.Status == "" {
+		p.Status = codexNotifyString(payload, "status")
+	}
+	return payload
+}
+
+func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r *http.Request, p codexNotifyPayload, payload map[string]any) {
+	if len(payload) == 0 {
+		return
+	}
+	sessionID := codexNotifySessionID(p)
+	turnID := firstNonEmpty(codexNotifyString(payload, "turn-id", "turn_id", "turnID"), p.TurnID)
+	if sessionID == "" && turnID == "" {
+		return
+	}
+	if sessionID == "" {
+		sessionID = turnID
+	}
+	model := firstNonEmpty(codexNotifyString(payload, "model", "request_model", "response_model"), p.Model)
+	provider := inferSystem("", model)
+	if provider == "unknown" {
+		provider = "codex"
+	}
+	userID, userName := userFromHTTPRequest(r, nil)
+	promptID := firstNonEmpty(
+		a.lastHookPromptIDForTurn("codex", sessionID, turnID),
+		a.lastHookPromptID("codex", sessionID),
+		promptIDForTurn("codex", sessionID, turnID),
+	)
+	meta := llmEventMeta{
+		Source:    codexNotifyTurnCompleteSource,
+		Provider:  provider,
+		Model:     model,
+		SessionID: sessionID,
+		TurnID:    turnID,
+		PromptID:  promptID,
+		AgentName: "codex",
+		AgentType: "codex",
+		UserID:    userID,
+		UserName:  userName,
+	}
+
+	if prompt := codexNotifyPrompt(payload); prompt != "" {
+		emittedPromptID := emitLLMPromptEvent(ctx, meta, prompt, nil)
+		if emittedPromptID != "" {
+			meta.PromptID = emittedPromptID
+			a.rememberHookPromptID("codex", sessionID, turnID, emittedPromptID)
+		}
+	}
+	if response := codexNotifyResponse(payload); response != "" {
+		meta.ResponseID = stableLLMEventID("response", "codex", sessionID, turnID)
+		emitLLMResponseEvent(ctx, meta, response, "", codexNotifyFinishReasons(payload))
+	}
+}
+
+func codexNotifyPrompt(payload map[string]any) string {
+	messages := codexNotifyStringSlice(payload, "input-messages", "input_messages", "prompts")
+	for i := len(messages) - 1; i >= 0; i-- {
+		if message := strings.TrimSpace(messages[i]); message != "" {
+			return message
+		}
+	}
+	return codexNotifyString(payload, "last-user-message", "last_user_message", "prompt", "prompt_content")
+}
+
+func codexNotifyResponse(payload map[string]any) string {
+	return codexNotifyString(payload, "last-assistant-message", "last_assistant_message", "response", "response_content")
+}
+
+func codexNotifyFinishReasons(payload map[string]any) []string {
+	reasons := codexNotifyStringSlice(payload, "finish-reasons", "finish_reasons", "gen_ai.response.finish_reasons")
+	if len(reasons) > 0 {
+		return reasons
+	}
+	if reason := codexNotifyString(payload, "finish-reason", "finish_reason"); reason != "" {
+		return []string{reason}
+	}
+	return nil
+}
+
+func codexNotifyString(payload map[string]any, keys ...string) string {
+	for _, key := range keys {
+		switch value := payload[key].(type) {
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		case map[string]any:
+			if text := codexNotifyString(value, "content", "text", "message"); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func codexNotifyStringSlice(payload map[string]any, keys ...string) []string {
+	for _, key := range keys {
+		switch value := payload[key].(type) {
+		case []any:
+			out := make([]string, 0, len(value))
+			for _, item := range value {
+				switch v := item.(type) {
+				case string:
+					if strings.TrimSpace(v) != "" {
+						out = append(out, strings.TrimSpace(v))
+					}
+				case map[string]any:
+					if text := codexNotifyString(v, "content", "text", "message"); text != "" {
+						out = append(out, text)
+					}
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		case []string:
+			out := make([]string, 0, len(value))
+			for _, item := range value {
+				if strings.TrimSpace(item) != "" {
+					out = append(out, strings.TrimSpace(item))
+				}
+			}
+			if len(out) > 0 {
+				return out
+			}
+		case string:
+			if strings.TrimSpace(value) != "" {
+				return []string{strings.TrimSpace(value)}
+			}
+		}
+	}
+	return nil
 }
 
 func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, result string) {
@@ -1548,12 +1898,55 @@ func enrichCodexNotifySpan(ctx context.Context, p codexNotifyPayload, kind, resu
 			attribute.String("defenseclaw.codex.notify.result", result),
 		)
 	}
-	if p.Status != "" {
-		span.SetAttributes(attribute.String("defenseclaw.codex.notify.status", p.Status))
+	// p.Status and p.Model come straight off the wire from the codex
+	// CLI and a hostile / malformed payload can plant CRLF (log
+	// injection into operator terminals via span exporters), ANSI
+	// escapes (terminal hijack), or arbitrarily long strings (span
+	// storage DoS). Sanitize before stamping them on the span.
+	//
+	// `defenseclaw.codex.notify.status` mirrors the metric label
+	// produced upstream by sanitizeNotifyType, so the span attribute
+	// uses the same projection and stays correlatable.
+	//
+	// `gen_ai.response.model` is treated as identifying free-form text
+	// (capped + control-char-stripped) instead of being collapsed to
+	// the bounded NormalizeModelLabel family; spans are per-request so
+	// preserving the full model name has no TSDB-cardinality cost.
+	if statusAttr := sanitizeNotifyType(p.Status); p.Status != "" && statusAttr != "" {
+		span.SetAttributes(attribute.String("defenseclaw.codex.notify.status", statusAttr))
 	}
-	if p.Model != "" {
-		span.SetAttributes(attribute.String("gen_ai.response.model", p.Model))
+	if modelAttr := sanitizeCodexNotifySpanString(p.Model, 128); modelAttr != "" {
+		span.SetAttributes(attribute.String("gen_ai.response.model", modelAttr))
 	}
+}
+
+// sanitizeCodexNotifySpanString returns value with control / CR / LF /
+// ANSI runes stripped and length capped at maxLen bytes, truncated on
+// a UTF-8 rune boundary. Used for per-request span attributes (not
+// metric labels) where preserving identifying detail matters more
+// than collapsing to a bounded enum.
+//
+// Rune-boundary truncation is required because the OTLP wire format
+// rejects span attributes that are not valid UTF-8; a naive
+// byte-slice on a maxLen byte boundary can split a multi-byte rune
+// mid-sequence and silently drop the entire span when the exporter
+// validates. Walking back to the previous rune-start byte preserves
+// the prefix that fits inside the cap.
+//
+// Empty input returns empty so callers can keep their `if x != ""`
+// gating on whether to stamp the attribute at all.
+func sanitizeCodexNotifySpanString(value string, maxLen int) string {
+	if value == "" {
+		return ""
+	}
+	cleaned := stripLogInjectionRunes(strings.TrimSpace(value))
+	if cleaned == "" {
+		return ""
+	}
+	if maxLen > 0 && len(cleaned) > maxLen {
+		cleaned = truncateToRuneBoundary(cleaned, maxLen)
+	}
+	return cleaned
 }
 
 func codexNotifyAuditDetails(p codexNotifyPayload, body []byte, kind, result string, parseErr error) string {

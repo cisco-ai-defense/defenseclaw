@@ -22,11 +22,14 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import platform
+import stat
 import subprocess
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -235,6 +238,7 @@ class ClawConfig:
     mode: str = "openclaw"
     home_dir: str = "~/.openclaw"
     config_file: str = "~/.openclaw/openclaw.json"
+    workspace_dir: str = ""
     openclaw_home_original: str = ""
 
 
@@ -1165,6 +1169,7 @@ class Config:
     registries: RegistriesConfig = field(default_factory=RegistriesConfig)
     webhooks: list[WebhookConfig] = field(default_factory=list)
     privacy: PrivacyConfig = field(default_factory=lambda: PrivacyConfig())
+    _loaded_authoritative_dicts: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
 
@@ -1174,7 +1179,19 @@ class Config:
         return connector_paths.connector_home(
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
+            workspace_dir=self.connector_workspace_dir(),
         ) or _expand(self.claw.home_dir)
+
+    def connector_workspace_dir(self) -> str:
+        """Return the explicitly pinned connector workspace, if any."""
+        raw = (self.claw.workspace_dir or "").strip()
+        if not raw:
+            return ""
+        raw = _expand(raw)
+        try:
+            return str(Path(raw).expanduser().resolve(strict=False))
+        except OSError:
+            return os.path.abspath(raw)
 
     def active_connector(self) -> str:
         """Return the canonical connector name for this config.
@@ -1203,6 +1220,7 @@ class Config:
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
             openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
         )
 
     def plugin_dirs(self) -> list[str]:
@@ -1213,6 +1231,7 @@ class Config:
         return connector_paths.plugin_dirs(
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
+            workspace_dir=self.connector_workspace_dir(),
         )
 
     def mcp_servers(self) -> list[MCPServerEntry]:
@@ -1226,6 +1245,7 @@ class Config:
         return connector_paths.mcp_servers(
             self.active_connector(),
             openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
             openclaw_bin_resolver=openclaw_bin,
             openclaw_cmd_prefix=openclaw_cmd_prefix(),
         )
@@ -1340,16 +1360,133 @@ class Config:
         return llm
 
     def save(self) -> None:
+        """Persist this :class:`Config` to ``~/.defenseclaw/config.yaml``.
+
+        Round-trips through the existing file so that YAML keys the
+        Python dataclass does NOT model survive the save. The two known
+        callers that depend on this contract today are:
+
+        * ``audit_sinks:`` — written by ``defenseclaw setup splunk``
+          (see ``cli/defenseclaw/observability/writer.py``). Operators
+          configure local-Splunk HEC, remote Splunk Enterprise, OTLP
+          logs, and webhook forwarding here.
+        * ``otel.resource.attributes:`` — stamped by the same writer
+          to attribute exporters back to the preset that configured
+          them.
+
+        Before this round-trip, every connector-setup call site that
+        invoked ``cfg.save()`` (``setup codex``, ``setup claude-code``,
+        ``execute_guardrail_setup``, etc.) would silently strip those
+        blocks because ``dataclasses.asdict(self)`` only emits the
+        fields the dataclass declares — turning Splunk dashboards dark
+        without any warning. The two workaround "no cfg.save() here"
+        comments in ``cmd_setup.py`` documented this foot-gun; this
+        method removes the need for them.
+
+        Modeled keys still win — including the v4-migration strip of
+        the legacy ``splunk:`` top-level key and the byte-stability
+        strips of empty ``notifications``/``privacy``/``asset_policy``
+        blocks — so that operators who programmatically reset a value
+        through the dataclass still see the file updated.
+
+        Write is atomic via ``tmp + os.replace`` (matches the
+        observability writer pattern) so a crash mid-write cannot
+        leave a half-written ``config.yaml`` that the Go gateway
+        refuses to reload.
+        """
         path = os.path.join(self.data_dir, CONFIG_FILE_NAME)
-        data = _config_to_dict(self)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        dataclass_data = _config_to_dict(self)
+        owned_keys = _owned_top_level_keys(self)
+        with locked_config_yaml(path):
+            existing = _load_existing_config_yaml(path)
+            merged = _merge_preserving_unmodeled(
+                existing, dataclass_data, owned_keys,
+                authoritative_base=self._loaded_authoritative_dicts,
+            )
+            write_config_yaml_secure(path, merged)
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+@contextmanager
+def locked_config_yaml(path: str):
+    """Hold an exclusive per-config lock for a read/merge/write cycle."""
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    lock_path = path + ".lock"
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    try:
+        lock = os.fdopen(fd, "w")
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock.close()
+
+
+def write_config_yaml_secure(path: str, data: dict[str, Any]) -> None:
+    """Atomically write YAML without widening config.yaml permissions."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(os.stat(path).st_mode)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        existing_mode = None
+
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    if existing_mode is not None and existing_mode != 0o600:
+        target_mode = existing_mode & 0o600
+        if target_mode == 0:
+            target_mode = 0o600
+        try:
+            os.chmod(tmp, target_mode)
+        except OSError as exc:
+            _log.warning(
+                "config.save: cannot mirror %o mode onto %s (%s); writing as 0600",
+                existing_mode, tmp, exc,
+            )
+    os.replace(tmp, path)
+    try:
+        dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
 
 def _llm_is_empty(d: dict[str, Any] | None) -> bool:
     if not d:
@@ -1374,6 +1511,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     """Serialize Config to a dict suitable for YAML."""
     from dataclasses import asdict
     d = asdict(cfg)
+    d.pop("_loaded_authoritative_dicts", None)
     gw = d.get("gateway")
     if gw and not gw.get("token"):
         gw.pop("token", None)
@@ -1438,6 +1576,244 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         if not sources:
             d.pop("registries", None)
     return d
+
+
+def _owned_top_level_keys(cfg: Config) -> frozenset[str]:
+    """Return the set of TOP-LEVEL YAML keys the dataclass declares.
+
+    Used by :meth:`Config.save` to distinguish "dataclass intentionally
+    omitted this key" (e.g. ``notifications:`` was at full defaults so
+    ``_config_to_dict`` stripped it) from "the dataclass doesn't model
+    this key at all" (e.g. ``audit_sinks:``, written by
+    :mod:`defenseclaw.observability.writer`). The first case should drop
+    the key from the on-disk file; the second case should preserve it.
+
+    Implementation note: we read the field names off ``Config`` itself
+    via ``dataclasses.fields`` rather than calling ``asdict(cfg)`` so
+    this stays O(fields) instead of O(full config tree) and so it is
+    safe to call from inside ``save()`` without triggering side effects
+    on lazily-populated nested dataclasses.
+    """
+    from dataclasses import fields
+    return frozenset(f.name for f in fields(cfg) if not f.name.startswith("_"))
+
+
+def _load_existing_config_yaml(path: str) -> dict[str, Any]:
+    """Best-effort read of an existing ``config.yaml`` for round-trip save.
+
+    Returns ``{}`` when the file is missing (first save), unreadable, or
+    malformed. On parse failure we log a warning but do NOT raise — the
+    operator's previous file may be partially corrupt and we still want
+    ``cfg.save()`` to succeed so the next setup wizard can rewrite it
+    cleanly. Worst-case the on-disk file is replaced with the
+    dataclass-only view, which is exactly the pre-fix behaviour, so we
+    cannot regress relative to the old serializer.
+    """
+    try:
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        _log.warning(
+            "config.save: cannot read existing %s (%s); "
+            "writing dataclass-only view (any unmodelled keys will be lost)",
+            path, exc,
+        )
+        return {}
+    except yaml.YAMLError as exc:
+        backup = _backup_unparseable_config(path)
+        _log.warning(
+            "config.save: existing %s failed to parse (%s); "
+            "writing dataclass-only view (backup=%s)",
+            path, exc, backup or "unavailable",
+        )
+        return {}
+    if not isinstance(raw, dict):
+        _log.warning(
+            "config.save: existing %s is not a YAML mapping (got %s); "
+            "writing dataclass-only view",
+            path, type(raw).__name__,
+        )
+        return {}
+    return raw
+
+
+def _backup_unparseable_config(path: str) -> str:
+    try:
+        with open(path, "rb") as src:
+            data = src.read()
+    except OSError:
+        return ""
+    backup = f"{path}.bak"
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(backup, flags, 0o600)
+    except FileExistsError:
+        backup = f"{path}.bak.{os.getpid()}"
+        try:
+            fd = os.open(backup, flags, 0o600)
+        except OSError:
+            return ""
+    except OSError:
+        return ""
+    try:
+        with os.fdopen(fd, "wb") as dst:
+            dst.write(data)
+            dst.flush()
+            os.fsync(dst.fileno())
+    except OSError:
+        return ""
+    return backup
+
+
+# Dotted YAML paths whose VALUE is a dict[str, str]-style modeled
+# collection — i.e. the dataclass is the SINGLE SOURCE OF TRUTH for
+# the contents of the dict. When the caller clears one of these
+# (sets it to ``{}``), the on-disk file MUST be cleared too;
+# preserving the previous keys would leak stale secrets like an
+# ``otel.headers.Authorization`` token across an OTLP endpoint
+# rotation.
+#
+# The list is intentionally explicit (not auto-derived from
+# dataclass introspection) because not every nested dataclass field
+# typed as ``dict[str, str]`` is dataclass-authoritative — some
+# carry user-supplied free-form keys we want to preserve. Any new
+# secret-bearing modeled dict added to ``OTelConfig`` (or
+# elsewhere) MUST be added here so a clear-on-save honours the
+# operator's intent.
+#
+# Format: dotted YAML path from the top-level config dict.
+_AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset({
+    # Outbound OTLP credentials (Authorization, x-honeycomb-team,
+    # vendor-specific bearer headers). Letting a stale
+    # Authorization survive a clear is a credential-leak class
+    # regression.
+    "otel.headers",
+    # OpenTelemetry resource attributes (service.name,
+    # deployment.environment, custom operator labels). Some
+    # operators use this for tenant identifiers, so leftover keys
+    # after a clear leak prior tenant identity into the new
+    # session.
+    "otel.resource.attributes",
+})
+
+
+def _merge_preserving_unmodeled(
+    existing: dict[str, Any],
+    new: dict[str, Any],
+    owned_top_level: frozenset[str],
+    authoritative_base: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Deep-merge ``new`` over ``existing`` while preserving unmodelled keys.
+
+    Top-level rules (the layer where ``audit_sinks:`` lives):
+
+    * Key in ``new``: dataclass wins (with a recursive deep-merge when
+      both sides are dicts so nested unmodelled keys like operator
+      additions survive).
+    * Key only in ``existing``:
+        - If the key IS owned by the dataclass (``owned_top_level``) →
+          the dataclass intentionally chose to omit it (e.g.
+          ``_config_to_dict`` stripped ``notifications:`` because it
+          was at full defaults, or stripped the legacy ``splunk:``
+          v4-migration block). Drop it.
+        - Otherwise → unmodelled extension key (``audit_sinks:``,
+          operator-added comments-as-keys, future Go-side additions).
+          Preserve it unchanged.
+    * Key only in ``new`` → emit it.
+
+    Nested rules (any depth below top level):
+
+    * Both dicts → recurse via :func:`_deep_merge_nested`. The
+      recursion preserves unmodelled subkeys by default (so an
+      operator-added ``otel.custom_extension.foo`` survives a save
+      that doesn't touch it) BUT atomically replaces dicts whose
+      dotted path appears in
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS`. The latter
+      includes ``otel.headers`` and ``otel.resource.attributes``,
+      both of which are dataclass-authoritative collections — a
+      caller that clears ``cfg.otel.headers = {}`` to rotate OTLP
+      credentials gets the on-disk block cleared, which is the
+      whole point of clearing it.
+    * Lists → atomic replacement (the dataclass list is authoritative;
+      partial list merges would mis-handle operator deletions of list
+      elements modelled by the dataclass).
+    * Scalars / type mismatch → new wins.
+    """
+    out: dict[str, Any] = {}
+    # Pass 1: walk existing keys so file order is preserved when the
+    # dataclass output omits a key. yaml.safe_dump with sort_keys=False
+    # honours dict iteration order on CPython 3.7+, which keeps
+    # operator-edited files visually stable across saves.
+    for k, ev in existing.items():
+        if k in new:
+            nv = new[k]
+            if isinstance(ev, dict) and isinstance(nv, dict):
+                out[k] = _deep_merge_nested(ev, nv, path=k, authoritative_base=authoritative_base)
+            else:
+                out[k] = nv
+        elif k in owned_top_level:
+            # Dataclass owns this key and chose to omit it (default-strip
+            # or legacy-drop). Honour that decision.
+            continue
+        else:
+            # Unmodelled key — rescue it from the file. This is the
+            # whole point of the round-trip save.
+            out[k] = ev
+    # Pass 2: append keys present only in the dataclass output.
+    for k, nv in new.items():
+        if k not in existing:
+            out[k] = nv
+    return out
+
+
+def _deep_merge_nested(
+    existing: dict[str, Any],
+    new: dict[str, Any],
+    path: str = "",
+    authoritative_base: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Recursive deep-merge for nested dicts.
+
+    Behaviour:
+
+    * If the dotted path of the recursing dict is in
+      :data:`_AUTHORITATIVE_MODELED_DICT_PATHS` (e.g. ``otel.headers``,
+      ``otel.resource.attributes``), the dataclass dict is the
+      single source of truth. ``new`` wins atomically — no per-key
+      rescue from ``existing``. Setting the modeled map to ``{}``
+      therefore CLEARS the on-disk block, which is what callers
+      expect when they rotate OTLP credentials or change tenant
+      identifiers.
+
+    * Otherwise, keys only in ``existing`` are preserved (the
+      operator-added free-form rescue path) and keys in ``new``
+      win on overlap.
+    """
+    if path in _AUTHORITATIVE_MODELED_DICT_PATHS:
+        base = (authoritative_base or {}).get(path)
+        if base is not None and dict(new) == dict(base) and dict(existing) != dict(base):
+            return dict(existing)
+        # Atomic replace: dataclass dict wins. We deliberately keep
+        # the path in the recursion signature so future authoritative
+        # paths nested deeper still match without a separate flag.
+        return dict(new)
+    out: dict[str, Any] = {}
+    for k, ev in existing.items():
+        if k in new:
+            nv = new[k]
+            if isinstance(ev, dict) and isinstance(nv, dict):
+                child = f"{path}.{k}" if path else k
+                out[k] = _deep_merge_nested(ev, nv, path=child, authoritative_base=authoritative_base)
+            else:
+                out[k] = nv
+        else:
+            out[k] = ev
+    for k, nv in new.items():
+        if k not in existing:
+            out[k] = nv
+    return out
 
 
 def _default_notifications_dict() -> dict[str, Any]:
@@ -1867,19 +2243,19 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
 
 
 def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
-    if not raw:
+    if not isinstance(raw, dict) or not raw:
         return OTelConfig()
-    traces_raw = raw.get("traces", {})
-    logs_raw = raw.get("logs", {})
-    metrics_raw = raw.get("metrics", {})
-    batch_raw = raw.get("batch", {})
-    tls_raw = raw.get("tls", {})
-    resource_raw = raw.get("resource", {})
+    traces_raw = _as_mapping(raw.get("traces"))
+    logs_raw = _as_mapping(raw.get("logs"))
+    metrics_raw = _as_mapping(raw.get("metrics"))
+    batch_raw = _as_mapping(raw.get("batch"))
+    tls_raw = _as_mapping(raw.get("tls"))
+    resource_raw = _as_mapping(raw.get("resource"))
     return OTelConfig(
         enabled=raw.get("enabled", False),
         protocol=raw.get("protocol", "grpc"),
         endpoint=raw.get("endpoint", ""),
-        headers=raw.get("headers", {}),
+        headers=_as_mapping(raw.get("headers")),
         tls=OTelTLSConfig(
             insecure=tls_raw.get("insecure", False),
             ca_cert=tls_raw.get("ca_cert", ""),
@@ -1912,9 +2288,28 @@ def _merge_otel(raw: dict[str, Any] | None) -> OTelConfig:
             max_queue_size=batch_raw.get("max_queue_size", 2048),
         ),
         resource=OTelResourceConfig(
-            attributes=resource_raw.get("attributes", {}),
+            attributes=_as_mapping(resource_raw.get("attributes")),
         ),
     )
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _snapshot_authoritative_dicts(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for path in _AUTHORITATIVE_MODELED_DICT_PATHS:
+        cur: Any = raw
+        for part in path.split("."):
+            if not isinstance(cur, dict):
+                cur = {}
+                break
+            cur = cur.get(part, {})
+        out[path] = dict(cur) if isinstance(cur, dict) else {}
+    return out
 
 
 def _merge_webhooks(raw: list[dict[str, Any]] | None) -> list[WebhookConfig]:
@@ -2149,6 +2544,7 @@ def load() -> Config:
             mode=raw.get("claw", {}).get("mode", "openclaw"),
             home_dir=raw.get("claw", {}).get("home_dir", "~/.openclaw"),
             config_file=raw.get("claw", {}).get("config_file", "~/.openclaw/openclaw.json"),
+            workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
             openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
@@ -2224,6 +2620,7 @@ def load() -> Config:
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         notifications=_merge_notifications(raw.get("notifications")),
     )
+    cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     _migrate_llm_fields(cfg)
     _warn_disable_redaction_config(cfg)
     _warn_plaintext_secrets(cfg)

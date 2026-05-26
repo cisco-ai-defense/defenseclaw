@@ -176,10 +176,15 @@ There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or `DEFENSEC
 | Cursor | `~/.cursor/hooks.json` |
 | Windsurf | `~/.codeium/windsurf/hooks.json` |
 | Gemini CLI | `~/.gemini/settings.json` |
-| GitHub Copilot CLI | `<workspace>/.github/hooks/defenseclaw.json` |
+| GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` by default; `<workspace>/.github/hooks/defenseclaw.json` with `--workspace` |
+| OpenHands | `~/.openhands/hooks.json` by default; `<workspace>/.openhands/hooks.json` with `--workspace` |
 | Hermes | `~/.hermes/config.yaml` |
 
 A hash-checked backup of each file is stored in `~/.defenseclaw/backups/` before any mutation. Teardown (or `--disable`) restores the backup byte-for-byte; if the file has drifted since the backup, only DefenseClaw-owned entries are surgically removed.
+
+Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope.
+
+Every hook setup also writes the resolved connector path contract to `~/.defenseclaw/hook_contract_lock.json`. The `locations` block records the pinned workspace, hook config file, generated hook script, and the MCP/skills/rules/plugins/agents surfaces that DefenseClaw will scan for that connector. Use `defenseclaw doctor` to compare that lock against the files the active SDK can actually load.
 
 ## Reload without restart
 

@@ -289,6 +289,7 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"windsurf_observability", &stubConnector{name: "windsurf"}, false},
 		{"geminicli_observability", &stubConnector{name: "geminicli"}, false},
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
+		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
@@ -323,6 +324,7 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"windsurf", "windsurf", false},
 		{"geminicli", "geminicli", false},
 		{"copilot", "copilot", false},
+		{"openhands", "openhands", false},
 		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
@@ -449,6 +451,8 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		{"geminicli_remote", "geminicli", "gw.example.com", "", false},
 		{"copilot_loopback", "copilot", "127.0.0.1", "", false},
 		{"copilot_remote", "copilot", "10.0.0.5", "", false},
+		{"openhands_loopback", "openhands", "127.0.0.1", "", false},
+		{"openhands_remote", "openhands", "gw.example.com", "", false},
 
 		// Empty / unknown connector with no override → DISABLED.
 		// Reconnect spam against an unconfigured upstream is the
@@ -2480,6 +2484,13 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantMode:         "observability",
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks", "otel"},
+		},
+		{
+			name:             "openhands_observability_hooks",
+			connector:        "openhands",
+			wantMode:         "observability",
+			wantIntercept:    false,
+			wantTelemetryAll: []string{"hooks"},
 		},
 	}
 	for _, c := range cases {
@@ -5641,6 +5652,48 @@ func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
 	}
 	if !*called {
 		t.Error("loopback OTLP path token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeGeminiCLI: "scoped-token-abc",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/geminicli/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master token on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master token despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master bearer on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master bearer despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/geminicli/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped token: status=%d want 200", rr.Code)
 	}
 }
 

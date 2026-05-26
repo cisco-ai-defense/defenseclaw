@@ -81,8 +81,7 @@ class TestSetupCodexAlias(unittest.TestCase):
         def _save():
             with open(self.cfg_path, "w") as fh:
                 fh.write(
-                    f"claw_mode: {self.app.cfg.claw.mode}\n"
-                    f"guardrail_connector: {self.app.cfg.guardrail.connector}\n"
+                    f"claw_mode: {self.app.cfg.claw.mode}\nguardrail_connector: {self.app.cfg.guardrail.connector}\n"
                 )
 
         self.app.cfg.save = _save  # type: ignore[assignment]
@@ -91,12 +90,19 @@ class TestSetupCodexAlias(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def _run(self, *extra_args):
-        with patch(
-            "defenseclaw.commands.cmd_setup._restart_services",
-            return_value=None,
-        ), patch(
-            "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
-            return_value=None,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
         ):
             return _invoke(["codex", "--yes", *extra_args], self.app)
 
@@ -151,12 +157,19 @@ class TestSetupCodexAlias(unittest.TestCase):
         broke installs running on systems without the gateway binary
         on PATH.
         """
-        with patch(
-            "defenseclaw.commands.cmd_setup._restart_services",
-            return_value=None,
-        ) as restart_mock, patch(
-            "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
-            return_value=None,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ) as restart_mock,
+            patch(
+                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
         ):
             result = _invoke(["codex", "--yes", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -182,12 +195,19 @@ class TestSetupClaudeCodeAlias(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def _run(self, *extra_args):
-        with patch(
-            "defenseclaw.commands.cmd_setup._restart_services",
-            return_value=None,
-        ), patch(
-            "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
-            return_value=None,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
         ):
             return _invoke(["claude-code", "--yes", *extra_args], self.app)
 
@@ -226,8 +246,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         def _save():
             with open(self.cfg_path, "w") as fh:
                 fh.write(
-                    f"claw_mode: {self.app.cfg.claw.mode}\n"
-                    f"guardrail_connector: {self.app.cfg.guardrail.connector}\n"
+                    f"claw_mode: {self.app.cfg.claw.mode}\nguardrail_connector: {self.app.cfg.guardrail.connector}\n"
                 )
 
         self.app.cfg.save = _save  # type: ignore[assignment]
@@ -236,13 +255,21 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_new_aliases_pin_observability_connector(self):
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot"]:
-            with self.subTest(connector=connector), patch(
-                "defenseclaw.commands.cmd_setup._restart_services",
-                return_value=None,
-            ) as restart_mock, patch(
-                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
-                return_value=None,
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
+            with (
+                self.subTest(connector=connector),
+                patch(
+                    "defenseclaw.commands.cmd_setup._restart_services",
+                    return_value=None,
+                ) as restart_mock,
+                patch(
+                    "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    return_value=True,
+                ),
             ):
                 self.app.cfg.claw.mode = "openclaw"
                 self.app.cfg.guardrail.connector = "openclaw"
@@ -251,6 +278,8 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertEqual(result.exit_code, 0, msg=result.output)
                 self.assertEqual(self.app.cfg.guardrail.connector, connector)
                 self.assertEqual(self.app.cfg.claw.mode, connector)
+                self.assertEqual(self.app.cfg.claw.workspace_dir, "")
+                self.assertIn("Scope: global user config", result.output)
                 self.assertTrue(self.app.cfg.guardrail.enabled)
                 self.assertEqual(self.app.cfg.guardrail.mode, "observe")
                 self.assertEqual(self.app.cfg.guardrail.scanner_mode, "local")
@@ -261,16 +290,66 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 with open(hint_path) as fh:
                     self.assertEqual(fh.read().strip(), connector)
 
+    def test_new_aliases_support_hook_action_mode(self):
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
+            with (
+                self.subTest(connector=connector),
+                patch(
+                    "defenseclaw.commands.cmd_setup._restart_services",
+                    return_value=None,
+                ) as restart_mock,
+                patch(
+                    "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                    return_value=None,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    return_value=True,
+                ) as version_mock,
+            ):
+                self.app.cfg.claw.mode = "openclaw"
+                self.app.cfg.guardrail.connector = "openclaw"
+                self.app.cfg.guardrail.mode = "observe"
+                result = _invoke([connector, "--yes", "--mode", "action", "--no-restart"], self.app)
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(self.app.cfg.guardrail.connector, connector)
+                self.assertEqual(self.app.cfg.claw.mode, connector)
+                self.assertEqual(self.app.cfg.claw.workspace_dir, "")
+                self.assertTrue(self.app.cfg.guardrail.enabled)
+                self.assertEqual(self.app.cfg.guardrail.mode, "action")
+                self.assertIn("guardrail.mode=action", result.output)
+                version_mock.assert_called_with(
+                    connector,
+                    mode="action",
+                    data_dir=self.app.cfg.data_dir,
+                )
+                restart_mock.assert_not_called()
+
+    def test_alias_workspace_option_pins_workspace(self):
+        workspace = os.path.join(self.tmp_dir, "repo")
+        os.makedirs(workspace)
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
+        ):
+            result = _invoke(["openhands", "--yes", "--no-restart", "--workspace", workspace], self.app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.app.cfg.claw.workspace_dir, os.path.realpath(workspace))
+        self.assertIn("Workspace root pinned", result.output)
+
     def test_setup_help_lists_new_alias_commands(self):
         result = _invoke(["--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot"]:
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
             self.assertIn(connector, result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
         result = _invoke(["guardrail", "--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot"]:
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
             self.assertIn(connector, result.output)
         self.assertNotIn("openclaw, claudecode, codex, zeptoclaw", result.output)
 
@@ -294,15 +373,23 @@ class TestSetupCodexAliasInteractiveDecline(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_decline_leaves_state_unchanged(self):
-        with patch(
-            "defenseclaw.commands.cmd_setup.click.confirm",
-            return_value=False,
-        ), patch(
-            "defenseclaw.commands.cmd_setup._restart_services",
-            return_value=None,
-        ), patch(
-            "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
-            return_value=None,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.click.confirm",
+                return_value=False,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
         ):
             result = _invoke(["codex"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -350,7 +437,9 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
         )
 
         ok = _apply_connector_observability_only(
-            self.app, connector="openclaw", restart=False,
+            self.app,
+            connector="openclaw",
+            restart=False,
         )
         self.assertFalse(ok)
 
@@ -360,12 +449,20 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
             _apply_connector_observability_only,
         )
 
-        with patch(
-            "defenseclaw.commands.cmd_setup._restart_services",
-            return_value=None,
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
         ):
             ok1 = _apply_connector_observability_only(
-                self.app, connector="codex", restart=False,
+                self.app,
+                connector="codex",
+                restart=False,
             )
             self.assertTrue(ok1)
             snapshot_first = (
@@ -375,7 +472,9 @@ class TestApplyConnectorObservabilityHelper(unittest.TestCase):
             )
 
             ok2 = _apply_connector_observability_only(
-                self.app, connector="codex", restart=False,
+                self.app,
+                connector="codex",
+                restart=False,
             )
             self.assertTrue(ok2)
             snapshot_second = (

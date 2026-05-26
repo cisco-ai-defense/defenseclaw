@@ -80,6 +80,7 @@ KNOWN_CONNECTORS = {
     "windsurf",
     "geminicli",
     "copilot",
+    "openhands",
 }
 KNOWN_TYPES = {"skill", "mcp"}
 
@@ -130,9 +131,17 @@ class ManifestEntry:
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "type": self.type}
         for key in (
-            "source_url", "sha256", "version", "license", "publisher",
-            "description", "homepage", "connector", "transport",
-            "command", "url",
+            "source_url",
+            "sha256",
+            "version",
+            "license",
+            "publisher",
+            "description",
+            "homepage",
+            "connector",
+            "transport",
+            "command",
+            "url",
         ):
             value = getattr(self, key)
             if value:
@@ -187,6 +196,7 @@ class Manifest:
 # Parsing
 # ---------------------------------------------------------------------------
 
+
 def parse_manifest(raw: str | bytes) -> Manifest:
     """Parse *raw* as JSON or YAML and return a validated :class:`Manifest`.
 
@@ -238,34 +248,30 @@ def load_manifest_file(path: str | Path) -> Manifest:
 # also run it for full schema fidelity (extra errors / better messages).
 # ---------------------------------------------------------------------------
 
+
 def _build_manifest(data: Any) -> Manifest:
     if not isinstance(data, dict):
         raise ManifestError("manifest must be a mapping at the top level")
 
     schema_version = data.get("schema_version")
     if schema_version != 1:
-        raise ManifestError(
-            f"unsupported schema_version {schema_version!r} (expected 1)"
-        )
+        raise ManifestError(f"unsupported schema_version {schema_version!r} (expected 1)")
 
     publisher = _opt_str(data.get("publisher"), "publisher", max_len=256)
     generated_at = _opt_str(data.get("generated_at"), "generated_at", max_len=64)
     default_connector = _opt_str(
-        data.get("default_connector"), "default_connector", max_len=64,
+        data.get("default_connector"),
+        "default_connector",
+        max_len=64,
     )
     if default_connector and default_connector not in KNOWN_CONNECTORS:
-        raise ManifestError(
-            f"default_connector {default_connector!r} is not one of "
-            f"{sorted(KNOWN_CONNECTORS)}"
-        )
+        raise ManifestError(f"default_connector {default_connector!r} is not one of {sorted(KNOWN_CONNECTORS)}")
 
     raw_entries = data.get("entries")
     if not isinstance(raw_entries, list):
         raise ManifestError("entries must be a list")
     if len(raw_entries) > MAX_ENTRIES:
-        raise ManifestError(
-            f"manifest has {len(raw_entries)} entries (max {MAX_ENTRIES})"
-        )
+        raise ManifestError(f"manifest has {len(raw_entries)} entries (max {MAX_ENTRIES})")
 
     seen: set[tuple[str, str]] = set()
     entries: list[ManifestEntry] = []
@@ -276,10 +282,7 @@ def _build_manifest(data: Any) -> Manifest:
             raise ManifestError(f"entries[{idx}]: {exc}") from exc
         key = (entry.type, entry.name)
         if key in seen:
-            raise ManifestError(
-                f"entries[{idx}]: duplicate {entry.type} entry "
-                f"{entry.name!r}"
-            )
+            raise ManifestError(f"entries[{idx}]: duplicate {entry.type} entry {entry.name!r}")
         seen.add(key)
         entries.append(entry)
 
@@ -319,22 +322,16 @@ def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:
         raise ManifestError("entry must be a mapping")
     type_ = raw.get("type")
     if type_ not in KNOWN_TYPES:
-        raise ManifestError(
-            f"type must be one of {sorted(KNOWN_TYPES)} (got {type_!r})"
-        )
+        raise ManifestError(f"type must be one of {sorted(KNOWN_TYPES)} (got {type_!r})")
     name = raw.get("name")
     if not isinstance(name, str) or not NAME_RE.match(name):
-        raise ManifestError(
-            f"name must match {NAME_RE.pattern!r} (got {name!r})"
-        )
+        raise ManifestError(f"name must match {NAME_RE.pattern!r} (got {name!r})")
 
     connector = _opt_str(raw.get("connector"), "connector", max_len=64)
     if not connector:
         connector = default_connector
     if connector and connector not in KNOWN_CONNECTORS:
-        raise ManifestError(
-            f"connector {connector!r} is not one of {sorted(KNOWN_CONNECTORS)}"
-        )
+        raise ManifestError(f"connector {connector!r} is not one of {sorted(KNOWN_CONNECTORS)}")
 
     publisher = _opt_str(raw.get("publisher"), "publisher", max_len=256)
     license_ = _opt_str(raw.get("license"), "license", max_len=128)
@@ -348,10 +345,7 @@ def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:
     if type_ == "skill":
         source_url = _req_str(raw.get("source_url"), "source_url", max_len=MAX_STRING)
         if not SOURCE_URL_RE.match(source_url):
-            raise ManifestError(
-                f"source_url must start with clawhub://, https://, or http:// "
-                f"(got {source_url!r})"
-            )
+            raise ManifestError(f"source_url must start with clawhub://, https://, or http:// (got {source_url!r})")
         sha256 = _opt_str(raw.get("sha256"), "sha256", max_len=64)
         if sha256 and not SHA256_RE.match(sha256):
             raise ManifestError(f"sha256 must be 64 hex chars (got {sha256!r})")
@@ -371,34 +365,27 @@ def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:
 
     transport = _opt_str(raw.get("transport"), "transport", max_len=32) or "stdio"
     if transport not in KNOWN_TRANSPORTS:
-        raise ManifestError(
-            f"transport {transport!r} is not one of {sorted(KNOWN_TRANSPORTS)}"
-        )
+        raise ManifestError(f"transport {transport!r} is not one of {sorted(KNOWN_TRANSPORTS)}")
 
     command = _opt_str(raw.get("command"), "command", max_len=256)
     if command and not COMMAND_RE.match(command):
-        raise ManifestError(
-            f"command {command!r} contains characters outside the allow-list "
-            f"({COMMAND_RE.pattern})"
-        )
+        raise ManifestError(f"command {command!r} contains characters outside the allow-list ({COMMAND_RE.pattern})")
     args = _opt_str_list(raw.get("args"), "args", max_items=MAX_ARGS, max_len=1024)
     env_required = _opt_str_list(
-        raw.get("env_required"), "env_required",
-        max_items=MAX_ENV_VARS, max_len=128,
+        raw.get("env_required"),
+        "env_required",
+        max_items=MAX_ENV_VARS,
+        max_len=128,
     )
     for env in env_required:
         if not ENV_VAR_RE.match(env):
-            raise ManifestError(
-                f"env_required entry {env!r} must match {ENV_VAR_RE.pattern!r}"
-            )
+            raise ManifestError(f"env_required entry {env!r} must match {ENV_VAR_RE.pattern!r}")
     url = _opt_str(raw.get("url"), "url", max_len=MAX_STRING)
 
     if transport == "stdio" and not command:
         raise ManifestError("stdio transport requires a non-empty command")
     if transport != "stdio" and not url:
-        raise ManifestError(
-            f"transport {transport!r} requires a non-empty url"
-        )
+        raise ManifestError(f"transport {transport!r} requires a non-empty url")
 
     return ManifestEntry(
         name=name,
@@ -421,6 +408,7 @@ def _build_entry(raw: Any, default_connector: str) -> ManifestEntry:
 # ---------------------------------------------------------------------------
 # Tiny string helpers — keep length / type validation tight and uniform.
 # ---------------------------------------------------------------------------
+
 
 def _coerce_yaml_scalar(value: Any, label: str) -> str:
     """Coerce a YAML-auto-typed scalar to its string surface form.
@@ -455,16 +443,12 @@ def _coerce_yaml_scalar(value: Any, label: str) -> str:
     # Reject bool BEFORE int (bool is a subclass of int) so
     # ``version: yes`` doesn't silently become "True".
     if isinstance(value, bool):
-        raise ManifestError(
-            f"{label} must be a string (got bool — quote the value, e.g. \"true\")"
-        )
+        raise ManifestError(f'{label} must be a string (got bool — quote the value, e.g. "true")')
     if isinstance(value, int | float):
         # repr() avoids YAML's int(1) → "1" + float(1.0) → "1.0"
         # both rendering identically; preserves the operator's intent.
         return repr(value) if isinstance(value, float) else str(value)
-    raise ManifestError(
-        f"{label} must be a string (got {type(value).__name__})"
-    )
+    raise ManifestError(f"{label} must be a string (got {type(value).__name__})")
 
 
 def _opt_str(value: Any, label: str, *, max_len: int) -> str:
@@ -513,11 +497,7 @@ def _maybe_jsonschema_validate(payload: dict[str, Any]) -> None:
         import jsonschema
     except ImportError:
         return
-    schema_path = (
-        Path(__file__).resolve().parents[3]
-        / "schemas"
-        / "registry-manifest.schema.json"
-    )
+    schema_path = Path(__file__).resolve().parents[3] / "schemas" / "registry-manifest.schema.json"
     if not schema_path.exists():
         return
     try:

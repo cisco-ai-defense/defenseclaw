@@ -1,0 +1,52 @@
+---
+title: Connector Compatibility
+description: Versioned hook contracts, setup-time compatibility checks, and the runtime hook contract lock for DefenseClaw connectors.
+keywords:
+  - DefenseClaw hook contracts
+  - connector compatibility
+  - hook_contract_lock.json
+  - Codex hook version
+  - Claude Code hook version
+---
+
+DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at `cli/defenseclaw/inventory/hook_contracts.json`. The manifest maps each connector version range to the hook contract DefenseClaw knows how to install, parse, evaluate, and respond to.
+
+## Current contracts
+
+| Connector | Gate | Supported connector versions | Contract / hook script | AID surfaces |
+| --- | --- | --- | --- | --- |
+| OpenClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
+| ZeptoClaw | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
+| Codex | hook contract | `>=0.124.0` | `codex-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Claude Code | hook contract | `>=2.1.144` | `claudecode-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| Hermes | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | tool_call |
+| Cursor | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Windsurf | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| Gemini CLI | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| GitHub Copilot CLI | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| OpenHands | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+
+DefenseClaw leaves `max_exclusive` empty until an upstream release publishes a breaking hook change. Future versions are tracked through `hook_contract_lock.json` and doctor drift checks rather than a guessed major-version cap.
+
+The floors come from upstream release notes or current vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0` enabled hooks by default, Cursor `1.7.0` introduced beta hooks, Hermes `0.11.0` added shell hooks for `pre_tool_call`, Windsurf `1.12.41` added user prompt hooks to the Cascade pre-hook set, and Copilot CLI `1.0.18` is the first release containing every event in the current DefenseClaw Copilot contract. OpenHands uses the current documented `.openhands/hooks.json` contract, installs globally through `~/.openhands/hooks.json` by default, has been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned until upstream publishes a hook-version floor. Claude Code is pinned to the current documented hook surface captured at `2.1.144`; older Claude Code versions exposed smaller event sets.
+
+## Setup-time checks
+
+Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. Unsupported or unverified hook connector versions are allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
+
+Proxy connectors are recorded in the manifest too, but they are marked `not-gated` because their enforcement surface is the DefenseClaw proxy instead of an agent hook contract.
+
+## Runtime lock
+
+After gateway setup completes, DefenseClaw writes `hook_contract_lock.json` under the configured data directory. The lock records:
+
+| Field | Purpose |
+| --- | --- |
+| `raw_agent_version` | The exact connector version string discovered locally. |
+| `normalized_agent_version` | The semver-like value used for manifest range matching. |
+| `contract_id` | The deterministic hook contract selected for this connector. |
+| `hook_script_version` | The DefenseClaw hook script generation installed on disk. |
+| `hook_script_digests` | Hashes of installed hook scripts for drift detection. |
+| `defenseclaw_version` | The DefenseClaw build that produced the lock. |
+
+`defenseclaw doctor` reads the lock and compares it with the current discovery cache so connector upgrades, hook contract changes, and hook script drift show up before action-mode enforcement depends on them.

@@ -36,13 +36,14 @@ Tables below tag each row with the binary that owns it.
 | --- | --- |
 | `defenseclaw setup guardrail` | The central setup command. See [Setup Guardrail](/docs/setup/guardrail). |
 | `defenseclaw setup mode <connector>` | Switch the active claw connector with smart guardrail inheritance. See [Switching connectors](/docs/setup/guardrail/switching-connectors). |
-| `defenseclaw setup claude-code` | Observability-only alias for Claude Code. |
-| `defenseclaw setup codex` | Observability-only alias for Codex. |
-| `defenseclaw setup cursor` | Observability-only alias for Cursor. |
-| `defenseclaw setup windsurf` | Observability-only alias for Windsurf. |
-| `defenseclaw setup geminicli` | Observability-only alias for Gemini CLI. |
-| `defenseclaw setup copilot` | Observability-only alias for GitHub Copilot CLI. |
-| `defenseclaw setup hermes` | Observability-only alias for Hermes. |
+| `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup cursor` | Hook setup alias for Cursor; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup windsurf` | Hook setup alias for Windsurf; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup geminicli` | Hook setup alias for Gemini CLI; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
 | `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
@@ -58,7 +59,7 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw alerts` | Snapshot of recent alerts (default 25) as a table. `--limit N` to widen, `--show <n>` for full record. |
 | `defenseclaw alerts acknowledge` / `dismiss` | Acknowledge or dismiss alerts (writes an `audit_log_activity` mutation). `--severity all\|CRITICAL\|HIGH\|MEDIUM\|LOW`. |
 | `defenseclaw audit log-activity --payload-file <f>` | Record a config/operator mutation through the gateway's audit logger. Used internally by the TUI on save. |
-| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
+| `defenseclaw-gateway audit export` | JSONL export of `audit_events` from the SQLite DB, including `structured` when `structured_json` is present. Flags: `--output`, `--limit`, `--include-activity` (also dumps `activity_events`). |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | The gateway fan-out file. Every event the gateway sees is written here as JSONL — pair with `jq` for ad-hoc filtering. Pipeable by design. |
 
 ## Scanning

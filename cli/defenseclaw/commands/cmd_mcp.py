@@ -98,8 +98,8 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
         ux.warn(
             f"No MCP servers configured for connector={connector!r} "
             "(checked the connector-specific source: openclaw.json / "
-            ".claude/settings.json / .mcp.json / "
-            ".zeptoclaw/config.json).",
+            ".claude/settings.json / .codex/config.toml / "
+            ".zeptoclaw/config.json / user-global hook connector MCP files).",
         )
         return
 
@@ -579,8 +579,9 @@ def unblock(app: AppContext, target: str) -> None:
 #
 # OpenClaw uses ``openclaw config set/unset`` (schema-validated +
 # hot-reloaded). Claude Code and Codex have no equivalent CLI, so
-# we patch ``~/.claude/settings.json`` and ``./.mcp.json`` directly
-# via the atomic JSON helpers in :mod:`defenseclaw.connector_paths`.
+# we patch ``~/.claude/settings.json`` and ``~/.codex/config.toml``
+# directly, with explicit workspace overlays handled by the atomic JSON
+# helpers in :mod:`defenseclaw.connector_paths`.
 # ZeptoClaw owns its config.json from the TUI and does not expose a
 # safe write surface — we surface a clear error rather than racing
 # ZeptoClaw's autosave.
@@ -623,6 +624,7 @@ def _set_mcp_via_connector(cfg, name: str, entry: dict) -> None:
             cfg.active_connector(),
             name,
             entry,
+            workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
             openclaw_config_setter=_openclaw_config_set,
         )
     except connector_paths.MCPWriteUnsupportedError as e:
@@ -637,6 +639,7 @@ def _unset_mcp_via_connector(cfg, name: str) -> None:
         connector_paths.unset_mcp_server(
             cfg.active_connector(),
             name,
+            workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
             openclaw_config_unsetter=_openclaw_config_unset,
         )
     except connector_paths.MCPWriteUnsupportedError as e:

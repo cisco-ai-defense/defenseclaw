@@ -52,6 +52,12 @@ func newRawTelemetryDeduper() *rawTelemetryDeduper {
 }
 
 func (a *APIServer) rawDeduper() *rawTelemetryDeduper {
+	a.rawTelemetryMu.RLock()
+	d := a.rawTelemetryDedupe
+	a.rawTelemetryMu.RUnlock()
+	if d != nil {
+		return d
+	}
 	a.rawTelemetryMu.Lock()
 	defer a.rawTelemetryMu.Unlock()
 	if a.rawTelemetryDedupe == nil {
@@ -177,6 +183,55 @@ func (a *APIServer) rememberClaudeCodeRawHookEvents(req claudeCodeHookRequest) [
 	return uniqueNonEmpty(ids)
 }
 
+// rememberHookRawEvents is the profile-driven raw event deduper.
+// It folds rememberCodexRawHookEvents and
+// rememberClaudeCodeRawHookEvents into a single helper keyed on the
+// generic agentHookRequest, so any connector — codex, claudecode, and
+// every future generic connector with a non-nil NativeOTLPSpec — gets
+// automatic dedup coverage without bespoke code paths.
+//
+// The kind classification (prompt / tool_call / tool_result) matches
+// the bespoke helpers byte-for-byte by canonicalizing the event name
+// through canonicalEvent(). The content for hashing is derived from
+// the canonical fields of agentHookRequest:
+//
+//   - prompt   → req.Content (UserPromptSubmit, UserPromptExpansion)
+//   - tool_call → req.ToolArgs (PreToolUse, PermissionRequest,
+//     PermissionDenied)
+//   - tool_result → req.Content (PostToolUse, PostToolBatch, etc.)
+//
+// The toolID field is recovered from req.Payload["tool_use_id"]
+// because the unified normalizer (normalizeAgentHookRequest) does not
+// strip it to a typed slot — keeping the bespoke handlers' behaviour
+// without forcing the unified handler to know about every vendor
+// schema.
+//
+// Post PR #284 this helper handles the 5 hookOnly connectors
+// (hermes/cursor/windsurf/geminicli/copilot); codex and claudecode
+// have their own dedupers (rememberCodexRawHookEvents /
+// rememberClaudeCodeRawHookEvents) that probe connector-specific
+// fields like ToolUseID / PermissionRequestID. The unified
+// handleAgentHook routes to either via
+// hook_profile_runtime.go's profile-runtime registry.
+func (a *APIServer) rememberHookRawEvents(req agentHookRequest) []string {
+	canon := canonicalEvent(req.HookEventName)
+	toolID := firstString(req.Payload, "tool_use_id", "toolUseId", "tool_call_id", "toolCallId")
+	var ids []string
+	switch {
+	case isPromptLikeEvent(canon) || canon == "userpromptexpansion":
+		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "prompt", req.SessionID, req.TurnID, toolID, []byte(req.Content)))
+	case isGenericToolInspectionEvent(canon) || canon == "permissiondenied":
+		args := []byte(req.ToolArgs)
+		if len(args) == 0 {
+			args = []byte("{}")
+		}
+		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "tool_call", req.SessionID, req.TurnID, toolID, args))
+	case isResultLikeEvent(canon) || canon == "posttoolbatch":
+		ids = append(ids, a.rememberRawHookEvent(req.ConnectorName, "tool_result", req.SessionID, req.TurnID, toolID, []byte(req.Content)))
+	}
+	return uniqueNonEmpty(ids)
+}
+
 func appendRawTelemetryCanonicalDetails(details, origin string, canonical bool, eventIDs []string) string {
 	if !redaction.DisableAll() || origin == "" || len(eventIDs) == 0 {
 		return details
@@ -191,6 +246,19 @@ func appendRawTelemetryDedupeDetails(details string, decision rawTelemetryDedupe
 	}
 	return fmt.Sprintf("%s raw_origin=native_otlp raw_canonical=false raw_duplicate_of=%s raw_duplicate_count=%d",
 		details, strings.Join(uniqueNonEmpty(decision.duplicateIDs), ","), len(decision.duplicateIDs))
+}
+
+// rawOriginIfHook returns "hook" when the supplied raw event ID
+// slice is non-empty, "" otherwise. The HookAuditEnvelope schema
+// requires RawOrigin to be set whenever RawEventIDs is present so a
+// downstream SIEM query has the join key. Returning "" lets the
+// JSON omitempty rule drop the field entirely for events with no
+// dedup signature (e.g. SessionStart, ConfigChange).
+func rawOriginIfHook(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	return "hook"
 }
 
 func uniqueNonEmpty(values []string) []string {

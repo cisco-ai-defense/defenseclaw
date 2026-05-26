@@ -28,14 +28,12 @@ validation, audit drill-down) silently depend on:
 
 from __future__ import annotations
 
-import copy
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check_schemas.py"
@@ -47,9 +45,7 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
     def test_resource_schema_has_canonical_claw_mode_enum(self) -> None:
         """The released schema must list every connector emit() can produce."""
         doc = json.loads(RESOURCE_SCHEMA.read_text(encoding="utf-8"))
-        enum = set(
-            doc["properties"]["defenseclaw.claw.mode"].get("enum", [])
-        )
+        enum = set(doc["properties"]["defenseclaw.claw.mode"].get("enum", []))
         # Connector names from internal/gateway/connector plus the empty placeholder
         # for fresh installs that haven't picked a connector yet.
         self.assertEqual(
@@ -64,6 +60,7 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "windsurf",
                 "geminicli",
                 "copilot",
+                "openhands",
                 "",
             },
             "drift in defenseclaw.claw.mode enum — update Connector.Name() "
@@ -79,9 +76,7 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
         downstream consumer (silent drop of the resource record).
         """
         doc = json.loads(RESOURCE_SCHEMA.read_text(encoding="utf-8"))
-        enum = set(
-            doc["properties"]["defenseclaw.claw.mode"].get("enum", [])
-        )
+        enum = set(doc["properties"]["defenseclaw.claw.mode"].get("enum", []))
         self.assertNotIn("nemoclaw", enum)
         self.assertNotIn("opencode", enum)
 
@@ -130,9 +125,9 @@ class TestCheckSchemasDriftDetection(unittest.TestCase):
 
             res = self._run_against(tmp_path)
             self.assertNotEqual(
-                res.returncode, 0,
-                f"check_schemas should have flagged the dropped connector\n"
-                f"stdout={res.stdout}\nstderr={res.stderr}",
+                res.returncode,
+                0,
+                f"check_schemas should have flagged the dropped connector\nstdout={res.stdout}\nstderr={res.stderr}",
             )
             self.assertIn("defenseclaw.claw.mode", res.stderr)
             self.assertIn("claudecode", res.stderr)
@@ -153,7 +148,8 @@ class TestCheckSchemasDriftDetection(unittest.TestCase):
 
             res = self._run_against(tmp_path)
             self.assertNotEqual(
-                res.returncode, 0,
+                res.returncode,
+                0,
                 f"check_schemas should have flagged the legacy connector name\n"
                 f"stdout={res.stdout}\nstderr={res.stderr}",
             )

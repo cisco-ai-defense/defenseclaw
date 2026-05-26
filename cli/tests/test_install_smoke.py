@@ -42,8 +42,16 @@ import unittest
 from unittest.mock import patch
 
 CONNECTORS = (
-    "openclaw", "zeptoclaw", "claudecode", "codex",
-    "hermes", "cursor", "windsurf", "geminicli", "copilot",
+    "openclaw",
+    "zeptoclaw",
+    "claudecode",
+    "codex",
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "openhands",
 )
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -112,8 +120,8 @@ class InstallSmokeMatrixTests(unittest.TestCase):
     """Per-connector lifecycle round-trip smoke tests."""
 
     def _run_setup_disable_uninstall_for(self, connector_name: str) -> None:
-        from defenseclaw.commands.cmd_setup import execute_guardrail_setup
         from defenseclaw.commands import cmd_uninstall
+        from defenseclaw.commands.cmd_setup import execute_guardrail_setup
 
         with _IsolatedHome() as home:
             app = _build_app_with_connector(home, connector_name)

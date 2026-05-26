@@ -136,11 +136,11 @@ def test_codeguard_skill_replace_archives_prior_content(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     cfg = _cfg("cursor", tmp_path)
 
-    # First install creates the skill dir under the cwd-priority cursor
-    # skill path (cwd/.cursor/skills/codeguard); mutate it to look
-    # like a user-customized payload that --replace must preserve.
+    # First install creates the skill dir under the default user-global
+    # cursor skill path; mutate it to look like a user-customized
+    # payload that --replace must preserve.
     install_codeguard_asset(cfg, connector="cursor", target="skill")
-    skill_root = tmp_path / ".cursor" / "skills" / "codeguard"
+    skill_root = tmp_path / "home" / ".cursor" / "skills" / "codeguard"
     assert skill_root.is_dir(), f"skill root missing: {skill_root}"
     user_artifact = skill_root / "USER_PATCH.md"
     user_artifact.write_text("operator customization", encoding="utf-8")

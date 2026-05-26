@@ -127,6 +127,32 @@ class TestListSkillsForNonOpenClawConnector(unittest.TestCase):
         self.assertTrue(by_name["marked"]["eligible"])
         self.assertFalse(by_name["empty"]["eligible"])
 
+    def test_description_uses_skill_frontmatter(self):
+        cfg = _make_cfg(self.tmp, "openhands")
+        skill_root = os.path.join(self.tmp, "skills")
+        _seed_skill(
+            skill_root,
+            "frontmatter",
+            body="---\nname: frontmatter\ndescription: Frontmatter description\n---\n\n# Fallback\n",
+        )
+
+        with self._patch_skill_dirs([skill_root]):
+            rows = skill_list.list_skills(cfg)
+
+        self.assertEqual(rows[0]["description"], "Frontmatter description")
+
+    def test_openhands_installed_container_is_not_a_skill(self):
+        cfg = _make_cfg(self.tmp, "openhands")
+        openhands_skills = os.path.join(self.tmp, ".openhands", "skills")
+        installed = os.path.join(openhands_skills, "installed")
+        os.makedirs(installed, exist_ok=True)
+        _seed_skill(installed, "real-installed")
+
+        with self._patch_skill_dirs([openhands_skills, installed]):
+            rows = skill_list.list_skills(cfg)
+
+        self.assertEqual([r["name"] for r in rows], ["real-installed"])
+
     def test_dedup_across_skill_dirs(self):
         cfg = _make_cfg(self.tmp, "codex")
         a = os.path.join(self.tmp, "a")

@@ -547,9 +547,11 @@ func (p *SetupPanel) loadSections() {
 				"Changing this without also migrating content will orphan scans.",
 			Fields: []configField{
 				{Label: "Mode", Key: "claw.mode", Kind: "choice",
-					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"},
+					Options: []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"},
 					Value:   string(c.Claw.Mode),
 					Hint:    "Active agent framework. Drives skill/MCP/plugin path resolution — see internal/config/claw.go."},
+				{Label: "Workspace Dir", Key: "claw.workspace_dir", Kind: "string", Value: c.Claw.WorkspaceDir,
+					Hint: "Optional pinned workspace. Leave empty for global/user scope across the operator environment."},
 				{Label: "Home Dir", Key: "claw.home_dir", Kind: "string", Value: c.Claw.HomeDir,
 					Hint: "Override for the connector's home directory. Leave empty to use the OS/default connector paths."},
 				{Label: "Config File", Key: "claw.config_file", Kind: "string", Value: c.Claw.ConfigFile,
@@ -627,7 +629,7 @@ func (p *SetupPanel) loadSections() {
 						"Transport failures (gateway unreachable / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."},
 				{Label: "Scanner Mode", Key: "guardrail.scanner_mode", Kind: "choice", Value: c.Guardrail.ScannerMode, Options: []string{"local", "remote", "both"},
 					Hint: "local=regex+judge only; remote=Cisco AI Defense only; both=chained (local then remote)."},
-				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot"},
+				{Label: "Connector", Key: "guardrail.connector", Kind: "choice", Value: c.Guardrail.Connector, Options: []string{"", "codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"},
 					Hint: "Connector adapter used by the guardrail sidecar. Blank follows claw.mode/backward-compatible defaults."},
 				{Label: "Allow Empty Providers", Key: "guardrail.allow_empty_providers", Kind: "bool", Value: fmt.Sprintf("%v", c.Guardrail.AllowEmptyProviders),
 					Hint: "Let the sidecar boot when no upstream LLM providers are detected. Useful only for tests/stubs."},
@@ -1800,6 +1802,12 @@ func (p *SetupPanel) buildConnectorSetupWizardArgs() []string {
 		return args
 	}
 
+	if workspace := strings.TrimSpace(wizardFieldValue(p.wizFormFields, "Workspace Dir")); workspace != "" {
+		args = append(args, "--workspace", workspace)
+	}
+	if mode := wizardFieldValue(p.wizFormFields, "Guardrail Mode"); mode != "" {
+		args = append(args, "--mode", mode)
+	}
 	if wizardBoolValue(p.wizFormFields, "Restart Gateway", "yes") == "no" {
 		args = append(args, "--no-restart")
 	}
@@ -2080,6 +2088,7 @@ func (p *SetupPanel) connectorSetupWizardFields() []wizardFormField {
 	connector := "openclaw"
 	mode := "observe"
 	scannerMode := "local"
+	workspace := ""
 	if p.cfg != nil {
 		if active := strings.TrimSpace(string(p.cfg.Claw.Mode)); active != "" {
 			connector = active
@@ -2090,9 +2099,11 @@ func (p *SetupPanel) connectorSetupWizardFields() []wizardFormField {
 		if p.cfg.Guardrail.ScannerMode != "" {
 			scannerMode = p.cfg.Guardrail.ScannerMode
 		}
+		workspace = p.cfg.ConnectorWorkspaceDir()
 	}
 	return []wizardFormField{
-		{Label: "Connector", Kind: "choice", Options: []string{"openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}, Value: connector, Default: connector, Required: true, Hint: "Connector setup target. Claude Code maps to `setup claude-code`."},
+		{Label: "Connector", Kind: "choice", Options: []string{"openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"}, Value: connector, Default: connector, Required: true, Hint: "Connector setup target. Claude Code maps to `setup claude-code`."},
+		{Label: "Workspace Dir", Kind: "string", Value: workspace, Default: workspace, Hint: "Optional. Empty means global/user scope; set only to force repo-local hook/MCP/skill overlays."},
 		{Label: "Guardrail Mode", Kind: "choice", Options: []string{"observe", "action"}, Value: mode, Default: mode, Hint: "observe records only; action blocks. Hook-enforced connectors block via PreToolUse deny verdict (no proxy)."},
 		{Label: "Scanner Mode", Kind: "choice", Options: []string{"local", "remote", "both"}, Value: scannerMode, Default: scannerMode, Hint: "Used by OpenClaw/ZeptoClaw setup; hook-enforced connectors default to local."},
 		{Label: "Restart Gateway", Kind: "bool", Value: "yes", Default: "yes", Hint: "Restart gateway after setup so connector hooks/runtime files are rewired."},
@@ -2325,7 +2336,7 @@ func (p *SetupPanel) wizardFormDefs(idx int) []wizardFormField {
 		}
 	case wizardTokenRotation:
 		return []wizardFormField{
-			{Label: "Connector", Kind: "choice", Options: []string{"", "openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot"}, Value: "", Default: "", Hint: "Optional connector override. Blank uses the active guardrail connector."},
+			{Label: "Connector", Kind: "choice", Options: []string{"", "openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"}, Value: "", Default: "", Hint: "Optional connector override. Blank uses the active guardrail connector."},
 			{Label: "Refresh Hooks", Kind: "bool", Value: "yes", Default: "yes", Hint: "Run connector teardown/setup so hook token files are refreshed."},
 		}
 	case wizardCustomProviders:
@@ -4219,7 +4230,7 @@ func agentHookFields(label, prefix string, h config.AgentHookConfig) []configFie
 }
 
 func connectorHookMapFields(c *config.Config) []configField {
-	names := []string{"codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot"}
+	names := []string{"codex", "claudecode", "zeptoclaw", "openclaw", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"}
 	seen := map[string]bool{}
 	if c.ConnectorHooks != nil {
 		for name := range c.ConnectorHooks {

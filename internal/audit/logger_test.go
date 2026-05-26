@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit/sinks"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // captureSink is an in-memory sinks.Sink that records every event
@@ -80,6 +82,132 @@ func installCaptureSink(t *testing.T, l *Logger) *captureSink {
 	mgr.Register(cs)
 	l.SetSinks(mgr)
 	return cs
+}
+
+func TestForwardGatewayEventToSinks_EmitsCanonicalDefenseClawHECRow(t *testing.T) {
+	l := NewLogger(nil)
+	cs := installCaptureSink(t, l)
+
+	l.ForwardGatewayEventToSinks(context.Background(), gatewaylog.Event{
+		Timestamp: time.Unix(1700000000, 123000000).UTC(),
+		EventType: gatewaylog.EventLLMPrompt,
+		Severity:  gatewaylog.SeverityInfo,
+		RunID:     "run-1",
+		SessionID: "sess-1",
+		TurnID:    "turn-1",
+		AgentName: "codex",
+		Model:     "gpt-5.5",
+		LLMPrompt: &gatewaylog.LLMPromptPayload{
+			PromptID: "prompt-1",
+			TurnID:   "turn-1",
+			Role:     "user",
+			Prompt:   "hello",
+			Source:   "codex.notify.agent-turn-complete",
+		},
+	})
+
+	events := cs.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink events=%d want 1", len(events))
+	}
+	extras, ok := events[0].Structured[gatewaySplunkHECEventsKey].([]map[string]any)
+	if !ok || len(extras) != 1 {
+		t.Fatalf("missing gateway HEC extra event: %#v", events[0].Structured)
+	}
+	if got := extras[0]["sourcetype"]; got != "defenseclaw:json" {
+		t.Fatalf("sourcetype=%v want defenseclaw:json", got)
+	}
+	payload, ok := extras[0]["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload type=%T want map", extras[0]["event"])
+	}
+	if got := payload["event_type"]; got != "llm_prompt" {
+		t.Fatalf("event_type=%v want llm_prompt", got)
+	}
+	if got := payload["session_id"]; got != "sess-1" {
+		t.Fatalf("session_id=%v want sess-1", got)
+	}
+	if got := payload["turn_id"]; got != "turn-1" {
+		t.Fatalf("turn_id=%v want turn-1", got)
+	}
+	llmPrompt, ok := payload["llm_prompt"].(map[string]any)
+	if !ok {
+		t.Fatalf("llm_prompt type=%T want map", payload["llm_prompt"])
+	}
+	if got := llmPrompt["prompt"]; got == "" || got == "hello" {
+		t.Fatalf("prompt=%v, want redacted sink content", got)
+	}
+}
+
+func TestForwardGatewayEventToSinks_EmitsVerdictCorrelationFields(t *testing.T) {
+	l := NewLogger(nil)
+	cs := installCaptureSink(t, l)
+
+	l.ForwardGatewayEventToSinks(context.Background(), gatewaylog.Event{
+		Timestamp:      time.Unix(1700000000, 123000000).UTC(),
+		EventType:      gatewaylog.EventVerdict,
+		Severity:       gatewaylog.SeverityHigh,
+		RunID:          "run-1",
+		SessionID:      "sess-1",
+		TurnID:         "turn-1",
+		PolicyID:       "policy-1",
+		DestinationApp: "builtin",
+		ToolName:       "Bash",
+		ToolID:         "call-1",
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:  gatewaylog.StageFinal,
+			Action: "block",
+			Reason: "matched policy",
+		},
+	})
+
+	events := cs.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink events=%d want 1", len(events))
+	}
+	extras, ok := events[0].Structured[gatewaySplunkHECEventsKey].([]map[string]any)
+	if !ok || len(extras) != 1 {
+		t.Fatalf("missing gateway HEC extra event: %#v", events[0].Structured)
+	}
+	payload, ok := extras[0]["event"].(map[string]any)
+	if !ok {
+		t.Fatalf("payload type=%T want map", extras[0]["event"])
+	}
+	for key, want := range map[string]any{
+		"event_type":      "verdict",
+		"session_id":      "sess-1",
+		"turn_id":         "turn-1",
+		"policy_id":       "policy-1",
+		"destination_app": "builtin",
+		"tool_name":       "Bash",
+		"tool_id":         "call-1",
+	} {
+		if got := payload[key]; got != want {
+			t.Fatalf("payload[%s]=%v want %v (payload=%#v)", key, got, want, payload)
+		}
+	}
+	if _, ok := payload["verdict"].(map[string]any); !ok {
+		t.Fatalf("verdict payload missing or wrong type: %#v", payload["verdict"])
+	}
+}
+
+func TestForwardGatewayEventToSinks_IgnoresLifecycleEvents(t *testing.T) {
+	l := NewLogger(nil)
+	cs := installCaptureSink(t, l)
+
+	l.ForwardGatewayEventToSinks(context.Background(), gatewaylog.Event{
+		Timestamp: time.Unix(1700000000, 0).UTC(),
+		EventType: gatewaylog.EventLifecycle,
+		Severity:  gatewaylog.SeverityInfo,
+		Lifecycle: &gatewaylog.LifecyclePayload{
+			Subsystem:  "gateway",
+			Transition: "completed",
+		},
+	})
+
+	if events := cs.snapshot(); len(events) != 0 {
+		t.Fatalf("sink events=%d want 0: %#v", len(events), events)
+	}
 }
 
 func TestInferTargetType(t *testing.T) {
@@ -225,6 +353,57 @@ func TestLoggerSinkForwardingIncludesDefaultedFields(t *testing.T) {
 	}
 	if evt.Action != "skill-block" || evt.Target != "test-skill" {
 		t.Fatalf("forwarded event mismatch: %+v", evt)
+	}
+}
+
+func TestLoggerSinkForwardingIncludesStructuredPayload(t *testing.T) {
+	prevProcessID := ProcessAgentInstanceID()
+	t.Cleanup(func() { SetProcessAgentInstanceID(prevProcessID) })
+	SetProcessAgentInstanceID("logger-sink-process-id")
+
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	logger := NewLogger(store)
+	cs := installCaptureSink(t, logger)
+	if err := logger.LogEvent(Event{
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Structured: map[string]any{
+			"schema":    "defenseclaw.hook.v1",
+			"connector": "codex",
+			"result":    "ok",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+	logger.Close()
+
+	got := cs.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 forwarded event, got %d", len(got))
+	}
+	if got[0].Structured["schema"] != "defenseclaw.hook.v1" {
+		t.Fatalf("sink structured payload = %#v", got[0].Structured)
+	}
+	if got[0].Structured["connector"] != "codex" {
+		t.Fatalf("sink structured connector = %#v", got[0].Structured["connector"])
+	}
+	if got[0].SchemaVersion != version.SchemaVersion {
+		t.Fatalf("sink schema_version = %d, want %d", got[0].SchemaVersion, version.SchemaVersion)
+	}
+	if got[0].BinaryVersion == "" {
+		t.Fatalf("sink binary_version must be stamped: %+v", got[0])
+	}
+	if got[0].SidecarInstanceID == "" {
+		t.Fatalf("sink sidecar_instance_id must be stamped: %+v", got[0])
 	}
 }
 

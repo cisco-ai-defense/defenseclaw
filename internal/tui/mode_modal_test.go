@@ -87,6 +87,7 @@ func TestModePickerModal_HotkeysCoverEveryConnector(t *testing.T) {
 		"windsurf",
 		"geminicli",
 		"copilot",
+		"openhands",
 	}
 	for _, w := range want {
 		if !wires[w] {
@@ -181,6 +182,7 @@ func TestConnectorSetupCommandForMode(t *testing.T) {
 		{"windsurf", []string{"setup", "windsurf", "--yes"}, "setup windsurf"},
 		{"geminicli", []string{"setup", "geminicli", "--yes"}, "setup geminicli"},
 		{"copilot", []string{"setup", "copilot", "--yes"}, "setup copilot"},
+		{"openhands", []string{"setup", "openhands", "--yes"}, "setup openhands"},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -195,6 +197,31 @@ func TestConnectorSetupCommandForMode(t *testing.T) {
 			}
 			if strings.Contains(strings.Join(args, " "), "setup mode") {
 				t.Fatalf("Overview connector setup must not dispatch setup mode: %v", args)
+			}
+		})
+	}
+}
+
+func TestConnectorSetupCommandForModeWithGuardrailMode(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		wire string
+		mode string
+		want []string
+	}{
+		{"openhands", "action", []string{"setup", "openhands", "--yes", "--mode", "action"}},
+		{"codex", "observe", []string{"setup", "codex", "--yes", "--mode", "observe"}},
+		{"claudecode", "ACTION", []string{"setup", "claude-code", "--yes", "--mode", "action"}},
+		{"openclaw", "action", []string{"setup", "openclaw", "--yes"}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.wire+"_"+tc.mode, func(t *testing.T) {
+			t.Parallel()
+			args, _ := connectorSetupCommandForModeWithGuardrailMode(tc.wire, tc.mode)
+			if strings.Join(args, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("connectorSetupCommandForModeWithGuardrailMode(%q, %q) args=%v want=%v",
+					tc.wire, tc.mode, args, tc.want)
 			}
 		})
 	}

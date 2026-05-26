@@ -79,6 +79,7 @@ func TestStoreInitMigratesRunIDColumns(t *testing.T) {
 	}{
 		{table: "audit_events", column: "run_id"},
 		{table: "audit_events", column: "trace_id"},
+		{table: "audit_events", column: "structured_json"},
 		{table: "scan_results", column: "run_id"},
 	} {
 		ok, err := store.hasColumn(spec.table, spec.column)
@@ -188,6 +189,51 @@ func TestStoreLogEventRoundTripsPhase6Fields(t *testing.T) {
 		if c.got != c.want {
 			t.Errorf("%s roundtrip: got %q want %q", c.name, c.got, c.want)
 		}
+	}
+}
+
+func TestStoreLogEventRoundTripsStructuredPayload(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	in := Event{
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Structured: map[string]any{
+			"schema":      "defenseclaw.hook.v1",
+			"connector":   "codex",
+			"event":       "PreToolUse",
+			"result":      "ok",
+			"would_block": true,
+		},
+	}
+	if err := store.LogEvent(in); err != nil {
+		t.Fatalf("LogEvent: %v", err)
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event, got %d", len(events))
+	}
+	got := events[0]
+	if got.Structured["schema"] != "defenseclaw.hook.v1" {
+		t.Fatalf("structured schema = %#v, want defenseclaw.hook.v1", got.Structured["schema"])
+	}
+	if got.Structured["connector"] != "codex" || got.Structured["event"] != "PreToolUse" {
+		t.Fatalf("structured hook identity did not round-trip: %#v", got.Structured)
+	}
+	if got.Structured["would_block"] != true {
+		t.Fatalf("structured would_block = %#v, want true", got.Structured["would_block"])
 	}
 }
 

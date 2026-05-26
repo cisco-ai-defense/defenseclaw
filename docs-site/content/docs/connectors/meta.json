@@ -2,6 +2,7 @@
   "title": "Connectors",
   "pages": [
     "index",
+    "compatibility",
     "claudecode",
     "codex",
     "openclaw",
@@ -9,6 +10,7 @@
     "hermes",
     "geminicli",
     "copilot",
+    "openhands",
     "windsurf",
     "zeptoclaw"
   ]

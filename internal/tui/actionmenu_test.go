@@ -279,6 +279,7 @@ func TestMCPActions(t *testing.T) {
 			"claudecode": "~/.claude/settings.json",
 			"codex":      "./.mcp.json",
 			"zeptoclaw":  "~/.zeptoclaw/config.json",
+			"openhands":  "~/.openhands/mcp.json",
 		}
 		for connector, want := range cases {
 			actions := MCPActions("blocked", connector)

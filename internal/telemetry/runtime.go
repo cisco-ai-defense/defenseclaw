@@ -665,7 +665,7 @@ func (p *Provider) EndLLMSpan(
 	span.End()
 }
 
-// StartJudgeSpan starts a span for one LLM judge ChatCompletion (Track 3).
+// StartJudgeSpan starts a span for one LLM judge ChatCompletion.
 // Name: defenseclaw.guardrail.judge
 func (p *Provider) StartJudgeSpan(
 	ctx context.Context,

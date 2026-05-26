@@ -20,7 +20,7 @@ Pins three contracts:
 
 1. The dispatch matrix — OpenClaw delegates to its CLI shim,
    Claude Code patches ~/.claude/settings.json, Codex patches
-   ./.mcp.json, ZeptoClaw refuses with a clear error.
+   ~/.codex/config.toml by default, ZeptoClaw refuses with a clear error.
 2. Atomicity + 0o600 perms on the JSON-rewriting branches.
 3. Round-trip — what we set is what we read back via mcp_servers().
 """
@@ -174,50 +174,54 @@ class TestClaudeCodeWrites:
 
 
 # ---------------------------------------------------------------------------
-# Codex — patches ./.mcp.json
+# Codex — patches ~/.codex/config.toml by default
 # ---------------------------------------------------------------------------
 
 class TestCodexWrites:
-    def test_set_creates_mcp_json(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+    def test_set_creates_global_config_toml(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("codex", "demo", {"command": "uvx", "args": ["d"]})
 
-        path = tmp_path / ".mcp.json"
+        path = tmp_path / ".codex" / "config.toml"
         assert path.is_file()
-        data = json.loads(path.read_text())
-        assert data["mcpServers"]["demo"]["command"] == "uvx"
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["demo"]
+        assert entries[0].command == "uvx"
+        assert entries[0].args == ["d"]
 
     def test_set_uses_0o600(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("codex", "demo", {"command": "uvx"})
-        path = tmp_path / ".mcp.json"
+        path = tmp_path / ".codex" / "config.toml"
         mode = stat.S_IMODE(path.stat().st_mode)
         assert mode == 0o600
 
     def test_unset_removes_key(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        path = tmp_path / ".mcp.json"
-        path.write_text(json.dumps({"mcpServers": {
-            "demo": {"command": "x"},
-            "keep": {"command": "y"},
-        }}))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text(
+            '[mcp_servers.demo]\ncommand = "x"\n\n'
+            '[mcp_servers.keep]\ncommand = "y"\n'
+        )
         unset_mcp_server("codex", "demo")
-        data = json.loads(path.read_text())
-        assert "demo" not in data["mcpServers"]
-        assert "keep" in data["mcpServers"]
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["keep"]
+        assert entries[0].command == "y"
 
     def test_set_captures_restorable_backup(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        path = tmp_path / ".mcp.json"
-        path.write_text(json.dumps({"mcpServers": {"old": {"command": "old"}}}))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text('[mcp_servers.old]\ncommand = "old"\n')
 
         set_mcp_server("codex", "demo", {"command": "uvx"})
-        assert (tmp_path / ".defenseclaw-mcp.json.bak").is_file()
+        assert (tmp_path / ".codex" / ".defenseclaw-config.toml.bak").is_file()
         assert restore_managed_mcp_backup(str(path))
 
-        data = json.loads(path.read_text())
-        assert "demo" not in data["mcpServers"]
-        assert data["mcpServers"]["old"]["command"] == "old"
+        entries = connector_paths.mcp_servers("codex")
+        assert [e.name for e in entries] == ["old"]
+        assert entries[0].command == "old"
 
     def test_set_records_absolute_target_in_registry(self, tmp_path, monkeypatch):
         """C-2: workspace MCP backup must persist the absolute target path.
@@ -235,7 +239,7 @@ class TestCodexWrites:
         path = workspace / ".mcp.json"
         path.write_text(json.dumps({"mcpServers": {"old": {"command": "old"}}}))
 
-        set_mcp_server("codex", "demo", {"command": "uvx"})
+        set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(workspace))
 
         recorded = lookup_managed_mcp_backup(str(path))
         assert recorded is not None
@@ -263,7 +267,7 @@ class TestCodexWrites:
 
 class TestRoundTrip:
     def test_codex_set_then_read_then_unset(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         set_mcp_server(
             "codex", "demo",
@@ -297,11 +301,10 @@ class TestRoundTrip:
 
 class TestAtomicity:
     def test_set_recovers_from_corrupt_json(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
         path = tmp_path / ".mcp.json"
         path.write_text("{ this is not valid json")
 
-        set_mcp_server("codex", "demo", {"command": "uvx"})
+        set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(tmp_path))
 
         data = json.loads(path.read_text())
         assert data["mcpServers"]["demo"]["command"] == "uvx"
@@ -309,11 +312,12 @@ class TestAtomicity:
     def test_set_does_not_leave_tempfile_on_success(
         self, tmp_path, monkeypatch,
     ):
-        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("codex", "demo", {"command": "uvx"})
         # No leftover .dc-mcp- temp files
+        codex_dir = tmp_path / ".codex"
         leftovers = [
-            p for p in os.listdir(tmp_path) if p.startswith(".dc-mcp-")
+            p for p in os.listdir(codex_dir) if p.startswith(".dc-mcp-")
         ]
         assert leftovers == []
 

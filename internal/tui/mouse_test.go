@@ -137,8 +137,8 @@ func TestSetupMouseWizardFormFieldClick(t *testing.T) {
 		t.Fatalf("clicking choice field should cycle value, still %q", before)
 	}
 
-	p.HandleMouseClick(4, 6)
-	if p.wizFormFields[3].Value != "no" {
-		t.Fatalf("clicking bool field should toggle to no, got %q", p.wizFormFields[3].Value)
+	p.HandleMouseClick(4, 7)
+	if p.wizFormFields[4].Value != "no" {
+		t.Fatalf("clicking bool field should toggle to no, got %q", p.wizFormFields[4].Value)
 	}
 }

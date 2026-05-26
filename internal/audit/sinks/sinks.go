@@ -60,6 +60,7 @@ type Event struct {
 	// blanks without erroring. See audit.Event for the semantic
 	// contract of each field.
 	SessionID string `json:"session_id,omitempty"`
+	TurnID    string `json:"turn_id,omitempty"`
 	AgentName string `json:"agent_name,omitempty"`
 	AgentID   string `json:"agent_id,omitempty"`
 	// AgentInstanceID is per-session in v7 (empty when no session
@@ -73,6 +74,14 @@ type Event struct {
 	DestinationApp    string `json:"destination_app,omitempty"`
 	ToolName          string `json:"tool_name,omitempty"`
 	ToolID            string `json:"tool_id,omitempty"`
+
+	// v7 provenance fields. Logger stamps these before forwarding so
+	// every sink carries the same contract fields as the SQLite
+	// audit_events row.
+	SchemaVersion int    `json:"schema_version,omitempty"`
+	ContentHash   string `json:"content_hash,omitempty"`
+	Generation    uint64 `json:"generation,omitempty"`
+	BinaryVersion string `json:"binary_version,omitempty"`
 
 	// Structured payload — when set, this is the canonical machine-readable
 	// representation of the event (e.g. a guardrail verdict). Sinks should
@@ -473,6 +482,9 @@ func (m *Manager) shouldFlushImmediatelyLocked(action string) bool {
 }
 
 func defaultImmediateFlushActions() map[string]struct{} {
+	// These keys mirror internal/audit Action* constants. The sinks
+	// package sits below audit in the dependency graph, so importing
+	// audit here would create a cycle.
 	return map[string]struct{}{
 		"watch-start":          {},
 		"watch-stop":           {},
