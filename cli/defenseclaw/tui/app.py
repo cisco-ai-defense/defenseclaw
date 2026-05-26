@@ -80,6 +80,7 @@ from defenseclaw.tui.screens.mode_picker import ModePickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
 from defenseclaw.tui.screens.redaction import RedactionToggleScreen
+from defenseclaw.tui.screens.theme_picker import ThemePickerScreen
 from defenseclaw.tui.screens.setup_resource_editor import (
     SetupResourceEditorScreen,
     SetupResourceResult,
@@ -526,6 +527,14 @@ class DefenseClawTUI(App[None]):
         Binding(":", "open_command", "Command"),
         Binding("ctrl+k", "open_command", "Command"),
         Binding("ctrl+p", "open_panel_jumper", "Jump panel"),
+        # Ctrl+\ opens the theme picker. ``\`` was chosen because it's
+        # not claimed by readline / GNU terminal conventions, doesn't
+        # collide with the setup-wizard's Ctrl+T (reveal secrets), and
+        # is reachable on US/UK/Intl keyboards (next to Enter). Theme
+        # switching is low-frequency so a unique-but-discoverable key
+        # is more useful than a Ctrl+letter that fights with existing
+        # bindings.
+        Binding("ctrl+backslash", "open_theme_picker", "Theme", show=False),
         # Y / Ctrl+S target the *most recent* Activity entry's output
         # so they work the same from any panel — no need to switch to
         # Activity first just to grab the log. Both are global and
@@ -1191,6 +1200,18 @@ class DefenseClawTUI(App[None]):
 
     def on_mount(self) -> None:
         self._app_shutting_down = False
+        # Apply the operator's persisted theme (Textual >=8) before
+        # rendering anything: starting on the default and snapping to
+        # their choice after the first paint produces a visible flash.
+        # Best-effort — an unknown theme id (e.g. state file from a
+        # newer build with themes this binary doesn't ship) is silently
+        # ignored so the app still starts.
+        persisted_theme = (getattr(self.state, "theme", "") or "").strip()
+        if persisted_theme:
+            try:
+                self.theme = persisted_theme
+            except Exception:  # noqa: BLE001 - theme apply is cosmetic
+                pass
         self._refresh_models_from_disk()
         self.set_interval(0.25, self._tick_command_strip)
         self.set_interval(2.0, self._periodic_refresh)
@@ -1504,6 +1525,39 @@ class DefenseClawTUI(App[None]):
             self.action_switch_panel(target)
 
         self.push_screen(PanelJumperScreen(tuple(visible)), _on_dismiss)
+
+    def action_open_theme_picker(self) -> None:
+        """Open the Ctrl+\\ theme picker modal.
+
+        The picker live-previews each theme as the operator scrolls;
+        Enter persists the choice to ``TUIState.theme`` and Esc rolls
+        back to whatever was active when the modal opened. We pass
+        the *currently active* theme into the picker so it opens with
+        the cursor on the operator's existing choice rather than the
+        list head.
+        """
+
+        current = getattr(self, "theme", "") or "textual-dark"
+
+        def _on_dismiss(choice: str | None) -> None:
+            if not choice:
+                return
+            try:
+                self.theme = choice
+            except Exception:  # noqa: BLE001 - theme apply is cosmetic
+                return
+            # Persist so the next TUI launch starts with the same
+            # palette. Failures are swallowed: theme persistence is
+            # ergonomic, not security-critical.
+            try:
+                self.state_store.set_theme(choice)
+                self.state = self.state_store.state
+                self.state_store.save()
+            except Exception:  # noqa: BLE001 - persistence is cosmetic
+                pass
+            self.notify_toast("info", f"Theme set to {choice}.")
+
+        self.push_screen(ThemePickerScreen(current_theme=current), _on_dismiss)
 
     def action_toggle_help(self) -> None:
         self.help_open = not self.help_open

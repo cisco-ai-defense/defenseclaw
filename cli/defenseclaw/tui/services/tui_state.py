@@ -48,6 +48,11 @@ class TUIState:
     # don't strictly correspond to wall-clock — e.g. log rotation can
     # shrink the on-disk count without time travelling.
     panel_seen_counts: dict[str, int] = field(default_factory=dict)
+    # Operator-chosen Textual theme id (e.g. ``"tokyo-night"``,
+    # ``"ansi-dark"``). Empty string means "use the app default"
+    # (``textual-dark``) and is the migration value for existing state
+    # files that pre-date the theme picker.
+    theme: str = ""
 
     def to_dict(self) -> dict[str, object]:
         data = asdict(self)
@@ -96,12 +101,20 @@ class TUIState:
                     counts[key] = max(0, int(value))
                 except (TypeError, ValueError):
                     continue
+        # Theme id: opaque string. We don't validate against the
+        # Textual built-in list here because Textual versions ship
+        # different sets of themes — letting the caller fall back to
+        # the default at apply time keeps the state file forward-
+        # compatible.
+        theme_raw = payload.get("theme", "")
+        theme = theme_raw.strip() if isinstance(theme_raw, str) else ""
         return cls(
             active_panel=active,
             palette_mru=mru,
             panel_last_seen=seen,
             panel_filters=filters,
             panel_seen_counts=counts,
+            theme=theme,
         )
 
 
@@ -258,6 +271,25 @@ class TUIStateStore:
             return self._state
         self._state = replace(self._state, active_panel=panel)
         return self._state
+
+    def set_theme(self, theme: str) -> TUIState:
+        """Persist the operator's chosen Textual theme id.
+
+        Empty / whitespace-only input clears the override so the next
+        TUI start falls back to the built-in default. We accept any
+        opaque string here; theme-validity is enforced at apply time
+        in ``app.py`` so the state file stays forward-compatible with
+        future Textual releases that ship new themes.
+        """
+
+        cleaned = (theme or "").strip()
+        if cleaned == self._state.theme:
+            return self._state
+        self._state = replace(self._state, theme=cleaned)
+        return self._state
+
+    def get_theme(self) -> str:
+        return self._state.theme
 
     def set_panel_filter(self, panel: str, filter_value: str) -> TUIState:
         if not panel:

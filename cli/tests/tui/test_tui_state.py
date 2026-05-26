@@ -144,6 +144,72 @@ def test_set_active_panel_no_change_skips_update(state_dir: Path) -> None:
     assert after is before
 
 
+def test_theme_defaults_to_empty(state_dir: Path) -> None:
+    """Fresh state has no theme override so the app uses its default."""
+
+    store = TUIStateStore(state_dir)
+    state = store.load()
+    assert state.theme == ""
+    assert store.get_theme() == ""
+
+
+def test_set_theme_persists_and_round_trips(state_dir: Path) -> None:
+    """``set_theme`` is mirrored into the saved JSON and reloads cleanly."""
+
+    store = TUIStateStore(state_dir)
+    store.load()
+    store.set_theme("tokyo-night")
+    assert store.save() is True
+    assert store.get_theme() == "tokyo-night"
+
+    other = TUIStateStore(state_dir)
+    reloaded = other.load()
+    assert reloaded.theme == "tokyo-night"
+
+
+def test_set_theme_strips_whitespace_and_clears(state_dir: Path) -> None:
+    """Whitespace-only input is treated as 'clear my theme override'."""
+
+    store = TUIStateStore(state_dir)
+    store.load()
+    store.set_theme("  nord  ")
+    assert store.get_theme() == "nord"
+    store.set_theme("   ")
+    assert store.get_theme() == ""
+
+
+def test_set_theme_no_change_returns_same_state(state_dir: Path) -> None:
+    """Re-setting the same theme is a no-op to avoid spurious save churn."""
+
+    store = TUIStateStore(state_dir)
+    store.load()
+    store.set_theme("dracula")
+    before = store.state
+    after = store.set_theme("dracula")
+    assert after is before
+
+
+def test_legacy_state_file_without_theme_loads(state_dir: Path) -> None:
+    """State files written before the theme field MUST migrate cleanly."""
+
+    state_dir.mkdir(parents=True)
+    state_path = state_dir / STATE_FILENAME
+    state_path.write_text(
+        json.dumps(
+            {
+                "active_panel": "logs",
+                "palette_mru": ["doctor"],
+                # No ``theme`` key — older builds didn't write one.
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = TUIStateStore(state_dir)
+    state = store.load()
+    assert state.active_panel == "logs"
+    assert state.theme == ""
+
+
 def test_save_to_readonly_path_returns_false(state_dir: Path) -> None:
     state_dir.mkdir(parents=True)
     state_dir.chmod(0o500)
