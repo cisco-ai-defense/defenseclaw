@@ -502,6 +502,23 @@ class DefenseClawTUI(App[None]):
         "TOKEN_ACCENT_AMBER", TOKENS.accent_amber
     )
 
+    # Textual >=8.2.0: enable cross-container drag-selection with
+    # auto-scroll. Operators routinely want to copy log lines, activity
+    # entries, and stretches of catalog tables; in 7.x this was widget-
+    # bound and clunky. With auto-scroll on, dragging the selection past
+    # the viewport edge scrolls the panel so multi-page selections work
+    # naturally. Combined with the ``Y`` (yank) hotkey wired earlier,
+    # this is the primary copy-to-clipboard workflow.
+    #
+    # Tuning rationale:
+    #   * ``SELECT_AUTO_SCROLL_LINES`` defaults to 1 — too granular for
+    #     our wide log panels. 3 lines/frame matches the visual cadence
+    #     of our RichLog scroll speed.
+    #   * ``SELECT_AUTO_SCROLL_SPEED`` left at default (50 ms) — faster
+    #     than that produced a "snap" effect during testing.
+    ENABLE_SELECT_AUTO_SCROLL = True
+    SELECT_AUTO_SCROLL_LINES = 3
+
     BINDINGS = [
         Binding("ctrl+c", "cancel_or_quit", "Cancel/Quit", priority=True),
         Binding("q", "local_close", "Close", show=False),
@@ -1357,9 +1374,12 @@ class DefenseClawTUI(App[None]):
             text = f"{key} {label}"
             if unread:
                 text = f"{text} ({unread})"
-            try:
-                tab = tabs.query_one(f"#tab-{name}", Tab)
-            except NoMatches:
+            # Textual >=8.0 ``Tabs.get_tab(id) -> Tab | None`` replaces
+            # the older ``query_one("#tab-id", Tab)`` + NoMatches dance.
+            # It returns the tab widget directly (or None for unknown
+            # ids), so we skip exception-as-control-flow.
+            tab = tabs.get_tab(f"tab-{name}")
+            if tab is None:
                 continue
             # Textual Tab.label accepts either str or rich Text; str
             # is the simplest and avoids markup escaping issues with

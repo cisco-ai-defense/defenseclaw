@@ -155,10 +155,19 @@ class MetricTile(Vertical):
         self._progress.update(total=100, progress=_clamp(metric.progress))
         self._sparkline.data = metric.trend or (0,)
         self._detail.update(metric.detail)
-        self.set_class(metric.state == "ok", "metric-ok")
-        self.set_class(metric.state == "warn", "metric-warn")
-        self.set_class(metric.state == "error", "metric-error")
-        self.set_class(bool(metric.target_panel), "tile-clickable")
+        # Textual >=8.2.4 ``DOM.update_classes`` swaps a whole class
+        # mapping in a single style-recomputation pass. The previous
+        # four ``set_class`` calls each triggered an independent
+        # restyle of the tile + its descendants; the tile is rendered
+        # on every metric refresh, so the cost was real.
+        self.update_classes(
+            {
+                "metric-ok": metric.state == "ok",
+                "metric-warn": metric.state == "warn",
+                "metric-error": metric.state == "error",
+                "tile-clickable": bool(metric.target_panel),
+            }
+        )
         if metric.target_panel:
             self.tooltip = f"Open {metric.target_panel.title()}"
         else:
