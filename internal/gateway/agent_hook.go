@@ -95,6 +95,11 @@ type agentHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	HookOutput        map[string]interface{} `json:"hook_output,omitempty"`
+	// EvaluationID + RuleIDs join this hook response to the
+	// matching scan_findings rows / audit row. Additive — older
+	// connector hook scripts ignore the fields.
+	EvaluationID string   `json:"evaluation_id,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
 }
 
 func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
@@ -218,6 +223,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// defenseclaw.panics.total{subsystem="gateway"} and on the
 		// `result="panic"` label on the standard hook invocation
 		// counter.
+		//
+		// resp.EvaluationID + resp.RuleIDs are stamped inside the
+		// per-profile evaluators (claudeCode / codex / generic) so
+		// they round-trip back to the HTTP response and onto the
+		// audit envelope without a second pass here.
 		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, b, payload, runtime)
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
@@ -332,19 +342,21 @@ func (a *APIServer) finalizeAgentHook(
 			envResult = "panic"
 		}
 		env := HookAuditEnvelope{
-			Connector:   connectorName,
-			Event:       req.HookEventName,
-			Result:      envResult,
-			Action:      resp.Action,
-			RawAction:   resp.RawAction,
-			Severity:    resp.Severity,
-			Mode:        resp.Mode,
-			Reason:      resp.Reason,
-			WouldBlock:  resp.WouldBlock,
-			ElapsedMs:   elapsed.Milliseconds(),
-			BodyBytes:   int64(len(rawBody)),
-			RawOrigin:   rawOriginIfHook(rawEventIDs),
-			RawEventIDs: rawEventIDs,
+			Connector:    connectorName,
+			Event:        req.HookEventName,
+			Result:       envResult,
+			Action:       resp.Action,
+			RawAction:    resp.RawAction,
+			Severity:     resp.Severity,
+			Mode:         resp.Mode,
+			Reason:       resp.Reason,
+			WouldBlock:   resp.WouldBlock,
+			ElapsedMs:    elapsed.Milliseconds(),
+			BodyBytes:    int64(len(rawBody)),
+			RawOrigin:    rawOriginIfHook(rawEventIDs),
+			RawEventIDs:  rawEventIDs,
+			EvaluationID: resp.EvaluationID,
+			RuleIDs:      resp.RuleIDs,
 		}
 		if panicked {
 			env.Extra = map[string]string{"panic": "true"}
@@ -561,6 +573,8 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		BodyBytes:           int64(len(rawBody)),
 		RawOrigin:           rawOriginIfHook(rawEventIDs),
 		RawEventIDs:         rawEventIDs,
+		EvaluationID:        resp.EvaluationID,
+		RuleIDs:             resp.RuleIDs,
 		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
 		Extra:               mergeHookEnvelopeExtra(extra, hookCompatibilityExtra(profile)),
 	}
@@ -1269,6 +1283,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	if a.scannerCfg != nil && !a.agentHookEnabled(req.ConnectorName) {
 		return agentHookResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false, connector.HookCapability{})
 	}
+	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -1328,10 +1343,22 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 	}
 
+	// Emit the per-rule findings BEFORE dispatching the OS toast
+	// so the notification can carry the same evaluation_id +
+	// rule_ids surfaced on the audit row + HTTP response.
+	evalCtx := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, verdict,
+		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock)
+		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock, evalCtx)
 	}
-	return agentHookResponseForProfile(profile, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+	resp := agentHookResponseForProfile(profile, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+	// Stamp the unified-pipeline correlation keys so the HTTP
+	// response, the audit envelope (HookAuditEnvelope.EvaluationID
+	// / RuleIDs), and the scan_finding events all join on the same
+	// evaluation_id.
+	resp.EvaluationID = evalCtx.EvaluationID
+	resp.RuleIDs = evalCtx.RuleIDs
+	return resp
 }
 
 // collectAgentHookAssetDecisions runs the runtime asset-policy
@@ -1417,7 +1444,7 @@ func decodeAgentHookToolInput(raw json.RawMessage) map[string]interface{} {
 // req.ConnectorName so the subtitle reads e.g. "DefenseClaw hermes
 // PreToolUse" — operators paging through toasts can attribute each
 // one to a specific framework without opening the audit log.
-func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
+func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -1427,12 +1454,14 @@ func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, 
 	}
 	safeReason := string(redaction.ForSinkReason(reason))
 	base := notifier.BlockEvent{
-		Source:    notifier.SourceHook,
-		Target:    target,
-		Reason:    safeReason,
-		Severity:  severity,
-		Connector: req.ConnectorName,
-		Event:     req.HookEventName,
+		Source:       notifier.SourceHook,
+		Target:       target,
+		Reason:       safeReason,
+		Severity:     severity,
+		Connector:    req.ConnectorName,
+		Event:        req.HookEventName,
+		EvaluationID: evalCtx.EvaluationID,
+		RuleIDs:      evalCtx.RuleIDs,
 	}
 	switch {
 	case action == "block":
@@ -1443,12 +1472,14 @@ func (a *APIServer) dispatchAgentHookNotification(req agentHookRequest, action, 
 		// Native chat-side ask actually issued — only path that
 		// belongs in the approvals category.
 		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
-			Subject:   fmt.Sprintf("%s (%s)", target, req.HookEventName),
-			Reason:    safeReason,
-			Severity:  severity,
-			Source:    notifier.SourceHook,
-			Connector: req.ConnectorName,
-			Event:     req.HookEventName,
+			Subject:      fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:       safeReason,
+			Severity:     severity,
+			Source:       notifier.SourceHook,
+			Connector:    req.ConnectorName,
+			Event:        req.HookEventName,
+			EvaluationID: evalCtx.EvaluationID,
+			RuleIDs:      evalCtx.RuleIDs,
 		})
 	case rawAction == "confirm":
 		// Verdict was confirm but the user will not see a chat ask

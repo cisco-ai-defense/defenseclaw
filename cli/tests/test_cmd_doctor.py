@@ -28,6 +28,7 @@ from defenseclaw.commands.cmd_doctor import (
     _ANTHROPIC_DEFAULT_PROBE_MODEL,
     _anthropic_probe_model,
     _bedrock_region,
+    _check_cisco_ai_defense,
     _check_copilot_hooks,
     _check_guardrail_proxy,
     _check_hilt_support,
@@ -38,7 +39,14 @@ from defenseclaw.commands.cmd_doctor import (
     _probe_splunk_hec,
     _verify_bedrock,
 )
-from defenseclaw.config import Config, GatewayConfig, GuardrailConfig, LLMConfig, OpenShellConfig
+from defenseclaw.config import (
+    CiscoAIDefenseConfig,
+    Config,
+    GatewayConfig,
+    GuardrailConfig,
+    LLMConfig,
+    OpenShellConfig,
+)
 
 
 class DoctorGuardrailTests(unittest.TestCase):
@@ -923,6 +931,101 @@ class BedrockRoutingTests(unittest.TestCase):
         r = _DoctorResult()
         _check_llm_api_key(cfg, r)
         mock_bedrock.assert_called_once()
+
+
+class CiscoAIDefenseProbeTests(unittest.TestCase):
+    """The AI Defense probe surfaces an actionable hint on auth
+    failures because all three regional deployments (us / eu /
+    preview) reply with the same opaque ``401 invalid api key``
+    body. Without the endpoint hint, an operator who pasted a key
+    issued for a different region sees a generic "authentication
+    failed" and assumes the key is bad — re-issuing wastes a key
+    rotation cycle. The hint preserves the failure verdict (real
+    auth problems still fail loudly) but adds the URL we'll send
+    the key to and a remediation pointer to ``defenseclaw setup``.
+    """
+
+    def _make_cfg(self, *, endpoint: str = "https://us.api.inspect.aidefense.security.cisco.com") -> Config:
+        return Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, scanner_mode="remote"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+            cisco_ai_defense=CiscoAIDefenseConfig(
+                endpoint=endpoint, api_key_env="CISCO_AI_DEFENSE_API_KEY",
+            ),
+        )
+
+    @patch("defenseclaw.commands.cmd_doctor.click.echo")
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(401, "invalid api key"))
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
+    def test_401_emits_endpoint_and_setup_hint(
+        self, _mock_resolve, _mock_probe, mock_echo,
+    ):
+        cfg = self._make_cfg(endpoint="https://eu.api.inspect.aidefense.security.cisco.com")
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual(r.failed, 1, r.checks)
+        # Hints go through click.echo (not _emit) so they don't
+        # count toward the tally. Walk the captured calls and
+        # assert the operator-visible text appears.
+        printed = "\n".join(
+            call.args[0] if call.args else "" for call in mock_echo.call_args_list
+        )
+        self.assertIn(
+            "endpoint: https://eu.api.inspect.aidefense.security.cisco.com",
+            printed,
+        )
+        self.assertIn("defenseclaw setup", printed)
+
+    @patch("defenseclaw.commands.cmd_doctor.click.echo")
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(403, "forbidden"))
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
+    def test_403_also_emits_region_hint(
+        self, _mock_resolve, _mock_probe, mock_echo,
+    ):
+        # 403 is the same UX failure mode (authenticated but not
+        # authorized for the route) — same hint applies.
+        cfg = self._make_cfg()
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual(r.failed, 1, r.checks)
+        printed = "\n".join(
+            call.args[0] if call.args else "" for call in mock_echo.call_args_list
+        )
+        self.assertIn("defenseclaw setup", printed)
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
+    def test_200_is_pass_with_no_hint_noise(self, _mock_resolve, _mock_probe):
+        cfg = self._make_cfg()
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual(r.passed, 1, r.checks)
+        # The pass path uses the existing single-row format; no
+        # extra hints should fire so we don't train operators to
+        # ignore them on the happy path.
+        details = " ".join(c["detail"] for c in r.checks)
+        self.assertNotIn("↪", details)
+
+    @patch("defenseclaw.commands.cmd_doctor.click.echo")
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "DNS failure"))
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
+    def test_unreachable_warns_and_shows_endpoint(
+        self, _mock_resolve, _mock_probe, mock_echo,
+    ):
+        cfg = self._make_cfg(endpoint="https://preview.api.inspect.aidefense.aiteam.cisco.com")
+        r = _DoctorResult()
+        _check_cisco_ai_defense(cfg, r)
+        self.assertEqual(r.warned, 1, r.checks)
+        printed = "\n".join(
+            call.args[0] if call.args else "" for call in mock_echo.call_args_list
+        )
+        self.assertIn("preview.api.inspect.aidefense.aiteam.cisco.com", printed)
 
 
 if __name__ == "__main__":

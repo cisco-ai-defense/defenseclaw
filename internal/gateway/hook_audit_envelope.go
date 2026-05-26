@@ -81,6 +81,18 @@ type HookAuditEnvelope struct {
 	RawPayload  string            `json:"raw_payload,omitempty"`
 	Extra       map[string]string `json:"extra,omitempty"`
 
+	// EvaluationID + RuleIDs are the unified-pipeline correlation
+	// keys this hook emission was attributed to. The hook
+	// evaluator stamps them on agentHookResponse via
+	// emitHookRuleFindings; finalizeAgentHook copies them onto the
+	// envelope so audit sinks see the same join key SIEM
+	// dashboards pivot on (matches ScanPayload.evaluation_id /
+	// ScanFindingPayload.evaluation_id / VerdictPayload.
+	// evaluation_id). Both are omitempty: hooks that fire on a
+	// clean evaluation (no rules matched) carry neither.
+	EvaluationID string   `json:"evaluation_id,omitempty"`
+	RuleIDs      []string `json:"rule_ids,omitempty"`
+
 	// AuditActionOverride steers the audit ROW action (not the
 	// envelope JSON). When non-empty, the audit.Logger writes the
 	// row under this action constant instead of

@@ -130,6 +130,7 @@ func TestClaudeHookDispatch_BlockFiresOnBlock(t *testing.T) {
 	api.dispatchClaudeCodeHookNotification(
 		req, "block", "block", "HIGH",
 		"matched policy: deny-rm-rf", false,
+		hookEvaluationContext{},
 	)
 
 	got := rec.WaitFor(t, 1)
@@ -168,6 +169,7 @@ func TestClaudeHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 	api.dispatchClaudeCodeHookNotification(
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"allow", "block", "MEDIUM", "observe-mode trial", true,
+		hookEvaluationContext{},
 	)
 
 	got := rec.WaitFor(t, 1)
@@ -192,6 +194,7 @@ func TestClaudeHookDispatch_ConfirmFiresOnApprovalPending(t *testing.T) {
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Edit"},
 		"confirm", "confirm", "LOW",
 		"approval needed for write outside workspace", false,
+		hookEvaluationContext{},
 	)
 
 	got := rec.WaitFor(t, 1)
@@ -222,6 +225,7 @@ func TestClaudeHookDispatch_RedactsReason(t *testing.T) {
 	api.dispatchClaudeCodeHookNotification(
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"block", "block", "HIGH", rawSecret, false,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(got[0].Body, "AKIAIOSFODNN7EXAMPLE") {
@@ -242,6 +246,7 @@ func TestCodexHookDispatch_BlockFiresOnBlock(t *testing.T) {
 	api.dispatchCodexHookNotification(
 		codexHookRequest{HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH", "matched: blocked-shell", false,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if !strings.Contains(got[0].Subtitle, "codex") {
@@ -261,6 +266,7 @@ func TestCodexHookDispatch_RedactsReason(t *testing.T) {
 		codexHookRequest{HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH",
 		"prompt contained AKIAIOSFODNN7EXAMPLE", false,
+		hookEvaluationContext{},
 	)
 	got := rec.WaitFor(t, 1)
 	if strings.Contains(got[0].Body, "AKIAIOSFODNN7EXAMPLE") {
@@ -339,10 +345,12 @@ func TestNotifierDisabled_NoEmit(t *testing.T) {
 	api.dispatchClaudeCodeHookNotification(
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"block", "block", "HIGH", "any reason", false,
+		hookEvaluationContext{},
 	)
 	api.dispatchCodexHookNotification(
 		codexHookRequest{HookEventName: "PreToolUse", ToolName: "shell"},
 		"block", "block", "HIGH", "any reason", false,
+		hookEvaluationContext{},
 	)
 	api.dispatchAssetPolicyNotification(
 		config.AssetPolicyDecision{
@@ -520,6 +528,7 @@ func TestNotifierSourceFilter_AssetPolicyOff(t *testing.T) {
 	api.dispatchClaudeCodeHookNotification(
 		claudeCodeHookRequest{HookEventName: "PreToolUse", ToolName: "Bash"},
 		"block", "block", "HIGH", "hook block", false,
+		hookEvaluationContext{},
 	)
 
 	got := rec.WaitFor(t, 1)

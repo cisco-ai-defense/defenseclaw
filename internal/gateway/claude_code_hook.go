@@ -79,6 +79,14 @@ type claudeCodeHookResponse struct {
 	WouldBlock        bool                   `json:"would_block"`
 	AdditionalContext string                 `json:"additional_context,omitempty"`
 	ClaudeCodeOutput  map[string]interface{} `json:"claude_code_output,omitempty"`
+	// EvaluationID joins this hook response to the matching audit
+	// row + per-finding scan_findings rows. Additive — older
+	// connector hook scripts ignore the field.
+	EvaluationID string `json:"evaluation_id,omitempty"`
+	// RuleIDs are the top detection rule_ids that drove this
+	// verdict (capped at 8). Lets operators correlate a block
+	// without joining against scan_findings. Additive.
+	RuleIDs []string `json:"rule_ids,omitempty"`
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -87,13 +95,16 @@ type claudeCodeHookResponse struct {
 // concerns — audit envelope refresh, dispatch metric, dedup, trace
 // propagation, OTel emissions — live in exactly one place
 // (handleAgentHook) so per-connector handlers cannot drift apart on
-// any of those signals.
+// any of those signals. The evaluator stamps the unified-pipeline
+// correlation keys (resp.EvaluationID / resp.RuleIDs) on its return
+// value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
 	mode := a.claudeCodeMode()
 	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
 	}
+	t0 := time.Now()
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
@@ -174,10 +185,26 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			wouldBlock = true
 		}
 	}
+	// Fan the rule-level findings through the unified runtime
+	// finding pipeline so SIEM sees one EventScanFinding per
+	// matched rule and the correlator gets a chance to upgrade
+	// the verdict on multi-step attack flows. scanner="hook-rules".
+	// Done before dispatchClaudeCodeHookNotification so the OS toast
+	// can carry the same evaluation_id + rule_ids that the audit
+	// row + HTTP response will surface.
+	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
+		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock)
+		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx)
 	}
-	return claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	// Stamp the unified-pipeline correlation keys so the agent-hook
+	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
+	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
+	// both see them without a second pass.
+	resp.EvaluationID = evalCtx.EvaluationID
+	resp.RuleIDs = evalCtx.RuleIDs
+	return resp
 }
 
 // dispatchClaudeCodeHookNotification fires a user-session OS toast
@@ -203,7 +230,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 // through OnWouldBlock with WouldAsk=true so a single
 // notifications.block_would_block=false silences all observe-mode
 // noise without affecting real native asks.
-func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool) {
+func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest, action, rawAction, severity, reason string, wouldBlock bool, evalCtx hookEvaluationContext) {
 	if a == nil || a.notifier == nil {
 		return
 	}
@@ -213,12 +240,14 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 	}
 	safeReason := string(redaction.ForSinkReason(reason))
 	base := notifier.BlockEvent{
-		Source:    notifier.SourceHook,
-		Target:    target,
-		Reason:    safeReason,
-		Severity:  severity,
-		Connector: "claudecode",
-		Event:     req.HookEventName,
+		Source:       notifier.SourceHook,
+		Target:       target,
+		Reason:       safeReason,
+		Severity:     severity,
+		Connector:    "claudecode",
+		Event:        req.HookEventName,
+		EvaluationID: evalCtx.EvaluationID,
+		RuleIDs:      evalCtx.RuleIDs,
 	}
 	switch {
 	case action == "block":
@@ -227,12 +256,14 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 		a.notifier.OnWouldBlock(base)
 	case action == "confirm":
 		a.notifier.OnApprovalPending(notifier.ApprovalEvent{
-			Subject:   fmt.Sprintf("%s (%s)", target, req.HookEventName),
-			Reason:    safeReason,
-			Severity:  severity,
-			Source:    notifier.SourceHook,
-			Connector: "claudecode",
-			Event:     req.HookEventName,
+			Subject:      fmt.Sprintf("%s (%s)", target, req.HookEventName),
+			Reason:       safeReason,
+			Severity:     severity,
+			Source:       notifier.SourceHook,
+			Connector:    "claudecode",
+			Event:        req.HookEventName,
+			EvaluationID: evalCtx.EvaluationID,
+			RuleIDs:      evalCtx.RuleIDs,
 		})
 	case rawAction == "confirm":
 		evt := base

@@ -269,10 +269,25 @@ func emitEvent(ctx context.Context, e gatewaylog.Event) {
 	w.EmitContext(ctx, e)
 }
 
+// emitVerdictExtras carries optional verdict-event fields that
+// runtime finding emitters (guardrail Inspect, mid-stream,
+// tool-call inspect) stamp so SIEM can join the verdict to its
+// per-finding scan_findings rows. Pure additive — emitVerdict
+// callers that pass no extras get exactly the same wire shape as
+// before.
+type emitVerdictExtras struct {
+	EvaluationID string
+	RuleIDs      []string
+}
+
 // emitVerdict records a single guardrail-pipeline stage decision.
 // ctx carries the request correlation + agent identity that Gets
 // stamped onto the envelope. Pass context.Background() when emitting
 // outside a request (boot fall-backs, background self-tests).
+//
+// The variadic extras slot lets new call sites stamp evaluation_id
+// + rule_ids without forcing every existing caller (multi-turn,
+// block-list, approval-denied, etc.) to update.
 func emitVerdict(
 	ctx context.Context,
 	stage gatewaylog.Stage,
@@ -282,7 +297,12 @@ func emitVerdict(
 	severity gatewaylog.Severity,
 	categories []string,
 	latencyMs int64,
+	extras ...emitVerdictExtras,
 ) {
+	var ext emitVerdictExtras
+	if len(extras) > 0 {
+		ext = extras[0]
+	}
 	// Plan B6 / S0.10: VerdictPayload.Reason is documented as
 	// "short, redacted" but the redactor pipeline DOES legitimately
 	// receive raw-secret strings on the way in (the redaction layer
@@ -296,11 +316,13 @@ func emitVerdict(
 		Direction: direction,
 		Model:     model,
 		Verdict: &gatewaylog.VerdictPayload{
-			Stage:      stage,
-			Action:     action,
-			Reason:     reason,
-			Categories: categories,
-			LatencyMs:  latencyMs,
+			Stage:        stage,
+			Action:       action,
+			Reason:       reason,
+			Categories:   categories,
+			LatencyMs:    latencyMs,
+			EvaluationID: ext.EvaluationID,
+			RuleIDs:      ext.RuleIDs,
 		},
 	})
 }

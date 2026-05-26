@@ -200,6 +200,17 @@ func (l *Logger) SetGatewayLogWriter(w *gatewaylog.Writer) {
 	l.mu.Unlock()
 }
 
+// GatewayLogWriter returns the installed gateway JSONL writer (may
+// be nil when none is wired). Callers outside the audit package
+// use this to fan EventScan / EventScanFinding events from
+// runtime finding emitters (hook handlers, /api/v1/inspect/*,
+// proxy guardrail, mid-stream, tool-call-inspect) through the
+// same choke point as scanner.EmitScanResult, so gateway.jsonl
+// stays the single source of truth.
+func (l *Logger) GatewayLogWriter() *gatewaylog.Writer {
+	return l.gatewayWriterSnapshot()
+}
+
 func (l *Logger) gatewayWriterSnapshot() *gatewaylog.Writer {
 	l.mu.RLock()
 	w := l.gwWriter

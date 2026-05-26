@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.config import (
+    CiscoAIDefenseConfig,
     Config,
     GatewayConfig,
     GuardrailConfig,
@@ -48,6 +49,7 @@ def _make_app_context(data_dir: str, **overrides) -> AppContext:
         guardrail=overrides.get("guardrail", GuardrailConfig()),
         gateway=overrides.get("gateway", GatewayConfig()),
         openshell=overrides.get("openshell", OpenShellConfig()),
+        cisco_ai_defense=overrides.get("cisco_ai_defense", CiscoAIDefenseConfig()),
     )
     ctx = AppContext()
     ctx.cfg = cfg
@@ -130,6 +132,67 @@ class KeysSetTests(unittest.TestCase):
                 obj=app,
             )
             self.assertNotEqual(result.exit_code, 0)
+
+
+class BoundEndpointHintTests(unittest.TestCase):
+    """When a credential has a paired endpoint (today: AI Defense
+    region URL), `keys set` and `keys fill-missing` must surface the
+    bound URL right after the save line. The most common UX failure
+    we're catching is "operator pasted a key issued for a different
+    region into a config still pointed at the default" — all three
+    AID regions reply with the same opaque 401 body, so the only
+    durable signal of mismatch is showing the URL we'll send to.
+    """
+
+    def test_set_emits_bound_endpoint_for_cisco_aid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(
+                tmp,
+                cisco_ai_defense=CiscoAIDefenseConfig(
+                    endpoint="https://eu.api.inspect.aidefense.security.cisco.com",
+                ),
+            )
+            runner = CliRunner()
+            result = runner.invoke(
+                keys_cmd,
+                ["set", "CISCO_AI_DEFENSE_API_KEY", "--value", "fake-aid-key-123"],
+                obj=app,
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn(
+                "↪ bound to https://eu.api.inspect.aidefense.security.cisco.com",
+                result.output,
+            )
+            self.assertIn("change region/host", result.output)
+
+    def test_set_does_not_emit_hint_for_unbound_credential(self):
+        """VirusTotal has no paired endpoint — no hint should fire,
+        otherwise we'd train operators to ignore them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            runner = CliRunner()
+            result = runner.invoke(
+                keys_cmd,
+                ["set", "VIRUSTOTAL_API_KEY", "--value", "fake-vt-key"],
+                obj=app,
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("↪ bound to", result.output)
+
+    def test_set_does_not_emit_hint_for_unregistered_env(self):
+        """Custom env vars without a registry entry (e.g. ad-hoc
+        operator-defined keys) must save successfully *and* not
+        attempt to render a hint — the spec is None in that path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            runner = CliRunner()
+            result = runner.invoke(
+                keys_cmd,
+                ["set", "DEFENSECLAW_TEST_CUSTOM_KEY", "--value", "abc"],
+                obj=app,
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertNotIn("↪ bound to", result.output)
 
 
 if __name__ == "__main__":

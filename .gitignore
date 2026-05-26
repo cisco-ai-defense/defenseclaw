@@ -100,6 +100,8 @@ agent-out/
 # Local security-tooling working directories — each contributor's
 # Avarice / DeepSec runs drop campaign data, findings, and node_modules
 # under these trees. Keep them out of git so per-machine scan artifacts
-# never leak into PRs or the published audit trail.
+# never leak into PRs or the published audit trail. security_report/
+# holds ad-hoc on-disk review writeups produced by the same tooling.
 .avarice/
 .deepsec/
+security_report/

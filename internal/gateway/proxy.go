@@ -251,7 +251,8 @@ func (p *GuardrailProxy) resolveConfirm(ctx context.Context, r *http.Request, ve
 		return
 	}
 
-	approved, status, err := p.hilt.Request(ctx, hiltSessionID(ctx, r), subject, verdict.Severity, verdict.Reason, 0)
+	approved, status, err := p.hilt.Request(ctx, hiltSessionID(ctx, r), subject, verdict.Severity, verdict.Reason, 0,
+		HILTApprovalContext{EvaluationID: verdict.EvaluationID, RuleIDs: verdict.RuleIDs})
 	if approved {
 		verdict.Action = guardrailActionAllow
 		verdict.Reason = appendVerdictReason(verdict.Reason, "human approved once")
@@ -2469,12 +2470,14 @@ func (p *GuardrailProxy) enqueueBlockNotification(verdict *ScanVerdict, directio
 	// dispatcher applies its own per-category gate, dedup window,
 	// and rate limit before delivery.
 	p.notifier.OnBlock(notifier.BlockEvent{
-		Source:    notifier.SourceGuardrail,
-		Target:    model,
-		Reason:    string(redaction.ForSinkReason(verdict.Reason)),
-		Severity:  verdict.Severity,
-		Connector: p.connectorName(),
-		Event:     direction,
+		Source:       notifier.SourceGuardrail,
+		Target:       model,
+		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Severity:     verdict.Severity,
+		Connector:    p.connectorName(),
+		Event:        direction,
+		EvaluationID: verdict.EvaluationID,
+		RuleIDs:      verdict.RuleIDs,
 	})
 }
 
@@ -2491,12 +2494,14 @@ func (p *GuardrailProxy) enqueueWouldBlockNotification(verdict *ScanVerdict, dir
 		return
 	}
 	p.notifier.OnWouldBlock(notifier.BlockEvent{
-		Source:    notifier.SourceGuardrail,
-		Target:    model,
-		Reason:    string(redaction.ForSinkReason(verdict.Reason)),
-		Severity:  verdict.Severity,
-		Connector: p.connectorName(),
-		Event:     direction,
+		Source:       notifier.SourceGuardrail,
+		Target:       model,
+		Reason:       string(redaction.ForSinkReason(verdict.Reason)),
+		Severity:     verdict.Severity,
+		Connector:    p.connectorName(),
+		Event:        direction,
+		EvaluationID: verdict.EvaluationID,
+		RuleIDs:      verdict.RuleIDs,
 	})
 }
 
@@ -3509,6 +3514,42 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		}
 		details += fmt.Sprintf(" canonical=%s", strings.Join(ids, ","))
 	}
+
+	// Fan the verdict's findings through the unified scanner
+	// emission pipeline so per-rule detections from the guardrail
+	// proxy land on every observability surface (scan_findings DB
+	// rows, EventScan + EventScanFinding JSONL lines,
+	// defenseclaw_scan_findings_by_rule_total, sliding-window
+	// correlator). The resulting evaluation_id + top rule_ids are
+	// stamped onto the verdict so downstream notifier / webhook /
+	// block-notification paths can carry them too. The emission is
+	// skipped when an upstream caller (inspectToolCalls) already
+	// produced the IDs — that prevents double-emit of the same
+	// rule findings.
+	if verdict.EvaluationID == "" {
+		eval := p.emitGuardrailScanVerdictFindings(
+			ctx,
+			recordTelemetryScannerEnum(direction, verdict, elapsed),
+			recordTelemetryTarget(direction, model),
+			recordTelemetryTargetType(direction),
+			verdict,
+			elapsed,
+			"emit_proxy_findings",
+		)
+		if eval.EvaluationID != "" {
+			verdict.EvaluationID = eval.EvaluationID
+		}
+		if len(eval.RuleIDs) > 0 {
+			verdict.RuleIDs = eval.RuleIDs
+		}
+	}
+	if verdict.EvaluationID != "" {
+		details += fmt.Sprintf(" evaluation_id=%s", verdict.EvaluationID)
+	}
+	if len(verdict.RuleIDs) > 0 {
+		details += fmt.Sprintf(" rule_ids=%s", strings.Join(verdict.RuleIDs, ","))
+	}
+
 	if requestID != "" {
 		// Append the correlation key so the human-readable gateway.log
 		// line (which skips structured sinks) is still searchable by
@@ -4003,10 +4044,26 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	fmt.Fprintf(os.Stderr, "[guardrail] TOOL-CALL-INSPECT action=%s severity=%s findings=%d reason=%s\n",
 		action, severity, len(allFindings), strings.Join(top, ", "))
 
+	// Fan the structured per-rule findings through the unified
+	// scan_findings pipeline before stamping the audit row, so the
+	// `evaluation_id=` + `rule_ids=` correlation suffix can join
+	// the audit row to the EventScanFinding rows it produced.
+	// inspectToolCalls already has the full []RuleFinding (severity
+	// + confidence + evidence + tags per match) so we adapt them
+	// directly rather than re-deriving from NormalizeScanVerdict.
+	eval := p.emitToolCallInspectFindings(ctx, allFindings, action)
+	auditDetails := fmt.Sprintf("action=%s severity=%s confidence=%.2f", action, severity, confidence)
+	auditDetails = appendHookEvaluationDetails(auditDetails, eval)
+
 	if p.logger != nil {
 		for _, tc := range toolCalls {
-			_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailToolCallInspect), tc.Function.Name,
-				fmt.Sprintf("action=%s severity=%s confidence=%.2f", action, severity, confidence))
+			// Use the typed audit.ActionGuardrailToolCallInspect
+			// constant (rather than the string literal) for the
+			// row's action column, AND carry the evaluation_id +
+			// rule_ids in the details string so the unified-pipeline
+			// join key reaches SIEM without breaking the column-
+			// indexed action enum.
+			_ = p.logger.LogActionCtx(ctx, string(audit.ActionGuardrailToolCallInspect), tc.Function.Name, auditDetails)
 		}
 	}
 
@@ -4020,6 +4077,8 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		Reason:         strings.Join(top, ", "),
 		Findings:       FindingStrings(allFindings),
 		ScannerSources: []string{"tool-call-inspect"},
+		EvaluationID:   eval.EvaluationID,
+		RuleIDs:        eval.RuleIDs,
 	}
 }
 

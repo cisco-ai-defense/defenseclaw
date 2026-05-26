@@ -932,6 +932,72 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Unified runtime finding pipeline: scan_findings.confidence
+		// captures the regex / judge / AID detector self-reported
+		// score (0..1) so SIEM can rank by certainty alongside
+		// severity. evaluation_id on both scan_results and
+		// scan_findings joins each row to the upstream runtime
+		// evaluation (hook, /api/v1/inspect/*, proxy guardrail,
+		// mid-stream, tool-call-inspect, watcher rescan) that
+		// produced it. Classic scanner-invocation paths leave
+		// evaluation_id NULL.
+		description: "runtime findings: add confidence + evaluation_id to scan_results/scan_findings",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "scan_findings")
+			if err != nil {
+				return err
+			}
+			if present {
+				for _, spec := range []struct {
+					table, column, stmt string
+				}{
+					{"scan_findings", "confidence", `ALTER TABLE scan_findings ADD COLUMN confidence REAL`},
+					{"scan_findings", "evaluation_id", `ALTER TABLE scan_findings ADD COLUMN evaluation_id TEXT`},
+				} {
+					exists, err := hasColumnDB(ex, spec.table, spec.column)
+					if err != nil {
+						return err
+					}
+					if !exists {
+						if _, err := ex.Exec(spec.stmt); err != nil {
+							return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+						}
+					}
+				}
+				if _, err := ex.Exec(
+					`CREATE INDEX IF NOT EXISTS idx_scan_findings_evaluation_id ` +
+						`ON scan_findings(evaluation_id)`,
+				); err != nil {
+					return fmt.Errorf("create idx_scan_findings_evaluation_id: %w", err)
+				}
+			}
+			summaryPresent, err := tableExists(ex, "scan_results")
+			if err != nil {
+				return err
+			}
+			if summaryPresent {
+				exists, err := hasColumnDB(ex, "scan_results", "evaluation_id")
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(
+						`ALTER TABLE scan_results ADD COLUMN evaluation_id TEXT`,
+					); err != nil {
+						return fmt.Errorf("alter scan_results.evaluation_id: %w", err)
+					}
+				}
+				if _, err := ex.Exec(
+					`CREATE INDEX IF NOT EXISTS idx_scan_results_evaluation_id ` +
+						`ON scan_results(evaluation_id)`,
+				); err != nil {
+					return fmt.Errorf("create idx_scan_results_evaluation_id: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

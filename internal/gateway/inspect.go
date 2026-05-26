@@ -545,6 +545,21 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		_ = a.otel.EmitInspectSpan(context.Background(), req.Tool, verdict.Action, verdict.Severity, elapsedMs)
 	}
 
+	targetType := "tool_call"
+	if strings.ToLower(req.Tool) == "message" {
+		switch strings.ToLower(req.Direction) {
+		case "completion", "outbound", "response":
+			targetType = "completion"
+		case "tool_result", "tool-response":
+			targetType = "tool_response"
+		default:
+			targetType = "prompt"
+		}
+	}
+	evalCtx := a.emitInspectVerdictFindings(r.Context(), "inspect-http",
+		"/api/v1/inspect/tool:"+req.Tool, targetType, verdict, elapsed,
+		"emit_inspect_tool")
+
 	requestID := RequestIDFromContext(r.Context())
 	auditDetails := fmt.Sprintf("severity=%s confidence=%.2f reason=%s elapsed=%s mode=%s would_block=%v raw_action=%s",
 		verdict.Severity, verdict.Confidence, verdict.Reason, elapsed, verdict.Mode, verdict.WouldBlock, verdict.RawAction)
@@ -557,6 +572,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if requestID != "" {
 		auditDetails += fmt.Sprintf(" request_id=%s", requestID)
 	}
+	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
 
 	a.emitCodeGuardOTel(&req, verdict, elapsed)

@@ -205,6 +205,32 @@ def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = N
         r.record(tag, label, detail)
 
 
+def _emit_hint(text: str, *, indent: str = "      ") -> None:
+    """Print an advisory hint line attached to the previous check row.
+
+    Hints don't count toward the pass/fail/warn/skip tally and are
+    suppressed in JSON mode (consumers parse the result dict, not
+    rendered text). Used today by the AI Defense probe to surface
+    the bound endpoint after a 401 — the most common cause is a
+    valid key for a different region, and the API can't disambiguate
+    that on its own.
+    """
+    if _json_mode:
+        return
+    click.echo(f"{indent}{ux.dim('↪ ' + text)}")
+
+
+def _emit_aid_hint(text: str) -> None:
+    """Convenience wrapper for AI Defense hint rows.
+
+    Kept as a named helper (rather than calling ``_emit_hint``
+    directly at every site) so tests and grep can target the
+    AI-Defense-specific hints without false matches against future
+    hints from other probes.
+    """
+    _emit_hint(text)
+
+
 def _resolve_api_key(env_name: str, dotenv_path: str) -> str:
     """Resolve an API key from env → .env file → empty."""
     val = os.environ.get(env_name, "")
@@ -977,10 +1003,26 @@ def _check_cisco_ai_defense(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Cisco AI Defense", endpoint, r=r)
     elif code == 401 or code == 403:
         _emit("fail", "Cisco AI Defense", f"authentication failed (HTTP {code})", r=r)
+        # AI Defense has three regional deployments (us / eu / preview)
+        # and all of them reply with the same opaque "401 invalid api
+        # key" body — there's no way for the API itself to tell the
+        # operator "your key is for a different region". Surface the
+        # endpoint that was probed plus an actionable next step right
+        # under the failure so a wrong-region key (the most common
+        # post-rotation cause) doesn't get misdiagnosed as a revoked
+        # one. Hints are advisory rows: not counted in the result
+        # tally and suppressed in JSON mode (consumers there see the
+        # endpoint via the spec, not the rendered hint).
+        _emit_aid_hint(f"endpoint: {endpoint}")
+        _emit_aid_hint(
+            "if the key was issued for a different region, run: defenseclaw setup"
+        )
     elif code == 0:
         _emit("warn", "Cisco AI Defense", f"endpoint unreachable: {body[:100]}", r=r)
+        _emit_aid_hint(f"endpoint: {endpoint}")
     else:
         _emit("warn", "Cisco AI Defense", f"HTTP {code} (unexpected — endpoint responded but not 200)", r=r)
+        _emit_aid_hint(f"endpoint: {endpoint}")
 
 
 def _check_observability(cfg, r: _DoctorResult) -> None:
