@@ -11,6 +11,11 @@ keywords:
 
 The Antigravity connector wires DefenseClaw into Google's [Antigravity CLI](https://antigravity.google.com) (binary name `agy`) via all five Antigravity 2.0 lifecycle hooks installed in `~/.gemini/config/hooks.json` using the Claude-Code-compatible nested schema agy v1.0.x evaluates at runtime. DefenseClaw installs the hooks globally so every Antigravity session on the host reports into the same DefenseClaw gateway, while Antigravity continues to talk directly to its configured upstream model provider.
 
+<Video
+  src="antigravity"
+  caption="agy tries to write a Stripe secret to .env → PreToolUse hook matches SEC-STRIPE + PATH-ENV-FILE → tool call denied on every retry, even operator-approved ones → secret never reaches disk."
+/>
+
 <Callout type="info">
 **Why `~/.gemini/config/hooks.json` and not `~/.gemini/antigravity-cli/hooks.json`?** The marketing-facing path printed by `agy --help` (`~/.gemini/antigravity-cli/`) is silently ignored by agy v1.0.x at runtime — agy actually reads PreToolUse hooks from `~/.gemini/config/hooks.json` in a Claude-Code-compatible nested schema. This was determined empirically during the v0.5.0 smoke test: tracer hooks installed at the marketing path never fired; the same entries at the canonical path fired reliably on every tool call. DefenseClaw writes only the canonical path. `defenseclaw doctor` will surface a migration warning if a stale entry is left behind from a pre-v0.5.0 install at the legacy path.
 </Callout>
