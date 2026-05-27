@@ -124,7 +124,19 @@ func bedrockBlockedConverseBody(model, msg string) map[string]any {
 				},
 			},
 		},
-		"stopReason": "guardrail_intervened",
+		// Emit stopReason=end_turn so OpenClaw's amazon-bedrock provider
+		// adapter (pi-ai bifrost) treats this as a normal assistant turn
+		// and surfaces the block message in the UI. Bedrock SDK clients
+		// only recognize a fixed stopReason set {end_turn, tool_use,
+		// max_tokens, stop_sequence, content_filtered, guardrail_intervened}
+		// — and at least the bifrost adapter classifies any value outside
+		// {end_turn, tool_use, max_tokens, stop_sequence} as a non-final
+		// frame, which causes the synthetic block to be dropped and the
+		// client silently retries (in some configurations rephrasing the
+		// prompt). All out-of-band block signals (X-DefenseClaw-Blocked
+		// header, defenseclaw_blocked payload field, audit log) are still
+		// emitted, so policy enforcement is unchanged.
+		"stopReason": "end_turn",
 		"usage": map[string]int{
 			"inputTokens":  0,
 			"outputTokens": 1,
@@ -156,7 +168,7 @@ func (p *GuardrailProxy) writeBlockedResponseBedrockConverse(w http.ResponseWrit
 //  1. messageStart       — role=assistant
 //  2. contentBlockDelta  — delta.text = <block message>
 //  3. contentBlockStop   — contentBlockIndex=0
-//  4. messageStop        — stopReason=guardrail_intervened
+//  4. messageStop        — stopReason=end_turn (see bedrockBlockedConverseBody for why)
 //  5. metadata           — usage + metrics
 //
 // Each frame is framed with the AWS event-stream codec (preamble length +
@@ -198,7 +210,11 @@ func (p *GuardrailProxy) writeBlockedStreamBedrockConverse(w http.ResponseWriter
 		"p":                 "",
 	})
 	emit("messageStop", map[string]any{
-		"stopReason":          "guardrail_intervened",
+		// See bedrockBlockedConverseBody for the rationale — pi-ai's
+		// amazon-bedrock adapter only accepts a fixed set of stopReason
+		// values, and "guardrail_intervened" causes it to drop the
+		// synthetic response and silently retry.
+		"stopReason":          "end_turn",
 		"defenseclaw_blocked": true,
 		"defenseclaw_reason":  msg,
 		"defenseclaw_model":   model,

@@ -103,8 +103,8 @@ func TestWriteBlockedResponseBedrockConverse(t *testing.T) {
 	if len(resp.Output.Message.Content) != 1 || resp.Output.Message.Content[0].Text != "blocked by DefenseClaw" {
 		t.Errorf("content text = %+v; want [{Text: blocked by DefenseClaw}]", resp.Output.Message.Content)
 	}
-	if resp.StopReason != "guardrail_intervened" {
-		t.Errorf("stopReason = %q; want guardrail_intervened", resp.StopReason)
+	if resp.StopReason != "end_turn" {
+		t.Errorf("stopReason = %q; want end_turn", resp.StopReason)
 	}
 	if !resp.DefenseClawBlocked || resp.DefenseClawReason != "blocked by DefenseClaw" {
 		t.Errorf("missing defenseclaw metadata: %+v", resp)
@@ -192,8 +192,8 @@ func TestWriteBlockedStreamBedrockConverseRoundTrip(t *testing.T) {
 	if deltaText != "blocked by DefenseClaw" {
 		t.Errorf("deltaText = %q; want blocked by DefenseClaw", deltaText)
 	}
-	if stopReason != "guardrail_intervened" {
-		t.Errorf("stopReason = %q; want guardrail_intervened", stopReason)
+	if stopReason != "end_turn" {
+		t.Errorf("stopReason = %q; want end_turn", stopReason)
 	}
 	if blocked, _ := messageMeta["defenseclaw_blocked"].(bool); !blocked {
 		t.Errorf("messageStop missing defenseclaw_blocked=true: %+v", messageMeta)
