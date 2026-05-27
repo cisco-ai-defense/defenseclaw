@@ -22,13 +22,13 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import platform
 import stat
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -85,6 +85,42 @@ LEGACY_DEPLOYMENT_MODE_ALIASES = {
     "ci": "ci_cd",
     "edge": "server",
 }
+
+if os.name == "nt":
+    import msvcrt
+
+    def _lock_file_exclusive(file_obj) -> None:
+        # msvcrt.locking operates on byte ranges; lock 1 byte at offset 0.
+        file_obj.seek(0)
+        try:
+            file_obj.write("0")
+            file_obj.flush()
+        except Exception:
+            # Best-effort sentinel; lock still works for existing files.
+            pass
+        while True:
+            try:
+                msvcrt.locking(file_obj.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                time.sleep(0.05)
+
+    def _unlock_file(file_obj) -> None:
+        file_obj.seek(0)
+        try:
+            msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            # If the lock was lost or never acquired, do not crash teardown/save paths.
+            pass
+
+else:
+    import fcntl
+
+    def _lock_file_exclusive(file_obj) -> None:
+        fcntl.flock(file_obj.fileno(), fcntl.LOCK_EX)
+
+    def _unlock_file(file_obj) -> None:
+        fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
 
 
 def _home() -> Path:
@@ -1441,16 +1477,16 @@ def locked_config_yaml(path: str):
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(lock_path, flags, 0o600)
     try:
-        lock = os.fdopen(fd, "w")
+        lock = os.fdopen(fd, "a+")
     except BaseException:
         os.close(fd)
         raise
     try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _lock_file_exclusive(lock)
         try:
             yield
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            _unlock_file(lock)
     finally:
         lock.close()
 
