@@ -112,3 +112,17 @@ rules:
     severity: HIGH
     confidence: 0.75
     tags: [pii, bulk-data]
+
+  - id: ENT-CUSTOM-NAMES
+    pattern: '(?i)\b(?:Ezra\s+Doyle|Liam\s+Hernandez|Josh\s+Greene)\b'
+    title: "Restricted individual name (organization-defined)"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [pii, custom]
+
+  - id: ENT-CUSTOM-COMPETITOR-EMAIL
+    pattern: '(?i)\b[a-z0-9._%+\-]+@competitor\.com\b'
+    title: "Email address on competitor.com (organization-defined)"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [pii, custom]
