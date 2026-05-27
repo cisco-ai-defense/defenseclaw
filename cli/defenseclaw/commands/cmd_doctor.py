@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import click
@@ -772,6 +773,13 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
       ``ca_cert_pem`` or ``insecure_skip_verify``; declaring both is
       almost always a misconfiguration (we accept it on the Go side,
       but the warning matches the CLI's own validation).
+    * When an overlay entry declares ``base_url``, the host portion of
+      that URL must appear in the entry's ``domains`` list. The Go
+      gateway's ``inferProviderFromURL`` resolves an inbound request
+      to an overlay entry by host match; if the host is absent from
+      ``domains`` the resolver bails before the instance-binding
+      branch and the overlay's TLS / sub-block posture silently does
+      not apply.
     """
     label = "Custom-provider overlay"
     data_dir = getattr(cfg, "data_dir", "") or ""
@@ -812,6 +820,7 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
     tls_warns: list[str] = []
     family_warns: list[str] = []
     auth_warns: list[str] = []
+    domain_warns: list[str] = []
     bedrock_auth_modes = {"api_key", "iam_credentials", "profile", "instance_role"}
     vertex_auth_modes = {"service_account", "adc", "workload_identity"}
     azure_auth_modes = {"api_key", "managed_identity"}
@@ -822,6 +831,36 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
         tls = entry.get("tls") or {}
         if isinstance(tls, dict) and tls.get("ca_cert_pem") and tls.get("insecure_skip_verify"):
             tls_warns.append(name)
+        # Domain coverage: when an overlay declares base_url, requests
+        # whose X-DC-Target-URL (fetch-interceptor agents) or connector
+        # snapshot URL (native binaries like ZeptoClaw / Codex) carry
+        # that same URL must be recognizable to the Go gateway's
+        # inferProviderFromURL. If the host portion of base_url is
+        # not in this entry's domains, the resolver returns "" and
+        # bails before the instance-binding branch — the overlay's
+        # TLS / sub-block posture then silently does not apply and
+        # the user sees stock TLS / default routing instead.
+        base_url_raw = str(entry.get("base_url") or "").strip()
+        if base_url_raw:
+            try:
+                parsed = urllib.parse.urlparse(base_url_raw)
+                host = (parsed.hostname or "").lower()
+            except ValueError:
+                host = ""
+            entry_domains = entry.get("domains") or []
+            domain_strs: list[str] = []
+            if isinstance(entry_domains, list):
+                for d in entry_domains:
+                    s = str(d or "").strip().lower()
+                    if s:
+                        domain_strs.append(s)
+            if host:
+                covered = any(host == d or host.endswith("." + d) for d in domain_strs)
+                if not covered:
+                    rendered = ", ".join(domain_strs) if domain_strs else "(empty)"
+                    domain_warns.append(
+                        f"{name}: base_url host {host!r} not covered by domains [{rendered}]"
+                    )
         # Family-mismatch: a bedrock/vertex/azure sub-block paired with
         # a base_provider_type from a different family is dead config.
         # The Go gateway tolerates it (the dispatcher only consults the
@@ -937,6 +976,14 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
             "overlay declares unrecognized auth_mode: " + "; ".join(auth_warns),
             r=r,
         )
+    if domain_warns:
+        _emit(
+            "warn",
+            label,
+            "base_url host not declared in domains (gateway cannot resolve "
+            "the overlay from inbound URL): " + "; ".join(domain_warns),
+            r=r,
+        )
     if dup_warns:
         _emit(
             "warn",
@@ -945,7 +992,7 @@ def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
             + "; ".join(dup_warns),
             r=r,
         )
-    if tls_warns or family_warns or auth_warns or dup_warns:
+    if tls_warns or family_warns or auth_warns or domain_warns or dup_warns:
         return
     _emit("pass", label, f"{len(providers)} overlay entries OK", r=r)
 

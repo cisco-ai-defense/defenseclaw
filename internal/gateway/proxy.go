@@ -1662,11 +1662,25 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 
 	modelArg := compositeModelForUpstream(prefix, req.Model)
 
-	// When the operator has configured an instance_name AND the inferred
-	// provider matches the instance's base_provider_type, route through
-	// the overlay (so per-instance TLS / base_url apply). This keeps
-	// fetch-interceptor traffic flowing through custom-provider config
-	// without requiring the agent to send a new header.
+	// When the operator has configured an instance_name, route through the
+	// overlay so per-instance TLS / base_url / sub-block posture apply. This
+	// keeps fetch-interceptor traffic and native-binary connector traffic
+	// (ZeptoClaw / Codex) flowing through custom-provider config without
+	// requiring the agent to send a new header.
+	//
+	// The family guard below only fires when the URL resolved to a *different*
+	// provider than the pinned overlay entry. Two cases skip the guard and
+	// apply the overlay anyway:
+	//
+	//   1. The overlay declares no base_provider_type — there is nothing to
+	//      contradict the inferred family.
+	//   2. The inferred prefix matches the overlay's own Name. That only
+	//      happens when inferProviderFromURL hit a domain listed under this
+	//      exact overlay entry, which is the strongest possible "this is the
+	//      right overlay" signal. Without this carve-out, a corporate proxy
+	//      whose hostname is registered against an overlay with
+	//      base_provider_type="bedrock" silently bypasses the overlay because
+	//      the inferred prefix is the overlay name, not "bedrock".
 	instanceName := strings.TrimSpace(p.cfg.LLM.InstanceName)
 	if instanceName != "" {
 		registry, _, _ := providerRegistrySnapshot()
@@ -1675,7 +1689,12 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 				if !strings.EqualFold(prov.Name, instanceName) {
 					continue
 				}
-				if prov.BaseProviderType != "" && prov.BaseProviderType != prefix {
+				if prov.BaseProviderType != "" &&
+					prov.BaseProviderType != prefix &&
+					!strings.EqualFold(prov.Name, prefix) {
+					fmt.Fprintf(os.Stderr,
+						"[guardrail] instance %q has base_provider_type=%q but URL inferred to %q; skipping overlay\n",
+						instanceName, prov.BaseProviderType, prefix)
 					break
 				}
 				provider, err := NewProviderForInstance(instanceName, modelArg, req.TargetAPIKey, registry)

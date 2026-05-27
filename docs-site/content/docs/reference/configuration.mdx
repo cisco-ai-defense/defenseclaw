@@ -198,6 +198,7 @@ Custom-provider instances live in a separate JSON overlay so the same instance d
       "name": "acme-internal-bedrock",
       "base_provider_type": "bedrock",
       "base_url": "https://llm.internal:8443",
+      "domains": ["llm.internal"],
       "env_key": "ACME_BEDROCK_KEY",
       "allowed_request_types": ["chat", "embedding"],
       "available_models": ["us.anthropic.claude-sonnet-4-6"],
@@ -244,6 +245,8 @@ Custom-provider instances live in a separate JSON overlay so the same instance d
 ```
 
 In practice an entry only carries the sub-block matching its `base_provider_type` — extras are ignored at dispatch time but `defenseclaw doctor` warns about family mismatches (e.g. `bedrock` block with `base_provider_type: openai`), unknown `auth_mode` values, and dead overlay fields the role-level config already shadows. Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure).
+
+The `domains` array drives the gateway's URL → overlay lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this overlay entry's TLS, base_url, and sub-block posture. Any entry that declares `base_url` should also list the matching host in `domains`; `defenseclaw doctor` warns when the two diverge.
 
 ## Environment variables
 

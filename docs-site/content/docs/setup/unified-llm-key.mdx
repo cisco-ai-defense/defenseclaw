@@ -296,6 +296,7 @@ defenseclaw setup provider add \
   --name acme-internal-bedrock \
   --base-provider-type bedrock \
   --base-url https://llm.internal:8443 \
+  --domain llm.internal \
   --env-key ACME_BEDROCK_KEY \
   --allowed-request chat \
   --allowed-request embedding \
@@ -303,6 +304,17 @@ defenseclaw setup provider add \
   --request-path-override chat=/openai/v1/chat/completions \
   --ca-cert-file /etc/ssl/acme-root.pem
 ```
+
+<Callout type="warn" title="Set --domain when you set --base-url">
+The gateway resolves an inbound request to a custom-provider entry by
+matching the request URL's host against each entry's `domains` list. If
+you set `--base-url` but never declare a `--domain` covering the same
+host, `defenseclaw doctor` emits a `base_url host … not covered by
+domains` warning and the gateway falls back to default TLS / routing
+because it cannot match the inbound URL to the overlay. Always pass
+`--domain <host>` alongside `--base-url <scheme>://<host>:<port>` (or
+add the host to `domains` in the JSON overlay directly).
+</Callout>
 
 Then bind a resolved role to the instance:
 
@@ -327,8 +339,10 @@ defenseclaw setup guardrail \
 ```
 
 `defenseclaw doctor` validates that every `instance_name` in your
-config resolves to an overlay entry, and warns when an overlay TLS
-block declares both `ca_cert_pem` and `insecure_skip_verify`.
+config resolves to an overlay entry, warns when an overlay TLS block
+declares both `ca_cert_pem` and `insecure_skip_verify`, and warns when
+an entry's `base_url` host is not covered by its `domains` list (which
+would otherwise silently bypass the overlay at request time).
 
 ### Bedrock / Vertex AI / Azure on a custom instance
 
@@ -341,6 +355,7 @@ regional flags below — they just attach to the overlay entry instead.
 defenseclaw setup provider add \
   --name acme-bedrock-prod \
   --base-provider-type bedrock \
+  --domain bedrock-runtime.us-east-2.amazonaws.com \
   --bedrock-region us-east-2 \
   --bedrock-auth-mode iam_credentials \
   --bedrock-access-key-env ACME_AWS_AKID \
@@ -355,6 +370,12 @@ defenseclaw setup llm \
   --model heavy \
   --non-interactive
 ```
+
+When the upstream is the public AWS Bedrock service (rather than an
+internal proxy in front of it), the `--domain` value should be the
+regional Bedrock runtime host — that's the URL the agent's outbound
+calls actually carry. Internal Bedrock mirrors should use the mirror's
+host plus `--base-url`.
 
 The same shape works for Vertex AI (`--vertex-project-id`,
 `--vertex-region`, `--vertex-auth-mode`,

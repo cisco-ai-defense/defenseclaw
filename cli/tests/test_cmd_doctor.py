@@ -26,6 +26,7 @@ from defenseclaw.commands.cmd_doctor import (
     _ANTHROPIC_DEFAULT_PROBE_MODEL,
     _anthropic_probe_model,
     _bedrock_region,
+    _check_custom_provider_overlay,
     _check_guardrail_proxy,
     _check_hilt_support,
     _check_llm_api_key,
@@ -808,6 +809,118 @@ class BedrockRoutingTests(unittest.TestCase):
         r = _DoctorResult()
         _check_llm_api_key(cfg, r)
         mock_bedrock.assert_called_once()
+
+
+class CustomProviderOverlayChecksTests(unittest.TestCase):
+    """Cover ``_check_custom_provider_overlay`` warnings — specifically the
+    base_url/domains coverage check that prevents the resolver from
+    silently dropping the overlay when no domain entry matches the inbound
+    request URL.
+    """
+
+    def _make_cfg(self, data_dir: str) -> Config:
+        return Config(
+            data_dir=data_dir,
+            audit_db=os.path.join(data_dir, "audit.db"),
+            quarantine_dir=os.path.join(data_dir, "quarantine"),
+            plugin_dir=os.path.join(data_dir, "plugins"),
+            policy_dir=os.path.join(data_dir, "policies"),
+            guardrail=GuardrailConfig(),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+
+    def _write_overlay(self, data_dir: str, body: str) -> None:
+        path = os.path.join(data_dir, "custom-providers.json")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+
+    def test_base_url_host_missing_from_domains_emits_warn(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            self._write_overlay(data_dir, """{
+                "providers": [{
+                    "name": "acme-internal",
+                    "base_url": "https://llm.acme.internal:8443",
+                    "base_provider_type": "openai"
+                }]
+            }""")
+            r = _DoctorResult()
+            _check_custom_provider_overlay(self._make_cfg(data_dir), r)
+            warn_checks = [c for c in r.checks if c["status"] == "warn"]
+            self.assertTrue(
+                any("not covered by domains" in c["detail"] for c in warn_checks),
+                f"expected domains-coverage warn; got {r.checks}",
+            )
+
+    def test_base_url_host_covered_by_domains_does_not_warn(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            self._write_overlay(data_dir, """{
+                "providers": [{
+                    "name": "acme-internal",
+                    "domains": ["llm.acme.internal"],
+                    "base_url": "https://llm.acme.internal:8443",
+                    "base_provider_type": "openai"
+                }]
+            }""")
+            r = _DoctorResult()
+            _check_custom_provider_overlay(self._make_cfg(data_dir), r)
+            warn_checks = [
+                c for c in r.checks
+                if c["status"] == "warn" and "not covered by domains" in c["detail"]
+            ]
+            self.assertEqual(
+                warn_checks, [],
+                "domains-coverage warn should not fire when host is listed",
+            )
+
+    def test_subdomain_coverage_does_not_warn(self):
+        # domains entry "acme.internal" should cover a base_url host of
+        # "llm.acme.internal" via the suffix rule. This mirrors how the
+        # Go gateway's matchProviderDomain treats the domain entry as a
+        # substring match anchored at host or subdomain boundaries.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            self._write_overlay(data_dir, """{
+                "providers": [{
+                    "name": "acme-internal",
+                    "domains": ["acme.internal"],
+                    "base_url": "https://llm.acme.internal:8443",
+                    "base_provider_type": "openai"
+                }]
+            }""")
+            r = _DoctorResult()
+            _check_custom_provider_overlay(self._make_cfg(data_dir), r)
+            warn_checks = [
+                c for c in r.checks
+                if c["status"] == "warn" and "not covered by domains" in c["detail"]
+            ]
+            self.assertEqual(warn_checks, [], r.checks)
+
+    def test_entry_without_base_url_skips_domain_check(self):
+        # When the overlay extends a built-in (env_keys only) without
+        # declaring base_url, there is nothing for inferProviderFromURL
+        # to match against and the check has no opinion.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as data_dir:
+            self._write_overlay(data_dir, """{
+                "providers": [{
+                    "name": "openai",
+                    "env_keys": ["MY_OPENAI_KEY"]
+                }]
+            }""")
+            r = _DoctorResult()
+            _check_custom_provider_overlay(self._make_cfg(data_dir), r)
+            warn_checks = [
+                c for c in r.checks
+                if c["status"] == "warn" and "not covered by domains" in c["detail"]
+            ]
+            self.assertEqual(warn_checks, [], r.checks)
 
 
 if __name__ == "__main__":
