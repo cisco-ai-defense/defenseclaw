@@ -127,7 +127,9 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **API endpoint / key env / timeout** *(remote scanner only)* | `--cisco-endpoint`, `--cisco-api-key-env`, `--cisco-timeout-ms` | Defaults inherit from existing `aid.*` config. |
 | **Enable LLM judge?** *(default: current)* | implicit when `--judge-model` is set | Pass `--detection-strategy regex_only` to force the judge off; the bare guardrail command has no `--no-judge` toggle. |
 | **Select judge strategy** *(if judge on, default: regex_judge)* | `--detection-strategy regex_only\|regex_judge\|judge_first` | — |
-| **Inherit unified LLM key for judge?** *(default: Y)* | `--judge-api-key-env` | Override with a different env var to use a separate key. |
+| **Inherit unified LLM key for judge?** *(default: Y)* | `--judge-api-key-env`, or `--inherit-llm` to copy the connector's agent-side LLM block wholesale | Override with a different env var to use a separate key, or `--inherit-from guardrail.judge` to start from the previous judge config. |
+| **Who consumes the unified LLM key?** *(proxy connectors only)* | `--llm-role judge_only\|judge_and_agent` | Defaults to `judge_only` for hook-based connectors (Claude Code, Codex, ...) and `judge_and_agent` for proxy connectors (OpenClaw, ZeptoClaw). See [Unified LLM key → Hook-based vs proxy-based connectors](/docs/setup/unified-llm-key#hook-based-vs-proxy-based-connectors). |
+| **Judge provider / region / instance** *(judge on, advanced)* | `--judge-provider`, `--judge-region`, `--judge-instance-name` | Use `--judge-provider bedrock\|vertex_ai\|azure\|anthropic\|openai\|...` and the matching regional flags below to point the judge at a different backend than the agent LLM. `--judge-instance-name` binds to a `~/.defenseclaw/custom-providers.json` overlay entry. |
 | **Configure judge fallback models?** *(default: N)* | **interactive-only** | Edit `guardrail.judge.fallback_models` in `~/.defenseclaw/config.yaml` to script. |
 | **Configure advanced options?** *(default: N)* | — | Gates the next three prompts. |
 | **Guardrail proxy port** *(default: 4000)* | `--port` | — |
@@ -157,7 +159,7 @@ When you omit `--connector`, DefenseClaw resolves it in this order:
 
 ## Tabs by mode (non-interactive recipes)
 
-<Tabs items={['Observe', 'Action', 'Action + HITL', 'Action + judge']}>
+<Tabs items={['Observe', 'Action', 'Action + HITL', 'Action + judge', 'Action + Bedrock judge']}>
 
 <Tab value="Observe">
 
@@ -226,6 +228,28 @@ Regex still runs first (cheap and offline). The judge adjudicates anything regex
 
 </Tab>
 
+<Tab value="Action + Bedrock judge">
+
+```bash
+defenseclaw setup guardrail \
+  --non-interactive \
+  --connector claudecode \
+  --mode action \
+  --detection-strategy regex_judge \
+  --judge-provider bedrock \
+  --judge-model us.anthropic.claude-sonnet-4-6 \
+  --judge-bedrock-region us-east-1 \
+  --judge-bedrock-auth-mode iam_credentials \
+  --judge-bedrock-access-key-env AWS_ACCESS_KEY_ID \
+  --judge-bedrock-secret-key-env AWS_SECRET_ACCESS_KEY \
+  --judge-bedrock-inference-profile us. \
+  --restart
+```
+
+Routes the judge through AWS Bedrock instead of a SaaS endpoint. `boto3` ships in the base install, so no extra `pip install` is needed. Swap `--judge-provider vertex_ai` + `--judge-vertex-{project-id,region,auth-mode,service-account-json-env}` for GCP Vertex, or `--judge-provider azure` + `--judge-azure-{endpoint,api-version,auth-mode,deployment-alias}` for Azure OpenAI. For self-signed lab endpoints, add `--judge-tls-ca-cert-file /etc/ssl/lab-root.pem`. See [Unified LLM key → Regional providers](/docs/setup/unified-llm-key#regional-providers-bedrock-vertex-ai-azure-openai) for the full matrix.
+
+</Tab>
+
 </Tabs>
 
 ## Every flag
@@ -283,6 +307,66 @@ Regex still runs first (cheap and offline). The judge adjudicates anything regex
     "--judge-api-key-env": {
       type: "string",
       description: "Env var name for the judge API key.",
+    },
+    "--judge-provider": {
+      type: "string",
+      description: "Judge LLM provider (e.g. anthropic, openai, bedrock, vertex_ai, azure). Persisted to guardrail.judge.llm.provider. Required when the judge backend differs from the agent LLM.",
+    },
+    "--judge-region": {
+      type: "string",
+      description: "Generic regional provider region for the judge (Bedrock, Vertex). Stored on guardrail.judge.llm.region. Provider-specific flags (--judge-bedrock-region, --judge-vertex-region) take precedence when set.",
+    },
+    "--judge-instance-name": {
+      type: "string",
+      description: "Custom-provider overlay instance for the judge. Resolves to a ~/.defenseclaw/custom-providers.json entry registered via `defenseclaw setup provider add`.",
+    },
+    "--judge-auth-mode": {
+      type: "string",
+      description: "Generic judge auth mode. Maps to --judge-bedrock-auth-mode / --judge-vertex-auth-mode / --judge-azure-auth-mode depending on --judge-provider.",
+    },
+    "--judge-bedrock-region": {
+      type: "string",
+      description: "AWS region for the Bedrock judge (e.g. us-east-1). Pair with --judge-bedrock-auth-mode and the matching credential env vars.",
+    },
+    "--judge-bedrock-auth-mode": {
+      type: "api_key|iam_credentials|profile|instance_role",
+      description: "Bedrock auth strategy for the judge. iam_credentials needs --judge-bedrock-{access,secret,session-token}-key-env; profile needs --judge-bedrock-profile-name; instance_role relies on the EC2/EKS pod-identity chain.",
+    },
+    "--judge-bedrock-inference-profile": {
+      type: "string",
+      description: "Bedrock inference-profile prefix for the judge (e.g. 'us.'). Concatenated with the model id before dispatch.",
+    },
+    "--judge-bedrock-deployment": {
+      type: "alias=model-id (repeatable)",
+      description: "Judge Bedrock model alias. Lets a short --judge-model alias resolve to a longer Bedrock model id at request time.",
+    },
+    "--judge-vertex-project-id / --judge-vertex-region / --judge-vertex-auth-mode / --judge-vertex-service-account-json-env": {
+      type: "string",
+      description: "Vertex AI judge backend. Mirrors the agent-side --vertex-* flags. The Vertex SDK is an opt-in extra (`pip install 'defenseclaw[vertex]'`); the gateway falls back to LiteLLM's REST transport when the SDK is absent.",
+    },
+    "--judge-azure-endpoint / --judge-azure-api-version / --judge-azure-auth-mode / --judge-azure-deployment-alias": {
+      type: "string",
+      description: "Azure OpenAI judge backend. --judge-azure-deployment-alias is repeatable and accepts `model=deployment` pairs.",
+    },
+    "--judge-tls-ca-cert-file": {
+      type: "path",
+      description: "PEM-encoded CA bundle for a self-signed judge endpoint. Stored inline on guardrail.judge.llm.tls.ca_cert_pem so the gateway can verify the cert without an on-disk dependency.",
+    },
+    "--judge-insecure-skip-verify": {
+      type: "flag",
+      description: "Disable TLS verification for the judge endpoint. Lab use only — `defenseclaw doctor` warns when this is set alongside a CA bundle.",
+    },
+    "--llm-role": {
+      type: "judge_only|judge_and_agent",
+      description: "Who consumes the unified LLM key. Defaults are connector-aware: hook-based connectors get judge_only; proxy connectors get judge_and_agent. Explicit override always wins.",
+    },
+    "--inherit-from": {
+      type: "guardrail|guardrail.judge|scanners.skill|scanners.mcp|scanners.plugin",
+      description: "Seed guardrail.judge.llm from another resolved component before applying judge-* flags. Useful when an OpenClaw setup wants the judge to reuse the per-connector agent LLM.",
+    },
+    "--inherit-llm / --no-inherit-llm": {
+      type: "flag",
+      description: "Shortcut for --inherit-from guardrail. Copies the connector's agent-side LLM into guardrail.judge.llm so the judge reuses the agent's provider/model/api_key without re-typing every flag.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",

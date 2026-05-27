@@ -23,6 +23,18 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 | Node.js | 18+ (only for the OpenClaw plugin, source builds) |
 | Docker | Optional, for local observability and Splunk bundles |
 
+## What's bundled (LLM backends)
+
+The base install ships everything DefenseClaw needs to talk to the major LLM backends out of the box:
+
+| Backend | Status | Notes |
+| --- | --- | --- |
+| OpenAI / Anthropic / generic OpenAI-compatible | bundled | LiteLLM, the default LLM transport, is a base dependency. |
+| AWS Bedrock | bundled | `boto3` ships in `[project].dependencies` so SigV4, IAM credential modes, and Anthropic-on-Bedrock bearer tokens work without a follow-up `pip install`. |
+| Google Vertex AI | **opt-in extra** | The Vertex SDK pulls ~286 MB of transitive deps (BigQuery, Cloud Storage, gRPC, protobuf). Install when you need it: `pip install 'defenseclaw[vertex]'`. The gateway falls back to LiteLLM's REST transport when the SDK is absent, so basic Vertex calls still work — only service-account / workload-identity auth needs the SDK. |
+| Azure OpenAI | bundled | Routed via LiteLLM's `azure_openai` adapter. |
+| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/setup/unified-llm-key#custom-providers-internal-self-hosted-endpoints). |
+
 ## Pick an install path
 
 <Tabs items={['curl (recommended)', 'From source']}>
