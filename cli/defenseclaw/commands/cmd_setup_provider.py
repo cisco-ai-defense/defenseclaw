@@ -578,6 +578,144 @@ def _validate_request_path_override(raw: str) -> tuple[str, str]:
     return (key, value)
 
 
+# Allowed enum values for each provider family's auth_mode. Mirrored
+# from ``setup llm`` (cli/defenseclaw/commands/cmd_setup.py) so the
+# overlay never carries a value the role-side wizard would reject.
+_BEDROCK_AUTH_MODES = ("api_key", "iam_credentials", "profile", "instance_role")
+_VERTEX_AUTH_MODES = ("service_account", "adc", "workload_identity")
+_AZURE_AUTH_MODES = ("api_key", "managed_identity")
+
+
+def _parse_alias_pairs(raw: tuple[str, ...], flag_name: str) -> dict[str, str]:
+    """Parse repeatable ``alias=value`` (or ``model=deployment``) pairs
+    into a dict. Used by ``--bedrock-deployment`` and
+    ``--azure-deployment-alias`` so the wizard and the Click flags
+    write identical overlay shapes.
+    """
+    out: dict[str, str] = {}
+    for entry in raw:
+        if "=" not in entry:
+            raise click.BadParameter(
+                f"{flag_name} expects ``alias=value`` (got {entry!r})"
+            )
+        k, _, v = entry.partition("=")
+        k, v = k.strip(), v.strip()
+        if not k or not v:
+            raise click.BadParameter(
+                f"{flag_name} both sides of ``=`` must be non-empty (got {entry!r})"
+            )
+        out[k] = v
+    return out
+
+
+def _validate_family_match(
+    base_provider_type: str | None,
+    bedrock_set: bool,
+    vertex_set: bool,
+    azure_set: bool,
+) -> None:
+    """Refuse to write an overlay whose sub-block disagrees with its
+    ``base_provider_type``.
+
+    The data resolver tolerates a mismatch (it just ignores the
+    foreign sub-block), but writing one means the operator's
+    ``--bedrock-region`` will silently never apply when
+    ``--base-provider-type openai``. Failing loudly here is the
+    less-surprising option.
+
+    An empty ``base_provider_type`` is allowed — the resolver picks
+    the family from the model prefix or from inference, and at that
+    point any of the sub-blocks could be the correct one. Only a
+    contradiction is rejected.
+    """
+    if not base_provider_type:
+        return
+    bpt = base_provider_type.strip().lower()
+    if bedrock_set and bpt != "bedrock":
+        raise click.BadParameter(
+            f"--bedrock-* flags require --base-provider-type bedrock (got {bpt!r})"
+        )
+    if vertex_set and bpt != "vertex_ai":
+        raise click.BadParameter(
+            f"--vertex-* flags require --base-provider-type vertex_ai (got {bpt!r})"
+        )
+    if azure_set and bpt != "azure":
+        raise click.BadParameter(
+            f"--azure-* flags require --base-provider-type azure (got {bpt!r})"
+        )
+
+
+def _build_bedrock_block(
+    region: str | None,
+    auth_mode: str | None,
+    access_key_env: str | None,
+    secret_key_env: str | None,
+    session_token_env: str | None,
+    profile_name: str | None,
+    inference_profile: str | None,
+    deployment_aliases: dict[str, str],
+) -> dict[str, Any]:
+    """Project supplied bedrock fields onto an overlay dict. Empty
+    fields are omitted so the JSON stays compact and the resolver
+    can distinguish "operator left it blank" from "operator set the
+    empty string".
+    """
+    block: dict[str, Any] = {}
+    if region:
+        block["region"] = region.strip()
+    if auth_mode:
+        block["auth_mode"] = auth_mode.strip().lower()
+    if access_key_env:
+        block["access_key_env"] = access_key_env.strip()
+    if secret_key_env:
+        block["secret_key_env"] = secret_key_env.strip()
+    if session_token_env:
+        block["session_token_env"] = session_token_env.strip()
+    if profile_name:
+        block["profile_name"] = profile_name.strip()
+    if inference_profile:
+        block["inference_profile"] = inference_profile.strip()
+    if deployment_aliases:
+        block["deployment_aliases"] = dict(deployment_aliases)
+    return block
+
+
+def _build_vertex_block(
+    project_id: str | None,
+    region: str | None,
+    auth_mode: str | None,
+    service_account_json_env: str | None,
+) -> dict[str, Any]:
+    block: dict[str, Any] = {}
+    if project_id:
+        block["project_id"] = project_id.strip()
+    if region:
+        block["region"] = region.strip()
+    if auth_mode:
+        block["auth_mode"] = auth_mode.strip().lower()
+    if service_account_json_env:
+        block["service_account_json_env"] = service_account_json_env.strip()
+    return block
+
+
+def _build_azure_block(
+    endpoint: str | None,
+    api_version: str | None,
+    auth_mode: str | None,
+    deployment_aliases: dict[str, str],
+) -> dict[str, Any]:
+    block: dict[str, Any] = {}
+    if endpoint:
+        block["endpoint"] = endpoint.strip()
+    if api_version:
+        block["api_version"] = api_version.strip()
+    if auth_mode:
+        block["auth_mode"] = auth_mode.strip().lower()
+    if deployment_aliases:
+        block["deployment_aliases"] = dict(deployment_aliases)
+    return block
+
+
 def _read_ca_cert_file(path: str) -> str:
     """Read a PEM-encoded CA bundle from disk.
 
@@ -710,6 +848,108 @@ def _provider_add_interactive() -> dict[str, Any]:
         )
         insecure_skip_verify = click.confirm("  Confirm insecure skip-verify?", default=False)
 
+    # Provider-typed sub-block. Branch on base_provider_type so the
+    # operator only sees the prompts that match their backend.
+    # Bedrock / Vertex / Azure each carry a distinct shape; the
+    # remaining providers (openai-compatible, ollama, vllm, ...) do
+    # not need a sub-block — their config is covered by base_url +
+    # env_keys above.
+    bedrock_region = vertex_project_id = vertex_region = ""
+    bedrock_auth_mode = vertex_auth_mode = azure_auth_mode = ""
+    bedrock_access_key_env = bedrock_secret_key_env = ""
+    bedrock_session_token_env = bedrock_profile_name = ""
+    bedrock_inference_profile = ""
+    bedrock_deployment_aliases: dict[str, str] = {}
+    vertex_service_account_json_env = ""
+    azure_endpoint = azure_api_version = ""
+    azure_deployment_aliases: dict[str, str] = {}
+
+    if base_provider_type == "bedrock":
+        click.echo()
+        ux.subhead("Bedrock backend (blank to skip a field):")
+        bedrock_region = click.prompt("  AWS region (e.g. us-east-1)", default="", show_default=False).strip()
+        bedrock_auth_mode = click.prompt(
+            "  Auth mode",
+            type=click.Choice(list(_BEDROCK_AUTH_MODES)),
+            default="api_key",
+            show_default=True,
+        ).strip().lower()
+        if bedrock_auth_mode == "iam_credentials":
+            bedrock_access_key_env = click.prompt(
+                "  AWS_ACCESS_KEY_ID env var name", default="", show_default=False,
+            ).strip()
+            bedrock_secret_key_env = click.prompt(
+                "  AWS_SECRET_ACCESS_KEY env var name", default="", show_default=False,
+            ).strip()
+            bedrock_session_token_env = click.prompt(
+                "  AWS_SESSION_TOKEN env var (optional)", default="", show_default=False,
+            ).strip()
+        elif bedrock_auth_mode == "profile":
+            bedrock_profile_name = click.prompt(
+                "  AWS profile name (from ~/.aws/credentials)",
+                default="",
+                show_default=False,
+            ).strip()
+        bedrock_inference_profile = click.prompt(
+            "  Inference-profile prefix (e.g. 'us.', blank to skip)", default="", show_default=False,
+        ).strip()
+        click.echo()
+        ux.subhead("Bedrock model aliases (alias=model-id, blank ends):")
+        while True:
+            entry = click.prompt("  alias=model-id", default="", show_default=False).strip()
+            if not entry:
+                break
+            if "=" not in entry:
+                click.echo("    Expected alias=model-id — skipping.")
+                continue
+            k, _, v = entry.partition("=")
+            k, v = k.strip(), v.strip()
+            if k and v:
+                bedrock_deployment_aliases[k] = v
+    elif base_provider_type == "vertex_ai":
+        click.echo()
+        ux.subhead("Vertex AI backend (blank to skip a field):")
+        vertex_project_id = click.prompt("  GCP project id", default="", show_default=False).strip()
+        vertex_region = click.prompt("  GCP region/location (e.g. us-central1)", default="", show_default=False).strip()
+        vertex_auth_mode = click.prompt(
+            "  Auth mode",
+            type=click.Choice(list(_VERTEX_AUTH_MODES)),
+            default="service_account",
+            show_default=True,
+        ).strip().lower()
+        if vertex_auth_mode == "service_account":
+            vertex_service_account_json_env = click.prompt(
+                "  Service-account JSON env var",
+                default="GOOGLE_APPLICATION_CREDENTIALS",
+                show_default=True,
+            ).strip()
+    elif base_provider_type == "azure":
+        click.echo()
+        ux.subhead("Azure OpenAI backend (blank to skip a field):")
+        azure_endpoint = click.prompt(
+            "  Endpoint (e.g. https://name.openai.azure.com)", default="", show_default=False,
+        ).strip()
+        azure_api_version = click.prompt("  API version (e.g. 2024-10-21)", default="", show_default=False).strip()
+        azure_auth_mode = click.prompt(
+            "  Auth mode",
+            type=click.Choice(list(_AZURE_AUTH_MODES)),
+            default="api_key",
+            show_default=True,
+        ).strip().lower()
+        click.echo()
+        ux.subhead("Azure deployment aliases (model=deployment, blank ends):")
+        while True:
+            entry = click.prompt("  model=deployment", default="", show_default=False).strip()
+            if not entry:
+                break
+            if "=" not in entry:
+                click.echo("    Expected model=deployment — skipping.")
+                continue
+            k, _, v = entry.partition("=")
+            k, v = k.strip(), v.strip()
+            if k and v:
+                azure_deployment_aliases[k] = v
+
     env_keys: list[str] = []
     click.echo()
     ux.subhead("API-key env vars (blank ends):")
@@ -768,6 +1008,37 @@ def _provider_add_interactive() -> dict[str, Any]:
         ("tls.ca_cert_file", ca_cert_file or "(none)"),
         ("tls.insecure_skip_verify", str(insecure_skip_verify).lower()),
     ]
+    if base_provider_type == "bedrock":
+        rows.append(("bedrock.region", bedrock_region or "(none)"))
+        rows.append(("bedrock.auth_mode", bedrock_auth_mode or "(none)"))
+        if bedrock_access_key_env or bedrock_secret_key_env:
+            rows.append(
+                ("bedrock.creds", f"{bedrock_access_key_env or '?'}/{bedrock_secret_key_env or '?'}"),
+            )
+        if bedrock_profile_name:
+            rows.append(("bedrock.profile_name", bedrock_profile_name))
+        if bedrock_inference_profile:
+            rows.append(("bedrock.inference_profile", bedrock_inference_profile))
+        if bedrock_deployment_aliases:
+            rows.append((
+                "bedrock.deployment_aliases",
+                ", ".join(f"{k}={v}" for k, v in bedrock_deployment_aliases.items()),
+            ))
+    elif base_provider_type == "vertex_ai":
+        rows.append(("vertex.project_id", vertex_project_id or "(none)"))
+        rows.append(("vertex.region", vertex_region or "(none)"))
+        rows.append(("vertex.auth_mode", vertex_auth_mode or "(none)"))
+        if vertex_service_account_json_env:
+            rows.append(("vertex.sa_json_env", vertex_service_account_json_env))
+    elif base_provider_type == "azure":
+        rows.append(("azure.endpoint", azure_endpoint or "(none)"))
+        rows.append(("azure.api_version", azure_api_version or "(none)"))
+        rows.append(("azure.auth_mode", azure_auth_mode or "(none)"))
+        if azure_deployment_aliases:
+            rows.append((
+                "azure.deployment_aliases",
+                ", ".join(f"{k}={v}" for k, v in azure_deployment_aliases.items()),
+            ))
     width = max(len(k) for k, _ in rows)
     for k, v in rows:
         click.echo(f"    {k + ':':<{width + 1}} {v}")
@@ -788,6 +1059,22 @@ def _provider_add_interactive() -> dict[str, Any]:
         "request_path_overrides": request_path_overrides,
         "ca_cert_file": ca_cert_file,
         "insecure_skip_verify": insecure_skip_verify,
+        "bedrock_region": bedrock_region,
+        "bedrock_auth_mode": bedrock_auth_mode,
+        "bedrock_access_key_env": bedrock_access_key_env,
+        "bedrock_secret_key_env": bedrock_secret_key_env,
+        "bedrock_session_token_env": bedrock_session_token_env,
+        "bedrock_profile_name": bedrock_profile_name,
+        "bedrock_inference_profile": bedrock_inference_profile,
+        "bedrock_deployment_aliases": bedrock_deployment_aliases,
+        "vertex_project_id": vertex_project_id,
+        "vertex_region": vertex_region,
+        "vertex_auth_mode": vertex_auth_mode,
+        "vertex_service_account_json_env": vertex_service_account_json_env,
+        "azure_endpoint": azure_endpoint,
+        "azure_api_version": azure_api_version,
+        "azure_auth_mode": azure_auth_mode,
+        "azure_deployment_aliases": azure_deployment_aliases,
     }
 
 
@@ -885,6 +1172,120 @@ def _provider_add_interactive() -> dict[str, Any]:
     help="Disable TLS verification for this instance. Use only in trusted labs.",
 )
 @click.option(
+    "--bedrock-region",
+    "bedrock_region",
+    default=None,
+    help=(
+        "AWS region for an overlay-managed Bedrock instance "
+        "(requires --base-provider-type bedrock)."
+    ),
+)
+@click.option(
+    "--bedrock-auth-mode",
+    "bedrock_auth_mode",
+    default=None,
+    type=click.Choice(_BEDROCK_AUTH_MODES, case_sensitive=False),
+    help="Bedrock authentication scheme (api_key/iam_credentials/profile/instance_role).",
+)
+@click.option(
+    "--bedrock-access-key-env",
+    "bedrock_access_key_env",
+    default=None,
+    help="Env var name holding AWS_ACCESS_KEY_ID for this instance.",
+)
+@click.option(
+    "--bedrock-secret-key-env",
+    "bedrock_secret_key_env",
+    default=None,
+    help="Env var name holding AWS_SECRET_ACCESS_KEY for this instance.",
+)
+@click.option(
+    "--bedrock-session-token-env",
+    "bedrock_session_token_env",
+    default=None,
+    help="Env var name holding AWS_SESSION_TOKEN for short-lived STS credentials.",
+)
+@click.option(
+    "--bedrock-profile-name",
+    "bedrock_profile_name",
+    default=None,
+    help=(
+        "AWS shared-config profile name (from ~/.aws/credentials). "
+        "Applied process-wide on the gateway side."
+    ),
+)
+@click.option(
+    "--bedrock-inference-profile",
+    "bedrock_inference_profile",
+    default=None,
+    help=(
+        "Inference-profile prefix (e.g. 'us.') prepended to the model id "
+        "before dispatch."
+    ),
+)
+@click.option(
+    "--bedrock-deployment",
+    "bedrock_deployment_aliases",
+    multiple=True,
+    help=(
+        "alias=model-id mapping for Bedrock model aliases (repeatable). "
+        "Honored by the gateway when resolving a model id."
+    ),
+)
+@click.option(
+    "--vertex-project-id",
+    "vertex_project_id",
+    default=None,
+    help="GCP project id for an overlay-managed Vertex AI instance.",
+)
+@click.option(
+    "--vertex-region",
+    "vertex_region",
+    default=None,
+    help="GCP region/location for Vertex AI (e.g. us-central1).",
+)
+@click.option(
+    "--vertex-auth-mode",
+    "vertex_auth_mode",
+    default=None,
+    type=click.Choice(_VERTEX_AUTH_MODES, case_sensitive=False),
+    help="Vertex AI authentication scheme (service_account/adc/workload_identity).",
+)
+@click.option(
+    "--vertex-service-account-json-env",
+    "vertex_service_account_json_env",
+    default=None,
+    help="Env var name holding the GCP service-account JSON.",
+)
+@click.option(
+    "--azure-endpoint",
+    "azure_endpoint",
+    default=None,
+    help="Azure OpenAI endpoint (e.g. https://name.openai.azure.com).",
+)
+@click.option(
+    "--azure-api-version",
+    "azure_api_version",
+    default=None,
+    help="Azure OpenAI API version (e.g. 2024-10-21).",
+)
+@click.option(
+    "--azure-auth-mode",
+    "azure_auth_mode",
+    default=None,
+    type=click.Choice(_AZURE_AUTH_MODES, case_sensitive=False),
+    help="Azure OpenAI authentication scheme (api_key/managed_identity).",
+)
+@click.option(
+    "--azure-deployment-alias",
+    "azure_deployment_aliases",
+    multiple=True,
+    help=(
+        "model=deployment mapping for Azure deployments (repeatable). "
+        "Honored by the gateway when resolving a model id."
+    ),
+)
+@click.option(
     "--no-reload",
     is_flag=True,
     default=False,
@@ -905,6 +1306,22 @@ def provider_add(
     request_path_overrides: tuple[str, ...],
     ca_cert_file: str | None,
     insecure_skip_verify: bool,
+    bedrock_region: str | None,
+    bedrock_auth_mode: str | None,
+    bedrock_access_key_env: str | None,
+    bedrock_secret_key_env: str | None,
+    bedrock_session_token_env: str | None,
+    bedrock_profile_name: str | None,
+    bedrock_inference_profile: str | None,
+    bedrock_deployment_aliases: tuple[str, ...],
+    vertex_project_id: str | None,
+    vertex_region: str | None,
+    vertex_auth_mode: str | None,
+    vertex_service_account_json_env: str | None,
+    azure_endpoint: str | None,
+    azure_api_version: str | None,
+    azure_auth_mode: str | None,
+    azure_deployment_aliases: tuple[str, ...],
     no_reload: bool,
 ) -> None:
     """Add a provider entry to the operator overlay.
@@ -942,6 +1359,42 @@ def provider_add(
             ca_cert_file = wiz["ca_cert_file"] or None
         if not insecure_skip_verify:
             insecure_skip_verify = wiz["insecure_skip_verify"]
+        if bedrock_region is None:
+            bedrock_region = wiz.get("bedrock_region") or None
+        if bedrock_auth_mode is None:
+            bedrock_auth_mode = wiz.get("bedrock_auth_mode") or None
+        if bedrock_access_key_env is None:
+            bedrock_access_key_env = wiz.get("bedrock_access_key_env") or None
+        if bedrock_secret_key_env is None:
+            bedrock_secret_key_env = wiz.get("bedrock_secret_key_env") or None
+        if bedrock_session_token_env is None:
+            bedrock_session_token_env = wiz.get("bedrock_session_token_env") or None
+        if bedrock_profile_name is None:
+            bedrock_profile_name = wiz.get("bedrock_profile_name") or None
+        if bedrock_inference_profile is None:
+            bedrock_inference_profile = wiz.get("bedrock_inference_profile") or None
+        if not bedrock_deployment_aliases:
+            bedrock_deployment_aliases = tuple(
+                f"{k}={v}" for k, v in (wiz.get("bedrock_deployment_aliases") or {}).items()
+            )
+        if vertex_project_id is None:
+            vertex_project_id = wiz.get("vertex_project_id") or None
+        if vertex_region is None:
+            vertex_region = wiz.get("vertex_region") or None
+        if vertex_auth_mode is None:
+            vertex_auth_mode = wiz.get("vertex_auth_mode") or None
+        if vertex_service_account_json_env is None:
+            vertex_service_account_json_env = wiz.get("vertex_service_account_json_env") or None
+        if azure_endpoint is None:
+            azure_endpoint = wiz.get("azure_endpoint") or None
+        if azure_api_version is None:
+            azure_api_version = wiz.get("azure_api_version") or None
+        if azure_auth_mode is None:
+            azure_auth_mode = wiz.get("azure_auth_mode") or None
+        if not azure_deployment_aliases:
+            azure_deployment_aliases = tuple(
+                f"{k}={v}" for k, v in (wiz.get("azure_deployment_aliases") or {}).items()
+            )
 
     clean_name = (name or "").strip()
     if not clean_name:
@@ -997,6 +1450,43 @@ def provider_add(
     if base_provider_type:
         base_provider_type = base_provider_type.strip().lower()
 
+    bedrock_alias_map = _parse_alias_pairs(
+        tuple(bedrock_deployment_aliases), "--bedrock-deployment"
+    )
+    azure_alias_map = _parse_alias_pairs(
+        tuple(azure_deployment_aliases), "--azure-deployment-alias"
+    )
+
+    bedrock_block = _build_bedrock_block(
+        region=bedrock_region,
+        auth_mode=bedrock_auth_mode,
+        access_key_env=bedrock_access_key_env,
+        secret_key_env=bedrock_secret_key_env,
+        session_token_env=bedrock_session_token_env,
+        profile_name=bedrock_profile_name,
+        inference_profile=bedrock_inference_profile,
+        deployment_aliases=bedrock_alias_map,
+    )
+    vertex_block = _build_vertex_block(
+        project_id=vertex_project_id,
+        region=vertex_region,
+        auth_mode=vertex_auth_mode,
+        service_account_json_env=vertex_service_account_json_env,
+    )
+    azure_block = _build_azure_block(
+        endpoint=azure_endpoint,
+        api_version=azure_api_version,
+        auth_mode=azure_auth_mode,
+        deployment_aliases=azure_alias_map,
+    )
+
+    _validate_family_match(
+        base_provider_type,
+        bool(bedrock_block),
+        bool(vertex_block),
+        bool(azure_block),
+    )
+
     path = _overlay_path(app)
     # Serialize concurrent add/remove so a parallel wizard run cannot
     # lose entries. The lock is released on exit of the `with` block,
@@ -1045,6 +1535,27 @@ def provider_add(
             merged_tls.update(tls_block)
             entry["tls"] = merged_tls
 
+        # Provider-typed sub-blocks. Each one shallow-merges into the
+        # existing overlay entry: scalar fields are last-write-wins;
+        # deployment_aliases maps are unioned so repeated ``add`` calls
+        # can grow the alias table.
+        def _merge_subblock(name_: str, new_block: dict[str, Any]) -> None:
+            if not new_block:
+                return
+            current: dict[str, Any] = dict(entry.get(name_) or {})
+            existing_aliases = dict(current.get("deployment_aliases") or {})
+            new_aliases = dict(new_block.get("deployment_aliases") or {})
+            current.update(new_block)
+            if existing_aliases or new_aliases:
+                merged = dict(existing_aliases)
+                merged.update(new_aliases)
+                current["deployment_aliases"] = merged
+            entry[name_] = current
+
+        _merge_subblock("bedrock", bedrock_block)
+        _merge_subblock("vertex", vertex_block)
+        _merge_subblock("azure", azure_block)
+
         if clean_ports:
             overlay.ollama_ports = sorted(
                 {*overlay.ollama_ports, *clean_ports}
@@ -1082,6 +1593,45 @@ def provider_add(
             bits.append("insecure_skip_verify=true")
         if bits:
             click.echo(f"  {ux.dim('tls:')} {', '.join(bits)}")
+    if entry.get("bedrock"):
+        bedrock_info = entry["bedrock"]
+        bits = []
+        if bedrock_info.get("region"):
+            bits.append(f"region={bedrock_info['region']}")
+        if bedrock_info.get("auth_mode"):
+            bits.append(f"auth_mode={bedrock_info['auth_mode']}")
+        if bedrock_info.get("profile_name"):
+            bits.append(f"profile={bedrock_info['profile_name']}")
+        if bedrock_info.get("inference_profile"):
+            bits.append(f"inference_profile={bedrock_info['inference_profile']}")
+        if bedrock_info.get("deployment_aliases"):
+            bits.append(f"aliases={len(bedrock_info['deployment_aliases'])}")
+        if bits:
+            click.echo(f"  {ux.dim('bedrock:')} {', '.join(bits)}")
+    if entry.get("vertex"):
+        vertex_info = entry["vertex"]
+        bits = []
+        if vertex_info.get("project_id"):
+            bits.append(f"project_id={vertex_info['project_id']}")
+        if vertex_info.get("region"):
+            bits.append(f"region={vertex_info['region']}")
+        if vertex_info.get("auth_mode"):
+            bits.append(f"auth_mode={vertex_info['auth_mode']}")
+        if bits:
+            click.echo(f"  {ux.dim('vertex:')} {', '.join(bits)}")
+    if entry.get("azure"):
+        azure_info = entry["azure"]
+        bits = []
+        if azure_info.get("endpoint"):
+            bits.append(f"endpoint={azure_info['endpoint']}")
+        if azure_info.get("api_version"):
+            bits.append(f"api_version={azure_info['api_version']}")
+        if azure_info.get("auth_mode"):
+            bits.append(f"auth_mode={azure_info['auth_mode']}")
+        if azure_info.get("deployment_aliases"):
+            bits.append(f"deployments={len(azure_info['deployment_aliases'])}")
+        if bits:
+            click.echo(f"  {ux.dim('azure:')} {', '.join(bits)}")
 
     if no_reload:
         ux.subhead("sidecar reload skipped (--no-reload).")

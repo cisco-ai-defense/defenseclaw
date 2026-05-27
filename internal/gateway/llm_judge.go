@@ -150,7 +150,16 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 		return nil
 	}
 
-	provider, err := NewProviderForLLMConfig(model, apiKey, llm.BaseURL, llm.InstanceName, providers)
+	// Build an effective LLMConfig with the resolved API key pinned
+	// inline so the dispatcher does not re-resolve (which would lose
+	// the dotenv fallback applied above). Carries the role-level
+	// sub-blocks (Bedrock/Vertex/Azure/TLS) through unchanged so the
+	// dispatcher can merge them with the overlay (role wins).
+	effLLM := llm
+	effLLM.Model = model
+	effLLM.APIKey = apiKey
+	effLLM.APIKeyEnv = ""
+	provider, err := NewProviderForLLMConfig(&effLLM, providers)
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: failed to create provider: %v\n", err)
 		return nil

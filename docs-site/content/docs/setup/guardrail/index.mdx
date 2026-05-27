@@ -248,6 +248,8 @@ defenseclaw setup guardrail \
 
 Routes the judge through AWS Bedrock instead of a SaaS endpoint. `boto3` ships in the base install, so no extra `pip install` is needed. Swap `--judge-provider vertex_ai` + `--judge-vertex-{project-id,region,auth-mode,service-account-json-env}` for GCP Vertex, or `--judge-provider azure` + `--judge-azure-{endpoint,api-version,auth-mode,deployment-alias}` for Azure OpenAI. For self-signed lab endpoints, add `--judge-tls-ca-cert-file /etc/ssl/lab-root.pem`. See [Unified LLM key → Regional providers](/docs/setup/unified-llm-key#regional-providers-bedrock-vertex-ai-azure-openai) for the full matrix.
 
+If the same Bedrock / Vertex / Azure posture is already configured on a custom-provider overlay entry (region, auth mode, deployment aliases, TLS — see [Bedrock / Vertex AI / Azure on a custom instance](/docs/setup/unified-llm-key#bedrock--vertex-ai--azure-on-a-custom-instance)), the judge can inherit it with a single `--judge-instance-name <name>` instead of repeating every flag. Role-level judge flags still win field-by-field, so a shared overlay can supply auth credentials while `--judge-bedrock-region` pins a different region per environment.
+
 </Tab>
 
 </Tabs>

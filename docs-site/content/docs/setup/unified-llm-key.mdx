@@ -330,6 +330,81 @@ defenseclaw setup guardrail \
 config resolves to an overlay entry, and warns when an overlay TLS
 block declares both `ca_cert_pem` and `insecure_skip_verify`.
 
+### Bedrock / Vertex AI / Azure on a custom instance
+
+A custom instance can carry the full regional posture (region, auth
+mode, deployment aliases) so a *single* `setup llm --instance-name X`
+call is all that's needed downstream. Same flags as the role-level
+regional flags below — they just attach to the overlay entry instead.
+
+```bash
+defenseclaw setup provider add \
+  --name acme-bedrock-prod \
+  --base-provider-type bedrock \
+  --bedrock-region us-east-2 \
+  --bedrock-auth-mode iam_credentials \
+  --bedrock-access-key-env ACME_AWS_AKID \
+  --bedrock-secret-key-env ACME_AWS_SECRET \
+  --bedrock-inference-profile us. \
+  --bedrock-deployment fast=anthropic.claude-3-haiku-20240307-v1:0 \
+  --bedrock-deployment heavy=anthropic.claude-3-opus-20240229-v1:0
+
+defenseclaw setup llm \
+  --provider custom \
+  --instance-name acme-bedrock-prod \
+  --model heavy \
+  --non-interactive
+```
+
+The same shape works for Vertex AI (`--vertex-project-id`,
+`--vertex-region`, `--vertex-auth-mode`,
+`--vertex-service-account-json-env`) and Azure OpenAI
+(`--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`,
+`--azure-deployment-alias model=deployment`).
+
+#### Role wins, overlay fills blanks
+
+When the resolved role *and* the overlay both declare a sub-block,
+the role's fields win and the overlay only supplies values the role
+omitted. The example below pins region on the role but inherits
+auth mode and the deployment alias table from the overlay:
+
+```yaml
+# ~/.defenseclaw/config.yaml
+llm:
+  provider: custom
+  instance_name: acme-bedrock-prod
+  bedrock:
+    region: us-west-2          # overrides overlay's us-east-2
+```
+
+```json
+# ~/.defenseclaw/custom-providers.json
+{
+  "providers": [
+    {
+      "name": "acme-bedrock-prod",
+      "base_provider_type": "bedrock",
+      "bedrock": {
+        "region": "us-east-2",                  // shadowed by role above
+        "auth_mode": "iam_credentials",         // inherited
+        "access_key_env": "ACME_AWS_AKID",      // inherited
+        "secret_key_env": "ACME_AWS_SECRET",    // inherited
+        "deployment_aliases": {                 // inherited
+          "fast": "anthropic.claude-3-haiku-20240307-v1:0",
+          "heavy": "anthropic.claude-3-opus-20240229-v1:0"
+        }
+      }
+    }
+  ]
+}
+```
+
+Effective dispatch posture: region `us-west-2`, IAM-credentials auth
+from `ACME_AWS_*`, alias table from the overlay. `defenseclaw doctor`
+flags overlay fields that the role silently shadows so the dead config
+can be pruned.
+
 ## Regional providers (Bedrock / Vertex AI / Azure OpenAI)
 
 Regional providers require more than a single API key: a region (or

@@ -67,6 +67,20 @@ type Provider struct {
 
 	// TLS holds per-instance TLS settings for self-signed labs.
 	TLS *ProviderTLS `json:"tls,omitempty"`
+
+	// Bedrock holds per-instance Bedrock posture (region / auth /
+	// deployment aliases). Pointer-typed so absent in the overlay
+	// stays absent in the marshalled output and the gateway can
+	// distinguish "operator omitted" from "operator set defaults".
+	Bedrock *ProviderBedrock `json:"bedrock,omitempty"`
+
+	// Vertex holds per-instance Vertex AI posture (project / region /
+	// auth credentials env). Same omitempty semantics as Bedrock.
+	Vertex *ProviderVertex `json:"vertex,omitempty"`
+
+	// Azure holds per-instance Azure OpenAI posture (endpoint / API
+	// version / auth / deployment aliases). Same omitempty semantics.
+	Azure *ProviderAzure `json:"azure,omitempty"`
 }
 
 // ProviderTLS describes how the gateway should validate the provider's
@@ -79,6 +93,42 @@ type ProviderTLS struct {
 	// InsecureSkipVerify disables certificate validation entirely.
 	// Mutually exclusive with CACertPEM; lab use only.
 	InsecureSkipVerify bool `json:"insecure_skip_verify,omitempty"`
+}
+
+// ProviderBedrock mirrors the Python BedrockKeyConfig dataclass so the
+// operator overlay can pre-declare a Bedrock instance's region / auth
+// posture / inference-profile prefix / deployment aliases. The gateway
+// dispatcher merges this onto the role-level LLM config (role wins,
+// overlay fills blanks) before handing it to Bifrost.
+type ProviderBedrock struct {
+	Region            string            `json:"region,omitempty"`
+	AuthMode          string            `json:"auth_mode,omitempty"`
+	AccessKeyEnv      string            `json:"access_key_env,omitempty"`
+	SecretKeyEnv      string            `json:"secret_key_env,omitempty"`
+	SessionTokenEnv   string            `json:"session_token_env,omitempty"`
+	ProfileName       string            `json:"profile_name,omitempty"`
+	InferenceProfile  string            `json:"inference_profile,omitempty"`
+	DeploymentAliases map[string]string `json:"deployment_aliases,omitempty"`
+}
+
+// ProviderVertex mirrors the Python VertexKeyConfig dataclass. Auth
+// modes: "service_account" (env var holds the JSON), "adc" (ADC chain),
+// "workload_identity" (k8s WIF).
+type ProviderVertex struct {
+	ProjectID             string `json:"project_id,omitempty"`
+	Region                string `json:"region,omitempty"`
+	AuthMode              string `json:"auth_mode,omitempty"`
+	ServiceAccountJSONEnv string `json:"service_account_json_env,omitempty"`
+}
+
+// ProviderAzure mirrors the Python AzureKeyConfig dataclass. Auth
+// modes: "api_key" (gateway-injected from env), "managed_identity"
+// (AAD on the host).
+type ProviderAzure struct {
+	Endpoint          string            `json:"endpoint,omitempty"`
+	APIVersion        string            `json:"api_version,omitempty"`
+	AuthMode          string            `json:"auth_mode,omitempty"`
+	DeploymentAliases map[string]string `json:"deployment_aliases,omitempty"`
 }
 
 // ProvidersConfig is the top-level structure of providers.json.
@@ -234,6 +284,20 @@ func applyOverlay(base *ProvidersConfig, overlay ProvidersConfig) {
 			}
 			if op.TLS != nil {
 				base.Providers[idx].TLS = op.TLS
+			}
+			// Provider-typed sub-blocks. Overlay wins outright because
+			// the embedded providers.json never declares them — the
+			// operator overlay is the only source. Pointer assignment
+			// rather than field-wise merge keeps the surface tiny and
+			// honors omitempty in the marshalled overlay shape.
+			if op.Bedrock != nil {
+				base.Providers[idx].Bedrock = op.Bedrock
+			}
+			if op.Vertex != nil {
+				base.Providers[idx].Vertex = op.Vertex
+			}
+			if op.Azure != nil {
+				base.Providers[idx].Azure = op.Azure
 			}
 		} else {
 			base.Providers = append(base.Providers, op)

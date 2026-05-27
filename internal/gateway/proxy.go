@@ -1586,7 +1586,17 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	}
 
 	registry, _, _ := providerRegistrySnapshot()
-	provider, err := NewProviderForLLMConfig(cfgModel, apiKey, baseURL, instanceName, registry)
+	// Build an effective LLMConfig from the proxy config, with the
+	// already-resolved API key pinned inline so the dispatcher does
+	// not re-resolve (which would lose the connector token resolver
+	// / dotenv fallback applied above).
+	effLLM := p.cfg.LLM
+	effLLM.Model = cfgModel
+	effLLM.APIKey = apiKey
+	effLLM.APIKeyEnv = ""
+	effLLM.BaseURL = baseURL
+	effLLM.InstanceName = instanceName
+	provider, err := NewProviderForLLMConfig(&effLLM, registry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] failed to create provider for %q: %v\n", cfgModel, err)
 		return nil
