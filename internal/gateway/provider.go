@@ -115,6 +115,7 @@ type ChatRequest struct {
 	Tools        json.RawMessage `json:"tools,omitempty"`
 	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
 	Fallbacks    []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
+	ExtraParams  map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
 	RawBody      json.RawMessage `json:"-"`
 	TargetURL    string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
 	TargetPath   string          `json:"-"` // incoming request path; combined with TargetURL for provider matching

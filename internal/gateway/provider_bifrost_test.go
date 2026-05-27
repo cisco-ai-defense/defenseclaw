@@ -164,6 +164,48 @@ func TestBifrostProvider_NewTenantAccountBedrockABSK(t *testing.T) {
 	}
 }
 
+func TestBifrostProvider_NewTenantAccountVLLM(t *testing.T) {
+	keyID := bifrostKeyID(schemas.VLLM, "demo")
+	acc := newTenantAccount(schemas.VLLM, "demo", keyID, "http://localhost:30080/v1")
+
+	if len(acc.keys) != 1 {
+		t.Fatalf("expected 1 key, got %d", len(acc.keys))
+	}
+	key := acc.keys[0]
+	if key.Value.Val != "demo" {
+		t.Errorf("vLLM key value = %q, want demo", key.Value.Val)
+	}
+	if key.VLLMKeyConfig == nil {
+		t.Fatal("vLLM keys must include VLLMKeyConfig")
+	}
+	if key.VLLMKeyConfig.URL.Val != "http://localhost:30080" {
+		t.Errorf("vLLM URL = %q, want http://localhost:30080", key.VLLMKeyConfig.URL.Val)
+	}
+	if key.VLLMKeyConfig.ModelName != "" {
+		t.Errorf("vLLM ModelName = %q, want empty wildcard", key.VLLMKeyConfig.ModelName)
+	}
+}
+
+func TestVLLMServerURL(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"openai_style_base", "http://localhost:30080/v1", "http://localhost:30080"},
+		{"trailing_slash", "http://localhost:30080/v1/", "http://localhost:30080"},
+		{"server_root", "http://localhost:30080", "http://localhost:30080"},
+		{"prefixed_openai_style_base", "http://proxy.local/vllm/v1", "http://proxy.local/vllm"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := vllmServerURL(tt.in); got != tt.want {
+				t.Errorf("vllmServerURL(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestBifrostProvider_MessageConversion(t *testing.T) {
 	msgs := []ChatMessage{
 		{Role: "system", Content: "You are a helpful assistant."},
@@ -431,6 +473,39 @@ func TestBifrostProvider_ToolsConversion(t *testing.T) {
 	}
 	if bReq.Params.ToolChoice == nil {
 		t.Fatal("expected ToolChoice to be set")
+	}
+}
+
+func TestBifrostProvider_ExtraParamsConversion(t *testing.T) {
+	req := &ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		ExtraParams: map[string]any{
+			"chat_template_kwargs": map[string]any{"enable_thinking": false},
+		},
+	}
+
+	bReq := toBifrostChatRequest(schemas.VLLM, "test-model", req)
+	got, ok := bReq.Params.ExtraParams["chat_template_kwargs"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected chat_template_kwargs ExtraParams, got %#v", bReq.Params.ExtraParams)
+	}
+	if got["enable_thinking"] != false {
+		t.Errorf("enable_thinking = %#v, want false", got["enable_thinking"])
+	}
+}
+
+func TestNewBifrostRequestContext_EnablesExtraParamsPassthrough(t *testing.T) {
+	ctx := newBifrostRequestContext(context.Background(), &ChatRequest{
+		ExtraParams: map[string]any{"chat_template_kwargs": map[string]any{"enable_thinking": false}},
+	})
+	if got := ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams); got != true {
+		t.Errorf("passthrough flag = %#v, want true", got)
+	}
+
+	ctx = newBifrostRequestContext(context.Background(), &ChatRequest{})
+	if got := ctx.Value(schemas.BifrostContextKeyPassthroughExtraParams); got != nil {
+		t.Errorf("passthrough flag without extras = %#v, want nil", got)
 	}
 }
 
