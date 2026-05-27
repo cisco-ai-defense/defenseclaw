@@ -271,6 +271,11 @@ async def test_skills_reveal_button_focuses_registries_panel(monkeypatch) -> Non
         await pilot.pause()
         app.action_switch_panel("skills")
         await pilot.pause()
+        # Cancel the background _load_catalog_model worker that
+        # action_switch_panel spawns — on CI the subprocess may fail
+        # and surface as a WorkerFailed after the context exits.
+        app.workers.cancel_all()
+        await pilot.pause()
         # Skip the test if the user has no skills loaded — the click
         # only does anything when there's a selected row, and we'd
         # rather skip than fake catalog-loading machinery here.
@@ -316,6 +321,8 @@ async def test_catalog_button_dispatch_ignores_unknown_suffix() -> None:
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause()
         app.action_switch_panel("skills")
+        await pilot.pause()
+        app.workers.cancel_all()
         await pilot.pause()
         # Should NOT raise — silent ignore is the contract.
         app._handle_catalog_control("skills", "skills-this-suffix-does-not-exist")  # noqa: SLF001
