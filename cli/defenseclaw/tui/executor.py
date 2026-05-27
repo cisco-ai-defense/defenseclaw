@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-import pty
 import signal
 import time
+
+if os.name == "posix":
+    import pty
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
