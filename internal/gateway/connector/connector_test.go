@@ -5471,13 +5471,12 @@ func TestClaudeCodeHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T
 	}
 }
 
-// TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo pins the
-// fallback path: if the gateway ever returns action=block but does
-// NOT include a codex_output mirror (legacy callers, future codex
-// events not yet wired up), the hook must use the exit-2-with-stderr
-// path so Codex still blocks. The reason MUST land on stderr —
-// emitting an empty stderr was the original bug.
-func TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
+// TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON pins the
+// fallback path: if the gateway returns action=block but does NOT include
+// a codex_output mirror, the hook constructs minimal structured block JSON
+// and exits 0 so Codex v0.130+ treats it as a block decision rather than
+// "hook failed" (which is what exit 2 means on UserPromptSubmit).
+func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
 	}
@@ -5512,17 +5511,16 @@ func TestCodexHookScript_NoStructuredOutput_FallsBackToExitTwo(t *testing.T) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	if err == nil {
-		t.Fatalf("hook should exit 2 when gateway block has no structured codex_output, got exit 0\nstdout=%q\nstderr=%q",
-			stdout.String(), stderr.String())
+	if err != nil {
+		t.Fatalf("hook should exit 0 with inline block JSON, got error: %v\nstdout=%q\nstderr=%q",
+			err, stdout.String(), stderr.String())
 	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		if exitErr.ExitCode() != 2 {
-			t.Errorf("exit code = %d, want 2 (legacy block fallback)", exitErr.ExitCode())
-		}
+	out := stdout.String()
+	if !strings.Contains(out, `"decision":"block"`) {
+		t.Errorf("stdout must contain decision=block JSON, got: %q", out)
 	}
-	if !strings.Contains(stderr.String(), "hypothetical legacy verdict") {
-		t.Errorf("stderr must carry the block reason on the legacy path, got: %q", stderr.String())
+	if !strings.Contains(out, "hypothetical legacy verdict") {
+		t.Errorf("stdout must carry the block reason in the inline JSON, got: %q", out)
 	}
 }
 
