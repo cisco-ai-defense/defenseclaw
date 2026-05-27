@@ -2105,7 +2105,13 @@ class DefenseClawTUI(App[None]):
             self._refresh_hint()
 
     def _render_chrome(self) -> None:
-        self.query_one("#tabs", Tabs).active = f"tab-{self.active_panel}"
+        try:
+            tabs = self.query_one("#tabs", Tabs)
+        except NoMatches:
+            return
+        tab_id = f"tab-{self.active_panel}"
+        if tabs.query(f"#{tab_id}"):
+            tabs.active = tab_id
         # Refresh unread "(N)" badges on every tab whenever chrome
         # re-renders. Cheap (≤ 14 string updates) and keeps the tab
         # strip honest after refresh loops add new alerts / audit
