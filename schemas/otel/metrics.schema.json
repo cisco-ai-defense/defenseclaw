@@ -872,7 +872,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             },
             "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
             "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
@@ -887,7 +887,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             },
             "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
             "result": { "type": "string", "enum": ["ok", "rejected", "panic", "unknown", "other"] },
@@ -902,7 +902,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             },
             "model": { "type": "string" },
             "kind": { "type": "string", "enum": ["prompt", "completion", "total"] }
@@ -916,7 +916,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             },
             "event_type": { "type": "string", "enum": ["prompt", "tool_call", "tool_result", "stop", "notification", "sessionstart", "other", "unknown"] },
             "action": { "type": "string", "enum": ["allow", "block", "alert", "confirm", "panic", "would_block", "none", "other", "unknown"] },
@@ -932,7 +932,7 @@
           "attributes": {
             "connector": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             }
           }
         },
@@ -945,7 +945,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             },
             "result": { "type": "string", "enum": ["ok", "malformed"] }
           }
@@ -959,7 +959,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             }
           }
         },
@@ -972,7 +972,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             }
           }
         },
@@ -985,7 +985,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             }
           }
         },
@@ -998,7 +998,7 @@
             "signal": { "type": "string", "enum": ["logs", "metrics", "traces", "unknown"] },
             "source": {
               "type": "string",
-              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "unknown"]
+              "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "unknown"]
             }
           }
         },

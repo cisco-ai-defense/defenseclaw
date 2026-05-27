@@ -41,6 +41,7 @@ var (
 	CopilotWorkspaceDirOverride   string
 	OpenHandsHooksPathOverride    string
 	OpenHandsWorkspaceDirOverride string
+	AntigravityHooksPathOverride  string
 )
 
 type hookOnlyConnector struct {
@@ -210,6 +211,38 @@ func NewOpenHandsConnector() *hookOnlyConnector {
 	}
 }
 
+// NewAntigravityConnector wires Google's Antigravity (`agy`) CLI through
+// the unified hook collector. agy reads PreToolUse hooks from
+// ~/.gemini/config/hooks.json in a Claude-Code-compatible nested
+// schema (see patchAntigravityHooks) and supports a documented "ask"
+// decision that bypasses --dangerously-skip-permissions, which is the
+// strongest user-prompt primitive any connector currently exposes.
+//
+// Scope is intentionally "user" only: Antigravity merges every
+// discovered hooks.json (global, project, legacy) so writing into
+// more than one path causes duplicate firing. Setup writes only the
+// single global file (see antigravityHooksPath).
+func NewAntigravityConnector() *hookOnlyConnector {
+	return &hookOnlyConnector{
+		name:        "antigravity",
+		description: "Antigravity (agy) PreToolUse hooks with native ask/deny decisions",
+		apiPath:     "/api/v1/antigravity/hook",
+		scriptName:  "antigravity-hook.sh",
+		configPath:  antigravityHooksPath,
+		capability: func(opts SetupOpts) HookCapability {
+			return HookCapability{
+				CanBlock:           true,
+				CanAskNative:       true,
+				AskEvents:          []string{"PreToolUse"},
+				BlockEvents:        []string{"PreToolUse"},
+				SupportsFailClosed: false,
+				Scope:              "user",
+				ConfigPath:         antigravityHooksPath(opts),
+			}
+		},
+	}
+}
+
 func (c *hookOnlyConnector) Name() string                           { return c.name }
 func (c *hookOnlyConnector) Description() string                    { return c.description }
 func (c *hookOnlyConnector) HookAPIPath() string                    { return c.apiPath }
@@ -256,6 +289,20 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	}
 	if c.name == "copilot" {
 		profile.NativeOTLP = copilotNativeOTLPSpec(opts)
+	}
+	if c.name == "antigravity" {
+		// Antigravity is the only generic hook-only connector whose
+		// upstream wire shape is NOT flat hook_event_name +
+		// tool_name / tool_input. agy v1 nests the tool descriptor
+		// under `toolCall` (Claude-Code derived), so the unified
+		// handler's generic normalizer can't extract the event name
+		// or tool name and rejects every PreToolUse with HTTP 400
+		// ("hook event name is required"). The connector-side
+		// decoder maps agy's payload onto the canonical
+		// HookProfileRequest fields. See antigravity_hook_profile.go
+		// for the wire-shape contract this decoder honours and the
+		// empirical agy-version notes.
+		profile.Decode = antigravityProfileDecode
 	}
 	return ApplyHookContract(profile, opts)
 }
@@ -504,6 +551,20 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			SourceModes:      []string{"native", "hook"},
 			Notes:            []string{"DefenseClaw reports the required environment variables but does not mutate shell rc files."},
 		}
+	case "antigravity":
+		// Antigravity v1 publishes only the hooks surface in its
+		// documented configuration files; MCP / skills / rules /
+		// plugins / agents are not exposed as documented local
+		// install surfaces, so DefenseClaw treats those as
+		// unsupported until Google publishes contracts. This matches
+		// the conservative posture taken for Windsurf at first
+		// integration.
+		caps.MCP = unsupportedSurface("Antigravity MCP install surface is not documented; DefenseClaw v1 manages hooks only.")
+		caps.Skills = unsupportedSurface("Antigravity skills are not exposed as a documented local install surface.")
+		caps.Rules = unsupportedSurface("Antigravity rule install surface is not documented.")
+		caps.Plugins = pluginsAreOpenClawOnly()
+		caps.Agents = unsupportedSurface("Antigravity agent / subagent asset installation is not supported.")
+		caps.CodeGuard.Supported = false
 	case "openhands":
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
@@ -723,6 +784,8 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 		err = patchCopilotHooks(path, hookScript)
 	case "openhands":
 		err = patchOpenHandsHooks(path, hookScript)
+	case "antigravity":
+		err = patchAntigravityHooks(path, hookScript)
 	default:
 		err = fmt.Errorf("unknown hook connector %q", c.name)
 	}
@@ -738,7 +801,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 		return removeHermesHooks(path, hookScript)
 	case "geminicli":
 		return removeGeminiConfigEntries(path, hookScript)
-	case "cursor", "windsurf", "copilot", "openhands":
+	case "cursor", "windsurf", "copilot", "openhands", "antigravity":
 		return removeJSONHookReferences(path, hookScript)
 	default:
 		return nil
@@ -793,6 +856,36 @@ func openhandsHooksPath(opts SetupOpts) string {
 		return OpenHandsHooksPathOverride
 	}
 	return filepath.Join(openhandsWorkspaceRoot(opts), ".openhands", "hooks.json")
+}
+
+// antigravityHooksPath returns the global Antigravity hook config path.
+//
+// Antigravity (`agy` v1.0.x) reads PreToolUse hooks from
+// ~/.gemini/config/hooks.json. This was determined empirically during
+// the v0.5.0 smoke test: an earlier draft of this connector wrote to
+// ~/.gemini/antigravity-cli/hooks.json (the marketing-facing path
+// printed by `agy --help`), but agy never evaluated entries from that
+// file. Tracer hooks installed at ~/.gemini/config/hooks.json fired
+// reliably; the same entries at ~/.gemini/antigravity-cli/hooks.json
+// were silently ignored. agy's binary `strings` confirmed only the
+// `config/hooks.json` suffix is referenced at runtime.
+//
+// agy still merges every hooks.json it discovers (global config,
+// project-local under <workspace>/.antigravitycli/hooks.json, and the
+// legacy ~/.gemini/hooks.json) which causes a single hook to fire
+// once per discovered file. To keep the audit trail clean and prevent
+// double-billing of policy evaluations, DefenseClaw writes only the
+// global config file. Operators who must scope hooks to a single
+// workspace can override at runtime via AntigravityHooksPathOverride;
+// doctor surfaces a warning when more than one merged path holds a
+// defenseclaw-managed entry, and a separate migration warning when
+// the legacy ~/.gemini/antigravity-cli/hooks.json still contains
+// defenseclaw-managed entries from a pre-v0.5.0 install.
+func antigravityHooksPath(SetupOpts) string {
+	if AntigravityHooksPathOverride != "" {
+		return AntigravityHooksPathOverride
+	}
+	return homePath(".gemini", "config", "hooks.json")
 }
 
 func openhandsWorkspaceRoot(opts SetupOpts) string {
@@ -1264,6 +1357,136 @@ func patchOpenHandsHooks(path, hookScript string) error {
 			},
 		}
 		cfg[spec.event] = appendUniqueGeminiHookGroup(cfg[spec.event], hookScript, group)
+	}
+	return writeJSONObject(path, cfg)
+}
+
+// antigravityLifecycleEvents is the canonical Antigravity 2.0 hook
+// lifecycle event list per the published spec:
+//
+//	PreInvocation  — before the agent calls the LLM
+//	PreToolUse     — before a tool executes
+//	PostToolUse    — after a tool completes
+//	PostInvocation — after the LLM call + tool calls finish
+//	Stop           — when the agent loop is about to terminate
+//
+// Order is the spec's documented lifecycle order so the on-disk
+// hooks.json is human-readable in chronological sequence — useful
+// when operators are debugging which hooks fired in what order
+// against the gateway log.
+//
+// All five events are registered together to deliver Antigravity
+// 2.0 spec parity. Per the spec the events are official, stable
+// names; agy v1.0.x may not yet emit every event at runtime
+// (PreToolUse is empirically verified; the others are gated on
+// upstream agy implementation parity with the published spec),
+// but registering all five in hooks.json is still correct: when
+// agy starts emitting a previously-quiet event, DefenseClaw
+// handles it with zero redeploy. The forward-compat decoder /
+// respond branches in antigravity_hook_profile.go and
+// hook_only_profile.go are the runtime side of this guarantee.
+//
+// Tracking gap: if empirical testing reveals agy v1.0.x rejects
+// hooks.json on unknown event keys (rather than silently ignoring
+// them), narrow this list to the verified-emitting subset and
+// keep the code branches in place for a future agy version. As of
+// the spec publication, agy is documented to share its hooks.json
+// schema with Claude Code, which tolerates unknown event keys.
+var antigravityLifecycleEvents = []string{
+	"PreInvocation",
+	"PreToolUse",
+	"PostToolUse",
+	"PostInvocation",
+	"Stop",
+}
+
+// patchAntigravityHooks writes Antigravity's hooks.json in the
+// Claude-Code-compatible nested schema agy v1.0.x actually evaluates:
+//
+//	{
+//	  "defenseclaw-antigravity-preinvocation":  { "PreInvocation":  [...] },
+//	  "defenseclaw-antigravity-pretooluse":     { "PreToolUse":     [...] },
+//	  "defenseclaw-antigravity-posttooluse":    { "PostToolUse":    [...] },
+//	  "defenseclaw-antigravity-postinvocation": { "PostInvocation": [...] },
+//	  "defenseclaw-antigravity-stop":           { "Stop":           [...] }
+//	}
+//
+// where each per-event value follows agy's Claude-Code-derived
+// shape:
+//
+//	{
+//	  "<EventName>": [
+//	    {
+//	      "matcher": "*",
+//	      "hooks": [
+//	        { "type": "command", "command": "/abs/path/antigravity-hook.sh" }
+//	      ]
+//	    }
+//	  ]
+//	}
+//
+// Each outer key ("defenseclaw-antigravity-<event>") is a stable,
+// DefenseClaw-owned identifier that scopes ownership for re-setup
+// idempotence and for teardown — operators / other tools writing
+// to the same hooks.json file under their own keys are not
+// disturbed.
+//
+// This shape was determined empirically for PreToolUse:
+//   - During the v0.5.0 smoke test, an earlier flat schema
+//     ({event, matcher, command, description}) was written to
+//     ~/.gemini/antigravity-cli/hooks.json. agy ignored it
+//     entirely — no tracer fires, no agy log lines, nothing.
+//   - Replacing the file with a Claude-Code-nested schema at
+//     ~/.gemini/config/hooks.json caused agy to invoke the
+//     configured command on every tool call, with the canonical
+//     PreToolUse payload {toolCall: {name, args}, conversationId,
+//     stepIdx, transcriptPath, ...} (decoded by
+//     antigravityProfileDecode in antigravity_hook_profile.go).
+//
+// PreInvocation, PostToolUse, PostInvocation, and Stop reuse the
+// same nested schema per the Antigravity 2.0 spec, which inherits
+// the hooks.json structure from Claude Code wholesale. agy's
+// parser is documented to tolerate unknown event keys (it merges
+// every discovered hooks.json file and dispatches by event name);
+// if empirical testing reveals it rejects unknown events instead,
+// scope antigravityLifecycleEvents to the verified-emitting
+// subset.
+//
+// The "command" field is written as a bare path WITHOUT
+// shellWord() quoting. agy v1.0.x invokes the configured command
+// via direct exec(), not through a shell, so any surrounding
+// single quotes added by shellWord() would become literal
+// characters in the exec path and the hook would silently
+// no-fire (verified empirically via the v0.5.0 antigravity smoke
+// test: D1=bare-path-OK, D2=sh -c-OK, D3=direct-exec-FAILS-127).
+// This intentionally diverges from the other patch* helpers
+// (Claude Code, Gemini CLI, OpenHands, etc.), which all run
+// through a shell and where shellWord() correctly handles
+// homedirs containing whitespace. If a future agy release
+// switches to shell invocation we should revisit and add quoting
+// back for spaces/special characters; until then, agy users with
+// paths containing whitespace need DEFENSECLAW_HOME pointed at a
+// whitespace-free directory.
+func patchAntigravityHooks(path, hookScript string) error {
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		return err
+	}
+	for _, event := range antigravityLifecycleEvents {
+		key := "defenseclaw-antigravity-" + strings.ToLower(event)
+		cfg[key] = map[string]interface{}{
+			event: []interface{}{
+				map[string]interface{}{
+					"matcher": "*",
+					"hooks": []interface{}{
+						map[string]interface{}{
+							"type":    "command",
+							"command": hookScript,
+						},
+					},
+				},
+			},
+		}
 	}
 	return writeJSONObject(path, cfg)
 }

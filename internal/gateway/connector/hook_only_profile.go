@@ -84,11 +84,110 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		} else if (in.Action == "alert" || in.RawAction == "confirm") && in.AdditionalContext != "" {
 			output = map[string]interface{}{"additionalContext": in.AdditionalContext}
 		}
+	case "antigravity":
+		output = antigravityHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
 	}
 	if output == nil && in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}
 	}
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
+}
+
+// antigravityHookOutputForProfile renders the per-event hook
+// response wire shape Antigravity (`agy`) expects per the 2.0
+// lifecycle spec. Spec source (Antigravity 2.0 hook docs):
+//
+//	Event           | DefenseClaw hook role
+//	----------------+----------------------------------------------
+//	PreInvocation   | Inspect prompt + transcript before LLM call;
+//	                | block / ask / inject context.
+//	PreToolUse      | Inspect tool call args; block / ask / alert.
+//	                | (Empirically verified on agy v1.0.1.)
+//	PostToolUse     | Inspect tool output after run; cannot block
+//	                | (tool already executed) — surface findings as
+//	                | additionalContext for next-turn ingestion.
+//	PostInvocation  | Inspect LLM response + final state; cannot
+//	                | block (response already generated) — surface
+//	                | findings as additionalContext.
+//	Stop            | Per spec: "block-terminating the agent if
+//	                | validation checks fail." Distinct from
+//	                | PreInvocation/PreToolUse "deny" verb because
+//	                | the spec phrases Stop's block as preventing
+//	                | termination, not preventing an action.
+//
+// Action → wire decision mapping:
+//
+//	block on PreInvocation/PreToolUse → {decision: "deny",  reason}
+//	block on Stop                     → {decision: "block", reason}
+//	confirm                           → {decision: "ask",   reason} (Pre* only)
+//	alert with additional context     → {systemMessage}
+//	alert on Post* events             → {additionalContext}
+//
+// PostToolUse and PostInvocation NEVER emit deny/ask: by the time
+// these events fire the inspected action has already executed at
+// the agent layer, so blocking would be ineffective theatre.
+// Findings surface as additionalContext (the Claude-Code post-event
+// idiom agy borrows verbatim), which agy ingests as model-readable
+// context for the next turn.
+//
+// Empirical confidence:
+//   - PreToolUse: verified on agy v1.0.1 — {decision: "deny"} blocks,
+//     {decision: "ask"} prompts, both bypass --dangerously-skip-permissions.
+//   - PreInvocation, PostToolUse, PostInvocation, Stop: not yet
+//     verified empirically on agy v1.0.x. The wire shapes here
+//     follow agy's Claude-Code lineage; if empirical testing reveals
+//     agy uses different verbs / fields for these events, this
+//     function is the single edit point. Tests in
+//     hook_profile_dispatch_test.go and antigravity_hook_profile_test.go
+//     pin the current contract so divergences surface in CI.
+func antigravityHookOutputForProfile(event, action, rawAction, reason, additional string) map[string]interface{} {
+	switch canonicalHookEvent(event) {
+	case "preinvocation", "pretooluse":
+		switch action {
+		case "block":
+			return map[string]interface{}{"decision": "deny", "reason": reason}
+		case "confirm":
+			return map[string]interface{}{"decision": "ask", "reason": reason}
+		case "alert":
+			if additional != "" {
+				return map[string]interface{}{"systemMessage": additional}
+			}
+		}
+	case "stop":
+		// Spec phrases Stop's block verb as "block-terminating the
+		// agent if validation checks fail" — the wire string is
+		// "block" (matching agy's Claude-Code lineage for Stop
+		// hooks), distinct from "deny" used by Pre* events. If
+		// empirical testing on agy v1.0.x reveals "block" is not
+		// honored on Stop, the safe fallback is "deny" (verified
+		// for PreToolUse on the same agy version).
+		switch action {
+		case "block":
+			return map[string]interface{}{"decision": "block", "reason": reason}
+		case "alert":
+			if additional != "" {
+				return map[string]interface{}{"systemMessage": additional}
+			}
+		}
+	case "posttooluse", "postinvocation":
+		// Post* events fire after execution — DefenseClaw cannot
+		// retroactively block the inspected action. Findings
+		// surface as additionalContext for next-turn ingestion;
+		// agy's Claude-Code-derived schema treats this field as
+		// model-readable context that gets injected into the next
+		// LLM call automatically.
+		if additional != "" {
+			return map[string]interface{}{"additionalContext": additional}
+		}
+	}
+	// Forward-compat fallback: unknown / unrecognised events with
+	// confirm verdicts and additional context surface as
+	// systemMessage, matching the legacy hook-only fallback at the
+	// bottom of hookOnlyProfileRespond.
+	if rawAction == "confirm" && additional != "" {
+		return map[string]interface{}{"systemMessage": additional}
+	}
+	return nil
 }
 
 func copilotHookOutputForProfile(event, action, rawAction, reason, additional string) map[string]interface{} {

@@ -390,6 +390,40 @@
       "local_endpoints": []
     },
     {
+      "id": "antigravity",
+      "name": "Antigravity",
+      "vendor": "Google",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "antigravity",
+      "binary_names": [
+        "agy"
+      ],
+      "process_names": [
+        "agy",
+        "antigravity"
+      ],
+      "config_paths": [
+        "~/.gemini/config/hooks.json",
+        "~/.gemini/antigravity-cli/hooks.json",
+        ".antigravitycli/hooks.json"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [],
+      "package_names": [],
+      "env_var_names": [],
+      "domain_patterns": [
+        "antigravity.google.com",
+        "antigravity.dev"
+      ],
+      "history_patterns": [
+        "antigravity",
+        "agy "
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
       "id": "openhands",
       "name": "OpenHands",
       "vendor": "All Hands AI",

@@ -76,6 +76,7 @@ Each connector registers exactly one hook endpoint. The path is owned by the con
 | `POST` | `/api/v1/geminicli/hook` | Gemini CLI | same |
 | `POST` | `/api/v1/copilot/hook` | GitHub Copilot CLI | same |
 | `POST` | `/api/v1/openhands/hook` | OpenHands | same |
+| `POST` | `/api/v1/antigravity/hook` | Antigravity | same |
 | `POST` | `/api/v1/hermes/hook` | Hermes | same |
 
 All hook endpoints share a per-IP rate limiter (20 RPS, burst 40 — see `hookLimiter` in api.go). Loopback callers (the on-host hook scripts) are exempt; the limit only applies to remote callers.

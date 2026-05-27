@@ -188,6 +188,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
+    "antigravity": "Antigravity",
 }
 
 

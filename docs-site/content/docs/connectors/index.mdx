@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Ten first-class connectors — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Hermes — with a single enforcement contract.
+description: Eleven first-class connectors — OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes — with a single enforcement contract.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -9,6 +9,7 @@ keywords:
   - OpenClaw connector
   - GitHub Copilot CLI connector
   - OpenHands connector
+  - Antigravity connector
   - Gemini CLI connector
   - Windsurf connector
   - Hermes connector
@@ -20,7 +21,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
 
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. DefenseClaw sits in the LLM data path — every request and response is intercepted, scored, and forwarded." />
-  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Hermes. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
+  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
@@ -36,6 +37,7 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
   <Card title="Gemini CLI" href="/docs/connectors/geminicli" description="settings.json hooks + native OTLP exporter pointing at the gateway." />
   <Card title="GitHub Copilot CLI" href="/docs/connectors/copilot" description="Global hooks under ~/.copilot/hooks with optional workspace overrides." />
   <Card title="OpenHands" href="/docs/connectors/openhands" description="Global ~/.openhands/hooks.json command hooks across local OpenHands sessions." />
+  <Card title="Antigravity" href="/docs/connectors/antigravity" description="All five Antigravity 2.0 lifecycle hooks (PreInvocation/PreToolUse/PostToolUse/PostInvocation/Stop) in ~/.gemini/config/hooks.json, with native ask that overrides --dangerously-skip-permissions." />
   <Card title="Hermes" href="/docs/connectors/hermes" description="config.yaml hooks for the Hermes agent runtime." />
 </Cards>
 

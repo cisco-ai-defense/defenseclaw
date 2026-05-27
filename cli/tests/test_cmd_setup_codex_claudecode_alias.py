@@ -255,7 +255,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_new_aliases_pin_observability_connector(self):
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -291,7 +291,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     self.assertEqual(fh.read().strip(), connector)
 
     def test_new_aliases_support_hook_action_mode(self):
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
             with (
                 self.subTest(connector=connector),
                 patch(
@@ -340,16 +340,41 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.workspace_dir, os.path.realpath(workspace))
         self.assertIn("Workspace root pinned", result.output)
 
+    def test_antigravity_alias_rejects_workspace(self):
+        """Antigravity is global-only by design: agy merges every hooks
+        file it discovers, so a workspace-scoped install would silently
+        fire the same hook multiple times per tool call. The alias must
+        reject --workspace rather than accept it and quietly do the
+        wrong thing.
+        """
+        workspace = os.path.join(self.tmp_dir, "repo")
+        os.makedirs(workspace)
+        with (
+            patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None),
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True),
+        ):
+            result = _invoke(
+                ["antigravity", "--yes", "--no-restart", "--workspace", workspace],
+                self.app,
+            )
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("does not support --workspace", result.output)
+        # Sanity: the rejected setup must not have mutated config.
+        self.assertEqual(self.app.cfg.claw.workspace_dir, "")
+        self.assertNotEqual(self.app.cfg.claw.mode, "antigravity")
+
     def test_setup_help_lists_new_alias_commands(self):
         result = _invoke(["--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
             self.assertIn(connector, result.output)
 
     def test_guardrail_help_mentions_new_connector_choices(self):
         result = _invoke(["guardrail", "--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"]:
+        for connector in ["hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"]:
             self.assertIn(connector, result.output)
         self.assertNotIn("openclaw, claudecode, codex, zeptoclaw", result.output)
 

@@ -326,6 +326,13 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
             f"{connector} can block supported hook events but has no native human approval surface",
             r=r,
         )
+    elif connector == "antigravity":
+        _emit(
+            "pass",
+            "Human approval",
+            "Antigravity supports native PreToolUse ask; decision=ask overrides --dangerously-skip-permissions",
+            r=r,
+        )
     else:
         _emit("warn", "Human approval", f"connector {connector!r} support is unknown", r=r)
 
@@ -549,6 +556,104 @@ def _hook_json_references(path: str, script_name: str) -> bool:
     return False
 
 
+def _check_antigravity_hooks(cfg, r: _DoctorResult) -> None:
+    """Validate the Antigravity hook wiring.
+
+    Antigravity (`agy` v1.0.x) reads PreToolUse hooks from
+    ``~/.gemini/config/hooks.json`` in a Claude-Code-compatible
+    nested schema. This was determined empirically during the
+    v0.5.0 smoke test — earlier installs wrote a flat schema to
+    ``~/.gemini/antigravity-cli/hooks.json`` (the path advertised
+    by ``agy --help``), but agy never evaluated entries from that
+    file at runtime.
+
+    The connector is deliberately global-only — agy merges every
+    discovered hooks file (the canonical
+    ``~/.gemini/config/hooks.json``, the legacy
+    ``~/.gemini/antigravity-cli/hooks.json``, project-local
+    ``<workspace>/.antigravitycli/hooks.json``, and the legacy
+    ``~/.gemini/hooks.json``), so writing to more than one
+    location causes the same hook to fire multiple times per
+    tool call.
+
+    This check emits up to three independent signals:
+
+    1. PASS / FAIL on the canonical ``~/.gemini/config/hooks.json``.
+    2. WARN if the legacy ``~/.gemini/antigravity-cli/hooks.json``
+       still contains DefenseClaw-managed entries (left over from
+       a pre-v0.5.0 install). agy ignores this file at runtime
+       but it pollutes the operator's view of "where is the hook
+       registered" and is the #1 source of confusion for anyone
+       upgrading from an older DefenseClaw release.
+    3. WARN on additional discovered locations (legacy
+       ``~/.gemini/hooks.json``, workspace-local
+       ``.antigravitycli/hooks.json``) — these *do* fire and
+       cause duplicate evaluations.
+    """
+    home = os.path.expanduser("~")
+    canonical = os.path.join(home, ".gemini", "config", "hooks.json")
+    legacy = os.path.join(home, ".gemini", "antigravity-cli", "hooks.json")
+
+    # Signal 1: canonical path validation.
+    if not os.path.isfile(canonical):
+        _emit(
+            "fail",
+            "Antigravity hooks",
+            f"not found at {canonical} (agy v1.0.x reads PreToolUse "
+            "hooks from this path; re-run `defenseclaw setup antigravity`)",
+            r=r,
+        )
+    elif _hook_json_references(canonical, "antigravity-hook.sh"):
+        _emit("pass", "Antigravity hooks", f"reachable at {canonical}", r=r)
+    else:
+        _emit(
+            "fail",
+            "Antigravity hooks",
+            f"{canonical} exists but does not reference DefenseClaw hook script",
+            r=r,
+        )
+
+    # Signal 2: legacy-path migration warning. agy ignores this
+    # file at runtime so its presence won't break the integration,
+    # but it *will* mislead operators who run `agy --help` (which
+    # still advertises antigravity-cli/) and inspect the file
+    # expecting to see DefenseClaw-managed entries.
+    if os.path.isfile(legacy) and _hook_json_references(legacy, "antigravity-hook.sh"):
+        _emit(
+            "warn",
+            "Antigravity hooks",
+            "stale DefenseClaw entries found at "
+            f"{legacy} from a pre-v0.5.0 install. agy v1.0.x ignores "
+            "this path at runtime (it reads from "
+            "~/.gemini/config/hooks.json). Safe to delete the file or "
+            "remove the defenseclaw-antigravity-* keys to declutter; "
+            "leaving it in place will not break the integration but "
+            "will confuse anyone who inspects it.",
+            r=r,
+        )
+
+    # Signal 3: duplicate-firing warning. These paths *are*
+    # evaluated by agy and would cause one tool call to fire
+    # multiple DefenseClaw hooks per discovered file.
+    workspace = _workspace_dir(cfg)
+    extras = [os.path.join(home, ".gemini", "hooks.json")]
+    if workspace:
+        extras.append(os.path.join(workspace, ".antigravitycli", "hooks.json"))
+    duplicates = [
+        extra
+        for extra in extras
+        if os.path.isfile(extra) and _hook_json_references(extra, "antigravity-hook.sh")
+    ]
+    if duplicates:
+        _emit(
+            "warn",
+            "Antigravity hooks",
+            "DefenseClaw hook also registered in additional discovered "
+            "files (will cause duplicate firings): " + ", ".join(duplicates),
+            r=r,
+        )
+
+
 def _check_openhands_hooks(cfg, r: _DoctorResult) -> None:
     workspace = _workspace_dir(cfg)
     home = os.path.expanduser("~")
@@ -672,7 +777,17 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
     """
     connector = _active_connector(cfg)
     gc = cfg.guardrail
-    if connector in {"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"}:
+    if connector in {
+        "codex",
+        "claudecode",
+        "hermes",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "openhands",
+        "antigravity",
+    }:
         mode = (getattr(gc, "mode", "") or "observe").strip().lower()
         if mode == "action":
             return f"hook-enforced for {connector} (mode=action via PreToolUse deny) — proxy port intentionally closed"
@@ -1526,6 +1641,8 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
         _check_copilot_hooks(cfg, r)
     elif active_connector == "openhands":
         _check_openhands_hooks(cfg, r)
+    elif active_connector == "antigravity":
+        _check_antigravity_hooks(cfg, r)
     _check_hilt_support(cfg, active_connector, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
@@ -1685,6 +1802,7 @@ _CONNECTOR_LABELS = {
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
+    "antigravity": "Antigravity",
 }
 
 

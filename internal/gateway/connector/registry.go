@@ -175,6 +175,7 @@ func NewDefaultRegistry() *Registry {
 	r.RegisterBuiltin(NewGeminiCLIConnector())
 	r.RegisterBuiltin(NewCopilotConnector())
 	r.RegisterBuiltin(NewOpenHandsConnector())
+	r.RegisterBuiltin(NewAntigravityConnector())
 	return r
 }
 

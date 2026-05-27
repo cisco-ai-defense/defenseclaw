@@ -130,14 +130,15 @@ var genericHookScripts = []string{
 // lifecycle hook scripts. Only the matching connector's scripts are
 // written during setup.
 var connectorHookScripts = map[string][]string{
-	"claudecode": {"claude-code-hook.sh"},
-	"codex":      {"codex-hook.sh"},
-	"copilot":    {"copilot-hook.sh"},
-	"cursor":     {"cursor-hook.sh"},
-	"geminicli":  {"geminicli-hook.sh"},
-	"hermes":     {"hermes-hook.sh"},
-	"openhands":  {"openhands-hook.sh"},
-	"windsurf":   {"windsurf-hook.sh"},
+	"antigravity": {"antigravity-hook.sh"},
+	"claudecode":  {"claude-code-hook.sh"},
+	"codex":       {"codex-hook.sh"},
+	"copilot":     {"copilot-hook.sh"},
+	"cursor":      {"cursor-hook.sh"},
+	"geminicli":   {"geminicli-hook.sh"},
+	"hermes":      {"hermes-hook.sh"},
+	"openhands":   {"openhands-hook.sh"},
+	"windsurf":    {"windsurf-hook.sh"},
 }
 
 // hookScripts returns the full list of hook scripts (generic + all

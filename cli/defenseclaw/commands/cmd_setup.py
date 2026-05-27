@@ -1524,6 +1524,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "geminicli",
     "copilot",
     "openhands",
+    "antigravity",
 ]
 
 
@@ -1616,6 +1617,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "antigravity": {
+        "label": "Antigravity",
+        "description": "single PreToolUse hook in ~/.gemini/config/hooks.json with native ask that overrides --dangerously-skip-permissions",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
@@ -1678,6 +1685,10 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.openhands/mcp.json MCP entries when configured explicitly",
         "~/.agents/skills install surface and ~/.openhands/cache/skills/public-skills/skills discovery by default; workspace .agents/skills only when --workspace is provided",
         "~/.defenseclaw/hooks/openhands-hook.sh",
+    ),
+    "antigravity": (
+        "~/.gemini/config/hooks.json — single global hook entry in agy's Claude-Code-compatible nested schema; agy merges every discovered hooks file, so DefenseClaw never patches workspace-local copies",
+        "~/.defenseclaw/hooks/antigravity-hook.sh",
     ),
 }
 
@@ -1771,6 +1782,18 @@ def _detect_connector(data_dir: str | None = None) -> str | None:
         os.path.join(home, ".openhands")
     ):
         return "openhands"
+    # Antigravity auto-detection: agy v1.0.x evaluates hooks from
+    # ~/.gemini/config/hooks.json (the empirical path), but the
+    # legacy ~/.gemini/antigravity-cli/ dir may still exist on
+    # machines installed via pre-v0.5.0 DefenseClaw or simply
+    # created by `agy --help`. Either signal counts as "agy is
+    # installed on this host".
+    if (
+        os.path.isfile(os.path.join(home, ".gemini", "config", "hooks.json"))
+        or os.path.isfile(os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"))
+        or os.path.isdir(os.path.join(home, ".gemini", "antigravity-cli"))
+    ):
+        return "antigravity"
     return None
 
 
@@ -1941,6 +1964,11 @@ def _hilt_support_note(connector: str) -> str:
         return "Copilot CLI supports native ask on documented preToolUse hooks."
     if connector == "cursor":
         return "Cursor supports native ask only on documented ask-capable hook events."
+    if connector == "antigravity":
+        return (
+            "Antigravity supports native PreToolUse ask; returning decision=ask "
+            "from a hook overrides agy's --dangerously-skip-permissions flag."
+        )
     if connector in {"hermes", "windsurf", "geminicli", "openhands"}:
         return (
             "This connector can block supported hook events but has no native human approval surface; "
@@ -2393,6 +2421,7 @@ def setup_guardrail(
 #   defenseclaw setup geminicli      → observe by default for Gemini CLI
 #   defenseclaw setup copilot        → observe by default for GitHub Copilot CLI
 #   defenseclaw setup openhands      → observe by default for OpenHands
+#   defenseclaw setup antigravity    → observe by default for Antigravity (agy)
 #
 # Both commands also flip ``claw.mode`` so the rest of the CLI/TUI
 # (skill scanner, MCP scanner, plugin scanner, overview panels) reads
@@ -2771,6 +2800,20 @@ def _setup_observability_alias(
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         raise click.ClickException(f"unsupported connector for hook alias: {connector!r}")
 
+    # Antigravity is global-only by design. agy v1.0.x merges every
+    # hooks file it discovers (~/.gemini/config/hooks.json,
+    # legacy ~/.gemini/hooks.json, workspace .antigravitycli/hooks.json),
+    # so a workspace-scoped install would silently fire the same hook
+    # multiple times per tool call. Reject --workspace explicitly rather
+    # than accepting it and quietly doing the wrong thing.
+    if connector == "antigravity" and (workspace_dir or "").strip():
+        raise click.ClickException(
+            "antigravity setup does not support --workspace: agy merges every "
+            "hooks file it discovers, so DefenseClaw only writes the global "
+            "~/.gemini/config/hooks.json to avoid duplicate firings. "
+            "Re-run without --workspace."
+        )
+
     normalized_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
     _print_connector_observability_banner(connector, mode=normalized_mode)
 
@@ -3059,7 +3102,15 @@ def _make_observability_setup_command(connector: str) -> click.Command:
     return _cmd
 
 
-for _observability_connector in ("hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands"):
+for _observability_connector in (
+    "hermes",
+    "cursor",
+    "windsurf",
+    "geminicli",
+    "copilot",
+    "openhands",
+    "antigravity",
+):
     setup.add_command(_make_observability_setup_command(_observability_connector))
 
 
@@ -3094,6 +3145,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "geminicli",
         "copilot",
         "openhands",
+        "antigravity",
     }
 )
 

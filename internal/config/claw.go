@@ -564,7 +564,7 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".gemini", "extensions"),
 			workspaceJoin(cwd, ".gemini", "extensions"),
 		})
-	case "cursor", "windsurf", "copilot", "openhands":
+	case "cursor", "windsurf", "copilot", "openhands", "antigravity":
 		return nil
 	default:
 		return c.pluginDirsOpenClaw()

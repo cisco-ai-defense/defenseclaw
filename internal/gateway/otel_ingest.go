@@ -452,12 +452,14 @@ func agentIdentityForOTLPSource(source string) AgentIdentity {
 
 func normalizeConnectorTelemetrySource(source string) string {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
+	case "openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
 		return strings.ToLower(strings.TrimSpace(source))
 	case "claude-code", "claude_code":
 		return "claudecode"
 	case "gemini-cli", "gemini_cli", "gemini":
 		return "geminicli"
+	case "agy":
+		return "antigravity"
 	default:
 		return "unknown"
 	}

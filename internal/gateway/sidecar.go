@@ -1446,7 +1446,7 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 	switch conn.Name() {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
 		return false
 	default:
 		return true
@@ -1480,7 +1480,7 @@ func proxyShouldBindForConfiguredConnector(cfg *config.Config) bool {
 	switch configuredConnectorName(cfg) {
 	case "codex", "claudecode":
 		return false
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
 		return false
 	default:
 		return true
@@ -1549,7 +1549,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 		return true
 	case "codex", "claudecode":
 		return !isLoopbackGatewayHost(cfg.Gateway.Host)
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity":
 		return false
 	default:
 		// Empty / unknown connector: prefer DISABLED over reconnect

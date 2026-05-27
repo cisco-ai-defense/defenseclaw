@@ -853,6 +853,25 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if any(os.path.isfile(path) for path in candidates):
             return StepResult("Connector", "pass", "OpenHands hooks found")
         return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup mode openhands")
+    if connector == "antigravity":
+        # Antigravity is global-only by design — agy merges discovered
+        # hooks files, so DefenseClaw never writes to a workspace copy.
+        # The canonical path is ~/.gemini/config/hooks.json (the path
+        # agy v1.0.x actually evaluates). The legacy
+        # ~/.gemini/antigravity-cli/hooks.json is also accepted as a
+        # pass signal so operators recovering from a pre-v0.5.0
+        # install don't see a confusing "missing hooks" error before
+        # doctor's migration warning has had a chance to surface.
+        canonical = os.path.expanduser("~/.gemini/config/hooks.json")
+        legacy = os.path.expanduser("~/.gemini/antigravity-cli/hooks.json")
+        if os.path.isfile(canonical) or os.path.isfile(legacy):
+            return StepResult("Connector", "pass", "Antigravity hooks found")
+        return StepResult(
+            "Connector",
+            "warn",
+            "Antigravity hooks not found yet",
+            "defenseclaw setup mode antigravity",
+        )
     return StepResult("Connector", "warn", f"unknown connector {connector!r}")
 
 
