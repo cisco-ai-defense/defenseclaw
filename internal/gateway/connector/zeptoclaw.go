@@ -478,8 +478,7 @@ func (c *ZeptoClawConnector) HasUsableProviders() (int, error) {
 func (c *ZeptoClawConnector) SupportsComponentScanning() bool { return true }
 
 func (c *ZeptoClawConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
-	zeptoDir := filepath.Join(home, ".zeptoclaw")
+	zeptoDir := zeptoClawHomeDir()
 
 	targets := map[string][]string{
 		"skill":  {filepath.Join(zeptoDir, "skills"), filepath.Join(cwd, ".zeptoclaw", "skills")},
@@ -520,7 +519,16 @@ func zeptoClawConfigPath() string {
 	if ZeptoClawConfigPathOverride != "" {
 		return ZeptoClawConfigPathOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".zeptoclaw", "config.json")
+	return filepath.Join(zeptoClawHomeDir(), "config.json")
+}
+
+// zeptoClawHomeDir returns the ZeptoClaw home directory. Priority:
+// ZEPTOCLAW_HOME env (custom override) → $HOME/.zeptoclaw (default).
+func zeptoClawHomeDir() string {
+	if home := os.Getenv("ZEPTOCLAW_HOME"); home != "" {
+		return home
+	}
+	return filepath.Join(os.Getenv("HOME"), ".zeptoclaw")
 }
 
 // patchZeptoClawConfig reads ZeptoClaw's config.json, backs up the original

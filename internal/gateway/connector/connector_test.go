@@ -6458,3 +6458,59 @@ func mustNotExist(t *testing.T, path string) {
 		t.Fatalf("expected %s to NOT exist, got err=%v", path, err)
 	}
 }
+
+func TestZeptoClawConfigPath_ZEPTOCLAW_HOME(t *testing.T) {
+	// Ensure ZeptoClawConfigPathOverride is cleared for this test.
+	orig := ZeptoClawConfigPathOverride
+	ZeptoClawConfigPathOverride = ""
+	defer func() { ZeptoClawConfigPathOverride = orig }()
+
+	t.Run("uses ZEPTOCLAW_HOME when set", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "/custom/path")
+		got := zeptoClawConfigPath()
+		want := filepath.Join("/custom/path", "config.json")
+		if got != want {
+			t.Errorf("zeptoClawConfigPath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("falls back to HOME/.zeptoclaw when ZEPTOCLAW_HOME unset", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "")
+		t.Setenv("HOME", "/home/testuser")
+		got := zeptoClawConfigPath()
+		want := filepath.Join("/home/testuser", ".zeptoclaw", "config.json")
+		if got != want {
+			t.Errorf("zeptoClawConfigPath() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("ZeptoClawConfigPathOverride takes priority", func(t *testing.T) {
+		ZeptoClawConfigPathOverride = "/override/config.json"
+		defer func() { ZeptoClawConfigPathOverride = "" }()
+		t.Setenv("ZEPTOCLAW_HOME", "/custom/path")
+		got := zeptoClawConfigPath()
+		if got != "/override/config.json" {
+			t.Errorf("zeptoClawConfigPath() = %q, want override path", got)
+		}
+	})
+}
+
+func TestZeptoClawHomeDir(t *testing.T) {
+	t.Run("uses ZEPTOCLAW_HOME when set", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "/shared/.agent")
+		got := zeptoClawHomeDir()
+		if got != "/shared/.agent" {
+			t.Errorf("zeptoClawHomeDir() = %q, want /shared/.agent", got)
+		}
+	})
+
+	t.Run("falls back to HOME/.zeptoclaw", func(t *testing.T) {
+		t.Setenv("ZEPTOCLAW_HOME", "")
+		t.Setenv("HOME", "/home/testuser")
+		got := zeptoClawHomeDir()
+		want := filepath.Join("/home/testuser", ".zeptoclaw")
+		if got != want {
+			t.Errorf("zeptoClawHomeDir() = %q, want %q", got, want)
+		}
+	})
+}

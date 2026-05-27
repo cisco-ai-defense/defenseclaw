@@ -3779,3 +3779,67 @@ func TestIsValidConnectorName(t *testing.T) {
 		}
 	}
 }
+
+func TestSeedCustomProvidersFromLLMBaseURL(t *testing.T) {
+	t.Run("no-op for empty base_url", func(t *testing.T) {
+		err := SeedCustomProvidersFromLLMBaseURL("")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("no-op for localhost", func(t *testing.T) {
+		err := SeedCustomProvidersFromLLMBaseURL("http://localhost:11434/v1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("no-op for 127.0.0.1", func(t *testing.T) {
+		err := SeedCustomProvidersFromLLMBaseURL("http://127.0.0.1:8080/v1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("writes overlay and registers domain", func(t *testing.T) {
+		dir := t.TempDir()
+		overlayPath := filepath.Join(dir, "custom-providers.json")
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+
+		err := SeedCustomProvidersFromLLMBaseURL("https://llm-gateway.example.com/v1")
+		if err != nil {
+			t.Fatalf("SeedCustomProvidersFromLLMBaseURL: %v", err)
+		}
+
+		// Verify file was written.
+		data, err := os.ReadFile(overlayPath)
+		if err != nil {
+			t.Fatalf("overlay file not written: %v", err)
+		}
+		if !strings.Contains(string(data), "llm-gateway.example.com") {
+			t.Errorf("overlay missing expected domain, got: %s", data)
+		}
+
+		// Verify domain is now recognized.
+		if !isKnownProviderDomain("https://llm-gateway.example.com/v1/responses") {
+			t.Error("expected custom gateway domain to be known after seeding")
+		}
+	})
+
+	t.Run("skips already-known domain", func(t *testing.T) {
+		dir := t.TempDir()
+		overlayPath := filepath.Join(dir, "custom-providers.json")
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+
+		// api.openai.com is already in the built-in providers.
+		err := SeedCustomProvidersFromLLMBaseURL("https://api.openai.com/v1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// File should NOT have been written since domain is already known.
+		if _, err := os.Stat(overlayPath); !os.IsNotExist(err) {
+			t.Error("expected no overlay file for already-known domain")
+		}
+	})
+}

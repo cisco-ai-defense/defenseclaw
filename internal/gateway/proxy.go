@@ -1504,6 +1504,69 @@ func ReloadProviderRegistry() error {
 	return nil
 }
 
+// SeedCustomProvidersFromLLMBaseURL writes a custom-providers.json overlay
+// that registers the domain from llmBaseURL as a known provider. This allows
+// custom deployments to route traffic through an LLM gateway whose domain is
+// not in the built-in providers list.
+//
+// The file is written to the path returned by configs.CustomProvidersPath().
+// After writing, ReloadProviderRegistry() is called so the domain is
+// immediately recognized by isKnownProviderDomain().
+//
+// No-op when llmBaseURL is empty or cannot be parsed.
+func SeedCustomProvidersFromLLMBaseURL(llmBaseURL string) error {
+	llmBaseURL = strings.TrimSpace(llmBaseURL)
+	if llmBaseURL == "" {
+		return nil
+	}
+	u, err := url.Parse(llmBaseURL)
+	if err != nil {
+		return nil // unparseable URL — skip silently
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" || host == "127.0.0.1" || host == "localhost" {
+		return nil // loopback addresses are handled by Ollama / local logic
+	}
+
+	// Check if the domain is already known — avoid writing a redundant overlay.
+	providerRegistryMu.RLock()
+	for _, pd := range providerDomains {
+		if strings.EqualFold(pd.domain, host) {
+			providerRegistryMu.RUnlock()
+			return nil
+		}
+	}
+	providerRegistryMu.RUnlock()
+
+	overlayPath := configs.CustomProvidersPath()
+	if overlayPath == "" {
+		return fmt.Errorf("custom-providers path is empty (no HOME set)")
+	}
+
+	overlay := configs.ProvidersConfig{
+		Providers: []configs.Provider{{
+			Name:    "custom-gateway",
+			Domains: []string{host},
+			EnvKeys: []string{"LLM_GATEWAY"},
+		}},
+	}
+	data, err := json.MarshalIndent(overlay, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(overlayPath)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(overlayPath, data, 0o600); err != nil {
+		return err
+	}
+
+	fmt.Fprintf(os.Stderr, "[sidecar] custom-providers overlay seeded for domain %q\n", host)
+	return ReloadProviderRegistry()
+}
+
 // providerRegistrySnapshot returns the currently-loaded provider list
 // under the read lock. The returned slice is safe to iterate but not to
 // mutate.
