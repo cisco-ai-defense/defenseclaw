@@ -315,6 +315,7 @@ The gateway emits the following OTel metrics
 |--------|--------|
 | `defenseclaw.redaction.applied` | detector, field |
 | `defenseclaw.egress.events` | branch (known \| shape \| passthrough), decision (allow \| block), source (go \| ts) |
+| `defenseclaw.gateway.forwarded_headers` | path (chat-completions \| passthrough), result (ok \| rejected_invalid \| rejected_overflow) |
 
 **Sink delivery:**
 

@@ -881,6 +881,73 @@ responses in-process:
 - In `action` mode, terminates the stream early if a high-severity threat is detected
 - After the stream completes, runs the full multi-scanner inspection pipeline on assembled content
 
+## Custom Header Forwarding (`llm.forward_custom_headers`)
+
+The guardrail proxy forwards inbound HTTP headers from the agent to
+the upstream LLM provider on both the chat/completions path (via
+Bifrost's per-request `schemas.BifrostContextKeyExtraHeaders` context
+value) and the passthrough path (`/v1/responses`, `/v1/messages`,
+Bedrock/Gemini native, etc.). Enabled by default; operators opt out
+with `llm.forward_custom_headers: false`.
+
+When enabled, every inbound header is forwarded to the upstream
+provider except a small blocklist that matches the pre-refactor
+`handlePassthrough` inline list exactly (no silent behavior change vs.
+earlier gateway versions):
+
+- Proxy-hop / framework-internal: `X-DC-Target-URL`, `X-AI-Auth`,
+  `X-DC-Auth`, and any `X-DC-*` / `X-DefenseClaw-*` header.
+- Wire framing: `Host`, `Content-Length` — `Content-Length` is stripped
+  because guardrail notification injection can mutate the body size;
+  the Go HTTP client writes the authoritative value from
+  `upstreamReq.ContentLength`.
+- Authentication: `Authorization`, `X-API-Key`, `Api-Key` — re-minted
+  canonically by the gateway from the secrets sidecar so the upstream
+  always sees the resolved provider key, never a stale agent header.
+- W3C trace context: `Traceparent`, `Tracestate`.
+
+`internal/gateway/forward_headers.go` carries an annotated, commented-out
+**blocklist expansion** with danger ratings (HIGH / MEDIUM / LOW / ZERO)
+for `Cookie`, `Set-Cookie`, `Proxy-Authorization`, `Transfer-Encoding`,
+`TE`, `Trailers`, `Connection`, `Keep-Alive`, `Upgrade`,
+`Proxy-Authenticate`, `Baggage`, and `Content-Type`. Operators with a
+stricter posture (or who don't need any of the listed headers reaching
+their custom upstream) are encouraged to uncomment the HIGH-rated
+entries — at minimum `Cookie`, `Set-Cookie`, `Proxy-Authorization`,
+`Transfer-Encoding`, and `TE` — and bump the matching test in
+`forward_headers_test.go`. `Content-Type` is ZERO-rated (actively
+wrong to block, because Go's `http.NewRequestWithContext` does not
+auto-set it for a raw `io.Reader` body).
+
+Every header that survives the blocklist is validated against RFC 7230
+tchar (name) and printable ASCII + HTAB (value); CR/LF/NUL in a value
+yields HTTP 400 to block header- and log-injection. Soft caps of 64
+headers and 32 KiB combined name+value bytes per request yield HTTP
+413 to bound a hostile caller; the limits comfortably cover real
+provider headers (`anthropic-version`, `anthropic-beta`,
+`openai-organization`, tenant tags, tracing IDs).
+
+On the chat/completions path the resulting headers are attached to the
+request `context.Context` under
+`schemas.BifrostContextKeyExtraHeaders` — Bifrost's per-request
+extra-headers hook, honored by every provider through
+`providers/utils/utils.go:SetExtraHeaders` — so the upstream HTTP
+request the SDK emits carries them onto the wire. On the passthrough
+path they are written directly to the upstream `*http.Request`.
+
+`ConnectorSignals.ExtraHeaders` (declared on the connector contract
+for future use by ZeptoClaw/Codex/etc.) is also merged in with
+connector-wins semantics; the same blocklist and validation apply.
+
+Telemetry: `defenseclaw.gateway.forwarded_headers{path,result}`
+(path = `chat-completions` | `passthrough`; result = `ok` |
+`rejected_invalid` | `rejected_overflow`). The OTel counter is the
+steady-state signal — a per-request `forwarded_header_count=<n>`
+stderr line is gated behind `DEFENSECLAW_DEBUG=1` for local triage.
+Rejection-path stderr lines (`header forwarding rejected: <reason>`)
+remain unconditional because they are operator-actionable. Header
+names and values are never logged.
+
 ## Hot Reload
 
 Mode and scanner_mode can be changed at runtime without restarting:
