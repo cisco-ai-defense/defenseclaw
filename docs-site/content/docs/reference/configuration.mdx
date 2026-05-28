@@ -66,6 +66,60 @@ otel:
   service_name: defenseclaw
   signals: [traces, metrics, logs]
 
+# Top-level LLM block. Written by `defenseclaw setup llm` (and copied
+# into per-component blocks via the `--inherit-from` machinery). The
+# `role` field decides who consumes this block at resolve time:
+#   - `unified` (default): every component that does not declare its
+#     own `llm:` reads from here.
+#   - `agent`: guardrail.judge.llm stays empty and inherits through
+#     the unified merge — proxy connectors only.
+#   - `judge`: writes guardrail.judge.llm directly, leaves the top
+#     level alone — useful for hook-based connectors that already
+#     route the agent's traffic elsewhere.
+# See `defenseclaw setup guardrail --llm-role judge_only|judge_and_agent`
+# for the connector-aware variant.
+llm:
+  provider: anthropic          # anthropic | openai | bedrock | vertex_ai | azure | custom
+  model: claude-sonnet-4-5
+  api_key_env: DEFENSECLAW_LLM_KEY
+  base_url: ""                 # optional override; LiteLLM picks a default per provider
+  role: unified                # unified | agent | judge
+  instance_name: ""            # binds to a ~/.defenseclaw/custom-providers.json entry; required with provider: custom
+  region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
+
+  # Provider-specific sub-blocks. Only the one matching `provider`
+  # is consulted; the others may exist as leftover state from a
+  # previous setup and are ignored at resolve time.
+  bedrock:
+    region: us-east-1
+    auth_mode: iam_credentials # api_key | iam_credentials | profile | instance_role
+    access_key_env: AWS_ACCESS_KEY_ID
+    secret_key_env: AWS_SECRET_ACCESS_KEY
+    session_token_env: AWS_SESSION_TOKEN
+    profile_name: ""
+    inference_profile: us.     # optional model-id prefix
+    deployment_aliases: {}     # alias -> model-id, populated by --bedrock-deployment
+
+  vertex:
+    project_id: acme-prod-vertex
+    region: us-central1
+    auth_mode: service_account # service_account | adc | workload_identity
+    service_account_json_env: GOOGLE_APPLICATION_CREDENTIALS
+
+  azure:
+    endpoint: https://my-resource.openai.azure.com
+    api_version: 2024-10-21
+    auth_mode: api_key         # api_key | managed_identity
+    deployment_aliases: {}     # model -> deployment, populated by --azure-deployment-alias
+
+  # Inline TLS posture for self-signed or internal endpoints. Both
+  # `ca_cert_pem` and `insecure_skip_verify` exist so the gateway
+  # never has to read another file at request time; `doctor` warns
+  # when both are set on the same block.
+  tls:
+    ca_cert_pem: ""            # PEM bundle inlined from --tls-ca-cert-file
+    insecure_skip_verify: false
+
 guardrail:
   enabled: true
   connector: claudecode        # actively enforced connector
@@ -81,11 +135,16 @@ guardrail:
     api_key_env: CISCO_AI_DEFENSE_API_KEY
     timeout_ms: 5000
 
+  # When `judge.llm` is omitted, the judge inherits from the top-level
+  # `llm:` block. Populate it explicitly to point the judge at a
+  # different backend (e.g. an internal Bedrock instance) without
+  # changing what the agent talks to.
   judge:
     enabled: false
     model: anthropic/claude-sonnet-4-20250514
     api_base: ""
     api_key_env: DEFENSECLAW_LLM_KEY
+    llm: {}                    # same shape as top-level `llm:` above
 
   hilt:
     enabled: false
@@ -125,6 +184,69 @@ webhooks:
     secret_env: ""             # optional HMAC for `type: generic`
     min_severity: HIGH
 ```
+
+The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/setup/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
+
+## Custom-provider overlay (`~/.defenseclaw/custom-providers.json`)
+
+Custom-provider instances live in a separate JSON overlay so the same instance definition can be shared across roles (agent, judge) and across hosts. The Python merger (`_apply_instance_overlay`) and the Go dispatcher (`buildProviderFromEffective`) both apply the same rule: **the role wins; the overlay fills blanks**.
+
+```json
+{
+  "providers": [
+    {
+      "name": "acme-internal-bedrock",
+      "base_provider_type": "bedrock",
+      "base_url": "https://llm.internal:8443",
+      "domains": ["llm.internal"],
+      "env_key": "ACME_BEDROCK_KEY",
+      "allowed_request_types": ["chat", "embedding"],
+      "available_models": ["us.anthropic.claude-sonnet-4-6"],
+      "request_path_overrides": {
+        "chat": "/openai/v1/chat/completions"
+      },
+
+      "tls": {
+        "ca_cert_pem": "-----BEGIN CERTIFICATE-----\n...",
+        "insecure_skip_verify": false
+      },
+
+      "bedrock": {
+        "region": "us-east-1",
+        "auth_mode": "iam_credentials",
+        "access_key_env": "AWS_ACCESS_KEY_ID",
+        "secret_key_env": "AWS_SECRET_ACCESS_KEY",
+        "session_token_env": "AWS_SESSION_TOKEN",
+        "profile_name": "",
+        "inference_profile": "us.",
+        "deployment_aliases": {
+          "fast": "anthropic.claude-3-haiku-20240307-v1:0"
+        }
+      },
+
+      "vertex": {
+        "project_id": "acme-prod-vertex",
+        "region": "us-central1",
+        "auth_mode": "service_account",
+        "service_account_json_env": "GOOGLE_APPLICATION_CREDENTIALS"
+      },
+
+      "azure": {
+        "endpoint": "https://my-resource.openai.azure.com",
+        "api_version": "2024-10-21",
+        "auth_mode": "api_key",
+        "deployment_aliases": {
+          "gpt-4o": "prod-gpt4o-eus"
+        }
+      }
+    }
+  ]
+}
+```
+
+In practice an entry only carries the sub-block matching its `base_provider_type` — extras are ignored at dispatch time but `defenseclaw doctor` warns about family mismatches (e.g. `bedrock` block with `base_provider_type: openai`), unknown `auth_mode` values, and dead overlay fields the role-level config already shadows. Auth modes are the same as on `setup llm` (`api_key` / `iam_credentials` / `profile` / `instance_role` for Bedrock; `service_account` / `adc` / `workload_identity` for Vertex; `api_key` / `managed_identity` for Azure).
+
+The `domains` array drives the gateway's URL → overlay lookup: when an inbound request URL (set on `X-DC-Target-URL` by fetch-interceptor agents, or recorded in the connector snapshot for native binaries) matches one of the listed hosts, the resolver applies this overlay entry's TLS, base_url, and sub-block posture. Any entry that declares `base_url` should also list the matching host in `domains`; `defenseclaw doctor` warns when the two diverge.
 
 ## Environment variables
 

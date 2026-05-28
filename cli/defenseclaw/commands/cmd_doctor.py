@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import click
@@ -647,6 +648,353 @@ def _check_llm_api_key(cfg, r: _DoctorResult) -> None:
             "pass", "LLM API key",
             f"{env_name} is set (cannot verify provider '{provider or model}')", r=r,
         )
+
+
+def _check_llm_reachable(cfg, r: _DoctorResult) -> None:
+    """One-shot ``llm.ping`` against the guardrail's resolved LLM.
+
+    Complements :func:`_check_llm_api_key`: where that probe asserts the
+    key is *plausible* against provider-specific introspection endpoints,
+    this probe sends a single ``max_tokens=1`` chat to LiteLLM with the
+    full resolved provider routing — exactly the path the gateway and
+    scanners exercise at runtime. Skipped when the guardrail is off or
+    the model is unset because there's nothing meaningful to ping.
+
+    Implementation detail: ``defenseclaw.llm.ping`` returns
+    ``(ok, message)`` and never raises, so the doctor can render the
+    outcome without catching exceptions itself.
+    """
+    gc = cfg.guardrail
+    if not gc.enabled:
+        _emit("skip", "LLM reachable", "guardrail disabled", r=r)
+        return
+    llm = cfg.resolve_llm("guardrail")
+    if not (llm.model or "").strip():
+        _emit("skip", "LLM reachable", "no model configured", r=r)
+        return
+    try:
+        from defenseclaw import llm as _llm
+    except Exception as exc:
+        _emit("warn", "LLM reachable", f"llm.ping unavailable: {exc}", r=r)
+        return
+    ok, msg = _llm.ping(llm, timeout=5)
+    if ok:
+        _emit("pass", "LLM reachable", msg, r=r)
+    else:
+        _emit("warn", "LLM reachable", msg, r=r)
+
+
+def _check_regional_provider_config(cfg, r: _DoctorResult) -> None:
+    """Sanity-check provider-typed sub-blocks on the resolved LLM.
+
+    Bedrock requires a region; Vertex requires both ``project_id`` and
+    a region; Azure requires an ``endpoint`` and an ``api_version``.
+    We emit ``fail`` when the structured block is in use but missing a
+    required field — the runtime would otherwise reject every call with
+    a cryptic upstream error. When the structured block is absent we
+    skip silently so non-regional setups don't see noise.
+    """
+    if not cfg.guardrail.enabled:
+        _emit("skip", "Regional provider", "guardrail disabled", r=r)
+        return
+    llm = cfg.resolve_llm("guardrail")
+    label = "Regional provider"
+    provider = (llm.provider or "").strip().lower()
+    if provider in ("bedrock", "amazon-bedrock") and llm.bedrock is not None:
+        b = llm.bedrock
+        region = (b.region or llm.region or "").strip()
+        if not region:
+            _emit("fail", label, "bedrock configured without a region", r=r)
+            return
+        mode = (b.auth_mode or "").strip().lower() or "api_key"
+        if mode == "iam_credentials" and not (b.access_key_env and b.secret_key_env):
+            _emit(
+                "warn",
+                label,
+                "bedrock auth_mode=iam_credentials requires access/secret key env names",
+                r=r,
+            )
+            return
+        if mode == "profile" and not b.profile_name:
+            _emit("warn", label, "bedrock auth_mode=profile requires profile_name", r=r)
+            return
+        _emit("pass", label, f"bedrock region={region} auth_mode={mode}", r=r)
+        return
+    if provider == "vertex_ai" and llm.vertex is not None:
+        v = llm.vertex
+        if not (v.project_id or "").strip():
+            _emit("fail", label, "vertex_ai configured without project_id", r=r)
+            return
+        if not (v.region or llm.region or "").strip():
+            _emit("fail", label, "vertex_ai configured without region", r=r)
+            return
+        mode = (v.auth_mode or "").strip().lower() or "service_account"
+        if mode == "service_account" and not (v.service_account_json_env or "").strip():
+            _emit(
+                "warn",
+                label,
+                "vertex_ai auth_mode=service_account requires service_account_json_env",
+                r=r,
+            )
+            return
+        _emit("pass", label, f"vertex_ai project={v.project_id} region={v.region or llm.region}", r=r)
+        return
+    if provider == "azure" and llm.azure is not None:
+        a = llm.azure
+        if not (a.endpoint or "").strip():
+            _emit("fail", label, "azure configured without endpoint", r=r)
+            return
+        if not (a.api_version or "").strip():
+            _emit("warn", label, "azure configured without api_version", r=r)
+            return
+        _emit(
+            "pass",
+            label,
+            f"azure endpoint={a.endpoint} api_version={a.api_version}",
+            r=r,
+        )
+        return
+    _emit("skip", label, "no regional provider in use", r=r)
+
+
+def _check_custom_provider_overlay(cfg, r: _DoctorResult) -> None:
+    """Validate ``~/.defenseclaw/custom-providers.json`` consistency.
+
+    Checks:
+
+    * The overlay file parses (anything else is silently treated as
+      empty by ``LoadProviders`` on the Go side, but here we surface
+      the parse error so the operator can fix it).
+    * Any ``instance_name`` referenced in a resolved LLM block points
+      at an actual overlay entry. A typo here would route requests
+      through the default provider instead of the operator's custom
+      endpoint — a silent fallback that's hard to debug later.
+    * Per-instance TLS settings declare exactly one of
+      ``ca_cert_pem`` or ``insecure_skip_verify``; declaring both is
+      almost always a misconfiguration (we accept it on the Go side,
+      but the warning matches the CLI's own validation).
+    * When an overlay entry declares ``base_url``, the host portion of
+      that URL must appear in the entry's ``domains`` list. The Go
+      gateway's ``inferProviderFromURL`` resolves an inbound request
+      to an overlay entry by host match; if the host is absent from
+      ``domains`` the resolver bails before the instance-binding
+      branch and the overlay's TLS / sub-block posture silently does
+      not apply.
+    """
+    label = "Custom-provider overlay"
+    data_dir = getattr(cfg, "data_dir", "") or ""
+    if not data_dir:
+        _emit("skip", label, "no data_dir configured", r=r)
+        return
+    path = os.path.join(data_dir, "custom-providers.json")
+    if not os.path.isfile(path):
+        _emit("skip", label, "no overlay configured", r=r)
+        return
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        _emit("fail", label, f"cannot parse {path}: {exc}", r=r)
+        return
+    providers = payload.get("providers") or []
+    if not isinstance(providers, list):
+        _emit("fail", label, "providers field must be a list", r=r)
+        return
+    names: set[str] = set()
+    for entry in providers:
+        if isinstance(entry, dict) and entry.get("name"):
+            names.add(str(entry["name"]).strip().lower())
+    missing: list[tuple[str, str]] = []
+    for component in ("", "guardrail", "guardrail.judge", "scanners.skill", "scanners.mcp", "scanners.plugin"):
+        try:
+            resolved = cfg.resolve_llm(component)
+        except Exception:
+            continue
+        name = (getattr(resolved, "instance_name", "") or "").strip().lower()
+        if name and name not in names:
+            missing.append((component or "llm", name))
+    if missing:
+        rows = ", ".join(f"{c}->{n}" for c, n in missing)
+        _emit("fail", label, f"instance_name not found in overlay: {rows}", r=r)
+        return
+    tls_warns: list[str] = []
+    family_warns: list[str] = []
+    auth_warns: list[str] = []
+    domain_warns: list[str] = []
+    bedrock_auth_modes = {"api_key", "iam_credentials", "profile", "instance_role"}
+    vertex_auth_modes = {"service_account", "adc", "workload_identity"}
+    azure_auth_modes = {"api_key", "managed_identity"}
+    for entry in providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "?")
+        tls = entry.get("tls") or {}
+        if isinstance(tls, dict) and tls.get("ca_cert_pem") and tls.get("insecure_skip_verify"):
+            tls_warns.append(name)
+        # Domain coverage: when an overlay declares base_url, requests
+        # whose X-DC-Target-URL (fetch-interceptor agents) or connector
+        # snapshot URL (native binaries like ZeptoClaw / Codex) carry
+        # that same URL must be recognizable to the Go gateway's
+        # inferProviderFromURL. If the host portion of base_url is
+        # not in this entry's domains, the resolver returns "" and
+        # bails before the instance-binding branch — the overlay's
+        # TLS / sub-block posture then silently does not apply and
+        # the user sees stock TLS / default routing instead.
+        base_url_raw = str(entry.get("base_url") or "").strip()
+        if base_url_raw:
+            try:
+                parsed = urllib.parse.urlparse(base_url_raw)
+                host = (parsed.hostname or "").lower()
+            except ValueError:
+                host = ""
+            entry_domains = entry.get("domains") or []
+            domain_strs: list[str] = []
+            if isinstance(entry_domains, list):
+                for d in entry_domains:
+                    s = str(d or "").strip().lower()
+                    if s:
+                        domain_strs.append(s)
+            if host:
+                covered = any(host == d or host.endswith("." + d) for d in domain_strs)
+                if not covered:
+                    rendered = ", ".join(domain_strs) if domain_strs else "(empty)"
+                    domain_warns.append(
+                        f"{name}: base_url host {host!r} not covered by domains [{rendered}]"
+                    )
+        # Family-mismatch: a bedrock/vertex/azure sub-block paired with
+        # a base_provider_type from a different family is dead config.
+        # The Go gateway tolerates it (the dispatcher only consults the
+        # matching family) but surfacing it here saves the operator a
+        # confused stare at "why is my Bedrock region not applied?".
+        bpt = str(entry.get("base_provider_type") or "").strip().lower()
+        if entry.get("bedrock") and bpt and bpt != "bedrock":
+            family_warns.append(f"{name}: bedrock sub-block with base_provider_type={bpt!r}")
+        if entry.get("vertex") and bpt and bpt != "vertex_ai":
+            family_warns.append(f"{name}: vertex sub-block with base_provider_type={bpt!r}")
+        if entry.get("azure") and bpt and bpt != "azure":
+            family_warns.append(f"{name}: azure sub-block with base_provider_type={bpt!r}")
+        # Unknown auth_mode values are stored verbatim by the resolver
+        # and silently ignored by the dispatcher. Catch them here.
+        bedrock = entry.get("bedrock") or {}
+        vertex = entry.get("vertex") or {}
+        azure = entry.get("azure") or {}
+        if isinstance(bedrock, dict):
+            mode = str(bedrock.get("auth_mode") or "").strip().lower()
+            if mode and mode not in bedrock_auth_modes:
+                auth_warns.append(f"{name}: bedrock.auth_mode={mode!r}")
+        if isinstance(vertex, dict):
+            mode = str(vertex.get("auth_mode") or "").strip().lower()
+            if mode and mode not in vertex_auth_modes:
+                auth_warns.append(f"{name}: vertex.auth_mode={mode!r}")
+        if isinstance(azure, dict):
+            mode = str(azure.get("auth_mode") or "").strip().lower()
+            if mode and mode not in azure_auth_modes:
+                auth_warns.append(f"{name}: azure.auth_mode={mode!r}")
+    # Role+overlay duplicate-field detection: when both a resolved LLM
+    # role *and* the overlay it references set the same scalar, the
+    # role wins (per the documented precedence). The overlay value is
+    # then dead config — informational, not a failure, but worth a
+    # heads-up so operators reconcile the two.
+    dup_warns: list[str] = []
+    overlay_by_name: dict[str, dict] = {}
+    for entry in providers:
+        if isinstance(entry, dict) and entry.get("name"):
+            overlay_by_name[str(entry["name"]).strip().lower()] = entry
+    for component in ("", "guardrail", "guardrail.judge", "scanners.skill", "scanners.mcp", "scanners.plugin"):
+        try:
+            resolved = cfg.resolve_llm(component)
+        except Exception:
+            continue
+        inst_name = (getattr(resolved, "instance_name", "") or "").strip().lower()
+        if not inst_name or inst_name not in overlay_by_name:
+            continue
+        overlay_entry = overlay_by_name[inst_name]
+        # Scalar role fields whose role-level value silences the overlay
+        # equivalent are tracked here. Sub-block scalars (Bedrock.Region
+        # vs role.bedrock.region) are checked field-by-field on the
+        # resolved object — _apply_instance_overlay already does the
+        # merge, so equality here means the role explicitly set the
+        # value and the overlay declared a different one.
+        if resolved.base_url and overlay_entry.get("base_url") and \
+                resolved.base_url != overlay_entry.get("base_url"):
+            dup_warns.append(
+                f"{component or 'llm'}: base_url role={resolved.base_url!r} "
+                f"overlay={overlay_entry['base_url']!r} (role wins)"
+            )
+        # Bedrock/Vertex/Azure: compare each scalar field where both
+        # sides have a value. The overlay value is dead config.
+        role_b = getattr(resolved, "bedrock", None)
+        ov_b = overlay_entry.get("bedrock") or {}
+        if role_b is not None and isinstance(ov_b, dict):
+            for fld in ("region", "auth_mode", "profile_name", "inference_profile"):
+                rv = (getattr(role_b, fld, "") or "").strip()
+                ov = str(ov_b.get(fld) or "").strip()
+                if rv and ov and rv != ov:
+                    dup_warns.append(
+                        f"{component or 'llm'}: bedrock.{fld} role={rv!r} overlay={ov!r} (role wins)"
+                    )
+        role_v = getattr(resolved, "vertex", None)
+        ov_v = overlay_entry.get("vertex") or {}
+        if role_v is not None and isinstance(ov_v, dict):
+            for fld in ("project_id", "region", "auth_mode", "service_account_json_env"):
+                rv = (getattr(role_v, fld, "") or "").strip()
+                ov = str(ov_v.get(fld) or "").strip()
+                if rv and ov and rv != ov:
+                    dup_warns.append(
+                        f"{component or 'llm'}: vertex.{fld} role={rv!r} overlay={ov!r} (role wins)"
+                    )
+        role_a = getattr(resolved, "azure", None)
+        ov_a = overlay_entry.get("azure") or {}
+        if role_a is not None and isinstance(ov_a, dict):
+            for fld in ("endpoint", "api_version", "auth_mode"):
+                rv = (getattr(role_a, fld, "") or "").strip()
+                ov = str(ov_a.get(fld) or "").strip()
+                if rv and ov and rv != ov:
+                    dup_warns.append(
+                        f"{component or 'llm'}: azure.{fld} role={rv!r} overlay={ov!r} (role wins)"
+                    )
+    if tls_warns:
+        _emit(
+            "warn",
+            label,
+            "instances declare both ca_cert_pem and insecure_skip_verify: "
+            + ", ".join(tls_warns),
+            r=r,
+        )
+    if family_warns:
+        _emit(
+            "warn",
+            label,
+            "overlay sub-block family does not match base_provider_type: "
+            + "; ".join(family_warns),
+            r=r,
+        )
+    if auth_warns:
+        _emit(
+            "warn",
+            label,
+            "overlay declares unrecognized auth_mode: " + "; ".join(auth_warns),
+            r=r,
+        )
+    if domain_warns:
+        _emit(
+            "warn",
+            label,
+            "base_url host not declared in domains (gateway cannot resolve "
+            "the overlay from inbound URL): " + "; ".join(domain_warns),
+            r=r,
+        )
+    if dup_warns:
+        _emit(
+            "warn",
+            label,
+            "role and overlay disagree (role wins, overlay value is dead config): "
+            + "; ".join(dup_warns),
+            r=r,
+        )
+    if tls_warns or family_warns or auth_warns or domain_warns or dup_warns:
+        return
+    _emit("pass", label, f"{len(providers)} overlay entries OK", r=r)
 
 
 # Default model used for the Anthropic auth probe when the configured model
@@ -1382,6 +1730,9 @@ def doctor(app: AppContext, json_out: bool, do_fix: bool, assume_yes: bool) -> N
     if not json_out:
         _doctor_subsection("Credentials")
     _check_llm_api_key(cfg, r)
+    _check_llm_reachable(cfg, r)
+    _check_regional_provider_config(cfg, r)
+    _check_custom_provider_overlay(cfg, r)
     _check_cisco_ai_defense(cfg, r)
     _check_virustotal(cfg, r)
     _check_registry_credentials(cfg, r)

@@ -91,6 +91,7 @@ def _make_app(connector: str):
         judge_sweep=True,
         rule_pack_dir="",
         hook_fail_mode="",
+        llm_role="",
     )
 
     cfg = SimpleNamespace(

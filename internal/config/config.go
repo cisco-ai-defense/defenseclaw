@@ -310,6 +310,98 @@ type LLMConfig struct {
 	// MaxRetries bounds upstream retry attempts. 0 picks a sensible
 	// default (defaultLLMMaxRetries).
 	MaxRetries int `mapstructure:"max_retries" yaml:"max_retries,omitempty"`
+	// InstanceName points at a named entry in
+	// ~/.defenseclaw/custom-providers.json. When set, the gateway
+	// resolves base_url / TLS / base_provider_type from the overlay
+	// rather than from this struct. Mirrors the Python-side
+	// LLMConfig.instance_name field.
+	InstanceName string `mapstructure:"instance_name" yaml:"instance_name,omitempty"`
+
+	// Region is a free-form region/location hint surfaced on the role
+	// (e.g. "us-east-1" for Bedrock, "us-central1" for Vertex). The
+	// per-provider sub-blocks (Bedrock.Region, Vertex.Region) take
+	// precedence when both are set. Mirrors Python LLMConfig.region.
+	Region string `mapstructure:"region" yaml:"region,omitempty"`
+
+	// TLS holds optional per-role TLS overrides. Pointer-typed so an
+	// absent block round-trips through YAML unchanged.
+	TLS *TLSConfig `mapstructure:"tls" yaml:"tls,omitempty"`
+
+	// Bedrock holds optional per-role Bedrock posture. Pointer-typed
+	// so omitempty drops the block on marshal. The gateway dispatcher
+	// merges this with the overlay sub-block (role wins, overlay
+	// fills blanks) before populating Bifrost's BedrockKeyConfig.
+	Bedrock *BedrockKeyConfig `mapstructure:"bedrock" yaml:"bedrock,omitempty"`
+
+	// Vertex holds optional per-role Vertex AI posture. Same merge
+	// semantics as Bedrock.
+	Vertex *VertexKeyConfig `mapstructure:"vertex"  yaml:"vertex,omitempty"`
+
+	// Azure holds optional per-role Azure OpenAI posture. Same merge
+	// semantics as Bedrock.
+	Azure *AzureKeyConfig `mapstructure:"azure"   yaml:"azure,omitempty"`
+}
+
+// TLSConfig captures per-instance TLS overrides on a role-level
+// LLMConfig (the same shape lives in custom-providers.json under
+// providers[].tls). Operators reach for this when an internal LLM
+// endpoint terminates TLS with a self-signed cert chain.
+type TLSConfig struct {
+	// CACertFile is a path to a PEM-encoded CA bundle on disk. Used
+	// when the role wants to pin trust outside of the overlay.
+	CACertFile string `mapstructure:"ca_cert_file" yaml:"ca_cert_file,omitempty"`
+	// CACertPEM is the inline PEM bundle (typically loaded from the
+	// overlay; the gateway never writes this on a role config).
+	CACertPEM string `mapstructure:"ca_cert_pem" yaml:"ca_cert_pem,omitempty"`
+	// InsecureSkipVerify disables certificate validation. Lab-only.
+	InsecureSkipVerify bool `mapstructure:"insecure_skip_verify" yaml:"insecure_skip_verify,omitempty"`
+}
+
+// BedrockKeyConfig mirrors the Python LLMConfig.bedrock dataclass and
+// the overlay's providers[].bedrock JSON shape. The dispatcher uses
+// this struct to populate Bifrost's per-key BedrockKeyConfig.
+//
+// AuthMode values:
+//   - "api_key" (default): gateway-injected; Bifrost reads the API key.
+//   - "iam_credentials": access-key / secret-key (+ optional session
+//     token) provided via env vars named below.
+//   - "profile": named AWS shared-config profile; applied process-wide
+//     via AWS_PROFILE before Bifrost loads the default cred chain.
+//   - "instance_role": Bifrost falls through to the default cred chain
+//     (EC2 / ECS / EKS IRSA).
+type BedrockKeyConfig struct {
+	Region            string            `mapstructure:"region"             yaml:"region,omitempty"             json:"region,omitempty"`
+	AuthMode          string            `mapstructure:"auth_mode"          yaml:"auth_mode,omitempty"          json:"auth_mode,omitempty"`
+	AccessKeyEnv      string            `mapstructure:"access_key_env"     yaml:"access_key_env,omitempty"     json:"access_key_env,omitempty"`
+	SecretKeyEnv      string            `mapstructure:"secret_key_env"     yaml:"secret_key_env,omitempty"     json:"secret_key_env,omitempty"`
+	SessionTokenEnv   string            `mapstructure:"session_token_env"  yaml:"session_token_env,omitempty"  json:"session_token_env,omitempty"`
+	ProfileName       string            `mapstructure:"profile_name"       yaml:"profile_name,omitempty"       json:"profile_name,omitempty"`
+	InferenceProfile  string            `mapstructure:"inference_profile"  yaml:"inference_profile,omitempty"  json:"inference_profile,omitempty"`
+	DeploymentAliases map[string]string `mapstructure:"deployment_aliases" yaml:"deployment_aliases,omitempty" json:"deployment_aliases,omitempty"`
+}
+
+// VertexKeyConfig mirrors the Python LLMConfig.vertex dataclass. The
+// dispatcher uses this to populate Bifrost's per-key VertexKeyConfig.
+//
+// AuthMode values: "service_account" (env var holds JSON), "adc"
+// (default cred chain), "workload_identity" (k8s WIF).
+type VertexKeyConfig struct {
+	ProjectID             string `mapstructure:"project_id"               yaml:"project_id,omitempty"               json:"project_id,omitempty"`
+	Region                string `mapstructure:"region"                   yaml:"region,omitempty"                   json:"region,omitempty"`
+	AuthMode              string `mapstructure:"auth_mode"                yaml:"auth_mode,omitempty"                json:"auth_mode,omitempty"`
+	ServiceAccountJSONEnv string `mapstructure:"service_account_json_env" yaml:"service_account_json_env,omitempty" json:"service_account_json_env,omitempty"`
+}
+
+// AzureKeyConfig mirrors the Python LLMConfig.azure dataclass. The
+// dispatcher uses this to populate Bifrost's per-key AzureKeyConfig.
+//
+// AuthMode values: "api_key" (gateway-injected from env),
+// "managed_identity" (AAD on the host).
+type AzureKeyConfig struct {
+	Endpoint          string            `mapstructure:"endpoint"           yaml:"endpoint,omitempty"           json:"endpoint,omitempty"`
+	APIVersion        string            `mapstructure:"api_version"        yaml:"api_version,omitempty"        json:"api_version,omitempty"`
+	AuthMode          string            `mapstructure:"auth_mode"          yaml:"auth_mode,omitempty"          json:"auth_mode,omitempty"`
+	DeploymentAliases map[string]string `mapstructure:"deployment_aliases" yaml:"deployment_aliases,omitempty" json:"deployment_aliases,omitempty"`
 }
 
 // ResolvedAPIKey returns the API key from the env var first, then the

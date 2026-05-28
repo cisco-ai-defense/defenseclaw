@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -1403,6 +1405,120 @@ func TestResolveProvider_FetchInterceptor(t *testing.T) {
 				t.Errorf("got %s, want %s", gotType, tt.wantType)
 			}
 		})
+	}
+}
+
+// TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch covers the
+// case where the inferred prefix from the URL is the overlay's own Name (the
+// URL matched a host listed in the overlay's domains) but the overlay's
+// base_provider_type is a different adapter family. The historical guard
+// required prefix == base_provider_type, which silently dropped the overlay
+// whenever a corporate proxy was registered against an overlay with a
+// non-default family. The current behavior accepts the overlay when prefix
+// matches the overlay's Name, so per-instance TLS / sub-block posture still
+// apply.
+func TestResolveProvider_InstanceOverlay_FamilyMismatchAllowsNameMatch(t *testing.T) {
+	dir := t.TempDir()
+	overlayPath := filepath.Join(dir, "custom-providers.json")
+	overlay := `{
+		"providers": [{
+			"name": "acme-bedrock",
+			"domains": ["llm.acme.internal"],
+			"base_provider_type": "bedrock",
+			"base_url": "https://llm.acme.internal:8443",
+			"tls": {"insecure_skip_verify": true}
+		}]
+	}`
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatalf("ReloadProviderRegistry: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+		_ = ReloadProviderRegistry()
+	})
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.LLM.InstanceName = "acme-bedrock"
+	proxy.resolveProviderFn = proxy.resolveProviderFromHeaders
+
+	req := &ChatRequest{
+		Model:        "acme-bedrock/anthropic.claude-3-opus-20240229-v1:0",
+		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+		TargetAPIKey: "test-key",
+		TargetURL:    "https://llm.acme.internal:8443",
+	}
+	got := proxy.resolveProviderFn(req)
+	if got == nil {
+		t.Fatalf("expected overlay-bound provider, got nil")
+	}
+	bp, ok := got.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", got)
+	}
+	if bp.baseURL != "https://llm.acme.internal:8443" {
+		t.Errorf("baseURL = %q; want overlay value (proves NewProviderForInstance ran)", bp.baseURL)
+	}
+	if !bp.tls.InsecureSkipVerify {
+		t.Errorf("InsecureSkipVerify did not propagate from overlay TLS posture")
+	}
+}
+
+// TestResolveProvider_InstanceOverlay_FamilyMismatchUnrelatedURLSkipsOverlay
+// asserts the guard still fires when the URL inferred to an unrelated
+// built-in family (e.g. openai) but the pinned overlay declares a different
+// base_provider_type (bedrock). In that case applying the bedrock overlay
+// would be incorrect; the resolver must log and fall back. This is the
+// case the loosened guard intentionally still catches.
+func TestResolveProvider_InstanceOverlay_FamilyMismatchUnrelatedURLSkipsOverlay(t *testing.T) {
+	dir := t.TempDir()
+	overlayPath := filepath.Join(dir, "custom-providers.json")
+	overlay := `{
+		"providers": [{
+			"name": "acme-bedrock",
+			"base_provider_type": "bedrock",
+			"base_url": "https://llm.acme.internal:8443"
+		}]
+	}`
+	if err := os.WriteFile(overlayPath, []byte(overlay), 0o600); err != nil {
+		t.Fatalf("write overlay: %v", err)
+	}
+	t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", overlayPath)
+	if err := ReloadProviderRegistry(); err != nil {
+		t.Fatalf("ReloadProviderRegistry: %v", err)
+	}
+	t.Cleanup(func() {
+		t.Setenv("DEFENSECLAW_CUSTOM_PROVIDERS_PATH", "")
+		_ = ReloadProviderRegistry()
+	})
+
+	prov := &mockProvider{}
+	insp := newMockInspector()
+	proxy := newTestProxy(t, prov, insp, "action")
+	proxy.cfg.LLM.InstanceName = "acme-bedrock"
+	proxy.resolveProviderFn = proxy.resolveProviderFromHeaders
+
+	req := &ChatRequest{
+		Model:        "gpt-4",
+		Messages:     []ChatMessage{{Role: "user", Content: "hi"}},
+		TargetAPIKey: "sk-openai-key",
+		TargetURL:    "https://api.openai.com",
+	}
+	got := proxy.resolveProviderFn(req)
+	if got == nil {
+		t.Fatalf("expected fallback provider, got nil")
+	}
+	bp, ok := got.(*bifrostProvider)
+	if !ok {
+		t.Fatalf("expected *bifrostProvider, got %T", got)
+	}
+	if bp.baseURL == "https://llm.acme.internal:8443" {
+		t.Errorf("baseURL = overlay URL; overlay should NOT have been applied across families")
 	}
 }
 

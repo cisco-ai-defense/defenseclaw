@@ -290,6 +290,90 @@ def _maybe_warn_unknown_provider(prefix: str, component_path: str) -> None:
     )
 
 
+# --- Provider-typed config blocks ---------------------------------------
+#
+# Bedrock / Vertex / Azure each carry provider-specific configuration
+# the generic ``LLMConfig`` cannot express (region, auth mode, project
+# id, endpoint, api version, deployment aliases). Modelling them as
+# small typed dataclasses keeps the YAML self-describing and lets
+# ``Config.resolve_llm`` surface a single object that downstream callers
+# (gateway provider builder, doctor, credentials registry) can inspect
+# without sniffing magic env vars.
+#
+# All sub-blocks are optional — omitting them keeps the legacy "set
+# region via AWS_REGION env var" path working unchanged.
+
+
+@dataclass
+class BedrockKeyConfig:
+    """Bedrock-specific configuration. Mirrors the Go-side BedrockKeyConfig."""
+
+    region: str = ""
+    # auth_mode is one of:
+    #   * "api_key"        — single ABSK... bearer token (default, simplest)
+    #   * "iam_credentials" — explicit access + secret (+ optional session)
+    #   * "profile"         — read from ~/.aws/credentials
+    #   * "instance_role"   — no credentials, region from IMDS (EC2/ECS/EKS)
+    auth_mode: str = "api_key"
+    access_key_env: str = ""
+    secret_key_env: str = ""
+    session_token_env: str = ""
+    profile_name: str = ""
+    # Inference profile prefix hints (e.g. "us." / "eu." / "apac.") —
+    # purely informational; the model string already carries the prefix.
+    inference_profile: str = ""
+    # Maps a friendly model alias (the value the operator types in
+    # ``llm.model``) to the full Bedrock inference-profile model id.
+    # Parity with :attr:`AzureKeyConfig.deployment_aliases`; lets
+    # operators say ``--model sonnet-4`` instead of pasting the full
+    # ``us.anthropic.claude-sonnet-4-6`` every time.
+    deployment_aliases: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class VertexKeyConfig:
+    """Vertex / Google Cloud LLM configuration."""
+
+    project_id: str = ""
+    region: str = ""
+    # auth_mode is one of:
+    #   * "service_account" — path to JSON key file via env var
+    #   * "adc"             — application default credentials
+    auth_mode: str = "service_account"
+    service_account_json_env: str = "GOOGLE_APPLICATION_CREDENTIALS"
+
+
+@dataclass
+class AzureKeyConfig:
+    """Azure OpenAI configuration."""
+
+    endpoint: str = ""
+    api_version: str = "2024-10-21"
+    # auth_mode is one of:
+    #   * "api_key"  — bearer key from the Azure portal
+    #   * "entra_id" — managed identity / service principal (Bifrost handles)
+    auth_mode: str = "api_key"
+    # Maps a friendly model name (the value the operator types in
+    # ``llm.model``) to the on-disk Azure deployment name. Required
+    # because Azure deployments are named per-tenant and almost never
+    # match the upstream model id.
+    deployment_aliases: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class LLMTLSConfig:
+    """TLS overrides for self-hosted / on-prem custom-provider instances.
+
+    Mutually exclusive: setting both ``ca_cert_pem`` and
+    ``insecure_skip_verify`` is rejected by the validator. Used when an
+    operator points at an internal LLM endpoint behind a self-signed
+    or private-CA-issued certificate.
+    """
+
+    ca_cert_pem: str = ""
+    insecure_skip_verify: bool = False
+
+
 @dataclass
 class LLMConfig:
     """Unified LLM configuration block.
@@ -316,7 +400,14 @@ class LLMConfig:
     ``DEFENSECLAW_LLM_KEY`` — the canonical env var for the whole
     product. Local providers (``ollama/``, ``vllm/``, ``lm_studio/``)
     don't need a key; an empty resolved value is allowed.
+
+    ``instance_name`` selects a named entry from
+    ``~/.defenseclaw/custom-providers.json``. When set, the resolver
+    folds in the overlay's ``base_url``, ``tls``, and provider-typed
+    sub-block (bedrock/vertex/azure) before returning the effective
+    config. Only ``model`` then needs to be set on the role itself.
     """
+
     model: str = ""
     provider: str = ""
     api_key: str = ""
@@ -324,6 +415,14 @@ class LLMConfig:
     base_url: str = ""
     timeout: int = 0
     max_retries: int = 0
+    # Generic provider-typed knobs. Empty / None means "fall back to the
+    # next layer" — env vars, then upstream defaults.
+    region: str = ""
+    instance_name: str = ""
+    bedrock: BedrockKeyConfig | None = None
+    vertex: VertexKeyConfig | None = None
+    azure: AzureKeyConfig | None = None
+    tls: LLMTLSConfig | None = None
 
     def resolved_api_key(self) -> str:
         """Return the API key from env var first, then inline value.
@@ -1020,6 +1119,24 @@ class GuardrailConfig:
     # regardless of this field's value. Mirrors
     # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
     hook_fail_mode: str = "open"
+    # ``llm_role`` is the operator's answer to "should DefenseClaw's
+    # LLM be used only as a judge, or also as the agent's upstream?".
+    # One of:
+    #   * ""               — legacy / unset; treat like ``judge_only``
+    #                        on hook connectors and like
+    #                        ``judge_and_agent`` on proxy connectors
+    #                        based on the resolved connector kind.
+    #   * "judge_only"     — DefenseClaw's LLM is used only by the
+    #                        judge; the agent keeps its own LLM
+    #                        config. Mandatory shape for hook
+    #                        connectors (codex/claudecode/hermes/...);
+    #                        opt-in for proxy connectors.
+    #   * "judge_and_agent" — Proxy connectors only. DefenseClaw is
+    #                        the agent's LLM router AND runs the
+    #                        judge with the same key.
+    # Used by the wizard to remember the operator's choice across
+    # reruns so reconfigure flows don't re-prompt.
+    llm_role: str = ""
 
 
 @dataclass
@@ -1292,6 +1409,18 @@ class Config:
             out.timeout = override.timeout
         if override.max_retries > 0:
             out.max_retries = override.max_retries
+        if override.region:
+            out.region = override.region
+        if override.instance_name:
+            out.instance_name = override.instance_name
+        if override.bedrock is not None:
+            out.bedrock = override.bedrock
+        if override.vertex is not None:
+            out.vertex = override.vertex
+        if override.azure is not None:
+            out.azure = override.azure
+        if override.tls is not None:
+            out.tls = override.tls
 
         if not out.model:
             env_model = os.environ.get(DEFENSECLAW_LLM_MODEL_ENV, "").strip()
@@ -1303,6 +1432,22 @@ class Config:
             out.model = self.default_llm_model
         if not out.api_key_env and self.default_llm_api_key_env:
             out.api_key_env = self.default_llm_api_key_env
+
+        # If the resolved config references a named custom-provider
+        # instance, layer the overlay's defaults UNDER what the role
+        # already set. Operator-level overrides on the role always
+        # win — instance overlays only fill in blanks. Imported lazily
+        # so the loader stays cheap when no custom providers are in
+        # play (the common case).
+        if out.instance_name:
+            try:
+                _apply_instance_overlay(out, self.data_dir)
+            except Exception:  # pragma: no cover - defensive
+                # Overlay merge must never take config loading offline.
+                _log.warning(
+                    "config: failed to apply custom-provider overlay for %r",
+                    out.instance_name,
+                )
 
         _maybe_warn_unknown_provider(out.provider_prefix(), path)
         return out
@@ -1358,16 +1503,90 @@ def _llm_is_empty(d: dict[str, Any] | None) -> bool:
         d.get("model"), d.get("provider"), d.get("api_key"),
         d.get("api_key_env"), d.get("base_url"),
         d.get("timeout", 0), d.get("max_retries", 0),
+        d.get("region"), d.get("instance_name"),
+        d.get("bedrock"), d.get("vertex"), d.get("azure"), d.get("tls"),
     ))
 
 
 def _strip_empty_llm(parent: dict[str, Any] | None, key: str = "llm") -> None:
     """Drop an empty ``llm:`` sub-block so YAML stays minimal. Mirrors
-    Go's ``yaml:"llm,omitempty"`` for nested LLMConfig structs."""
+    Go's ``yaml:"llm,omitempty"`` for nested LLMConfig structs.
+
+    Also prunes provider-typed sub-blocks (``bedrock`` / ``vertex`` /
+    ``azure`` / ``tls``) that carry only default/empty values so a
+    freshly initialised but unused regional config does not bloat the
+    YAML.
+    """
     if not parent:
         return
-    if _llm_is_empty(parent.get(key)):
+    llm = parent.get(key)
+    if isinstance(llm, dict):
+        # First sweep: drop sub-blocks that are None or all-default.
+        if llm.get("bedrock") is None or _is_default_bedrock(llm.get("bedrock")):
+            llm.pop("bedrock", None)
+        if llm.get("vertex") is None or _is_default_vertex(llm.get("vertex")):
+            llm.pop("vertex", None)
+        if llm.get("azure") is None or _is_default_azure(llm.get("azure")):
+            llm.pop("azure", None)
+        if llm.get("tls") is None or _is_default_tls(llm.get("tls")):
+            llm.pop("tls", None)
+    if _llm_is_empty(llm):
         parent.pop(key, None)
+
+
+def _is_default_bedrock(d: Any) -> bool:
+    if not isinstance(d, dict):
+        return True
+    if d.get("auth_mode", "api_key") != "api_key":
+        return False
+    for field_name in (
+        "region",
+        "access_key_env",
+        "secret_key_env",
+        "session_token_env",
+        "profile_name",
+        "inference_profile",
+    ):
+        if d.get(field_name):
+            return False
+    aliases = d.get("deployment_aliases") or {}
+    if isinstance(aliases, dict) and aliases:
+        return False
+    return True
+
+
+def _is_default_vertex(d: Any) -> bool:
+    if not isinstance(d, dict):
+        return True
+    if d.get("auth_mode", "service_account") != "service_account":
+        return False
+    if (d.get("service_account_json_env") or "GOOGLE_APPLICATION_CREDENTIALS") != "GOOGLE_APPLICATION_CREDENTIALS":
+        return False
+    for field_name in ("project_id", "region"):
+        if d.get(field_name):
+            return False
+    return True
+
+
+def _is_default_azure(d: Any) -> bool:
+    if not isinstance(d, dict):
+        return True
+    if d.get("auth_mode", "api_key") != "api_key":
+        return False
+    if (d.get("api_version") or "2024-10-21") != "2024-10-21":
+        return False
+    if d.get("endpoint"):
+        return False
+    aliases = d.get("deployment_aliases") or {}
+    if isinstance(aliases, dict) and aliases:
+        return False
+    return True
+
+
+def _is_default_tls(d: Any) -> bool:
+    if not isinstance(d, dict):
+        return True
+    return not d.get("ca_cert_pem") and not d.get("insecure_skip_verify")
 
 
 def _config_to_dict(cfg: Config) -> dict[str, Any]:
@@ -1505,6 +1724,67 @@ def _merge_inspect_llm(raw: dict[str, Any] | None) -> InspectLLMConfig:
     )
 
 
+def _merge_bedrock(raw: Any) -> BedrockKeyConfig | None:
+    if not isinstance(raw, dict):
+        return None
+    aliases_raw = raw.get("deployment_aliases", {})
+    aliases: dict[str, str] = {}
+    if isinstance(aliases_raw, dict):
+        for k, v in aliases_raw.items():
+            if k and v:
+                aliases[str(k)] = str(v)
+    return BedrockKeyConfig(
+        region=str(raw.get("region", "") or ""),
+        auth_mode=str(raw.get("auth_mode", "api_key") or "api_key").strip().lower(),
+        access_key_env=str(raw.get("access_key_env", "") or ""),
+        secret_key_env=str(raw.get("secret_key_env", "") or ""),
+        session_token_env=str(raw.get("session_token_env", "") or ""),
+        profile_name=str(raw.get("profile_name", "") or ""),
+        inference_profile=str(raw.get("inference_profile", "") or ""),
+        deployment_aliases=aliases,
+    )
+
+
+def _merge_vertex(raw: Any) -> VertexKeyConfig | None:
+    if not isinstance(raw, dict):
+        return None
+    return VertexKeyConfig(
+        project_id=str(raw.get("project_id", "") or ""),
+        region=str(raw.get("region", "") or ""),
+        auth_mode=str(raw.get("auth_mode", "service_account") or "service_account"),
+        service_account_json_env=str(
+            raw.get("service_account_json_env", "GOOGLE_APPLICATION_CREDENTIALS")
+            or "GOOGLE_APPLICATION_CREDENTIALS"
+        ),
+    )
+
+
+def _merge_azure(raw: Any) -> AzureKeyConfig | None:
+    if not isinstance(raw, dict):
+        return None
+    aliases_raw = raw.get("deployment_aliases", {})
+    aliases: dict[str, str] = {}
+    if isinstance(aliases_raw, dict):
+        for k, v in aliases_raw.items():
+            if k and v:
+                aliases[str(k)] = str(v)
+    return AzureKeyConfig(
+        endpoint=str(raw.get("endpoint", "") or ""),
+        api_version=str(raw.get("api_version", "2024-10-21") or "2024-10-21"),
+        auth_mode=str(raw.get("auth_mode", "api_key") or "api_key"),
+        deployment_aliases=aliases,
+    )
+
+
+def _merge_tls(raw: Any) -> LLMTLSConfig | None:
+    if not isinstance(raw, dict):
+        return None
+    return LLMTLSConfig(
+        ca_cert_pem=str(raw.get("ca_cert_pem", "") or ""),
+        insecure_skip_verify=bool(raw.get("insecure_skip_verify", False)),
+    )
+
+
 def _merge_llm(raw: dict[str, Any] | None) -> LLMConfig:
     """Parse a unified llm: block. Mirrors Go's mapstructure decode.
 
@@ -1521,6 +1801,12 @@ def _merge_llm(raw: dict[str, Any] | None) -> LLMConfig:
         base_url=str(raw.get("base_url", "") or ""),
         timeout=int(raw.get("timeout", 0) or 0),
         max_retries=int(raw.get("max_retries", 0) or 0),
+        region=str(raw.get("region", "") or ""),
+        instance_name=str(raw.get("instance_name", "") or ""),
+        bedrock=_merge_bedrock(raw.get("bedrock")),
+        vertex=_merge_vertex(raw.get("vertex")),
+        azure=_merge_azure(raw.get("azure")),
+        tls=_merge_tls(raw.get("tls")),
     )
 
 
@@ -1599,6 +1885,64 @@ def _migrate_llm_fields(cfg: Config) -> None:
         cfg.guardrail.judge.llm.api_key_env = cfg.guardrail.judge.api_key_env
     if not cfg.guardrail.judge.llm.base_url and cfg.guardrail.judge.api_base:
         cfg.guardrail.judge.llm.base_url = cfg.guardrail.judge.api_base
+
+    # v5→v6: auto-derive `llm.instance_name` from a legacy `base_url`
+    # that matches a custom-providers.json overlay entry. Keeps the
+    # overlay as the single source of truth for self-hosted endpoints
+    # (so rotating the TLS bundle or base URL in one place is enough).
+    _derive_instance_name_from_base_url(cfg)
+
+
+def _derive_instance_name_from_base_url(cfg: Config) -> None:
+    """Set ``llm.instance_name`` for any LLMConfig whose ``base_url``
+    matches an entry in ``~/.defenseclaw/custom-providers.json``.
+
+    Idempotent: a config that already pins ``instance_name`` is left
+    untouched. The legacy ``base_url`` is cleared on the migrated
+    block(s) so the overlay's value (with its TLS settings) is the
+    only thing the gateway resolves at runtime.
+    """
+    data_dir = getattr(cfg, "data_dir", "") or os.path.expanduser("~/.defenseclaw")
+    overlay_path = os.path.join(data_dir, "custom-providers.json")
+    try:
+        with open(overlay_path, encoding="utf-8") as fh:
+            raw = yaml.safe_load(fh)
+    except (FileNotFoundError, PermissionError, OSError):
+        return
+    if not isinstance(raw, dict):
+        return
+    providers = raw.get("providers") or []
+    if not isinstance(providers, list):
+        return
+    by_url: dict[str, str] = {}
+    for p in providers:
+        if not isinstance(p, dict):
+            continue
+        name = str(p.get("name") or "").strip()
+        url = str(p.get("base_url") or "").strip()
+        if name and url:
+            by_url[url.rstrip("/")] = name
+
+    if not by_url:
+        return
+
+    def _maybe_apply(llm: LLMConfig) -> None:
+        if (llm.instance_name or "").strip():
+            return
+        url = (llm.base_url or "").strip().rstrip("/")
+        if not url:
+            return
+        match = by_url.get(url)
+        if match:
+            llm.instance_name = match
+            llm.base_url = ""
+
+    _maybe_apply(cfg.llm)
+    _maybe_apply(cfg.guardrail.llm)
+    _maybe_apply(cfg.guardrail.judge.llm)
+    _maybe_apply(cfg.scanners.skill_scanner.llm)
+    _maybe_apply(cfg.scanners.mcp_scanner.llm)
+    _maybe_apply(cfg.scanners.plugin_llm)
 
 
 def _merge_plugin_actions(raw: dict[str, Any] | None) -> PluginActionsConfig:
@@ -1820,7 +2164,21 @@ def _merge_guardrail(raw: dict[str, Any] | None, data_dir: str) -> GuardrailConf
         connector=raw.get("connector", ""),
         hilt=_merge_hilt(hilt_raw),
         hook_fail_mode=_normalize_hook_fail_mode(raw.get("hook_fail_mode", "")),
+        llm_role=_normalize_llm_role(raw.get("llm_role", "")),
     )
+
+
+def _normalize_llm_role(value: Any) -> str:
+    """Coerce a YAML-loaded value to one of "", "judge_only", or
+    "judge_and_agent". Anything else collapses to "" so the wizard
+    re-asks rather than silently honoring a typo.
+    """
+    if not isinstance(value, str):
+        return ""
+    v = value.strip().lower()
+    if v in {"judge_only", "judge_and_agent"}:
+        return v
+    return ""
 
 
 def _normalize_hook_fail_mode(value: Any) -> str:
@@ -1992,6 +2350,79 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
             dirs=plugin_raw.get("dirs", []),
         ),
     )
+
+
+def _apply_instance_overlay(out: LLMConfig, data_dir: str) -> None:
+    """Fold a custom-providers.json instance entry into a resolved LLMConfig.
+
+    Reads the overlay at ``<data_dir>/custom-providers.json`` (the
+    same file ``defenseclaw setup provider`` writes) and merges the
+    matching instance's defaults UNDER ``out``. Only blanks are
+    filled; explicit role-level values always win. Silent no-op when
+    the overlay file is missing, malformed, or has no matching
+    instance — the resolver's job is to be tolerant, not to validate
+    overlay shape; ``defenseclaw doctor`` is responsible for surfacing
+    overlay typos.
+
+    Recognised overlay fields per provider entry (additive to the
+    pre-existing ``name``/``domains``/``env_keys``/``profile_id``
+    shape consumed by the Go-side overlay merger — every field
+    below is optional):
+
+    * ``base_provider_type`` — the upstream provider family
+      (``openai``/``bedrock``/``azure``/``vertex``/``ollama`` ...)
+    * ``base_url``           — the on-prem / proxy endpoint URL
+    * ``available_models``   — strings the wizard offers in the
+      model picker for this instance
+    * ``request_path_overrides`` — per-route URL path overrides
+    * ``allowed_requests``   — allow-list of request types
+    * ``tls``                — TLS sub-block (ca_cert_pem, insecure_skip_verify)
+    * ``bedrock``/``vertex``/``azure`` — provider-typed sub-blocks
+    """
+    if not out.instance_name or not data_dir:
+        return
+    overlay_path = os.path.join(data_dir, "custom-providers.json")
+    try:
+        import json as _json
+        with open(overlay_path, encoding="utf-8") as f:
+            data = _json.load(f)
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    providers = data.get("providers") or []
+    if not isinstance(providers, list):
+        return
+    target_name = out.instance_name.strip().lower()
+    entry: dict[str, Any] | None = None
+    for p in providers:
+        if isinstance(p, dict) and str(p.get("name", "")).strip().lower() == target_name:
+            entry = p
+            break
+    if entry is None:
+        return
+    if not out.provider:
+        bp = entry.get("base_provider_type") or entry.get("provider") or ""
+        if isinstance(bp, str) and bp:
+            out.provider = bp.strip().lower()
+    if not out.base_url:
+        bu = entry.get("base_url") or ""
+        if isinstance(bu, str) and bu:
+            out.base_url = bu
+    if not out.api_key_env:
+        env_keys = entry.get("env_keys") or []
+        if isinstance(env_keys, list) and env_keys:
+            first = str(env_keys[0]).strip()
+            if first:
+                out.api_key_env = first
+    if out.tls is None:
+        out.tls = _merge_tls(entry.get("tls"))
+    if out.bedrock is None:
+        out.bedrock = _merge_bedrock(entry.get("bedrock"))
+    if out.vertex is None:
+        out.vertex = _merge_vertex(entry.get("vertex"))
+    if out.azure is None:
+        out.azure = _merge_azure(entry.get("azure"))
 
 
 def _load_dotenv_into_os(data_dir: str) -> None:

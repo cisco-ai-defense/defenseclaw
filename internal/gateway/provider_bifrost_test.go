@@ -117,7 +117,7 @@ func TestBifrostProvider_ABSKKeyDetection(t *testing.T) {
 func TestBifrostProvider_NewTenantAccount(t *testing.T) {
 	provKey := schemas.ModelProvider("test-provider")
 	keyID := bifrostKeyID(provKey, "test-key-123")
-	acc := newTenantAccount(provKey, "test-key-123", keyID, "")
+	acc := newTenantAccount(provKey, "test-key-123", keyID, "", tlsOverrides{}, nil, nil, nil)
 
 	if len(acc.keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(acc.keys))
@@ -150,7 +150,7 @@ func TestBifrostProvider_NewTenantAccount(t *testing.T) {
 
 func TestBifrostProvider_NewTenantAccountBedrockABSK(t *testing.T) {
 	keyID := bifrostKeyID(schemas.Bedrock, "ABSKtest123")
-	acc := newTenantAccount(schemas.Bedrock, "ABSKtest123", keyID, "")
+	acc := newTenantAccount(schemas.Bedrock, "ABSKtest123", keyID, "", tlsOverrides{}, nil, nil, nil)
 
 	if len(acc.keys) != 1 {
 		t.Fatalf("expected 1 key, got %d", len(acc.keys))
@@ -519,8 +519,8 @@ func TestBifrostProvider_TenantIsolation(t *testing.T) {
 
 	// Each tuple builds an independent, immutable Account. Mutating one's
 	// input arguments can't affect another's cached state.
-	a1 := newTenantAccount(provKey, "key-1", k1, "")
-	a2 := newTenantAccount(provKey, "key-2", k2, "")
+	a1 := newTenantAccount(provKey, "key-1", k1, "", tlsOverrides{}, nil, nil, nil)
+	a2 := newTenantAccount(provKey, "key-2", k2, "", tlsOverrides{}, nil, nil, nil)
 	if a1 == a2 {
 		t.Fatal("newTenantAccount must return distinct instances for distinct tenants")
 	}
@@ -529,7 +529,7 @@ func TestBifrostProvider_TenantIsolation(t *testing.T) {
 	}
 
 	// BaseURL variation must flow into NetworkConfig.
-	aURL := newTenantAccount(provKey, "key-1", k1, "http://custom:8080")
+	aURL := newTenantAccount(provKey, "key-1", k1, "http://custom:8080", tlsOverrides{}, nil, nil, nil)
 	if aURL.config.NetworkConfig.BaseURL != "http://custom:8080" {
 		t.Errorf("baseURL = %q, want http://custom:8080", aURL.config.NetworkConfig.BaseURL)
 	}

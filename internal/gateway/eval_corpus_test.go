@@ -419,7 +419,7 @@ func mustBuildEvalJudge(t *testing.T, judge string) *LLMJudge {
 	}
 	llm := config.LLMConfig{Model: model, APIKeyEnv: "DEFENSECLAW_LLM_KEY"}
 	rp := guardrail.LoadRulePack("")
-	j := NewLLMJudge(cfg, llm, "", rp)
+	j := NewLLMJudge(cfg, llm, "", rp, nil)
 	if j == nil {
 		t.Skipf("eval judge %q failed to init; check DEFENSECLAW_LLM_KEY and model %q", judge, model)
 	}

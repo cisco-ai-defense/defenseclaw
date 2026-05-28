@@ -204,7 +204,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if cfg.Guardrail.Judge.Enabled {
 		dotenvPath := filepath.Join(cfg.DataDir, ".env")
 		judgeLLM := cfg.ResolveLLM("guardrail.judge")
-		judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp)
+		providers, _, _ := providerRegistrySnapshot()
+		judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, providers)
 		if judge != nil {
 			router.SetJudge(judge)
 			features := "tool-result-pii"
