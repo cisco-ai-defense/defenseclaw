@@ -25,13 +25,13 @@ import (
 
 func TestCopyForwardableHeaders_PassesThroughCommonProviderHeaders(t *testing.T) {
 	src := http.Header{
-		"Anthropic-Version": []string{"2023-06-01"},
-		"Anthropic-Beta":    []string{"messages-2024-09-04"},
+		"Anthropic-Version":   []string{"2023-06-01"},
+		"Anthropic-Beta":      []string{"messages-2024-09-04"},
 		"Openai-Organization": []string{"org-abc123"},
-		"User-Agent":         []string{"litellm/1.0"},
-		"Accept":             []string{"application/json"},
-		"Tenant-Id":          []string{"tenant-42"},
-		"X-Region":           []string{"us-east-1"},
+		"User-Agent":          []string{"litellm/1.0"},
+		"Accept":              []string{"application/json"},
+		"Tenant-Id":           []string{"tenant-42"},
+		"X-Region":            []string{"us-east-1"},
 	}
 	dst := http.Header{}
 	n, err := CopyForwardableHeaders(dst, src)
@@ -252,7 +252,7 @@ func TestCopyForwardableHeaders_OverwritesPreExistingValue(t *testing.T) {
 
 func TestCopyForwardableHeaders_NameCanonicalization(t *testing.T) {
 	src := http.Header{
-		"x-tenant-id": []string{"t1"},
+		"x-tenant-id":  []string{"t1"},
 		"X-MIXED-cAsE": []string{"v"},
 	}
 	dst := http.Header{}

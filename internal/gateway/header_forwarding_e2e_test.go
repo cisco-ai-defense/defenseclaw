@@ -111,12 +111,12 @@ func postPassthrough(t *testing.T, proxy *GuardrailProxy, targetURL, path string
 // and that the canonical Authorization is re-minted from X-AI-Auth.
 func TestPassthrough_ForwardsAllowedHeaders(t *testing.T) {
 	var (
-		gotTenant      string
-		gotAnthropic   string
-		gotAuth        string
-		gotXDC         string
-		gotXDefclaw    string
-		gotHits        int32
+		gotTenant    string
+		gotAnthropic string
+		gotAuth      string
+		gotXDC       string
+		gotXDefclaw  string
+		gotHits      int32
 	)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&gotHits, 1)
