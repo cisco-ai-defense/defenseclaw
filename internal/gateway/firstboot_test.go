@@ -130,6 +130,30 @@ func TestEnsureGatewayToken_PreservesOtherDotenvLines(t *testing.T) {
 	}
 }
 
+func TestEnsureGatewayToken_RespectsEnvWhenLocalKeyResolutionDisabled(t *testing.T) {
+	tmp := t.TempDir()
+	dotenv := filepath.Join(tmp, ".env")
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "enterprise-configmap-token")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
+
+	// Simulate enterprise mode where DisableLocalKeyResolution() is called
+	// before the sidecar boots. The gateway token must still be read from
+	// the process env — localKeyResolutionDisabled only gates LLM API keys.
+	localKeyResolutionDisabled = true
+	t.Cleanup(func() { localKeyResolutionDisabled = false })
+
+	tok, err := EnsureGatewayToken(dotenv)
+	if err != nil {
+		t.Fatalf("EnsureGatewayToken: %v", err)
+	}
+	if tok != "enterprise-configmap-token" {
+		t.Errorf("expected env-supplied token, got %q (first-boot generation should not trigger when env is set)", tok)
+	}
+	if _, err := os.Stat(dotenv); err == nil {
+		t.Error("dotenv should not have been written when env var was already set")
+	}
+}
+
 // TestRunGuardrail_OpenClaw_CredentialsBeforeProbe pins the boot-path
 // invariant: the active connector must receive SetCredentials() BEFORE
 // the HasUsableProviders() probe runs in runGuardrail. The earlier
