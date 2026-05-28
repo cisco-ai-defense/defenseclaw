@@ -55,7 +55,14 @@ var validDeploymentModes = map[string]struct{}{
 const (
 	DefaultDataDirName = ".defenseclaw"
 	DefaultAuditDBName = "audit.db"
-	DefaultConfigName  = "config.yaml"
+	// DefaultJudgeBodiesDBName is the separate SQLite file that
+	// holds retained LLM judge bodies. We split it out from
+	// audit.db so the high-volume body INSERTs do not share a
+	// write lock with audit_events / activity_events; see the
+	// JudgeBodyStore design notes in
+	// internal/audit/judge_body_store.go.
+	DefaultJudgeBodiesDBName = "judge_bodies.db"
+	DefaultConfigName        = "config.yaml"
 )
 
 func DefaultDataPath() string {
@@ -104,6 +111,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		DataDir:       dataDir,
 		AuditDB:       filepath.Join(dataDir, DefaultAuditDBName),
+		JudgeBodiesDB: filepath.Join(dataDir, DefaultJudgeBodiesDBName),
 		QuarantineDir: filepath.Join(dataDir, "quarantine"),
 		PluginDir:     "",
 		PolicyDir:     filepath.Join(dataDir, "policies"),

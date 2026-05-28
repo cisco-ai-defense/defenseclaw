@@ -128,6 +128,19 @@ func TestAlertsPanel_DetailEnrichment_FindingsScanner(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("log event: %v", err)
 	}
+	// Seed the parent scan_results row so InsertFinding's FK to
+	// scan_results(id) is satisfied. The DSN-resident
+	// `foreign_keys=ON` pragma added with the SQLite write-lock
+	// remediation enforces this constraint at runtime, matching
+	// the production code path
+	// (internal/watcher/rescan.go::persistScanResult) which always
+	// inserts the scan_result before any findings.
+	if err := store.InsertScanResult(
+		runID, "skill-scanner", "skill://demo",
+		time.Now().UTC(), 0, 1, "HIGH", "{}",
+	); err != nil {
+		t.Fatalf("seed scan_result: %v", err)
+	}
 	// Seed findings against the run (scanID == runID per the
 	// store's existing convention, see ListFindingsByRunID which
 	// proxies to ListFindingsByScan).

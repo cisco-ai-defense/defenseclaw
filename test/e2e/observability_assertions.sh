@@ -24,8 +24,9 @@
 #      window (default: last 30 minutes + 5 seconds of forward drift).
 #   4. request_id, when emitted, is a valid v4 UUID.
 #   5. audit.db contains at least one row with a non-empty request_id.
-#   6. When judge persistence is enabled (default), audit.db contains
-#      at least one judge_responses row.
+#   6. When judge persistence is enabled, judge_bodies.db (Phase 4)
+#      contains at least one judge_responses row; legacy audit.db
+#      falls through as a fallback when judge_bodies.db is absent.
 #
 # The Splunk HEC mock assertion is opt-in: the CI workflow passes
 # --splunk-mock-log only when judge traffic is expected (full-live
@@ -33,7 +34,7 @@
 #
 # Usage:
 #   test/e2e/observability_assertions.sh \
-#       [--jsonl PATH] [--db PATH] \
+#       [--jsonl PATH] [--db PATH] [--judge-bodies-db PATH] \
 #       [--ts-window-seconds N] [--require-judge] \
 #       [--require-shared-request-id]
 
@@ -41,6 +42,11 @@ set -euo pipefail
 
 JSONL_PATH="${JSONL_PATH:-$HOME/.defenseclaw/gateway.jsonl}"
 AUDIT_DB_PATH="${AUDIT_DB_PATH:-$HOME/.defenseclaw/audit.db}"
+# Phase 4 SQLite split: judge bodies live in their own DB file so
+# audit_events / activity_events writers don't share a fsync window
+# with the (much larger, much higher-volume) raw judge responses.
+# The default mirrors internal/config/defaults.go::DefaultJudgeBodiesDBName.
+JUDGE_BODIES_DB_PATH="${JUDGE_BODIES_DB_PATH:-$HOME/.defenseclaw/judge_bodies.db}"
 TS_WINDOW_SECONDS="${TS_WINDOW_SECONDS:-1800}"
 REQUIRE_JUDGE="${REQUIRE_JUDGE:-0}"
 REQUIRE_SHARED_REQUEST_ID="${REQUIRE_SHARED_REQUEST_ID:-0}"
@@ -54,6 +60,7 @@ while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --jsonl) JSONL_PATH="$2"; shift 2;;
         --db) AUDIT_DB_PATH="$2"; shift 2;;
+        --judge-bodies-db) JUDGE_BODIES_DB_PATH="$2"; shift 2;;
         --ts-window-seconds) TS_WINDOW_SECONDS="$2"; shift 2;;
         --require-judge) REQUIRE_JUDGE=1; shift;;
         --require-shared-request-id) REQUIRE_SHARED_REQUEST_ID=1; shift;;
@@ -82,7 +89,7 @@ ok() {
     echo "OK: $*"
 }
 
-echo "[observability_assertions] jsonl=$JSONL_PATH db=$AUDIT_DB_PATH ts_window=${TS_WINDOW_SECONDS}s"
+echo "[observability_assertions] jsonl=$JSONL_PATH db=$AUDIT_DB_PATH judge_bodies_db=$JUDGE_BODIES_DB_PATH ts_window=${TS_WINDOW_SECONDS}s"
 
 # 1. JSONL file must exist and be non-empty.
 if [[ ! -f "$JSONL_PATH" ]]; then
@@ -132,13 +139,26 @@ if command -v sqlite3 >/dev/null 2>&1; then
 
     # 6. Optional: require at least one judge_responses row when the
     # caller has confirmed judge persistence should be on.
+    #
+    # Phase 4 split: judge bodies now live in judge_bodies.db. We
+    # check that file first; if it does not exist (e.g. pre-Phase-4
+    # binary or operator pinned legacy layout) we transparently fall
+    # back to the legacy table on audit.db. This keeps the script
+    # green across both shapes during the rollout window.
     if [[ "$REQUIRE_JUDGE" == "1" ]]; then
-        JUDGE_COUNT=$(sqlite3 "$AUDIT_DB_PATH" \
-            "SELECT COUNT(*) FROM judge_responses;" || echo "0")
-        if [[ "$JUDGE_COUNT" == "0" ]]; then
-            fail "judge_responses had 0 rows (expected ≥1 with persistence on)"
+        if [[ -f "$JUDGE_BODIES_DB_PATH" ]]; then
+            JUDGE_COUNT=$(sqlite3 "$JUDGE_BODIES_DB_PATH" \
+                "SELECT COUNT(*) FROM judge_responses;" || echo "0")
+            JUDGE_SOURCE="$JUDGE_BODIES_DB_PATH"
+        else
+            JUDGE_COUNT=$(sqlite3 "$AUDIT_DB_PATH" \
+                "SELECT COUNT(*) FROM judge_responses;" || echo "0")
+            JUDGE_SOURCE="$AUDIT_DB_PATH (legacy fallback)"
         fi
-        ok "judge_responses row count = $JUDGE_COUNT"
+        if [[ "$JUDGE_COUNT" == "0" ]]; then
+            fail "judge_responses had 0 rows (expected ≥1 with persistence on); source=$JUDGE_SOURCE"
+        fi
+        ok "judge_responses row count = $JUDGE_COUNT (source=$JUDGE_SOURCE)"
     fi
 else
     echo "[observability_assertions] sqlite3 not installed; skipping DB checks"
