@@ -690,9 +690,39 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			connForwardKey = connKey
 		}
 	}
+	// Direct-provider fallback: when neither the fetch interceptor nor a
+	// connector supplied an upstream (e.g. ZeptoClaw configured with only
+	// api_base and no api_key, or any agent pointed straight at the
+	// guardrail proxy as a custom OpenAI-compatible endpoint), hydrate
+	// from the gateway's own config — the same fallback that
+	// resolveConfiguredProvider applies on the chat/completions path —
+	// so the Responses API (/v1/responses) and other provider-native
+	// passthrough paths reach the configured custom provider instead of
+	// being rejected with 400.
 	if targetOrigin == "" {
-		// No target URL from fetch interceptor or connector snapshot; reject.
-		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header")
+		if base := strings.TrimSpace(p.cfg.LLM.BaseURL); base != "" {
+			cfgModel := p.cfg.Model
+			if cfgModel == "" {
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: llm.base_url set but no llm.model configured — cannot hydrate upstream auth\n")
+			} else if !localKeyResolutionDisabled || tokenResolver != nil {
+				resolvedKey, err := p.resolveDirectProviderUpstreamKey(r.Context(), cfgModel, "")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: token resolver error for configured model %q: %v\n", cfgModel, err)
+				} else if resolvedKey != "" {
+					targetOrigin = base
+					connForwardKey = resolvedKey
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: direct-provider hydration model=%q base=%s\n",
+						cfgModel, scrubURLSecrets(base))
+				} else {
+					fmt.Fprintf(os.Stderr, "[guardrail] passthrough: no API key available for configured model %q\n", cfgModel)
+				}
+			}
+		}
+	}
+	if targetOrigin == "" {
+		// No target URL from fetch interceptor, connector snapshot, or
+		// gateway-configured custom provider; reject.
+		writeOpenAIError(w, http.StatusBadRequest, "missing X-DC-Target-URL header and no llm.base_url configured")
 		return
 	}
 	if connForwardKey != "" && r.Header.Get("X-AI-Auth") == "" {
@@ -1615,26 +1645,11 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 		return nil
 	}
 
-	apiKey := ""
-	// If an external token resolver is registered, use it for direct-provider mode too.
-	if tokenResolver != nil {
-		providerPrefix, modelID := splitModel(cfgModel)
-		if providerPrefix == "" {
-			providerPrefix = inferProvider(modelID, "")
-		}
-		resolvedKey, err := tokenResolver(context.Background(), providerPrefix)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for configured model %q: %v\n", cfgModel, err)
-			return nil
-		}
-		apiKey = resolvedKey
-	} else if req.TargetAPIKey != "" {
-		apiKey = req.TargetAPIKey
-	} else if p.cfg.APIKeyEnv != "" {
-		dotenvPath := filepath.Join(p.dataDir, ".env")
-		apiKey = ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath)
+	apiKey, err := p.resolveDirectProviderUpstreamKey(context.Background(), cfgModel, req.TargetAPIKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] external token resolver error for configured model %q: %v\n", cfgModel, err)
+		return nil
 	}
-
 	if apiKey == "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] no API key available for configured model %q\n", cfgModel)
 		return nil
@@ -1665,6 +1680,43 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 		return nil
 	}
 	return provider
+}
+
+// resolveDirectProviderUpstreamKey returns the upstream API key to use
+// when the proxy is operating in direct-provider mode (no
+// X-DC-Target-URL header, no connector-supplied key). Used by both the
+// chat/completions resolver (resolveConfiguredProvider) and the
+// passthrough handler, which need the same precedence so the Responses
+// API and chat completions behave identically against a custom
+// provider:
+//
+//  1. tokenResolver (the enterprise secrets-sidecar hook registered via
+//     SetTokenResolver). When set, this is the only source — failure
+//     short-circuits to an error so we don't accidentally fall back to
+//     a stale dotenv value when the sidecar is unreachable.
+//  2. inboundKey (typically req.TargetAPIKey from X-AI-Auth, only set
+//     on the chat/completions path). Empty on the passthrough path.
+//  3. p.cfg.APIKeyEnv + ~/.defenseclaw/.env dotenv lookup.
+//
+// Returns ("", nil) when none of the sources produced a key. Returns a
+// non-nil error only for tokenResolver failures (caller should fail
+// the request rather than fall back).
+func (p *GuardrailProxy) resolveDirectProviderUpstreamKey(ctx context.Context, cfgModel, inboundKey string) (string, error) {
+	if tokenResolver != nil {
+		providerPrefix, modelID := splitModel(cfgModel)
+		if providerPrefix == "" {
+			providerPrefix = inferProvider(modelID, "")
+		}
+		return tokenResolver(ctx, providerPrefix)
+	}
+	if inboundKey != "" {
+		return inboundKey, nil
+	}
+	if p.cfg != nil && p.cfg.APIKeyEnv != "" {
+		dotenvPath := filepath.Join(p.dataDir, ".env")
+		return ResolveAPIKey(p.cfg.APIKeyEnv, dotenvPath), nil
+	}
+	return "", nil
 }
 
 // hydrateConnectorSignals lets a connector whose agent has no fetch

@@ -881,6 +881,35 @@ responses in-process:
 - In `action` mode, terminates the stream early if a high-severity threat is detected
 - After the stream completes, runs the full multi-scanner inspection pipeline on assembled content
 
+## Upstream Hydration for the Responses API (Passthrough)
+
+`handlePassthrough` resolves the upstream URL and API key in three
+priority layers, so the OpenAI Responses API (`/v1/responses`,
+`/openai/v1/responses`) and other provider-native passthrough paths
+reach a custom upstream even when the agent has neither a fetch
+interceptor nor an `api_key` in its own config:
+
+1. `X-DC-Target-URL` header from the fetch interceptor.
+2. `ConnectorSignals.RawUpstream` from the active connector's snapshot
+   (e.g. ZeptoClaw's `~/.zeptoclaw/config.json` `api_base`+`api_key`).
+3. **Direct-provider fallback** — `llm.base_url` from the gateway
+   config, with the API key resolved through the same chain that
+   `resolveConfiguredProvider` uses on the chat path:
+   `tokenResolver` (the enterprise secrets-sidecar hook installed via
+   `gateway.SetTokenResolver`) → `req.TargetAPIKey` (chat path only) →
+   `ResolveAPIKey(p.cfg.APIKeyEnv, ~/.defenseclaw/.env)`.
+
+When all three layers come up empty the gateway returns
+`400 missing X-DC-Target-URL header and no llm.base_url configured`.
+
+The fallback is what lets the Responses API reach a custom
+OpenAI-compatible provider in topologies where ZeptoClaw (or another
+native-binary agent) is configured with only `api_base` pointing at the
+guardrail proxy and the actual upstream + key come from the gateway's
+own configuration. Full prompt / response / tool inspection runs
+identically regardless of which layer produced the upstream — only the
+resolution path differs.
+
 ## Hot Reload
 
 Mode and scanner_mode can be changed at runtime without restarting:
