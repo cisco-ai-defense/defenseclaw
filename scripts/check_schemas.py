@@ -62,6 +62,8 @@ EXPECTED_CLAW_MODE_ENUM = {
     "windsurf",
     "geminicli",
     "copilot",
+    "openhands",
+    "antigravity",
     "",
 }
 

@@ -248,6 +248,14 @@ func (l *Logger) emitGatewaySnapshot(emitter StructuredEmitter, ev gatewaylog.Ev
 	emitter.EmitGatewayEvent(ev)
 }
 
+// gatewayLogSinkActionNamespace prefixes the sink-only action key for
+// mirrored gatewaylog events ("gatewaylog.<event-type>"). This is a
+// sink-telemetry namespace, not an audit.Action registry member: the
+// concrete suffix is the dynamic gatewaylog event type, so it cannot be
+// a single curated enum value. Kept as a named constant so the call
+// site carries no raw audit-action string literal.
+const gatewayLogSinkActionNamespace = "gatewaylog."
+
 // ForwardGatewayEventToSinks mirrors native gatewaylog events that are
 // semantically useful to SIEM consumers into the audit sink fan-out. The
 // gatewaylog writer is the source of truth for these events; this method only
@@ -284,7 +292,7 @@ func (l *Logger) ForwardGatewayEventToSinks(ctx context.Context, ev gatewaylog.E
 	l.forwardSinkEventCtx(sinkCtx, sinksMgr, sinks.Event{
 		ID:                uuid.NewString(),
 		Timestamp:         ev.Timestamp,
-		Action:            "gatewaylog." + string(ev.EventType),
+		Action:            gatewayLogSinkActionNamespace + string(ev.EventType),
 		Target:            "gatewaylog",
 		Actor:             "defenseclaw",
 		Details:           fmt.Sprintf("event_type=%s", ev.EventType),

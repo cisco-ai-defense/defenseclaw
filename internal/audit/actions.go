@@ -183,6 +183,17 @@ const (
 	ActionGatewayDegraded             Action = "gateway-degraded"
 	ActionToolResultPIIAlert          Action = "tool-result-pii-alert"
 
+	// Gateway judge-bodies / judge-store sidecar lifecycle. These
+	// actions track the optional judge-response body store and the
+	// async judge-response persistence store as the gateway sidecar
+	// opens them, falls back to audit.db, drains on shutdown, and
+	// reports close failures.
+	ActionGatewayJudgeBodiesReady        Action = "gateway.judge_bodies.ready"
+	ActionGatewayJudgeBodiesFallback     Action = "gateway.judge_bodies.fallback"
+	ActionGatewayJudgeBodiesCloseSkipped Action = "gateway.judge_bodies.close_skipped"
+	ActionGatewayJudgeBodiesCloseError   Action = "gateway.judge_bodies.close_error"
+	ActionGatewayJudgeStoreDrainTimeout  Action = "gateway.judge_store.drain_timeout"
+
 	// Guardrail and inspect instrumentation. These actions describe
 	// proxy health, verdict/inspection rows, OPA evaluation, guardrail
 	// config changes, inspect-tool decisions, and judge summaries.
@@ -377,6 +388,11 @@ func AllActions() []Action {
 		ActionGatewayRecovered,
 		ActionGatewayDegraded,
 		ActionToolResultPIIAlert,
+		ActionGatewayJudgeBodiesReady,
+		ActionGatewayJudgeBodiesFallback,
+		ActionGatewayJudgeBodiesCloseSkipped,
+		ActionGatewayJudgeBodiesCloseError,
+		ActionGatewayJudgeStoreDrainTimeout,
 		ActionGuardrailStart,
 		ActionGuardrailHealthy,
 		ActionGuardrailVerdict,

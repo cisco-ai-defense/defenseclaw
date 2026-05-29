@@ -383,7 +383,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 			inserter = &judgeBodyStoreInserter{s: bs}
 			if logger != nil {
 				_ = logger.LogEvent(audit.Event{
-					Action:   "gateway.judge_bodies.ready",
+					Action:   string(audit.ActionGatewayJudgeBodiesReady),
 					Actor:    "defenseclaw-gateway",
 					Severity: "INFO",
 					Details:  "path=" + bodyDBPath,
@@ -392,7 +392,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		} else {
 			if logger != nil {
 				_ = logger.LogEvent(audit.Event{
-					Action:   "gateway.judge_bodies.fallback",
+					Action:   string(audit.ActionGatewayJudgeBodiesFallback),
 					Actor:    "defenseclaw-gateway",
 					Severity: "ERROR",
 					Details: fmt.Sprintf(
@@ -599,7 +599,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		if err := s.judgeStore.Shutdown(ctx); err != nil {
 			if s.logger != nil {
 				_ = s.logger.LogEvent(audit.Event{
-					Action:   "gateway.judge_store.drain_timeout",
+					Action:   string(audit.ActionGatewayJudgeStoreDrainTimeout),
 					Actor:    "defenseclaw-gateway",
 					Severity: "ERROR",
 					Details:  "error=" + err.Error(),
@@ -628,7 +628,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		if !judgeStoreClosed {
 			if s.logger != nil {
 				_ = s.logger.LogEvent(audit.Event{
-					Action:   "gateway.judge_bodies.close_skipped",
+					Action:   string(audit.ActionGatewayJudgeBodiesCloseSkipped),
 					Actor:    "defenseclaw-gateway",
 					Severity: "ERROR",
 					Details:  "reason=worker_still_running",
@@ -639,7 +639,7 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		} else if err := s.judgeBodyStore.Close(); err != nil {
 			if s.logger != nil {
 				_ = s.logger.LogEvent(audit.Event{
-					Action:   "gateway.judge_bodies.close_error",
+					Action:   string(audit.ActionGatewayJudgeBodiesCloseError),
 					Actor:    "defenseclaw-gateway",
 					Severity: "ERROR",
 					Details:  "error=" + err.Error(),

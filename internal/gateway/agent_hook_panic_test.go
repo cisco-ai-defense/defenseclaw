@@ -403,27 +403,3 @@ func TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit(t *testing.T) {
 		t.Fatalf("connector-hook audit row count = %d, want exactly 1 (post-finalize panic must not re-run finalizeAgentHook)", connectorHookRows)
 	}
 }
-
-// itoa is a tiny helper that avoids strconv import for the single
-// truncation-count comparison.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
-}

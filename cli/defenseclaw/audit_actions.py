@@ -161,6 +161,13 @@ ACTION_GATEWAY_RECOVERED: Final[str] = "gateway-recovered"
 ACTION_GATEWAY_DEGRADED: Final[str] = "gateway-degraded"
 ACTION_TOOL_RESULT_PII_ALERT: Final[str] = "tool-result-pii-alert"
 
+# Gateway judge-bodies / judge-store sidecar lifecycle.
+ACTION_GATEWAY_JUDGE_BODIES_READY: Final[str] = "gateway.judge_bodies.ready"
+ACTION_GATEWAY_JUDGE_BODIES_FALLBACK: Final[str] = "gateway.judge_bodies.fallback"
+ACTION_GATEWAY_JUDGE_BODIES_CLOSE_SKIPPED: Final[str] = "gateway.judge_bodies.close_skipped"
+ACTION_GATEWAY_JUDGE_BODIES_CLOSE_ERROR: Final[str] = "gateway.judge_bodies.close_error"
+ACTION_GATEWAY_JUDGE_STORE_DRAIN_TIMEOUT: Final[str] = "gateway.judge_store.drain_timeout"
+
 # Guardrail and inspect instrumentation.
 ACTION_GUARDRAIL_START: Final[str] = "guardrail-start"
 ACTION_GUARDRAIL_HEALTHY: Final[str] = "guardrail-healthy"
@@ -346,6 +353,11 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_GATEWAY_RECOVERED,
     ACTION_GATEWAY_DEGRADED,
     ACTION_TOOL_RESULT_PII_ALERT,
+    ACTION_GATEWAY_JUDGE_BODIES_READY,
+    ACTION_GATEWAY_JUDGE_BODIES_FALLBACK,
+    ACTION_GATEWAY_JUDGE_BODIES_CLOSE_SKIPPED,
+    ACTION_GATEWAY_JUDGE_BODIES_CLOSE_ERROR,
+    ACTION_GATEWAY_JUDGE_STORE_DRAIN_TIMEOUT,
     ACTION_GUARDRAIL_START,
     ACTION_GUARDRAIL_HEALTHY,
     ACTION_GUARDRAIL_VERDICT,

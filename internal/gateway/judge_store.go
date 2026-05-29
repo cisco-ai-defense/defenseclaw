@@ -456,7 +456,7 @@ func (j *JudgeStore) fanoutAudit(jb judgePersistJob) {
 		DestinationApp: jb.destApp,
 	})
 	evt := audit.Event{
-		Action:   "llm-judge-response",
+		Action:   string(audit.ActionLLMJudgeResponse),
 		Target:   jb.payload.Model,
 		Actor:    "defenseclaw-gateway",
 		Severity: string(jb.payload.Severity),

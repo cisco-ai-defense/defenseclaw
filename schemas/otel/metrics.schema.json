@@ -275,6 +275,12 @@
       "description": "Gateway events written through the writer choke point"
     },
     {
+      "name": "defenseclaw.gateway.forwarded_headers",
+      "type": "counter",
+      "unit": "{header}",
+      "description": "Inbound HTTP headers forwarded from the agent to the upstream LLM provider (path=chat-completions|passthrough, result=ok|rejected_invalid|rejected_overflow)"
+    },
+    {
       "name": "defenseclaw.gateway.judge.errors",
       "type": "counter",
       "unit": "{error}",
@@ -363,6 +369,24 @@
       "type": "histogram",
       "unit": "ms",
       "description": "Tool/message inspect latency distribution"
+    },
+    {
+      "name": "defenseclaw.judge.persist.batch_size",
+      "type": "histogram",
+      "unit": "{row}",
+      "description": "Rows committed per judge-persistence transaction"
+    },
+    {
+      "name": "defenseclaw.judge.persist.drops",
+      "type": "counter",
+      "unit": "{drop}",
+      "description": "Judge bodies dropped before persistence (queue full)"
+    },
+    {
+      "name": "defenseclaw.judge.persist.queue_depth",
+      "type": "gauge",
+      "unit": "{item}",
+      "description": "Current depth of the async judge-persistence queue"
     },
     {
       "name": "defenseclaw.judge.semaphore.depth",
