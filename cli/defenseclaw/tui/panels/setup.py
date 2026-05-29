@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import os
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any, Literal
@@ -21,6 +23,16 @@ from typing import Any, Literal
 from defenseclaw import config as dc_config
 from defenseclaw.tui.services.cli_choices import (
     AI_DISCOVERY_MODES,
+    AZURE_AUTH_MODES,
+    BEDROCK_AUTH_MODES,
+    CUSTOM_PROVIDER_BASE_TYPES,
+    CUSTOM_PROVIDER_REQUEST_TYPES,
+    GUARDRAIL_JUDGE_INHERIT_PATHS,
+    GUARDRAIL_JUDGE_LLM_ROLES,
+    LLM_INHERIT_PATHS,
+    LLM_ROLES,
+    REGIONAL_PROVIDERS,
+    VERTEX_AUTH_MODES,
 )
 from defenseclaw.tui.services.cli_choices import (
     CONNECTORS as _CHOICE_CONNECTORS,
@@ -231,6 +243,19 @@ class WizardFormField:
     options: tuple[str, ...] = ()
     hint: str = ""
     required: bool = False
+    # Optional predicate that decides whether this field is shown for the
+    # current driver-field values (e.g. only show Bedrock rows when the
+    # selected provider is ``bedrock``). ``None`` means "always visible".
+    # Excluded from equality/repr so existing argv/parity tests that
+    # compare fields by their data values stay stable when a predicate is
+    # attached.
+    visible_when: Callable[[Mapping[str, str]], bool] | None = dataclass_field(
+        default=None, compare=False, repr=False
+    )
+    # Optional model-picker hook. When set, pressing Enter on this field
+    # opens the searchable ModelPickerScreen instead of submitting the
+    # form. The string is the picker mode (currently only ``"llm"``).
+    picker: str = dataclass_field(default="", compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.hint or self.kind == "section":
@@ -248,7 +273,17 @@ class WizardFormField:
             self.options,
             self.hint,
             self.required,
+            visible_when=self.visible_when,
+            picker=self.picker,
         )
+
+    def is_visible(self, driver_values: Mapping[str, str]) -> bool:
+        if self.visible_when is None:
+            return True
+        try:
+            return bool(self.visible_when(driver_values))
+        except Exception:  # noqa: BLE001 - a bad predicate must never crash the form.
+            return True
 
 
 @dataclass(frozen=True)
@@ -261,6 +296,7 @@ class SetupPanelAction:
     open_resource_editor: str = ""
     refresh_credentials: bool = False
     clear_restart_queue: bool = False
+    open_model_picker: bool = False
 
 
 @dataclass(frozen=True)
@@ -919,6 +955,31 @@ class SetupPanelModel:
         self.form_reveal = False
         self.form_error = ""
 
+    def recompute_dependent_fields(self) -> None:
+        """Rebuild the active form when a driver field (provider/role/action)
+        changed, re-deriving conditional groups and dynamic option lists
+        while preserving every value the operator already entered.
+
+        Called from the app's single field-write chokepoint after a driver
+        row changes. No-op for wizards without dependent fields.
+        """
+
+        rebuild = _DEPENDENT_FIELD_REBUILDERS.get(self.active_wizard)
+        if rebuild is None:
+            return
+        overrides = _field_value_overrides(self.form_fields)
+        self.form_fields = list(rebuild(overrides, self.config))
+        if self.form_fields:
+            self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
+            # Keep the cursor off a freshly-revealed section divider.
+            if self.form_fields[self.form_cursor].kind == "section":
+                for offset, field in enumerate(self.form_fields[self.form_cursor :], start=self.form_cursor):
+                    if field.kind != "section":
+                        self.form_cursor = offset
+                        break
+        else:
+            self.form_cursor = 0
+
     def toggle_form_reveal(self) -> bool:
         if not any(field.kind == "password" for field in self.form_fields):
             return False
@@ -1328,18 +1389,129 @@ def _token_rotation_wizard_fields() -> tuple[WizardFormField, ...]:
     )
 
 
-def _custom_providers_wizard_fields() -> tuple[WizardFormField, ...]:
-    return (
+def _custom_action_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
+    targets = {n.strip().lower() for n in names}
+    return lambda dv: (dv.get("action", "") or "").strip().lower() in targets
+
+
+def _custom_base_type_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
+    targets = {n.strip().lower() for n in names}
+
+    def predicate(dv: Mapping[str, str]) -> bool:
+        if (dv.get("action", "") or "").strip().lower() != "add":
+            return False
+        return (dv.get("base_type", "") or "").strip().lower() in targets
+
+    return predicate
+
+
+def _custom_providers_fields_for(overrides: Mapping[str, str] | None = None) -> tuple[WizardFormField, ...]:
+    overrides = overrides or {}
+    action = (overrides.get("@Action") or "list").strip().lower() or "list"
+    base_type = (overrides.get("--base-provider-type") or "").strip().lower()
+    is_add = _custom_action_is("add")
+    is_add_or_remove = _custom_action_is("add", "remove")
+    is_bedrock = _custom_base_type_is("bedrock")
+    is_vertex = _custom_base_type_is("vertex_ai")
+    is_azure = _custom_base_type_is("azure")
+    candidates: tuple[WizardFormField, ...] = (
+        WizardFormField("Action", "choice", value="list", default="list", options=("list", "show", "add", "remove")),
+        WizardFormField("Name", "string", visible_when=is_add_or_remove, required=True),
         WizardFormField(
-            "Action", "choice", value="list", default="list", options=("list", "show", "add", "remove")
+            "Domains", "string", hint="LLM allow-list domains, comma-separated.", visible_when=is_add
         ),
-        WizardFormField("Name", "string"),
-        WizardFormField("Domains", "string"),
-        WizardFormField("Env Keys", "string"),
-        WizardFormField("Profile ID", "string"),
-        WizardFormField("Ollama Ports", "string"),
-        WizardFormField("Reload Sidecar", "bool", value="yes", default="yes"),
+        WizardFormField(
+            "Base Provider Type",
+            "choice",
+            "--base-provider-type",
+            value="",
+            default="",
+            options=CUSTOM_PROVIDER_BASE_TYPES,
+            hint="Upstream family; blank infers from model prefix.",
+            visible_when=is_add,
+        ),
+        WizardFormField("Base URL", "string", "--base-url", hint="https://llm.internal:8443", visible_when=is_add),
+        WizardFormField(
+            "Available Models (CSV)",
+            "string",
+            "--available-model",
+            hint="Model ids served by this instance, comma-separated.",
+            visible_when=is_add,
+        ),
+        WizardFormField(
+            "Allowed Requests (CSV)",
+            "string",
+            "--allowed-request",
+            hint=f"Subset of {', '.join(CUSTOM_PROVIDER_REQUEST_TYPES)}; blank=all.",
+            visible_when=is_add,
+        ),
+        WizardFormField(
+            "Request Path Overrides (CSV)",
+            "string",
+            "--request-path-override",
+            hint="key=value pairs, e.g. chat=/openai/v1/chat/completions.",
+            visible_when=is_add,
+        ),
+        WizardFormField("Env Keys", "string", hint="API-key env vars, comma-separated.", visible_when=is_add),
+        WizardFormField("Profile ID", "string", visible_when=is_add),
+        WizardFormField("Ollama Ports", "string", hint="Extra loopback ports, comma-separated.", visible_when=is_add),
+        WizardFormField(
+            "CA Cert File", "string", "--ca-cert-file", hint="PEM CA bundle for self-signed certs.", visible_when=is_add
+        ),
+        WizardFormField(
+            "Insecure Skip Verify",
+            "bool",
+            "--insecure-skip-verify",
+            value="no",
+            default="no",
+            hint="Disable TLS verification (trusted labs only).",
+            visible_when=is_add,
+        ),
+        WizardFormField("Bedrock", "section", visible_when=is_bedrock),
+        WizardFormField("Region", "string", "--bedrock-region", visible_when=is_bedrock),
+        WizardFormField(
+            "Auth Mode", "choice", "--bedrock-auth-mode", options=BEDROCK_AUTH_MODES, visible_when=is_bedrock
+        ),
+        WizardFormField("Access Key Env", "string", "--bedrock-access-key-env", visible_when=is_bedrock),
+        WizardFormField("Secret Key Env", "string", "--bedrock-secret-key-env", visible_when=is_bedrock),
+        WizardFormField("Session Token Env", "string", "--bedrock-session-token-env", visible_when=is_bedrock),
+        WizardFormField("Profile Name", "string", "--bedrock-profile-name", visible_when=is_bedrock),
+        WizardFormField("Inference Profile", "string", "--bedrock-inference-profile", visible_when=is_bedrock),
+        WizardFormField(
+            "Deployment Aliases (CSV)",
+            "string",
+            "--bedrock-deployment",
+            hint="alias=model-id pairs, comma-separated.",
+            visible_when=is_bedrock,
+        ),
+        WizardFormField("Vertex AI", "section", visible_when=is_vertex),
+        WizardFormField("Project ID", "string", "--vertex-project-id", visible_when=is_vertex),
+        WizardFormField("Region", "string", "--vertex-region", visible_when=is_vertex),
+        WizardFormField(
+            "Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex
+        ),
+        WizardFormField(
+            "Service Account JSON Env", "string", "--vertex-service-account-json-env", visible_when=is_vertex
+        ),
+        WizardFormField("Azure", "section", visible_when=is_azure),
+        WizardFormField("Endpoint", "string", "--azure-endpoint", visible_when=is_azure),
+        WizardFormField("API Version", "string", "--azure-api-version", visible_when=is_azure),
+        WizardFormField("Auth Mode", "choice", "--azure-auth-mode", options=AZURE_AUTH_MODES, visible_when=is_azure),
+        WizardFormField(
+            "Deployment Aliases (CSV)",
+            "string",
+            "--azure-deployment-alias",
+            hint="model=deployment pairs, comma-separated.",
+            visible_when=is_azure,
+        ),
+        WizardFormField("Reload Sidecar", "bool", value="yes", default="yes", visible_when=is_add_or_remove),
     )
+    driver = {"action": action, "base_type": base_type}
+    return _apply_dynamic_fields(candidates, overrides, driver)
+
+
+def _custom_providers_wizard_fields() -> tuple[WizardFormField, ...]:
+    return _custom_providers_fields_for({})
 
 
 def wizard_form_defs(
@@ -1492,6 +1664,22 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.NOTIFICATIONS_ROUTING: lambda cfg=None: notifications_routing_wizard_fields(cfg),
     SetupWizard.AI_DISCOVERY: lambda cfg=None: ai_discovery_wizard_fields(cfg),
     SetupWizard.SPLUNK_DASHBOARDS: lambda cfg=None: splunk_dashboards_wizard_fields(),
+}
+
+
+# Wizards whose form re-derives when a driver field changes. Each rebuilder
+# takes ``(overrides, cfg)`` where ``overrides`` is the by-flag snapshot of
+# current values, and returns the filtered field list for the new driver
+# selection. Lambdas keep resolution lazy so the builders can live anywhere.
+_DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
+    SetupWizard.LLM: lambda overrides, cfg: _llm_wizard_fields_for(
+        provider=overrides.get("--provider", "anthropic"),
+        role=overrides.get("--role", "unified"),
+        overrides=overrides,
+        cfg=cfg,
+    ),
+    SetupWizard.GUARDRAIL: lambda overrides, cfg: _guardrail_wizard_fields_for(overrides, cfg),
+    SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
 }
 
 
@@ -1883,6 +2071,13 @@ def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tupl
     return WIZARD_COMMANDS[SetupWizard.NOTIFICATIONS_ROUTING]
 
 
+# Guardrail judge flags whose CSV field value repeats once per item, matching
+# the CLI's ``multiple=True`` options (fallbacks + regional deployment aliases).
+_GUARDRAIL_REPEATABLE_FLAGS: frozenset[str] = frozenset(
+    {"--judge-bedrock-deployment", "--judge-azure-deployment-alias"}
+)
+
+
 def build_wizard_args(
     wizard: SetupWizard | int,
     fields: Sequence[WizardFormField],
@@ -1967,11 +2162,12 @@ def build_wizard_args(
             judge_dirty = judge_dirty or field.value != field.default
             continue
         if field.kind == "bool":
+            # ``--human-approval`` / ``--disable-redaction`` are tri-state on
+            # the CLI (default=None), so emit the explicit on/off form rather
+            # than relying on the "skip when value==default" shortcut.
             if wizard == SetupWizard.GUARDRAIL and field.flag in {
                 "--human-approval",
                 "--disable-redaction",
-                "--judge",
-                "--share-judge-key-with-scanners",
             }:
                 if field.value == "yes" and field.flag:
                     base.append(field.flag)
@@ -1990,12 +2186,12 @@ def build_wizard_args(
                 continue
             if not always_pass_defaults and field.value == field.default and not field.required:
                 continue
-            # CSV-style multi-flag fields (e.g. --judge-fallback) repeat
-            # the flag once per value.
-            if field.flag == "--judge-fallback":
+            # CSV-style multi-flag fields (e.g. --judge-fallback, the judge
+            # regional deployment aliases) repeat the flag once per value.
+            if field.flag in _GUARDRAIL_REPEATABLE_FLAGS:
                 for item in (chunk.strip() for chunk in field.value.split(",")):
                     if item:
-                        base.extend(("--judge-fallback", item))
+                        base.extend((field.flag, item))
                 continue
             base.extend((field.flag, field.value))
 
@@ -2012,6 +2208,7 @@ def build_wizard_args(
 _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.CONNECTOR_SETUP: lambda fields: _build_connector_setup_args(fields),
     SetupWizard.CREDENTIALS: lambda fields: _build_credentials_args(fields),
+    SetupWizard.LLM: lambda fields: _build_llm_args(fields),
     SetupWizard.LOCAL_OBSERVABILITY: lambda fields: _build_local_observability_args(fields),
     SetupWizard.TOKEN_ROTATION: lambda fields: _build_token_rotation_args(fields),
     SetupWizard.CUSTOM_PROVIDERS: lambda fields: _build_custom_provider_args(fields),
@@ -2033,8 +2230,14 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Name"):
             missing.append("Name")
-        if action == "add" and not wizard_field_value(fields, "Domains"):
-            missing.append("Domains")
+        # ``setup provider add`` accepts either a domain allow-list or a
+        # --base-url; require at least one rather than mandating Domains.
+        if (
+            action == "add"
+            and not wizard_field_value(fields, "Domains")
+            and not wizard_field_value(fields, "Base URL")
+        ):
+            missing.append("Domains or Base URL")
     for field in fields:
         if not field.required or field.kind in {"section", "preset", "whtype", "regid", "bool"}:
             continue
@@ -2139,52 +2342,321 @@ def connector_setup_wizard_fields(cfg: object | Mapping[str, Any] | None = None)
     )
 
 
-def llm_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
-    provider = str(get_config_value(cfg, "llm.provider", "anthropic") or "anthropic")
+# ---------------------------------------------------------------------------
+# Dynamic dependent-field machinery (connector-aware LLM / guardrail judge /
+# custom-provider wizards). These wizards expose provider-specific field
+# groups (Bedrock / Vertex / Azure / TLS) that appear only for the matching
+# provider. The TUI is a pure argv builder, so we reuse the *pure* catalog
+# readers from ``defenseclaw.commands._llm_picker`` (no interactive pickers)
+# to populate model/region choices, and emit each selection as a ``--flag``.
+# ---------------------------------------------------------------------------
+
+
+def _llm_data_dir(cfg: object | Mapping[str, Any] | None) -> str:
+    """Best-effort DefenseClaw data dir for custom-provider overlay reads."""
+    for attr in ("data_dir", "config_dir", "home"):
+        val = getattr(cfg, attr, "")
+        if isinstance(val, str) and val:
+            return val
+    env = os.environ.get("DEFENSECLAW_HOME")
+    if env:
+        return env
+    return os.path.expanduser("~/.defenseclaw")
+
+
+def _llm_catalog_provider_choices() -> tuple[str, ...]:
+    """Canonical provider ids, catalog order first, plus ``custom``."""
+    base: list[str] = []
+    try:
+        from defenseclaw.commands import _llm_picker  # noqa: PLC0415
+
+        base = [str(p.get("name", "")).strip() for p in _llm_picker.catalog_providers()]
+        base = [name for name in base if name]
+    except Exception:  # noqa: BLE001 - degrade to the static list.
+        base = []
+    if not base:
+        base = list(_WIZARD_LLM_PROVIDERS)
+    base.append("custom")
+    return tuple(dict.fromkeys(base))
+
+
+def llm_catalog_models(provider: str, instance_name: str = "", data_dir: str = "") -> tuple[str, ...]:
+    """Curated model ids for ``provider`` (or a custom instance's models)."""
+    try:
+        from defenseclaw.commands import _llm_picker  # noqa: PLC0415
+
+        models: list[str] = []
+        if instance_name:
+            inst = _llm_picker.custom_instance(data_dir, instance_name)
+            if inst:
+                models = [str(m) for m in (inst.get("available_models") or []) if m]
+        if not models:
+            entry = _llm_picker.catalog_entry(provider)
+            if entry:
+                models = [str(m) for m in (entry.get("models") or []) if m]
+        return tuple(models)
+    except Exception:  # noqa: BLE001 - the picker falls back to free text.
+        return ()
+
+
+def _llm_catalog_regions(provider: str) -> tuple[str, ...]:
+    try:
+        from defenseclaw.commands import _llm_picker  # noqa: PLC0415
+
+        entry = _llm_picker.catalog_entry(provider) or {}
+        return tuple(str(r) for r in (entry.get("regions") or []) if r)
+    except Exception:  # noqa: BLE001
+        return ()
+
+
+def llm_model_candidates(
+    fields: Sequence[WizardFormField],
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[str, ...]:
+    """Curated model ids for the provider/instance currently selected in *fields*.
+
+    Used by the searchable model picker so the modal can offer catalog
+    suggestions while still accepting any free-text model id.
+    """
+
+    provider = (wizard_field_value(fields, "Provider") or "anthropic").strip().lower()
+    instance = (wizard_field_value(fields, "Instance Name") or "").strip()
+    return llm_catalog_models(provider, instance, _llm_data_dir(cfg))
+
+
+def _provider_is(*names: str) -> Callable[[Mapping[str, str]], bool]:
+    targets = {n.strip().lower() for n in names}
+    return lambda dv: (dv.get("provider", "") or "").strip().lower() in targets
+
+
+def _provider_regional_or_custom(dv: Mapping[str, str]) -> bool:
+    provider = (dv.get("provider", "") or "").strip().lower()
+    return provider in REGIONAL_PROVIDERS or provider == "custom"
+
+
+def _field_value_overrides(fields: Sequence[WizardFormField]) -> dict[str, str]:
+    """Snapshot current field values keyed by flag (``@label`` fallback).
+
+    Keying by flag keeps preserved values stable across a dependent-field
+    rebuild even when two provider groups reuse a label (e.g. both Bedrock
+    and Vertex have an ``Auth Mode`` row) — their flags differ, so values
+    never collide.
+    """
+
+    out: dict[str, str] = {}
+    for field in fields:
+        if field.kind == "section":
+            continue
+        key = field.flag or ("@" + field.label)
+        out[key] = field.value
+    return out
+
+
+def _apply_dynamic_fields(
+    candidates: Sequence[WizardFormField],
+    overrides: Mapping[str, str],
+    driver: Mapping[str, str],
+) -> tuple[WizardFormField, ...]:
+    """Filter ``candidates`` by visibility and overlay preserved values."""
+    out: list[WizardFormField] = []
+    for field in candidates:
+        if not field.is_visible(driver):
+            continue
+        if field.kind != "section":
+            key = field.flag or ("@" + field.label)
+            if key in overrides:
+                field = field.with_value(overrides[key])
+        out.append(field)
+    return tuple(out)
+
+
+def _llm_wizard_fields_for(
+    *,
+    provider: str,
+    role: str,
+    overrides: Mapping[str, str],
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[WizardFormField, ...]:
+    provider = (provider or "anthropic").strip().lower() or "anthropic"
+    role = (role or "unified").strip().lower() or "unified"
+    if role not in LLM_ROLES:
+        role = "unified"
+    provider_default = str(get_config_value(cfg, "llm.provider", "anthropic") or "anthropic").strip().lower()
     api_key_env = str(
         get_config_value(cfg, "llm.api_key_env", dc_config.DEFENSECLAW_LLM_KEY_ENV) or dc_config.DEFENSECLAW_LLM_KEY_ENV
     )
     timeout = str(get_config_value(cfg, "llm.timeout", 30) or 30)
     retries = str(get_config_value(cfg, "llm.max_retries", 2) or 2)
-    return (
+    model_default = str(get_config_value(cfg, "llm.model", "") or "")
+    base_url_default = str(get_config_value(cfg, "llm.base_url", "") or "")
+    region_opts = _llm_catalog_regions(provider)
+    is_bedrock = _provider_is("bedrock")
+    is_vertex = _provider_is("vertex_ai")
+    is_azure = _provider_is("azure")
+
+    candidates: tuple[WizardFormField, ...] = (
+        WizardFormField("Role", "choice", "--role", value=role, default="unified", options=LLM_ROLES, required=True),
         WizardFormField(
-            "Provider", "choice", "--provider", value=provider, default=provider, options=LLM_PROVIDERS, required=True
+            "Provider",
+            "choice",
+            "--provider",
+            value=provider,
+            default=provider_default or "anthropic",
+            options=_llm_catalog_provider_choices(),
+            required=True,
         ),
         WizardFormField(
-            "Model",
+            "Instance Name",
             "string",
-            "--model",
-            value=str(get_config_value(cfg, "llm.model", "") or ""),
-            default=str(get_config_value(cfg, "llm.model", "") or ""),
-            required=True,
+            "--instance-name",
+            hint="Custom-provider instance from `setup provider add` (optional).",
+        ),
+        WizardFormField(
+            "Model", "string", "--model", value=model_default, default=model_default, required=True, picker="llm"
         ),
         WizardFormField("API Key Env", "string", "--api-key-env", value=api_key_env, default=api_key_env),
         WizardFormField("API Key", "password", "--api-key"),
-        WizardFormField(
-            "Base URL",
-            "string",
-            "--base-url",
-            value=str(get_config_value(cfg, "llm.base_url", "") or ""),
-            default=str(get_config_value(cfg, "llm.base_url", "") or ""),
-        ),
+        WizardFormField("Base URL", "string", "--base-url", value=base_url_default, default=base_url_default),
         WizardFormField("Timeout", "int", "--timeout", value=timeout, default=timeout),
         WizardFormField("Max Retries", "int", "--max-retries", value=retries, default=retries),
+        WizardFormField("Bedrock", "section", visible_when=is_bedrock),
+        WizardFormField(
+            "Region",
+            "choice" if region_opts else "string",
+            "--bedrock-region",
+            options=region_opts,
+            hint="AWS region, e.g. us-east-1.",
+            visible_when=is_bedrock,
+        ),
+        WizardFormField(
+            "Auth Mode", "choice", "--bedrock-auth-mode", options=BEDROCK_AUTH_MODES, visible_when=is_bedrock
+        ),
+        WizardFormField("Access Key Env", "string", "--bedrock-access-key-env", visible_when=is_bedrock),
+        WizardFormField("Secret Key Env", "string", "--bedrock-secret-key-env", visible_when=is_bedrock),
+        WizardFormField("Session Token Env", "string", "--bedrock-session-token-env", visible_when=is_bedrock),
+        WizardFormField("Profile Name", "string", "--bedrock-profile-name", visible_when=is_bedrock),
+        WizardFormField("Inference Profile", "string", "--bedrock-inference-profile", visible_when=is_bedrock),
+        WizardFormField(
+            "Deployment Aliases (CSV)",
+            "string",
+            "--bedrock-deployment",
+            hint="alias=model-id pairs, comma-separated (repeatable).",
+            visible_when=is_bedrock,
+        ),
+        WizardFormField("Vertex AI", "section", visible_when=is_vertex),
+        WizardFormField("Project ID", "string", "--vertex-project-id", visible_when=is_vertex),
+        WizardFormField("Region", "string", "--vertex-region", hint="GCP location, e.g. us-central1.", visible_when=is_vertex),
+        WizardFormField("Auth Mode", "choice", "--vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=is_vertex),
+        WizardFormField(
+            "Service Account JSON Env", "string", "--vertex-service-account-json-env", visible_when=is_vertex
+        ),
+        WizardFormField("Azure", "section", visible_when=is_azure),
+        WizardFormField(
+            "Endpoint", "string", "--azure-endpoint", hint="https://name.openai.azure.com", visible_when=is_azure
+        ),
+        WizardFormField("API Version", "string", "--azure-api-version", hint="e.g. 2024-10-21.", visible_when=is_azure),
+        WizardFormField("Auth Mode", "choice", "--azure-auth-mode", options=AZURE_AUTH_MODES, visible_when=is_azure),
+        WizardFormField(
+            "Deployment Aliases (CSV)",
+            "string",
+            "--azure-deployment-alias",
+            hint="model=deployment pairs, comma-separated (repeatable).",
+            visible_when=is_azure,
+        ),
+        WizardFormField("TLS", "section", visible_when=_provider_regional_or_custom),
+        WizardFormField(
+            "TLS CA Cert File",
+            "string",
+            "--tls-ca-cert-file",
+            hint="PEM CA bundle for self-signed endpoints.",
+            visible_when=_provider_regional_or_custom,
+        ),
+        WizardFormField(
+            "Insecure Skip Verify",
+            "bool",
+            "--insecure-skip-verify",
+            value="no",
+            default="no",
+            hint="Disable TLS verification (lab use only).",
+            visible_when=_provider_regional_or_custom,
+        ),
+        WizardFormField("Apply", "section"),
+        WizardFormField(
+            "Inherit From",
+            "choice",
+            "--inherit-from",
+            value="",
+            default="",
+            options=("", *LLM_INHERIT_PATHS),
+            hint="Copy a sibling LLM block before applying flags (optional).",
+        ),
+        WizardFormField(
+            "Ping After Save",
+            "bool",
+            "--ping",
+            "--no-ping",
+            value="no",
+            default="no",
+            hint="Send a one-shot reachability probe after saving.",
+        ),
     )
+    driver = {"provider": provider, "role": role}
+    return _apply_dynamic_fields(candidates, overrides, driver)
 
 
-def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
+def llm_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
+    provider = str(get_config_value(cfg, "llm.provider", "anthropic") or "anthropic").strip().lower() or "anthropic"
+    return _llm_wizard_fields_for(provider=provider, role="unified", overrides={}, cfg=cfg)
+
+
+# Repeatable flags whose CSV field value fans out to one ``--flag value``
+# pair per comma-separated item (mirrors ``multiple=True`` on the CLI).
+_LLM_REPEATABLE_FLAGS: frozenset[str] = frozenset({"--bedrock-deployment", "--azure-deployment-alias"})
+
+
+def _build_llm_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    """Translate the connector-aware LLM wizard form into ``setup llm`` argv.
+
+    Only the *visible* fields reach this builder (the model already pruned
+    the hidden provider groups), so every non-empty string/choice row maps
+    1:1 to its ``--flag value``. ``--role`` is always emitted because it is
+    the selector that decides where the block is written.
+    """
+
+    base: list[str] = ["setup", "llm", "--non-interactive"]
+    for field in fields:
+        if field.kind == "section":
+            continue
+        if field.kind == "bool":
+            if field.value == field.default:
+                continue
+            if field.value == "yes" and field.flag:
+                base.append(field.flag)
+            elif field.value == "no" and field.no_flag:
+                base.append(field.no_flag)
+            continue
+        if not field.flag:
+            continue
+        value = field.value.strip()
+        if not value:
+            continue
+        if field.flag in _LLM_REPEATABLE_FLAGS:
+            for item in split_csv(value):
+                if item:
+                    base.extend((field.flag, item))
+            continue
+        base.extend((field.flag, value))
+    return tuple(base)
+
+
+def _guardrail_wizard_fields_for(
+    overrides: Mapping[str, str] | None = None,
+    cfg: object | Mapping[str, Any] | None = None,
+) -> tuple[WizardFormField, ...]:
+    overrides = overrides or {}
     connector = str(get_config_value(cfg, "guardrail.connector", "") or "")
     if not connector:
         connector = str(get_config_value(cfg, "claw.mode", "openclaw") or "openclaw")
-    fail_mode = str(get_config_value(cfg, "guardrail.hook_fail_mode", "open") or "open").lower()
-    if fail_mode not in {"open", "closed"}:
-        fail_mode = "open"
-    judge_enabled_default = "yes" if bool(get_config_value(cfg, "guardrail.judge.enabled", False)) else "no"
-    judge_fallbacks_raw = get_config_value(cfg, "guardrail.judge.fallbacks", []) or []
-    if isinstance(judge_fallbacks_raw, (list, tuple)):
-        judge_fallbacks_csv = ",".join(str(item) for item in judge_fallbacks_raw if str(item).strip())
-    else:
-        judge_fallbacks_csv = str(judge_fallbacks_raw)
     mode = str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
     scanner_mode = str(get_config_value(cfg, "guardrail.scanner_mode", "local") or "local")
     strategy = str(get_config_value(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only")
@@ -2203,6 +2675,9 @@ def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tu
         if provider := str(get_config_value(cfg, "llm.provider", "") or ""):
             judge_provider = provider
             judge_provider_default = provider
+    # A live provider change (driver) wins so the conditional Bedrock /
+    # Vertex / Azure judge groups re-derive against the new selection.
+    judge_provider = (overrides.get("@Provider") or judge_provider).strip().lower() or judge_provider
     judge_key_env = str(get_config_value(cfg, "guardrail.judge.api_key_env", "") or "")
     judge_key_default = ""
     if not judge_key_env:
@@ -2215,7 +2690,11 @@ def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tu
         judge_base_default = judge_base
     hilt = "yes" if bool(get_config_value(cfg, "guardrail.hilt.enabled", False)) else "no"
     redaction = "yes" if bool(get_config_value(cfg, "privacy.disable_redaction", False)) else "no"
-    return (
+    j_bedrock = _provider_is("bedrock")
+    j_vertex = _provider_is("vertex_ai", "vertex")
+    j_azure = _provider_is("azure")
+    j_region_opts = _llm_catalog_regions(judge_provider)
+    candidates: tuple[WizardFormField, ...] = (
         WizardFormField("Core", "section"),
         WizardFormField(
             "Connector",
@@ -2226,14 +2705,6 @@ def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tu
             options=CONNECTORS,
         ),
         WizardFormField("Mode", "choice", "--mode", value=mode, default="observe", options=("observe", "action")),
-        WizardFormField(
-            "Hook Fail Mode",
-            "choice",
-            "--fail-mode",
-            value=fail_mode,
-            default="open",
-            options=("open", "closed"),
-        ),
         WizardFormField(
             "Scanner Mode",
             "choice",
@@ -2268,33 +2739,106 @@ def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tu
         ),
         WizardFormField("LLM Judge", "section"),
         WizardFormField(
-            "Judge",
-            "bool",
-            "--judge",
-            "--no-judge",
-            value=judge_enabled_default,
-            default=judge_enabled_default,
+            "Provider",
+            "choice",
+            value=judge_provider,
+            default=judge_provider_default,
+            options=_llm_catalog_provider_choices(),
         ),
         WizardFormField(
-            "Provider", "choice", value=judge_provider, default=judge_provider_default, options=_bifrost_providers()
-        ),
-        WizardFormField("Model", "string", "--judge-model", value=judge_model, default=judge_model_default),
-        WizardFormField(
-            "Fallback Models (CSV)",
-            "string",
-            "--judge-fallback",
-            value=judge_fallbacks_csv,
-            default=judge_fallbacks_csv,
+            "Model", "string", "--judge-model", value=judge_model, default=judge_model_default, picker="llm"
         ),
         WizardFormField("API Key Env", "string", "--judge-api-key-env", value=judge_key_env, default=judge_key_default),
         WizardFormField("API Base URL", "string", "--judge-api-base", value=judge_base, default=judge_base_default),
         WizardFormField(
-            "Share Judge Key With Scanners",
+            "Instance Name",
+            "string",
+            "--judge-instance-name",
+            hint="Custom-provider instance for the judge (optional).",
+        ),
+        WizardFormField(
+            "LLM Role",
+            "choice",
+            "--llm-role",
+            value="judge_only",
+            default="judge_only",
+            options=GUARDRAIL_JUDGE_LLM_ROLES,
+            hint="judge_only=hook connectors; judge_and_agent=proxy connectors.",
+        ),
+        WizardFormField(
+            "Inherit From",
+            "choice",
+            "--inherit-from",
+            value="",
+            default="",
+            options=GUARDRAIL_JUDGE_INHERIT_PATHS,
+            hint="Copy a sibling LLM block onto the judge before flags (optional).",
+        ),
+        WizardFormField("Judge: Bedrock", "section", visible_when=j_bedrock),
+        WizardFormField(
+            "Region",
+            "choice" if j_region_opts else "string",
+            "--judge-bedrock-region",
+            options=j_region_opts,
+            hint="AWS region, e.g. us-east-1.",
+            visible_when=j_bedrock,
+        ),
+        WizardFormField(
+            "Auth Mode", "choice", "--judge-bedrock-auth-mode", options=BEDROCK_AUTH_MODES, visible_when=j_bedrock
+        ),
+        WizardFormField("Access Key Env", "string", "--judge-bedrock-access-key-env", visible_when=j_bedrock),
+        WizardFormField("Secret Key Env", "string", "--judge-bedrock-secret-key-env", visible_when=j_bedrock),
+        WizardFormField("Session Token Env", "string", "--judge-bedrock-session-token-env", visible_when=j_bedrock),
+        WizardFormField("Profile Name", "string", "--judge-bedrock-profile-name", visible_when=j_bedrock),
+        WizardFormField("Inference Profile", "string", "--judge-bedrock-inference-profile", visible_when=j_bedrock),
+        WizardFormField(
+            "Deployment Aliases (CSV)",
+            "string",
+            "--judge-bedrock-deployment",
+            hint="alias=model-id pairs, comma-separated (repeatable).",
+            visible_when=j_bedrock,
+        ),
+        WizardFormField("Judge: Vertex AI", "section", visible_when=j_vertex),
+        WizardFormField("Project ID", "string", "--judge-vertex-project-id", visible_when=j_vertex),
+        WizardFormField("Region", "string", "--judge-vertex-region", hint="GCP location.", visible_when=j_vertex),
+        WizardFormField(
+            "Auth Mode", "choice", "--judge-vertex-auth-mode", options=VERTEX_AUTH_MODES, visible_when=j_vertex
+        ),
+        WizardFormField(
+            "Service Account JSON Env",
+            "string",
+            "--judge-vertex-service-account-json-env",
+            visible_when=j_vertex,
+        ),
+        WizardFormField("Judge: Azure", "section", visible_when=j_azure),
+        WizardFormField(
+            "Endpoint", "string", "--judge-azure-endpoint", hint="https://name.openai.azure.com", visible_when=j_azure
+        ),
+        WizardFormField("API Version", "string", "--judge-azure-api-version", visible_when=j_azure),
+        WizardFormField("Auth Mode", "choice", "--judge-azure-auth-mode", options=AZURE_AUTH_MODES, visible_when=j_azure),
+        WizardFormField(
+            "Deployment Aliases (CSV)",
+            "string",
+            "--judge-azure-deployment-alias",
+            hint="model=deployment pairs, comma-separated (repeatable).",
+            visible_when=j_azure,
+        ),
+        WizardFormField("Judge: TLS", "section", visible_when=_provider_regional_or_custom),
+        WizardFormField(
+            "TLS CA Cert File",
+            "string",
+            "--judge-tls-ca-cert-file",
+            hint="PEM CA bundle for self-signed judge endpoints.",
+            visible_when=_provider_regional_or_custom,
+        ),
+        WizardFormField(
+            "Insecure Skip Verify",
             "bool",
-            "--share-judge-key-with-scanners",
-            "--no-share-judge-key-with-scanners",
+            "--judge-insecure-skip-verify",
             value="no",
             default="no",
+            hint="Disable TLS verification for the judge (lab use only).",
+            visible_when=_provider_regional_or_custom,
         ),
         WizardFormField("Cisco AI Defense", "section"),
         WizardFormField(
@@ -2333,6 +2877,11 @@ def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tu
         WizardFormField("Verify After Setup", "bool", "--verify", "--no-verify", value="yes", default="yes"),
         WizardFormField("Disable", "bool", "--disable", value="no", default="no"),
     )
+    return _apply_dynamic_fields(candidates, overrides, {"provider": judge_provider})
+
+
+def guardrail_wizard_fields(cfg: object | Mapping[str, Any] | None = None) -> tuple[WizardFormField, ...]:
+    return _guardrail_wizard_fields_for({}, cfg)
 
 
 SPLUNK_PIPELINE_OPTIONS: tuple[str, ...] = ("splunk-o11y", "local-docker", "enterprise", "custom")
@@ -2750,33 +3299,61 @@ def _build_local_observability_args(fields: Sequence[WizardFormField]) -> tuple[
     return tuple(args)
 
 
+# Custom-provider flags whose CSV field repeats once per item (mirrors the
+# CLI's ``multiple=True`` options).
+_CUSTOM_PROVIDER_REPEATABLE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--available-model",
+        "--allowed-request",
+        "--request-path-override",
+        "--bedrock-deployment",
+        "--azure-deployment-alias",
+    }
+)
+
+
 def _build_custom_provider_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     action = wizard_field_value(fields, "Action")
-    if action == "add":
-        args = ["setup", "provider", "add"]
-        if name := wizard_field_value(fields, "Name"):
-            args.extend(("--name", name))
-        for domain in split_csv(wizard_field_value(fields, "Domains")):
-            args.extend(("--domain", domain))
-        for env_key in split_csv(wizard_field_value(fields, "Env Keys")):
-            args.extend(("--env-key", env_key))
-        if profile_id := wizard_field_value(fields, "Profile ID"):
-            args.extend(("--profile-id", profile_id))
-        for port in split_csv(wizard_field_value(fields, "Ollama Ports")):
-            args.extend(("--ollama-port", port))
-        if wizard_bool_value(fields, "Reload Sidecar", "yes") == "no":
-            args.append("--no-reload")
-        return tuple(args)
-    if action == "remove":
-        args = ["setup", "provider", "remove"]
-        if name := wizard_field_value(fields, "Name"):
-            args.extend(("--name", name))
-        if wizard_bool_value(fields, "Reload Sidecar", "yes") == "no":
-            args.append("--no-reload")
-        return tuple(args)
     if action == "show":
         return ("setup", "provider", "show")
-    return ("setup", "provider", "list")
+    if action not in {"add", "remove"}:
+        return ("setup", "provider", "list")
+    args: list[str] = ["setup", "provider", action]
+    if name := wizard_field_value(fields, "Name"):
+        args.extend(("--name", name))
+    if action == "remove":
+        if wizard_bool_value(fields, "Reload Sidecar", "yes") == "no":
+            args.append("--no-reload")
+        return tuple(args)
+    # action == "add": label-only CSV groups first, then every flagged
+    # field that survived the dependent-field visibility filter.
+    for domain in split_csv(wizard_field_value(fields, "Domains")):
+        args.extend(("--domain", domain))
+    for env_key in split_csv(wizard_field_value(fields, "Env Keys")):
+        args.extend(("--env-key", env_key))
+    if profile_id := wizard_field_value(fields, "Profile ID"):
+        args.extend(("--profile-id", profile_id))
+    for port in split_csv(wizard_field_value(fields, "Ollama Ports")):
+        args.extend(("--ollama-port", port))
+    for field in fields:
+        if field.kind == "section" or not field.flag:
+            continue
+        if field.kind == "bool":
+            if field.value == "yes":
+                args.append(field.flag)
+            continue
+        value = field.value.strip()
+        if not value:
+            continue
+        if field.flag in _CUSTOM_PROVIDER_REPEATABLE_FLAGS:
+            for item in split_csv(value):
+                if item:
+                    args.extend((field.flag, item))
+            continue
+        args.extend((field.flag, value))
+    if wizard_bool_value(fields, "Reload Sidecar", "yes") == "no":
+        args.append("--no-reload")
+    return tuple(args)
 
 
 def _guardrail_section(cfg: object | Mapping[str, Any] | None) -> ConfigSection:

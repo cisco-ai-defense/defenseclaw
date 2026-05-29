@@ -1,0 +1,181 @@
+{
+  "_comment": "Curated provider/model catalog used by `defenseclaw setup llm` for picker autocomplete. It carries provider/auth/region metadata (env_keys, auth_modes, regions, api_versions, inference_profiles) that LiteLLM does not model, so it is hand-maintained rather than generated. Each cloud provider lists ~5 current chat models; the suggested ids are validated against LiteLLM's bundled registry by `make check-llm-catalog`, which fails on ids LiteLLM no longer knows or has marked deprecated. Runtime dispatch is handled by the Bifrost SDK (not LiteLLM). Not exhaustive: the picker accepts any model id and offers a 'type a model id' fall-through, and operators can add custom instances via `defenseclaw setup provider add` and choose from their `available_models`. Local providers (ollama/vllm/lm_studio) are not validated because LiteLLM does not track self-hosted tags. This is the tracked source; `make _bundle-data` copies it into cli/defenseclaw/_data/llm/ (a gitignored build-staging dir) so the wheel and editable installs can read it via importlib.resources.",
+  "schema_version": 1,
+  "providers": [
+    {
+      "name": "anthropic",
+      "label": "Anthropic (Claude)",
+      "kind": "cloud",
+      "env_keys": ["ANTHROPIC_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "models": [
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5"
+      ]
+    },
+    {
+      "name": "openai",
+      "label": "OpenAI",
+      "kind": "cloud",
+      "env_keys": ["OPENAI_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "models": [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.2",
+        "gpt-5.1"
+      ]
+    },
+    {
+      "name": "bedrock",
+      "label": "AWS Bedrock",
+      "kind": "regional",
+      "env_keys": ["AWS_BEARER_TOKEN_BEDROCK", "DEFENSECLAW_LLM_KEY"],
+      "regions": [
+        "us-east-1",
+        "us-east-2",
+        "us-west-2",
+        "eu-central-1",
+        "eu-west-1",
+        "ap-northeast-1",
+        "ap-southeast-1"
+      ],
+      "inference_profiles": ["us.", "eu.", "apac."],
+      "auth_modes": ["api_key", "iam_credentials", "profile", "instance_role"],
+      "models": [
+        "us.anthropic.claude-opus-4-8",
+        "us.anthropic.claude-opus-4-7",
+        "us.anthropic.claude-sonnet-4-6",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "us.amazon.nova-2-lite-v1:0"
+      ]
+    },
+    {
+      "name": "vertex_ai",
+      "label": "Google Vertex AI",
+      "kind": "regional",
+      "env_keys": ["GOOGLE_APPLICATION_CREDENTIALS"],
+      "regions": [
+        "us-central1",
+        "us-east5",
+        "europe-west1",
+        "europe-west4",
+        "asia-northeast1"
+      ],
+      "auth_modes": ["service_account", "adc"],
+      "models": [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "claude-sonnet-4-5@20250929",
+        "claude-opus-4-5@20251101",
+        "claude-haiku-4-5@20251001"
+      ]
+    },
+    {
+      "name": "azure",
+      "label": "Azure OpenAI",
+      "kind": "regional",
+      "env_keys": ["AZURE_API_KEY", "AZURE_OPENAI_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "auth_modes": ["api_key", "entra_id"],
+      "api_versions": ["2024-10-21", "2024-08-01-preview", "2024-06-01"],
+      "models": [
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.2",
+        "gpt-5.1"
+      ]
+    },
+    {
+      "name": "gemini",
+      "label": "Google AI Studio (Gemini)",
+      "kind": "cloud",
+      "env_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "models": [
+        "gemini-3.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-3.1-pro-preview"
+      ]
+    },
+    {
+      "name": "groq",
+      "label": "Groq",
+      "kind": "cloud",
+      "env_keys": ["GROQ_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "models": [
+        "meta-llama/llama-4-maverick-17b-128e-instruct",
+        "meta-llama/llama-4-scout-17b-16e-instruct",
+        "llama-3.3-70b-versatile",
+        "llama-3.1-8b-instant",
+        "openai/gpt-oss-120b"
+      ]
+    },
+    {
+      "name": "mistral",
+      "label": "Mistral",
+      "kind": "cloud",
+      "env_keys": ["MISTRAL_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "models": [
+        "mistral-large-latest",
+        "mistral-medium-latest",
+        "mistral-small-latest",
+        "magistral-medium-latest",
+        "codestral-latest"
+      ]
+    },
+    {
+      "name": "deepseek",
+      "label": "DeepSeek",
+      "kind": "cloud",
+      "env_keys": ["DEEPSEEK_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner",
+        "deepseek-v3.2",
+        "deepseek-r1",
+        "deepseek-coder"
+      ]
+    },
+    {
+      "name": "openrouter",
+      "label": "OpenRouter",
+      "kind": "cloud",
+      "env_keys": ["OPENROUTER_API_KEY", "DEFENSECLAW_LLM_KEY"],
+      "models": [
+        "anthropic/claude-sonnet-4.6",
+        "openai/gpt-5.2",
+        "google/gemini-3-pro-preview",
+        "deepseek/deepseek-v3.2",
+        "z-ai/glm-5"
+      ]
+    },
+    {
+      "name": "ollama",
+      "label": "Ollama (local)",
+      "kind": "local",
+      "env_keys": [],
+      "default_base_url": "http://127.0.0.1:11434",
+      "models": ["llama3.3", "qwen3", "qwen2.5-coder", "gemma3", "deepseek-r1"]
+    },
+    {
+      "name": "vllm",
+      "label": "vLLM (local)",
+      "kind": "local",
+      "env_keys": [],
+      "default_base_url": "http://127.0.0.1:8000/v1",
+      "models": []
+    },
+    {
+      "name": "lm_studio",
+      "label": "LM Studio (local)",
+      "kind": "local",
+      "env_keys": [],
+      "default_base_url": "http://127.0.0.1:1234/v1",
+      "models": []
+    }
+  ]
+}

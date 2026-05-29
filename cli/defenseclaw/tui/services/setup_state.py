@@ -21,6 +21,8 @@ from types import SimpleNamespace
 from typing import Any, Literal
 from urllib.parse import urlparse
 
+from defenseclaw.tui.services.cli_choices import REGIONAL_PROVIDERS
+
 ReadinessStatus = Literal["pass", "warn", "fail"]
 ValidationSeverity = Literal["ok", "warning", "error"]
 ConfigFieldKind = Literal["string", "int", "bool", "password", "choice", "header"]
@@ -203,6 +205,12 @@ def missing_credential_rows(rows: Sequence[CredentialRow]) -> tuple[CredentialRo
     return tuple(row for row in rows if row.requirement.lower() == "required" and not row.set)
 
 
+# Maps a regional provider id to its config sub-block name. ``vertex_ai`` is
+# the provider id but the persisted block is ``llm.vertex`` (see config.py
+# ``LLMConfig.vertex``); Azure carries an endpoint instead of a region.
+_REGIONAL_BLOCK: dict[str, str] = {"bedrock": "bedrock", "vertex_ai": "vertex", "azure": "azure"}
+
+
 def build_readiness_checks(
     cfg: object | Mapping[str, Any] | None,
     health: object | Mapping[str, Any] | None,
@@ -299,8 +307,13 @@ def build_readiness_checks(
 
     provider = str(_get_path(cfg, "llm.provider", "") or "").strip()
     model = str(_get_path(cfg, "llm.model", "") or "").strip()
-    if provider and model:
-        checks.append(ReadinessCheck("LLM Config", f"{provider}/{model}", "pass"))
+    instance_name = str(_get_path(cfg, "llm.instance_name", "") or "").strip()
+    # A custom-provider instance overlay supplies base_url/model/keys at
+    # resolve time, so binding one is a complete config even when the
+    # inline llm.model is blank.
+    if provider and (model or instance_name):
+        detail = f"{provider}/{model}" if model else f"{provider} (via instance {instance_name})"
+        checks.append(ReadinessCheck("LLM Config", detail, "pass"))
     else:
         checks.append(
             ReadinessCheck(
@@ -309,6 +322,38 @@ def build_readiness_checks(
                 "warn",
                 _intent("defenseclaw", ("setup", "llm"), "setup llm", "setup"),
             ),
+        )
+
+    # Regional provider (Bedrock / Vertex AI / Azure) needs a region (or an
+    # Azure endpoint) before the SDK can route; surface the gap explicitly
+    # so a half-configured regional block doesn't fail silently at runtime.
+    if provider in REGIONAL_PROVIDERS:
+        region = str(
+            _get_path(cfg, f"llm.{_REGIONAL_BLOCK[provider]}.region", "")
+            or _get_path(cfg, "llm.region", "")
+            or "").strip()
+        azure_endpoint = str(_get_path(cfg, "llm.azure.endpoint", "") or "").strip()
+        configured = region or (provider == "azure" and azure_endpoint)
+        if configured:
+            where = azure_endpoint if (provider == "azure" and not region) else region
+            checks.append(ReadinessCheck("Regional Provider", f"{provider} ({where})", "pass"))
+        else:
+            need = "endpoint" if provider == "azure" else "region"
+            checks.append(
+                ReadinessCheck(
+                    "Regional Provider",
+                    f"{provider} selected but no {need} configured.",
+                    "warn",
+                    _intent("defenseclaw", ("setup", "llm"), "setup llm", "setup"),
+                ),
+            )
+
+    # Custom-provider overlay binding. ``llm.instance_name`` points at an
+    # entry in custom-providers.json whose base_url / env keys / TLS apply
+    # at resolve time. Only surface the row when an overlay is in play.
+    if instance_name:
+        checks.append(
+            ReadinessCheck("Custom-provider Overlay", f"instance '{instance_name}' bound", "pass")
         )
 
     if any(

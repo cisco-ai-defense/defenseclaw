@@ -23,12 +23,16 @@ from defenseclaw.tui.panels.setup import (
     SetupPanelModel,
     SetupWizard,
     UninstallModalState,
+    _custom_providers_fields_for,
+    _guardrail_wizard_fields_for,
+    _llm_wizard_fields_for,
     action_matrix_fields,
     build_setup_sections,
     build_wizard_args,
     connector_setup_command_for_mode,
     connector_setup_wizard_fields,
     guardrail_wizard_fields,
+    llm_model_candidates,
     missing_required_fields,
     notifications_consequence_copy,
     notifications_desired_action,
@@ -44,6 +48,7 @@ from defenseclaw.tui.panels.setup import (
     wizard_field_value,
     wizard_form_defs,
 )
+from defenseclaw.tui.screens.model_picker import filter_models, picker_rows
 from defenseclaw.tui.services.setup_state import (
     ConfigDiffEntry,
     ConfigField,
@@ -773,37 +778,67 @@ def test_scanner_wizards_offer_unified_llm_provider_list() -> None:
     assert ("--api-timeout-ms", "5000") == argv[argv.index("--api-timeout-ms") : argv.index("--api-timeout-ms") + 2]
 
 
-def test_guardrail_wizard_forwards_new_flags() -> None:
-    """Guardrail wizard now surfaces the CLI flags the interactive
-    walkthrough used to gate behind multi-step prompts.
-
-    Connector, hook fail-mode, judge on/off, judge fallbacks (CSV ->
-    repeated flag), and share-judge-key-with-scanners must all reach
+def test_guardrail_wizard_forwards_core_and_judge_flags() -> None:
+    """Guardrail wizard forwards the connector and core knobs to
     ``setup guardrail --non-interactive ...``.
+
+    The wizard only emits flags the CLI actually accepts: the judge
+    enable/disable, hook fail-mode, fallback models, and
+    share-judge-key toggles are NOT options on ``setup guardrail`` (judge
+    use is driven by ``--detection-strategy``; fail-mode lives on the
+    separate ``guardrail fail-mode`` command), so they must never appear.
     """
 
     fields = guardrail_wizard_fields({})
     fields = _with_field(fields, "Connector", "claudecode")
-    fields = _with_field(fields, "Hook Fail Mode", "closed")
-    fields = _with_field(fields, "Judge", "yes")
-    fields = _with_field(fields, "Fallback Models (CSV)", "claude-3-opus, gpt-4o,gemini-pro")
-    fields = _with_field(fields, "Share Judge Key With Scanners", "yes")
+    fields = _with_field(fields, "Strategy", "judge_first")
 
     argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
     assert "--connector" in argv
     connector_idx = argv.index("--connector")
     assert argv[connector_idx + 1] == "claudecode"
-    assert "--fail-mode" in argv
-    fail_idx = argv.index("--fail-mode")
-    assert argv[fail_idx + 1] == "closed"
-    assert "--judge" in argv
-    assert "--no-judge" not in argv
-    fallback_positions = [i for i, value in enumerate(argv) if value == "--judge-fallback"]
-    assert len(fallback_positions) == 3
-    assert argv[fallback_positions[0] + 1] == "claude-3-opus"
-    assert argv[fallback_positions[1] + 1] == "gpt-4o"
-    assert argv[fallback_positions[2] + 1] == "gemini-pro"
-    assert "--share-judge-key-with-scanners" in argv
+    assert "--detection-strategy" in argv
+    strat_idx = argv.index("--detection-strategy")
+    assert argv[strat_idx + 1] == "judge_first"
+
+    # Flags that the CLI does not define must never be emitted.
+    for stale in (
+        "--fail-mode",
+        "--judge",
+        "--no-judge",
+        "--judge-fallback",
+        "--share-judge-key-with-scanners",
+        "--no-share-judge-key-with-scanners",
+    ):
+        assert stale not in argv
+
+
+def test_guardrail_wizard_argv_is_accepted_by_real_cli() -> None:
+    """Every option the guardrail wizard emits (defaults and with a
+    regional judge selected) must be a real ``setup guardrail`` option;
+    the wizard is a pure argv builder, so an unknown flag would crash the
+    subprocess with a Click usage error (exit code 2).
+    """
+
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.tui.panels.setup import _guardrail_wizard_fields_for
+
+    def assert_options_known(fields) -> None:
+        argv = list(build_wizard_args(SetupWizard.GUARDRAIL, list(fields)))
+        result = CliRunner().invoke(cmd_setup.setup, ["guardrail", *argv[2:]], catch_exceptions=True)
+        assert "No such option" not in (result.output or ""), result.output
+
+    assert_options_known(guardrail_wizard_fields({}))
+
+    bedrock = list(_guardrail_wizard_fields_for({"@Provider": "bedrock"}, None))
+    bedrock = [
+        f.with_value("us.anthropic.claude-sonnet-4-6")
+        if f.label == "Model" and f.flag == "--judge-model"
+        else f
+        for f in bedrock
+    ]
+    assert_options_known(bedrock)
 
 
 def test_ai_discovery_wizard_maps_to_enable_or_disable() -> None:
@@ -991,7 +1026,7 @@ def test_notifications_routing_submit_with_no_changes_surfaces_form_error() -> N
     submitter should refuse early with a friendly hint instead.
     """
 
-    from defenseclaw.tui.panels.setup import SetupWizard, SetupPanelModel
+    from defenseclaw.tui.panels.setup import SetupPanelModel, SetupWizard
 
     model = SetupPanelModel(cfg=None)
     model.open_wizard_form(SetupWizard.NOTIFICATIONS_ROUTING)
@@ -1020,9 +1055,11 @@ def test_cli_choices_module_matches_cli_source_of_truth() -> None:
     from defenseclaw.commands.cmd_setup import _WIZARD_LLM_PROVIDERS as CLI_PROVIDERS
     from defenseclaw.tui.services.cli_choices import (
         AI_DISCOVERY_MODES,
-        CONNECTORS as TUI_CONNECTORS,
         GUARDRAIL_CONNECTORS,
         WIZARD_LLM_PROVIDERS,
+    )
+    from defenseclaw.tui.services.cli_choices import (
+        CONNECTORS as TUI_CONNECTORS,
     )
 
     assert tuple(WIZARD_LLM_PROVIDERS) == tuple(CLI_PROVIDERS)
@@ -1036,6 +1073,50 @@ def test_cli_choices_module_matches_cli_source_of_truth() -> None:
     from defenseclaw.commands.cmd_agent import _AI_DISCOVERY_MODES as CLI_AI_MODES
 
     assert tuple(AI_DISCOVERY_MODES) == tuple(CLI_AI_MODES)
+
+
+def test_cli_choices_roles_auth_modes_match_cli_source_of_truth() -> None:
+    """Connector-aware role / inherit / auth-mode choices stay in sync.
+
+    These mirror inline ``click.Choice`` lists on ``setup_llm`` /
+    ``setup_guardrail``. We pull the live choices off the Click command
+    params so a contributor who edits one option without updating
+    ``cli_choices`` gets a single, obvious failure rather than the TUI
+    silently emitting argv the CLI rejects.
+    """
+
+    from defenseclaw.commands.cmd_setup import setup_guardrail, setup_llm
+    from defenseclaw.tui.services.cli_choices import (
+        AZURE_AUTH_MODES,
+        BEDROCK_AUTH_MODES,
+        GUARDRAIL_JUDGE_INHERIT_PATHS,
+        GUARDRAIL_JUDGE_LLM_ROLES,
+        LLM_INHERIT_PATHS,
+        LLM_ROLES,
+        VERTEX_AUTH_MODES,
+    )
+
+    def _choices(cmd, opt_name: str) -> tuple[str, ...]:
+        for param in cmd.params:
+            if param.name == opt_name:
+                choices = getattr(param.type, "choices", None)
+                assert choices is not None, f"{opt_name} is not a Choice option"
+                return tuple(choices)
+        raise AssertionError(f"option {opt_name!r} not found on {cmd.name}")
+
+    # setup llm
+    assert LLM_ROLES == _choices(setup_llm, "role")
+    assert LLM_INHERIT_PATHS == _choices(setup_llm, "inherit_from")
+    assert BEDROCK_AUTH_MODES == _choices(setup_llm, "bedrock_auth_mode")
+    assert VERTEX_AUTH_MODES == _choices(setup_llm, "vertex_auth_mode")
+    assert AZURE_AUTH_MODES == _choices(setup_llm, "azure_auth_mode")
+
+    # setup guardrail (judge family)
+    assert GUARDRAIL_JUDGE_LLM_ROLES == _choices(setup_guardrail, "llm_role")
+    assert GUARDRAIL_JUDGE_INHERIT_PATHS == _choices(setup_guardrail, "judge_inherit_from")
+    assert BEDROCK_AUTH_MODES == _choices(setup_guardrail, "judge_bedrock_auth_mode")
+    assert VERTEX_AUTH_MODES == _choices(setup_guardrail, "judge_vertex_auth_mode")
+    assert AZURE_AUTH_MODES == _choices(setup_guardrail, "judge_azure_auth_mode")
 
 
 def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
@@ -1059,3 +1140,237 @@ def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
             assert tuple(argv[: len(prefix)]) == prefix, (
                 f"{wizard.name}: expected argv prefix {prefix!r}, got {argv!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Connector-aware LLM roles, regional providers, custom-provider instances,
+# dynamic dependent fields, and the model picker (parity with the expanded
+# ``setup llm`` / ``setup guardrail`` / ``setup provider`` commands).
+# ---------------------------------------------------------------------------
+
+
+def _set_by_flag(fields: Sequence, flag: str, value: str) -> list:
+    """Set the first field carrying ``flag`` to ``value``.
+
+    Some regional groups reuse labels (two ``Region`` rows), so tests key
+    on the unambiguous CLI flag instead of the display label.
+    """
+
+    out = []
+    done = False
+    for field in fields:
+        if not done and field.flag == flag:
+            out.append(field.with_value(value))
+            done = True
+        else:
+            out.append(field)
+    assert done, f"no field with flag {flag!r}"
+    return out
+
+
+def _pair_after(argv: Sequence[str], flag: str) -> str:
+    idx = argv.index(flag)
+    return argv[idx + 1]
+
+
+def test_llm_wizard_emits_role_and_non_interactive() -> None:
+    fields = _llm_wizard_fields_for(provider="anthropic", role="judge", overrides={"--role": "judge"}, cfg=None)
+    fields = _set_by_flag(fields, "--model", "claude-sonnet-4")
+    argv = build_wizard_args(SetupWizard.LLM, fields)
+    assert argv[:3] == ("setup", "llm", "--non-interactive")
+    assert _pair_after(argv, "--role") == "judge"
+    assert _pair_after(argv, "--model") == "claude-sonnet-4"
+
+
+def test_llm_wizard_bedrock_group_visible_and_repeatable_deployment() -> None:
+    fields = _llm_wizard_fields_for(
+        provider="bedrock", role="unified", overrides={"--provider": "bedrock"}, cfg=None
+    )
+    labels = {f.label for f in fields}
+    # Bedrock rows are visible, vertex/azure rows are filtered out.
+    assert "Bedrock" in labels
+    assert "Vertex AI" not in labels
+    assert "Azure" not in labels
+
+    fields = _set_by_flag(fields, "--bedrock-region", "us-east-1")
+    fields = _set_by_flag(fields, "--bedrock-auth-mode", "iam_credentials")
+    fields = _set_by_flag(fields, "--model", "us.anthropic.claude-sonnet-4-6")
+    fields = _set_by_flag(
+        fields, "--bedrock-deployment", "sonnet=us.anthropic.claude-sonnet-4-6, haiku=us.anthropic.claude-haiku"
+    )
+    argv = build_wizard_args(SetupWizard.LLM, fields)
+    assert _pair_after(argv, "--bedrock-region") == "us-east-1"
+    assert _pair_after(argv, "--bedrock-auth-mode") == "iam_credentials"
+    # Repeatable: one ``--bedrock-deployment`` per CSV item.
+    positions = [i for i, v in enumerate(argv) if v == "--bedrock-deployment"]
+    assert len(positions) == 2
+    assert argv[positions[0] + 1] == "sonnet=us.anthropic.claude-sonnet-4-6"
+    assert argv[positions[1] + 1] == "haiku=us.anthropic.claude-haiku"
+
+
+def test_llm_wizard_tls_visible_for_regional_and_custom_only() -> None:
+    openai = {f.label for f in _llm_wizard_fields_for(provider="openai", role="unified", overrides={}, cfg=None)}
+    assert "TLS" not in openai
+
+    for prov in ("bedrock", "vertex_ai", "azure", "custom"):
+        labels = {f.label for f in _llm_wizard_fields_for(provider=prov, role="unified", overrides={"--provider": prov}, cfg=None)}
+        assert "TLS" in labels, prov
+
+
+def test_llm_wizard_instance_name_inherit_and_ping() -> None:
+    fields = _llm_wizard_fields_for(provider="custom", role="unified", overrides={"--provider": "custom"}, cfg=None)
+    fields = _set_by_flag(fields, "--instance-name", "corp-llm")
+    fields = _set_by_flag(fields, "--model", "internal-model")
+    fields = _set_by_flag(fields, "--inherit-from", "guardrail")
+    fields = _set_by_flag(fields, "--ping", "yes")
+    argv = build_wizard_args(SetupWizard.LLM, fields)
+    assert _pair_after(argv, "--instance-name") == "corp-llm"
+    assert _pair_after(argv, "--inherit-from") == "guardrail"
+    assert "--ping" in argv
+    assert "--no-ping" not in argv
+
+
+def test_llm_wizard_model_candidates_track_provider() -> None:
+    fields = _llm_wizard_fields_for(provider="anthropic", role="unified", overrides={}, cfg=None)
+    candidates = llm_model_candidates(fields, None)
+    # The bundled catalog ships curated anthropic ids; tolerate an empty
+    # catalog (degrades to free-text) but never crash.
+    assert isinstance(candidates, tuple)
+
+
+def test_setup_panel_recompute_reveals_regional_fields_on_provider_change() -> None:
+    model = SetupPanelModel(cfg=None)
+    model.active_wizard = SetupWizard.LLM
+    model.open_wizard_form(SetupWizard.LLM)
+    assert "Bedrock" not in {f.label for f in model.form_fields}
+
+    # Flip the provider row and recompute, mirroring the app chokepoint.
+    for index, field in enumerate(model.form_fields):
+        if field.flag == "--provider":
+            model.form_fields[index] = field.with_value("bedrock")
+            break
+    model.recompute_dependent_fields()
+    labels = {f.label for f in model.form_fields}
+    assert "Bedrock" in labels
+    assert "Vertex AI" not in labels
+
+
+def test_setup_panel_recompute_preserves_entered_values() -> None:
+    model = SetupPanelModel(cfg=None)
+    model.active_wizard = SetupWizard.LLM
+    model.open_wizard_form(SetupWizard.LLM)
+    # Enter a model id, then change provider; the model value must survive.
+    for index, field in enumerate(model.form_fields):
+        if field.flag == "--model":
+            model.form_fields[index] = field.with_value("keep-me")
+        if field.flag == "--provider":
+            model.form_fields[index] = field.with_value("bedrock")
+    model.recompute_dependent_fields()
+    assert wizard_field_value(model.form_fields, "Model") == "keep-me"
+
+
+def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
+    fields = _guardrail_wizard_fields_for({"@Provider": "bedrock"}, None)
+    labels = {f.label for f in fields}
+    assert "Judge: Bedrock" in labels
+    assert "Judge: Vertex AI" not in labels
+
+    fields = _set_by_flag(fields, "--judge-bedrock-region", "us-west-2")
+    fields = _set_by_flag(fields, "--llm-role", "judge_and_agent")
+    fields = [
+        f.with_value("us.anthropic.claude-sonnet-4-6") if f.flag == "--judge-model" else f for f in fields
+    ]
+    argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
+    assert _pair_after(argv, "--judge-bedrock-region") == "us-west-2"
+    assert _pair_after(argv, "--llm-role") == "judge_and_agent"
+    # Provider is folded into the model id as ``provider/model``.
+    assert _pair_after(argv, "--judge-model") == "bedrock/us.anthropic.claude-sonnet-4-6"
+
+
+def test_custom_provider_add_repeatable_and_flagless_groups() -> None:
+    fields = _custom_providers_fields_for({"@Action": "add", "--base-provider-type": "openai"})
+    fields = _with_field(fields, "Name", "acme")
+    fields = _with_field(fields, "Domains", "llm.acme.test, api.acme.test")
+    fields = _with_field(fields, "Env Keys", "ACME_KEY,ACME_KEY_2")
+    fields = _with_field(fields, "Ollama Ports", "11434,11435")
+    fields = _with_field(fields, "Profile ID", "prof-1")
+    fields = _set_by_flag(fields, "--available-model", "gpt-4o, gpt-4o-mini")
+    fields = _set_by_flag(fields, "--allowed-request", "chat,embedding")
+    fields = _set_by_flag(fields, "--request-path-override", "chat=/v1/chat,embedding=/v1/embed")
+    fields = _set_by_flag(fields, "--base-url", "https://llm.acme.test:8443")
+
+    argv = build_wizard_args(SetupWizard.CUSTOM_PROVIDERS, fields)
+    assert argv[:3] == ("setup", "provider", "add")
+    assert _pair_after(argv, "--name") == "acme"
+    assert [argv[i + 1] for i, v in enumerate(argv) if v == "--domain"] == ["llm.acme.test", "api.acme.test"]
+    assert [argv[i + 1] for i, v in enumerate(argv) if v == "--env-key"] == ["ACME_KEY", "ACME_KEY_2"]
+    assert [argv[i + 1] for i, v in enumerate(argv) if v == "--ollama-port"] == ["11434", "11435"]
+    assert _pair_after(argv, "--profile-id") == "prof-1"
+    assert [argv[i + 1] for i, v in enumerate(argv) if v == "--available-model"] == ["gpt-4o", "gpt-4o-mini"]
+    assert [argv[i + 1] for i, v in enumerate(argv) if v == "--allowed-request"] == ["chat", "embedding"]
+    assert [argv[i + 1] for i, v in enumerate(argv) if v == "--request-path-override"] == [
+        "chat=/v1/chat",
+        "embedding=/v1/embed",
+    ]
+
+
+def test_custom_provider_base_type_drives_family_visibility() -> None:
+    for base_type, shown, hidden in (
+        ("bedrock", "Bedrock", "Vertex AI"),
+        ("vertex_ai", "Vertex AI", "Azure"),
+        ("azure", "Azure", "Bedrock"),
+    ):
+        labels = {
+            f.label for f in _custom_providers_fields_for({"@Action": "add", "--base-provider-type": base_type})
+        }
+        assert shown in labels, base_type
+        assert hidden not in labels, base_type
+    # ``list`` hides every add-only row.
+    list_labels = {f.label for f in _custom_providers_fields_for({"@Action": "list"})}
+    assert "Base URL" not in list_labels
+    assert "Name" not in list_labels
+
+
+def test_custom_provider_add_requires_name_and_domain_or_base_url() -> None:
+    fields = _custom_providers_fields_for({"@Action": "add", "--base-provider-type": "openai"})
+    missing = missing_required_fields(SetupWizard.CUSTOM_PROVIDERS, fields)
+    assert "Name" in missing
+    assert "Domains or Base URL" in missing
+
+    fields = _with_field(fields, "Name", "acme")
+    fields = _set_by_flag(fields, "--base-url", "https://llm.acme.test")
+    assert missing_required_fields(SetupWizard.CUSTOM_PROVIDERS, fields) == ()
+
+
+def test_every_setup_wizard_emits_only_real_cli_options() -> None:
+    """The TUI is a pure argv builder that shells out to
+    ``defenseclaw setup ...``; an unknown flag would crash the subprocess
+    with a Click usage error. This sweep opens every wizard with its
+    defaults and asserts the real ``setup`` group accepts each option
+    (exit code 2 / "No such option" is the failure we guard against).
+    """
+
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_setup
+
+    runner = CliRunner()
+    for wizard in SetupWizard:
+        argv = list(build_wizard_args(wizard, list(wizard_form_defs(wizard))))
+        if not argv or argv[0] != "setup":
+            continue
+        result = runner.invoke(cmd_setup.setup, argv[1:], catch_exceptions=True)
+        assert "No such option" not in (result.output or ""), f"{wizard.name}: {result.output}"
+
+
+def test_model_picker_filter_and_freeform_row() -> None:
+    models = ("claude-sonnet-4", "claude-haiku-4", "gpt-4o")
+    # Empty query keeps declared order.
+    assert filter_models("", models) == list(models)
+    # Substring match, exact-first ordering.
+    assert filter_models("claude", models) == ["claude-sonnet-4", "claude-haiku-4"]
+    assert filter_models("gpt-4o", models)[0] == "gpt-4o"
+    # A typed id the catalog lacks becomes a free-form first row.
+    rows = picker_rows("my-custom-model", models)
+    assert rows[0] == "my-custom-model"
+    # An exact catalog hit is not duplicated as a free-form row.
+    assert picker_rows("gpt-4o", models).count("gpt-4o") == 1

@@ -66,7 +66,9 @@ from defenseclaw.tui.panels.setup import (
     SetupPanelModel,
     SetupWizard,
     connector_setup_command_for_mode,
+    llm_model_candidates,
     render_wizard_value,
+    wizard_field_value,
 )
 from defenseclaw.tui.panels.skills import SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
@@ -77,6 +79,7 @@ from defenseclaw.tui.screens.detail import DetailScreen
 from defenseclaw.tui.screens.judge_history import JudgeHistoryScreen
 from defenseclaw.tui.screens.mcp_set_form import MCPSetFormScreen
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
+from defenseclaw.tui.screens.model_picker import ModelPickerScreen
 from defenseclaw.tui.screens.notifications import NotificationsToggleScreen
 from defenseclaw.tui.screens.panel_jumper import PanelChoice, PanelJumperScreen
 from defenseclaw.tui.screens.redaction import RedactionToggleScreen
@@ -110,6 +113,22 @@ from defenseclaw.tui.widgets.status_strip import render_status_strip
 from defenseclaw.tui.widgets.toasts import ToastLevel, ToastManager, ToastStack
 
 TOKENS = DEFAULT_TOKENS
+
+
+# Wizard rows whose value changes must re-derive the conditional field groups
+# (e.g. picking ``bedrock`` reveals the Bedrock region/auth rows). Keyed by the
+# CLI flag for flagged rows, and by the visible label for flag-less rows such as
+# the custom-provider ``Action`` selector.
+_SETUP_DRIVER_FLAGS: dict[SetupWizard, frozenset[str]] = {
+    SetupWizard.LLM: frozenset({"--provider", "--role"}),
+    SetupWizard.CUSTOM_PROVIDERS: frozenset({"--base-provider-type"}),
+}
+_SETUP_DRIVER_LABELS: dict[SetupWizard, frozenset[str]] = {
+    # The guardrail judge "Provider" row carries no flag (it is emitted as
+    # ``--judge-provider`` by the arg builder), so it must be matched by label.
+    SetupWizard.GUARDRAIL: frozenset({"Provider"}),
+    SetupWizard.CUSTOM_PROVIDERS: frozenset({"Action"}),
+}
 
 
 _DEFENSECLAW_LOGO = (
@@ -5435,6 +5454,8 @@ class DefenseClawTUI(App[None]):
             )
         if action.refresh_credentials:
             self.run_worker(self._load_setup_credentials(), exclusive=False, thread=False)
+        if action.open_model_picker:
+            self.run_worker(self._open_model_picker(), exclusive=False, thread=False)
         if action.intent is not None:
             self.run_worker(self._confirm_and_run_intent(action.intent), exclusive=False, thread=False)
         self._render_chrome()
@@ -5664,7 +5685,16 @@ class DefenseClawTUI(App[None]):
     def _replace_setup_form_value(self, index: int, value: str) -> None:
         fields = self.setup_model.form_fields
         if 0 <= index < len(fields):
-            fields[index] = fields[index].with_value(value)
+            field = fields[index]
+            fields[index] = field.with_value(value)
+            # When a "driver" row (provider / role / action / family)
+            # changes, re-derive the conditional field groups so e.g. the
+            # Bedrock rows appear the moment provider flips to bedrock.
+            wizard = self.setup_model.active_wizard
+            driver_flags = _SETUP_DRIVER_FLAGS.get(wizard, frozenset())
+            driver_labels = _SETUP_DRIVER_LABELS.get(wizard, frozenset())
+            if (field.flag and field.flag in driver_flags) or field.label in driver_labels:
+                self.setup_model.recompute_dependent_fields()
 
     def _move_setup_section(self, delta: int) -> None:
         if not self.setup_model.sections:
@@ -5817,6 +5847,9 @@ class DefenseClawTUI(App[None]):
                 delta = -1 if key == "left" else 1
                 self._replace_setup_form_value(cursor, _cycle_value(field.value, field.options, delta))
                 return SetupPanelAction(True)
+            if key == "enter" and getattr(field, "picker", ""):
+                # Searchable model picker instead of submitting the form.
+                return SetupPanelAction(True, open_model_picker=True)
             if key == "enter":
                 return self.setup_model.submit_wizard_form()
         if len(key) == 1 and field.kind not in {"section", "preset", "whtype", "regid"}:
@@ -5893,6 +5926,26 @@ class DefenseClawTUI(App[None]):
         self._render_chrome()
         if action.hint:
             self._set_status(action.hint)
+
+    async def _open_model_picker(self) -> None:
+        fields = self.setup_model.form_fields
+        cursor = _clamp_int(getattr(self.setup_model, "form_cursor", 0), 0, max(0, len(fields) - 1))
+        if not fields or cursor >= len(fields):
+            return
+        field = fields[cursor]
+        if not getattr(field, "picker", ""):
+            return
+        provider = (wizard_field_value(fields, "Provider") or "provider").strip()
+        candidates = llm_model_candidates(fields, self.config)
+        choice = await self.push_screen_wait(
+            ModelPickerScreen(candidates, current=field.value, provider=provider)
+        )
+        if choice is None:
+            self._set_status("Model selection cancelled.")
+            return
+        self._replace_setup_form_value(cursor, choice)
+        self._render_chrome()
+        self._set_status(f"Model set to {choice}.")
 
     async def _open_mcp_set_form(self) -> None:
         model = self.mcps_model

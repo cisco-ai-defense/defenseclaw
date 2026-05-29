@@ -17,7 +17,7 @@ DIST_DIR    := dist
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync check-upgrade-manifest \
+        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         set-version \
         _bundle-data \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
@@ -528,7 +528,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-provider-coverage check-upgrade-manifest
+check: check-v7 check-provider-coverage check-llm-catalog check-upgrade-manifest
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -562,6 +562,15 @@ check-provider-coverage: sync-openclaw-extension
 		fi && \
 		npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
+
+# check-llm-catalog cross-references the suggested model ids in
+# bundles/llm/model_catalog.json against LiteLLM's bundled registry,
+# failing on ids LiteLLM no longer knows or has marked deprecated. The
+# curated catalog carries provider/auth/region metadata LiteLLM does not
+# model (so it stays hand-maintained), but the model list still rots as
+# providers ship and retire models — this gate catches that drift.
+check-llm-catalog:
+	@$(VENV)/bin/python scripts/check_llm_catalog.py
 
 check-upgrade-manifest:
 	@python3 scripts/generate-upgrade-manifest.py --check
@@ -638,6 +647,7 @@ _bundle-data:
 	@mkdir -p cli/defenseclaw/_data/skills
 	@mkdir -p cli/defenseclaw/_data/splunk_local_bridge
 	@mkdir -p cli/defenseclaw/_data/local_observability_stack
+	@mkdir -p cli/defenseclaw/_data/llm
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
@@ -653,6 +663,10 @@ _bundle-data:
 	cp -r policies/guardrail/permissive cli/defenseclaw/_data/policies/guardrail/
 	cp scripts/install-openshell-sandbox.sh cli/defenseclaw/_data/scripts/
 	cp -r skills/codeguard cli/defenseclaw/_data/skills/
+	@# Curated LLM model catalog consumed by `defenseclaw setup llm` and the
+	@# Textual TUI model picker via importlib.resources. Tracked source lives
+	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
+	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
 	@# splunk_local_bridge and local_observability_stack are bind-mounted by Docker
 	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. We must
 	@# rsync-with-delete instead of `rm -rf && cp -r` because Docker Desktop on
