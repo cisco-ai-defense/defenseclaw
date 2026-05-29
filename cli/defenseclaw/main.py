@@ -181,17 +181,12 @@ def _ensure_codeguard_skill(cfg) -> None:
 
 
 def _try_launch_tui() -> bool:
-    """When invoked with no subcommand on a TTY, hand off to the Go TUI.
+    """When invoked with no subcommand on a TTY, launch the Textual TUI.
 
-    Uses :func:`defenseclaw.gateway.resolve_gateway_binary` instead of a
-    bare ``shutil.which`` so the handoff also works immediately after
-    ``make all`` — see the module docstring of ``defenseclaw.gateway``
-    for the full resolution order and rationale.
+    We only fall through to the Click CLI when stdin is not a TTY, when
+    the user passed an actual subcommand, or when ``--help``/``--version``
+    is on the command line.
     """
-    import os
-
-    from defenseclaw.gateway import resolve_gateway_binary
-
     if not sys.stdin.isatty():
         return False
 
@@ -201,12 +196,10 @@ def _try_launch_tui() -> bool:
     if any(a in {"-h", "--help", "--version"} for a in argv):
         return False
 
-    gateway = resolve_gateway_binary()
-    if gateway is None:
-        return False
+    from defenseclaw.tui import run_textual_tui
 
-    os.execvp(gateway, [gateway, "tui"])
-    return True  # unreachable
+    run_textual_tui()
+    return True
 
 
 def main() -> None:
