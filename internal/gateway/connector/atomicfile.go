@@ -93,4 +93,3 @@ func resolveAtomicWritePath(path string) (string, error) {
 	}
 	return "", fmt.Errorf("resolve symlink %s: too many symlinks", path)
 }
-

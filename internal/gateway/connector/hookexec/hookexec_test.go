@@ -78,17 +78,17 @@ func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runR
 	}
 	var out, errb bytes.Buffer
 	opts := Options{
-		Connector: connector,
-		Event:     "PreToolUse",
-		APIAddr:   "127.0.0.1:8787",
-		FailMode:  "open",
-		Home:      home,
-		HookDir:   hookDir,
-		Stdin:     strings.NewReader(`{"event":"x"}`),
-		Stdout:    &out,
-		Stderr:    &errb,
+		Connector:  connector,
+		Event:      "PreToolUse",
+		APIAddr:    "127.0.0.1:8787",
+		FailMode:   "open",
+		Home:       home,
+		HookDir:    hookDir,
+		Stdin:      strings.NewReader(`{"event":"x"}`),
+		Stdout:     &out,
+		Stderr:     &errb,
 		HTTPClient: &http.Client{Transport: rt},
-		Now:       func() time.Time { return time.Unix(0, 0).UTC() },
+		Now:        func() time.Time { return time.Unix(0, 0).UTC() },
 	}
 	if mutate != nil {
 		mutate(&opts)
