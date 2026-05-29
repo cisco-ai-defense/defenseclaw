@@ -27,20 +27,17 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        (no helper signatures changed), so a downgrade to v3 only
 #        loses the stale-dir sweep — older hook scripts that source
 #        either version keep working unmodified.
-#   v6 — defenseclaw_harden_env now preserves access to curl and jq even
-#        when the locked-down PATH omits their install directory. Before
-#        locking, the function snapshots the paths of curl and jq
-#        (command -v); after locking it adds each tool's directory back
-#        only if the tool is no longer reachable on the hardened PATH.
-#        This fixes "gateway unreachable" errors on Windows Git Bash,
-#        where curl lives in /mingw64/bin and the [ -d /mingw64/bin ]
-#        guard can silently fail for subprocess-spawned bash instances.
-#        Also adds the _dc_jq shim: real jq when available (unchanged on
+#   v6 — adds the _dc_jq shim: real jq when available (unchanged on
 #        Mac/Linux), python3 fallback for object + string fields, then a
-#        pure-shell string-only last resort.  jq is not bundled with Git
-#        for Windows so the shim makes block decisions parse-able without
-#        requiring a separate jq install.  No helper signatures changed;
+#        pure-shell string-only last resort.  This makes block decisions
+#        parse-able on hosts without jq.  No helper signatures changed;
 #        hook scripts just replace bare `jq` calls with `_dc_jq`.
+#        NOTE: an earlier iteration of v6 also restored curl/jq directories
+#        from the pre-lockdown PATH after hardening. That was removed because
+#        the pre-lockdown PATH is agent-controlled and restoring one of its
+#        directories could re-admit an agent-planted binary. Windows no
+#        longer uses these bash hooks (it runs the hook natively in the Go
+#        binary), so the Git Bash /mingw64 workaround is no longer needed.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -134,46 +131,26 @@ defenseclaw_harden_env() {
         GIT_TRACE GIT_TRACE_PACKET GIT_TRACE_PACK_ACCESS \
         GIT_SSH GIT_SSH_COMMAND
 
-  # Snapshot locations of tools we require BEFORE locking PATH.  If the
-  # hardened PATH omits their directory (common on Windows Git Bash where
-  # curl lives in /mingw64/bin and the [ -d /mingw64/bin ] guard can
-  # silently fail for subprocess-spawned bash), we restore only those
-  # specific directories afterwards — preserving the security goal (no
-  # agent-injected bins) while keeping curl and jq reachable.
-  local _dc_pre_curl _dc_pre_jq
-  _dc_pre_curl="$(command -v curl 2>/dev/null || true)"
-  _dc_pre_jq="$(command -v jq 2>/dev/null || true)"
-
   # Lock down PATH — keep only standard system bins unless setup baked
   # a literal DEFENSECLAW_BAKED_HOOK_PATH into this helper file. Hooks
   # inherit the agent environment, so runtime DEFENSECLAW_HOOK_PATH (or
   # a companion "trusted" flag) is intentionally ignored; otherwise a
   # compromised agent could prepend trojan curl/jq/head.
+  #
+  # We deliberately do NOT restore any directory derived from the
+  # pre-lockdown PATH. That PATH is agent-controlled, so adding one of its
+  # directories back (to recover a curl/jq not on the hardened PATH) could
+  # re-admit an agent-planted binary and defeat this lockdown. Tools that
+  # are missing from the standard dirs are handled by the _dc_jq parsing
+  # fallback below, not by widening PATH. On Windows the hook runs natively
+  # in the DefenseClaw Go binary (no bash), so the previous Git Bash
+  # /mingw64 special-casing is unnecessary here.
   unset DEFENSECLAW_HOOK_PATH DEFENSECLAW_HOOK_PATH_TRUSTED
   if [ -n "$DEFENSECLAW_BAKED_HOOK_PATH" ]; then
     export PATH="$DEFENSECLAW_BAKED_HOOK_PATH"
-  elif [ -d /mingw64/bin ]; then
-    # Git for Windows installs curl.exe under /mingw64/bin. Keep the Unix
-    # system dirs too so sed/head/tail remain available.
-    export PATH="/mingw64/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   else
     export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   fi
-
-  # After lockdown: if curl or jq vanished, add back only their directory.
-  # _dc_restore_tool_dir is a local helper — defined here, used immediately.
-  _dc_restore_tool_dir() {
-    local _p="$1"
-    [ -z "$_p" ] && return 0
-    local _d
-    _d="$(dirname "$_p" 2>/dev/null)"
-    case ":$PATH:" in
-      *":$_d:"*) ;;
-      *) export PATH="$PATH:$_d" ;;
-    esac
-  }
-  command -v curl >/dev/null 2>&1 || _dc_restore_tool_dir "$_dc_pre_curl"
-  command -v jq   >/dev/null 2>&1 || _dc_restore_tool_dir "$_dc_pre_jq"
 
   # Keep the locale predictable so jq output / sed regex behavior
   # don't shift under the agent's locale.

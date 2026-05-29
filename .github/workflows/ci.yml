@@ -235,3 +235,57 @@ jobs:
       # tests landed.
       - run: make dev-pycli
       - run: make test
+
+  windows-hook-path:
+    name: Windows Hook Path
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: astral-sh/setup-uv@v8.1.0
+      # The gateway embeds the OpenClaw extension tree, normally generated
+      # by `make sync-openclaw-extension`. Windows is hook-only and needs no
+      # OpenClaw plugin, so drop the same `.placeholder` marker that target
+      # writes when extensions/defenseclaw/dist is absent. Done in bash
+      # (Git Bash ships on the runner) to avoid GNU make's flaky shell
+      # resolution on Windows.
+      - name: Generate OpenClaw extension placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          embed_dir=internal/gateway/connector/openclaw_extension
+          mkdir -p "$embed_dir"
+          printf '%s\n' \
+            "OpenClaw extension not built." \
+            "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
+            > "$embed_dir/.placeholder"
+      # Prove the Windows hook surfaces compile and vet cleanly.
+      - name: Go build (hook surfaces + binary)
+        run: go build ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/... ./cmd/defenseclaw
+      - name: Go vet (hook surfaces)
+        run: go vet ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
+      # Prove every test binary on the hook surfaces builds on Windows
+      # (compiles all test files, runs zero tests).
+      - name: Go test-compile (all hook-surface tests build on Windows)
+        run: go test -run "^$" ./internal/gateway/connector/... ./internal/cli/... ./internal/daemon/... ./internal/notify/...
+      # Execute the native Go hook decision engine end to end — this is the
+      # whole Windows hook path (stdin cap, token, HTTP, per-connector
+      # output/exit, fail-open/closed, Codex/Claude block schema).
+      - name: Go test - native hook engine
+        run: go test ./internal/gateway/connector/hookexec/...
+      # Execute the per-OS connector capability model and hook-wiring tests.
+      - name: Go test - connector capability + hook wiring
+        run: go test ./internal/gateway/connector/ -run "ProxyConnector|IsProxyConnector|ConnectorSupportedOnOS|RegistryNamesFilter|HookInvocationCommand|ShellWordPassesNativeCommandThrough|BuildCodexHooksTableHashesTheCommand|IsOwnedHookRecognizesNativeCommand"
+      # Execute the native `defenseclaw hook` entrypoint + sidecar resolution.
+      - name: Go test - hook entrypoint
+        run: go test ./internal/cli/ -run "BuildHookOptions|ReadHookSidecar|HookCommandRegistered"
+      - name: Sync Python env
+        shell: bash
+        run: uv sync
+      # Execute the per-OS connector gating and the Windows config-lock
+      # contention test natively on Windows.
+      - name: Python test - platform gating + config lock
+        shell: bash
+        run: uv run python -m pytest cli/tests/test_platform_support.py cli/tests/test_config_lock_mutex.py -q

@@ -37,11 +37,16 @@ func watchdogStartDir() string {
 	return ""
 }
 
-// watchdogSysProcAttr returns a SysProcAttr for Windows. Setsid is a Unix
-// concept; on Windows we return a zero-value struct which lets os.StartProcess
-// use default process creation flags.
+// watchdogSysProcAttr returns a SysProcAttr that starts the background
+// watchdog truly detached. Setsid is a Unix concept; the Windows equivalent
+// is CREATE_NEW_PROCESS_GROUP (so the launcher's Ctrl+C/Ctrl+Break is not
+// inherited and the child is addressable by GenerateConsoleCtrlEvent for a
+// graceful stop) combined with DETACHED_PROCESS (drop the inherited console
+// so a closing terminal cannot deliver CTRL_CLOSE and kill the watchdog).
 func watchdogSysProcAttr() *syscall.SysProcAttr {
-	return &syscall.SysProcAttr{}
+	return &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
 }
 
 func watchdogProcessAlive(pid int, _ *os.Process) bool {
@@ -54,6 +59,14 @@ func watchdogProcessAlive(pid int, _ *os.Process) bool {
 }
 
 func watchdogTerminate(proc *os.Process) error {
+	// Prefer a graceful stop via Ctrl+Break to the watchdog's process group.
+	// Go maps a console Ctrl+Break to os.Interrupt, which the watchdog loop
+	// handles through signal.NotifyContext. A detached watchdog has no shared
+	// console, so this returns an error; fall back to TerminateProcess. The
+	// caller waits for exit and force-kills on timeout.
+	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(proc.Pid)); err == nil {
+		return nil
+	}
 	return proc.Kill()
 }
 

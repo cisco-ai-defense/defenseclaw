@@ -21,16 +21,34 @@ package daemon
 import (
 	"os"
 	"os/exec"
+	"syscall"
 
 	"golang.org/x/sys/windows"
 )
 
 func setSysProcAttr(cmd *exec.Cmd) {
-	// Windows does not support Setpgid; processes are already in their own job.
+	// Detach the gateway so it outlives the launching process and console.
+	// CREATE_NEW_PROCESS_GROUP puts the gateway in its own group, so a
+	// Ctrl+C/Ctrl+Break aimed at the launcher's group is not inherited, and
+	// it becomes addressable by GenerateConsoleCtrlEvent for graceful stop.
+	// DETACHED_PROCESS drops the inherited console so a closing terminal
+	// cannot deliver CTRL_CLOSE and take the gateway down with it.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS,
+	}
 }
 
 func sendTermSignal(proc *os.Process) error {
-	// Windows has no SIGTERM; kill the process directly.
+	// Prefer a graceful stop: deliver Ctrl+Break to the gateway's own
+	// process group. Go's runtime turns a console Ctrl+Break into
+	// os.Interrupt, which the sidecar handles by cancelling its context and
+	// calling http.Server.Shutdown. When the gateway was started detached
+	// (no shared console), this returns an error; fall back to
+	// TerminateProcess so `stop` does not block for the full timeout. The
+	// caller still waits for exit and force-kills on timeout.
+	if err := windows.GenerateConsoleCtrlEvent(windows.CTRL_BREAK_EVENT, uint32(proc.Pid)); err == nil {
+		return nil
+	}
 	return proc.Kill()
 }
 

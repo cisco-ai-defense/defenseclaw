@@ -23,8 +23,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -40,39 +38,63 @@ func userHomeDir() string {
 	return os.Getenv("HOME")
 }
 
-// resolveWindowsBash finds a Git Bash (non-WSL) bash.exe on Windows.
-// WSL's bash runs in a separate network namespace and cannot reach the
-// Windows-side gateway on 127.0.0.1, so we prefer Git Bash.
-// Returns a quoted path if spaces are present, or just "bash" as fallback.
-func resolveWindowsBash() string {
-	if runtime.GOOS != "windows" {
-		return "bash"
+// nativeHookFlag is the distinctive argument fragment that marks a command as
+// the DefenseClaw native Go hook entrypoint (`defenseclaw-gateway hook
+// --connector <name>`). It is used both when writing an agent's hook command on
+// Windows and when recognizing DefenseClaw-owned hooks during teardown.
+const nativeHookFlag = "hook --connector "
+
+// hookInvocationCommand returns the command string an agent runtime is
+// configured to run for a DefenseClaw hook.
+//
+// On Unix the agent runs the bundled .sh hook through its shell, so the command
+// is the script path (unixCommand) the caller already resolved.
+//
+// On Windows there is no Bash/.cmd/jq/PATH-restore chain: the agent invokes the
+// DefenseClaw binary's hidden `hook` subcommand directly. The Windows command
+// deliberately carries no per-install volatile values — the gateway address,
+// token, and fail mode are resolved at runtime from the hook sidecar
+// (hooks/.hookcfg, hooks/.token) and the environment. Keeping the command
+// byte-identical across setup and teardown is required so Codex's trust-hash
+// recognition and the JSON/YAML hook removers (which match on the exact command
+// string) still find the entries DefenseClaw inserted.
+func hookInvocationCommand(connector, unixCommand string) string {
+	return hookInvocationCommandFor(runtime.GOOS, connector, unixCommand)
+}
+
+// hookInvocationCommandFor is the OS-parameterized core of
+// hookInvocationCommand, split out so the Windows command string can be
+// exercised by tests on any host.
+func hookInvocationCommandFor(goos, connector, unixCommand string) string {
+	if goos != "windows" {
+		return unixCommand
 	}
-	// Check common Git for Windows locations.
-	candidates := []string{
-		filepath.Join(os.Getenv("ProgramFiles"), "Git", "bin", "bash.exe"),
-		filepath.Join(os.Getenv("ProgramFiles(x86)"), "Git", "bin", "bash.exe"),
-		filepath.Join(os.Getenv("LocalAppData"), "Programs", "Git", "bin", "bash.exe"),
+	return windowsQuoteExe(defenseclawHookBinary()) + " " + nativeHookFlag + connector
+}
+
+// defenseclawHookBinary returns the path to the running gateway binary, which
+// also hosts the hidden `hook` subcommand. Falls back to the bare binary name
+// (resolved via PATH by the agent) when the path cannot be determined.
+func defenseclawHookBinary() string {
+	if exe, err := os.Executable(); err == nil && strings.TrimSpace(exe) != "" {
+		return exe
 	}
-	for _, p := range candidates {
-		if p == "" {
-			continue
-		}
-		if _, err := os.Stat(p); err == nil {
-			return `"` + p + `"`
-		}
-	}
-	// Fall back to PATH lookup — prefer git bash's bash over WSL.
-	if gitPath, err := exec.LookPath("git"); err == nil {
-		// git.exe is typically at C:\Program Files\Git\cmd\git.exe
-		// bash.exe is at C:\Program Files\Git\bin\bash.exe
-		gitDir := filepath.Dir(filepath.Dir(gitPath))
-		candidate := filepath.Join(gitDir, "bin", "bash.exe")
-		if _, err := os.Stat(candidate); err == nil {
-			return `"` + candidate + `"`
-		}
-	}
-	return "bash"
+	return "defenseclaw-gateway"
+}
+
+// windowsQuoteExe wraps an executable path in double quotes so cmd.exe and agent
+// runtimes treat a path containing spaces (e.g. "C:\Program Files\...") as a
+// single token. Backslashes are preserved verbatim inside double quotes.
+func windowsQuoteExe(p string) string {
+	return `"` + p + `"`
+}
+
+// isNativeHookCommand reports whether cmd is the DefenseClaw native Go hook
+// entrypoint invocation written on Windows. Used by teardown ownership
+// recognition, which otherwise keys on a hooks-dir path / script marker that a
+// native (non-file) command does not carry.
+func isNativeHookCommand(cmd string) bool {
+	return strings.Contains(cmd, nativeHookFlag)
 }
 
 // SecureTokenMatch compares two token strings in constant time to prevent

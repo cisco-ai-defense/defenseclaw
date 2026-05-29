@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -481,7 +482,12 @@ func TestAllConnectors_ImplementInterface(t *testing.T) {
 // it exists on disk.
 func TestOpenClaw_ExtensionAvailable_OnFullBuild(t *testing.T) {
 	t.Parallel()
-	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, ".placeholder")); err == nil {
+	// embed.FS always uses forward-slash paths; filepath.Join would emit
+	// backslashes on Windows and never match the embedded entry, so the
+	// skip would not fire and the test would spuriously fail on a Windows
+	// placeholder build. Use path.Join (and the shared constant) to mirror
+	// openClawExtensionAvailable.
+	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
 		t.Skip("gateway built without OpenClaw extension (placeholder present) — full-build assertion does not apply here")
 	}
 	if !openClawExtensionAvailable() {

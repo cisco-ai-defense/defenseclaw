@@ -33,6 +33,22 @@ redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
 
+## Platform support
+
+| Connector | macOS | Linux | Windows |
+| --------- | ----- | ----- | ------- |
+| OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
+| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands (hook-based) | OK | OK | OK |
+
+Windows is **hook-only**: the eight hook-based connectors run their hook
+decisions natively in the `defenseclaw` binary (the agent invokes
+`defenseclaw hook --connector <name> --event <event>`), so no Git Bash, `jq`,
+or shell shims are required. The proxy connectors (OpenClaw, ZeptoClaw) need
+the local guardrail proxy, which DefenseClaw does not host on Windows; they are
+hidden from the connector pickers and rejected by setup there. The Go registry
+(`connectorSupportedOnOS`) and the Python `platform_support` module are the two
+sources of truth for this gating, kept in sync by a parity test.
+
 ## Versioned Hook Contracts
 
 The machine-readable compatibility source lives at

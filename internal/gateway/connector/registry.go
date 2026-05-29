@@ -112,6 +112,12 @@ func (r *Registry) Available() []ConnectorInfo {
 
 	out := make([]ConnectorInfo, 0, len(r.builtins)+len(r.plugins))
 	for _, c := range r.builtins {
+		// Hide connectors unsupported on this OS (proxy connectors on Windows)
+		// so the TUI/CLI and /v1/connectors never surface a path that cannot
+		// run here.
+		if !ConnectorSupportedOnHostOS(c.Name()) {
+			continue
+		}
 		out = append(out, ConnectorInfo{
 			Name:               c.Name(),
 			Description:        c.Description(),
@@ -121,6 +127,9 @@ func (r *Registry) Available() []ConnectorInfo {
 		})
 	}
 	for _, c := range r.plugins {
+		if !ConnectorSupportedOnHostOS(c.Name()) {
+			continue
+		}
 		out = append(out, ConnectorInfo{
 			Name:               c.Name(),
 			Description:        c.Description(),

@@ -89,17 +89,18 @@ LEGACY_DEPLOYMENT_MODE_ALIASES = {
 if os.name == "nt":
     import msvcrt
 
+    # msvcrt.locking() locks a byte range starting at the file pointer's
+    # CURRENT position. To get mutual exclusion we must lock the SAME byte
+    # (offset 0) on every acquisition, so we seek(0) immediately before each
+    # lock/unlock call and we never write to the lock file. Writing (in any
+    # mode) can advance the pointer or grow the file, which would make
+    # concurrent holders lock disjoint ranges and silently defeat the lock.
     def _lock_file_exclusive(file_obj) -> None:
-        # msvcrt.locking operates on byte ranges; lock 1 byte at offset 0.
-        file_obj.seek(0)
-        try:
-            file_obj.write("0")
-            file_obj.flush()
-        except Exception:
-            # Best-effort sentinel; lock still works for existing files.
-            pass
         while True:
+            file_obj.seek(0)
             try:
+                # LK_LOCK blocks for ~10s then raises; retry so this behaves
+                # like a blocking exclusive lock (fcntl.flock(LOCK_EX)).
                 msvcrt.locking(file_obj.fileno(), msvcrt.LK_LOCK, 1)
                 return
             except OSError:
@@ -110,7 +111,8 @@ if os.name == "nt":
         try:
             msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1)
         except OSError:
-            # If the lock was lost or never acquired, do not crash teardown/save paths.
+            # Lock already released (e.g. handle closed); don't crash
+            # teardown/save paths.
             pass
 
 else:
@@ -1622,7 +1624,10 @@ def locked_config_yaml(path: str):
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(lock_path, flags, 0o600)
     try:
-        lock = os.fdopen(fd, "a+")
+        # "r+" (not "a+"): the lock file is a pure sentinel we never write to,
+        # and append mode would force the file pointer to EOF, breaking the
+        # offset-0 byte-range lock used on Windows (see _lock_file_exclusive).
+        lock = os.fdopen(fd, "r+")
     except BaseException:
         os.close(fd)
         raise

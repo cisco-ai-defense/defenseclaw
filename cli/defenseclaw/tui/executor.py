@@ -40,6 +40,13 @@ class CommandExecutor:
         self._process: asyncio.subprocess.Process | None = None
         self._master_fd: int | None = None
         self._cancelled = False
+        if use_pty and os.name != "posix":
+            # The 'pty' module is POSIX-only and is not imported elsewhere;
+            # fail fast with a clear message instead of a NameError deep in
+            # _run_pty when a caller forces PTY mode on Windows.
+            raise ValueError(
+                "PTY execution (use_pty=True) is only supported on POSIX platforms"
+            )
         self.use_pty = os.name == "posix" if use_pty is None else use_pty
 
     @property

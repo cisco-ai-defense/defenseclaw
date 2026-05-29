@@ -20,10 +20,21 @@ package connector
 
 import "os"
 
-// otlpOpenNoFollow returns 0 on Windows (O_NOFOLLOW is a Unix concept;
-// Windows does not follow symlinks during CreateFile by default).
+// otlpOpenNoFollow returns 0 on Windows. O_NOFOLLOW is a Unix flag and is not
+// available here. (Windows DOES traverse reparse points/symlinks during
+// CreateFile unless FILE_FLAG_OPEN_REPARSE_POINT is set, but creating symlinks
+// on Windows requires elevation or Developer Mode, and the token file is
+// created with O_EXCL, so the practical exposure is limited.)
 func otlpOpenNoFollow() int {
 	return 0
+}
+
+// otlpValidatePerm is a no-op on Windows. Go synthesizes FileMode permission
+// bits from the read-only attribute (a writable file reports 0666, never
+// 0600), so the Unix 0600 check would reject every legitimately created token.
+// Access control on Windows is governed by ACLs, not POSIX mode bits.
+func otlpValidatePerm(_ string, _ os.FileInfo) error {
+	return nil
 }
 
 // otlpValidateOwner is a no-op on Windows. File ownership uses ACLs and

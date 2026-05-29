@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -119,6 +120,13 @@ func (c *ZeptoClawConnector) AllowedHosts() []string {
 }
 
 func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	// Proxy connectors require the local guardrail proxy, which DefenseClaw
+	// does not host on Windows (hook-only there). Fail clearly instead of
+	// planting a half-configured proxy connector.
+	if !ConnectorSupportedOnHostOS(c.Name()) {
+		return errConnectorUnsupportedOnOS(c.Name(), runtime.GOOS)
+	}
+
 	// Surface 1: Patch ZeptoClaw config to route api_base through proxy.
 	if err := c.patchZeptoClawConfig(opts); err != nil {
 		return fmt.Errorf("zeptoclaw config patch: %w", err)

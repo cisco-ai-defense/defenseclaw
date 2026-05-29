@@ -21,33 +21,42 @@ package connector
 import (
 	"fmt"
 	"os"
-	"time"
+
+	"golang.org/x/sys/windows"
 )
 
-// withFileLock on Windows uses an exclusive open as a lock mechanism.
-// Windows file locking is mandatory (opening with exclusive access blocks
-// other openers), which provides the same mutual exclusion guarantee as
-// flock on Unix.
+// withFileLock acquires an exclusive, blocking lock on path+".lock" before
+// running fn, and releases it when fn returns.
+//
+// It uses Windows LockFileEx (exclusive, without LOCKFILE_FAIL_IMMEDIATELY),
+// which blocks until the lock is available and is released automatically by
+// the OS when the holding process exits or the handle is closed. That gives
+// the same mutual-exclusion and crash-safety guarantees as flock(LOCK_EX) on
+// Unix. The earlier O_CREATE|O_EXCL sentinel-file approach was non-blocking
+// (it returned an error on contention instead of waiting) and left a stale
+// lock file that hard-failed all callers for up to a minute after a crash.
 func withFileLock(path string, fn func() error) error {
 	lockPath := path + ".lock"
-	const staleLockAge = 60 * time.Second
 
-	// Clean up stale lock files from crashed processes.
-	if info, err := os.Stat(lockPath); err == nil {
-		if time.Since(info.ModTime()) > staleLockAge {
-			_ = os.Remove(lockPath)
-		}
-	}
-
-	// On Windows, O_CREATE|O_EXCL ensures only one process can hold the lock.
-	// If the file already exists (held by another process), OpenFile fails.
-	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+	// O_RDWR (not O_EXCL): every caller opens the shared lock file; mutual
+	// exclusion is enforced by the byte-range lock below, not by file
+	// existence. Go opens with FILE_SHARE_READ|WRITE|DELETE so concurrent
+	// processes can open the handle and then contend on the lock.
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
+		return fmt.Errorf("open lock file %s: %w", lockPath, err)
+	}
+	defer lockFile.Close()
+
+	handle := windows.Handle(lockFile.Fd())
+	overlapped := new(windows.Overlapped)
+	// Lock 1 byte at offset 0. All callers use the same range, so this
+	// serializes them. No LOCKFILE_FAIL_IMMEDIATELY flag -> the call blocks.
+	if err := windows.LockFileEx(handle, windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, overlapped); err != nil {
 		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
 	}
 	defer func() {
-		lockFile.Close()
-		_ = os.Remove(lockPath)
+		_ = windows.UnlockFileEx(handle, 0, 1, 0, overlapped)
 	}()
 
 	return fn()

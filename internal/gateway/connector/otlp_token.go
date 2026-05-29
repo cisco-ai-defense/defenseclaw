@@ -259,8 +259,8 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("OTLP path-token %s is not a regular file", path)
 	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		return "", fmt.Errorf("OTLP path-token %s has mode %o, want 600", path, mode)
+	if err := otlpValidatePerm(path, info); err != nil {
+		return "", err
 	}
 	if err := otlpValidateOwner(path, info); err != nil {
 		return "", err

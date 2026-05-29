@@ -343,6 +343,10 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 	}
 
+	if err := writeHookConfigSidecar(hookDir, apiAddr, defaultHookFailMode); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -396,37 +400,36 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
-		// On Windows, agent runtimes cannot execute .sh files directly and
-		// may run them through a shell that cannot exec Windows .exe files.
-		// Write a .cmd wrapper alongside each .sh hook so connectors can
-		// reference the .cmd path as the hook command — cmd.exe runs it
-		// natively and forwards stdin/stdout to Git Bash correctly.
-		if runtime.GOOS == "windows" && strings.HasSuffix(name, ".sh") {
-			if err := writeWindowsHookWrapper(hookDir, name); err != nil {
-				return fmt.Errorf("write windows hook wrapper %s: %w", name, err)
-			}
-		}
+	}
+	if err := writeHookConfigSidecar(hookDir, apiAddr, normalizeHookFailMode(failMode)); err != nil {
+		return err
 	}
 	return nil
 }
 
-// writeWindowsHookWrapper writes a .cmd file that calls Git Bash to execute
-// the corresponding .sh hook. Using a .cmd wrapper avoids the ambiguity of
-// which bash (Git Bash vs WSL) a runtime picks up from PATH, and ensures
-// cmd.exe — which always works on Windows — is the entry point.
-func writeWindowsHookWrapper(hookDir, shName string) error {
-	bashExe := filepath.ToSlash(resolveWindowsBash())
-	// Strip leading/trailing quotes resolveWindowsBash may add.
-	bashExe = strings.Trim(bashExe, `"`)
-	shPath := filepath.ToSlash(filepath.Join(hookDir, shName))
-	cmdName := strings.TrimSuffix(shName, ".sh") + ".cmd"
-	cmdPath := filepath.Join(hookDir, cmdName)
-	// %* forwards any extra arguments; stdin/stdout are inherited by cmd.exe.
-	// "exit /b %ERRORLEVEL%" explicitly propagates the bash exit code
-	// (e.g. exit 2 for hook-block) to the calling agent runtime; without
-	// it some cmd.exe invocations silently reset the exit code.
-	content := "@echo off\r\n\"" + bashExe + "\" \"" + shPath + "\" %*\r\nexit /b %ERRORLEVEL%\r\n"
-	return os.WriteFile(cmdPath, []byte(content), 0o700)
+// hookConfigSidecarName is the file the native Go hook entrypoint reads on
+// Windows for the gateway address + fail mode. It lets the agent hook command
+// stay free of per-install flags (so its trust-hash / match string is stable),
+// while still conveying the operator's enforcement choice and a non-default
+// API port. The Bash hooks (Unix) bake these values into the script and ignore
+// this file.
+const hookConfigSidecarName = ".hookcfg"
+
+// writeHookConfigSidecar persists the gateway address and fail mode the native
+// Go hook entrypoint resolves at runtime. It is only written on Windows, where
+// the native entrypoint replaces the Bash hooks; Unix keeps the .sh hooks
+// unchanged and never reads this file.
+func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	body := fmt.Sprintf("DEFENSECLAW_GATEWAY_ADDR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+		apiAddr, normalizeHookFailMode(failMode))
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return fmt.Errorf("write hook config sidecar: %w", err)
+	}
+	return nil
 }
 
 func hookScriptNamesForConnector(opts SetupOpts, c Connector) []string {

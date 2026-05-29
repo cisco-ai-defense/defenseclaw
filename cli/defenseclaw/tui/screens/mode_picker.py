@@ -21,6 +21,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
+from defenseclaw.platform_support import supported_connectors
 from defenseclaw.tui.theme import DEFAULT_TOKENS
 from defenseclaw.tui.widgets.action_menu import ActionMenu, MenuAction
 
@@ -47,6 +48,16 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
 )
+
+
+def visible_mode_picker_choices(os_name: str | None = None) -> tuple[ModeChoice, ...]:
+    """Mode-picker rows supported on *os_name*.
+
+    On Windows the proxy connectors (openclaw/zeptoclaw) are dropped because
+    DefenseClaw is hook-only there; on macOS/Linux this is a no-op.
+    """
+    supported = set(supported_connectors([c.wire for c in MODE_PICKER_CHOICES], os_name))
+    return tuple(c for c in MODE_PICKER_CHOICES if c.wire in supported)
 
 
 class ModePickerScreen(ModalScreen[str | None]):
@@ -91,15 +102,22 @@ class ModePickerScreen(ModalScreen[str | None]):
     def __init__(self, current_wire: str = "openclaw") -> None:
         super().__init__()
         self.current_wire = normalize_connector(current_wire)
+        # Hide proxy connectors on Windows; no-op on macOS/Linux. Resolve
+        # once so compose() and _sync_preview() share the same row order.
+        self.choices = visible_mode_picker_choices()
 
     def compose(self) -> ComposeResult:
         current = choice_for_wire(self.current_wire)
-        actions = tuple(_choice_action(choice, current_wire=self.current_wire) for choice in MODE_PICKER_CHOICES)
+        actions = tuple(_choice_action(choice, current_wire=self.current_wire) for choice in self.choices)
+        selected = next(
+            (i for i, c in enumerate(self.choices) if c.wire == current.wire),
+            0,
+        )
         with Vertical(id="mode-picker-dialog"):
             yield Static("Switch active claw connector", id="mode-picker-title")
-            yield ActionMenu(actions, selected_index=choice_index(current.wire), id="mode-picker-menu")
+            yield ActionMenu(actions, selected_index=selected, id="mode-picker-menu")
             yield Static(preview_for_switch(self.current_wire, current.wire), id="mode-picker-preview")
-            yield Static("up/down move  o/z/k/c/h/u/w/g/p jump  enter confirm  esc close", id="mode-picker-hint")
+            yield Static("up/down move  o/z/k/c/h/u/w/g/p/n jump  enter confirm  esc close", id="mode-picker-hint")
 
     def on_key(self, event: events.Key) -> None:
         if not event.character:
@@ -139,7 +157,7 @@ class ModePickerScreen(ModalScreen[str | None]):
     def _sync_preview(self) -> None:
         menu = self.query_one(ActionMenu)
         index = menu.selected_index if menu.selected_index is not None else 0
-        choice = MODE_PICKER_CHOICES[index]
+        choice = self.choices[index]
         self.query_one("#mode-picker-preview", Static).update(preview_for_switch(self.current_wire, choice.wire))
 
 

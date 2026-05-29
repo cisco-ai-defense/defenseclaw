@@ -25,7 +25,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -60,10 +62,13 @@ const openClawPlaceholderName = ".placeholder"
 // failing loudly when someone tries to switch to OpenClaw without
 // having built the plugin.
 func openClawExtensionAvailable() bool {
-	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, "package.json")); err == nil {
+	// embed.FS always uses forward-slash paths; filepath.Join would emit
+	// backslashes on Windows and never match the embedded entries, so use
+	// path.Join here.
+	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, "package.json")); err == nil {
 		return true
 	}
-	if _, err := openClawExtensionFS.ReadFile(filepath.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
+	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
 		return false
 	}
 	return false
@@ -124,6 +129,13 @@ func (c *OpenClawConnector) AllowedHosts() []string {
 }
 
 func (c *OpenClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	// Proxy connectors require the local guardrail proxy, which DefenseClaw
+	// does not host on Windows (hook-only there). Fail clearly instead of
+	// planting a half-configured proxy connector.
+	if !ConnectorSupportedOnHostOS(c.Name()) {
+		return errConnectorUnsupportedOnOS(c.Name(), runtime.GOOS)
+	}
+
 	// The Makefile keeps the gateway buildable on machines without the
 	// TS plugin built (typical for non-OpenClaw operators) by embedding
 	// a placeholder. If the operator now actually wants OpenClaw, refuse
