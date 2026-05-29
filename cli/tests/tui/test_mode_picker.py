@@ -51,6 +51,8 @@ def test_mode_picker_choices_cover_go_connectors() -> None:
         "windsurf",
         "geminicli",
         "copilot",
+        "openhands",
+        "antigravity",
     ]
     assert choice_for_wire("claude-code").wire == "claudecode"
     assert choice_for_hotkey("c").wire == "codex"

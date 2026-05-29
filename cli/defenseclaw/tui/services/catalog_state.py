@@ -1171,6 +1171,8 @@ def mcp_unset_target_for_connector(connector: str) -> str:
             return "~/.gemini/settings.json"
         case "copilot":
             return "./.github/mcp.json"
+        case "openhands":
+            return "~/.openhands/mcp.json"
         case _:
             return "OpenClaw config"
 
@@ -1213,6 +1215,10 @@ def friendly_connector_name(connector: str) -> str:
             return "Gemini CLI"
         case "copilot":
             return "GitHub Copilot CLI"
+        case "openhands":
+            return "OpenHands"
+        case "antigravity":
+            return "Antigravity"
         case value:
             return value[:1].upper() + value[1:] if value else "OpenClaw"
 
