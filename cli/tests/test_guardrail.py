@@ -1238,6 +1238,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "y",         # human approval — INLINE PROMPT (mode == action)
             "MEDIUM",    # approval min severity
             "",          # local scanner
+            "2",         # LLM role for proxy-backed connector: judge AND agent
             "n",         # no LLM judge
             "n",         # decline advanced options — HILT is no longer there
             "",
@@ -1280,6 +1281,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "",       # hook fail-mode (default = open)
             "n",      # human approval (inline) — declined
             "",       # local scanner
+            "2",      # LLM role for proxy-backed connector: judge AND agent
             "n",      # no LLM judge
             "y",      # configure advanced options
             "",       # default port
@@ -1332,6 +1334,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "",      # hook fail-mode (default = open)
             # NO HILT prompt here — observe mode skips it entirely.
             "",      # local scanner
+            "2",     # LLM role for proxy-backed connector: judge AND agent
             "n",     # no LLM judge
             "y",     # configure advanced options
             "",      # default port

@@ -27,6 +27,7 @@ import shutil
 import socket
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -136,6 +137,14 @@ from defenseclaw.commands.cmd_setup_local_observability import (  # noqa: E402
 )
 
 setup.add_command(local_observability)
+
+# Import the Terraform-backed Splunk O11y dashboard installer so the
+# interactive Splunk wizard can reuse the same idempotent apply path and
+# the command group can be registered below.
+from defenseclaw.commands.cmd_setup_splunk_o11y_dashboards import (  # noqa: E402
+    apply_dashboards,
+    splunk_o11y_dashboards,
+)
 
 # Register `defenseclaw setup webhook` (Slack/PagerDuty/Webex/generic
 # notifiers). Distinct from `setup observability add webhook` (generic
@@ -354,9 +363,12 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
 )
 @click.option(
     "--provider",
-    type=click.Choice(_WIZARD_LLM_PROVIDERS, case_sensitive=False),
+    type=click.Choice(_WIZARD_LLM_PROVIDERS + ["custom"], case_sensitive=False),
     default=None,
-    help="LLM provider to write non-interactively.",
+    help=(
+        "LLM provider to write non-interactively. Use 'custom' with "
+        "--instance-name to bind a custom-providers.json instance."
+    ),
 )
 @click.option("--model", default=None, help="LLM model id to write non-interactively.")
 @click.option(
@@ -372,6 +384,124 @@ def migrate_llm(app: AppContext, dry_run: bool, no_backup: bool) -> None:
 @click.option("--base-url", default=None, help="Provider base URL override.")
 @click.option("--timeout", type=int, default=None, help="LLM timeout in seconds.")
 @click.option("--max-retries", type=int, default=None, help="LLM retry count.")
+@click.option(
+    "--region",
+    default=None,
+    help="Generic provider region (Bedrock, Vertex, etc.). Stored on llm.region.",
+)
+@click.option(
+    "--instance-name",
+    default=None,
+    help=(
+        "Custom-provider instance name as registered via "
+        "`defenseclaw setup provider add`. Selects the overlay entry whose "
+        "base_url, env keys, and TLS settings are applied at resolve time."
+    ),
+)
+@click.option(
+    "--inherit-from",
+    type=click.Choice(["guardrail", "guardrail.judge", "scanners.skill", "scanners.mcp", "scanners.plugin"]),
+    default=None,
+    help=(
+        "Copy a resolved component config (provider/model/api_key_env/base_url) "
+        "into the unified top-level llm block before applying other flags."
+    ),
+)
+@click.option(
+    "--inherit/--no-inherit",
+    "inherit_preflight",
+    default=None,
+    help=(
+        "Run the interactive 'inherit preflight' that lists sibling LLM "
+        "configs (per-scanner / guardrail / judge) and offers to reuse "
+        "one. Defaults to on in interactive mode, off under --non-interactive."
+    ),
+)
+@click.option(
+    "--role",
+    type=click.Choice(["unified", "agent", "judge"]),
+    default="unified",
+    show_default=True,
+    help=(
+        "Where to write the LLM settings. 'unified' updates the top-level "
+        "llm: block (default). 'judge' writes to guardrail.judge.llm so a "
+        "hook-based connector can keep its own agent LLM. 'agent' writes "
+        "to the top-level llm: block AND leaves guardrail.judge.llm empty "
+        "so it inherits through the unified merge."
+    ),
+)
+@click.option(
+    "--auth-mode",
+    default=None,
+    help=(
+        "Generic auth mode flag. When --provider bedrock, maps to "
+        "--bedrock-auth-mode; --provider azure maps to --azure-auth-mode; "
+        "--provider vertex_ai maps to --vertex-auth-mode."
+    ),
+)
+@click.option("--bedrock-region", default=None, help="AWS region for Bedrock (e.g. us-east-1).")
+@click.option(
+    "--bedrock-auth-mode",
+    type=click.Choice(["api_key", "iam_credentials", "profile", "instance_role"]),
+    default=None,
+    help="Bedrock auth strategy.",
+)
+@click.option("--bedrock-access-key-env", default=None, help="Env var holding AWS access key ID for Bedrock.")
+@click.option("--bedrock-secret-key-env", default=None, help="Env var holding AWS secret access key for Bedrock.")
+@click.option("--bedrock-session-token-env", default=None, help="Env var holding AWS session token for Bedrock.")
+@click.option("--bedrock-profile-name", default=None, help="AWS profile name when bedrock-auth-mode=profile.")
+@click.option("--bedrock-inference-profile", default=None, help="Bedrock inference-profile prefix (e.g. 'us.').")
+@click.option(
+    "--bedrock-deployment",
+    "bedrock_deployment_aliases",
+    multiple=True,
+    help="Bedrock model alias formatted ``alias=model-id`` (repeatable).",
+)
+@click.option("--vertex-project-id", default=None, help="GCP project ID for Vertex AI.")
+@click.option("--vertex-region", default=None, help="GCP region/location for Vertex AI.")
+@click.option(
+    "--vertex-auth-mode",
+    type=click.Choice(["service_account", "adc", "workload_identity"]),
+    default=None,
+    help="Vertex auth strategy.",
+)
+@click.option(
+    "--vertex-service-account-json-env",
+    default=None,
+    help="Env var holding the path to the Vertex service-account JSON.",
+)
+@click.option("--azure-endpoint", default=None, help="Azure OpenAI endpoint (e.g. https://name.openai.azure.com).")
+@click.option("--azure-api-version", default=None, help="Azure OpenAI api-version (e.g. 2024-10-21).")
+@click.option(
+    "--azure-auth-mode",
+    type=click.Choice(["api_key", "managed_identity"]),
+    default=None,
+    help="Azure auth strategy.",
+)
+@click.option(
+    "--azure-deployment-alias",
+    "azure_deployment_aliases",
+    multiple=True,
+    help="Azure deployment alias formatted ``model=deployment`` (repeatable).",
+)
+@click.option(
+    "--tls-ca-cert-file",
+    default=None,
+    type=click.Path(exists=False, dir_okay=False),
+    help="PEM CA bundle for self-signed LLM endpoints (inline-stored on llm.tls.ca_cert_pem).",
+)
+@click.option(
+    "--insecure-skip-verify",
+    is_flag=True,
+    default=False,
+    help="Disable TLS verification for this LLM endpoint (lab use only).",
+)
+@click.option(
+    "--ping/--no-ping",
+    "run_ping",
+    default=False,
+    help="After saving, send a one-shot 'ping' request via LiteLLM to verify reachability.",
+)
 @click.option(
     "--non-interactive",
     "--accept-defaults",
@@ -389,6 +519,31 @@ def setup_llm(
     base_url: str | None,
     timeout: int | None,
     max_retries: int | None,
+    region: str | None,
+    instance_name: str | None,
+    inherit_from: str | None,
+    inherit_preflight: bool | None,
+    role: str,
+    auth_mode: str | None,
+    bedrock_region: str | None,
+    bedrock_auth_mode: str | None,
+    bedrock_access_key_env: str | None,
+    bedrock_secret_key_env: str | None,
+    bedrock_session_token_env: str | None,
+    bedrock_profile_name: str | None,
+    bedrock_inference_profile: str | None,
+    bedrock_deployment_aliases: tuple[str, ...],
+    vertex_project_id: str | None,
+    vertex_region: str | None,
+    vertex_auth_mode: str | None,
+    vertex_service_account_json_env: str | None,
+    azure_endpoint: str | None,
+    azure_api_version: str | None,
+    azure_auth_mode: str | None,
+    azure_deployment_aliases: tuple[str, ...],
+    tls_ca_cert_file: str | None,
+    insecure_skip_verify: bool,
+    run_ping: bool,
     non_interactive: bool,
 ) -> None:
     """Configure the unified top-level ``llm:`` block.
@@ -405,10 +560,29 @@ def setup_llm(
     ``scripts/setup-llm.sh`` and the LLM section of ``defenseclaw init``.
     """
     cfg = app.cfg
-    llm = cfg.llm
+
+    target_path = _role_to_target_path(role)
+    llm = _target_llm_block(cfg, target_path)
+
+    # --auth-mode delegates to the appropriate provider-typed flag so an
+    # operator who only knows "I want IAM creds for Bedrock" doesn't have
+    # to remember the long-form flag name.
+    if auth_mode is not None:
+        prov = (provider or llm.provider or "").strip().lower()
+        if prov == "bedrock" and bedrock_auth_mode is None:
+            bedrock_auth_mode = auth_mode
+        elif prov in ("azure", "azure_openai") and azure_auth_mode is None:
+            azure_auth_mode = auth_mode
+        elif prov in ("vertex_ai", "vertex", "gemini") and vertex_auth_mode is None:
+            vertex_auth_mode = auth_mode
+        else:
+            ux.warn(
+                f"--auth-mode is only honored for bedrock/azure/vertex_ai providers; "
+                f"current provider is {prov!r} — ignoring."
+            )
 
     if show:
-        resolved = cfg.resolve_llm("")
+        resolved = cfg.resolve_llm(target_path)
         click.echo()
         ux.section("Unified LLM configuration")
         click.echo(f"    {ux.dim('provider:')}    {resolved.provider or '(unset)'}")
@@ -437,19 +611,46 @@ def setup_llm(
             base_url=base_url,
             timeout=timeout,
             max_retries=max_retries,
+            region=region,
+            instance_name=instance_name,
+            inherit_from=inherit_from,
+            target_path=target_path,
+            bedrock_region=bedrock_region,
+            bedrock_auth_mode=bedrock_auth_mode,
+            bedrock_access_key_env=bedrock_access_key_env,
+            bedrock_secret_key_env=bedrock_secret_key_env,
+            bedrock_session_token_env=bedrock_session_token_env,
+            bedrock_profile_name=bedrock_profile_name,
+            bedrock_inference_profile=bedrock_inference_profile,
+            bedrock_deployment_aliases=bedrock_deployment_aliases,
+            vertex_project_id=vertex_project_id,
+            vertex_region=vertex_region,
+            vertex_auth_mode=vertex_auth_mode,
+            vertex_service_account_json_env=vertex_service_account_json_env,
+            azure_endpoint=azure_endpoint,
+            azure_api_version=azure_api_version,
+            azure_auth_mode=azure_auth_mode,
+            azure_deployment_aliases=azure_deployment_aliases,
+            tls_ca_cert_file=tls_ca_cert_file,
+            insecure_skip_verify=insecure_skip_verify,
         )
         cfg.save()
 
         click.echo()
         ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
-        resolved = cfg.resolve_llm("")
+        resolved = cfg.resolve_llm(target_path)
         key_env = resolved.api_key_env or DEFENSECLAW_LLM_KEY_ENV
         key_state = _mask(os.environ.get(key_env, "")) if os.environ.get(key_env, "") else "(not set)"
-        ux.kv("llm.provider", resolved.provider or "(unset)")
-        ux.kv("llm.model", resolved.model or "(unset)")
-        ux.kv("llm.api_key_env", f"{key_env} = {key_state}")
+        label_prefix = "llm" if not target_path else f"{target_path}.llm"
+        ux.kv(f"{label_prefix}.provider", resolved.provider or "(unset)")
+        ux.kv(f"{label_prefix}.model", resolved.model or "(unset)")
+        ux.kv(f"{label_prefix}.api_key_env", f"{key_env} = {key_state}")
         if resolved.base_url:
-            ux.kv("llm.base_url", resolved.base_url)
+            ux.kv(f"{label_prefix}.base_url", resolved.base_url)
+        if resolved.instance_name:
+            ux.kv(f"{label_prefix}.instance_name", resolved.instance_name)
+        if run_ping:
+            _run_llm_ping(resolved)
         return
 
     click.echo()
@@ -463,13 +664,35 @@ def setup_llm(
         click.echo(f"  Current: model={llm.model}, api_key_env={llm.api_key_env or DEFENSECLAW_LLM_KEY_ENV}")
         click.echo()
 
-    _configure_llm(cfg, cfg.data_dir)
+    preflight_result: dict[str, Any] | None = None
+    if inherit_preflight is not False:
+        preflight_result = _maybe_inherit_existing_llm(
+            cfg, target_path=target_path, inherit_from=inherit_from,
+        )
+    if preflight_result and preflight_result.get("action") == "inherit":
+        # Operator picked "Inherit fully" — skip the full prompt
+        # walkthrough and go straight to save.
+        _clear_legacy_llm_fields(cfg)
+    elif preflight_result and preflight_result.get("action") == "partial":
+        # Inherit-then-prompt-for-model: keep the inherited fields,
+        # but let the operator type a different model id.
+        target_llm = _target_llm_block(cfg, target_path)
+        target_llm.model = click.prompt(
+            "  LLM model id (overrides the inherited model)",
+            default=target_llm.model or "",
+            show_default=bool(target_llm.model),
+        ).strip()
+        _clear_legacy_llm_fields(cfg)
+    else:
+        _configure_llm(cfg, cfg.data_dir, target_path=target_path)
     cfg.save()
 
     click.echo()
     ux.ok(f"Saved to {os.path.join(cfg.data_dir, 'config.yaml')}")
     click.echo()
     ux.subhead("Next: defenseclaw doctor       # verify the unified LLM is reachable")
+    if run_ping:
+        _run_llm_ping(cfg.resolve_llm(target_path))
 
 
 @setup.command("skill-scanner")
@@ -645,12 +868,27 @@ def _interactive_setup(sc, llm, aid, cfg) -> None:
     sc.lenient = click.confirm("  Lenient mode (tolerate malformed skills)?", default=sc.lenient)
 
 
-def _configure_llm(cfg, data_dir: str) -> None:
+_LLM_ROLE_TO_TARGET_PATH: dict[str, str] = {
+    "unified": "",
+    "agent": "",
+    "judge": "guardrail.judge",
+}
+
+
+def _role_to_target_path(role: str) -> str:
+    """Map a ``--role`` value to a target_path accepted by
+    :func:`_target_llm_block` / :meth:`Config.resolve_llm`.
+    """
+    return _LLM_ROLE_TO_TARGET_PATH.get(role, "")
+
+
+def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
     """Prompt for unified ``llm:`` settings (provider, model, API key).
 
-    Writes to the top-level ``cfg.llm`` block — the single source of
-    truth consumed by guardrail (Bifrost), MCP scanner, skill scanner,
-    and the plugin scanner via :meth:`Config.resolve_llm`. Per-scanner
+    Writes to the target block selected by ``target_path`` (defaults to
+    the top-level ``cfg.llm`` block — the single source of truth
+    consumed by guardrail (Bifrost), MCP scanner, skill scanner, and
+    the plugin scanner via :meth:`Config.resolve_llm`). Per-scanner
     overrides can be added later by editing ``scanners.*.llm`` or
     ``guardrail.judge.llm`` directly.
 
@@ -664,20 +902,34 @@ def _configure_llm(cfg, data_dir: str) -> None:
     entirely and instead prompt for a base URL with a sensible default
     — these runtimes don't authenticate incoming requests.
     """
-    from defenseclaw.guardrail import detect_api_key_env
-
-    llm = cfg.llm
+    from defenseclaw.commands._llm_picker import (  # noqa: PLC0415
+        custom_instance,
+        list_custom_instances,
+        pick_auth_mode,
+        pick_key_env,
+        pick_model,
+        pick_provider,
+        pick_region,
+        summary_panel,
+    )
+    from defenseclaw.guardrail import detect_api_key_env  # noqa: PLC0415
+    llm = _target_llm_block(cfg, target_path)
 
     default_provider = llm.provider if llm.provider in _WIZARD_LLM_PROVIDERS else "anthropic"
-    llm.provider = click.prompt(
-        "  LLM provider (cloud: anthropic/openai/..., local: ollama/vllm/lm_studio)",
-        type=click.Choice(_WIZARD_LLM_PROVIDERS),
-        default=default_provider,
+    instances = list_custom_instances(data_dir)
+    llm.provider = pick_provider(
+        current=default_provider,
+        instances=instances,
+        flag_value=None,
+        non_interactive=False,
     )
-    llm.model = click.prompt(
-        "  LLM model id (e.g. 'claude-3-5-sonnet-20241022', 'gpt-4o', 'llama3.1')",
-        default=llm.model or "",
-        show_default=bool(llm.model),
+    instance_obj = custom_instance(data_dir, llm.instance_name) if llm.instance_name else None
+    llm.model = pick_model(
+        current=llm.model or "",
+        provider=llm.provider,
+        instance=instance_obj,
+        flag_value=None,
+        non_interactive=False,
     )
 
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
@@ -703,21 +955,18 @@ def _configure_llm(cfg, data_dir: str) -> None:
         # DEFENSECLAW_LLM_KEY.
         existing_env = llm.api_key_env
         suggested_env = existing_env or DEFENSECLAW_LLM_KEY_ENV
-        env_name = click.prompt(
-            "  API key env var (leave as DEFENSECLAW_LLM_KEY for the unified key)",
-            default=suggested_env,
-            show_default=True,
+        # Surface LiteLLM's native env-var name as a hint when the
+        # operator hasn't already pinned a custom one (so they can
+        # reuse an existing ANTHROPIC_API_KEY / OPENAI_API_KEY).
+        guessed = detect_api_key_env(f"{llm.provider}/{llm.model}")
+        if not existing_env and guessed and guessed != "LLM_API_KEY" and guessed != DEFENSECLAW_LLM_KEY_ENV:
+            click.echo(f"    Note: LiteLLM's native env var for {llm.provider} is {guessed}.")
+        env_name = pick_key_env(
+            provider=llm.provider,
+            current=suggested_env,
+            flag_value=None,
+            non_interactive=False,
         )
-        # Hint the user where to put the key when they've customised
-        # the env var to something provider-specific (e.g. when sharing
-        # a laptop with other tools that read ANTHROPIC_API_KEY).
-        if env_name != DEFENSECLAW_LLM_KEY_ENV:
-            guessed = detect_api_key_env(f"{llm.provider}/{llm.model}")
-            if env_name != guessed and guessed != "LLM_API_KEY":
-                click.echo(
-                    f"    Note: LiteLLM's native env var for {llm.provider} is {guessed}; "
-                    f"we'll still read {env_name} because you set it explicitly."
-                )
         _prompt_and_save_secret(env_name, llm.api_key, data_dir)
         llm.api_key = ""
         llm.api_key_env = env_name
@@ -726,6 +975,51 @@ def _configure_llm(cfg, data_dir: str) -> None:
             default=llm.base_url or "",
             show_default=bool(llm.base_url),
         )
+
+    # Provider-typed prompts: region + auth-mode for bedrock / vertex / azure.
+    prov = (llm.provider or "").strip().lower()
+    if prov in ("bedrock", "vertex_ai", "vertex", "gemini", "azure", "azure_openai"):
+        region_default = ""
+        if prov == "bedrock" and llm.bedrock is not None:
+            region_default = llm.bedrock.region
+        elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
+            region_default = llm.vertex.region
+        region_value = pick_region(
+            provider=prov,
+            current=region_default,
+            flag_value=None,
+            non_interactive=False,
+        )
+        auth_default = ""
+        if prov == "bedrock" and llm.bedrock is not None:
+            auth_default = llm.bedrock.auth_mode
+        elif prov in ("vertex_ai", "vertex", "gemini") and llm.vertex is not None:
+            auth_default = llm.vertex.auth_mode
+        elif prov in ("azure", "azure_openai") and llm.azure is not None:
+            auth_default = llm.azure.auth_mode
+        auth_value = pick_auth_mode(
+            provider=prov,
+            current=auth_default,
+            flag_value=None,
+            non_interactive=False,
+        )
+        if prov == "bedrock":
+            _apply_llm_provider_typed_flags(
+                llm,
+                bedrock_region=region_value,
+                bedrock_auth_mode=auth_value,
+            )
+        elif prov in ("vertex_ai", "vertex", "gemini"):
+            _apply_llm_provider_typed_flags(
+                llm,
+                vertex_region=region_value,
+                vertex_auth_mode=auth_value,
+            )
+        elif prov in ("azure", "azure_openai"):
+            _apply_llm_provider_typed_flags(
+                llm,
+                azure_auth_mode=auth_value,
+            )
 
     llm.timeout = click.prompt("  LLM timeout (seconds)", type=int, default=llm.timeout or 30)
     llm.max_retries = click.prompt("  LLM max retries", type=int, default=llm.max_retries or 2)
@@ -736,6 +1030,9 @@ def _configure_llm(cfg, data_dir: str) -> None:
     # block populated after a successful wizard run would round-trip a
     # redundant copy of the same values into YAML.
     _clear_legacy_llm_fields(cfg)
+
+    click.echo()
+    summary_panel(role=("unified" if not target_path else "judge"), llm=llm)
 
 
 def _configure_llm_non_interactive(
@@ -749,13 +1046,46 @@ def _configure_llm_non_interactive(
     base_url: str | None = None,
     timeout: int | None = None,
     max_retries: int | None = None,
+    region: str | None = None,
+    instance_name: str | None = None,
+    inherit_from: str | None = None,
+    target_path: str = "",
+    bedrock_region: str | None = None,
+    bedrock_auth_mode: str | None = None,
+    bedrock_access_key_env: str | None = None,
+    bedrock_secret_key_env: str | None = None,
+    bedrock_session_token_env: str | None = None,
+    bedrock_profile_name: str | None = None,
+    bedrock_inference_profile: str | None = None,
+    bedrock_deployment_aliases: tuple[str, ...] = (),
+    vertex_project_id: str | None = None,
+    vertex_region: str | None = None,
+    vertex_auth_mode: str | None = None,
+    vertex_service_account_json_env: str | None = None,
+    azure_endpoint: str | None = None,
+    azure_api_version: str | None = None,
+    azure_auth_mode: str | None = None,
+    azure_deployment_aliases: tuple[str, ...] = (),
+    tls_ca_cert_file: str | None = None,
+    insecure_skip_verify: bool = False,
 ) -> None:
     """Apply unified ``llm:`` settings without prompting.
 
     Secret values supplied through ``--api-key`` are written to the
     env-backed ``.env`` store and never persisted into ``config.yaml``.
+
+    Provider-typed flags (``bedrock_*`` / ``vertex_*`` / ``azure_*``) and
+    TLS flags populate the corresponding sub-blocks on :class:`LLMConfig`;
+    ``instance_name`` selects a custom-providers.json overlay entry whose
+    ``base_url``, env keys, and TLS settings are applied at resolve time.
+
+    ``target_path`` routes the write to a non-default block — for
+    example ``"guardrail.judge"`` so a hook-based connector can keep
+    its own agent LLM while DefenseClaw judges with a different model.
     """
-    llm = cfg.llm
+    _apply_llm_inherit(cfg, inherit_from=inherit_from, target_path=target_path)
+
+    llm = _target_llm_block(cfg, target_path)
     if provider is not None:
         llm.provider = provider.strip().lower()
     elif not llm.provider:
@@ -763,6 +1093,10 @@ def _configure_llm_non_interactive(
 
     if model is not None:
         llm.model = model.strip()
+    if region is not None:
+        llm.region = region.strip()
+    if instance_name is not None:
+        llm.instance_name = instance_name.strip()
 
     is_local = llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS
     if is_local:
@@ -792,7 +1126,305 @@ def _configure_llm_non_interactive(
     elif not llm.max_retries:
         llm.max_retries = 2
 
+    _apply_llm_provider_typed_flags(
+        llm,
+        bedrock_region=bedrock_region,
+        bedrock_auth_mode=bedrock_auth_mode,
+        bedrock_access_key_env=bedrock_access_key_env,
+        bedrock_secret_key_env=bedrock_secret_key_env,
+        bedrock_session_token_env=bedrock_session_token_env,
+        bedrock_profile_name=bedrock_profile_name,
+        bedrock_inference_profile=bedrock_inference_profile,
+        bedrock_deployment_aliases=bedrock_deployment_aliases,
+        vertex_project_id=vertex_project_id,
+        vertex_region=vertex_region,
+        vertex_auth_mode=vertex_auth_mode,
+        vertex_service_account_json_env=vertex_service_account_json_env,
+        azure_endpoint=azure_endpoint,
+        azure_api_version=azure_api_version,
+        azure_auth_mode=azure_auth_mode,
+        azure_deployment_aliases=azure_deployment_aliases,
+        tls_ca_cert_file=tls_ca_cert_file,
+        insecure_skip_verify=insecure_skip_verify,
+    )
+
     _clear_legacy_llm_fields(cfg)
+
+
+def _apply_llm_inherit(cfg, *, inherit_from: str | None, target_path: str) -> None:
+    """Copy a resolved component config into the unified or sub-block llm.
+
+    ``target_path`` is either ``""`` (top-level ``cfg.llm``) or a component
+    path accepted by :meth:`Config.resolve_llm` (e.g. ``"guardrail.judge"``).
+
+    ``inherit_from`` selects the *source* component. The source's
+    resolved fields (provider/model/api_key_env/base_url/region/
+    instance_name and the provider-typed sub-blocks) are copied into the
+    target block; further flag/prompt overrides win because they run
+    after this step.
+    """
+    if not inherit_from:
+        return
+    try:
+        src = cfg.resolve_llm(inherit_from)
+    except Exception as exc:
+        raise click.ClickException(
+            f"--inherit-from {inherit_from!r}: could not resolve source: {exc}"
+        ) from exc
+
+    target_llm = _target_llm_block(cfg, target_path)
+    target_llm.provider = src.provider or target_llm.provider
+    target_llm.model = src.model or target_llm.model
+    if src.api_key_env:
+        target_llm.api_key_env = src.api_key_env
+    if getattr(src, "base_url", "") :
+        target_llm.base_url = src.base_url
+    if getattr(src, "region", ""):
+        target_llm.region = src.region
+    if getattr(src, "instance_name", ""):
+        target_llm.instance_name = src.instance_name
+    for attr in ("bedrock", "vertex", "azure", "tls"):
+        src_val = getattr(src, attr, None)
+        if src_val is not None:
+            setattr(target_llm, attr, _clone_dataclass(src_val))
+
+
+def _maybe_inherit_existing_llm(cfg, *, target_path: str, inherit_from: str | None) -> dict[str, Any] | None:
+    """Wrapper around :func:`_apply_llm_inherit` for the interactive
+    path: applies the flag if present, otherwise runs the
+    :func:`preflight_inherit` two-panel card with per-candidate ping
+    and a four-option menu (Inherit / Partial / Reconfigure / Back).
+
+    Returns the preflight result dict so the caller can act on
+    ``"partial"`` (re-prompt only the changed field) or ``"back"``
+    (abort the wizard) — or ``None`` when ``inherit_from`` was already
+    supplied / no candidates exist.
+    """
+    if inherit_from:
+        _apply_llm_inherit(cfg, inherit_from=inherit_from, target_path=target_path)
+        return None
+    try:
+        from defenseclaw.commands._llm_picker import (  # noqa: PLC0415
+            preflight_inherit,
+        )
+    except ImportError:
+        return None
+    target = _target_llm_block(cfg, target_path)
+    # If the target is already populated, don't badger the operator —
+    # they ran the wizard with the intent to *update* the block.
+    if (target.provider or "").strip() or (target.model or "").strip():
+        return None
+    result = preflight_inherit(cfg, target_path=target_path)
+    if not result:
+        return None
+    action = result.get("action")
+    src = result.get("source_path") or ""
+    if action == "back":
+        raise click.Abort()
+    if action == "reconfigure":
+        return result
+    if src:
+        # Both "inherit" and "partial" copy first; "partial" causes
+        # the caller to immediately re-prompt for the model.
+        _apply_llm_inherit(cfg, inherit_from=src, target_path=target_path)
+        ux.ok(f"inherited from {src}")
+    return result
+
+
+def _target_llm_block(cfg, target_path: str):
+    """Return the mutable :class:`LLMConfig` for ``target_path``.
+
+    Supports ``""`` (top-level), ``"guardrail"``, ``"guardrail.judge"``,
+    ``"scanners.skill"``, ``"scanners.mcp"``, and ``"scanners.plugin"``.
+    """
+    if not target_path:
+        return cfg.llm
+    if target_path == "guardrail":
+        return cfg.guardrail.llm
+    if target_path == "guardrail.judge":
+        return cfg.guardrail.judge.llm
+    if target_path == "scanners.skill":
+        return cfg.scanners.skill_scanner.llm
+    if target_path == "scanners.mcp":
+        return cfg.scanners.mcp_scanner.llm
+    if target_path == "scanners.plugin":
+        return cfg.scanners.plugin_llm
+    raise click.ClickException(f"unknown llm target path: {target_path!r}")
+
+
+def _clone_dataclass(value):
+    """Best-effort copy of a dataclass instance (provider-typed blocks)."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    try:
+        return replace(value)
+    except TypeError:
+        return value
+
+
+def _apply_llm_provider_typed_flags(
+    llm,
+    *,
+    bedrock_region: str | None = None,
+    bedrock_auth_mode: str | None = None,
+    bedrock_access_key_env: str | None = None,
+    bedrock_secret_key_env: str | None = None,
+    bedrock_session_token_env: str | None = None,
+    bedrock_profile_name: str | None = None,
+    bedrock_inference_profile: str | None = None,
+    bedrock_deployment_aliases: tuple[str, ...] = (),
+    vertex_project_id: str | None = None,
+    vertex_region: str | None = None,
+    vertex_auth_mode: str | None = None,
+    vertex_service_account_json_env: str | None = None,
+    azure_endpoint: str | None = None,
+    azure_api_version: str | None = None,
+    azure_auth_mode: str | None = None,
+    azure_deployment_aliases: tuple[str, ...] = (),
+    tls_ca_cert_file: str | None = None,
+    insecure_skip_verify: bool = False,
+) -> None:
+    """Populate the provider-typed sub-blocks on ``llm`` from CLI flags.
+
+    Initializes the nested dataclass lazily so a config that doesn't
+    use Bedrock/Vertex/Azure stays free of empty sub-blocks (and is
+    pruned by :func:`config._strip_empty_llm` on save).
+    """
+    from defenseclaw.config import (  # noqa: PLC0415
+        AzureKeyConfig,
+        BedrockKeyConfig,
+        LLMTLSConfig,
+        VertexKeyConfig,
+    )
+
+    bedrock_touched = any(
+        v not in (None, "")
+        for v in (
+            bedrock_region,
+            bedrock_auth_mode,
+            bedrock_access_key_env,
+            bedrock_secret_key_env,
+            bedrock_session_token_env,
+            bedrock_profile_name,
+            bedrock_inference_profile,
+        )
+    ) or bool(bedrock_deployment_aliases)
+    if bedrock_touched:
+        if llm.bedrock is None:
+            llm.bedrock = BedrockKeyConfig()
+        b = llm.bedrock
+        if bedrock_region is not None:
+            b.region = bedrock_region.strip()
+        if bedrock_auth_mode is not None:
+            b.auth_mode = bedrock_auth_mode.strip().lower()
+        if bedrock_access_key_env is not None:
+            b.access_key_env = bedrock_access_key_env.strip()
+        if bedrock_secret_key_env is not None:
+            b.secret_key_env = bedrock_secret_key_env.strip()
+        if bedrock_session_token_env is not None:
+            b.session_token_env = bedrock_session_token_env.strip()
+        if bedrock_profile_name is not None:
+            b.profile_name = bedrock_profile_name.strip()
+        if bedrock_inference_profile is not None:
+            b.inference_profile = bedrock_inference_profile.strip()
+        for raw in bedrock_deployment_aliases:
+            if "=" not in raw:
+                raise click.BadParameter(
+                    f"--bedrock-deployment expects ``alias=model`` (got {raw!r})"
+                )
+            mname, _, dname = raw.partition("=")
+            mname, dname = mname.strip(), dname.strip()
+            if not mname or not dname:
+                raise click.BadParameter(
+                    f"--bedrock-deployment both sides required (got {raw!r})"
+                )
+            b.deployment_aliases[mname] = dname
+
+    vertex_touched = any(
+        v not in (None, "")
+        for v in (vertex_project_id, vertex_region, vertex_auth_mode, vertex_service_account_json_env)
+    )
+    if vertex_touched:
+        if llm.vertex is None:
+            llm.vertex = VertexKeyConfig()
+        v = llm.vertex
+        if vertex_project_id is not None:
+            v.project_id = vertex_project_id.strip()
+        if vertex_region is not None:
+            v.region = vertex_region.strip()
+        if vertex_auth_mode is not None:
+            v.auth_mode = vertex_auth_mode.strip().lower()
+        if vertex_service_account_json_env is not None:
+            v.service_account_json_env = vertex_service_account_json_env.strip()
+
+    azure_touched = any(
+        v not in (None, "")
+        for v in (azure_endpoint, azure_api_version, azure_auth_mode)
+    ) or bool(azure_deployment_aliases)
+    if azure_touched:
+        if llm.azure is None:
+            llm.azure = AzureKeyConfig()
+        a = llm.azure
+        if azure_endpoint is not None:
+            a.endpoint = azure_endpoint.strip()
+        if azure_api_version is not None:
+            a.api_version = azure_api_version.strip()
+        if azure_auth_mode is not None:
+            a.auth_mode = azure_auth_mode.strip().lower()
+        for raw in azure_deployment_aliases:
+            if "=" not in raw:
+                raise click.BadParameter(
+                    f"--azure-deployment-alias expects ``model=deployment`` (got {raw!r})"
+                )
+            mname, _, dname = raw.partition("=")
+            mname, dname = mname.strip(), dname.strip()
+            if not mname or not dname:
+                raise click.BadParameter(
+                    f"--azure-deployment-alias both sides required (got {raw!r})"
+                )
+            a.deployment_aliases[mname] = dname
+
+    tls_touched = bool(tls_ca_cert_file) or insecure_skip_verify
+    if tls_touched:
+        if insecure_skip_verify and tls_ca_cert_file:
+            raise click.BadParameter(
+                "--insecure-skip-verify and --tls-ca-cert-file are mutually exclusive."
+            )
+        if llm.tls is None:
+            llm.tls = LLMTLSConfig()
+        if tls_ca_cert_file:
+            if not os.path.isfile(tls_ca_cert_file):
+                raise click.BadParameter(f"--tls-ca-cert-file: not found: {tls_ca_cert_file!r}")
+            with open(tls_ca_cert_file, encoding="utf-8") as f:
+                pem = f.read()
+            if "BEGIN CERTIFICATE" not in pem:
+                raise click.BadParameter(
+                    f"--tls-ca-cert-file: {tls_ca_cert_file!r} is not a PEM certificate"
+                )
+            llm.tls.ca_cert_pem = pem
+        if insecure_skip_verify:
+            llm.tls.insecure_skip_verify = True
+            ux.warn(
+                "--insecure-skip-verify enabled for llm.tls; the gateway will trust "
+                "ANY server certificate. Use only in trusted labs."
+            )
+
+
+def _run_llm_ping(resolved) -> None:
+    """Call :func:`defenseclaw.llm.ping` against a resolved LLMConfig
+    and print the outcome. Errors are caught so a flaky network does
+    not block the wizard save.
+    """
+    try:
+        from defenseclaw import llm as llm_mod  # noqa: PLC0415
+    except Exception as exc:
+        ux.warn(f"llm.ping unavailable: {exc}")
+        return
+    ok, msg = llm_mod.ping(resolved)
+    if ok:
+        ux.ok(f"llm ping: {msg}")
+    else:
+        ux.warn(f"llm ping failed: {msg}")
 
 
 def _clear_legacy_llm_fields(cfg) -> None:
@@ -2114,18 +2746,126 @@ def _apply_guardrail_extra_options(
 @click.option("--judge-model", default=None, help="LLM judge model (e.g. anthropic/claude-sonnet-4-20250514)")
 @click.option("--judge-api-base", default=None, help="LLM judge API base URL (e.g. Bifrost URL)")
 @click.option("--judge-api-key-env", default=None, help="Env var name for judge API key")
+@click.option("--judge-provider", default=None,
+              help=(
+                  "Judge LLM provider (e.g. anthropic, bedrock, vertex_ai). "
+                  "Persisted to guardrail.judge.llm.provider."
+              ))
+@click.option("--judge-region", default=None,
+              help="Judge regional provider region (Bedrock/Vertex). Persisted to guardrail.judge.llm.region.")
+@click.option("--judge-instance-name", default=None,
+              help="Custom-provider instance for the judge. Persisted to guardrail.judge.llm.instance_name.")
 @click.option(
-    "--human-approval/--no-human-approval",
+    "--llm-role",
+    type=click.Choice(["judge_only", "judge_and_agent"]),
     default=None,
-    help="Enable or disable human approval (HILT) for risky actions",
+    help=(
+        "How the LLM is used by this connector. 'judge_only' (hook-based "
+        "connectors like Codex/Claude Code) configures only the guardrail "
+        "judge. 'judge_and_agent' (proxy-backed connectors like OpenClaw/"
+        "ZeptoClaw) configures both judge and the agent's upstream LLM."
+    ),
 )
 @click.option(
-    "--hilt-min-severity",
-    type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False),
+    "--inherit-from",
+    "judge_inherit_from",
+    type=click.Choice(["", "guardrail", "scanners.skill", "scanners.mcp", "scanners.plugin"]),
     default=None,
-    help="Minimum severity that asks for human approval",
+    help=(
+        "Copy resolved provider/model/api_key_env from a sibling LLM "
+        "block onto guardrail.judge.llm before applying flags."
+    ),
 )
-@click.option("--disable-redaction/--enable-redaction", default=None, help="Disable or enable prompt/log redaction")
+@click.option(
+    "--inherit-llm/--no-inherit-llm",
+    "judge_inherit_llm",
+    default=None,
+    help=(
+        "Shortcut for --inherit-from guardrail. Copies the connector's "
+        "agent-side LLM into guardrail.judge.llm so the judge reuses the "
+        "same model/key."
+    ),
+)
+@click.option(
+    "--judge-auth-mode",
+    default=None,
+    help=(
+        "Generic judge auth-mode. Maps to --judge-bedrock-auth-mode / "
+        "--judge-azure-auth-mode / --judge-vertex-auth-mode depending on "
+        "--judge-provider."
+    ),
+)
+@click.option("--judge-bedrock-region", default=None,
+              help="AWS region for the Bedrock judge (e.g. us-east-1).")
+@click.option(
+    "--judge-bedrock-auth-mode",
+    type=click.Choice(["api_key", "iam_credentials", "profile", "instance_role"]),
+    default=None,
+    help="Bedrock auth strategy for the judge.",
+)
+@click.option("--judge-bedrock-access-key-env", default=None,
+              help="Env var holding AWS access key ID for the Bedrock judge.")
+@click.option("--judge-bedrock-secret-key-env", default=None,
+              help="Env var holding AWS secret access key for the Bedrock judge.")
+@click.option("--judge-bedrock-session-token-env", default=None,
+              help="Env var holding AWS session token for the Bedrock judge.")
+@click.option("--judge-bedrock-profile-name", default=None,
+              help="AWS profile name when judge-bedrock-auth-mode=profile.")
+@click.option("--judge-bedrock-inference-profile", default=None,
+              help="Bedrock inference-profile prefix for the judge (e.g. 'us.').")
+@click.option(
+    "--judge-bedrock-deployment",
+    "judge_bedrock_deployment_aliases",
+    multiple=True,
+    help="Judge Bedrock model alias formatted ``alias=model-id`` (repeatable).",
+)
+@click.option("--judge-vertex-project-id", default=None,
+              help="GCP project ID for the Vertex AI judge.")
+@click.option("--judge-vertex-region", default=None,
+              help="GCP region/location for the Vertex AI judge.")
+@click.option(
+    "--judge-vertex-auth-mode",
+    type=click.Choice(["service_account", "adc", "workload_identity"]),
+    default=None,
+    help="Vertex auth strategy for the judge.",
+)
+@click.option("--judge-vertex-service-account-json-env", default=None,
+              help="Env var holding the path to the Vertex service-account JSON (judge).")
+@click.option("--judge-azure-endpoint", default=None,
+              help="Azure OpenAI endpoint for the judge (e.g. https://name.openai.azure.com).")
+@click.option("--judge-azure-api-version", default=None,
+              help="Azure OpenAI api-version for the judge (e.g. 2024-10-21).")
+@click.option(
+    "--judge-azure-auth-mode",
+    type=click.Choice(["api_key", "managed_identity"]),
+    default=None,
+    help="Azure auth strategy for the judge.",
+)
+@click.option(
+    "--judge-azure-deployment-alias",
+    "judge_azure_deployment_aliases",
+    multiple=True,
+    help="Judge Azure deployment alias formatted ``model=deployment`` (repeatable).",
+)
+@click.option(
+    "--judge-tls-ca-cert-file",
+    default=None,
+    type=click.Path(exists=False, dir_okay=False),
+    help="PEM CA bundle for self-signed judge endpoints (inline-stored on guardrail.judge.llm.tls.ca_cert_pem).",
+)
+@click.option(
+    "--judge-insecure-skip-verify",
+    is_flag=True,
+    default=False,
+    help="Disable TLS verification for the judge endpoint (lab use only).",
+)
+@click.option("--human-approval/--no-human-approval", default=None,
+              help="Enable or disable human approval (HILT) for risky actions")
+@click.option("--hilt-min-severity",
+              type=click.Choice(_HILT_MIN_SEVERITIES, case_sensitive=False), default=None,
+              help="Minimum severity that asks for human approval")
+@click.option("--disable-redaction/--enable-redaction", default=None,
+              help="Disable or enable prompt/log redaction")
 @click.option(
     "--workspace",
     "--workspace-dir",
@@ -2133,16 +2873,12 @@ def _apply_guardrail_extra_options(
     default=None,
     help="Opt into workspace-scoped connector config. Defaults to global/user config.",
 )
-@click.option(
-    "--restart/--no-restart", default=True, help="Restart gateway and the active connector after setup (default: on)"
-)
-@click.option("--verify/--no-verify", default=True, help="Run connectivity checks after setup (default: on)")
-@click.option(
-    "--non-interactive",
-    "--accept-defaults",
-    is_flag=True,
-    help="Use flags instead of prompts (alias: --accept-defaults)",
-)
+@click.option("--restart/--no-restart", default=True,
+              help="Restart gateway and the active connector after setup (default: on)")
+@click.option("--verify/--no-verify", default=True,
+              help="Run connectivity checks after setup (default: on)")
+@click.option("--non-interactive", "--accept-defaults", is_flag=True,
+              help="Use flags instead of prompts (alias: --accept-defaults)")
 @pass_ctx
 def setup_guardrail(
     app: AppContext,
@@ -2155,14 +2891,33 @@ def setup_guardrail(
     cisco_api_key_env,
     cisco_timeout_ms,
     block_message,
-    detection_strategy,
-    rule_pack,
-    judge_model,
-    judge_api_base,
-    judge_api_key_env,
-    human_approval,
-    hilt_min_severity,
-    disable_redaction,
+    detection_strategy, rule_pack, judge_model, judge_api_base, judge_api_key_env,
+    judge_provider: str | None,
+    judge_region: str | None,
+    judge_instance_name: str | None,
+    llm_role: str | None,
+    judge_inherit_from: str | None,
+    judge_inherit_llm: bool | None,
+    judge_auth_mode: str | None,
+    judge_bedrock_region: str | None,
+    judge_bedrock_auth_mode: str | None,
+    judge_bedrock_access_key_env: str | None,
+    judge_bedrock_secret_key_env: str | None,
+    judge_bedrock_session_token_env: str | None,
+    judge_bedrock_profile_name: str | None,
+    judge_bedrock_inference_profile: str | None,
+    judge_bedrock_deployment_aliases: tuple[str, ...],
+    judge_vertex_project_id: str | None,
+    judge_vertex_region: str | None,
+    judge_vertex_auth_mode: str | None,
+    judge_vertex_service_account_json_env: str | None,
+    judge_azure_endpoint: str | None,
+    judge_azure_api_version: str | None,
+    judge_azure_auth_mode: str | None,
+    judge_azure_deployment_aliases: tuple[str, ...],
+    judge_tls_ca_cert_file: str | None,
+    judge_insecure_skip_verify: bool,
+    human_approval, hilt_min_severity, disable_redaction,
     workspace_dir: str | None,
     restart: bool,
     verify: bool,
@@ -2243,13 +2998,25 @@ def setup_guardrail(
             hilt_min_severity=hilt_min_severity,
             disable_redaction=disable_redaction,
         )
+        # Optional: inherit a sibling LLM block onto guardrail.judge.llm
+        # before applying per-judge flags so non-empty operator overrides
+        # always win on top.
+        effective_inherit_from = judge_inherit_from
+        if judge_inherit_llm and not effective_inherit_from:
+            # --inherit-llm is a friendlier alias for --inherit-from guardrail.
+            effective_inherit_from = "guardrail"
+        if effective_inherit_from:
+            _apply_llm_inherit(app.cfg, inherit_from=effective_inherit_from, target_path="guardrail.judge")
         if judge_model is not None:
             gc.judge.model = judge_model
+            gc.judge.llm.model = judge_model
             gc.judge.enabled = True
         if judge_api_base is not None:
             gc.judge.api_base = judge_api_base
+            gc.judge.llm.base_url = judge_api_base
         if judge_api_key_env is not None:
             gc.judge.api_key_env = judge_api_key_env
+            gc.judge.llm.api_key_env = judge_api_key_env
             # Mirror the interactive path (see _interactive_guardrail_setup):
             # when the operator supplies a NEW env var that diverges from the
             # unified DEFENSECLAW_LLM_KEY, share it into the v5 top-level
@@ -2266,6 +3033,59 @@ def setup_guardrail(
                 and not app.cfg.llm.api_key_env
             ):
                 app.cfg.llm.api_key_env = judge_api_key_env
+        if judge_provider is not None:
+            gc.judge.llm.provider = judge_provider.strip().lower()
+        if judge_region is not None:
+            gc.judge.llm.region = judge_region.strip()
+        if judge_instance_name is not None:
+            gc.judge.llm.instance_name = judge_instance_name.strip()
+
+        # Generic --judge-auth-mode → provider-typed alias.
+        effective_jbed_auth = judge_bedrock_auth_mode
+        effective_jver_auth = judge_vertex_auth_mode
+        effective_jaz_auth = judge_azure_auth_mode
+        if judge_auth_mode is not None:
+            jprov = (judge_provider or gc.judge.llm.provider or "").strip().lower()
+            if jprov == "bedrock" and effective_jbed_auth is None:
+                effective_jbed_auth = judge_auth_mode
+            elif jprov in ("azure", "azure_openai") and effective_jaz_auth is None:
+                effective_jaz_auth = judge_auth_mode
+            elif jprov in ("vertex_ai", "vertex", "gemini") and effective_jver_auth is None:
+                effective_jver_auth = judge_auth_mode
+
+        _apply_llm_provider_typed_flags(
+            gc.judge.llm,
+            bedrock_region=judge_bedrock_region,
+            bedrock_auth_mode=effective_jbed_auth,
+            bedrock_access_key_env=judge_bedrock_access_key_env,
+            bedrock_secret_key_env=judge_bedrock_secret_key_env,
+            bedrock_session_token_env=judge_bedrock_session_token_env,
+            bedrock_profile_name=judge_bedrock_profile_name,
+            bedrock_inference_profile=judge_bedrock_inference_profile,
+            bedrock_deployment_aliases=judge_bedrock_deployment_aliases,
+            vertex_project_id=judge_vertex_project_id,
+            vertex_region=judge_vertex_region,
+            vertex_auth_mode=effective_jver_auth,
+            vertex_service_account_json_env=judge_vertex_service_account_json_env,
+            azure_endpoint=judge_azure_endpoint,
+            azure_api_version=judge_azure_api_version,
+            azure_auth_mode=effective_jaz_auth,
+            azure_deployment_aliases=judge_azure_deployment_aliases,
+            tls_ca_cert_file=judge_tls_ca_cert_file,
+            insecure_skip_verify=judge_insecure_skip_verify,
+        )
+
+        if llm_role is not None:
+            gc.llm_role = llm_role
+        elif not gc.llm_role:
+            # Default the role based on the connector class so saved
+            # configs declare the intent even when the operator didn't
+            # supply --llm-role explicitly.
+            gc.llm_role = (
+                "judge_and_agent"
+                if (gc.connector or "openclaw") in _PROXY_BACKED_CONNECTORS
+                else "judge_only"
+            )
         gc.enabled = True
 
         # Apply sensible strategy defaults when judge is enabled
@@ -3159,6 +3979,30 @@ _OBSERVABILITY_ONLY_CONNECTORS = _HOOK_ENFORCED_CONNECTORS
 _GUARDRAIL_SUPPORTING_CONNECTORS = _PROXY_BACKED_CONNECTORS
 
 
+def connector_llm_role(connector: str) -> str:
+    """Return the default ``llm_role`` for ``connector``.
+
+    Hook-based connectors (Codex, Claude Code, ...) intercept the
+    agent's outbound LLM call via a sidecar hook, so DefenseClaw only
+    ever uses an LLM for the judge — ``judge_only``.
+
+    Proxy-backed connectors (OpenClaw, ZeptoClaw) route the agent
+    through DefenseClaw's gateway and can therefore either share one
+    LLM for judge AND agent or split them. The safer default is
+    ``judge_and_agent``; operators who want to keep their agent LLM
+    untouched can still pick ``judge_only`` interactively or via
+    ``setup guardrail --llm-role judge_only``.
+
+    Unknown connectors fall back to ``judge_only`` to avoid silently
+    rerouting their traffic through the proxy.
+    """
+    if connector in _HOOK_ENFORCED_CONNECTORS:
+        return "judge_only"
+    if connector in _PROXY_BACKED_CONNECTORS:
+        return "judge_and_agent"
+    return "judge_only"
+
+
 def _setup_guardrail_connector_alias(
     app: AppContext,
     *,
@@ -3222,6 +4066,31 @@ def _setup_guardrail_connector_alias(
         judge_model=judge_model,
         judge_api_base=judge_api_base,
         judge_api_key_env=judge_api_key_env,
+        judge_provider=None,
+        judge_region=None,
+        judge_instance_name=None,
+        llm_role=None,
+        judge_inherit_from=None,
+        judge_inherit_llm=None,
+        judge_auth_mode=None,
+        judge_bedrock_region=None,
+        judge_bedrock_auth_mode=None,
+        judge_bedrock_access_key_env=None,
+        judge_bedrock_secret_key_env=None,
+        judge_bedrock_session_token_env=None,
+        judge_bedrock_profile_name=None,
+        judge_bedrock_inference_profile=None,
+        judge_bedrock_deployment_aliases=(),
+        judge_vertex_project_id=None,
+        judge_vertex_region=None,
+        judge_vertex_auth_mode=None,
+        judge_vertex_service_account_json_env=None,
+        judge_azure_endpoint=None,
+        judge_azure_api_version=None,
+        judge_azure_auth_mode=None,
+        judge_azure_deployment_aliases=(),
+        judge_tls_ca_cert_file=None,
+        judge_insecure_skip_verify=False,
         human_approval=human_approval,
         hilt_min_severity=hilt_min_severity,
         disable_redaction=disable_redaction,
@@ -4350,6 +5219,40 @@ def _interactive_guardrail_setup(
     click.echo("  " + ux.dim("Tool calls additionally run the tool_injection judge."))
     click.echo()
 
+    # Connector-aware LLM role branching.
+    #
+    # Hook-based connectors (Codex, Claude Code, …) keep their own
+    # agent LLM — DefenseClaw only uses an LLM for the judge. Proxy-
+    # backed connectors (OpenClaw, ZeptoClaw) can either share one
+    # LLM for judge + agent or split them. We surface the decision
+    # here so saved configs declare intent rather than relying on
+    # implicit defaults.
+    default_role = gc.llm_role or connector_llm_role(gc.connector or "")
+    if connector_llm_role(gc.connector or "") == "judge_only":
+        click.echo(
+            "  " + ux.dim(
+                "This connector uses its own LLM — DefenseClaw will use the LLM "
+                "you configure here only for the judge."
+            )
+        )
+        gc.llm_role = "judge_only"
+    else:
+        click.echo("  " + ux.bold("How should DefenseClaw use the LLM?"))
+        click.echo(
+            "    " + ux.bold("[1] Judge only          ")
+            + ux.dim("— keep your existing agent LLM, use DefenseClaw only for the judge")
+        )
+        click.echo(
+            "    " + ux.bold("[2] Judge AND agent     ")
+            + ux.dim("— route the agent's LLM through DefenseClaw too (recommended)")
+        )
+        role_default = "2" if default_role == "judge_and_agent" else "1"
+        role_choice = click.prompt(
+            "  Select role", type=click.Choice(["1", "2"]), default=role_default,
+        )
+        gc.llm_role = "judge_only" if role_choice == "1" else "judge_and_agent"
+        click.echo()
+
     enable_judge = click.confirm("  Enable LLM judge?", default=gc.judge.enabled)
     gc.judge.enabled = enable_judge
 
@@ -5064,34 +5967,22 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 }
 
 
-@setup.command("splunk")
-@click.option(
-    "--o11y",
-    "enable_o11y",
-    is_flag=True,
-    default=False,
-    help="Enable Splunk Observability Cloud (OTLP traces + metrics)",
-)
-@click.option(
-    "--logs",
-    "enable_logs",
-    is_flag=True,
-    default=False,
-    help="Enable local Splunk via Docker (HEC logs + dashboards, Free mode)",
-)
-@click.option(
-    "--s3-export", is_flag=True, default=False, help="Enable local Splunk and start the optional S3 exporter sidecar"
-)
-@click.option("--s3-bucket", default=None, help="S3 bucket for --s3-export (or set S3_BUCKET)")
-@click.option("--s3-prefix", default=None, help="S3 prefix for --s3-export (default: agentwatch/defenseclaw)")
-@click.option("--aws-region", default=None, help="AWS region for --s3-export (default: us-west-2)")
-@click.option(
-    "--enterprise",
-    "enable_enterprise",
-    is_flag=True,
-    default=False,
-    help="Enable remote Splunk Enterprise via HEC endpoint + token",
-)
+@click.group("splunk", invoke_without_command=True)
+@click.pass_context
+@click.option("--o11y", "enable_o11y", is_flag=True, default=False,
+              help="Enable Splunk Observability Cloud (OTLP traces + metrics)")
+@click.option("--logs", "enable_logs", is_flag=True, default=False,
+              help="Enable local Splunk via Docker (HEC logs + dashboards, Free mode)")
+@click.option("--s3-export", is_flag=True, default=False,
+              help="Enable local Splunk and start the optional S3 exporter sidecar")
+@click.option("--s3-bucket", default=None,
+              help="S3 bucket for --s3-export (or set S3_BUCKET)")
+@click.option("--s3-prefix", default=None,
+              help="S3 prefix for --s3-export (default: agentwatch/defenseclaw)")
+@click.option("--aws-region", default=None,
+              help="AWS region for --s3-export (default: us-west-2)")
+@click.option("--enterprise", "enable_enterprise", is_flag=True, default=False,
+              help="Enable remote Splunk Enterprise via HEC endpoint + token")
 @click.option("--realm", default=None, help="Splunk O11y realm (e.g. us1, us0, eu0)")
 @click.option("--access-token", default=None, help="Splunk O11y access token")
 @click.option("--hec-endpoint", default=None, help="Remote Splunk Enterprise HEC endpoint")
@@ -5135,9 +6026,8 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
     ),
 )
 @click.option("--non-interactive", is_flag=True, help="Use flags instead of prompts")
-@pass_ctx
 def setup_splunk(
-    app: AppContext,
+    ctx: click.Context,
     enable_o11y: bool,
     enable_logs: bool,
     s3_export: bool,
@@ -5182,6 +6072,13 @@ def setup_splunk(
 
     Both can run simultaneously. Without flags, runs an interactive wizard.
     """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    app = ctx.find_object(AppContext)
+    if app is None:
+        raise click.ClickException("App context unavailable")
+
     if show_credentials:
         _show_splunk_credentials(app.cfg.data_dir)
         return
@@ -5289,6 +6186,12 @@ def setup_splunk(
         app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
+# Register `defenseclaw setup splunk dashboards` (Terraform-backed dashboard
+# and detector provisioning for Splunk Observability Cloud).
+setup.add_command(setup_splunk)
+setup_splunk.add_command(splunk_o11y_dashboards)
+
+
 # ---------------------------------------------------------------------------
 # Interactive wizard
 # ---------------------------------------------------------------------------
@@ -5329,6 +6232,8 @@ def _interactive_splunk_setup(
     if click.confirm("  Enable Splunk Observability Cloud (traces + metrics)?", default=False):
         _interactive_o11y(app, realm, access_token, app_name)
         did_o11y = True
+        click.echo()
+        _interactive_o11y_dashboards(app)
         click.echo()
 
     if click.confirm("  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False):
@@ -5398,6 +6303,44 @@ def _interactive_o11y(
     )
 
 
+def _interactive_o11y_dashboards(app: AppContext) -> bool:
+    click.echo()
+    click.echo("  Splunk O11y Dashboards")
+    click.echo("  ──────────────────────")
+    click.echo()
+    if not click.confirm("  Install Splunk Observability Cloud dashboards now?", default=False):
+        return False
+
+    o11y_api_token = click.prompt(
+        "  O11y API token (not the ingest token)",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
+    if not o11y_api_token:
+        click.echo("  error: O11y API token is required to install dashboards", err=True)
+        raise SystemExit(1)
+
+    apply_dashboards(
+        app,
+        api_url=None,
+        o11y_api_token=o11y_api_token,
+        name_prefix="",
+        with_detectors=False,
+        enable_detectors=False,
+        detector_notifications=(),
+        work_dir=None,
+        state_path=None,
+        terraform_bin="terraform",
+        plugin_dir=None,
+        skip_init=False,
+        skip_validate=False,
+        timeout=900,
+        yes=True,
+    )
+    return True
+
+
 def _prompt_splunk_token(current: str | None) -> str:
     env_val = os.environ.get("SPLUNK_ACCESS_TOKEN", "")
     if current:
@@ -5407,7 +6350,12 @@ def _prompt_splunk_token(current: str | None) -> str:
     else:
         hint = "(not set)"
 
-    val = click.prompt(f"  Access token [{hint}]", default="", show_default=False, hide_input=True)
+    val = click.prompt(
+        f"  O11y ingest access token [{hint}]",
+        default="",
+        show_default=False,
+        hide_input=True,
+    )
     if val:
         return val
     return current or env_val

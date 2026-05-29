@@ -22,36 +22,85 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // bifrostProvider implements LLMProvider by delegating to the Bifrost Go SDK.
-// Each distinct (providerKey, apiKey, baseURL) tuple gets its own dedicated
-// Bifrost client with an immutable Account, so credentials and endpoints for
-// one tenant are isolated from other in-flight requests.
+// Each distinct (providerKey, apiKey, baseURL, tls, sub-block) tuple gets its
+// own dedicated Bifrost client with an immutable Account, so credentials,
+// endpoints, regional posture, and TLS posture for one tenant are isolated
+// from other in-flight requests.
 type bifrostProvider struct {
 	providerKey schemas.ModelProvider
 	model       string
 	apiKey      string
 	baseURL     string
+	tls         tlsOverrides
+	// Effective per-provider sub-blocks (role wins, overlay fills
+	// blanks; see NewProviderForLLMConfig). Pointer-typed so an
+	// absent block contributes nothing to the Bifrost Key.
+	bedrock *config.BedrockKeyConfig
+	vertex  *config.VertexKeyConfig
+	azure   *config.AzureKeyConfig
 }
 
-// tenantKey identifies a unique (provider, api-key, base-url) tuple. Each
-// tuple gets its own dedicated Bifrost client + frozen Account so that
-// credentials and endpoints for one tenant can never leak into an in-flight
-// request for another. Previously a single package-level client + mutable
-// account map was shared across all tenants: two concurrent requests hitting
-// the same provider with different keys or base URLs could race so that the
-// Bifrost client executed request A using tenant B's credentials.
+// tenantKey identifies a unique (provider, api-key, base-url, tls, sub-block)
+// tuple. Each tuple gets its own dedicated Bifrost client + frozen Account so
+// that credentials and endpoints for one tenant can never leak into an
+// in-flight request for another. Previously a single package-level client +
+// mutable account map was shared across all tenants: two concurrent requests
+// hitting the same provider with different keys or base URLs could race so
+// that the Bifrost client executed request A using tenant B's credentials.
+//
+// “tlsID“ is a sha256 of the TLS posture (insecure_skip_verify || ca_cert_pem)
+// so two custom-provider instances with the same base URL but different TLS
+// trust stores get distinct clients and cannot share connections.
+//
+// “subID“ is a sha256 of the per-provider sub-block (Bedrock region,
+// Vertex project, Azure endpoint, deployment aliases, ...) so two
+// instances differing only in region or auth mode never share a
+// Bifrost client and never confuse their dispatch routing.
 type tenantKey struct {
 	provider schemas.ModelProvider
 	keyID    string // sha256 of apiKey — the raw key is never in the map key.
 	baseURL  string
+	tlsID    string // sha256 of tls posture; empty when no per-instance TLS overrides.
+	subID    string // sha256 of per-provider sub-block; empty when none set.
+}
+
+// tlsOverrides bundles the per-instance TLS knobs from a custom-providers
+// overlay. Both fields are forwarded to the Bifrost “NetworkConfig“ which
+// already supports custom CA bundles and TLS-skip; this type just keeps the
+// API on our side cohesive.
+type tlsOverrides struct {
+	CACertPEM          string
+	InsecureSkipVerify bool
+}
+
+func (t tlsOverrides) isZero() bool {
+	return !t.InsecureSkipVerify && t.CACertPEM == ""
+}
+
+func (t tlsOverrides) id() string {
+	if t.isZero() {
+		return ""
+	}
+	h := sha256.New()
+	if t.InsecureSkipVerify {
+		_, _ = h.Write([]byte("insecure;"))
+	}
+	_, _ = h.Write([]byte("ca="))
+	_, _ = h.Write([]byte(t.CACertPEM))
+	sum := h.Sum(nil)
+	return "tls:sha256:" + hex.EncodeToString(sum[:8])
 }
 
 var (
@@ -86,7 +135,60 @@ func (a *tenantAccount) GetConfigForProvider(providerKey schemas.ModelProvider) 
 	return a.config, nil
 }
 
-func newTenantAccount(providerKey schemas.ModelProvider, apiKey, keyID, baseURL string) *tenantAccount {
+// envOr resolves an env-var name to its current value (trimmed); empty
+// env-var name returns the empty string. Centralised so the dispatcher
+// can lift per-instance secrets from the env without sprinkling Getenv
+// calls through provider-specific branches.
+func envOr(name string) string {
+	if name == "" {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv(name))
+}
+
+// awsProfileOnce serializes process-wide AWS_PROFILE writes so two
+// concurrent dispatches for different Bedrock instances cannot race on
+// the env var. Bifrost has no per-key profile-name field, so the only
+// reliable handoff to the AWS default credential chain is the env var
+// itself. The first profile to win is logged; any conflicting second
+// caller is dropped with a warning (operators must reach for
+// iam_credentials or instance_role to mix profiles in one process).
+var (
+	awsProfileMu      sync.Mutex
+	awsProfileApplied string
+)
+
+func applyAWSProfile(profile string) {
+	if profile == "" {
+		return
+	}
+	awsProfileMu.Lock()
+	defer awsProfileMu.Unlock()
+	if awsProfileApplied == profile {
+		return
+	}
+	if awsProfileApplied != "" && awsProfileApplied != profile {
+		fmt.Fprintf(os.Stderr,
+			"[gateway] AWS_PROFILE already pinned to %q; refusing to switch to %q. "+
+				"Use iam_credentials or instance_role to mix Bedrock profiles in one process.\n",
+			awsProfileApplied, profile)
+		return
+	}
+	_ = os.Setenv("AWS_PROFILE", profile)
+	awsProfileApplied = profile
+	fmt.Fprintf(os.Stderr,
+		"[gateway] AWS_PROFILE set to %q for the lifetime of this process (Bedrock dispatch).\n",
+		profile)
+}
+
+func newTenantAccount(
+	providerKey schemas.ModelProvider,
+	apiKey, keyID, baseURL string,
+	tls tlsOverrides,
+	bedrock *config.BedrockKeyConfig,
+	vertex *config.VertexKeyConfig,
+	azure *config.AzureKeyConfig,
+) *tenantAccount {
 	key := schemas.Key{
 		ID:     keyID,
 		Name:   string(providerKey) + "-key",
@@ -94,17 +196,124 @@ func newTenantAccount(providerKey schemas.ModelProvider, apiKey, keyID, baseURL 
 		Models: schemas.WhiteList{"*"},
 		Weight: 1.0,
 	}
+
+	// Bedrock posture → Bifrost BedrockKeyConfig. Auth modes:
+	//   - "api_key":         key.Value carries the API key (already set).
+	//   - "iam_credentials": access-key + secret-key env vars supply the creds.
+	//   - "profile":         AWS_PROFILE applied process-wide before init.
+	//   - "instance_role":   leave AccessKey/SecretKey empty so Bifrost
+	//                        falls through to the default credential chain.
+	if providerKey == schemas.Bedrock && bedrock != nil {
+		bcfg := &schemas.BedrockKeyConfig{}
+		mode := strings.ToLower(strings.TrimSpace(bedrock.AuthMode))
+		switch mode {
+		case "iam_credentials":
+			bcfg.AccessKey = schemas.EnvVar{Val: envOr(bedrock.AccessKeyEnv), EnvVar: bedrock.AccessKeyEnv, FromEnv: bedrock.AccessKeyEnv != ""}
+			bcfg.SecretKey = schemas.EnvVar{Val: envOr(bedrock.SecretKeyEnv), EnvVar: bedrock.SecretKeyEnv, FromEnv: bedrock.SecretKeyEnv != ""}
+			if bedrock.SessionTokenEnv != "" {
+				bcfg.SessionToken = &schemas.EnvVar{Val: envOr(bedrock.SessionTokenEnv), EnvVar: bedrock.SessionTokenEnv, FromEnv: true}
+			}
+		case "profile":
+			applyAWSProfile(bedrock.ProfileName)
+			// Bifrost reads default cred chain when AccessKey/SecretKey are empty.
+		case "instance_role":
+			// Leave AccessKey/SecretKey empty for IMDS / IRSA / ECS task creds.
+		default:
+			// "api_key" or unspecified — key.Value already carries the bearer token.
+		}
+		if bedrock.Region != "" {
+			bcfg.Region = &schemas.EnvVar{Val: bedrock.Region}
+		}
+		key.BedrockKeyConfig = bcfg
+		if len(bedrock.DeploymentAliases) > 0 {
+			key.Aliases = schemas.KeyAliases(bedrock.DeploymentAliases)
+		}
+	}
+
+	// Vertex posture → Bifrost VertexKeyConfig. Auth modes:
+	//   - "service_account":   env var holds the JSON; AuthCredentials populated.
+	//   - "adc" / "workload_identity": leave AuthCredentials empty so
+	//     Bifrost falls through to the default credential chain.
+	if providerKey == schemas.Vertex && vertex != nil {
+		vcfg := &schemas.VertexKeyConfig{
+			ProjectID: schemas.EnvVar{Val: vertex.ProjectID},
+			Region:    schemas.EnvVar{Val: vertex.Region},
+		}
+		mode := strings.ToLower(strings.TrimSpace(vertex.AuthMode))
+		if mode == "service_account" && vertex.ServiceAccountJSONEnv != "" {
+			vcfg.AuthCredentials = schemas.EnvVar{
+				Val:     envOr(vertex.ServiceAccountJSONEnv),
+				EnvVar:  vertex.ServiceAccountJSONEnv,
+				FromEnv: true,
+			}
+		}
+		key.VertexKeyConfig = vcfg
+	}
+
+	// Azure posture → Bifrost AzureKeyConfig. Auth modes:
+	//   - "api_key":          key.Value carries the API key (already set).
+	//   - "managed_identity": Bifrost defers to AAD; leave Client*/Tenant*
+	//                         nil so the default-credential chain runs.
+	if providerKey == schemas.Azure && azure != nil {
+		acfg := &schemas.AzureKeyConfig{
+			Endpoint: schemas.EnvVar{Val: azure.Endpoint},
+		}
+		if azure.APIVersion != "" {
+			acfg.APIVersion = &schemas.EnvVar{Val: azure.APIVersion}
+		}
+		key.AzureKeyConfig = acfg
+		if len(azure.DeploymentAliases) > 0 {
+			key.Aliases = schemas.KeyAliases(azure.DeploymentAliases)
+		}
+	}
+
 	nc := schemas.NetworkConfig{
 		DefaultRequestTimeoutInSeconds: 120,
 	}
 	if baseURL != "" {
 		nc.BaseURL = baseURL
 	}
+	if tls.InsecureSkipVerify {
+		nc.InsecureSkipVerify = true
+	}
+	if tls.CACertPEM != "" {
+		nc.CACertPEM = tls.CACertPEM
+	}
 	return &tenantAccount{
 		provider: providerKey,
 		keys:     []schemas.Key{key},
 		config:   &schemas.ProviderConfig{NetworkConfig: nc},
 	}
+}
+
+// subBlockID returns a stable hash of the per-provider sub-block so two
+// instances with the same API key + base URL but different regions or
+// deployment aliases get distinct Bifrost clients. Pointer-nil + empty
+// fields collapse to "" so a role with no sub-blocks behaves
+// identically to before this change.
+func subBlockID(bedrock *config.BedrockKeyConfig, vertex *config.VertexKeyConfig, azure *config.AzureKeyConfig) string {
+	if bedrock == nil && vertex == nil && azure == nil {
+		return ""
+	}
+	h := sha256.New()
+	enc := json.NewEncoder(h)
+	// json.Marshal would allocate a buffer per call; reusing the same
+	// stream encoder keeps the hash cost in the noise even for
+	// hot-path dispatches.
+	if bedrock != nil {
+		_, _ = h.Write([]byte("b:"))
+		_ = enc.Encode(bedrock)
+	}
+	if vertex != nil {
+		_, _ = h.Write([]byte("v:"))
+		_ = enc.Encode(vertex)
+	}
+	if azure != nil {
+		_, _ = h.Write([]byte("a:"))
+		_ = enc.Encode(azure)
+	}
+	sum := h.Sum(nil)
+	return "sub:sha256:" + hex.EncodeToString(sum[:8])
 }
 
 func isBedrockAPIKey(key string) bool {
@@ -121,15 +330,25 @@ func bifrostKeyID(providerKey schemas.ModelProvider, apiKey string) string {
 }
 
 // getBifrostClient returns a Bifrost client dedicated to the given
-// (provider, apiKey, baseURL) tuple. Distinct tuples get distinct clients;
-// identical tuples share a cached client. The returned client's Account is
-// immutable for the tuple's lifetime, so a concurrent call with different
-// credentials cannot change what this client uses mid-request.
-func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string) (*bifrost.Bifrost, error) {
+// (provider, apiKey, baseURL, tls, sub-block) tuple. Distinct tuples get
+// distinct clients; identical tuples share a cached client. The
+// returned client's Account is immutable for the tuple's lifetime, so a
+// concurrent call with different credentials cannot change what this
+// client uses mid-request.
+func getBifrostClient(
+	providerKey schemas.ModelProvider,
+	apiKey, baseURL string,
+	tls tlsOverrides,
+	bedrock *config.BedrockKeyConfig,
+	vertex *config.VertexKeyConfig,
+	azure *config.AzureKeyConfig,
+) (*bifrost.Bifrost, error) {
 	tk := tenantKey{
 		provider: providerKey,
 		keyID:    bifrostKeyID(providerKey, apiKey),
 		baseURL:  baseURL,
+		tlsID:    tls.id(),
+		subID:    subBlockID(bedrock, vertex, azure),
 	}
 
 	bifrostTenantsMu.RLock()
@@ -145,7 +364,7 @@ func getBifrostClient(providerKey schemas.ModelProvider, apiKey, baseURL string)
 		return c, nil
 	}
 
-	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL)
+	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, tls, bedrock, vertex, azure)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
@@ -203,7 +422,7 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 }
 
 func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +438,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 }
 
 func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure)
 	if err != nil {
 		return nil, err
 	}

@@ -3,10 +3,16 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 )
 
 // ChatMessage is the OpenAI-compatible message format used as the canonical
@@ -234,6 +240,192 @@ func NewProviderWithBase(model string, apiKey string, baseURL string) (LLMProvid
 		model:       modelID,
 		apiKey:      apiKey,
 		baseURL:     baseURL,
+	}, nil
+}
+
+// NewProviderForInstance constructs a provider by resolving a
+// custom-providers.json overlay entry by name. The overlay's
+// “base_provider_type“, “base_url“, and per-instance TLS settings
+// take precedence over the value inferred from “model“; “apiKey“
+// still flows from the resolved :class:`LLMConfig` (whose
+// “resolved_api_key()“ reads the overlay's env_keys list).
+//
+// Returns an “ErrCustomProviderInstanceNotFound“-style error when
+// “name“ is non-empty but no overlay entry matches, so callers can
+// fall back to :func:`NewProviderWithBase` without silently routing to
+// the wrong endpoint.
+//
+// This shim preserves the legacy four-string API for tests and any
+// caller that hasn't yet migrated to the LLMConfig overload. Internally
+// it just constructs a transient LLMConfig and delegates.
+func NewProviderForInstance(name, model, apiKey string, providers *configs.ProvidersConfig) (LLMProvider, error) {
+	if providers == nil {
+		return nil, fmt.Errorf("gateway: NewProviderForInstance: providers registry is nil")
+	}
+	clean := strings.ToLower(strings.TrimSpace(name))
+	if clean == "" {
+		return nil, fmt.Errorf("gateway: NewProviderForInstance: instance name is empty")
+	}
+	for i := range providers.Providers {
+		if strings.ToLower(providers.Providers[i].Name) == clean {
+			llm := &config.LLMConfig{
+				Model:        model,
+				APIKey:       apiKey,
+				InstanceName: clean,
+			}
+			return buildProviderFromEffective(llm, &providers.Providers[i])
+		}
+	}
+	return nil, fmt.Errorf("gateway: custom-provider instance %q not found in overlay", name)
+}
+
+// NewProviderForLLMConfig is the canonical adapter from a resolved
+// :type:`config.LLMConfig` to an :type:`LLMProvider`. Precedence is
+// role wins, overlay fills blanks:
+//
+//  1. The LLMConfig is taken as authoritative for every field it sets.
+//  2. If “InstanceName“ matches an overlay entry, any LLMConfig field
+//     left blank (BaseURL, provider family, TLS, bedrock/vertex/azure
+//     sub-blocks) is populated from the overlay entry.
+//  3. The merged "effective" config is handed to Bifrost as a single
+//     Key + sub-block payload.
+//
+// “providers“ may be nil; in that case the function silently degrades
+// to a vanilla provider so a bootstrap that fails to load the overlay
+// still gets a usable provider rather than crashing the gateway.
+func NewProviderForLLMConfig(llm *config.LLMConfig, providers *configs.ProvidersConfig) (LLMProvider, error) {
+	if llm == nil {
+		return nil, fmt.Errorf("gateway: NewProviderForLLMConfig: llm config is nil")
+	}
+	var inst *configs.Provider
+	name := strings.TrimSpace(llm.InstanceName)
+	if name != "" && providers != nil {
+		clean := strings.ToLower(name)
+		for i := range providers.Providers {
+			if strings.ToLower(providers.Providers[i].Name) == clean {
+				inst = &providers.Providers[i]
+				break
+			}
+		}
+		if inst == nil {
+			// Fall through with inst=nil so a typo in instance_name
+			// surfaces in `defenseclaw doctor` rather than taking
+			// the gateway offline. Log so operators can trace
+			// silent fallbacks in real time.
+			fmt.Fprintf(os.Stderr,
+				"[gateway] instance %q not found in overlay; falling back to role-level config\n", name)
+		}
+	}
+	return buildProviderFromEffective(llm, inst)
+}
+
+// buildProviderFromEffective performs the role-wins / overlay-fills
+// merge and returns a “bifrostProvider“ ready for dispatch. Pulled out
+// of NewProviderForLLMConfig so NewProviderForInstance can share the
+// same merge logic.
+func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (LLMProvider, error) {
+	model := llm.Model
+	apiKey := llm.ResolvedAPIKey()
+	baseURL := strings.TrimRight(strings.TrimSpace(llm.BaseURL), "/")
+	// Provider type precedence: explicit role config > overlay's
+	// base_provider_type > known model prefix > infer. The
+	// LLMConfig.Provider field is the only "explicit role family"
+	// signal — the prefix in Model can carry a *custom instance
+	// name* (e.g. "acme-internal/some-model") which is not a real
+	// provider family, so we deliberately do not honor it as a
+	// family hint when the overlay has a base_provider_type.
+	providerType := strings.ToLower(strings.TrimSpace(llm.Provider))
+
+	// Effective sub-blocks: role wins, overlay fills blanks. Sub-block
+	// pointer-nil-ness is treated as "operator did not specify".
+	effBedrock := llm.Bedrock
+	effVertex := llm.Vertex
+	effAzure := llm.Azure
+	var tls tlsOverrides
+	if llm.TLS != nil {
+		tls = tlsOverrides{
+			CACertPEM:          llm.TLS.CACertPEM,
+			InsecureSkipVerify: llm.TLS.InsecureSkipVerify,
+		}
+	}
+
+	if inst != nil {
+		if baseURL == "" {
+			baseURL = strings.TrimRight(inst.BaseURL, "/")
+		}
+		if providerType == "" {
+			providerType = inst.BaseProviderType
+		}
+		if tls.isZero() && inst.TLS != nil {
+			tls = tlsOverrides{
+				CACertPEM:          inst.TLS.CACertPEM,
+				InsecureSkipVerify: inst.TLS.InsecureSkipVerify,
+			}
+		}
+		if effBedrock == nil && inst.Bedrock != nil {
+			effBedrock = &config.BedrockKeyConfig{
+				Region:            inst.Bedrock.Region,
+				AuthMode:          inst.Bedrock.AuthMode,
+				AccessKeyEnv:      inst.Bedrock.AccessKeyEnv,
+				SecretKeyEnv:      inst.Bedrock.SecretKeyEnv,
+				SessionTokenEnv:   inst.Bedrock.SessionTokenEnv,
+				ProfileName:       inst.Bedrock.ProfileName,
+				InferenceProfile:  inst.Bedrock.InferenceProfile,
+				DeploymentAliases: inst.Bedrock.DeploymentAliases,
+			}
+		}
+		if effVertex == nil && inst.Vertex != nil {
+			effVertex = &config.VertexKeyConfig{
+				ProjectID:             inst.Vertex.ProjectID,
+				Region:                inst.Vertex.Region,
+				AuthMode:              inst.Vertex.AuthMode,
+				ServiceAccountJSONEnv: inst.Vertex.ServiceAccountJSONEnv,
+			}
+		}
+		if effAzure == nil && inst.Azure != nil {
+			effAzure = &config.AzureKeyConfig{
+				Endpoint:          inst.Azure.Endpoint,
+				APIVersion:        inst.Azure.APIVersion,
+				AuthMode:          inst.Azure.AuthMode,
+				DeploymentAliases: inst.Azure.DeploymentAliases,
+			}
+		}
+	}
+
+	if providerType == "" {
+		if p, _ := splitModel(model); p != "" {
+			providerType = p
+		} else {
+			providerType = inferProvider(model, apiKey)
+		}
+	}
+	providerKey, err := mapProviderKey(providerType)
+	if err != nil {
+		return nil, fmt.Errorf("gateway: unsupported provider type %q: %w", providerType, err)
+	}
+
+	_, modelID := splitModel(model)
+	if modelID == "" {
+		modelID = model
+	}
+	// Bedrock inference_profile injects a region prefix onto the model
+	// id before dispatch. Bifrost has no field for it; this is how
+	// the role path (--bedrock-inference-profile us.) already works.
+	if providerKey == schemas.Bedrock && effBedrock != nil && effBedrock.InferenceProfile != "" {
+		if !strings.HasPrefix(modelID, effBedrock.InferenceProfile) {
+			modelID = effBedrock.InferenceProfile + modelID
+		}
+	}
+
+	return &bifrostProvider{
+		providerKey: providerKey,
+		model:       modelID,
+		apiKey:      apiKey,
+		baseURL:     baseURL,
+		tls:         tls,
+		bedrock:     effBedrock,
+		vertex:      effVertex,
+		azure:       effAzure,
 	}, nil
 }
 

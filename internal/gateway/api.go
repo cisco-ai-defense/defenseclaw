@@ -1965,7 +1965,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 			if reg := SharedAgentRegistry(); reg != nil && reg.AgentName() != "" {
 				agentName = reg.AgentName()
 			}
-			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, agentName, SharedAgentRegistry().AgentID(), tIn, tOut)
+			a.otel.RecordLLMTokens(ctx, "chat", "defenseclaw", req.Model, agentName, SharedAgentRegistry().AgentID(), SessionIDFromContext(ctx), tIn, tOut)
 		}
 	}
 

@@ -32,12 +32,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.config import LLMConfig
+from defenseclaw.config import (
+    AzureKeyConfig,
+    BedrockKeyConfig,
+    LLMConfig,
+    VertexKeyConfig,
+    _apply_instance_overlay,
+)
 from defenseclaw.guardrail import detect_api_key_env
 from defenseclaw.scanner._llm_env import (
     _LOCAL_PROVIDERS,
@@ -377,6 +384,170 @@ class ParityTests(unittest.TestCase):
                     f"detect_api_key_env({model!r}) -> {suggestion}, "
                     f"not in _PROVIDER_ENV_VARS[{provider!r}]={expected}",
                 )
+
+
+class CustomProviderParityTests(unittest.TestCase):
+    """End-to-end parity tests for the role-wins / overlay-fills merger.
+
+    The same precedence rule is implemented twice — once in Python
+    (:func:`defenseclaw.config._apply_instance_overlay`) and once in
+    Go (``internal/gateway.buildProviderFromEffective``). These tests
+    pin the Python behavior so a regression there is caught
+    immediately; the Go side has a sibling unit test
+    (``TestNewProviderForLLMConfig_OverlayBedrock`` /
+    ``_RoleWinsOverlay``) that asserts the same precedence on the
+    gateway dispatcher.
+    """
+
+    def _write_overlay(self, tmp_dir: str, entry: dict) -> None:
+        path = os.path.join(tmp_dir, "custom-providers.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"providers": [entry], "ollama_ports": []}, f)
+
+    def test_overlay_only_bedrock(self):
+        # When the role declares only instance_name, every Bedrock
+        # field must come from the overlay.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_overlay(tmp, {
+                "name": "acme",
+                "base_provider_type": "bedrock",
+                "bedrock": {
+                    "region": "us-east-2",
+                    "auth_mode": "iam_credentials",
+                    "access_key_env": "ACME_AKID",
+                    "secret_key_env": "ACME_SECRET",
+                    "deployment_aliases": {"fast": "anthropic.claude-3-haiku-20240307-v1:0"},
+                },
+            })
+            llm = LLMConfig(instance_name="acme")
+            _apply_instance_overlay(llm, tmp)
+            self.assertIsNotNone(llm.bedrock)
+            self.assertEqual(llm.bedrock.region, "us-east-2")
+            self.assertEqual(llm.bedrock.auth_mode, "iam_credentials")
+            self.assertEqual(llm.bedrock.access_key_env, "ACME_AKID")
+            self.assertEqual(
+                llm.bedrock.deployment_aliases.get("fast"),
+                "anthropic.claude-3-haiku-20240307-v1:0",
+            )
+            self.assertEqual(llm.provider, "bedrock")
+
+    def test_role_only_bedrock(self):
+        # When the role sets every Bedrock field, the missing overlay
+        # is irrelevant — values come from the role.
+        with tempfile.TemporaryDirectory() as tmp:
+            llm = LLMConfig(
+                instance_name="acme",
+                bedrock=BedrockKeyConfig(
+                    region="eu-west-1",
+                    auth_mode="instance_role",
+                ),
+            )
+            _apply_instance_overlay(llm, tmp)
+            self.assertEqual(llm.bedrock.region, "eu-west-1")
+            self.assertEqual(llm.bedrock.auth_mode, "instance_role")
+
+    def test_role_wins_overlay(self):
+        # Role declares a Bedrock sub-block; overlay declares a
+        # different one. The whole role block wins (the overlay
+        # block is dead config) — _apply_instance_overlay only
+        # replaces the bedrock attribute when it is None.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_overlay(tmp, {
+                "name": "acme",
+                "base_provider_type": "bedrock",
+                "bedrock": {"region": "us-east-2", "auth_mode": "iam_credentials"},
+            })
+            llm = LLMConfig(
+                instance_name="acme",
+                bedrock=BedrockKeyConfig(region="us-west-2", auth_mode="api_key"),
+            )
+            _apply_instance_overlay(llm, tmp)
+            self.assertEqual(llm.bedrock.region, "us-west-2")
+            self.assertEqual(llm.bedrock.auth_mode, "api_key")
+
+    def test_instance_role_keeps_empty_creds(self):
+        # auth_mode=instance_role with no access_key_env / secret_key_env
+        # must survive the overlay-fills pass with empty credentials so
+        # the Go dispatcher falls through to the default AWS credential
+        # chain (IMDS / IRSA).
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_overlay(tmp, {
+                "name": "acme",
+                "base_provider_type": "bedrock",
+                "bedrock": {"region": "us-east-1", "auth_mode": "instance_role"},
+            })
+            llm = LLMConfig(instance_name="acme")
+            _apply_instance_overlay(llm, tmp)
+            self.assertEqual(llm.bedrock.auth_mode, "instance_role")
+            self.assertEqual(llm.bedrock.access_key_env, "")
+            self.assertEqual(llm.bedrock.secret_key_env, "")
+
+    def test_azure_deployment_aliases(self):
+        # Azure deployment_aliases land in the resolved config so the
+        # Go dispatcher can populate schemas.KeyAliases.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_overlay(tmp, {
+                "name": "acme-az",
+                "base_provider_type": "azure",
+                "azure": {
+                    "endpoint": "https://acme.openai.azure.com",
+                    "api_version": "2024-10-21",
+                    "auth_mode": "api_key",
+                    "deployment_aliases": {"gpt-4o": "acme-gpt-4o-prod"},
+                },
+            })
+            llm = LLMConfig(instance_name="acme-az")
+            _apply_instance_overlay(llm, tmp)
+            self.assertIsNotNone(llm.azure)
+            self.assertEqual(llm.azure.endpoint, "https://acme.openai.azure.com")
+            self.assertEqual(
+                llm.azure.deployment_aliases.get("gpt-4o"),
+                "acme-gpt-4o-prod",
+            )
+
+    def test_vertex_adc(self):
+        # Vertex with auth_mode=adc keeps an empty service-account env
+        # so the Go side falls back to ADC.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_overlay(tmp, {
+                "name": "acme-vx",
+                "base_provider_type": "vertex_ai",
+                "vertex": {"project_id": "acme-proj", "region": "us-central1", "auth_mode": "adc"},
+            })
+            llm = LLMConfig(instance_name="acme-vx")
+            _apply_instance_overlay(llm, tmp)
+            self.assertIsNotNone(llm.vertex)
+            self.assertEqual(llm.vertex.project_id, "acme-proj")
+            self.assertEqual(llm.vertex.auth_mode, "adc")
+            # _merge_vertex defaults service_account_json_env to GOOGLE_APPLICATION_CREDENTIALS;
+            # the Go dispatcher ignores it under "adc" auth_mode, which is what we want.
+            self.assertEqual(
+                llm.vertex.service_account_json_env,
+                "GOOGLE_APPLICATION_CREDENTIALS",
+            )
+
+    def test_missing_instance_name_is_noop(self):
+        # Defensive: an LLMConfig with no instance_name must not touch
+        # the overlay even if it exists in data_dir.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_overlay(tmp, {
+                "name": "acme",
+                "base_provider_type": "bedrock",
+                "bedrock": {"region": "us-east-1"},
+            })
+            llm = LLMConfig()
+            _apply_instance_overlay(llm, tmp)
+            self.assertIsNone(llm.bedrock)
+            self.assertIsNone(llm.vertex)
+            self.assertIsNone(llm.azure)
+
+    def test_unused_class_imports(self):
+        # Touch every imported sub-config class so a future import
+        # cleanup doesn't accidentally drop the public re-exports that
+        # downstream tooling depends on. Cheap, deterministic, no I/O.
+        self.assertIsNotNone(VertexKeyConfig())
+        self.assertIsNotNone(AzureKeyConfig())
+        self.assertIsNotNone(BedrockKeyConfig())
 
 
 if __name__ == "__main__":

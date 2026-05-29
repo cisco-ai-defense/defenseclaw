@@ -17,10 +17,10 @@ DIST_DIR    := dist
         plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync \
+        check check-audit-actions check-error-codes check-schemas check-v7 check-provider-coverage check-version-sync check-upgrade-manifest \
         set-version \
         _bundle-data \
-        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-checksums dist-clean
+        dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
 # ---------------------------------------------------------------------------
 # Version stamping
@@ -528,7 +528,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-provider-coverage
+check: check-v7 check-provider-coverage check-upgrade-manifest
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -562,6 +562,9 @@ check-provider-coverage: sync-openclaw-extension
 		fi && \
 		npx --prefer-offline --no-install vitest run src/__tests__/provider-coverage.test.ts
 	@echo "check-provider-coverage: corpus is in sync across Go + TS."
+
+check-upgrade-manifest:
+	@python3 scripts/generate-upgrade-manifest.py --check
 
 # ---------------------------------------------------------------------------
 # Lint targets
@@ -606,7 +609,7 @@ go-lint: sync-openclaw-extension
 # Distribution targets — build release artifacts into dist/
 # ---------------------------------------------------------------------------
 
-dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-checksums
+dist: dist-cli dist-gateway dist-plugin dist-sandbox dist-upgrade-manifest dist-checksums
 	@echo ""
 	@echo "Release artifacts:"
 	@ls -lh $(DIST_DIR)/
@@ -638,6 +641,7 @@ _bundle-data:
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/default
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/strict
 	@rm -rf cli/defenseclaw/_data/policies/guardrail/permissive
+	@rm -rf cli/defenseclaw/_data/splunk_o11y_dashboards
 	cp policies/rego/*.rego cli/defenseclaw/_data/policies/rego/
 	rm -f cli/defenseclaw/_data/policies/rego/*_test.rego
 	cp policies/rego/data.json cli/defenseclaw/_data/policies/rego/
@@ -659,6 +663,7 @@ _bundle-data:
 	@# so dashboard / dashcfg edits propagate without restarting the obs stack.
 	rsync -a --delete --inplace bundles/splunk_local_bridge/        cli/defenseclaw/_data/splunk_local_bridge/
 	rsync -a --delete --inplace bundles/local_observability_stack/  cli/defenseclaw/_data/local_observability_stack/
+	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
 dist-gateway:
@@ -703,9 +708,13 @@ dist-test:
 	chmod +x $(DIST_DIR)/test/*.sh 2>/dev/null || true
 	@echo "Test scripts copied to $(DIST_DIR)/test/"
 
+dist-upgrade-manifest:
+	@mkdir -p $(DIST_DIR)
+	python3 scripts/generate-upgrade-manifest.py --out $(DIST_DIR)/upgrade-manifest.json
+
 dist-checksums:
 	@test -d $(DIST_DIR) || { echo "Run 'make dist' first"; exit 1; }
-	cd $(DIST_DIR) && find . -type f ! -name checksums.txt | sort | xargs shasum -a 256 > checksums.txt
+	cd $(DIST_DIR) && find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
 	@echo "Checksums written to $(DIST_DIR)/checksums.txt"
 
 dist-clean:

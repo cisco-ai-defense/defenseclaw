@@ -220,7 +220,7 @@ def connector_home(
     if name == "codex":
         return os.path.join(home, ".codex")
     if name == "zeptoclaw":
-        return os.path.join(home, ".zeptoclaw")
+        return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
     if name == "geminicli":
         return os.path.join(home, ".gemini")
     if name == "copilot":
@@ -290,8 +290,9 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".mcp.json"),
         ]
     elif name == "zeptoclaw":
+        zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
         paths = [
-            os.path.join(home, ".zeptoclaw", "config.json"),
+            os.path.join(zepto_home, "config.json"),
             _workspace_path(workspace_dir, ".mcp.json"),
         ]
     elif name == "geminicli":
@@ -513,10 +514,10 @@ def _codex_skill_dirs(workspace_dir: str | None = None) -> list[str]:
 
 
 def _zeptoclaw_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
+    zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
     return _dedup(
         [
-            os.path.join(home, ".zeptoclaw", "skills"),
+            os.path.join(zepto_home, "skills"),
             _workspace_path(workspace_dir, ".zeptoclaw", "skills"),
         ]
     )
@@ -623,8 +624,8 @@ def _codex_plugin_dirs() -> list[str]:
 
 
 def _zeptoclaw_plugin_dirs() -> list[str]:
-    home = str(Path.home())
-    base = os.path.join(home, ".zeptoclaw", "plugins")
+    zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
+    base = os.path.join(zepto_home, "plugins")
     return _dedup(
         [
             base,
@@ -754,9 +755,9 @@ def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
 
 
 def _zeptoclaw_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
-    home = str(Path.home())
+    zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_zepto_config(os.path.join(home, ".zeptoclaw", "config.json")))
+    entries.extend(_read_zepto_config(os.path.join(zepto_home, "config.json")))
     project_mcp = _workspace_path(workspace_dir, ".mcp.json")
     if project_mcp:
         entries.extend(_read_dotmcp_json(project_mcp))

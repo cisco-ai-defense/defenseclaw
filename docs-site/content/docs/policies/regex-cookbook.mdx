@@ -1,0 +1,148 @@
+---
+title: Regex cookbook
+description: Battle-tested regex patterns for DefenseClaw guardrails — secrets, command injection, exfiltration markers, prompt injection — with explanations and counterexamples.
+keywords:
+  - DefenseClaw regex
+  - secrets detection
+  - prompt injection
+  - command injection
+  - RE2
+---
+
+DefenseClaw compiles every guardrail pattern with Go's standard `regexp` package, which is
+RE2-based. The wizard's regex tester catches incompatible features before you commit; this page
+is the deeper reference for the patterns that ship in the strict pack.
+
+<Callout type="info" title="RE2 in 30 seconds">
+RE2 trades a few features for predictable, polynomial-time matching. Patterns you know from PCRE
+that <strong>do not work</strong> in RE2:
+
+- Lookarounds: `(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)`
+- Backreferences: `\1`, `\2`, `\k<name>`
+- Atomic groups: `(?>…)`
+- Possessive quantifiers: `*+`, `++`, `?+`
+
+If your pattern needs any of those, the wizard turns the input field red and tells you which
+feature failed. Re-author with a non-capturing group and tighter quantifiers.
+</Callout>
+
+## Anatomy of a good rule
+
+```yaml
+- id: SEC-OPENAI-V2
+  title: OpenAI API key (current format)
+  pattern: 'sk-[A-Za-z0-9]{48}'
+  severity: CRITICAL
+  confidence: 0.95
+  tags: [secret, openai]
+```
+
+What makes this work:
+
+- **Anchored prefix.** `sk-` is the OpenAI marker. Without it the pattern would match every
+  ~48-character base62 string.
+- **Bounded quantifier.** `{48}` instead of `{20,}` keeps the false positive rate low.
+- **Conservative confidence.** Even at 0.95, the LLM judge can downgrade in context.
+- **Self-describing tags.** Useful when you triage thousands of findings in dashboards.
+
+## Patterns by category
+
+### Secrets
+
+| ID | Pattern shape | Catches | Avoids |
+| --- | --- | --- | --- |
+| `SEC-AWS-KEY` | `\b(AKIA\|ASIA)[A-Z0-9]{16}\b` | IAM, STS keys | Random base62 of similar length |
+| `SEC-GITHUB-TOKEN` | `\bgh[posr]_[A-Za-z0-9]{36,}` | New GitHub token formats | Plain `gh-` strings |
+| `SEC-PRIVKEY` | `-----BEGIN [A-Z ]+PRIVATE KEY-----` | RSA, ED25519, OPENSSH | Public certs, certificate signing requests |
+| `SEC-OPENAI-V2` | `sk-[A-Za-z0-9]{48}` | OpenAI keys | `sk-test-` Stripe keys |
+| `SEC-SLACK-WEBHOOK` | `https://hooks\.slack\.com/services/[A-Z0-9]+/[A-Z0-9]+/[A-Za-z0-9]+` | Slack incoming webhooks | Other Slack URLs (channels, files) |
+
+### Prompt / tool injection
+
+These rely on the natural-language signal more than character classes. Always pair with an LLM
+judge for confirmation — the regex is the cheap pre-filter.
+
+```yaml
+- id: INJ-OVERRIDE-INSTRUCTION
+  pattern: '(?i)\b(ignore|disregard)\s+(all\s+)?(previous|prior|above)\s+(instructions|prompts|rules)\b'
+  severity: HIGH
+- id: INJ-SHELL-EXEC
+  pattern: '(?i)\b(rm\s+-rf|dd\s+if=|mkfs|truncate\s+-s|format\s+c:)\b'
+  severity: CRITICAL
+```
+
+### Unicode obfuscation (ZWSP / RTL / homoglyph)
+
+Attackers slip zero-width characters and bidi controls inside otherwise-benign strings to defeat
+keyword matchers (`i​gnore previous` reads identically to the eye but `i\u200Bgnore` slips past
+`(?i)ignore`). Two layers cover this:
+
+```yaml
+- id: OBFUSC-UNICODE-ZWSP
+  title: Zero-width whitespace inside text
+  pattern: '[\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{FEFF}]'
+  severity: MEDIUM
+  signal_strength: high
+  tags: [obfuscation, unicode]
+- id: OBFUSC-CYRILLIC-LATIN-MIX
+  title: Cyrillic letter inside an otherwise-ASCII word
+  pattern: '\b[a-zA-Z]*[\x{0430}-\x{044F}][a-zA-Z]+\b'
+  severity: MEDIUM
+  signal_strength: medium
+  tags: [obfuscation, homoglyph]
+```
+
+<Callout type="warn" title="Why MEDIUM and not HIGH">
+A single ZWSP isn't proof of malice — copy-pasting from Word or PDF leaks them all the time.
+But the same finding inside the same session as a sensitive-access or injection finding is what the
+Layer-5 correlator promotes to CRITICAL via the <code>signal_strength: high</code> axis. Keep the
+base severity at MEDIUM so you don't drown in false positives, and let the correlator do the
+work. See [Layer 5 — Session correlator](./#layer-5--session-correlator).
+</Callout>
+
+### Exfiltration markers
+
+When a model surfaces a base64 blob, an out-of-band webhook URL, or a tar pipe, you usually want
+to alert before allowing the output downstream:
+
+```yaml
+- id: EXFIL-CURL-PIPE-SH
+  pattern: '\bcurl\s+[^\s]+\s*\|\s*(bash|sh|zsh)\b'
+  severity: CRITICAL
+- id: EXFIL-WEBHOOK-DOMAIN
+  pattern: '(?i)\b(webhook\.site|requestbin\.com|ngrok\.io|interactsh\.com)\b'
+  severity: HIGH
+```
+
+### Enterprise data shape
+
+Numeric-only patterns are the easiest to false-positive. Always pair them with a `condition`
+in your finding suppressions (see [the suppression cookbook](./suppression-cookbook)).
+
+```yaml
+- id: PII-SSN
+  pattern: '\b\d{3}-\d{2}-\d{4}\b'
+  severity: HIGH
+- id: PII-CREDIT-CARD
+  pattern: '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b'
+  severity: CRITICAL
+```
+
+## Patterns to avoid
+
+- **`.*` anywhere unanchored.** It almost always matches, slowly. Pair with at least one bounded
+  segment (`[A-Z0-9]{8,}`) and an anchor.
+- **Greedy quantifiers under groups under quantifiers.** `(\w+)+` is the classic catastrophic
+  backtracking shape. The wizard's `REGEX_REDOS` heuristic flags this on the way in.
+- **Case-insensitive without `(?i)`.** Use the inline flag so the engine and your tester agree.
+
+## Workflow
+
+In the [Policy creator](./creator) Rule pack section:
+
+1. Pick a recipe from the catalog or click "+ Rule" on the appropriate file.
+2. Paste your pattern in. The wizard runs every keystroke through V8, the RE2 lint, and the
+   ReDoS heuristic, plus your `should match` and `should NOT match` examples.
+3. Once the pill colors line up (green for pass, amber for mismatch, red for compile error),
+   review the verdict in the Live Test pane on the right — it'll show how the pattern interacts
+   with the severity matrix and admission policy.

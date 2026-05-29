@@ -205,6 +205,18 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
 	router.SetRulePack(rp)
 	ApplyRulePackOverrides(rp)
+	// local-patterns.yaml replaces the compiled-in local pattern set
+	// per-profile when present in the rule pack. Calling with nil
+	// LocalPatterns is a no-op (keeps the defaults), so this is safe
+	// even when an operator hasn't customized the file.
+	ApplyLocalPatternsOverride(rp.LocalPatterns)
+
+	// Seed custom-providers overlay from llm.base_url so a custom LLM
+	// gateway domain is recognized by isKnownProviderDomain(). Must run
+	// before providerRegistrySnapshot() calls below.
+	if err := SeedCustomProvidersFromLLMBaseURL(cfg.LLM.BaseURL); err != nil {
+		fmt.Fprintf(os.Stderr, "[sidecar] custom-providers seed warning: %v\n", err)
+	}
 
 	// Wire LLM judge when enabled. The judge handles tool-call injection
 	// detection AND tool-result PII inspection (via inspectToolResult),
@@ -213,7 +225,8 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if cfg.Guardrail.Judge.Enabled {
 		dotenvPath := filepath.Join(cfg.DataDir, ".env")
 		judgeLLM := cfg.ResolveLLM("guardrail.judge")
-		judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp)
+		providers, _, _ := providerRegistrySnapshot()
+		judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, providers)
 		if judge != nil {
 			router.SetJudge(judge)
 			features := "tool-result-pii"

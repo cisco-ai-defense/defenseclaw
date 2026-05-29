@@ -256,9 +256,265 @@ You don't pick the Bifrost key directly. You pick a model — the gateway maps `
 | `~/.defenseclaw/config.yaml` | The `*_env` references only | The actual secret never enters `config.yaml`. |
 | `os.environ` | Highest-priority lookup | A shell `export` always wins over the dotenv copy. Useful for one-shot debugging. |
 
+## Hook-based vs proxy-based connectors
+
+How an agent connector intercepts model traffic determines what the
+unified key actually pays for:
+
+| Connector class | Examples | What the LLM does |
+| --- | --- | --- |
+| Hook-based | Codex, Claude Code, Hermes, Cursor, Windsurf, Copilot CLI, Gemini CLI | The agent talks to its own LLM directly. DefenseClaw runs as a *judge only*: it inspects prompts/responses and emits verdicts. The unified key is only needed when `guardrail.judge.enabled: true`. |
+| Proxy-based | OpenClaw, ZeptoClaw | Outbound LLM traffic is routed through the gateway proxy. The gateway uses the unified key for *both* the upstream LLM (the agent's model) and the optional judge. |
+
+The wizard records the intent on `guardrail.llm_role`:
+
+- `judge_only` — set automatically for hook-based connectors. Only the
+  judge consumes the key.
+- `judge_and_agent` — set automatically for proxy-based connectors.
+  The same key powers the agent's upstream LLM and the judge.
+
+Set the role explicitly when scripting:
+
+```bash
+defenseclaw setup guardrail \
+  --connector openclaw \
+  --llm-role judge_and_agent \
+  --judge-model anthropic/claude-sonnet-4-5 \
+  --non-interactive
+```
+
+## Custom providers (internal / self-hosted endpoints)
+
+Internal LLM gateways (a corporate vLLM cluster, an isolated Bedrock
+mirror, a lab vending machine) plug in via the
+`~/.defenseclaw/custom-providers.json` overlay. Each entry exposes
+its own `base_url`, env keys, allowed request types, and per-instance
+TLS posture.
+
+```bash
+defenseclaw setup provider add \
+  --name acme-internal-bedrock \
+  --base-provider-type bedrock \
+  --base-url https://llm.internal:8443 \
+  --domain llm.internal \
+  --env-key ACME_BEDROCK_KEY \
+  --allowed-request chat \
+  --allowed-request embedding \
+  --available-model us.anthropic.claude-sonnet-4-6 \
+  --request-path-override chat=/openai/v1/chat/completions \
+  --ca-cert-file /etc/ssl/acme-root.pem
+```
+
+<Callout type="warn" title="Set --domain when you set --base-url">
+The gateway resolves an inbound request to a custom-provider entry by
+matching the request URL's host against each entry's `domains` list. If
+you set `--base-url` but never declare a `--domain` covering the same
+host, `defenseclaw doctor` emits a `base_url host … not covered by
+domains` warning and the gateway falls back to default TLS / routing
+because it cannot match the inbound URL to the overlay. Always pass
+`--domain <host>` alongside `--base-url <scheme>://<host>:<port>` (or
+add the host to `domains` in the JSON overlay directly).
+</Callout>
+
+Then bind a resolved role to the instance:
+
+```bash
+defenseclaw setup llm \
+  --provider custom \
+  --instance-name acme-internal-bedrock \
+  --model us.anthropic.claude-sonnet-4-6 \
+  --api-key-env ACME_BEDROCK_KEY \
+  --non-interactive
+```
+
+The judge can point at a *different* instance than the top-level LLM
+without copy-pasting:
+
+```bash
+defenseclaw setup guardrail \
+  --judge-instance-name acme-judge-cluster \
+  --judge-provider anthropic \
+  --judge-model claude-sonnet-4-5 \
+  --non-interactive
+```
+
+`defenseclaw doctor` validates that every `instance_name` in your
+config resolves to an overlay entry, warns when an overlay TLS block
+declares both `ca_cert_pem` and `insecure_skip_verify`, and warns when
+an entry's `base_url` host is not covered by its `domains` list (which
+would otherwise silently bypass the overlay at request time).
+
+### Bedrock / Vertex AI / Azure on a custom instance
+
+A custom instance can carry the full regional posture (region, auth
+mode, deployment aliases) so a *single* `setup llm --instance-name X`
+call is all that's needed downstream. Same flags as the role-level
+regional flags below — they just attach to the overlay entry instead.
+
+```bash
+defenseclaw setup provider add \
+  --name acme-bedrock-prod \
+  --base-provider-type bedrock \
+  --domain bedrock-runtime.us-east-2.amazonaws.com \
+  --bedrock-region us-east-2 \
+  --bedrock-auth-mode iam_credentials \
+  --bedrock-access-key-env ACME_AWS_AKID \
+  --bedrock-secret-key-env ACME_AWS_SECRET \
+  --bedrock-inference-profile us. \
+  --bedrock-deployment fast=anthropic.claude-3-haiku-20240307-v1:0 \
+  --bedrock-deployment heavy=anthropic.claude-3-opus-20240229-v1:0
+
+defenseclaw setup llm \
+  --provider custom \
+  --instance-name acme-bedrock-prod \
+  --model heavy \
+  --non-interactive
+```
+
+When the upstream is the public AWS Bedrock service (rather than an
+internal proxy in front of it), the `--domain` value should be the
+regional Bedrock runtime host — that's the URL the agent's outbound
+calls actually carry. Internal Bedrock mirrors should use the mirror's
+host plus `--base-url`.
+
+The same shape works for Vertex AI (`--vertex-project-id`,
+`--vertex-region`, `--vertex-auth-mode`,
+`--vertex-service-account-json-env`) and Azure OpenAI
+(`--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`,
+`--azure-deployment-alias model=deployment`).
+
+#### Role wins, overlay fills blanks
+
+When the resolved role *and* the overlay both declare a sub-block,
+the role's fields win and the overlay only supplies values the role
+omitted. The example below pins region on the role but inherits
+auth mode and the deployment alias table from the overlay:
+
+```yaml
+# ~/.defenseclaw/config.yaml
+llm:
+  provider: custom
+  instance_name: acme-bedrock-prod
+  bedrock:
+    region: us-west-2          # overrides overlay's us-east-2
+```
+
+```json
+# ~/.defenseclaw/custom-providers.json
+{
+  "providers": [
+    {
+      "name": "acme-bedrock-prod",
+      "base_provider_type": "bedrock",
+      "bedrock": {
+        "region": "us-east-2",                  // shadowed by role above
+        "auth_mode": "iam_credentials",         // inherited
+        "access_key_env": "ACME_AWS_AKID",      // inherited
+        "secret_key_env": "ACME_AWS_SECRET",    // inherited
+        "deployment_aliases": {                 // inherited
+          "fast": "anthropic.claude-3-haiku-20240307-v1:0",
+          "heavy": "anthropic.claude-3-opus-20240229-v1:0"
+        }
+      }
+    }
+  ]
+}
+```
+
+Effective dispatch posture: region `us-west-2`, IAM-credentials auth
+from `ACME_AWS_*`, alias table from the overlay. `defenseclaw doctor`
+flags overlay fields that the role silently shadows so the dead config
+can be pruned.
+
+## Regional providers (Bedrock / Vertex AI / Azure OpenAI)
+
+Regional providers require more than a single API key: a region (or
+project), an auth mode, and sometimes a deployment alias. The CLI
+ships dedicated flags so non-interactive installs can configure them
+without hand-editing YAML.
+
+### AWS Bedrock
+
+```bash
+defenseclaw setup llm \
+  --provider bedrock \
+  --model us.anthropic.claude-sonnet-4-6 \
+  --bedrock-region us-east-1 \
+  --bedrock-auth-mode iam_credentials \
+  --bedrock-access-key-env AWS_ACCESS_KEY_ID \
+  --bedrock-secret-key-env AWS_SECRET_ACCESS_KEY \
+  --bedrock-session-token-env AWS_SESSION_TOKEN \
+  --bedrock-inference-profile us. \
+  --non-interactive
+```
+
+Auth modes:
+
+| Mode | What's required |
+| --- | --- |
+| `api_key` (default) | `AWS_BEARER_TOKEN_BEDROCK` or `DEFENSECLAW_LLM_KEY` |
+| `iam_credentials` | `--bedrock-access-key-env`, `--bedrock-secret-key-env`, optional `--bedrock-session-token-env` |
+| `profile` | `--bedrock-profile-name` (matching `~/.aws/credentials`) |
+| `instance_role` | nothing — EC2 / EKS pod identity supplies short-lived creds |
+
+### Google Vertex AI
+
+```bash
+defenseclaw setup llm \
+  --provider vertex_ai \
+  --model claude-sonnet-4-5@vertex \
+  --vertex-project-id acme-prod-vertex \
+  --vertex-region us-central1 \
+  --vertex-auth-mode service_account \
+  --vertex-service-account-json-env GOOGLE_APPLICATION_CREDENTIALS \
+  --non-interactive
+```
+
+### Azure OpenAI
+
+```bash
+defenseclaw setup llm \
+  --provider azure \
+  --model gpt-4o \
+  --azure-endpoint https://my-resource.openai.azure.com \
+  --azure-api-version 2024-10-21 \
+  --azure-auth-mode api_key \
+  --azure-deployment-alias gpt-4o=gpt4o-prod \
+  --azure-deployment-alias gpt-4o-mini=gpt4o-mini-prod \
+  --api-key-env AZURE_OPENAI_API_KEY \
+  --non-interactive
+```
+
+`defenseclaw doctor` calls
+[`_check_regional_provider_config`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_doctor.py)
+which fails fast when a regional sub-block is missing a required
+field, and runs
+[`_check_llm_reachable`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_doctor.py)
+to send a one-shot `max_tokens=1` ping through the resolved route.
+
+## Reachability ping (`--ping`)
+
+Pair any `setup llm` invocation with `--ping` to issue an immediate
+`llm.ping` after save. It returns `(ok, message)` and never raises,
+so the wizard stays usable when the network is flaky:
+
+```bash
+defenseclaw setup llm \
+  --provider anthropic \
+  --model claude-sonnet-4-5 \
+  --api-key-env DEFENSECLAW_LLM_KEY \
+  --non-interactive --ping
+```
+
+```
+  ✓ llm ping: ok (anthropic/claude-sonnet-4-5)
+```
+
 ## Reference
 
 - [`cli/defenseclaw/commands/cmd_keys.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_keys.py) — the four subcommands.
 - [`cli/defenseclaw/credentials.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/credentials.py) — the `CREDENTIALS` registry and the resolve / classify functions.
+- [`cli/defenseclaw/commands/_llm_picker.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/_llm_picker.py) — shared interactive pickers and the inherit preflight.
+- [`internal/configs/embed.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/configs/embed.go) — the Go-side `Provider` overlay schema (custom providers).
 - [Reference → Keys](/docs/reference/keys) — the full credential table with feature gating and override paths.
 - [Setup → Skill scanner](/docs/setup/skill-scanner) and [MCP scanner](/docs/setup/mcp-scanner) — the two scanners that consume the unified key via `inject_llm_env`.

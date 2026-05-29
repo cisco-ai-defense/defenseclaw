@@ -18,19 +18,17 @@
 
 import json
 import os
-import tempfile
+import sys
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.models import Event
-from tests.helpers import make_app_context, cleanup_app
 
+from tests.helpers import cleanup_app, make_app_context
 
 # ---------------------------------------------------------------------------
 # Status command
@@ -263,7 +261,6 @@ class TestAlertsCommand(unittest.TestCase):
     def _insert_scan_with_findings(self, target, scanner, findings):
         """Helper: insert a scan_result and its findings into the store."""
         import uuid
-        from datetime import timedelta
         scan_id = str(uuid.uuid4())
         max_sev = findings[0]["severity"] if findings else "INFO"
         self.app.store.insert_scan_result(
@@ -716,12 +713,22 @@ class TestSetupSplunkCommand(unittest.TestCase):
 
         result = self.runner.invoke(setup, ["splunk", "--help"], obj=self.app)
         self.assertEqual(result.exit_code, 0)
+        self.assertIn("dashboards", result.output)
         self.assertIn("--o11y", result.output)
         self.assertIn("--logs", result.output)
         self.assertIn("--enterprise", result.output)
         self.assertIn("--hec-endpoint", result.output)
         self.assertIn("--skip-test", result.output)
         self.assertIn("--accept-splunk-license", result.output)
+
+    def test_setup_splunk_dashboards_help(self):
+        from defenseclaw.commands.cmd_setup import setup
+
+        result = self.runner.invoke(setup, ["splunk", "dashboards", "apply", "--help"], obj=self.app)
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("--api-url", result.output)
+        self.assertIn("--o11y-api-token", result.output)
+        self.assertIn("--with-detectors", result.output)
 
     def test_setup_splunk_o11y_non_interactive(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1397,7 +1404,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertFalse(self.app.cfg.otel.enabled)
         self.assertFalse(self.app.cfg.splunk.enabled)
 
-    def test_setup_splunk_interactive_o11y(self):
+    @patch("defenseclaw.commands.cmd_setup.apply_dashboards")
+    def test_setup_splunk_interactive_o11y(self, mock_apply_dashboards):
         from defenseclaw.commands.cmd_setup import setup
 
         user_input = "\n".join([
@@ -1408,6 +1416,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
             "y",           # Traces?
             "y",           # Metrics?
             "n",           # Logs?
+            "n",           # Install dashboards?
             "n",           # Enable local?
             "n",           # Enable Enterprise?
         ]) + "\n"
@@ -1420,6 +1429,37 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertTrue(self.app.cfg.otel.enabled)
         self.assertEqual(self.app.cfg.otel.traces.endpoint, "ingest.us1.observability.splunkcloud.com")
         self.assertFalse(self.app.cfg.otel.logs.enabled)
+        mock_apply_dashboards.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_setup.apply_dashboards")
+    def test_setup_splunk_interactive_o11y_installs_dashboards(self, mock_apply_dashboards):
+        from defenseclaw.commands.cmd_setup import setup
+
+        user_input = "\n".join([
+            "y",           # Enable O11y?
+            "us1",         # Realm
+            "my-secret",   # Access token
+            "test-svc",    # Service name
+            "y",           # Traces?
+            "y",           # Metrics?
+            "n",           # Logs?
+            "y",           # Install dashboards?
+            "o11y-api-token",  # O11y API token
+            "n",           # Enable local?
+            "n",           # Enable Enterprise?
+        ]) + "\n"
+
+        result = self.runner.invoke(
+            setup, ["splunk"], obj=self.app,
+            input=user_input, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_apply_dashboards.assert_called_once()
+        call_args = mock_apply_dashboards.call_args.args
+        call_kwargs = mock_apply_dashboards.call_args.kwargs
+        self.assertIs(call_args[0], self.app)
+        self.assertEqual(call_kwargs["o11y_api_token"], "o11y-api-token")
+        self.assertTrue(call_kwargs["yes"])
 
     def test_setup_splunk_show_credentials_no_env_file(self):
         from defenseclaw.commands.cmd_setup import setup

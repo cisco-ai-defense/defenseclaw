@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/configs"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -110,7 +111,7 @@ type LLMJudge struct {
 // vLLM / LM Studio endpoint without fabricating a credential. The
 // optional RulePack supplies externalized judge prompts, suppressions,
 // and severity overrides.
-func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack) *LLMJudge {
+func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath string, rp *guardrail.RulePack, providers *configs.ProvidersConfig) *LLMJudge {
 	if cfg == nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: config is nil\n")
 		return nil
@@ -149,12 +150,25 @@ func NewLLMJudge(cfg *config.JudgeConfig, llm config.LLMConfig, dotenvPath strin
 		return nil
 	}
 
-	provider, err := NewProviderWithBase(model, apiKey, llm.BaseURL)
+	// Build an effective LLMConfig with the resolved API key pinned
+	// inline so the dispatcher does not re-resolve (which would lose
+	// the dotenv fallback applied above). Carries the role-level
+	// sub-blocks (Bedrock/Vertex/Azure/TLS) through unchanged so the
+	// dispatcher can merge them with the overlay (role wins).
+	effLLM := llm
+	effLLM.Model = model
+	effLLM.APIKey = apiKey
+	effLLM.APIKeyEnv = ""
+	provider, err := NewProviderForLLMConfig(&effLLM, providers)
 	if err != nil {
 		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: failed to create provider: %v\n", err)
 		return nil
 	}
-	fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
+	if strings.TrimSpace(llm.InstanceName) != "" {
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s, instance=%s)\n", model, llm.InstanceName)
+	} else {
+		fmt.Fprintf(defaultLogWriter, "  [llm-judge] init: judge ready (model=%s)\n", model)
+	}
 	return &LLMJudge{cfg: cfg, model: model, provider: provider, rp: rp}
 }
 

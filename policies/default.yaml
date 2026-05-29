@@ -29,7 +29,36 @@ skill_actions:
     runtime: enable
     install: none
 
-scanner_overrides: {}
+# Scanner-specific severity overrides. Each top-level key is a scanner
+# type (mcp, plugin, skill, …); each second-level key is a severity tier
+# (LOW/MEDIUM/HIGH/CRITICAL); each leaf is the {runtime, file, install}
+# action triple to apply when *that* scanner emits *that* severity. The
+# active enforcement matrix is the union of these overrides with the
+# skill_actions defaults above.
+#
+# The two entries below mirror policies/rego/data.json — the bundled
+# data.json is what the gateway actually reads at runtime, and an
+# integrity test (see TestPolicyYAMLDataJSONParity) fails CI if this
+# section drifts from the JSON.
+scanner_overrides:
+  mcp:
+    MEDIUM:
+      runtime: block
+      file: quarantine
+      install: block
+    LOW:
+      runtime: block
+      file: none
+      install: none
+  plugin:
+    HIGH:
+      runtime: block
+      file: quarantine
+      install: block
+    MEDIUM:
+      runtime: allow
+      file: none
+      install: none
 
 first_party_allow_list:
   # See policies/strict.yaml for the rationale behind the per-connector
@@ -39,6 +68,7 @@ first_party_allow_list:
     reason: first-party DefenseClaw plugin
     source_path_contains:
       - ".defenseclaw"
+      - "extensions/defenseclaw"
       - ".openclaw/extensions"
       - ".zeptoclaw/extensions"
       - ".claude/extensions"
@@ -49,6 +79,8 @@ first_party_allow_list:
     reason: first-party DefenseClaw skill
     source_path_contains:
       - ".defenseclaw"
+      - "workspace/skills/codeguard"
+      - "skills/codeguard"
       - ".openclaw/workspace/skills"
       - ".openclaw/skills"
       - ".zeptoclaw/skills"
@@ -88,6 +120,7 @@ guardrail:
       - "aws_access_key"
       - "aws_secret_access"
       - "password="
+      - "token:"
       - "bearer "
       - "ghp_"
       - "gho_"

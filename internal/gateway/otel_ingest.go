@@ -282,7 +282,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 	// telemetry directly — no extra audit OTLP sink needed.
 	a.otel.RecordOTelIngest(ctx, string(signal), source, "ok", stats.Records, bodyBytes)
 	for _, usage := range extractOTLPTokenUsage(summaryBody, signal, source) {
-		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, usage.agentName, SharedAgentRegistry().AgentID(), usage.tokenType, usage.tokens)
+		a.otel.RecordLLMTokenUsage(ctx, usage.operationName, usage.providerName, usage.model, usage.agentName, SharedAgentRegistry().AgentID(), SessionIDFromContext(ctx), usage.tokenType, usage.tokens)
 	}
 	for _, duration := range extractOTLPOperationDurations(summaryBody, signal, source) {
 		a.otel.RecordLLMDuration(ctx, duration.operationName, duration.providerName, duration.model, duration.agentName, SharedAgentRegistry().AgentID(), duration.durationSeconds)

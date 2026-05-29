@@ -1,0 +1,151 @@
+---
+title: Verify a policy locally
+description: Step-by-step recipe to take a downloaded install script from the policy creator and confirm it activates cleanly against a real DefenseClaw install.
+keywords:
+  - DefenseClaw policy
+  - policy verification
+  - install script
+  - defenseclaw policy activate
+  - defenseclaw policy evaluate
+  - OPA evaluate
+---
+
+The [Policy creator](/docs/policies/creator) downloads an install script that
+writes every artifact the gateway needs and then runs
+`defenseclaw policy activate <name>`. This page is the cookbook for verifying
+that the download actually does what the creator promised — useful before
+shipping a new policy to a shared install, and as a CI step if you keep a
+policy in version control.
+
+The recipe assumes you have:
+
+- `defenseclaw` installed (Go binary at `defenseclaw` or the Python CLI at
+  `cli/.venv/bin/defenseclaw`).
+- A sandbox directory you can wipe (`/tmp/dc-verify` in the examples).
+- The downloaded install script saved as `~/Downloads/install-<name>.sh`.
+
+## 1. Sandboxed dry run
+
+Always run a newly downloaded script in a throwaway `--data-dir` before
+pointing it at your real install. The script is plain bash and does no
+post-install cleanup; this gives you a clean rollback path if something goes
+sideways.
+
+```bash
+mkdir -p /tmp/dc-verify
+cd /tmp/dc-verify
+
+# 1. Initialize a fresh install rooted at this sandbox dir.
+defenseclaw setup init --data-dir=/tmp/dc-verify --non-interactive
+
+# 2. Run the downloaded install script against the sandbox.
+DEFENSECLAW_DATA_DIR=/tmp/dc-verify \
+  bash ~/Downloads/install-my-policy.sh
+
+# 3. Confirm the artifacts landed.
+ls /tmp/dc-verify/policies/
+# Expected: my-policy.yaml + rego/data.json (+ rule-pack subdirs if you
+#           authored custom Rego or correlation patterns)
+```
+
+## 2. Static validation
+
+The CLI ships a validator that loads the YAML, runs the OPA modules
+against the generated `data.json`, and checks every severity-action triple
+is well-formed.
+
+```bash
+defenseclaw --data-dir=/tmp/dc-verify policy validate
+```
+
+If this fails, the policy will not activate — fix the reported errors in
+the creator and re-download before continuing.
+
+## 3. Evaluate an example admission decision
+
+`policy evaluate` runs the same OPA pipeline the gateway uses at admission
+time. Feed it a representative input and compare the verdict against your
+expectations.
+
+```bash
+cat <<'EOF' > /tmp/admission-input.json
+{
+  "target_type": "skill",
+  "target_name": "test-skill",
+  "path": "/tmp/test-skill",
+  "scan_result": {
+    "max_severity": "HIGH",
+    "total_findings": 3,
+    "findings": [
+      {"severity": "HIGH",   "scanner": "codeguard", "title": "SEC-AWS-KEY"},
+      {"severity": "MEDIUM", "scanner": "codeguard", "title": "PII-EMAIL"}
+    ]
+  }
+}
+EOF
+
+defenseclaw --data-dir=/tmp/dc-verify policy evaluate \
+  --input /tmp/admission-input.json
+```
+
+Expected output (truncated):
+
+```text
+verdict: deny
+file_action: quarantine
+install_action: block
+runtime_action: allow
+reason: "HIGH severity finding"
+```
+
+If your `skill_actions.high.install` is `block` (the default + strict
+preset's choice), the verdict above is the contract — any other result
+indicates drift between the wizard's expected behavior and the gateway's
+runtime decision.
+
+## 4. Diff against the active policy
+
+Once you're happy with the sandbox run, compare the new policy to whatever
+is active in your real install **before** activating:
+
+```bash
+diff -u \
+  ~/.defenseclaw/policies/$(readlink ~/.defenseclaw/policies/active.yaml).yaml \
+  /tmp/dc-verify/policies/my-policy.yaml
+```
+
+The diff focuses your review on the fields you actually changed and makes
+it obvious when a download regenerated something you didn't intend to
+modify.
+
+## 5. Promote to the real install
+
+When the sandbox passes every check, copy the artifacts into the real
+data dir and activate:
+
+```bash
+cp /tmp/dc-verify/policies/my-policy.yaml ~/.defenseclaw/policies/
+defenseclaw policy activate my-policy
+defenseclaw policy show my-policy
+```
+
+The audit log records the activation:
+
+```bash
+defenseclaw audit tail --action policy-activate -n 5
+```
+
+## Troubleshooting
+
+- **`policy validate` reports "data.json missing required key"** — the
+  install script didn't write `policies/rego/data.json`. Re-run with
+  `bash -x ~/Downloads/install-<name>.sh` to see which step failed (usually
+  a permissions issue on `~/.defenseclaw/policies/`).
+- **`policy activate` succeeds but the gateway behavior doesn't change** —
+  some fields (`cisco_ai_defense`, `webhooks`) only mutate `config.yaml` and
+  require a gateway restart to take effect. The script does not restart the
+  gateway for you.
+- **`policy evaluate` returns `allow` when you expected `deny`** — re-check
+  the `Diff vs preset` banner in the playground; an unintended
+  `skill_actions.<severity>.runtime: enable` change at the wrong tier is the
+  most common cause.

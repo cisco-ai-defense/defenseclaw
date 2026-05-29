@@ -12,12 +12,31 @@ dependencies = [
     "rich>=13.0",
     "cisco-ai-skill-scanner>=2.0.11",
     "cisco-ai-mcp-scanner>=4.3; python_version>='3.11'",
+    # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
+    # SigV4 (iam_credentials / profile / instance_role) and for the
+    # Anthropic-on-Bedrock route used by ABSK bearer tokens. Bundling
+    # it costs ~30 MB on top of the existing 428 MB base install
+    # (~7%) and removes a recurring first-run failure for the largest
+    # enterprise LLM provider in the matrix. Vertex AI's SDK is ~286
+    # MB and kept as an opt-in extra (see ``[vertex]``) — flip there
+    # if usage analytics ever justify the disk cost.
+    "boto3>=1.34",
 ]
 
 # P3-#20: the legacy Textual TUI (`defenseclaw alerts --tui`) was
 # retired in favour of the Go-based TUI launched via `defenseclaw tui`.
 # No Python-side TUI extra is shipped anymore; the alerts command now
 # renders a plain Rich table.
+
+[project.optional-dependencies]
+# Vertex AI auth (service-account JSON, ADC, workload identity).
+# LiteLLM lazy-imports ``google-cloud-aiplatform`` for this route, and
+# the SDK pulls ~286 MB of transitive deps (BigQuery, Cloud Storage,
+# Cloud Resource Manager, gRPC, protobuf). That nearly doubles the
+# base install, so we keep it opt-in. Install with
+# ``pip install 'defenseclaw[vertex]'``. Bedrock is bundled by
+# default — see the ``boto3`` entry under ``[project].dependencies``.
+vertex = ["google-cloud-aiplatform>=1.60", "google-auth>=2.30"]
 
 [dependency-groups]
 dev = [
@@ -66,6 +85,7 @@ defenseclaw = [
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/data/ui/views/*",
     "_data/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/metadata/*",
     "_data/scripts/*.sh",
+    "_data/llm/*.json",
     "inventory/ai_signatures.json",
     "inventory/hook_contracts.json",
     "_data/policies/openshell/*.rego",
@@ -91,6 +111,8 @@ defenseclaw = [
     "_data/local_observability_stack/grafana/dashboards/*.json",
     "_data/local_observability_stack/grafana/provisioning/dashboards/*.yml",
     "_data/local_observability_stack/grafana/provisioning/datasources/*.yml",
+    "_data/splunk_o11y_dashboards/*.md",
+    "_data/splunk_o11y_dashboards/terraform/*.tf",
 ]
 
 [tool.uv]
@@ -132,7 +154,7 @@ override-dependencies = [
     # typosquat in practice, but we still cap below 0.136.3 to keep
     # the audit clean. Re-evaluate the upper bound when fastapi
     # 0.136.4+ ships clean.
-    "starlette>=1.0.1",
+    "starlette>=1.0.1,<1.1",
     "fastapi>=0.136.1,<0.136.3",
     # Textual 7.5.0 is the last 7.x release; cisco-ai-skill-scanner
     # 2.0.11 caps textual<8. We override to the latest 8.x so the

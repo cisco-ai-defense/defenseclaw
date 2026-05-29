@@ -234,6 +234,18 @@ jobs:
           make dist-cli
           make dist-plugin
 
+      - name: Finalize upgrade manifest and checksums
+        run: |
+          set -euo pipefail
+          make dist-upgrade-manifest
+          rm -f dist/checksums.txt.sig dist/checksums.txt.pem
+          make dist-checksums
+          cosign sign-blob \
+            --yes \
+            --output-certificate=dist/checksums.txt.pem \
+            --output-signature=dist/checksums.txt.sig \
+            dist/checksums.txt
+
       # Atomic: tag + release + every asset are created in a single API
       # call. On workflow_dispatch, --target $GITHUB_SHA tells gh to create
       # the tag at this commit if it doesn't yet exist. On push:tags the
@@ -255,6 +267,7 @@ jobs:
             dist/checksums.txt.sig
             dist/checksums.txt.pem
             dist/*.whl
+            dist/upgrade-manifest.json
           )
 
           notes_args=()

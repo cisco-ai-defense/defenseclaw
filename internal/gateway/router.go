@@ -654,6 +654,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.content", contentStr)
 			r.otel.SetRawSpanString(span, "defenseclaw.llm.response.raw_content", string(msg.Content))
 			r.otel.EndLLMSpan(
+				parentCtx,
 				span, msg.Model,
 				promptTokens, completionTokens,
 				finishReasons, toolCallCount,
@@ -662,6 +663,7 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				r.defaultAgentName,
 				r.defaultAgentName,
 				SharedAgentRegistry().AgentID(),
+				SessionIDFromContext(parentCtx),
 			)
 
 			// Store LLM context so tool_call spans become children of this LLM span.

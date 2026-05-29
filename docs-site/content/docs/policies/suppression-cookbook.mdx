@@ -1,0 +1,103 @@
+---
+title: Suppression cookbook
+description: Patterns for tuning DefenseClaw's three suppression layers — pre-judge strips, finding suppressions, and tool suppressions — without losing real signals.
+keywords:
+  - DefenseClaw suppressions
+  - pre_judge_strips
+  - finding_suppressions
+  - tool_suppressions
+---
+
+DefenseClaw applies suppressions in three places before emitting a finding. Each layer answers a
+different question:
+
+| Layer                  | Question                                                                              | When to reach for it                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `pre_judge_strips`     | "Is the LLM judge wasting time on a chunk of input that's a known fixture?"           | A README example, sample data, or a benchmarking prompt keeps tripping the judge. |
+| `finding_suppressions` | "Did we already classify this finding as a known false positive?"                    | An id consistently fires on data that's safe (epoch timestamps, platform IDs).      |
+| `tool_suppressions`    | "Is this tool inherently noisy and not worth alerting on?"                          | Read-only or cosmetic shell commands like `git status` flooding your dashboard.     |
+
+<Callout type="warn" title="Don't blanket-match">
+The wizard's findings tray flags any suppression with a pattern of `.*`, `.+`, or `^.*$`. A
+blanket match silences every finding the layer would otherwise emit. Always anchor and scope.
+</Callout>
+
+## Pre-judge strips
+
+Strips run on the raw input *before* it ever reaches the judge model. Use them to remove
+predictable, harmless content the judge would otherwise classify as a leak.
+
+```yaml
+pre_judge_strips:
+  - id: STRIP-DOCS-EXAMPLE-AWS-KEY
+    pattern: 'AKIAIOSFODNN7EXAMPLE'
+    context: AWS docs example credential keeps tripping the PII judge
+    applies_to: [pii]
+```
+
+When to use:
+
+- A documented "fake" credential is included in an example or test fixture.
+- Telemetry payloads from your own services are being flagged as exfiltration markers.
+- A known tutorial pattern (e.g., the AWS docs example) shows up in user prompts often enough to
+  drown the real signal.
+
+When **not** to use:
+
+- The pattern matches anything that could ever be real production data. Use a finding suppression
+  instead, which can be conditional.
+- The judge is wrong about a *category* — that's an LLM judges section problem, not a strip.
+
+## Finding suppressions
+
+Drop a finding only when both the rule id pattern AND a per-finding entity pattern match.
+Optionally narrow further with a `condition` such as `is_epoch` (numeric, looks like a Unix
+timestamp) or `is_platform_id` (matches well-known platform-issued ID formats).
+
+```yaml
+finding_suppressions:
+  - id: SUPP-EPOCH-TIMESTAMP
+    finding_pattern: '^SEC-DATA-NUMERIC'
+    entity_pattern: '^\d{10,13}$'
+    condition: is_epoch
+    reason: Epoch timestamps look like card numbers under a numeric-only rule
+```
+
+Recipes you can copy from [the recipe catalog](./recipes):
+
+- `SUPP-EPOCH-TIMESTAMP`: numeric "secrets" that are actually Unix timestamps.
+- `SUPP-PLATFORM-IDS`: platform-issued IDs (Stripe customer ids, Slack team ids, etc.) that look
+  like API keys to a permissive regex.
+
+## Tool suppressions
+
+Suppress findings on tools whose name matches a regex. The wizard scopes this *very* tightly so
+you don't accidentally silence write/destructive variants.
+
+```yaml
+tool_suppressions:
+  - tool_pattern: '^(shell|bash|sh)\.execute$'
+    suppress_findings: [JUDGE-INJ-DESTRUCTIVE]
+    reason: Cosmetic shell commands generate noise without security risk
+```
+
+Pair with the rule pack:
+
+1. Add a `JUDGE-INJ-DESTRUCTIVE` category in the LLM judges section that lights up on actual
+   destructive calls (`rm -rf`, `dd`, `mkfs`, `truncate`).
+2. Add the tool suppression here so cosmetic invocations of the same shell tool don't trip the
+   same finding id when the model just wants to `git status`.
+
+## Workflow
+
+In the [Policy creator](./creator):
+
+1. Open the **LLM judges** section and confirm your judge categories actually map to the
+   findings you care about. Add or remove categories before tuning suppressions.
+2. Open the **Suppressions** section. Use the recipe picker on each tab to seed your suppressions
+   with the bundled strict-pack entries.
+3. Use the regex tester in each suppression to verify your pattern matches the entity you intend
+   without matching anything else. The wizard will turn the example pill green when the pattern
+   matches.
+4. Watch the findings tray (bottom of the wizard) for `SUPP_OVER_BROAD` warnings. Tighten any
+   pattern the wizard flags before exporting.

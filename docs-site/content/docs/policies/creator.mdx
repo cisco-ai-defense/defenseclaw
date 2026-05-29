@@ -1,0 +1,156 @@
+---
+title: Policy creator
+description: Build a DefenseClaw policy section by section. Live OPA-WASM evaluation in the browser, copy-pasteable YAML on the way out.
+keywords:
+  - DefenseClaw policy
+  - policy generator
+  - OPA WASM
+  - regex tester
+  - guardrail rule pack
+  - suppressions
+---
+
+import PolicyCreator from "@/components/policy-creator";
+
+Two ways in: step through a six-screen wizard and we'll assemble a complete policy (**Quick
+Start**), or open every knob the engine reads, section by section (**Playground**). Both tabs share
+the same draft policy, so you can interview-then-tweak, and either side surfaces a live OPA verdict
+in your browser as you go.
+
+<Callout type="info" title="No data leaves the page">
+The wizard ships compiled WebAssembly copies of the bundled Rego (admission, guardrail, firewall,
+audit, skill_actions). Evaluation happens entirely in your browser — your draft policy and the
+inputs you test against are never uploaded. Saved progress lives in `localStorage`.
+</Callout>
+
+<PolicyCreator />
+
+## Power features
+
+These small affordances exist on top of the two main tabs to shorten the most common loops:
+
+| Feature | Where | What it does |
+| --- | --- | --- |
+| **Live preview drawer** | Quick Start (every step except Review) | Floating bottom-right pane that pipes the in-progress policy through OPA-WASM against canned scenarios. Lets you watch the verdict change as you click cards. |
+| **Custom test input** | Live Test pane (in the drawer or on the Review step) | Switch the input source from "canned scenario" to "custom input" and paste your own JSON. Per-domain drafts persist to `localStorage`. Re-evaluates 250 ms after you stop typing. |
+| **`⌘K` / `Ctrl-K` palette** | Playground | Fuzzy-search every section and knob ("hilt severity", "splunk hec token", "block threshold"). Selecting a result expands the matching section, scrolls to it, and flashes a brief outline. |
+| **Syntax-highlighted Rego editor** | Playground → Custom Rego | Zero-dependency editor: transparent textarea over a tokenized overlay. Tab inserts 2 spaces, Shift-Tab dedents. Highlighting is presentation-only — `opa check` runs on your host at install time. |
+| **Copy share link** | Quick Start Review + Playground Review | Encodes the current policy into the URL fragment as `gzip + base64url`, copies the link to your clipboard. The fragment never leaves your browser as a network request, but the link itself contains the policy — share it like you would the YAML. |
+
+When someone opens a share link, the page decodes the fragment, prompts before replacing any
+in-progress draft, and silently strips the hash. If the payload fails any check (wrong version,
+larger than 1 MB after decompression, doesn't look like a policy, malformed gzip) the page shows a
+yellow banner explaining which check failed instead of clobbering your draft.
+
+## Quick Start vs. Playground
+
+<Cards>
+  <Card
+    title="Quick Start (default)"
+    href="#"
+    description="Six-step wizard: Posture → Block → Allow → Response → Sinks → Review. One question per screen, Back/Next at the bottom, breadcrumb at the top. Final Review step renders the live policy summary and runs canned scenarios through OPA in your browser."
+  />
+  <Card
+    title="Playground"
+    href="#"
+    description="14 collapsible sections covering every knob the engine reads. Use this for fine-tuning the Quick Start output, hand-authoring rule packs, or writing custom Rego snippets."
+  />
+</Cards>
+
+When you click **Open in Playground →** at the bottom of the Quick Start, your answers carry over
+and every Playground section is pre-filled. A blue banner at the top of the Playground reminds you
+where the state came from, and a Restart Quick Start button lets you start the interview again
+without losing your in-flight Playground edits.
+
+## How the Quick Start works
+
+<Steps>
+
+<Step>
+
+**Step 1 — Posture.** Picks the base preset (Permissive / Balanced / Strict). The Balanced default is
+the sensible production starting point; Permissive is for shadow-mode evaluation (only CRITICAL
+findings block installs); Strict is for regulated workloads where false-positive cost is acceptable.
+
+</Step>
+
+<Step>
+
+**Step 2 — What to block.** Nine cards grouped under four headers (Data leaks, Network exfiltration,
+Code execution, LLM-layer attacks). Multi-select. Each card lists exactly which rules it enables
+and which firewall destinations it adds — deep-link to the
+[regex cookbook](/docs/policies/regex-cookbook) to see the patterns it ships.
+
+</Step>
+
+<Step>
+
+**Step 3 — What to allow.** Multi-select cards for the most common alert-volume reducers: cosmetic
+shell commands (git status, ls, pwd), first-party plugins, internal domains, known dev tools.
+Free-form text inputs let you add your own globs and domains. Deep-links to the
+[suppression cookbook](/docs/policies/suppression-cookbook) explain when each layer is right.
+
+</Step>
+
+<Step>
+
+**Step 4 — Response.** Pick how aggressive enforcement should be: log silently, alert on HIGH+, ask
+first (HILT) on MEDIUM+, or hard block on MEDIUM+. Drives the guardrail thresholds, the HILT
+configuration, and the skill\_actions matrix.
+
+</Step>
+
+<Step>
+
+**Step 5 — Sinks.** Toggle local audit log, stdout, Splunk HEC, Slack webhook, or a generic webhook.
+Secrets are referenced by env var name only — never typed inline.
+
+</Step>
+
+<Step>
+
+**Step 6 — Review.** Inline policy summary plus the live OPA test pane: pick a canned scenario (a
+CRITICAL secret in a skill, an MCP install with a sketchy domain, a quarantined plugin), see the
+verdict (`blocked` / `allowed` / `quarantined`), and tweak earlier steps until it matches intent.
+Then **Open in Playground →** hands you off to the full editor with everything pre-filled. The
+Review section there renders every YAML file plus `data.json`; copy them into
+`~/.defenseclaw/policies/` (or run the bundled install script) and activate with:
+
+```bash
+defenseclaw policy activate <name>
+```
+
+</Step>
+
+</Steps>
+
+## What lives behind each Playground section
+
+| Section          | Backed by                                                                                                                              |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Basics           | `name`, `description`, `basedOn` keys in the top-level policy YAML.                                                                    |
+| Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-scanner `scanner_overrides.<scanner>.<sev>`.                                     |
+| Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
+| Guardrail        | `guardrail.block_threshold` / `alert_threshold`, `guardrail.hilt`, `guardrail.patterns`, `severity_mappings`, Cisco trust level.       |
+| Rule pack        | Per-file regex rules (`policies/guardrail/<pack>/rules/<filename>.yaml`).                                                              |
+| Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
+| Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
+| LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |
+| Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
+| Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
+| Watch / Audit    | `watch.rescan_*`, `audit.log_*`, `audit.retention_days`.                                                                               |
+| Custom Rego      | Per-snippet `package defenseclaw.custom.<name>` modules emitted into `policies/rego/custom-<name>.rego`.                               |
+| Review & export  | Renders every YAML file the engine needs + `policies/rego/data.json` + a copy-pasteable bash install script.                           |
+
+## Limits to know about
+
+- **Rego compilation is offline.** The wizard exports `data.json` (read by the bundled Rego at runtime)
+  and any custom snippets you author. It does *not* recompile the shipped Rego — for that you still
+  need `opa build` on the host. The lint in the Custom Rego section catches the obvious shape
+  mistakes (`package` header, balanced braces, `:=` vs `=`).
+- **Regex parity.** The browser uses V8 regex; the engine uses Go's `regexp` (RE2). The validator
+  flags RE2 incompatibilities (lookaround, backrefs) inline so you catch them before exporting.
+  Inline flag groups (`(?i)`, `(?ims)`) are translated to JS flags transparently so bundled rules
+  don't false-error.
+- **Pre-existing rule packs.** When you switch the base preset, the wizard reloads the bundled
+  rule pack so you can see (and edit) the patterns that ship with that pack.
