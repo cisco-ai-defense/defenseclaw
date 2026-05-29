@@ -171,9 +171,6 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # TUI panels embed wide ASCII tables / banner strings that we want
 # kept on one line for readability.
 "cli/defenseclaw/tui/**" = ["E501"]
-# JSON-mirror fields in policy-creator TypedDicts must preserve the
-# upstream camelCase keys (``basedOn``, ``sensitiveTools``).
-"cli/defenseclaw/tui/creator/types.py" = ["N815"]
 
 [tool.pytest.ini_options]
 testpaths = ["cli/tests"]
