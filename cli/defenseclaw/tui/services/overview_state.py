@@ -752,7 +752,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
             )
-        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot":
+        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot" | "openhands" | "antigravity":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -784,6 +784,10 @@ def friendly_connector_name(connector: str) -> str:
             return "Gemini CLI"
         case "copilot":
             return "GitHub Copilot CLI"
+        case "openhands":
+            return "OpenHands"
+        case "antigravity":
+            return "Antigravity"
         case value:
             return value[:1].upper() + value[1:] if value else "OpenClaw"
 
@@ -800,6 +804,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "skills"): ("unsupported/documented paths only",),
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
+        ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
+        ("antigravity", "skills"): ("unsupported/hooks-only surface",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
@@ -809,6 +815,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "mcps"): ("~/.codeium/windsurf/mcp_config.json", "~/.codeium/windsurf/mcp.json"),
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
+        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
+        ("antigravity", "mcps"): ("unsupported/hooks-only surface",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): ("~/.claude/plugins",),
         ("codex", "plugins"): ("~/.codex/plugins",),
@@ -818,6 +826,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "plugins"): ("unsupported",),
         ("geminicli", "plugins"): ("./.gemini/extensions",),
         ("copilot", "plugins"): ("copilot plugin list",),
+        ("openhands", "plugins"): ("unsupported",),
+        ("antigravity", "plugins"): ("unsupported",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): ("~/.claude/settings.json",),
         ("codex", "config"): ("~/.codex/config.toml",),
@@ -827,6 +837,8 @@ def connector_source_label(connector: str, category: str) -> str:
         ("windsurf", "config"): ("~/.codeium/windsurf/hooks.json",),
         ("geminicli", "config"): ("~/.gemini/settings.json",),
         ("copilot", "config"): ("./.github/hooks/*.json",),
+        ("openhands", "config"): ("~/.openhands/hooks.json",),
+        ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
     }
     return ", ".join(sources.get((connector, category), ()))
 

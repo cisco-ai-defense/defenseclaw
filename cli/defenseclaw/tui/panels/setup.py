@@ -3416,7 +3416,7 @@ def _connector_setup_alias(wire: str) -> str:
     normalized = wire.strip().lower().replace("_", "-")
     if normalized in {"claudecode", "claude-code"}:
         return "claude-code"
-    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot"}:
+    if normalized in {"openclaw", "zeptoclaw", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity"}:
         return normalized
     return ""
 
