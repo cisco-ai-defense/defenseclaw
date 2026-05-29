@@ -94,6 +94,10 @@ struct ScanView: View {
 
             targetCatalog
 
+            if let selectedTarget {
+                ScanTargetDetail(item: selectedTarget)
+            }
+
             VStack(alignment: .leading, spacing: 6) {
                 Text("Target")
                     .font(.caption.weight(.semibold))
@@ -237,8 +241,10 @@ struct ScanView: View {
                     title: skill.name,
                     subtitle: skill.path ?? "No path reported",
                     target: skill.path ?? skill.name,
-                    badge: skill.enabled ? "Enabled" : "Disabled",
-                    isBlocked: skill.blocked || skill.quarantined
+                    badge: targetBadge(blocked: skill.blocked, quarantined: skill.quarantined, enabled: skill.enabled),
+                    isBlocked: skill.blocked || skill.quarantined,
+                    statusReason: targetReason(blocked: skill.blocked, quarantined: skill.quarantined, enabled: skill.enabled),
+                    lastScan: skill.lastScan
                 )
             }
         case .mcp:
@@ -249,8 +255,10 @@ struct ScanView: View {
                     title: server.name,
                     subtitle: server.command ?? server.url,
                     target: server.url.isEmpty ? server.name : server.url,
-                    badge: server.isRunning ? "Running" : "Configured",
-                    isBlocked: server.blocked
+                    badge: server.blocked ? "Blocked" : (server.isRunning ? "Running" : "Configured"),
+                    isBlocked: server.blocked,
+                    statusReason: server.blocked ? "Blocked by policy or allowlist." : nil,
+                    lastScan: server.lastScan
                 )
             }
         case .plugin:
@@ -261,8 +269,10 @@ struct ScanView: View {
                     title: plugin.name,
                     subtitle: plugin.pluginDescription ?? plugin.path ?? plugin.source ?? "Plugin",
                     target: plugin.path ?? plugin.id,
-                    badge: plugin.enabled ? "Enabled" : "Disabled",
-                    isBlocked: plugin.blocked || plugin.quarantined
+                    badge: targetBadge(blocked: plugin.blocked, quarantined: plugin.quarantined, enabled: plugin.enabled),
+                    isBlocked: plugin.blocked || plugin.quarantined,
+                    statusReason: targetReason(blocked: plugin.blocked, quarantined: plugin.quarantined, enabled: plugin.enabled),
+                    lastScan: plugin.lastScan
                 )
             }
         case .code:
@@ -280,6 +290,13 @@ struct ScanView: View {
                 || item.subtitle.lowercased().contains(query)
                 || item.badge.lowercased().contains(query)
         }
+    }
+
+    private var selectedTarget: ScanTargetItem? {
+        guard let selectedTargetID else {
+            return nil
+        }
+        return targetItems.first { $0.id == selectedTargetID }
     }
 
     private var resultsCard: some View {
@@ -553,6 +570,19 @@ private enum ScanCommandError: LocalizedError {
     }
 }
 
+private func targetBadge(blocked: Bool, quarantined: Bool, enabled: Bool) -> String {
+    if blocked { return "Blocked" }
+    if quarantined { return "Quarantined" }
+    return enabled ? "Enabled" : "Disabled"
+}
+
+private func targetReason(blocked: Bool, quarantined: Bool, enabled: Bool) -> String? {
+    if quarantined { return "Quarantined — isolated by a scan or policy decision." }
+    if blocked { return "Blocked by policy or allowlist." }
+    if !enabled { return "Disabled — present but not active." }
+    return nil
+}
+
 private struct ScanTargetItem: Identifiable {
     let id: String
     let kind: ScanTarget
@@ -561,6 +591,8 @@ private struct ScanTargetItem: Identifiable {
     let target: String
     let badge: String
     let isBlocked: Bool
+    var statusReason: String? = nil
+    var lastScan: ScanSummary? = nil
 
     static func defaultCodeTargets() -> [ScanTargetItem] {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -630,6 +662,65 @@ private struct ScanTargetCard: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor).opacity(0.35), lineWidth: 0.8)
         )
+    }
+}
+
+private struct ScanTargetDetail: View {
+    let item: ScanTargetItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: item.kind.systemImage)
+                    .foregroundStyle(item.isBlocked ? .red : .accentColor)
+                Text(item.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                Spacer()
+                Text(item.badge)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(item.isBlocked ? .red : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background((item.isBlocked ? Color.red : Color.secondary).opacity(0.12), in: Capsule())
+            }
+
+            detailRow("Path", item.target)
+            if !item.subtitle.isEmpty, item.subtitle != item.target {
+                detailRow("Detail", item.subtitle)
+            }
+            if let reason = item.statusReason {
+                detailRow("Status", reason, emphasize: item.isBlocked)
+            }
+            detailRow("Last scan", item.lastScan.map(scanText) ?? "Not scanned yet")
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.35), lineWidth: 0.5)
+        )
+    }
+
+    private func detailRow(_ label: String, _ value: String, emphasize: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospaced())
+                .foregroundStyle(emphasize ? .red : .primary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func scanText(_ scan: ScanSummary) -> String {
+        var parts = ["\(scan.severity.rawValue) · \(scan.findingCount) finding(s)"]
+        if let scannedAt = scan.scannedAt {
+            parts.append(scannedAt.formatted(date: .abbreviated, time: .shortened))
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
