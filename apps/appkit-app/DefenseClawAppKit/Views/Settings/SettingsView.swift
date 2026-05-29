@@ -1673,20 +1673,44 @@ struct DiagnosticsView: View {
     }
 
     private func subsystemGrid(_ health: HealthSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        var entries: [(String, SubsystemHealth)] = [
+            ("Gateway", health.gateway),
+            ("Watcher", health.watcher),
+            ("API", health.api),
+            ("Guardrail", health.guardrail),
+            ("Telemetry", health.telemetry),
+            ("Sinks", health.splunk)
+        ]
+        if let sandbox = health.sandbox {
+            entries.append(("Sandbox", sandbox))
+        }
+        // Surface failures/warnings first, preserving original order within a rank.
+        let ordered = entries.enumerated().sorted { lhs, rhs in
+            let l = subsystemSeverityRank(lhs.element.1.state)
+            let r = subsystemSeverityRank(rhs.element.1.state)
+            return l == r ? lhs.offset < rhs.offset : l < r
+        }.map(\.element)
+
+        return VStack(alignment: .leading, spacing: 10) {
             Text("Subsystems")
                 .font(.headline)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 12)], spacing: 12) {
-                subsystemCard("Gateway", health.gateway)
-                subsystemCard("Watcher", health.watcher)
-                subsystemCard("API", health.api)
-                subsystemCard("Guardrail", health.guardrail)
-                subsystemCard("Telemetry", health.telemetry)
-                subsystemCard("Sinks", health.splunk)
-                if let sandbox = health.sandbox {
-                    subsystemCard("Sandbox", sandbox)
+                ForEach(ordered, id: \.0) { name, subsystem in
+                    subsystemCard(name, subsystem)
                 }
             }
+        }
+    }
+
+    private func subsystemSeverityRank(_ state: SubsystemState) -> Int {
+        // Genuine problems first, then transient, then benign (running/disabled) last.
+        switch state {
+        case .error: return 0
+        case .stopped: return 1
+        case .reconnecting: return 2
+        case .starting: return 3
+        case .running: return 4
+        case .disabled: return 5
         }
     }
 
@@ -1704,7 +1728,7 @@ struct DiagnosticsView: View {
                     .foregroundStyle(stateColor(health.state))
             }
 
-            Text(health.lastError ?? "No subsystem detail reported")
+            Text(subsystemDetail(health))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(3)
@@ -1718,8 +1742,44 @@ struct DiagnosticsView: View {
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }
 
+    private func subsystemDetail(_ health: SubsystemHealth) -> String {
+        if let error = health.lastError, !error.isEmpty {
+            return error
+        }
+        switch health.state {
+        case .running: return "Operating normally."
+        case .disabled: return "Disabled in configuration."
+        case .starting: return "Starting up…"
+        case .reconnecting: return "Reconnecting…"
+        case .stopped: return "Stopped."
+        case .error: return "Reported an error with no detail."
+        }
+    }
+
     private var statusPayloadCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        DisclosureGroup {
+            Group {
+                if statusPayload.isEmpty {
+                    Text("No /status payload available yet.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    LazyVGrid(columns: [GridItem(.fixed(180), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 8) {
+                        ForEach(statusPayload.keys.sorted(), id: \.self) { key in
+                            Text(key)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(statusPayload[key]?.description ?? "")
+                                .font(.caption.monospaced())
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
             HStack {
                 Text("Raw Status Snapshot")
                     .font(.headline)
@@ -1727,24 +1787,6 @@ struct DiagnosticsView: View {
                 Text("\(statusPayload.count) keys")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
-
-            if statusPayload.isEmpty {
-                Text("No /status payload available yet.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else {
-                LazyVGrid(columns: [GridItem(.fixed(180), alignment: .leading), GridItem(.flexible(), alignment: .leading)], alignment: .leading, spacing: 8) {
-                    ForEach(statusPayload.keys.sorted(), id: \.self) { key in
-                        Text(key)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(statusPayload[key]?.description ?? "")
-                            .font(.caption.monospaced())
-                            .lineLimit(2)
-                            .textSelection(.enabled)
-                    }
-                }
             }
         }
         .padding(14)
