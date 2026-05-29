@@ -18,21 +18,21 @@
 
 import json
 import os
-import unittest
-from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock, patch
-import uuid
-
 import sys
+import unittest
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
-from defenseclaw.commands.cmd_mcp import mcp, _parse_args, _build_mcp_scan_map
+from defenseclaw.commands.cmd_mcp import _build_mcp_scan_map, _parse_args, mcp
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.models import Finding, ScanResult
-from tests.helpers import make_app_context, cleanup_app
+
+from tests.helpers import cleanup_app, make_app_context
 
 
 class MCPCommandTestBase(unittest.TestCase):
@@ -388,7 +388,6 @@ class TestBuildMCPScanMap(MCPCommandTestBase):
 
 class TestAttachErrorHandler(unittest.TestCase):
     def test_attaches_to_three_loggers(self):
-        import logging
         from defenseclaw.scanner.mcp import _attach_error_handler, _ErrorCapture
 
         errors: list[str] = []
@@ -409,6 +408,7 @@ class TestAttachErrorHandler(unittest.TestCase):
 
     def test_captures_error_from_child_logger(self):
         import logging
+
         from defenseclaw.scanner.mcp import _attach_error_handler, _ErrorCapture
 
         errors: list[str] = []
@@ -426,6 +426,7 @@ class TestAttachErrorHandler(unittest.TestCase):
 
     def test_error_capture_filters_by_level(self):
         import logging
+
         from defenseclaw.scanner.mcp import _ErrorCapture
 
         errors: list[str] = []

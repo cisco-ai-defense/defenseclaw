@@ -47,10 +47,9 @@ import yaml
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_policy import policy
-from tests.helpers import make_app_context, cleanup_app
 
+from tests.helpers import cleanup_app, make_app_context
 
 # A reasonably "rich" policy document — one we'd expect the docs-site
 # policy creator to produce for an operator who toggled multiple panels

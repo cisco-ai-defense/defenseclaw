@@ -21,7 +21,6 @@ from __future__ import annotations
 import io
 import os
 import tarfile
-import tempfile
 import unittest
 import zipfile
 from unittest.mock import MagicMock, patch
@@ -45,7 +44,6 @@ from defenseclaw.registry import (
     fetch_npm_package,
     parse_clawhub_uri,
 )
-
 
 # ---------------------------------------------------------------------------
 # detect_source

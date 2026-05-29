@@ -21,7 +21,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 
 import pytest
-
 from defenseclaw.tui.app import DefenseClawTUI, _palette_row_for_entry
 from defenseclaw.tui.command_line import infer_command_risk
 from defenseclaw.tui.registry import CmdEntry

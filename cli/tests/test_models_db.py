@@ -14,21 +14,21 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import json
+import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.db import Store
 from defenseclaw.enforce.policy import PolicyEngine
 from defenseclaw.logger import Logger
-from defenseclaw.models import ActionState, Event, Finding, ScanResult, compare_severity
+from defenseclaw.models import Event, Finding, ScanResult, compare_severity
 
 
 class ModelsDbTests(unittest.TestCase):

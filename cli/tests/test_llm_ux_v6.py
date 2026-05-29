@@ -43,7 +43,6 @@ from unittest import mock
 import click
 import yaml
 from click.testing import CliRunner
-
 from defenseclaw import config as _cfgmod
 from defenseclaw import credentials as creds
 from defenseclaw.commands import _llm_picker
@@ -57,7 +56,6 @@ from defenseclaw.config import (
     LLMTLSConfig,
     VertexKeyConfig,
 )
-
 
 _PEM_DUMMY = (
     "-----BEGIN CERTIFICATE-----\n"

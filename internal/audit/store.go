@@ -36,15 +36,15 @@ import (
 )
 
 type Event struct {
-	ID         string         `json:"id"`
-	Timestamp  time.Time      `json:"timestamp"`
-	Action     string         `json:"action"`
-	Target     string         `json:"target"`
-	Actor      string         `json:"actor"`
-	Details    string         `json:"details"`
-	Severity   string         `json:"severity"`
-	RunID      string         `json:"run_id,omitempty"`
-	TraceID    string         `json:"trace_id,omitempty"`
+	ID        string    `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Action    string    `json:"action"`
+	Target    string    `json:"target"`
+	Actor     string    `json:"actor"`
+	Details   string    `json:"details"`
+	Severity  string    `json:"severity"`
+	RunID     string    `json:"run_id,omitempty"`
+	TraceID   string    `json:"trace_id,omitempty"`
 	// RequestID is the per-request correlation key minted at the
 	// top of every proxy path. Populated in Phase 5 via the
 	// gateway context threading; older call sites may leave it

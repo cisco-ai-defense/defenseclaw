@@ -29,7 +29,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
-
 from defenseclaw.tui.app import DefenseClawTUI, _diagnose_summary_line
 
 

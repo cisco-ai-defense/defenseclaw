@@ -564,6 +564,7 @@ class TestInitShowsScannerDefaults(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_init_saves_scanner_defaults_to_config(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which):
         from pathlib import Path
+
         import yaml
 
         mock_path.return_value = Path(self.tmp_dir)
@@ -637,6 +638,7 @@ class TestInitShowsGatewayDefaults(unittest.TestCase):
     @patch("defenseclaw.config.default_data_path")
     def test_init_saves_gateway_defaults_to_config(self, mock_path, _mock_env, _mock_scanners, _mock_guardrail, _mock_which):
         from pathlib import Path
+
         import yaml
 
         mock_path.return_value = Path(self.tmp_dir)
@@ -694,6 +696,7 @@ class TestResolveOpenclawGateway(unittest.TestCase):
 
     def test_local_mode_reads_port_and_token(self):
         import json
+
         from defenseclaw.commands.cmd_init import _resolve_openclaw_gateway
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -715,6 +718,7 @@ class TestResolveOpenclawGateway(unittest.TestCase):
 
     def test_non_local_mode_reads_host(self):
         import json
+
         from defenseclaw.commands.cmd_init import _resolve_openclaw_gateway
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -737,6 +741,7 @@ class TestResolveOpenclawGateway(unittest.TestCase):
 
     def test_missing_gateway_block(self):
         import json
+
         from defenseclaw.commands.cmd_init import _resolve_openclaw_gateway
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -752,6 +757,7 @@ class TestResolveOpenclawGateway(unittest.TestCase):
 
     def test_no_auth_token(self):
         import json
+
         from defenseclaw.commands.cmd_init import _resolve_openclaw_gateway
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1281,6 +1287,7 @@ class TestIsSidecarRunning(unittest.TestCase):
 
     def test_json_pid_format(self):
         import json
+
         from defenseclaw.commands.cmd_init import _read_pid
         pid_file = os.path.join(self.tmp_dir, "gateway.pid")
         with open(pid_file, "w") as f:
@@ -1353,7 +1360,8 @@ class TestSaveOwnershipBackup(unittest.TestCase):
 
     def test_creates_backup_file(self):
         import json
-        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
+
+        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup
         backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
         self.assertTrue(os.path.isfile(backup_path))
 
@@ -1367,7 +1375,7 @@ class TestSaveOwnershipBackup(unittest.TestCase):
         self.assertEqual(data["original_gid"], os.stat(self.oc_home).st_gid)
 
     def test_backup_file_path(self):
-        from defenseclaw.commands.cmd_init_sandbox import _save_ownership_backup, OPENCLAW_OWNERSHIP_BACKUP
+        from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP, _save_ownership_backup
         backup_path = _save_ownership_backup(self.oc_home, self.data_dir)
         expected = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
         self.assertEqual(backup_path, expected)
@@ -1388,7 +1396,8 @@ class TestIntegrateOpenclawHomeIdempotent(unittest.TestCase):
 
     def test_idempotent_when_already_configured(self):
         import json
-        from defenseclaw.commands.cmd_init_sandbox import _integrate_openclaw_home, OPENCLAW_OWNERSHIP_BACKUP
+
+        from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP, _integrate_openclaw_home
 
         # Simulate a previous successful integration
         backup_path = os.path.join(self.data_dir, OPENCLAW_OWNERSHIP_BACKUP)
@@ -1441,6 +1450,7 @@ class TestRestoreOpenclawOwnership(unittest.TestCase):
 
     def test_removes_symlink(self):
         import json
+
         from defenseclaw.commands.cmd_init_sandbox import OPENCLAW_OWNERSHIP_BACKUP
         from defenseclaw.commands.cmd_setup_sandbox import _restore_openclaw_ownership
 

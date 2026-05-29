@@ -139,6 +139,7 @@ class TestCLIFlagParsing(unittest.TestCase):
     def test_judge_exfil_yaml_roundtrip(self):
         """exfil flag survives load → asdict → reload."""
         from dataclasses import asdict
+
         from defenseclaw.config import _merge_guardrail
 
         raw = {
@@ -210,6 +211,7 @@ class TestCLIFlagParsing(unittest.TestCase):
     def test_guardrail_full_yaml_roundtrip(self):
         """All guardrail + judge fields survive load→asdict→reload cycle."""
         from dataclasses import asdict
+
         from defenseclaw.config import _merge_guardrail
 
         raw = {

@@ -25,8 +25,16 @@ import tempfile
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
-from defenseclaw.config import Config, GatewayConfig, MCPScannerConfig, ScannersConfig, SkillScannerConfig, SkillActionsConfig, OpenShellConfig, ClawConfig, InspectLLMConfig, CiscoAIDefenseConfig
+from defenseclaw.config import (
+    ClawConfig,
+    Config,
+    GatewayConfig,
+    MCPScannerConfig,
+    OpenShellConfig,
+    ScannersConfig,
+    SkillActionsConfig,
+    SkillScannerConfig,
+)
 from defenseclaw.context import AppContext
 from defenseclaw.db import Store
 from defenseclaw.logger import Logger

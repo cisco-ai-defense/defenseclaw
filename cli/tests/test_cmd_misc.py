@@ -1230,7 +1230,6 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self, _mock_bridge_bin, mock_run, _mock_preflight,
     ):
         from click.testing import CliRunner
-
         from defenseclaw.commands.cmd_setup import setup
 
         mock_run.return_value = MagicMock(

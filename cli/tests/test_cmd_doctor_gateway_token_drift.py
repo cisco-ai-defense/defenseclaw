@@ -40,8 +40,8 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
-    _DoctorResult,
     _check_gateway_token_drift,
+    _DoctorResult,
     _fix_gateway_token_drift,
     _read_pid_from_file,
     _read_process_env_var,

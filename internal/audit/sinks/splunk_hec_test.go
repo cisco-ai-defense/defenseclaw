@@ -368,7 +368,7 @@ func TestSplunkHECSink_SourceTypeOverride_OperatorWins(t *testing.T) {
 		Timestamp: time.Unix(1700000000, 0).UTC(),
 	})
 
-    // The defaults that the operator didn't override must still apply
+	// The defaults that the operator didn't override must still apply
 	// (Phase 3 plan: defaults win unless explicitly overridden).
 	_ = sink.Forward(context.Background(), Event{
 		ID: "v1", Action: "guardrail-verdict", Severity: "HIGH",

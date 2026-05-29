@@ -48,10 +48,10 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_mcp import mcp
 from defenseclaw.config import MCPServerEntry
 from defenseclaw.models import Finding, ScanResult
+
 from tests.helpers import cleanup_app, make_app_context
 
 

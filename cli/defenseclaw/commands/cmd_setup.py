@@ -2251,7 +2251,10 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "antigravity": {
         "label": "Antigravity",
-        "description": "single PreToolUse hook in ~/.gemini/config/hooks.json with native ask that overrides --dangerously-skip-permissions",
+        "description": (
+            "single PreToolUse hook in ~/.gemini/config/hooks.json with native "
+            "ask that overrides --dangerously-skip-permissions"
+        ),
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -2315,11 +2318,19 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.openhands/hooks.json hooks by default",
         "<workspace>/.openhands/hooks.json hooks only when --workspace is provided",
         "~/.openhands/mcp.json MCP entries when configured explicitly",
-        "~/.agents/skills install surface and ~/.openhands/cache/skills/public-skills/skills discovery by default; workspace .agents/skills only when --workspace is provided",
+        (
+            "~/.agents/skills install surface and ~/.openhands/cache/skills/"
+            "public-skills/skills discovery by default; workspace .agents/skills "
+            "only when --workspace is provided"
+        ),
         "~/.defenseclaw/hooks/openhands-hook.sh",
     ),
     "antigravity": (
-        "~/.gemini/config/hooks.json — single global hook entry in agy's Claude-Code-compatible nested schema; agy merges every discovered hooks file, so DefenseClaw never patches workspace-local copies",
+        (
+            "~/.gemini/config/hooks.json — single global hook entry in agy's "
+            "Claude-Code-compatible nested schema; agy merges every discovered "
+            "hooks file, so DefenseClaw never patches workspace-local copies"
+        ),
         "~/.defenseclaw/hooks/antigravity-hook.sh",
     ),
 }

@@ -17,17 +17,17 @@
 """Tests for CLI commands — status, alerts, aibom, plugin, mcp, init."""
 
 import os
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-from defenseclaw.context import AppContext
 from defenseclaw.config import Config, default_config
+from defenseclaw.context import AppContext
 from defenseclaw.models import Event, Finding, ScanResult
 
 

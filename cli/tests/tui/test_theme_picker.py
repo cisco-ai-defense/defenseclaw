@@ -13,14 +13,13 @@ worker pollution that plagues integration tests.
 from __future__ import annotations
 
 import pytest
-from textual.app import App, ComposeResult
-from textual.widgets import Static
-
 from defenseclaw.tui.screens.theme_picker import (
     THEME_CHOICES,
     ThemeChoice,
     ThemePickerScreen,
 )
+from textual.app import App, ComposeResult
+from textual.widgets import Static
 
 
 class _HarnessApp(App[None]):

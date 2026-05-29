@@ -52,7 +52,6 @@ What this test does NOT do
 from __future__ import annotations
 
 import ast
-import os
 import re
 import unittest
 from pathlib import Path

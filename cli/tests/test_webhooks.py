@@ -48,7 +48,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.commands.cmd_doctor import _check_webhooks, _DoctorResult
 from defenseclaw.config import Config
 from defenseclaw.webhooks import (
-    WebhookView,
     apply_webhook,
     compute_hmac,
     format_generic_payload,

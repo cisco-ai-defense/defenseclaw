@@ -32,7 +32,6 @@ from unittest import mock
 
 from defenseclaw import ux
 
-
 # ANSI escape sequence introducer. Used as a cheap "is this string
 # colorized?" check — any helper that emits an ANSI control will
 # include this byte.

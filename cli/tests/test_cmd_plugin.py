@@ -19,15 +19,14 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_plugin import (
     _build_plugin_actions_map,
     _build_plugin_scan_map,
@@ -37,7 +36,8 @@ from defenseclaw.commands.cmd_plugin import (
 )
 from defenseclaw.enforce import PolicyEngine
 from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
-from tests.helpers import make_app_context, cleanup_app
+
+from tests.helpers import cleanup_app, make_app_context
 
 
 class PluginCommandTestBase(unittest.TestCase):
@@ -84,6 +84,7 @@ class TestPluginInstall(PluginCommandTestBase):
     @staticmethod
     def _clean_result():
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import ScanResult
         return ScanResult(
             scanner="plugin-scanner", target="x",
@@ -687,6 +688,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     def _clean_scan_result(self, target="x"):
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import ScanResult
         return ScanResult(
             scanner="plugin-scanner", target=target,
@@ -696,6 +698,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
 
     def _critical_scan_result(self, target="x"):
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import Finding, ScanResult
         return ScanResult(
             scanner="plugin-scanner", target=target,
@@ -960,6 +963,7 @@ class TestPluginRegistryInstall(PluginCommandTestBase):
     def test_install_action_with_medium_severity_no_enforcement(self, mock_fetch, mock_scan):
         """Medium severity with default config has no file/runtime/install actions."""
         from datetime import datetime, timedelta, timezone
+
         from defenseclaw.models import Finding, ScanResult
         mock_scan.return_value = ScanResult(
             scanner="plugin-scanner", target="x",

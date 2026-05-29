@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
@@ -2573,9 +2572,8 @@ def test_detail_modal_table_renders_bracketed_label_value_literally() -> None:
 
     from io import StringIO
 
-    from rich.console import Console
-
     from defenseclaw.tui.screens.detail import DetailModalModel
+    from rich.console import Console
 
     rows = (
         ("Action", "scan"),
@@ -2674,9 +2672,8 @@ def test_setup_wizard_mode_hint_renders_bracketed_hint_literally() -> None:
     actionable wizard guidance.
     """
 
-    from rich.markup import escape as rich_escape
-
     from defenseclaw.tui.theme import DEFAULT_TOKENS as TOKENS
+    from rich.markup import escape as rich_escape
 
     hostile_hint = "set webhooks[0].url to your endpoint"
     # Mirror the exact fragment in app.py:_setup_body_text so a

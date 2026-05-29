@@ -22,9 +22,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from textual.widgets import Button, Input
-
 from defenseclaw.tui.app import DefenseClawTUI
+from textual.widgets import Button, Input
 
 
 @pytest.mark.asyncio

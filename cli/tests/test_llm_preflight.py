@@ -28,7 +28,6 @@ import unittest
 from unittest import mock
 
 import click
-
 from defenseclaw import config as _cfgmod
 from defenseclaw.commands import _llm_picker
 

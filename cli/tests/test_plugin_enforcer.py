@@ -18,10 +18,10 @@
 
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.enforce.plugin_enforcer import PluginEnforcer

@@ -35,6 +35,7 @@ import unittest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
+
 from tests.connector_fixtures import make_codex_config
 
 

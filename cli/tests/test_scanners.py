@@ -16,14 +16,11 @@
 
 """Tests for defenseclaw.scanner — MCP and skill scanner wrappers."""
 
-import json
 import os
-import tempfile
+import sys
 import unittest
-from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
@@ -36,7 +33,7 @@ class TestMCPScannerWrapper(unittest.TestCase):
 
     def test_config_fields_used_directly(self):
         """Common config values are accessible via wrapper."""
-        from defenseclaw.config import MCPScannerConfig, InspectLLMConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         llm = InspectLLMConfig(
@@ -93,9 +90,10 @@ class TestMCPScannerWrapper(unittest.TestCase):
         self.assertIn("mcp-scanner/yara", result.findings[0].scanner)
 
     def test_scan_raises_system_exit_on_import_error(self):
+        import builtins
+
         from defenseclaw.config import MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
-        import builtins
 
         s = MCPScannerWrapper(MCPScannerConfig())
         real_import = builtins.__import__
@@ -111,10 +109,11 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper._convert")
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_scan_with_mocked_sdk(self, mock_asyncio_run, mock_convert):
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         mock_tool_result = MagicMock()
         mock_tool_result.tool_name = "test-tool"
@@ -153,11 +152,12 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_invalid_analyzer_names_warn_on_stderr(self, mock_asyncio_run, mock_convert):
         """Typos in analyzer names must produce a warning, not silently drop."""
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
         from io import StringIO
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         mock_asyncio_run.return_value = []
         mock_convert.return_value = ScanResult(
@@ -186,11 +186,12 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_all_invalid_analyzers_falls_back_to_none(self, mock_asyncio_run, mock_convert):
         """When every analyzer name is invalid, fall back to all analyzers (None)."""
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
         from io import StringIO
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         mock_asyncio_run.return_value = []
         mock_convert.return_value = ScanResult(
@@ -222,10 +223,11 @@ class TestMCPScannerWrapper(unittest.TestCase):
     @patch("defenseclaw.scanner.mcp.asyncio.run")
     def test_scan_instructions_iterates_over_results(self, mock_asyncio_run, mock_convert):
         """Regression: instruction results must be iterated like tools/prompts/resources."""
-        from defenseclaw.config import MCPScannerConfig
-        from defenseclaw.scanner.mcp import MCPScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import MCPScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         finding = MagicMock()
         finding.severity = "HIGH"
@@ -340,7 +342,7 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertEqual(s.name(), "skill-scanner")
 
     def test_inject_env_sets_vars(self):
-        from defenseclaw.config import SkillScannerConfig, InspectLLMConfig
+        from defenseclaw.config import InspectLLMConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         llm = InspectLLMConfig(api_key="test-key-value", model="gpt-4")
@@ -361,7 +363,7 @@ class TestSkillScannerWrapper(unittest.TestCase):
             os.environ.update(env_backup)
 
     def test_inject_env_does_not_override_existing(self):
-        from defenseclaw.config import SkillScannerConfig, InspectLLMConfig
+        from defenseclaw.config import InspectLLMConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         llm = InspectLLMConfig(api_key="new-key")
@@ -418,9 +420,10 @@ class TestSkillScannerWrapper(unittest.TestCase):
         self.assertIn("injection", result.findings[0].tags)
 
     def test_scan_raises_system_exit_on_import_error(self):
+        import builtins
+
         from defenseclaw.config import SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
-        import builtins
 
         s = SkillScannerWrapper(SkillScannerConfig())
         real_import = builtins.__import__
@@ -435,10 +438,11 @@ class TestSkillScannerWrapper(unittest.TestCase):
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper._convert")
     def test_scan_with_mocked_sdk(self, mock_convert):
-        from defenseclaw.config import SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
 
         mock_sdk_module = MagicMock()
         mock_scanner_instance = MagicMock()
@@ -474,10 +478,11 @@ class TestSkillScannerWrapper(unittest.TestCase):
         ``llm_provider`` (our internal short names like ``bedrock`` do
         not match the upstream ``LLMProvider`` enum).
         """
-        from defenseclaw.config import LLMConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
 
         mock_sdk_module = MagicMock()
         mock_scanner_instance = MagicMock()
@@ -523,10 +528,11 @@ class TestSkillScannerWrapper(unittest.TestCase):
     def test_scan_uses_llm_analyzer_for_gemini(self, mock_convert):
         """Gemini flows the same way: model carries the provider, no
         ``llm_provider`` kwarg leaked to upstream."""
-        from defenseclaw.config import LLMConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
 
         mock_sdk_module = MagicMock()
         mock_scanner_instance = MagicMock()
@@ -566,10 +572,11 @@ class TestSkillScannerWrapper(unittest.TestCase):
     def test_scan_forwards_explicit_llm_base_url(self, mock_convert):
         """Operator-set ``llm.base_url`` must reach build_analyzers so
         custom endpoints (Vertex, Azure, self-hosted vLLM) work."""
-        from defenseclaw.config import LLMConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
 
         mock_sdk_module = MagicMock()
         mock_scanner_instance = MagicMock()
@@ -612,10 +619,11 @@ class TestSkillScannerWrapper(unittest.TestCase):
         unified key isn't an Anthropic key. Skipping the LLM analyzer
         with a log line is strictly better.
         """
-        from defenseclaw.config import LLMConfig, SkillScannerConfig
-        from defenseclaw.scanner.skill import SkillScannerWrapper
-        from defenseclaw.models import ScanResult
         from datetime import datetime, timezone
+
+        from defenseclaw.config import LLMConfig, SkillScannerConfig
+        from defenseclaw.models import ScanResult
+        from defenseclaw.scanner.skill import SkillScannerWrapper
 
         mock_sdk_module = MagicMock()
         mock_scanner_instance = MagicMock()
@@ -670,7 +678,7 @@ class TestMCPScannerCommonConfigs(unittest.TestCase):
 
     def test_inject_env_sets_provider_key(self):
         """_inject_env sets the provider-specific env var (e.g. OPENAI_API_KEY)."""
-        from defenseclaw.config import MCPScannerConfig, InspectLLMConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, MCPScannerConfig
         from defenseclaw.scanner.mcp import MCPScannerWrapper
 
         llm = InspectLLMConfig(api_key="llm-key-123", provider="openai")
@@ -785,7 +793,7 @@ class TestSkillScannerCommonConfigs(unittest.TestCase):
         self.assertEqual(s.cisco_ai_defense.api_key, "")
 
     def test_inject_env_uses_inspect_llm(self):
-        from defenseclaw.config import SkillScannerConfig, InspectLLMConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, InspectLLMConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         llm = InspectLLMConfig(api_key="shared-llm-key", model="gpt-4o")
@@ -805,7 +813,7 @@ class TestSkillScannerCommonConfigs(unittest.TestCase):
                 os.environ.pop(k, None)
 
     def test_inject_env_cisco_resolved_from_env_var(self):
-        from defenseclaw.config import SkillScannerConfig, CiscoAIDefenseConfig
+        from defenseclaw.config import CiscoAIDefenseConfig, SkillScannerConfig
         from defenseclaw.scanner.skill import SkillScannerWrapper
 
         aid = CiscoAIDefenseConfig(api_key="direct", api_key_env="TEST_CISCO_RESOLVE_XYZ")

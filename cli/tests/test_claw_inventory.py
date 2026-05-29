@@ -22,39 +22,36 @@ failure, timeout, human output modes, and CLI integration.
 
 from __future__ import annotations
 
-import io
 import json
 import os
+import shutil
 import subprocess
 import tempfile
-import shutil
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
-
 from defenseclaw.config import (
     ClawConfig,
     Config,
     MCPActionsConfig,
     PluginActionsConfig,
-    SkillActionsConfig,
     SeverityAction,
+    SkillActionsConfig,
 )
-from defenseclaw.models import ActionEntry, ActionState
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
-    _CmdResult,
     _admission_verdict,
     _build_actions_map_for_type,
     _build_scan_map_for_type,
     _build_summary,
+    _CmdResult,
     _fetch_all,
     _format_scan,
     _format_verdict,
-    _parse_skills,
-    _parse_plugins,
     _parse_mcp,
+    _parse_plugins,
+    _parse_skills,
     _parse_tools,
     _policy_detail_suffix,
     _resolve_categories,
@@ -65,7 +62,7 @@ from defenseclaw.inventory.claw_inventory import (
     enrich_with_policy,
     format_claw_aibom_human,
 )
-
+from defenseclaw.models import ActionEntry
 
 # ---------------------------------------------------------------------------
 # Fixtures — canonical JSON payloads returned by ``openclaw … --json``
@@ -1451,7 +1448,7 @@ class TestEnrichWithPolicy(_StoreWithPolicyMixin, unittest.TestCase):
 
     def _seed_store(self):
         import uuid
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timezone
         pe = self._pe()
         now = datetime.now(timezone.utc)
 
@@ -1810,6 +1807,7 @@ class TestCLIIntegrationWithPolicy(unittest.TestCase):
         """
         import uuid
         from datetime import datetime, timezone
+
         from defenseclaw.enforce import PolicyEngine
         pe = PolicyEngine(self.app.store)
         now = datetime.now(timezone.utc)

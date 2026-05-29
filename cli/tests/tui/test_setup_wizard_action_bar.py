@@ -16,9 +16,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from textual.widgets import Button
-
 from defenseclaw.tui.app import DefenseClawTUI
+from textual.widgets import Button
 
 
 @pytest.mark.asyncio

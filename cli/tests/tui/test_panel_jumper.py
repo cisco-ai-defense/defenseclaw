@@ -24,7 +24,6 @@ from defenseclaw.tui.screens.panel_jumper import (
     filter_choices,
 )
 
-
 CHOICES = (
     PanelChoice("overview", "Overview", "1"),
     PanelChoice("alerts", "Alerts", "2"),

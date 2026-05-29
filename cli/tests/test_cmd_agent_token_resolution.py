@@ -22,10 +22,7 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-import pytest
-
 from defenseclaw.commands.cmd_agent import _resolve_gateway_target
-
 
 _GATEWAY_VARS = ("DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN", "MY_TOK")
 

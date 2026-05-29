@@ -19,11 +19,9 @@ the broader shell tests.
 from __future__ import annotations
 
 import pytest
+from defenseclaw.tui.app import DefenseClawTUI
 from textual.containers import Horizontal
 from textual.widgets import Button, Input
-
-from defenseclaw.tui.app import DefenseClawTUI
-
 
 CATALOG_PANELS: tuple[str, ...] = ("skills", "mcps", "plugins", "tools")
 

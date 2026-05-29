@@ -35,7 +35,6 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from click.testing import CliRunner
-
 from defenseclaw import config
 from defenseclaw.context import AppContext
 

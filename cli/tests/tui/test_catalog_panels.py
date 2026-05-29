@@ -463,8 +463,8 @@ def test_skill_detail_pane_handles_clean_row_without_findings_bloat() -> None:
 
 
 def test_mcp_detail_pane_renders_transport_url_and_command() -> None:
-    from defenseclaw.tui.services.catalog_state import catalog_detail_text
     from defenseclaw.tui.panels.mcps import MCPRow
+    from defenseclaw.tui.services.catalog_state import catalog_detail_text
 
     row = MCPRow(
         name="context7",

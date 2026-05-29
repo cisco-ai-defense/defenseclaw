@@ -25,11 +25,11 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
+
 from tests.connector_fixtures import make_zeptoclaw_config
 
 

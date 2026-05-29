@@ -22,14 +22,13 @@ import tempfile
 import unittest
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_setup_provider import (
     OVERLAY_ENV,
     _normalize_domain,
+    _Overlay,
     _read_overlay,
     _validate_env_keys,
     _write_overlay,
-    _Overlay,
     provider,
 )
 

@@ -28,11 +28,10 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
-    _DoctorResult,
     _check_gateway_token_env_alignment,
+    _DoctorResult,
     _fix_gateway_token_env,
 )
-
 
 # Same hygiene helper as test_cmd_agent_token_resolution.py — strip
 # all gateway-related vars from the inherited environment so tests

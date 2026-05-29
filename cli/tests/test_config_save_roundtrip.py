@@ -369,8 +369,8 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
             mode = os.stat(cfg_path).st_mode & 0o777
         self.assertEqual(
             mode, 0o600,
-            msg=("Config.save widened mode to %o; pre-fix umask-honoring "
-                 "open() leaked secrets to group/other readers" % mode),
+            msg=(f"Config.save widened mode to {mode:o}; pre-fix umask-honoring "
+                 "open() leaked secrets to group/other readers"),
         )
 
     def test_save_first_create_is_0600(self):
@@ -388,8 +388,8 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
             mode = os.stat(cfg_path).st_mode & 0o777
         self.assertEqual(
             mode, 0o600,
-            msg=("First-save mode = %o (want 0o600). Process umask "
-                 "must not widen the new file." % mode),
+            msg=(f"First-save mode = {mode:o} (want 0o600). Process umask "
+                 "must not widen the new file."),
         )
 
     def test_save_does_not_widen_stricter_existing_mode(self):
@@ -412,8 +412,8 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
         # so the live file lands at 0o400.
         self.assertEqual(
             mode, 0o400,
-            msg=("Config.save widened 0o400 to %o; mode mirror was "
-                 "supposed to narrow-only, not widen." % mode),
+            msg=(f"Config.save widened 0o400 to {mode:o}; mode mirror was "
+                 "supposed to narrow-only, not widen."),
         )
 
     def test_save_strips_world_readable_bits_on_legacy_0644(self):
@@ -436,8 +436,8 @@ class TestConfigSavePreservesFileMode(unittest.TestCase):
         # from 0o644 to 0o600.
         self.assertEqual(
             mode, 0o600,
-            msg=("Save did not narrow legacy 0o644 to 0o600; got %o. "
-                 "Upgrade path leaves credentials world-readable." % mode),
+            msg=(f"Save did not narrow legacy 0o644 to 0o600; got {mode:o}. "
+                 "Upgrade path leaves credentials world-readable."),
         )
 
 

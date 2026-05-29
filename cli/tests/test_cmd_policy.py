@@ -18,17 +18,15 @@
 
 import json
 import os
-import shutil
-import tempfile
+import sys
 import unittest
 
-import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_policy import policy
-from tests.helpers import make_app_context, cleanup_app
+
+from tests.helpers import cleanup_app, make_app_context
 
 
 class PolicyCommandTestBase(unittest.TestCase):

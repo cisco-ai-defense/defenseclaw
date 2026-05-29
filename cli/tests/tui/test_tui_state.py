@@ -7,12 +7,10 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-
 from defenseclaw.tui.services.tui_state import (
     PALETTE_MRU_LIMIT,
     STATE_FILENAME,

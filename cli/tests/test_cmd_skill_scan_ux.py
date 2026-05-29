@@ -49,9 +49,9 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-
 from defenseclaw.commands.cmd_skill import skill
 from defenseclaw.models import Finding, ScanResult
+
 from tests.helpers import cleanup_app, make_app_context
 
 
