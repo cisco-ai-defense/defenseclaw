@@ -9,8 +9,9 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -25,7 +26,7 @@ from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
@@ -46,7 +47,14 @@ from defenseclaw.tui.panels.alerts import AlertEvent, AlertPanelAction, AlertsPa
 from defenseclaw.tui.panels.audit import AuditPanelModel
 from defenseclaw.tui.panels.first_run import FirstRunPanelModel
 from defenseclaw.tui.panels.inventory import FAST_SCAN_CATEGORIES, InventoryPanelModel
-from defenseclaw.tui.panels.logs import FILTER_LABELS, FILTER_PRESETS, LOG_SOURCE_LABELS, LOG_SOURCES, LogsPanelModel
+from defenseclaw.tui.panels.logs import (
+    FILTER_HOOKS,
+    FILTER_LABELS,
+    FILTER_PRESETS,
+    LOG_SOURCE_LABELS,
+    LOG_SOURCES,
+    LogsPanelModel,
+)
 from defenseclaw.tui.panels.mcps import MCPsPanelModel
 from defenseclaw.tui.panels.overview import (
     DoctorCache,
@@ -69,6 +77,7 @@ from defenseclaw.tui.panels.setup import (
     llm_model_candidates,
     render_wizard_value,
     wizard_field_value,
+    wizard_state_summary,
 )
 from defenseclaw.tui.panels.skills import SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
@@ -343,16 +352,24 @@ class DefenseClawTUI(App[None]):
 
     #detail-panel {
         height: auto;
-        max-height: 14;
+        max-height: 16;
         margin-top: 1;
         padding: 1 2;
         border: round TOKEN_BORDER_ACTIVE;
         background: TOKEN_SURFACE_RAISED;
         color: TOKEN_TEXT_PRIMARY;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
     }
 
     #detail-panel.hidden {
         display: none;
+    }
+
+    #detail-panel-body {
+        height: auto;
+        width: 1fr;
+        color: TOKEN_TEXT_PRIMARY;
     }
 
     #activity {
@@ -817,6 +834,7 @@ class DefenseClawTUI(App[None]):
                     yield Button("Scan", id="logs-filter-5", compact=True, classes="severity-low")
                     yield Button("Drift", id="logs-filter-6", compact=True)
                     yield Button("Guardrail", id="logs-filter-7", compact=True)
+                    yield Button("Hooks", id="logs-filter-8", compact=True)
                 with Horizontal(id="registries-controls", classes="panel-controls hidden"):
                     yield Button("Sources", id="registries-tab-sources", compact=True)
                     yield Button("Entries", id="registries-tab-entries", compact=True)
@@ -1131,7 +1149,15 @@ class DefenseClawTUI(App[None]):
                     cursor_type="row",
                     zebra_stripes=True,
                 )
-                yield Static("", id="detail-panel", classes="hidden")
+                # Scroll container so long alert / audit / log details
+                # are fully reachable. A bare ``Static`` is not
+                # scrollable in Textual (``is_scrollable`` needs a
+                # layout or child nodes), so its ``max-height`` silently
+                # clipped any detail past ~10 lines — the rich gateway
+                # finding + history blocks never showed. The inner
+                # ``Static`` carries the renderable; the wrapper scrolls.
+                with VerticalScroll(id="detail-panel", classes="hidden"):
+                    yield Static("", id="detail-panel-body")
             yield Input(
                 placeholder="Type defenseclaw version, doctor, or a TUI alias",
                 id="command-input",
@@ -3735,6 +3761,16 @@ class DefenseClawTUI(App[None]):
             blocks_total = tool_blocks + subprocess_blocks
             allow_count, alert_count, block_decisions, top_hook = self._connector_hook_breakdown()
 
+            # Hook connectors don't advance the gateway ``requests``
+            # counter, so fall back to the count of connector-hook audit
+            # events — the same events the operator sees streaming in the
+            # Logs panel — when the live counter is zero.
+            hook_timestamps = self._hook_event_timestamps()
+            hook_calls = requests or len(hook_timestamps)
+            block_timestamps = self._block_event_timestamps()
+            blocks_value = blocks_total or len(block_timestamps)
+            finding_timestamps = self._finding_event_timestamps()
+
             call_detail_parts: list[str] = []
             if allow_count or alert_count or block_decisions:
                 call_detail_parts.append(
@@ -3777,21 +3813,21 @@ class DefenseClawTUI(App[None]):
                 MetricDatum(
                     key="hook_calls",
                     label=f"Hook Calls ({connector})",
-                    value=requests,
-                    progress=min(float(requests), 100.0),
+                    value=hook_calls,
+                    progress=min(float(hook_calls), 100.0),
                     detail=calls_detail,
-                    trend=_metric_trend(requests),
-                    state="ok" if requests else ("error" if not gateway_online else "warn"),
-                    target_panel="activity",
+                    trend=self._metric_history(hook_timestamps),
+                    state="ok" if hook_calls else ("error" if not gateway_online else "warn"),
+                    target_panel="logs",
                 ),
                 MetricDatum(
                     key="blocks",
                     label="Blocks",
-                    value=blocks_total,
-                    progress=min(float(blocks_total) * 5, 100.0),
+                    value=blocks_value,
+                    progress=min(float(blocks_value) * 5, 100.0),
                     detail=blocks_detail,
-                    trend=_metric_trend(blocks_total, invert=blocks_total == 0),
-                    state="error" if blocks_total else ("ok" if requests else "warn"),
+                    trend=self._metric_history(block_timestamps),
+                    state="error" if blocks_value else ("ok" if hook_calls else "warn"),
                     target_panel="audit",
                 ),
                 MetricDatum(
@@ -3800,7 +3836,7 @@ class DefenseClawTUI(App[None]):
                     value=total_findings,
                     progress=min(float(total_findings) * 5, 100.0),
                     detail=self._findings_metric_detail(critical, high, medium, low),
-                    trend=_metric_trend(total_findings, invert=total_findings == 0),
+                    trend=self._metric_history(finding_timestamps),
                     state="error" if critical or high else ("warn" if medium else "ok"),
                     target_panel="alerts",
                 ),
@@ -3824,7 +3860,7 @@ class DefenseClawTUI(App[None]):
                 value=counts.active_alerts,
                 progress=min(float(counts.active_alerts), 100.0),
                 detail=self._findings_metric_detail(critical, high, medium, low),
-                trend=_metric_trend(counts.active_alerts, invert=counts.active_alerts == 0),
+                trend=self._metric_history(self._finding_event_timestamps()),
                 state="error" if (critical or high) else ("warn" if medium else "ok"),
                 target_panel="alerts",
             ),
@@ -3837,7 +3873,7 @@ class DefenseClawTUI(App[None]):
                     "skill+mcp scans · "
                     f"[{TOKENS.accent_red}]{counts.blocked_skills + counts.blocked_mcps}[/] blocked"
                 ),
-                trend=_metric_trend(counts.total_scans),
+                trend=self._metric_history(self._scan_event_timestamps()),
                 state="ok" if counts.total_scans else "warn",
                 target_panel="audit",
             ),
@@ -3942,6 +3978,75 @@ class DefenseClawTUI(App[None]):
             top_event, _ = max(events_by_target.items(), key=lambda kv: kv[1])
         return allow, alert, block, top_event
 
+    def _hook_event_timestamps(self) -> list[datetime]:
+        """Timestamps of recent connector-hook audit events.
+
+        Each connector-hook event is one hook call (preToolUse,
+        afterShellExecution, ...), so this is the authoritative "Hook
+        Calls" series even when the gateway's connector ``requests``
+        counter stays at zero — hook connectors deliver calls
+        out-of-band from proxied LLM requests, so that counter never
+        moves for them.
+        """
+
+        if self.audit_model is None:
+            return []
+        return [
+            event.timestamp
+            for event in self.audit_model.items
+            if event.action == "connector-hook" and event.timestamp is not None
+        ]
+
+    def _block_event_timestamps(self) -> list[datetime]:
+        """Timestamps of recent block / deny / quarantine audit events."""
+
+        if self.audit_model is None:
+            return []
+        stamps: list[datetime] = []
+        for event in self.audit_model.items:
+            action = (event.action or "").lower()
+            details = (event.details or "").lower()
+            is_block = (
+                action in {"block", "guardrail-block", "deny", "quarantine"}
+                or "action=block" in details
+                or "action=deny" in details
+            )
+            if is_block and event.timestamp is not None:
+                stamps.append(event.timestamp)
+        return stamps
+
+    def _finding_event_timestamps(self) -> list[datetime]:
+        """Timestamps of recent severity-bearing alert events."""
+
+        if self.alerts_model is None:
+            return []
+        return [
+            event.timestamp
+            for event in self.alerts_model.audit_events
+            if event.timestamp is not None
+        ]
+
+    def _scan_event_timestamps(self) -> list[datetime]:
+        """Timestamps of recent scan / finding audit events."""
+
+        if self.audit_model is None:
+            return []
+        stamps: list[datetime] = []
+        for event in self.audit_model.items:
+            action = (event.action or "").lower()
+            if ("scan" in action or "finding" in action) and event.timestamp is not None:
+                stamps.append(event.timestamp)
+        return stamps
+
+    def _metric_history(self, timestamps: Iterable[datetime]) -> tuple[float, ...]:
+        """Build a per-tile time-bucketed sparkline from event timestamps.
+
+        Anchored on the current wall clock so the rightmost bars are the
+        most recent buckets; empty windows render as a flat baseline.
+        """
+
+        return _event_histogram(timestamps, now=datetime.now(timezone.utc))
+
     def _top_block_target(self) -> tuple[str, int]:
         """Most-frequently blocked audit target across recent events."""
 
@@ -4004,10 +4109,21 @@ class DefenseClawTUI(App[None]):
         target = event.target_panel
         if not target:
             return
+        # The Hook Calls tile drills into the Logs panel pre-filtered to
+        # connector-hook events (OTEL stream + Hooks filter) so the click
+        # lands directly on the hook calls the tile is counting.
+        if event.key == "hook_calls" and target == "logs":
+            self.logs_model.set_source("otel")
+            self.logs_model.set_filter(FILTER_HOOKS)
         if target == self.active_panel:
+            self._render_chrome()
+            self._set_status("Logs filtered to connector hooks.")
             return
         self.action_switch_panel(target)
-        self._set_status(f"Opened {target} (clicked {event.key} tile).")
+        if event.key == "hook_calls" and target == "logs":
+            self._set_status("Opened Logs filtered to connector hooks.")
+        else:
+            self._set_status(f"Opened {target} (clicked {event.key} tile).")
 
     # ------------------------------------------------------------------
     # Command-progress strip — single source of truth for command lifecycle
@@ -4879,9 +4995,9 @@ class DefenseClawTUI(App[None]):
             lines.append(f"[{TOKENS.accent_cyan}]{header.search_prompt}[/]")
         for group in self.logs_model.chip_groups():
             chips = "  ".join(
-                f"[{TOKENS.accent_violet} bold]{chip.shortcut} {chip.label}[/]"
+                f"[{TOKENS.accent_violet} bold]{(chip.shortcut + ' ' if chip.shortcut else '')}{chip.label}[/]"
                 if chip.active
-                else f"[{TOKENS.text_secondary}]{chip.shortcut} {chip.label}[/]"
+                else f"[{TOKENS.text_secondary}]{(chip.shortcut + ' ' if chip.shortcut else '')}{chip.label}[/]"
                 for chip in group.chips
             )
             lines.append(f"{group.label} {chips}")
@@ -5128,13 +5244,14 @@ class DefenseClawTUI(App[None]):
                 table.focus()
 
     def _render_detail_panel(self) -> None:
-        panel = self.query_one("#detail-panel", Static)
+        panel = self.query_one("#detail-panel", VerticalScroll)
+        body = self.query_one("#detail-panel-body", Static)
         detail = self._detail_text()
         self.detail_text = detail
         if not detail:
             if not panel.has_class("hidden"):
                 panel.add_class("hidden")
-                panel.update("")
+                body.update("")
             self._last_detail_signature = None
             return
         panel.remove_class("hidden")
@@ -5152,7 +5269,12 @@ class DefenseClawTUI(App[None]):
             # render. Route every detail update through the same
             # safety wrapper the body uses so a bogus span never
             # tears down the TUI.
-            panel.update(self._safe_body_renderable(detail))
+            body.update(self._safe_body_renderable(detail))
+            # New row / new panel: start at the top so the detail's
+            # title and highest-signal lines are visible rather than
+            # whatever scroll offset the previous (longer) detail left
+            # behind.
+            panel.scroll_home(animate=False)
             self._last_detail_signature = detail_signature
 
     def _detail_text(self) -> str:
@@ -5527,6 +5649,11 @@ class DefenseClawTUI(App[None]):
                 ("Field", "Value", "Hint"),
                 tuple((field.label, field.display_value, field.hint) for field in self.first_run_model.fields),
             )
+        if self.setup_model.goal_active:
+            return (
+                ("Goal", "What it does"),
+                tuple((goal.label, goal.summary) for goal in self.setup_model.goals),
+            )
         if self.setup_model.form_active:
             return (
                 ("Field", "Value", "Kind", "Hint"),
@@ -5568,6 +5695,17 @@ class DefenseClawTUI(App[None]):
                 f"{self.first_run_model.empty_state()}\n\n"
                 "Keys: up/down select, left/right change, Ctrl+R run init, 0 Setup.\n"
                 "This uses the canonical init backend and keeps the full setup wizard available."
+            )
+        if self.setup_model.goal_active:
+            wizard_idx = int(self.setup_model.active_wizard)
+            wizard = WIZARD_NAMES[wizard_idx]
+            summary = wizard_state_summary(self.setup_model.active_wizard, self.setup_model.config)
+            summary_line = f"[{TOKENS.text_secondary}]{rich_escape(summary)}[/]\n" if summary else ""
+            return (
+                f"[bold #22D3EE]Setup[/] · [bold]{wizard}[/] · What do you want to do?\n"
+                f"{summary_line}"
+                f"[{TOKENS.text_muted}]Enter choose · ↑/↓ move · Esc back · "
+                f"Advanced opens the full form[/]"
             )
         if self.setup_model.form_active:
             wizard_idx = int(self.setup_model.active_wizard)
@@ -5653,6 +5791,8 @@ class DefenseClawTUI(App[None]):
     def _setup_cursor(self) -> int:
         if self.first_run_model.active:
             return self.first_run_model.cursor
+        if self.setup_model.goal_active:
+            return getattr(self.setup_model, "goal_cursor", 0)
         if self.setup_model.form_active:
             return getattr(self.setup_model, "form_cursor", 0)
         if self.setup_model.mode == "config":
@@ -5664,6 +5804,8 @@ class DefenseClawTUI(App[None]):
             return
         if self.first_run_model.active:
             self.first_run_model.cursor = min(row, max(0, len(self.first_run_model.fields) - 1))
+        elif self.setup_model.goal_active:
+            self.setup_model.goal_cursor = min(row, max(0, len(self.setup_model.goals) - 1))
         elif self.setup_model.form_active:
             self.setup_model.form_cursor = min(row, max(0, len(self.setup_model.form_fields) - 1))
         elif self.setup_model.mode == "config":
@@ -5754,10 +5896,12 @@ class DefenseClawTUI(App[None]):
 
     def _active_overlay_blocks_table(self) -> bool:
         if self.active_panel == "setup":
-            return self.setup_model.form_active
+            return self.setup_model.form_active or self.setup_model.goal_active
         return False
 
     def _handle_setup_key(self, key: str) -> SetupPanelAction:
+        if self.setup_model.goal_active:
+            return self._handle_setup_goal_key(key)
         if self.setup_model.form_active:
             return self._handle_setup_form_key(key)
         if key == "S":
@@ -5801,7 +5945,9 @@ class DefenseClawTUI(App[None]):
                 self.setup_model.active_wizard = SetupWizard(value)
                 return SetupPanelAction(True)
         if key in {"enter", "e", "space"}:
-            self.setup_model.open_wizard_form(self.setup_model.active_wizard)
+            opened = self.setup_model.open_goal_menu(self.setup_model.active_wizard)
+            if opened:
+                return SetupPanelAction(True, hint="Choose what you want to do.")
             return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
         if key in {"c", "`"}:
             self.setup_model.mode = "config"
@@ -5811,6 +5957,34 @@ class DefenseClawTUI(App[None]):
             return SetupPanelAction(True, refresh_credentials=True, hint="Refreshing credential snapshot.")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
             return self.setup_model.credential_action(key)
+        return SetupPanelAction(False)
+
+    def _handle_setup_goal_key(self, key: str) -> SetupPanelAction:
+        goals = self.setup_model.goals
+        if not goals:
+            self.setup_model.close_wizard_form()
+            return SetupPanelAction(True)
+        if key in {"esc", "escape", "q", "left"}:
+            self.setup_model.goal_active = False
+            self.setup_model.goals = ()
+            self.setup_model.active_goal = None
+            return SetupPanelAction(True, hint="Back to the wizard list.")
+        if key in {"up", "k", "shift+tab"}:
+            self.setup_model.move_goal_cursor(-1)
+            return SetupPanelAction(True)
+        if key in {"down", "j", "tab"}:
+            self.setup_model.move_goal_cursor(1)
+            return SetupPanelAction(True)
+        if key.isdigit():
+            index = int(key)
+            if 0 <= index < len(goals):
+                self.setup_model.goal_cursor = index
+                self.setup_model.select_active_goal()
+                return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
+            return SetupPanelAction(True)
+        if key in {"enter", "space", "e", "right"}:
+            self.setup_model.select_active_goal()
+            return SetupPanelAction(True, open_form=True, hint="Setup wizard form opened.")
         return SetupPanelAction(False)
 
     def _handle_setup_form_key(self, key: str) -> SetupPanelAction:
@@ -7452,6 +7626,48 @@ def _metric_trend(value: int, *, invert: bool = False) -> tuple[float, ...]:
         return (2, 1, 3, 2, 1) if invert else (0, 0, 0, 0, 0)
     steps = (0.2, 0.35, 0.5, 0.7, 1.0)
     return tuple(max(1.0, bounded * step) for step in steps)
+
+
+# Each metric sparkline shows the last ``_METRIC_HISTORY_WINDOW`` of
+# activity split into ``_METRIC_HISTORY_BUCKETS`` equal time buckets.
+# Bar height is the number of events that landed in that bucket, so the
+# tile reads as a live "events per unit of time" histogram rather than a
+# decorative ramp. The Sparkline widget auto-scales to the tallest bar.
+_METRIC_HISTORY_BUCKETS = 24
+_METRIC_HISTORY_WINDOW = timedelta(minutes=5)
+
+
+def _event_histogram(
+    timestamps: Iterable[datetime],
+    *,
+    now: datetime,
+    buckets: int = _METRIC_HISTORY_BUCKETS,
+    window: timedelta = _METRIC_HISTORY_WINDOW,
+) -> tuple[float, ...]:
+    """Bucket event timestamps into a fixed-width time histogram.
+
+    Returns ``buckets`` counts ordered oldest -> newest, each bar
+    spanning ``window / buckets`` and ending at ``now``. Events outside
+    ``[now - window, now]`` are dropped. Naive datetimes are treated as
+    UTC so demo fixtures and live gateway events bucket consistently.
+    """
+
+    if buckets <= 0 or window <= timedelta(0):
+        return tuple(0.0 for _ in range(max(buckets, 0)))
+    counts = [0.0] * buckets
+    span = window / buckets
+    start = now - window
+    for raw in timestamps:
+        if raw is None:
+            continue
+        moment = raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+        moment = moment.astimezone(timezone.utc)
+        if moment < start or moment > now:
+            continue
+        index = int((moment - start) / span)
+        index = max(0, min(index, buckets - 1))
+        counts[index] += 1.0
+    return tuple(counts)
 
 
 def _policy_posture(cfg: OverviewConfig | None) -> str:

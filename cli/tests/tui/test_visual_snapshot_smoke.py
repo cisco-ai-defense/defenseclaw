@@ -287,7 +287,9 @@ async def test_textual_setup_form_exports_svg_snapshot(tmp_path) -> None:
 
     async with app.run_test(size=(120, 40)) as pilot:
         await pilot.press("0")
-        await pilot.press("enter")
+        await pilot.press("enter")  # wizard list -> goal menu.
+        await pilot.pause()
+        await pilot.press("enter")  # goal menu -> filtered form.
         await pilot.pause()
         svg = app.export_screenshot()
 

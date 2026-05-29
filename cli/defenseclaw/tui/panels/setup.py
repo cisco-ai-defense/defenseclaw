@@ -287,6 +287,43 @@ class WizardFormField:
 
 
 @dataclass(frozen=True)
+class WizardGoal:
+    """A goal-first entry point that sits in front of a setup wizard.
+
+    Selecting a goal seeds ``presets`` (field overrides keyed exactly the
+    way :func:`_field_value_overrides` emits them — by ``--flag`` or
+    ``@Label`` for flag-less rows) and narrows the form to ``fields`` plus
+    any required selectors, preset-touched rows, and the conditional groups
+    those presets reveal. An empty ``fields`` *and* empty ``presets`` means
+    the "Advanced — show all settings" escape hatch that reproduces today's
+    full form.
+
+    ``available_when(cfg) -> bool`` hides goals that do not apply to the
+    current configuration (e.g. an Agent-LLM goal only makes sense for
+    proxy-backed connectors).
+    """
+
+    id: str
+    label: str
+    summary: str = ""
+    presets: Mapping[str, str] = dataclass_field(default_factory=dict)
+    fields: tuple[str, ...] = ()
+    available_when: Callable[[Any], bool] | None = dataclass_field(default=None, compare=False, repr=False)
+
+    @property
+    def is_advanced(self) -> bool:
+        return not self.fields and not self.presets
+
+    def is_available(self, cfg: object | Mapping[str, Any] | None) -> bool:
+        if self.available_when is None:
+            return True
+        try:
+            return bool(self.available_when(cfg))
+        except Exception:  # noqa: BLE001 - a bad predicate must never hide the menu.
+            return True
+
+
+@dataclass(frozen=True)
 class SetupPanelAction:
     handled: bool
     intent: SetupCommandIntent | None = None
@@ -450,6 +487,13 @@ class SetupPanelModel:
         self.form_active = False
         self.form_reveal = False
         self.form_error = ""
+        # Goal-first entry layer: a contextual "what do you want to do?" menu
+        # that sits in front of the wizard form. ``active_goal`` is carried
+        # into the form so its preset filter survives dependent rebuilds.
+        self.goal_active = False
+        self.goal_cursor = 0
+        self.goals: tuple[WizardGoal, ...] = ()
+        self.active_goal: WizardGoal | None = None
 
     def set_config(self, cfg: object | Mapping[str, Any] | None) -> None:
         active_name = self.sections[self.active_section].name if self.sections else ""
@@ -939,14 +983,82 @@ class SetupPanelModel:
             + self.sections[self.active_section + 1 :]
         )
 
-    def open_wizard_form(self, wizard: SetupWizard | int | None = None) -> None:
+    def open_goal_menu(self, wizard: SetupWizard | int | None = None) -> bool:
+        """Open the contextual goal menu for ``wizard``.
+
+        Returns ``True`` when a menu was opened. When the wizard exposes only
+        the always-present Advanced goal there is nothing to choose, so this
+        opens the full form directly and returns ``False`` (no regression for
+        wizards without a goal set).
+        """
+
         if wizard is not None:
             self.active_wizard = SetupWizard(wizard)
-        self.form_fields = list(wizard_form_defs(self.active_wizard, self.config))
-        self.form_cursor = 0
+        self.goals = wizard_goals(self.active_wizard, self.config)
+        if len(self.goals) <= 1:
+            self.open_wizard_form(self.active_wizard, goal=self.goals[0] if self.goals else None)
+            return False
+        self.goal_active = True
+        self.goal_cursor = 0
+        self.form_active = False
+        self.active_goal = None
+        return True
+
+    def move_goal_cursor(self, delta: int) -> None:
+        if not self.goals:
+            self.goal_cursor = 0
+            return
+        self.goal_cursor = _clamp(self.goal_cursor + delta, 0, len(self.goals) - 1)
+
+    def select_active_goal(self) -> None:
+        """Open the wizard form for the goal under the cursor."""
+
+        if not self.goals:
+            self.open_wizard_form(self.active_wizard)
+            return
+        goal = self.goals[_clamp(self.goal_cursor, 0, len(self.goals) - 1)]
+        self.open_wizard_form(self.active_wizard, goal=goal)
+
+    def open_wizard_form(
+        self,
+        wizard: SetupWizard | int | None = None,
+        *,
+        goal: WizardGoal | None = None,
+    ) -> None:
+        if wizard is not None:
+            self.active_wizard = SetupWizard(wizard)
+        # Advanced goals carry no presets/filter, so treat them like "no goal".
+        self.active_goal = goal if (goal is not None and not goal.is_advanced) else None
+        presets = dict(self.active_goal.presets) if self.active_goal else {}
+        base = list(wizard_form_defs(self.active_wizard, self.config))
+        if presets:
+            seeded = _seed_parametrized_fields(self.active_wizard, presets, self.config)
+            if seeded is not None:
+                base = list(seeded)
+            rebuild = _DEPENDENT_FIELD_REBUILDERS.get(self.active_wizard)
+            if rebuild is not None:
+                merged = _field_value_overrides(base)
+                merged.update(presets)
+                base = list(rebuild(merged, self.config))
+            else:
+                base = list(_overlay_field_overrides(base, presets))
+        if self.active_goal is not None:
+            base = list(_filter_fields_for_goal(base, self.active_goal))
+        self.form_fields = base
         self.form_active = True
+        self.goal_active = False
         self.form_reveal = False
         self.form_error = ""
+        self._place_form_cursor()
+
+    def _place_form_cursor(self) -> None:
+        """Put the form cursor on the first editable (non-section) row."""
+
+        self.form_cursor = 0
+        for offset, field in enumerate(self.form_fields):
+            if field.kind != "section":
+                self.form_cursor = offset
+                return
 
     def close_wizard_form(self) -> None:
         self.form_fields = []
@@ -954,6 +1066,10 @@ class SetupPanelModel:
         self.form_active = False
         self.form_reveal = False
         self.form_error = ""
+        self.goal_active = False
+        self.goal_cursor = 0
+        self.goals = ()
+        self.active_goal = None
 
     def recompute_dependent_fields(self) -> None:
         """Rebuild the active form when a driver field (provider/role/action)
@@ -961,14 +1077,24 @@ class SetupPanelModel:
         while preserving every value the operator already entered.
 
         Called from the app's single field-write chokepoint after a driver
-        row changes. No-op for wizards without dependent fields.
+        row changes. No-op for wizards without dependent fields. When a goal
+        is active its field filter is re-applied so the narrowed subset (and
+        its seeded presets) survives the rebuild.
         """
 
         rebuild = _DEPENDENT_FIELD_REBUILDERS.get(self.active_wizard)
         if rebuild is None:
             return
         overrides = _field_value_overrides(self.form_fields)
-        self.form_fields = list(rebuild(overrides, self.config))
+        # Re-seed any preset the goal filter may have hidden so it persists
+        # across the rebuild even when its row is not currently visible.
+        if self.active_goal is not None:
+            for key, value in self.active_goal.presets.items():
+                overrides.setdefault(key, value)
+        fields = list(rebuild(overrides, self.config))
+        if self.active_goal is not None:
+            fields = list(_filter_fields_for_goal(fields, self.active_goal))
+        self.form_fields = fields
         if self.form_fields:
             self.form_cursor = _clamp(self.form_cursor, 0, len(self.form_fields) - 1)
             # Keep the cursor off a freshly-revealed section divider.
@@ -1681,6 +1807,763 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL: lambda overrides, cfg: _guardrail_wizard_fields_for(overrides, cfg),
     SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
 }
+
+
+# ---------------------------------------------------------------------------
+# Goal-first wizard entry points. Every setup wizard gets a short "what do you
+# want to do?" menu whose entries seed preset values and narrow the form to
+# the rows that matter for that intent. ``wizard_goals`` always appends an
+# "Advanced — show all settings" goal that reproduces today's full form, so
+# power users keep the flat editor and the menu never traps anyone.
+# ---------------------------------------------------------------------------
+
+
+_ADVANCED_GOAL = WizardGoal(
+    id="advanced",
+    label="Advanced — show all settings",
+    summary="Open the full form with every field (the flat editor).",
+)
+
+# LLM conditional section headers. Listing them in a goal keeps the matching
+# provider's auth rows (Bedrock/Vertex/Azure/TLS) when the operator picks a
+# regional/custom provider inside that goal, without surfacing them otherwise.
+_LLM_PROVIDER_SECTIONS: tuple[str, ...] = ("Bedrock", "Vertex AI", "Azure", "TLS")
+_GUARDRAIL_JUDGE_SECTIONS: tuple[str, ...] = (
+    "Judge: Bedrock",
+    "Judge: Vertex AI",
+    "Judge: Azure",
+    "Judge: TLS",
+)
+
+
+def _cfg_str(cfg: object | Mapping[str, Any] | None, path: str, default: str = "") -> str:
+    return str(get_config_value(cfg, path, default) or default).strip()
+
+
+def _active_connector(cfg: object | Mapping[str, Any] | None) -> str:
+    return _cfg_str(cfg, "claw.mode", "").lower()
+
+
+def _connector_is_proxy(connector: str) -> bool:
+    """True for proxy-backed connectors that host both judge AND agent LLMs."""
+
+    name = (connector or "").strip().lower()
+    if not name:
+        return False
+    try:
+        from defenseclaw.commands.cmd_setup import connector_llm_role  # noqa: PLC0415
+
+        return connector_llm_role(name) == "judge_and_agent"
+    except Exception:  # noqa: BLE001 - degrade to the static proxy set.
+        return name in GUARDRAIL_CONNECTORS
+
+
+def _guardrail_enabled(cfg: object | Mapping[str, Any] | None) -> bool:
+    """True when the guardrail master switch is on (``guardrail.enabled``)."""
+
+    return bool(get_config_value(cfg, "guardrail.enabled", False))
+
+
+def _llm_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    main_configured = bool(_cfg_str(cfg, "llm.model"))
+    main_label = "Change my main model" if main_configured else "Set up my main model"
+    return (
+        WizardGoal(
+            "main",
+            main_label,
+            summary="Pick the provider, model, and API key for the unified LLM.",
+            presets={"--role": "unified"},
+            fields=("Provider", "Model", "API Key", "API Key Env", *_LLM_PROVIDER_SECTIONS),
+        ),
+        WizardGoal(
+            "judge",
+            "Add or change the Judge LLM",
+            summary="Configure a dedicated judge model for guardrail verdicts.",
+            presets={"--role": "judge", "--inherit-from": "llm"},
+            fields=("Provider", "Model", "API Key Env", "API Key", "Inherit From", *_LLM_PROVIDER_SECTIONS),
+            available_when=lambda c: _guardrail_enabled(c) or _connector_is_proxy(_active_connector(c)),
+        ),
+        WizardGoal(
+            "agent",
+            "Configure the Agent LLM",
+            summary="Set the agent-side model (proxy connectors only).",
+            presets={"--role": "agent"},
+            fields=("Provider", "Model", "API Key", "API Key Env", *_LLM_PROVIDER_SECTIONS),
+            available_when=lambda c: _connector_is_proxy(_active_connector(c)),
+        ),
+        WizardGoal(
+            "regional",
+            "Use a regional provider (Bedrock / Vertex / Azure)",
+            summary="Switch to a cloud-region provider; auth rows appear on pick.",
+            fields=("Provider", "Model", *_LLM_PROVIDER_SECTIONS),
+        ),
+        WizardGoal(
+            "instance",
+            "Connect a self-hosted / custom instance",
+            summary="Point at an OpenAI-compatible endpoint with optional TLS.",
+            fields=("Provider", "Instance Name", "Base URL", "Model", *_LLM_PROVIDER_SECTIONS),
+        ),
+        WizardGoal(
+            "test",
+            "Test my LLM connection",
+            summary="Save and send a one-shot reachability probe.",
+            presets={"--ping": "yes"},
+            fields=("Provider", "Model", "API Key", *_LLM_PROVIDER_SECTIONS),
+        ),
+    )
+
+
+def _guardrail_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "mode",
+            "Switch enforcement mode (observe / action)",
+            summary="Toggle log-only (observe) vs blocking (action) enforcement.",
+            fields=("Mode", "Scanner Mode"),
+        ),
+        WizardGoal(
+            "judge",
+            "Set up / change the LLM Judge",
+            summary="Choose the judge provider, model, and detection strategy.",
+            presets={"--detection-strategy": "regex_judge"},
+            fields=(
+                "Provider",
+                "--judge-model",
+                "--judge-api-key-env",
+                "--judge-api-base",
+                "--detection-strategy",
+                "--inherit-from",
+                *_GUARDRAIL_JUDGE_SECTIONS,
+            ),
+        ),
+        WizardGoal(
+            "cisco",
+            "Connect Cisco AI Defense",
+            summary="Point the guardrail at a Cisco AI Defense endpoint.",
+            fields=("--cisco-endpoint", "--cisco-api-key-env", "--cisco-timeout-ms"),
+        ),
+        WizardGoal(
+            "hitl",
+            "Require human approval (HITL)",
+            summary="Gate high-severity verdicts on a human approval step.",
+            presets={"--human-approval": "yes"},
+            fields=("--human-approval", "--hilt-min-severity"),
+        ),
+        WizardGoal(
+            "detection",
+            "Tune detection strategy / rule pack",
+            summary="Adjust the regex/judge strategy and rule pack.",
+            fields=("--detection-strategy", "--rule-pack"),
+        ),
+    )
+
+
+def _connector_setup_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "switch",
+            "Switch to a different connector",
+            summary="Re-point DefenseClaw at another agent framework.",
+            fields=("Connector", "Restart Gateway"),
+        ),
+        WizardGoal(
+            "proxy-stack",
+            "Set up a proxy connector with the local stack",
+            summary="Bring up the local guardrail/scanner stack for a proxy.",
+            presets={"@Local Stack": "yes"},
+            fields=("Connector", "Guardrail Mode", "Scanner Mode", "Local Stack"),
+        ),
+        WizardGoal(
+            "rerun",
+            "Re-run setup for my current connector",
+            summary="Re-apply guardrail/scanner settings and verify.",
+            fields=("Guardrail Mode", "Scanner Mode", "Verify After Setup"),
+        ),
+    )
+
+
+def _credentials_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "list",
+            "See which credentials are set",
+            summary="List env-backed credentials and their status.",
+            presets={"@Action": "list"},
+            fields=("Action",),
+        ),
+        WizardGoal(
+            "check",
+            "Check required credentials",
+            summary="Verify every required credential is present.",
+            presets={"@Action": "check"},
+            fields=("Action",),
+        ),
+        WizardGoal(
+            "fill",
+            "Fill in missing required credentials",
+            summary="Prompt for any required credential that is unset.",
+            presets={"@Action": "fill-missing"},
+            fields=("Action",),
+        ),
+        WizardGoal(
+            "set",
+            "Set a credential value",
+            summary="Write a single env-backed credential.",
+            presets={"@Action": "set"},
+            fields=("Action", "Env Name", "Secret Value"),
+        ),
+    )
+
+
+def _local_observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "status",
+            "Check stack status",
+            summary="Report whether the local OTel stack is running.",
+            presets={"@Action": "status"},
+            fields=("Action",),
+        ),
+        WizardGoal(
+            "up",
+            "Start the local stack",
+            summary="Bring up the bundled OTel stack (needs Docker).",
+            presets={"@Action": "up"},
+            fields=("Action", "Timeout", "Signals", "Audit Sink", "No Wait"),
+        ),
+        WizardGoal(
+            "url",
+            "Show the dashboard URL",
+            summary="Print the local dashboard URL.",
+            presets={"@Action": "url"},
+            fields=("Action",),
+        ),
+        WizardGoal(
+            "logs",
+            "Tail logs",
+            summary="Stream logs from a stack service.",
+            presets={"@Action": "logs"},
+            fields=("Action", "Service", "Follow"),
+        ),
+        WizardGoal(
+            "down",
+            "Stop the stack",
+            summary="Stop the local OTel stack.",
+            presets={"@Action": "down"},
+            fields=("Action",),
+        ),
+        WizardGoal(
+            "reset",
+            "Reset / wipe the stack",
+            summary="Tear down and delete local stack state.",
+            presets={"@Action": "reset"},
+            fields=("Action", "Confirm Reset"),
+        ),
+    )
+
+
+def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "auto",
+            "Rotate the gateway token (auto-detect connector)",
+            summary="Rotate and refresh hooks for the detected connector.",
+            fields=("Refresh Hooks",),
+        ),
+        WizardGoal(
+            "specific",
+            "Rotate for a specific connector",
+            summary="Rotate the token for a named connector.",
+            fields=("Connector", "Refresh Hooks"),
+        ),
+    )
+
+
+def _custom_providers_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "list",
+            "List custom provider instances",
+            summary="Show every configured custom-provider overlay.",
+            presets={"@Action": "list"},
+        ),
+        WizardGoal(
+            "show",
+            "Show one instance",
+            summary="Print one instance's configuration.",
+            presets={"@Action": "show"},
+        ),
+        WizardGoal(
+            "add-openai",
+            "Add a self-hosted / OpenAI-compatible instance",
+            summary="Register an OpenAI-compatible endpoint.",
+            presets={"@Action": "add", "--base-provider-type": "openai"},
+        ),
+        WizardGoal(
+            "add-regional",
+            "Add a regional instance (Bedrock / Vertex / Azure)",
+            summary="Register a cloud-region provider overlay.",
+            presets={"@Action": "add"},
+        ),
+        WizardGoal(
+            "remove",
+            "Remove an instance",
+            summary="Delete a custom-provider overlay.",
+            presets={"@Action": "remove"},
+        ),
+    )
+
+
+def _skill_scanner_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "strictness",
+            "Set scan strictness",
+            summary="Choose the scan policy and lenient mode.",
+            fields=("Scan Policy", "Lenient Mode"),
+        ),
+        WizardGoal(
+            "llm",
+            "Enable LLM-assisted analysis",
+            summary="Turn on the LLM analyzer and pick its model.",
+            presets={"--use-llm": "yes"},
+            fields=("LLM Analyzer", "LLM Provider", "LLM Model", "LLM Consensus Runs"),
+        ),
+        WizardGoal(
+            "analyzers",
+            "Turn on extra analyzers",
+            summary="Enable behavioral, meta, and trigger analyzers.",
+            fields=("Behavioral Analyzer", "Meta Analyzer", "Trigger Analyzer"),
+        ),
+        WizardGoal(
+            "threat-intel",
+            "Connect threat intel (VirusTotal / AI Defense)",
+            summary="Enable VirusTotal and Cisco AI Defense analyzers.",
+            fields=("VirusTotal Scanner", "AI Defense Analyzer"),
+        ),
+    )
+
+
+def _mcp_scanner_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "analyzers",
+            "Choose which analyzers run",
+            summary="Pick the analyzer list for MCP scans.",
+            fields=("Analyzers",),
+        ),
+        WizardGoal(
+            "llm",
+            "Enable LLM analysis",
+            summary="Select the LLM provider and model for MCP scans.",
+            fields=("LLM Provider", "LLM Model"),
+        ),
+        WizardGoal(
+            "remote",
+            "Use a remote scan API",
+            summary="Point scans at a remote scan API endpoint.",
+            fields=("API Endpoint", "API Key Env", "API Timeout (ms)"),
+        ),
+        WizardGoal(
+            "targets",
+            "Scan prompts / resources / instructions",
+            summary="Choose which MCP surfaces to scan.",
+            fields=("Scan Prompts", "Scan Resources", "Scan Instructions"),
+        ),
+    )
+
+
+def _gateway_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "ports",
+            "Change host and ports",
+            summary="Set the gateway host, proxy port, and API port.",
+            fields=("Host", "Port", "API Port"),
+        ),
+        WizardGoal(
+            "remote",
+            "Connect to a remote gateway",
+            summary="Target a remote gateway with an auth token.",
+            presets={"--remote": "yes"},
+            fields=("Remote Mode", "Host", "Port", "API Port", "Auth Token"),
+        ),
+        WizardGoal(
+            "token",
+            "Set the auth token",
+            summary="Set the gateway auth token directly.",
+            fields=("Auth Token",),
+        ),
+        WizardGoal(
+            "ssm",
+            "Pull the token from AWS SSM",
+            summary="Resolve the auth token from an SSM parameter.",
+            fields=("SSM Param", "SSM Region", "SSM Profile"),
+        ),
+    )
+
+
+def _splunk_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "o11y",
+            "Send to Splunk Observability Cloud",
+            summary="Stream telemetry to Splunk Observability Cloud.",
+            presets={"@Mode": "splunk-o11y"},
+            fields=("Mode", "Realm", "Access Token", "Apply Dashboards After"),
+        ),
+        WizardGoal(
+            "local-docker",
+            "Run a local Splunk (Docker)",
+            summary="Spin up a local Splunk via Docker for logs.",
+            presets={"@Mode": "local-docker"},
+            fields=("Mode", "Accept Splunk License", "Traces", "Metrics", "Logs Export"),
+        ),
+        WizardGoal(
+            "enterprise",
+            "Send to Splunk Enterprise HEC",
+            summary="Forward events to a Splunk Enterprise HEC endpoint.",
+            presets={"@Mode": "enterprise"},
+            fields=("Mode", "HEC Endpoint", "HEC Token", "HEC Index", "HEC Source", "HEC Sourcetype"),
+        ),
+    )
+
+
+def _observability_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "splunk-o11y",
+            "Splunk Observability Cloud",
+            summary="Add the Splunk Observability Cloud preset.",
+            presets={"@Preset": "splunk-o11y"},
+        ),
+        WizardGoal(
+            "datadog",
+            "Datadog",
+            summary="Add the Datadog preset.",
+            presets={"@Preset": "datadog"},
+        ),
+        WizardGoal(
+            "honeycomb",
+            "Honeycomb",
+            summary="Add the Honeycomb preset.",
+            presets={"@Preset": "honeycomb"},
+        ),
+        WizardGoal(
+            "newrelic",
+            "New Relic",
+            summary="Add the New Relic preset.",
+            presets={"@Preset": "newrelic"},
+        ),
+        WizardGoal(
+            "grafana-cloud",
+            "Grafana Cloud",
+            summary="Add the Grafana Cloud preset.",
+            presets={"@Preset": "grafana-cloud"},
+        ),
+        WizardGoal(
+            "otlp",
+            "Generic OTLP endpoint",
+            summary="Add a generic OTLP exporter preset.",
+            presets={"@Preset": "otlp"},
+        ),
+    )
+
+
+def _webhooks_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "slack",
+            "Add a Slack alert webhook",
+            summary="Send alerts to a Slack incoming webhook.",
+            presets={"@Type": "slack"},
+        ),
+        WizardGoal(
+            "pagerduty",
+            "Add PagerDuty incidents",
+            summary="Open PagerDuty incidents via Events API v2.",
+            presets={"@Type": "pagerduty"},
+        ),
+        WizardGoal(
+            "webex",
+            "Add a Cisco Webex bot",
+            summary="Post alerts to a Cisco Webex room.",
+            presets={"@Type": "webex"},
+        ),
+        WizardGoal(
+            "generic",
+            "Add a generic HMAC webhook",
+            summary="POST signed JSON to a generic endpoint.",
+            presets={"@Type": "generic"},
+        ),
+    )
+
+
+def _sandbox_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "init",
+            "Initialize the sandbox (defaults)",
+            summary="Set up the OpenShell sandbox with a policy.",
+            fields=("Policy",),
+        ),
+        WizardGoal(
+            "network",
+            "Set the sandbox network (IPs / DNS)",
+            summary="Configure sandbox/host IPs and DNS.",
+            fields=("Sandbox IP", "Host IP", "DNS", "No Host Networking"),
+        ),
+        WizardGoal(
+            "policy",
+            "Change the sandbox policy",
+            summary="Switch the sandbox enforcement policy.",
+            fields=("Policy",),
+        ),
+        WizardGoal(
+            "disable",
+            "Disable the sandbox",
+            summary="Turn the sandbox off.",
+            presets={"--disable": "yes"},
+            fields=("Disable",),
+        ),
+    )
+
+
+def _registries_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "clawhub",
+            "Add a ClawHub catalog",
+            summary="Register a ClawHub catalog source.",
+            presets={"--kind": "clawhub"},
+            fields=("Source id", "Content", "Sync Now", "Scan After Sync"),
+        ),
+        WizardGoal(
+            "http",
+            "Add an HTTP manifest (YAML/JSON)",
+            summary="Register an HTTP manifest catalog.",
+            presets={"--kind": "http_yaml"},
+            fields=("Source id", "Content", "Manifest URL", "Auth env (optional)"),
+        ),
+        WizardGoal(
+            "smithery",
+            "Add Smithery / skills.sh",
+            summary="Register a Smithery or skills.sh source.",
+            presets={"--kind": "smithery"},
+            fields=("Source id", "Content"),
+        ),
+        WizardGoal(
+            "git",
+            "Add a Git / file source",
+            summary="Register a Git or local file catalog.",
+            presets={"--kind": "git"},
+            fields=("Source id", "Content", "Manifest URL"),
+        ),
+    )
+
+
+def _notifications_routing_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "verdicts",
+            "Choose which verdicts notify me",
+            summary="Toggle block/observe/HITL verdict notifications.",
+            fields=(
+                "Block (enforced)",
+                "Block (would-block / observe)",
+                "HITL Approval",
+                "Restart Gateway After",
+            ),
+        ),
+        WizardGoal(
+            "sources",
+            "Choose which sources notify me",
+            summary="Toggle hook/guardrail/asset-policy sources.",
+            fields=(
+                "Source: Hooks",
+                "Source: Guardrail",
+                "Source: Asset Policy",
+                "Restart Gateway After",
+            ),
+        ),
+    )
+
+
+def _ai_discovery_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "toggle",
+            "Turn AI discovery on / off",
+            summary="Enable or disable the AI discovery sidecar.",
+            fields=("Enable",),
+        ),
+        WizardGoal(
+            "cadence",
+            "Set the scan cadence",
+            summary="Tune the discovery mode and scan intervals.",
+            fields=("Mode", "Scan Interval (min)", "Process Poll (sec)"),
+        ),
+        WizardGoal(
+            "scope",
+            "Set where it scans (scope)",
+            summary="Choose scan roots and per-scan limits.",
+            fields=("Scan Roots (CSV)", "Max Files / Scan", "Max Bytes / File"),
+        ),
+        WizardGoal(
+            "sources",
+            "Choose detection sources",
+            summary="Toggle shell history, manifests, env, and domains.",
+            fields=("Shell History", "Package Manifests", "Env Var Names", "Network Domains"),
+        ),
+    )
+
+
+def _splunk_dashboards_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "apply",
+            "Apply dashboards",
+            summary="Apply the Splunk O11y dashboards.",
+            presets={"@Action": "apply"},
+            fields=("Action", "With Detectors", "Enable Detectors"),
+        ),
+        WizardGoal(
+            "apply-detectors",
+            "Apply dashboards + detectors",
+            summary="Apply dashboards and enable detectors.",
+            presets={"@Action": "apply", "--with-detectors": "yes", "--enable-detectors": "yes"},
+            fields=("Action", "With Detectors", "Enable Detectors"),
+        ),
+        WizardGoal(
+            "destroy",
+            "Remove dashboards",
+            summary="Destroy the Splunk O11y dashboards.",
+            presets={"@Action": "destroy"},
+            fields=("Action",),
+        ),
+    )
+
+
+# Per-wizard goal builders. Each returns the *contextual* goals (without the
+# trailing Advanced entry, which ``wizard_goals`` always appends). Lambdas keep
+# resolution lazy so builders can live anywhere in the module.
+_WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
+    SetupWizard.CONNECTOR_SETUP: _connector_setup_goals,
+    SetupWizard.CREDENTIALS: _credentials_goals,
+    SetupWizard.LLM: _llm_goals,
+    SetupWizard.LOCAL_OBSERVABILITY: _local_observability_goals,
+    SetupWizard.TOKEN_ROTATION: _token_rotation_goals,
+    SetupWizard.CUSTOM_PROVIDERS: _custom_providers_goals,
+    SetupWizard.SKILL_SCANNER: _skill_scanner_goals,
+    SetupWizard.MCP_SCANNER: _mcp_scanner_goals,
+    SetupWizard.GATEWAY: _gateway_goals,
+    SetupWizard.GUARDRAIL: _guardrail_goals,
+    SetupWizard.SPLUNK: _splunk_goals,
+    SetupWizard.OBSERVABILITY: _observability_goals,
+    SetupWizard.WEBHOOKS: _webhooks_goals,
+    SetupWizard.SANDBOX: _sandbox_goals,
+    SetupWizard.REGISTRIES: _registries_goals,
+    SetupWizard.NOTIFICATIONS_ROUTING: _notifications_routing_goals,
+    SetupWizard.AI_DISCOVERY: _ai_discovery_goals,
+    SetupWizard.SPLUNK_DASHBOARDS: _splunk_dashboards_goals,
+}
+
+
+def wizard_goals(
+    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
+) -> tuple[WizardGoal, ...]:
+    """Resolve the goal menu for ``wizard``.
+
+    Goals whose ``available_when`` predicate is False for the current config
+    are dropped, and an "Advanced — show all settings" goal is always appended
+    so the flat editor stays reachable and the menu is never empty.
+    """
+
+    wizard = SetupWizard(wizard)
+    builder = _WIZARD_GOAL_BUILDERS.get(wizard)
+    goals: tuple[WizardGoal, ...] = ()
+    if builder is not None:
+        try:
+            goals = tuple(goal for goal in builder(cfg) if goal.is_available(cfg))
+        except Exception:  # noqa: BLE001 - a bad builder must not break the menu.
+            goals = ()
+    return (*goals, _ADVANCED_GOAL)
+
+
+def _seed_parametrized_fields(
+    wizard: SetupWizard,
+    presets: Mapping[str, str],
+    cfg: object | Mapping[str, Any] | None,
+) -> tuple[WizardFormField, ...] | None:
+    """Rebuild the base field set for wizards whose form shape depends on a
+    preset/type selector that has no dependent-field rebuilder (Observability
+    presets and Webhook channel types). Returns ``None`` when no swap applies.
+    """
+
+    del cfg
+    if wizard == SetupWizard.OBSERVABILITY:
+        preset_id = (presets.get("@Preset") or "").strip()
+        if preset_id:
+            return observability_wizard_fields(preset_id)
+    if wizard == SetupWizard.WEBHOOKS:
+        channel = (presets.get("@Type") or "").strip()
+        if channel:
+            return webhook_wizard_fields(channel)
+    return None
+
+
+def wizard_state_summary(
+    wizard: SetupWizard | int, cfg: object | Mapping[str, Any] | None = None
+) -> str:
+    """One-line "here's what's configured today" string for the goal menu.
+
+    Returns an empty string for wizards without a useful summary so the
+    renderer can omit the line entirely.
+    """
+
+    wizard = SetupWizard(wizard)
+    if wizard == SetupWizard.LLM:
+        provider = _cfg_str(cfg, "llm.provider")
+        model = _cfg_str(cfg, "llm.model")
+        main = f"{provider}/{model}" if (provider and model) else (model or provider or "not set")
+        judge = _cfg_str(cfg, "guardrail.judge.model") or "not set"
+        connector = _active_connector(cfg) or "none"
+        role = "judge+agent" if _connector_is_proxy(connector) else "judge"
+        return f"Main: {main}  ·  Judge: {judge}  ·  Connector: {connector} ({role})"
+    if wizard == SetupWizard.GUARDRAIL:
+        mode = _cfg_str(cfg, "guardrail.mode", "observe") or "observe"
+        enabled = "on" if _guardrail_enabled(cfg) else "off"
+        strategy = _cfg_str(cfg, "guardrail.detection_strategy", "regex_only") or "regex_only"
+        return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {strategy}"
+    if wizard == SetupWizard.CONNECTOR_SETUP:
+        connector = _active_connector(cfg) or "not set"
+        return f"Active connector: {connector}"
+    if wizard == SetupWizard.AI_DISCOVERY:
+        enabled = "on" if bool(get_config_value(cfg, "ai_discovery.enabled", True)) else "off"
+        mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"
+        return f"AI discovery: {enabled}  ·  Mode: {mode}"
+    if wizard == SetupWizard.GATEWAY:
+        host = _cfg_str(cfg, "gateway.host") or "localhost"
+        port = _cfg_str(cfg, "gateway.port") or "9090"
+        return f"Gateway: {host}:{port}"
+    return ""
 
 
 _AI_DISCOVERY_MODES = AI_DISCOVERY_MODES
@@ -2468,6 +3351,89 @@ def _apply_dynamic_fields(
                 field = field.with_value(overrides[key])
         out.append(field)
     return tuple(out)
+
+
+def _overlay_field_overrides(
+    fields: Sequence[WizardFormField], overrides: Mapping[str, str]
+) -> tuple[WizardFormField, ...]:
+    """Overlay ``overrides`` onto ``fields`` by flag/``@label`` key.
+
+    Unlike :func:`_apply_dynamic_fields` this does not re-derive visibility;
+    it is used to seed a goal's presets onto a wizard that has no dependent
+    rebuilder (the value carries through to :func:`build_wizard_args`).
+    """
+
+    out: list[WizardFormField] = []
+    for field in fields:
+        if field.kind != "section":
+            key = field.flag or ("@" + field.label)
+            if key in overrides:
+                field = field.with_value(overrides[key])
+        out.append(field)
+    return tuple(out)
+
+
+def _prune_empty_sections(fields: Sequence[WizardFormField]) -> tuple[WizardFormField, ...]:
+    """Drop section dividers that have no following non-section row before
+    the next divider, so a goal filter never leaves an orphaned header.
+    """
+
+    out: list[WizardFormField] = []
+    for index, field in enumerate(fields):
+        if field.kind == "section":
+            has_child = False
+            for following in fields[index + 1 :]:
+                if following.kind == "section":
+                    break
+                has_child = True
+                break
+            if not has_child:
+                continue
+        out.append(field)
+    return tuple(out)
+
+
+def _filter_fields_for_goal(
+    fields: Sequence[WizardFormField], goal: WizardGoal | None
+) -> tuple[WizardFormField, ...]:
+    """Narrow ``fields`` to the rows relevant for ``goal``.
+
+    A row is kept when it is a required selector (so driver rows like
+    Role/Provider always survive a rebuild), is explicitly listed in
+    ``goal.fields`` (by label *or* flag), or is touched by ``goal.presets``
+    (so the seeded value stays visible and reaches the arg builder).
+
+    Conditional rows (``visible_when`` set, e.g. the Bedrock/Vertex/Azure
+    auth groups) are kept only when their owning section header is named in
+    ``goal.fields`` — so a goal that lists ``"Bedrock"`` reveals that whole
+    group when the operator picks a Bedrock provider, while a goal that does
+    not name it (e.g. the Cisco goal) never surfaces unrelated judge groups.
+    Orphaned section headers are pruned afterwards. An advanced goal (empty
+    ``fields``) returns the rows unchanged.
+    """
+
+    if goal is None or not goal.fields:
+        return tuple(fields)
+    wanted = set(goal.fields)
+    preset_keys = set(goal.presets.keys())
+    kept: list[WizardFormField] = []
+    current_section = ""
+    for field in fields:
+        if field.kind == "section":
+            current_section = field.label
+            kept.append(field)
+            continue
+        key = field.flag or ("@" + field.label)
+        keep = (
+            field.required
+            or field.label in wanted
+            or (bool(field.flag) and field.flag in wanted)
+            or key in preset_keys
+            or (field.visible_when is not None and current_section in wanted)
+        )
+        if keep:
+            kept.append(field)
+    return _prune_empty_sections(kept)
 
 
 def _llm_wizard_fields_for(

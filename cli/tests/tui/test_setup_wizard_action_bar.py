@@ -20,6 +20,23 @@ from defenseclaw.tui.app import DefenseClawTUI
 from textual.widgets import Button
 
 
+async def _open_first_wizard_form(pilot) -> None:
+    """Open the Setup panel and the first wizard's form.
+
+    ``enter`` on the wizard list now opens the goal menu (the
+    "what do you want to do?" step); a second ``enter`` selects the
+    first goal which opens the filtered form. Tests that only care
+    about the form sub-bar drive straight through to the form here.
+    """
+
+    await pilot.press("0")  # Setup panel key.
+    await pilot.pause()
+    await pilot.press("enter")  # wizard list -> goal menu.
+    await pilot.pause()
+    await pilot.press("enter")  # goal menu -> filtered form.
+    await pilot.pause()
+
+
 @pytest.mark.asyncio
 async def test_setup_wizard_bar_hidden_until_form_opens() -> None:
     """The wizard action bar appears only after `form_active` flips True.
@@ -37,7 +54,13 @@ async def test_setup_wizard_bar_hidden_until_form_opens() -> None:
         bar = app.query_one("#setup-wizard-controls")
         assert bar.has_class("hidden") is True
 
-        # Open first wizard form via the same keystroke the user uses.
+        # Enter opens the goal menu; the bar stays hidden there too.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.setup_model.goal_active is True
+        assert bar.has_class("hidden") is True
+
+        # Selecting a goal opens the filtered form.
         await pilot.press("enter")
         await pilot.pause()
         assert app.setup_model.form_active is True
@@ -63,9 +86,7 @@ async def test_setup_wizard_bar_run_disabled_when_required_fields_missing() -> N
 
     app = DefenseClawTUI()
     async with app.run_test(size=(180, 50)) as pilot:
-        await pilot.press("0")
-        await pilot.press("enter")
-        await pilot.pause()
+        await _open_first_wizard_form(pilot)
         app.setup_model.form_fields = [
             replace(field, value="") if field.required else field
             for field in app.setup_model.form_fields
@@ -85,9 +106,7 @@ async def test_setup_wizard_cancel_button_closes_form() -> None:
 
     app = DefenseClawTUI()
     async with app.run_test(size=(180, 50)) as pilot:
-        await pilot.press("0")
-        await pilot.press("enter")
-        await pilot.pause()
+        await _open_first_wizard_form(pilot)
         assert app.setup_model.form_active is True
         app._handle_setup_control("setup-wizard-cancel")  # noqa: SLF001
         await pilot.pause()
@@ -100,9 +119,7 @@ async def test_setup_wizard_next_prev_buttons_move_cursor() -> None:
 
     app = DefenseClawTUI()
     async with app.run_test(size=(180, 50)) as pilot:
-        await pilot.press("0")
-        await pilot.press("enter")
-        await pilot.pause()
+        await _open_first_wizard_form(pilot)
         navigable = [f for f in app.setup_model.form_fields if f.kind != "section"]
         if len(navigable) < 2:
             return  # Single-field wizards can't move; nothing to assert.
@@ -122,9 +139,7 @@ async def test_setup_wizard_clear_button_wipes_focused_value() -> None:
 
     app = DefenseClawTUI()
     async with app.run_test(size=(180, 50)) as pilot:
-        await pilot.press("0")
-        await pilot.press("enter")
-        await pilot.pause()
+        await _open_first_wizard_form(pilot)
         target_idx = None
         for idx, field in enumerate(app.setup_model.form_fields):
             if field.kind in {"string", "password", "int"}:
@@ -148,9 +163,7 @@ async def test_setup_wizard_reveal_button_only_enabled_for_secret_fields() -> No
 
     app = DefenseClawTUI()
     async with app.run_test(size=(180, 50)) as pilot:
-        await pilot.press("0")
-        await pilot.press("enter")
-        await pilot.pause()
+        await _open_first_wizard_form(pilot)
         password_idx = None
         non_password_idx = None
         for idx, field in enumerate(app.setup_model.form_fields):
@@ -186,9 +199,7 @@ async def test_setup_wizard_run_button_submits_form_when_ready(monkeypatch) -> N
 
     app = DefenseClawTUI()
     async with app.run_test(size=(180, 50)) as pilot:
-        await pilot.press("0")
-        await pilot.press("enter")
-        await pilot.pause()
+        await _open_first_wizard_form(pilot)
         assert app.setup_model.form_active is True
 
         # Pre-load a fake submit result so the handler thinks the

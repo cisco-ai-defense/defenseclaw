@@ -23,7 +23,9 @@ from defenseclaw.tui.panels.setup import (
     SetupPanelModel,
     SetupWizard,
     UninstallModalState,
+    WizardGoal,
     _custom_providers_fields_for,
+    _filter_fields_for_goal,
     _guardrail_wizard_fields_for,
     _llm_wizard_fields_for,
     action_matrix_fields,
@@ -47,6 +49,8 @@ from defenseclaw.tui.panels.setup import (
     webhook_wizard_fields,
     wizard_field_value,
     wizard_form_defs,
+    wizard_goals,
+    wizard_state_summary,
 )
 from defenseclaw.tui.screens.model_picker import filter_models, picker_rows
 from defenseclaw.tui.services.setup_state import (
@@ -1374,3 +1378,211 @@ def test_model_picker_filter_and_freeform_row() -> None:
     assert rows[0] == "my-custom-model"
     # An exact catalog hit is not duplicated as a free-form row.
     assert picker_rows("gpt-4o", models).count("gpt-4o") == 1
+
+
+# ---------------------------------------------------------------------------
+# Goal-first wizard entry points
+# ---------------------------------------------------------------------------
+
+
+def _guardrail_on_cfg(connector: str = "openclaw") -> SimpleNamespace:
+    """A config with guardrail enabled and an LLM/judge already configured."""
+
+    return SimpleNamespace(
+        claw=SimpleNamespace(mode=connector),
+        llm=SimpleNamespace(provider="anthropic", model="claude-sonnet-4"),
+        guardrail=SimpleNamespace(
+            enabled=True,
+            mode="action",
+            detection_strategy="regex_only",
+            judge=SimpleNamespace(model="bedrock/judge-model"),
+        ),
+    )
+
+
+def _goal_index(model: SetupPanelModel, goal_id: str) -> int:
+    for index, goal in enumerate(model.goals):
+        if goal.id == goal_id:
+            return index
+    raise AssertionError(f"goal not found: {goal_id} in {[g.id for g in model.goals]}")
+
+
+def _select_goal(model: SetupPanelModel, wizard: SetupWizard, goal_id: str) -> None:
+    assert model.open_goal_menu(wizard) is True
+    model.goal_cursor = _goal_index(model, goal_id)
+    model.select_active_goal()
+
+
+def test_wizard_goals_always_end_with_advanced() -> None:
+    # Every wizard exposes at least the Advanced escape hatch, and it is
+    # always the final entry so the menu can never trap an operator.
+    for wizard in SetupWizard:
+        goals = wizard_goals(wizard, None)
+        assert goals, wizard.name
+        assert goals[-1].id == "advanced", wizard.name
+        assert goals[-1].is_advanced, wizard.name
+        # Advanced is the only entry flagged advanced.
+        assert sum(1 for g in goals if g.is_advanced) == 1, wizard.name
+
+
+def test_llm_goal_menu_gates_judge_and_agent_on_context() -> None:
+    # Hook connector with guardrail disabled: no judge/agent goals.
+    hook_cfg = SimpleNamespace(
+        claw=SimpleNamespace(mode="codex"),
+        llm=SimpleNamespace(provider="anthropic", model=""),
+        guardrail=SimpleNamespace(enabled=False, mode="observe", judge=SimpleNamespace(model="")),
+    )
+    ids = {g.id for g in wizard_goals(SetupWizard.LLM, hook_cfg)}
+    assert "judge" not in ids
+    assert "agent" not in ids
+    assert "main" in ids
+
+    # Proxy connector with guardrail enabled: judge + agent both surface.
+    ids = {g.id for g in wizard_goals(SetupWizard.LLM, _guardrail_on_cfg("openclaw"))}
+    assert "judge" in ids
+    assert "agent" in ids
+
+
+def test_llm_main_goal_label_reflects_existing_config() -> None:
+    fresh = SimpleNamespace(
+        claw=SimpleNamespace(mode="codex"),
+        llm=SimpleNamespace(provider="", model=""),
+        guardrail=SimpleNamespace(enabled=False, mode="observe", judge=SimpleNamespace(model="")),
+    )
+    main_fresh = next(g for g in wizard_goals(SetupWizard.LLM, fresh) if g.id == "main")
+    main_existing = next(g for g in wizard_goals(SetupWizard.LLM, _guardrail_on_cfg()) if g.id == "main")
+    assert "Set up" in main_fresh.label
+    assert "Change" in main_existing.label
+
+
+def test_llm_judge_goal_filters_fields_and_emits_role_judge() -> None:
+    model = SetupPanelModel(cfg=_guardrail_on_cfg())
+    _select_goal(model, SetupWizard.LLM, "judge")
+    assert model.form_active is True
+    assert model.goal_active is False
+    labels = {f.label for f in model.form_fields}
+    # Judge-relevant rows survive; advanced tuning rows are filtered out.
+    assert "Provider" in labels
+    assert "Inherit From" in labels
+    assert "Timeout" not in labels
+    assert "Max Retries" not in labels
+
+    fields = _set_by_flag(model.form_fields, "--model", "claude-sonnet-4")
+    argv = build_wizard_args(SetupWizard.LLM, fields)
+    assert argv[:3] == ("setup", "llm", "--non-interactive")
+    assert _pair_after(argv, "--role") == "judge"
+    assert _pair_after(argv, "--inherit-from") == "llm"
+
+
+def test_llm_advanced_goal_reproduces_full_form() -> None:
+    model = SetupPanelModel(cfg=_guardrail_on_cfg())
+    _select_goal(model, SetupWizard.LLM, "advanced")
+    assert model.active_goal is None
+    goal_labels = [f.label for f in model.form_fields]
+    full_labels = [f.label for f in wizard_form_defs(SetupWizard.LLM, model.config)]
+    assert goal_labels == full_labels
+
+
+def test_llm_test_goal_seeds_ping_flag() -> None:
+    model = SetupPanelModel(cfg=_guardrail_on_cfg())
+    _select_goal(model, SetupWizard.LLM, "test")
+    fields = _set_by_flag(model.form_fields, "--model", "claude-sonnet-4")
+    argv = build_wizard_args(SetupWizard.LLM, fields)
+    assert "--ping" in argv
+    assert "--no-ping" not in argv
+
+
+def test_llm_judge_goal_filter_persists_across_provider_change() -> None:
+    model = SetupPanelModel(cfg=_guardrail_on_cfg())
+    _select_goal(model, SetupWizard.LLM, "judge")
+    # Flip the provider row to a regional provider and recompute.
+    for index, field in enumerate(model.form_fields):
+        if field.flag == "--provider":
+            model.form_fields[index] = field.with_value("bedrock")
+            break
+    model.recompute_dependent_fields()
+    labels = {f.label for f in model.form_fields}
+    # Regional auth rows appear within the goal, advanced tuning stays hidden.
+    assert "Bedrock" in labels
+    assert "Timeout" not in labels
+    # The seeded role survives the rebuild.
+    argv = build_wizard_args(SetupWizard.LLM, model.form_fields)
+    assert _pair_after(argv, "--role") == "judge"
+
+
+def test_guardrail_cisco_goal_hides_judge_regional_rows() -> None:
+    model = SetupPanelModel(cfg=None)
+    _select_goal(model, SetupWizard.GUARDRAIL, "cisco")
+    labels = {f.label for f in model.form_fields}
+    assert "Endpoint" in labels  # the Cisco endpoint row
+    assert "Judge: Bedrock" not in labels
+    assert "Region" not in labels
+
+
+def test_observability_goal_seeds_vendor_preset() -> None:
+    model = SetupPanelModel(cfg=None)
+    _select_goal(model, SetupWizard.OBSERVABILITY, "datadog")
+    assert wizard_field_value(model.form_fields, "Preset") == "datadog"
+    argv = build_wizard_args(SetupWizard.OBSERVABILITY, model.form_fields)
+    assert "datadog" in argv
+
+
+def test_open_goal_menu_falls_back_to_form_when_only_advanced(monkeypatch) -> None:
+    # A wizard whose menu would have only the Advanced entry opens the form
+    # directly instead of parking on a one-item menu (no regression).
+    import defenseclaw.tui.panels.setup as setup_mod
+
+    only_advanced = wizard_goals(SetupWizard.LLM, None)[-1]
+    monkeypatch.setattr(setup_mod, "wizard_goals", lambda *_a, **_k: (only_advanced,))
+
+    model = SetupPanelModel(cfg=None)
+    opened = model.open_goal_menu(SetupWizard.LLM)
+    assert opened is False
+    assert model.form_active is True
+    assert model.goal_active is False
+
+
+def test_filter_fields_for_goal_advanced_is_noop() -> None:
+    fields = wizard_form_defs(SetupWizard.LLM, None)
+    advanced = WizardGoal(id="advanced", label="Advanced")
+    assert _filter_fields_for_goal(fields, advanced) == tuple(fields)
+    assert _filter_fields_for_goal(fields, None) == tuple(fields)
+
+
+def test_wizard_state_summary_llm_reports_main_and_judge() -> None:
+    summary = wizard_state_summary(SetupWizard.LLM, _guardrail_on_cfg("openclaw"))
+    assert "Main:" in summary
+    assert "Judge:" in summary
+    assert "openclaw" in summary
+    # Wizards without a summary return an empty string the renderer can skip.
+    assert wizard_state_summary(SetupWizard.CREDENTIALS, None) == ""
+
+
+def test_every_goal_opens_and_emits_only_real_cli_options() -> None:
+    """Selecting any goal of any wizard must build a valid argv.
+
+    The TUI shells out to ``defenseclaw setup ...``; an unknown flag would
+    crash the subprocess. This walks every goal (including the gated
+    judge/agent LLM goals and each Observability/Webhook preset branch) and
+    asserts the real ``setup`` group accepts every emitted option.
+    """
+
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_setup
+
+    runner = CliRunner()
+    cfg = _guardrail_on_cfg("openclaw")
+    for wizard in SetupWizard:
+        goals = wizard_goals(wizard, cfg)
+        for goal in goals:
+            model = SetupPanelModel(cfg=cfg)
+            opened = model.open_goal_menu(wizard)
+            if opened:
+                model.goal_cursor = _goal_index(model, goal.id)
+                model.select_active_goal()
+            assert model.form_active is True, f"{wizard.name}/{goal.id}"
+            argv = list(build_wizard_args(wizard, list(model.form_fields)))
+            if not argv or argv[0] != "setup":
+                continue
+            result = runner.invoke(cmd_setup.setup, argv[1:], catch_exceptions=True)
+            assert "No such option" not in (result.output or ""), f"{wizard.name}/{goal.id}: {result.output}"

@@ -16,7 +16,10 @@ from types import SimpleNamespace
 
 from defenseclaw.tui.panels.logs import (
     FILTER_ERRORS,
+    FILTER_HOOKS,
+    FILTER_LABELS,
     FILTER_NONE,
+    FILTER_PRESETS,
     FILTER_TYPE_PRESET,
     FILTER_TYPE_SEVERITY,
     LogsPanelModel,
@@ -370,6 +373,48 @@ def test_logs_filter_change_metadata_and_modal_hooks() -> None:
     assert panel.handle_key("R").modal == "redaction"
     assert panel.handle_key("N").modal == "notifications"
     assert panel.handle_key("J").modal == "judge-history"
+
+
+def test_logs_hooks_filter_keeps_only_connector_hook_lines() -> None:
+    """The Hooks preset narrows any source to connector-hook activity.
+
+    OTEL renders hook lifecycle rows as ``HOOK`` lines and free-form
+    gateway tails carry the ``connector-hook`` action, so the preset
+    matches the ``hook`` token and drops everything else.
+    """
+
+    panel = LogsPanelModel()
+    panel.source = "otel"
+    panel.lines["otel"] = [
+        "12:00:00.000 HOOK   INFO     cursor preToolUse   allow",
+        "12:00:01.000 OTEL   INFO     subsystem=otel transition=completed",
+        "12:00:02.000 CODEX  INFO     codex.notify.session",
+    ]
+
+    panel.set_filter(FILTER_HOOKS)
+    filtered = panel.filtered_lines()
+    assert len(filtered) == 1
+    assert "HOOK" in filtered[0]
+
+
+def test_logs_hooks_filter_is_registered_and_reachable_via_cycle() -> None:
+    assert FILTER_HOOKS in FILTER_PRESETS
+    assert FILTER_LABELS[FILTER_HOOKS] == "Hooks"
+
+    panel = LogsPanelModel()
+    # Key 9 stays free for the global Audit panel hotkey, so Hooks is not
+    # bound to a number key — it must remain reachable by cycling with f.
+    assert panel.handle_key("9").handled is False
+    seen: set[str] = set()
+    for _ in range(len(FILTER_PRESETS)):
+        panel.handle_key("f")
+        seen.add(panel.filter_mode)
+    assert FILTER_HOOKS in seen
+
+    # The Hooks chip is rendered without a number shortcut to avoid
+    # implying the conflicting 9 key.
+    hooks_chip = next(chip for chip in panel.filter_chip_group().chips if chip.value == FILTER_HOOKS)
+    assert hooks_chip.shortcut == ""
 
 
 def test_render_otel_line_collapses_connector_hook_lifecycle_to_summary() -> None:

@@ -14,13 +14,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import pytest
 from defenseclaw.config import RegistrySource
 from defenseclaw.models import Event
-from defenseclaw.tui.app import DefenseClawTUI, _fetch_ai_usage
+from defenseclaw.tui.app import DefenseClawTUI, _event_histogram, _fetch_ai_usage
 from defenseclaw.tui.executor import CommandEvent
 from defenseclaw.tui.panels.ai_discovery import (
     AIDiscoveryPanelModel,
@@ -31,9 +32,16 @@ from defenseclaw.tui.panels.ai_discovery import (
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertsPanelModel
 from defenseclaw.tui.panels.audit import AuditPanelModel
 from defenseclaw.tui.panels.inventory import InventoryPanelModel, InventorySnapshot
-from defenseclaw.tui.panels.logs import LogsPanelModel
+from defenseclaw.tui.panels.logs import FILTER_HOOKS, LogsPanelModel
 from defenseclaw.tui.panels.mcps import MCPRow, MCPsPanelModel
-from defenseclaw.tui.panels.overview import EnforcementCounts, HealthSnapshot, OverviewPanelModel, SubsystemHealth
+from defenseclaw.tui.panels.overview import (
+    ConnectorHealth,
+    EnforcementCounts,
+    HealthSnapshot,
+    OverviewConfig,
+    OverviewPanelModel,
+    SubsystemHealth,
+)
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTab
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
@@ -42,6 +50,7 @@ from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, Cre
 from defenseclaw.tui.widgets.native_metrics import MetricTile, OverviewMetrics
 from rich.text import Text
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.widgets import Button, DataTable, Input, ProgressBar, Sparkline, Static
 
 
@@ -693,6 +702,55 @@ async def test_alerts_panel_renders_table_and_panel_local_keys_win() -> None:
 
 
 @pytest.mark.asyncio
+async def test_long_alert_detail_scrolls_instead_of_clipping() -> None:
+    """A rich alert detail must be fully reachable, not clipped.
+
+    Regression: the detail pane was a bare ``Static`` capped at
+    ``max-height``. Textual statics are not scrollable, so any alert
+    whose detail exceeded the cap (gateway finding block + ids +
+    history) silently lost its tail. The pane is now a
+    ``VerticalScroll`` so the overflow scrolls into view.
+    """
+
+    alerts = AlertsPanelModel()
+    long_details = " ".join(f"field{i}=value-{i}" for i in range(40))
+    alerts.set_events(
+        [
+            AlertEvent(
+                id="a1",
+                severity="CRITICAL",
+                action="scan",
+                target="cursor:preToolUse",
+                details=long_details,
+                run_id="run-" + "x" * 60,
+                trace_id="trace-" + "y" * 60,
+                request_id="req-" + "z" * 60,
+                session_id="sess-" + "w" * 60,
+            )
+        ]
+    )
+    app = DefenseClawTUI(alerts_model=alerts)
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.press("2")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        panel = app.query_one("#detail-panel", VerticalScroll)
+        assert not panel.has_class("hidden")
+        # The full detail is rendered (last field + trailing id rows),
+        # not truncated at the height cap.
+        assert "field39=value-39" in app.detail_text
+        assert "SessionID:" in app.detail_text
+        # Overflow is scrollable, and the bottom is actually reachable.
+        assert panel.max_scroll_y > 0
+        panel.scroll_end(animate=False)
+        await pilot.pause()
+        assert panel.scroll_offset.y > 0
+
+
+@pytest.mark.asyncio
 async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> None:
     alerts = AlertsPanelModel()
     alerts.set_events(
@@ -1207,6 +1265,13 @@ async def test_setup_panel_renders_wizards_and_form() -> None:
         await pilot.click("#panel-table", offset=(2, 4))
         await pilot.pause()
         assert int(setup.active_wizard) == 3
+
+        # Enter opens the goal menu first; a second Enter picks a goal
+        # and opens the filtered form.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert setup.goal_active is True
+        assert "What do you want to do?" in app.body_text
 
         await pilot.press("enter")
         await pilot.pause()
@@ -3138,3 +3203,79 @@ async def test_overview_body_fallback_renders_bracketed_notice_literally() -> No
         await pilot.pause()
         plain = Text.from_markup(app.body_text).plain
         assert "[d]" in plain
+
+
+def test_event_histogram_buckets_recent_events_by_time() -> None:
+    now = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
+    window = timedelta(minutes=10)
+    buckets = 10  # one bucket per minute
+    timestamps = [
+        now - timedelta(seconds=30),  # newest bucket (index 9)
+        now - timedelta(seconds=90),  # bucket 8
+        now - timedelta(seconds=95),  # bucket 8
+        now - timedelta(minutes=20),  # older than the window -> dropped
+        now + timedelta(minutes=1),  # in the future -> dropped
+    ]
+    hist = _event_histogram(timestamps, now=now, buckets=buckets, window=window)
+    assert len(hist) == buckets
+    assert hist[9] == 1.0
+    assert hist[8] == 2.0
+    assert sum(hist) == 3.0
+
+
+def test_event_histogram_handles_empty_and_naive_timestamps() -> None:
+    now = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
+    assert _event_histogram([], now=now, buckets=6, window=timedelta(minutes=6)) == (0.0,) * 6
+    # Naive datetimes are treated as UTC so they still bucket.
+    naive = now.replace(tzinfo=None) - timedelta(seconds=10)
+    hist = _event_histogram([naive], now=now, buckets=6, window=timedelta(minutes=6))
+    assert sum(hist) == 1.0
+
+
+@pytest.mark.asyncio
+async def test_hook_calls_tile_counts_audit_events_and_deeplinks_to_logs() -> None:
+    """Hook Calls reflects connector-hook audit events (not the gateway
+    ``requests`` counter, which stays zero for hook connectors) and the
+    tile drills into the Logs panel pre-filtered to hook activity."""
+
+    cfg = OverviewConfig(data_dir="/tmp/dc", claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="cursor", state="running", requests=0),
+        )
+    )
+    audit = AuditPanelModel()
+    audit.set_events(
+        [
+            Event(
+                id=f"hook-{i}",
+                action="connector-hook",
+                target="preToolUse",
+                severity="INFO",
+                details="connector=cursor action=allow",
+            )
+            for i in range(5)
+        ]
+    )
+    logs = LogsPanelModel()
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit, logs_model=logs)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+
+        metrics = {metric.key: metric for metric in app._overview_metric_data()}
+        assert "hook_calls" in metrics
+        hook_tile = metrics["hook_calls"]
+        # Value comes from the audit events, not the zeroed live counter.
+        assert hook_tile.value == 5
+        assert hook_tile.target_panel == "logs"
+        # The sparkline is a real time histogram with a populated bucket.
+        assert any(bar > 0 for bar in hook_tile.trend)
+
+        await pilot.click("#overview-hook_calls-metric")
+        await pilot.pause()
+        assert app.active_panel == "logs"
+        assert logs.source == "otel"
+        assert logs.filter_mode == FILTER_HOOKS

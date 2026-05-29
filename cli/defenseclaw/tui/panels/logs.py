@@ -49,6 +49,7 @@ FILTER_WARNINGS = "warnings+"
 FILTER_SCAN = "scan"
 FILTER_DRIFT = "drift"
 FILTER_GUARDRAIL = "guardrail"
+FILTER_HOOKS = "hooks"
 
 FILTER_PRESETS: tuple[str, ...] = (
     FILTER_NONE,
@@ -59,6 +60,7 @@ FILTER_PRESETS: tuple[str, ...] = (
     FILTER_SCAN,
     FILTER_DRIFT,
     FILTER_GUARDRAIL,
+    FILTER_HOOKS,
 )
 FILTER_LABELS: dict[str, str] = {
     FILTER_NONE: "All",
@@ -69,7 +71,14 @@ FILTER_LABELS: dict[str, str] = {
     FILTER_SCAN: "Scan",
     FILTER_DRIFT: "Drift",
     FILTER_GUARDRAIL: "Guardrail",
+    FILTER_HOOKS: "Hooks",
 }
+
+# Tokens that mark a line as a connector-hook event. Connector hook
+# lifecycle rows render as ``HOOK`` in the OTEL stream and free-form
+# gateway lines carry the ``connector-hook`` audit action, so matching
+# the ``hook`` substring catches both without a structured event type.
+HOOK_PATTERNS: tuple[str, ...] = ("hook",)
 
 NOISE_PATTERNS: tuple[str, ...] = (
     "event tick seq=",
@@ -374,7 +383,12 @@ class LogsPanelModel:
         return tuple(groups)
 
     def filter_chip_group(self) -> LogChipGroupState:
-        """Return the preset filter row, including number-key shortcuts."""
+        """Return the preset filter row, including number-key shortcuts.
+
+        Only the first eight presets advertise a number shortcut; key 9
+        is reserved for the global Audit panel hotkey, so the Hooks
+        preset is keyless (reached via click or the f cycle).
+        """
 
         chips = tuple(
             LogChipState(
@@ -382,7 +396,7 @@ class LogsPanelModel:
                 value=preset,
                 label=FILTER_LABELS[preset],
                 active=preset == self.filter_mode,
-                shortcut=str(index),
+                shortcut=str(index) if index <= 8 else "",
                 style_key="active-chip" if preset == self.filter_mode else "inactive-chip",
             )
             for index, preset in enumerate(FILTER_PRESETS, start=1)
@@ -739,7 +753,11 @@ class LogsPanelModel:
             old = self.verdict_severity
             self.cycle_verdict_severity()
             return LogPanelAction(True, filter_change=_filter_change(FILTER_TYPE_SEVERITY, old, self.verdict_severity))
-        if key in {str(i) for i in range(1, 9)} and not self.searching:
+        # Filters are bound to number keys 1-8 only. The 9 key is the
+        # global hotkey for the Audit panel, so the Hooks preset (the 9th
+        # entry) is reached via its chip, the f cycle, or the Hook Calls
+        # tile deep-link instead of a conflicting number shortcut.
+        if key in {str(i) for i in range(1, 9)} and not self.searching and int(key) <= len(FILTER_PRESETS):
             old = self.filter_mode
             self.set_filter(FILTER_PRESETS[int(key) - 1])
             return LogPanelAction(True, filter_change=_filter_change(FILTER_TYPE_PRESET, old, self.filter_mode))
@@ -830,6 +848,8 @@ class LogsPanelModel:
             return "drift" in lower_line or "rescan" in lower_line
         if self.filter_mode == FILTER_GUARDRAIL:
             return "guardrail" in lower_line or "guard" in lower_line
+        if self.filter_mode == FILTER_HOOKS:
+            return any(pattern in lower_line for pattern in HOOK_PATTERNS)
         return True
 
     def is_noise(self, lower_line: str) -> bool:

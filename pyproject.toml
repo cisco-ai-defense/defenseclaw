@@ -11,7 +11,7 @@ dependencies = [
     "requests==2.33.0",
     "rich>=13.0",
     "cisco-ai-skill-scanner>=2.0.11",
-    "cisco-ai-mcp-scanner>=4.3; python_version>='3.11'",
+    "cisco-ai-mcp-scanner>=4.7.2; python_version>='3.11'",
     # AWS Bedrock support is bundled. LiteLLM lazy-imports boto3 for
     # SigV4 (iam_credentials / profile / instance_role) and for the
     # Anthropic-on-Bedrock route used by ABSK bearer tokens. Bundling
