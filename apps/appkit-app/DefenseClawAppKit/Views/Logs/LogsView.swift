@@ -4,7 +4,7 @@ import DefenseClawKit
 
 /// Application logs viewer with live tail, filtering, search, and export.
 struct LogsView: View {
-    @State private var filterLevel: LogLevel = .debug
+    @State private var filterLevel: LogLevel = .warn
     @State private var filterCategory: String? = nil
     @State private var searchText = ""
     @State private var autoScroll = true
