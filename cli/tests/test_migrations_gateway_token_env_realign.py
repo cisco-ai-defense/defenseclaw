@@ -6,7 +6,7 @@ Tests for ``_align_gateway_token_env_in_config``: surgically rewrite
 dotenv has ``DEFENSECLAW_GATEWAY_TOKEN`` set.
 
 The migration is wired into the registry at whatever version the
-release manager cuts (currently keyed at 0.6.2 — see migrations.py
+release manager cuts (currently keyed at 0.7.0 — see migrations.py
 for the rationale). Tests use ``_REGISTRY_VERSION`` so re-keying the
 registry needs zero test changes.
 

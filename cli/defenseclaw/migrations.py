@@ -1273,7 +1273,7 @@ def _migrate_0_5_0_strip_codex_enforcement_keys(ctx: MigrationContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Migration: gateway.token_env realignment (registered at version 0.6.2)
+# Migration: gateway.token_env realignment (registered at version 0.7.0)
 # ---------------------------------------------------------------------------
 #
 # The version key in MIGRATIONS is what the cursor uses to decide
@@ -1445,11 +1445,10 @@ MIGRATIONS: list[tuple[str, str, Callable[[MigrationContext], None]]] = [
         _migrate_0_5_0,
     ),
     (
-        # Registered at 0.6.2 because upstream is at 0.6.1 and this
-        # migration ships in the NEXT patch release. The function name
-        # deliberately does NOT mention a version so re-keying here at
-        # merge time (if a different version is cut) needs no rename.
-        "0.6.2",
+        # Ships in the 0.7.0 release. The function name deliberately
+        # does NOT mention a version so re-keying here at merge time
+        # (if a different version is cut) needs no rename.
+        "0.7.0",
         "Repoint legacy gateway.token_env=OPENCLAW_GATEWAY_TOKEN in config.yaml "
         "to the canonical DEFENSECLAW_GATEWAY_TOKEN so the Python CLI and the Go "
         "gateway agree on the env var name (closes the 'gateway token unavailable' "
