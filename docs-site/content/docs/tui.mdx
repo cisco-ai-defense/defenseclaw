@@ -1,0 +1,64 @@
+---
+title: Terminal UI (TUI)
+description: The DefenseClaw terminal UI — a keyboard-driven dashboard over the defenseclaw CLI. How to open it and a tour of the panels.
+keywords:
+  - DefenseClaw TUI
+  - defenseclaw tui
+  - terminal UI
+  - dashboard
+---
+
+The DefenseClaw **TUI** is a full-screen, keyboard-driven dashboard over the
+`defenseclaw` CLI. It surfaces the gateway status, your scanned inventory
+(skills, MCPs, plugins, tools), alerts, logs, audit trail, and setup — all in
+one place. Every action in the TUI maps to a real `defenseclaw` command, so you
+never have to memorize the CLI to drive it.
+
+## Open the TUI
+
+```bash
+defenseclaw tui
+```
+
+That's it. The TUI opens full-screen in your terminal. Use a reasonably large
+window for the best layout. Run `defenseclaw init` first if you haven't yet, so
+the panels have data to show.
+
+<Video
+  src="tui"
+  caption="A quick tour of the DefenseClaw terminal UI: the Overview panel, the tab bar, and the command palette."
+/>
+
+## Panels
+
+Switch panels with the number/letter key shown, or cycle with `Tab` /
+`Shift+Tab`. Press `Ctrl+P` to fuzzy-jump to any panel by name.
+
+| Key | Panel | What it shows |
+| --- | --- | --- |
+| `1` | Overview | Gateway status, active connector/policy, at-a-glance health |
+| `2` | Alerts | Recent guardrail and hook alerts |
+| `3` | Skills | Scanned skill inventory |
+| `4` | MCPs | Scanned MCP servers |
+| `5` | Plugins | Scanned plugins |
+| `6` | Inventory | Combined inventory view |
+| `8` | Logs | Live gateway logs with filter presets |
+| `9` | Audit | Audit trail |
+| `A` | Activity | Live output from commands you run |
+| `T` | Tools | Tool inventory |
+| `V` | AI Discovery | Discovered AI usage |
+| `R` | Registries | Configured registries |
+| `0` | Setup | Connector and gateway setup |
+
+## Handy keys
+
+| Key | Action |
+| --- | --- |
+| `?` | Toggle the help overlay |
+| `Ctrl+K` or `:` | Open the command palette (search-and-run any command) |
+| `Ctrl+P` | Jump to a panel by name |
+| `Ctrl+\` | Theme picker |
+| `D` | Run `defenseclaw doctor` in the background and toast the result |
+| `Y` | Copy the last command's output |
+| `Ctrl+S` | Save the last run to a log file |
+| `Ctrl+C` | Quit the TUI |

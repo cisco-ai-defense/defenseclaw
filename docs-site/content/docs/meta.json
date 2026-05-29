@@ -3,6 +3,7 @@
   "pages": [
     "index",
     "command-generator",
+    "tui",
     "---Get Started---",
     "get-started",
     "---Setup---",
