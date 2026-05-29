@@ -44,6 +44,8 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("windsurf", "Windsurf", "w", False, "Cascade hooks + fail-open block decisions"),
     ModeChoice("geminicli", "Gemini CLI", "g", False, "settings.json hooks + structured deny responses"),
     ModeChoice("copilot", "Copilot", "p", False, "workspace hooks + native pre-tool approval"),
+    ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
+    ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
 )
 
 

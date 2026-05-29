@@ -30,6 +30,8 @@ CONNECTOR_CHOICES: tuple[str, ...] = (
     "windsurf",
     "geminicli",
     "copilot",
+    "openhands",
+    "antigravity",
 )
 PROFILE_CHOICES: tuple[str, ...] = ("observe", "action")
 SCANNER_MODE_CHOICES: tuple[str, ...] = ("local", "remote", "both")
