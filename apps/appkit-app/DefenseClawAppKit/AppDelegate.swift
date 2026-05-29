@@ -12,6 +12,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         log.info("app", "Application launched", details: "pid=\(ProcessInfo.processInfo.processIdentifier)")
 
+        installMainMenu()
+
         // Ensure ~/.defenseclaw/ exists with default config (like `defenseclaw init`)
         do {
             try ConfigManager().ensureInitialized()
@@ -152,5 +154,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func showAdvanced() {
         showSection(.advanced)
+    }
+
+    // MARK: - Main menu
+
+    /// Builds the application main menu. The app launches bare (no MainMenu.xib),
+    /// so without this there are no standard App/Edit/Window commands and no
+    /// keyboard navigation. The Go menu mirrors the TUI's number-key navigation.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        // App menu
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "About DefenseClaw", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Hide DefenseClaw", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "Quit DefenseClaw", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        // Edit menu (standard editing via the responder chain)
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        // Go menu — keyboard navigation to each section (parity with TUI number keys)
+        let goItem = NSMenuItem()
+        mainMenu.addItem(goItem)
+        let goMenu = NSMenu(title: "Go")
+        goItem.submenu = goMenu
+        let sections: [(String, Selector, String)] = [
+            ("Home", #selector(showHome), "1"),
+            ("Setup", #selector(showSetup), "2"),
+            ("Scans", #selector(showScan), "3"),
+            ("Protection", #selector(showProtection), "4"),
+            ("Policy", #selector(showPolicy), "5"),
+            ("Alerts", #selector(showAlerts), "6"),
+            ("Tools", #selector(showTools), "7"),
+            ("Logs", #selector(showLogs), "8")
+        ]
+        for (title, action, key) in sections {
+            let item = goMenu.addItem(withTitle: title, action: action, keyEquivalent: key)
+            item.target = self
+        }
+
+        // Window menu
+        let windowItem = NSMenuItem()
+        mainMenu.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
     }
 }
