@@ -18,6 +18,8 @@ struct ScanView: View {
     @State private var mcpServers: [MCPServer] = []
     @State private var plugins: [Plugin] = []
     @State private var codeTargets = ScanTargetItem.defaultCodeTargets()
+    @State private var targetFilter = ""
+    @State private var targetLayout: ListLayoutMode = .tile
 
     private let commandRunner = LocalCommandRunner()
 
@@ -130,7 +132,7 @@ struct ScanView: View {
 
     private var targetCatalog: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(spacing: 10) {
                 Label("Available \(scanType.pluralLabel)", systemImage: scanType.systemImage)
                     .font(.headline)
                 Spacer()
@@ -138,10 +140,32 @@ struct ScanView: View {
                     ProgressView()
                         .controlSize(.small)
                 } else {
-                    Text("\(targetItems.count)")
+                    Text("\(filteredTargetItems.count) of \(targetItems.count)")
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
+                ListLayoutToggle(mode: $targetLayout)
+            }
+
+            if !targetItems.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Filter \(scanType.pluralLabel.lowercased())", text: $targetFilter)
+                        .textFieldStyle(.plain)
+                    if !targetFilter.isEmpty {
+                        Button {
+                            targetFilter = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
             }
 
             if targetItems.isEmpty {
@@ -151,18 +175,47 @@ struct ScanView: View {
                     description: Text(scanType.emptyDescription)
                 )
                 .frame(maxWidth: .infinity, minHeight: 110)
+            } else if filteredTargetItems.isEmpty {
+                ContentUnavailableView(
+                    "No matches",
+                    systemImage: "line.3.horizontal.decrease.circle",
+                    description: Text("No \(scanType.pluralLabel.lowercased()) match “\(targetFilter)”.")
+                )
+                .frame(maxWidth: .infinity, minHeight: 110)
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 12)], spacing: 12) {
-                    ForEach(targetItems) { item in
-                        ScanTargetCard(
-                            item: item,
-                            isSelected: selectedTargetID == item.id
-                        )
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            select(item)
+                switch targetLayout {
+                case .tile:
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 12)], spacing: 12) {
+                        ForEach(filteredTargetItems) { item in
+                            ScanTargetCard(
+                                item: item,
+                                isSelected: selectedTargetID == item.id
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                select(item)
+                            }
                         }
                     }
+                case .table:
+                    VStack(spacing: 0) {
+                        ForEach(filteredTargetItems) { item in
+                            ScanTargetRow(
+                                item: item,
+                                isSelected: selectedTargetID == item.id
+                            )
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                select(item)
+                            }
+                            Divider()
+                        }
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color(nsColor: .separatorColor).opacity(0.35), lineWidth: 0.5)
+                    )
                 }
             }
         }
@@ -214,6 +267,18 @@ struct ScanView: View {
             }
         case .code:
             return codeTargets
+        }
+    }
+
+    private var filteredTargetItems: [ScanTargetItem] {
+        let query = targetFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else {
+            return targetItems
+        }
+        return targetItems.filter { item in
+            item.title.lowercased().contains(query)
+                || item.subtitle.lowercased().contains(query)
+                || item.badge.lowercased().contains(query)
         }
     }
 
@@ -565,6 +630,46 @@ private struct ScanTargetCard: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(isSelected ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor).opacity(0.35), lineWidth: 0.8)
         )
+    }
+}
+
+private struct ScanTargetRow: View {
+    let item: ScanTargetItem
+    let isSelected: Bool
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: item.kind.systemImage)
+                .foregroundStyle(item.isBlocked ? .red : .accentColor)
+                .frame(width: 18)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.title)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                Text(item.subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 8)
+
+            Text(item.badge)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(item.isBlocked ? .red : .secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background((item.isBlocked ? Color.red : Color.secondary).opacity(0.12), in: Capsule())
+
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
     }
 }
 
