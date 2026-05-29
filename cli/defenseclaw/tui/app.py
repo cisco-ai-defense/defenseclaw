@@ -1286,7 +1286,14 @@ class DefenseClawTUI(App[None]):
             return
 
         if self._handle_active_panel_key(event):
+            # The active panel fully consumed this key, so suppress the
+            # focused DataTable's built-in bindings too. Without
+            # ``prevent_default`` an ``enter`` press ALSO fires the table's
+            # ``enter -> select_cursor`` binding, which posts a second
+            # ``RowSelected`` and re-toggles the detail view — the AI
+            # Discovery detail visibly flickered open/closed on every Enter.
             event.stop()
+            event.prevent_default()
             return
 
         panel = PANEL_SHORTCUTS.get(event.key.lower())

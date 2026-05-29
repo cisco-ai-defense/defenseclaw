@@ -1850,6 +1850,43 @@ async def test_ai_discovery_open_detail_toggles_when_row_selected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ai_discovery_enter_toggles_detail_exactly_once_per_press() -> None:
+    """Each ``enter`` press flips the detail panel exactly once.
+
+    Regression: with the DataTable focused, ``enter`` was handled twice
+    — once by the app's ``on_key`` (which toggled the detail) and again
+    by the table's built-in ``enter -> select_cursor`` binding, which
+    posted a ``RowSelected`` that re-toggled it. The net effect made the
+    detail flicker open/closed on every keypress instead of latching.
+    """
+
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(AIUsageSignal(name="openai-agent", vendor="OpenAI", product="Codex"),),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        assert app.active_panel == "ai"
+        assert ai_model.detail_open is False
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+
+        # Second press must close it — the double-dispatch bug left it
+        # open here because the stray RowSelected toggled it a second time.
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is False
+
+
+@pytest.mark.asyncio
 async def test_ai_discovery_export_without_snapshot_sets_status(tmp_path) -> None:
     """Export with no snapshot leaves disk untouched and posts status.
 
