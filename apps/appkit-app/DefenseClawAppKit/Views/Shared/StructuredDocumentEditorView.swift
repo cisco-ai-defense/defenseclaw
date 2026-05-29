@@ -254,10 +254,7 @@ private struct StructuredValueEditor: View {
         VStack(alignment: .leading, spacing: 6) {
             scalarHeader
             if isSecretLikeString {
-                SecureField("Secret value", text: textBinding)
-                    .textFieldStyle(.roundedBorder)
-                    .privacySensitive()
-                    .disabled(!isEditable)
+                RevealableSecureField(placeholder: "Secret value", text: textBinding, isEditable: isEditable)
                 Text("Masked because this field name looks secret-like. Prefer *_env fields or the Secrets setup flow for normal use.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)

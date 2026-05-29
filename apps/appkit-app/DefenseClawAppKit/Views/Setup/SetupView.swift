@@ -523,11 +523,10 @@ private struct SetupFieldCard: View {
             .labelsHidden()
             .pickerStyle(.menu)
         case .password:
-            SecureField(field.placeholder, text: Binding(
+            RevealableSecureField(placeholder: field.placeholder, text: Binding(
                 get: { model.textBindingValue(for: field) },
                 set: { model.setText($0, for: field) }
             ))
-            .textFieldStyle(.roundedBorder)
         default:
             TextField(field.placeholder, text: Binding(
                 get: { model.textBindingValue(for: field) },
@@ -664,11 +663,10 @@ private struct SetupWorkflowCard: View {
                 .labelsHidden()
                 .pickerStyle(.menu)
             case .password:
-                SecureField("", text: Binding(
+                RevealableSecureField(placeholder: "", text: Binding(
                     get: { model.workflowTextValue(workflow, field: field) },
                     set: { model.setWorkflowText($0, workflow: workflow, field: field) }
                 ))
-                .textFieldStyle(.roundedBorder)
             default:
                 TextField("", text: Binding(
                     get: { model.workflowTextValue(workflow, field: field) },
