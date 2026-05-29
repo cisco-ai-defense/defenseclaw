@@ -98,6 +98,7 @@ from defenseclaw.tui.services.catalog_state import (
     CatalogPanelAction,
     catalog_detail_text,
 )
+from defenseclaw.tui.services.cli_choices import CONNECTORS as _KNOWN_CONNECTORS
 from defenseclaw.tui.services.overview_state import (
     ConnectorHealth,
     HealthSnapshot,
@@ -3648,12 +3649,15 @@ class DefenseClawTUI(App[None]):
     def _overview_metric_data(self) -> tuple[MetricDatum, ...]:
         """Build the metric-tile row for the Overview header.
 
-        For hook-based connectors (claudecode / codex / openclaw) the
-        tiles surface what an operator actually wants to know about a
-        hook-style integration: how many tool calls have been seen, how
-        many were blocked, the severity breakdown of recent findings,
-        and the AI-agent count. For other connectors we fall back to
-        the generic alert / scan / guardrail / agent set.
+        For every known connector (cursor, codex, claudecode, openclaw,
+        windsurf, geminicli, copilot, hermes, zeptoclaw) the tiles
+        surface what an operator actually wants to know about the
+        integration: how many tool calls have been seen, how many were
+        blocked, the severity breakdown of recent findings, and the
+        AI-agent count. The label tracks the active connector name so a
+        cursor deployment reads "Hook Calls (cursor)", not a stale
+        default. When no connector is configured we fall back to the
+        generic alert / scan / guardrail / agent set.
         """
 
         counts = self.overview_model.enforcement
@@ -3716,7 +3720,7 @@ class DefenseClawTUI(App[None]):
 
         is_hook_connector = (
             self.overview_model.cfg is not None
-            and connector in {"claudecode", "codex", "openclaw"}
+            and connector in _KNOWN_CONNECTORS
         )
 
         if is_hook_connector:
