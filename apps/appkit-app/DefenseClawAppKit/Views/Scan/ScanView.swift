@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 import DefenseClawKit
 
 struct ScanView: View {
@@ -86,6 +87,7 @@ struct ScanView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isScanning)
+                .help(runDisabledReason ?? "Run the \(scanType.label.lowercased()) scanner against the selected target")
             }
 
             targetCatalog
@@ -94,9 +96,17 @@ struct ScanView: View {
                 Text("Target")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                TextField(scanType.placeholder, text: $targetPath)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced))
+                HStack(spacing: 8) {
+                    TextField(scanType.placeholder, text: $targetPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced))
+                    Button {
+                        chooseTarget()
+                    } label: {
+                        Label("Browse…", systemImage: "folder")
+                    }
+                    .help("Choose a file or folder to scan")
+                }
             }
 
             if let error {
@@ -278,6 +288,30 @@ struct ScanView: View {
         selectedTargetID = item.id
         targetPath = item.target
         error = nil
+    }
+
+    private var runDisabledReason: String? {
+        if isScanning {
+            return "A scan is already running."
+        }
+        if targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Choose a \(scanType.label.lowercased()) target above, browse for a path, or type one to enable Run."
+        }
+        return nil
+    }
+
+    private func chooseTarget() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Select"
+        panel.message = "Choose a \(scanType.label.lowercased()) target to scan"
+        if panel.runModal() == .OK, let url = panel.url {
+            targetPath = url.path
+            selectedTargetID = nil
+            error = nil
+        }
     }
 
     private func loadTargets() async {
