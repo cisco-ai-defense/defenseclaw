@@ -330,6 +330,19 @@ type LLMConfig struct {
 	// LLMConfig.instance_name field.
 	InstanceName string `mapstructure:"instance_name" yaml:"instance_name,omitempty"`
 
+	// ForwardCustomHeaders controls whether the guardrail gateway
+	// forwards inbound HTTP headers (minus an always-denied blocklist of
+	// proxy-hop, auth, hop-by-hop, cookie, and framework-internal headers)
+	// from the agent on to the upstream LLM provider on both the
+	// /v1/chat/completions and passthrough paths (Responses API,
+	// /v1/messages, etc.).
+	//
+	// Pointer-typed so an absent YAML field round-trips as nil, which is
+	// interpreted as the safe default (enabled). Operators opt out
+	// explicitly with `forward_custom_headers: false`. Use
+	// ForwardCustomHeadersEnabled() to read the effective value.
+	ForwardCustomHeaders *bool `mapstructure:"forward_custom_headers" yaml:"forward_custom_headers,omitempty"`
+
 	// Region is a free-form region/location hint surfaced on the role
 	// (e.g. "us-east-1" for Bedrock, "us-central1" for Vertex). The
 	// per-provider sub-blocks (Bedrock.Region, Vertex.Region) take
@@ -497,6 +510,18 @@ func (l LLMConfig) IsLocalProvider() bool {
 		}
 	}
 	return false
+}
+
+// ForwardCustomHeadersEnabled reports whether the gateway forwards
+// inbound HTTP headers from the agent through to the upstream LLM
+// provider. The feature is enabled by default; nil (unset YAML) is
+// treated as true so existing configs keep working. Operators can
+// opt out with `llm.forward_custom_headers: false`.
+func (l LLMConfig) ForwardCustomHeadersEnabled() bool {
+	if l.ForwardCustomHeaders == nil {
+		return true
+	}
+	return *l.ForwardCustomHeaders
 }
 
 // recognizedLLMProviders lists the "provider/" prefixes the gateway and

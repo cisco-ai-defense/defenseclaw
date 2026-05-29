@@ -86,6 +86,17 @@ llm:
   role: unified                # unified | agent | judge
   instance_name: ""            # binds to a ~/.defenseclaw/custom-providers.json entry; required with provider: custom
   region: ""                   # generic regional hint (Bedrock / Vertex); provider-specific sub-blocks below take precedence
+  # forward_custom_headers controls whether the guardrail gateway
+  # forwards inbound HTTP headers from the agent to the upstream LLM
+  # provider on both /v1/chat/completions and the passthrough path
+  # (/v1/responses, /v1/messages, Bedrock/Gemini native, ...). Default
+  # is on; set to false to suppress all inbound header copying so the
+  # upstream only sees the canonical Authorization the gateway re-mints
+  # from the secrets sidecar. A small blocklist (proxy-hop, auth, host,
+  # X-DC-*, X-DefenseClaw-*, W3C trace context) plus RFC 7230 /
+  # printable-ASCII validation and 64-header / 32 KiB caps apply
+  # regardless. See docs/GUARDRAIL.md → Custom Header Forwarding.
+  forward_custom_headers: true
 
   # Provider-specific sub-blocks. Only the one matching `provider`
   # is consulted; the others may exist as leftover state from a

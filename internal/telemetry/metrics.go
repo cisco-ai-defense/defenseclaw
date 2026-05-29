@@ -134,6 +134,14 @@ type metricsSet struct {
 	// source (go|ts). Kept low-cardinality so Prometheus recording
 	// rules can roll this up per-branch without blowing up TSDB.
 	egressEvents metric.Int64Counter
+
+	// Guardrail per-request agent-to-upstream header forwarding
+	// (llm.forward_custom_headers). Labels: path
+	// (chat-completions|passthrough), result (ok|rejected_invalid|
+	// rejected_overflow). The counter is incremented once per
+	// request: ok records the number of forwarded headers; rejected_*
+	// records 1 so operators can alert on validation-failure rates.
+	forwardedHeaders metric.Int64Counter
 	// External integrations — sink health
 	sinkBatchesDelivered metric.Int64Counter
 	sinkBatchesDropped   metric.Int64Counter
@@ -603,7 +611,18 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 		return nil, err
 	}
 
-	// v7 instruments — external integrations (sink health)
+	// Per-request header forwarding from agent to upstream LLM
+	// provider. Counts forwarded headers on the ok path; counts 1 per
+	// failed request on rejected_* so operators can alert on
+	// validation-failure rates without inflating ok totals.
+	ms.forwardedHeaders, err = m.Int64Counter("defenseclaw.gateway.forwarded_headers",
+		metric.WithUnit("{header}"),
+		metric.WithDescription("Inbound HTTP headers forwarded from the agent to the upstream LLM provider (path=chat-completions|passthrough, result=ok|rejected_invalid|rejected_overflow)"))
+	if err != nil {
+		return nil, err
+	}
+
+	// External integrations — sink health
 	ms.sinkBatchesDelivered, err = m.Int64Counter("defenseclaw.audit.sink.batches.delivered",
 		metric.WithUnit("{batch}"),
 		metric.WithDescription("Audit sink batches acknowledged by remote"))
@@ -1962,6 +1981,28 @@ func (p *Provider) RecordEgress(ctx context.Context, branch, decision, source st
 		attribute.String("branch", branch),
 		attribute.String("decision", decision),
 		attribute.String("source", source),
+	))
+}
+
+// RecordForwardedHeaders records agent-to-upstream header forwarding.
+// Call once per request:
+//   - On success: result="ok", count=number of headers forwarded.
+//   - On validation failure: result="rejected_invalid" or
+//     "rejected_overflow", count=1 (request count, not header count).
+//
+// path is "chat-completions" or "passthrough"; values outside that set
+// are still accepted so the schema validator catches the regression
+// in test rather than the gateway silently dropping the sample.
+func (p *Provider) RecordForwardedHeaders(ctx context.Context, path, result string, count int64) {
+	if !p.Enabled() || p.metrics == nil {
+		return
+	}
+	if count <= 0 {
+		return
+	}
+	p.metrics.forwardedHeaders.Add(ctx, count, metric.WithAttributes(
+		attribute.String("path", path),
+		attribute.String("result", result),
 	))
 }
 
