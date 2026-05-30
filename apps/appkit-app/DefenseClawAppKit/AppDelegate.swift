@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var appViewModel = AppViewModel()
 
     private let log = AppLogger.shared
+    private var engineVersion: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         log.info("app", "Application launched", details: "pid=\(ProcessInfo.processInfo.processIdentifier)")
@@ -169,7 +170,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
         appItem.submenu = appMenu
-        appMenu.addItem(withTitle: "About DefenseClaw", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        let aboutItem = appMenu.addItem(withTitle: "About DefenseClaw", action: #selector(showAboutPanel), keyEquivalent: "")
+        aboutItem.target = self
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Hide DefenseClaw", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
         let hideOthers = appMenu.addItem(withTitle: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
@@ -222,5 +224,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
+        refreshEngineVersion()
+    }
+
+    /// Fetches the DefenseClaw engine (gateway) version asynchronously and
+    /// updates its menu item. Kept distinct from the macOS app bundle version.
+    private func refreshEngineVersion() {
+        Task { [weak self] in
+            let version = await Self.fetchEngineVersion()
+            await MainActor.run {
+                self?.engineVersion = version
+            }
+        }
+    }
+
+    /// Custom About panel showing both the macOS app bundle version and the
+    /// distinct DefenseClaw engine (gateway/CLI) version.
+    @objc private func showAboutPanel() {
+        let appVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
+        let credits = NSAttributedString(
+            string: "DefenseClaw Engine \(engineVersion ?? "checking…")",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor
+            ]
+        )
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .applicationVersion: appVersion,
+            .credits: credits
+        ])
+    }
+
+    private static func fetchEngineVersion() async -> String? {
+        guard let result = try? await LocalCommandRunner().run("defenseclaw-gateway", arguments: ["--version"]),
+              result.exitCode == 0 else {
+            return nil
+        }
+        // e.g. "defenseclaw-gateway version 0.6.1+local-7bdc2ca (commit=…, built=…)"
+        let output = result.standardOutput
+        if let range = output.range(of: "version ") {
+            let rest = output[range.upperBound...]
+            if let token = rest.split(whereSeparator: { $0 == " " || $0 == "\n" }).first {
+                return String(token)
+            }
+        }
+        return output.split(separator: "\n").first.map { String($0).trimmingCharacters(in: .whitespaces) }
     }
 }
