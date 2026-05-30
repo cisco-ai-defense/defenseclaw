@@ -26,9 +26,10 @@ import (
 // side must be made on both; these tests fail loudly if they drift.
 var proxyConnectorNames = []string{"openclaw", "zeptoclaw"}
 
-// hookConnectorNames are the eight hook-based connectors supported on every
+// hookConnectorNames are the hook-based connectors supported on every
 // OS, including Windows.
 var hookConnectorNames = []string{
+	"antigravity",
 	"claudecode",
 	"codex",
 	"copilot",
@@ -94,7 +95,7 @@ func TestConnectorSupportedOnOS(t *testing.T) {
 
 // TestRegistryNamesFilterToHookConnectorsOnWindows takes the full built-in
 // registry (Available() returns all connectors on this non-Windows host) and
-// asserts that applying the Windows OS filter yields exactly the eight hook
+// asserts that applying the Windows OS filter yields exactly the hook
 // connectors, with both proxy connectors removed.
 func TestRegistryNamesFilterToHookConnectorsOnWindows(t *testing.T) {
 	reg := NewDefaultRegistry()

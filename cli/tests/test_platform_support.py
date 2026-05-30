@@ -48,7 +48,7 @@ from defenseclaw.tui.services.cli_choices import (
 # made here too; the assertions below fail loudly if the two drift.
 PROXY_CONNECTORS = {"openclaw", "zeptoclaw"}
 
-# The eight hook-based connectors supported on every OS, including Windows.
+# The hook-based connectors supported on every OS, including Windows.
 HOOK_CONNECTORS = {
     "codex",
     "claudecode",
@@ -58,6 +58,7 @@ HOOK_CONNECTORS = {
     "geminicli",
     "copilot",
     "openhands",
+    "antigravity",
 }
 
 
@@ -73,7 +74,7 @@ def test_proxy_set_agrees_with_existing_python_sources() -> None:
     assert set(_PROXY_BACKED_CONNECTORS) == PROXY_CONNECTORS
 
 
-def test_hook_enforced_set_is_the_eight_hook_connectors() -> None:
+def test_hook_enforced_set_is_the_hook_connectors() -> None:
     assert set(_HOOK_ENFORCED_CONNECTORS) == HOOK_CONNECTORS
 
 
