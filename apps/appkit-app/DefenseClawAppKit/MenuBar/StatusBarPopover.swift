@@ -101,6 +101,8 @@ struct StatusBarPopover: View {
             appDelegate.showProtection()
         case .scan:
             appDelegate.showScan()
+        case .inventory:
+            appDelegate.showInventory()
         case .policy:
             appDelegate.showPolicy()
         case .alerts:

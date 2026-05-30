@@ -133,6 +133,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         showSection(.scan)
     }
 
+    @objc func showInventory() {
+        showSection(.inventory)
+    }
+
     @objc func showPolicy() {
         showSection(.policy)
     }
@@ -207,7 +211,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ("Policy", #selector(showPolicy), "5"),
             ("Alerts", #selector(showAlerts), "6"),
             ("Tools", #selector(showTools), "7"),
-            ("Logs", #selector(showLogs), "8")
+            ("Logs", #selector(showLogs), "8"),
+            ("Inventory", #selector(showInventory), "9")
         ]
         for (title, action, key) in sections {
             let item = goMenu.addItem(withTitle: title, action: action, keyEquivalent: key)

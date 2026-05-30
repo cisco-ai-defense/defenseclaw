@@ -5,6 +5,7 @@ enum OperatorSection: String, CaseIterable, Identifiable {
     case setup
     case protection
     case scan
+    case inventory
     case policy
     case alerts
     case operations
@@ -18,6 +19,7 @@ enum OperatorSection: String, CaseIterable, Identifiable {
         case .setup: return "Setup"
         case .protection: return "Protection"
         case .scan: return "Scans"
+        case .inventory: return "Inventory"
         case .policy: return "Policy"
         case .alerts: return "Alerts"
         case .operations: return "Operations"
@@ -31,6 +33,7 @@ enum OperatorSection: String, CaseIterable, Identifiable {
         case .setup: return "Wizards and integrations"
         case .protection: return "Guardrails and enforcement"
         case .scan: return "Skills, MCPs, plugins, code"
+        case .inventory: return "Installed skills, MCPs, and plugins"
         case .policy: return "Rich policy editors"
         case .alerts: return "Audit and findings"
         case .operations: return "Diagnostics, logs, services"
@@ -44,6 +47,7 @@ enum OperatorSection: String, CaseIterable, Identifiable {
         case .setup: return "wand.and.stars"
         case .protection: return "shield.checkered"
         case .scan: return "magnifyingglass"
+        case .inventory: return "square.stack.3d.up"
         case .policy: return "doc.text.magnifyingglass"
         case .alerts: return "bell.badge"
         case .operations: return "stethoscope"
@@ -108,6 +112,8 @@ struct OperatorConsoleView: View {
             ProtectionView()
         case .scan:
             ScanView()
+        case .inventory:
+            InventoryView()
         case .policy:
             PolicyView()
         case .alerts:
