@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "preToolUse",
+  "session_id": "dc-e2e-cursor",
+  "turn_id": "dc-e2e-turn",
+  "agent_id": "cursor-e2e",
+  "agent_name": "cursor e2e agent",
+  "agent_type": "cursor-cli",
+  "tool_name": "run_terminal_cmd",
+  "tool_input": {
+    "command": "cat /etc/shadow"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "BeforeTool",
+  "session_id": "dc-e2e-geminicli",
+  "turn_id": "dc-e2e-turn",
+  "agent_id": "geminicli-e2e",
+  "agent_name": "geminicli e2e agent",
+  "agent_type": "geminicli-cli",
+  "tool_name": "RunShellCommand",
+  "tool_input": {
+    "command": "cat /etc/shadow"
+  }
+}

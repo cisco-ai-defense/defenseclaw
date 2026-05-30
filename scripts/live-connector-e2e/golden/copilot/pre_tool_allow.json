@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "dc-e2e-copilot",
+  "turn_id": "dc-e2e-turn",
+  "agent_id": "copilot-e2e",
+  "agent_name": "copilot e2e agent",
+  "agent_type": "copilot-cli",
+  "tool_name": "shell",
+  "tool_input": {
+    "command": "echo dc-contract-allow"
+  }
+}
