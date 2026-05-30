@@ -2238,8 +2238,17 @@ class DefenseClawTUI(App[None]):
         # strip honest after refresh loops add new alerts / audit
         # entries while the operator is parked on a different panel.
         self._update_tab_labels()
-        self.query_one("#activity", RichLog).set_class(self.active_panel != "activity", "hidden")
-        body_widget = self.query_one("#body", Static)
+        # A catalog-load worker (or the periodic refresh) can reach here
+        # after the screen has begun tearing down, at which point #activity
+        # and #body are gone and query_one raises NoMatches — surfacing as
+        # WorkerFailed and intermittently failing the TUI catalog tests.
+        # Bail out quietly; there is nothing left to render.
+        try:
+            activity = self.query_one("#activity", RichLog)
+            body_widget = self.query_one("#body", Static)
+        except NoMatches:
+            return
+        activity.set_class(self.active_panel != "activity", "hidden")
         if self.active_panel == "overview" and not self.help_open:
             renderable = self._overview_renderable()
             body_widget.update(renderable)
