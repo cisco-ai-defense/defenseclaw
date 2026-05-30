@@ -583,6 +583,18 @@ private func targetReason(blocked: Bool, quarantined: Bool, enabled: Bool) -> St
     return nil
 }
 
+/// Status-relevant color for a target badge so states are distinguishable at a glance.
+private func targetStatusColor(_ badge: String) -> Color {
+    switch badge {
+    case "Blocked": return .red
+    case "Quarantined": return .orange
+    case "Enabled", "Running": return .green
+    case "Configured": return .blue
+    case "Disabled": return .gray
+    default: return .secondary
+    }
+}
+
 private struct ScanTargetItem: Identifiable {
     let id: String
     let kind: ScanTarget
@@ -644,10 +656,10 @@ private struct ScanTargetCard: View {
             HStack(spacing: 8) {
                 Text(item.badge)
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(item.isBlocked ? .red : .secondary)
+                    .foregroundStyle(targetStatusColor(item.badge))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background((item.isBlocked ? Color.red : Color.secondary).opacity(0.12), in: Capsule())
+                    .background(targetStatusColor(item.badge).opacity(0.12), in: Capsule())
                 Spacer()
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
@@ -679,10 +691,10 @@ private struct ScanTargetDetail: View {
                 Spacer()
                 Text(item.badge)
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(item.isBlocked ? .red : .secondary)
+                    .foregroundStyle(targetStatusColor(item.badge))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background((item.isBlocked ? Color.red : Color.secondary).opacity(0.12), in: Capsule())
+                    .background(targetStatusColor(item.badge).opacity(0.12), in: Capsule())
             }
 
             detailRow("Path", item.target)
@@ -748,10 +760,10 @@ private struct ScanTargetRow: View {
 
             Text(item.badge)
                 .font(.caption2.weight(.semibold))
-                .foregroundStyle(item.isBlocked ? .red : .secondary)
+                .foregroundStyle(targetStatusColor(item.badge))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 3)
-                .background((item.isBlocked ? Color.red : Color.secondary).opacity(0.12), in: Capsule())
+                .background(targetStatusColor(item.badge).opacity(0.12), in: Capsule())
 
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
