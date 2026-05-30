@@ -4351,6 +4351,21 @@ class DefenseClawTUI(App[None]):
         if hidden:
             return
 
+        # The #command-progress container can briefly exist without its child
+        # widgets during a panel-switch re-render: Textual mounts the parent
+        # before (re)attaching the composed children, and the 0.25s
+        # _tick_command_strip timer can fire inside that window. The child
+        # queries below would then raise NoMatches and take down the worker
+        # (the parent guard above only covers the container). Probe the first
+        # child up front and bail if the inner DOM isn't ready yet — the
+        # children compose as one unit and this method is synchronous, so once
+        # the probe resolves they all stay mounted for the rest of the render.
+        # The next tick repaints cleanly once the DOM settles.
+        try:
+            self.query_one("#command-progress-icon", Static)
+        except NoMatches:
+            return
+
         panel.set_class(self._strip_state == "running", "running")
         panel.set_class(self._strip_state == "success", "success")
         panel.set_class(self._strip_state == "failure", "failure")
