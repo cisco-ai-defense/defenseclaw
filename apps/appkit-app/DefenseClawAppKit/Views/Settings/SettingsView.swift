@@ -725,10 +725,10 @@ struct EnforcementView: View {
             } else {
                 HSplitView {
                     itemList
-                        .frame(minWidth: 520)
+                        .frame(minWidth: 340)
 
                     detailPanel
-                        .frame(minWidth: 360, idealWidth: 420)
+                        .frame(minWidth: 280, idealWidth: 420)
                 }
             }
         }
@@ -790,7 +790,6 @@ struct EnforcementView: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(18)
-        .padding(.leading, 72)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 

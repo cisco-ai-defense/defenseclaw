@@ -42,7 +42,7 @@ struct ManagedTextFileWorkspaceView: View {
                 .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
 
             editor
-                .frame(minWidth: 440)
+                .frame(minWidth: 360)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: model.categoryFilter) { _, _ in model.selectFirstFilteredIfNeeded() }
