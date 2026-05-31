@@ -39,10 +39,10 @@ struct ManagedTextFileWorkspaceView: View {
     var body: some View {
         HSplitView {
             sidebar
-                .frame(minWidth: 280, idealWidth: 320, maxWidth: 380)
+                .frame(minWidth: 260, idealWidth: 280, maxWidth: 360)
 
             editor
-                .frame(minWidth: 360)
+                .frame(minWidth: 340)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .onChange(of: model.categoryFilter) { _, _ in model.selectFirstFilteredIfNeeded() }

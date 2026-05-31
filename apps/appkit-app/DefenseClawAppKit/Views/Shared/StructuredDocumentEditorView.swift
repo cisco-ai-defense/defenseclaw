@@ -408,10 +408,12 @@ private struct StructuredValueEditor: View {
                 .foregroundStyle(.secondary)
             Text(title)
                 .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
             Text(subtitle)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Spacer()
+                .lineLimit(1)
+            Spacer(minLength: 8)
             typePicker(for: $value)
         }
     }
