@@ -64,6 +64,7 @@ final class OperatorNavigationModel {
 struct OperatorConsoleView: View {
     @Environment(AppViewModel.self) private var appViewModel
     let navigation: OperatorNavigationModel
+    @State private var sidebarCompact = false
 
     private var selection: Binding<OperatorSection?> {
         Binding(
@@ -81,24 +82,58 @@ struct OperatorConsoleView: View {
             if appViewModel.firstRunCompleted {
                 NavigationSplitView {
                     List(selection: selection) {
-                        Section("DefenseClaw") {
+                        Section {
                             ForEach(OperatorSection.allCases) { section in
-                                OperatorSidebarRow(section: section)
+                                OperatorSidebarRow(section: section, compact: sidebarCompact)
                                     .tag(section)
+                            }
+                        } header: {
+                            if !sidebarCompact {
+                                Text("DefenseClaw")
                             }
                         }
                     }
                     .listStyle(.sidebar)
-                    .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 320)
+                    .navigationSplitViewColumnWidth(sidebarCompact ? 64 : 260)
+                    .toolbar {
+                        ToolbarItem(placement: .navigation) {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.15)) { sidebarCompact.toggle() }
+                            } label: {
+                                Image(systemName: "sidebar.left")
+                            }
+                            .help(sidebarCompact ? "Show sidebar labels" : "Collapse sidebar to icons")
+                        }
+                    }
                 } detail: {
                     detailView
                         .navigationTitle(navigation.selection.title)
                 }
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onChange(of: geo.size.width) { _, width in
+                                updateSidebarCompaction(for: width)
+                            }
+                            .onAppear { updateSidebarCompaction(for: geo.size.width) }
+                    }
+                )
             } else {
                 FirstRunSetupView(navigation: navigation, appViewModel: appViewModel)
             }
         }
-        .frame(minWidth: 1040, minHeight: 720)
+        .frame(minWidth: 800, minHeight: 720)
+    }
+
+    /// Auto-collapse the sidebar to an icon rail when the window is too narrow
+    /// to show it docked alongside the detail content (instead of overlaying).
+    private func updateSidebarCompaction(for width: CGFloat) {
+        let shouldCompact = width < 980
+        if shouldCompact != sidebarCompact {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                sidebarCompact = shouldCompact
+            }
+        }
     }
 
     @ViewBuilder
@@ -128,22 +163,35 @@ struct OperatorConsoleView: View {
 
 private struct OperatorSidebarRow: View {
     let section: OperatorSection
+    var compact: Bool = false
 
     var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: section.systemImage)
-                .foregroundStyle(.secondary)
-                .frame(width: 16)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(section.title)
-                    .lineLimit(1)
-                Text(section.subtitle)
-                    .font(.caption)
+        if compact {
+            HStack {
+                Spacer(minLength: 0)
+                Image(systemName: section.systemImage)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .frame(width: 22)
+                Spacer(minLength: 0)
             }
+            .padding(.vertical, 6)
+            .help(section.title)
+        } else {
+            HStack(spacing: 10) {
+                Image(systemName: section.systemImage)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 16)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(section.title)
+                        .lineLimit(1)
+                    Text(section.subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.vertical, 2)
         }
-        .padding(.vertical, 2)
     }
 }
