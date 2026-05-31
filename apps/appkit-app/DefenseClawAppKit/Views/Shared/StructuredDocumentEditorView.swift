@@ -255,6 +255,7 @@ private struct StructuredValueEditor: View {
             scalarHeader
             if isSecretLikeString {
                 RevealableSecureField(placeholder: "Secret value", text: textBinding, isEditable: isEditable)
+                    .id(label)
                 Text("Masked because this field name looks secret-like. Prefer *_env fields or the Secrets setup flow for normal use.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)

@@ -26,6 +26,7 @@ struct InventoryView: View {
         }
         .frame(minWidth: 760, minHeight: 480)
         .task { await load() }
+        .onChange(of: category) { _, _ in selectedID = nil }
     }
 
     private var header: some View {
@@ -39,6 +40,12 @@ struct InventoryView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                if let loadError {
+                    Label("Partial data", systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                        .font(.caption.weight(.semibold))
+                        .help(loadError)
+                }
                 Button {
                     Task { await load() }
                 } label: {
@@ -239,7 +246,9 @@ struct InventoryView: View {
 
     private func loadPlugins() async throws -> [Plugin] {
         let result = try await commandRunner.run("defenseclaw", arguments: ["plugin", "list", "--json"])
-        guard result.exitCode == 0 else { return [] }
+        guard result.exitCode == 0 else {
+            throw InventoryError.pluginListFailed(result.combinedOutput)
+        }
         let output = result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
         guard output.first == "[" || output.first == "{" else { return [] }
         let decoder = JSONDecoder()
@@ -283,6 +292,17 @@ private struct InventoryItem: Identifiable {
     let isBlocked: Bool
     let statusReason: String?
     let lastScan: ScanSummary?
+}
+
+private enum InventoryError: LocalizedError {
+    case pluginListFailed(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .pluginListFailed(let output):
+            return output.isEmpty ? "defenseclaw plugin list failed." : output
+        }
+    }
 }
 
 private struct InventoryPluginResponse: Decodable {
