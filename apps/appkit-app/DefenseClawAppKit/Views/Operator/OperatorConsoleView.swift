@@ -95,16 +95,6 @@ struct OperatorConsoleView: View {
                     }
                     .listStyle(.sidebar)
                     .navigationSplitViewColumnWidth(sidebarCompact ? 64 : 260)
-                    .toolbar {
-                        ToolbarItem(placement: .navigation) {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.15)) { sidebarCompact.toggle() }
-                            } label: {
-                                Image(systemName: "sidebar.left")
-                            }
-                            .help(sidebarCompact ? "Show sidebar labels" : "Collapse sidebar to icons")
-                        }
-                    }
                 } detail: {
                     detailView
                         .navigationTitle(navigation.selection.title)
