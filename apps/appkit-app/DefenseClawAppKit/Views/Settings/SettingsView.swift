@@ -359,8 +359,46 @@ struct GuardrailSettingsView: View {
     private let liveModes = ["observe", "action"]
     private let liveScannerModeOptions = ["local", "remote", "both"]
 
+    private var guardrailStatusBanner: some View {
+        let color: Color
+        let title: String
+        let detail: String
+        if !enabled {
+            color = .red
+            title = "Guardrail disabled"
+            detail = "No requests are scanned or blocked."
+        } else if liveMode == "action" {
+            color = .green
+            title = "Action mode — blocking"
+            detail = "Scanning and blocking malicious requests. Scanner: \(liveScannerMode.capitalized)."
+        } else {
+            color = .orange
+            title = "Observe mode — monitoring"
+            detail = "Scanning and logging threats; requests are not blocked. Scanner: \(liveScannerMode.capitalized)."
+        }
+        return HStack(spacing: 10) {
+            Image(systemName: enabled ? "shield.fill" : "shield.slash")
+                .foregroundStyle(color)
+                .font(.title3)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.headline)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(12)
+        .background(color.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+    }
+
     var body: some View {
         Form {
+            Section {
+                guardrailStatusBanner
+            }
+
             // Master enable/disable — equivalent to `defenseclaw setup guardrail --disable --restart`
             Section("Guardrail") {
                 Toggle("Enable Guardrail", isOn: $enabled)
