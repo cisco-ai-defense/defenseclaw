@@ -97,8 +97,6 @@ struct ScanView: View {
                 ScanTargetDetail(item: selectedTarget)
             }
 
-            targetCatalog
-
             VStack(alignment: .leading, spacing: 6) {
                 Text("Target")
                     .font(.caption.weight(.semibold))
@@ -121,10 +119,12 @@ struct ScanView: View {
             } else if let targetLoadMessage {
                 ScanNoticeBanner(message: targetLoadMessage)
             } else if targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("Select a target above or enter a path manually.")
+                Text("Choose a target from the list below or enter a path manually.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            targetCatalog
         }
         .padding(18)
         .background(Color(nsColor: .controlBackgroundColor))
