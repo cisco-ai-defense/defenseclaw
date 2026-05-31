@@ -744,13 +744,14 @@ struct EnforcementView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Enforcement")
                         .font(.title2.weight(.semibold))
+                        .lineLimit(1)
                     Text("Block, allow, unblock, and review skills, MCP servers, plugins, and tools from one operator surface.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
-                .layoutPriority(1)
 
-                Spacer()
+                Spacer(minLength: 12)
 
                 Button {
                     Task { await loadData() }
@@ -789,7 +790,7 @@ struct EnforcementView: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(18)
-        .padding(.leading, 18)
+        .padding(.leading, 72)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
