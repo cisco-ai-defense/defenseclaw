@@ -64,7 +64,6 @@ final class OperatorNavigationModel {
 struct OperatorConsoleView: View {
     @Environment(AppViewModel.self) private var appViewModel
     let navigation: OperatorNavigationModel
-    @State private var sidebarCompact = false
 
     private var selection: Binding<OperatorSection?> {
         Binding(
@@ -80,50 +79,35 @@ struct OperatorConsoleView: View {
     var body: some View {
         Group {
             if appViewModel.firstRunCompleted {
-                NavigationSplitView {
-                    List(selection: selection) {
-                        Section {
-                            ForEach(OperatorSection.allCases) { section in
-                                OperatorSidebarRow(section: section, compact: sidebarCompact)
-                                    .tag(section)
-                            }
-                        } header: {
-                            if !sidebarCompact {
-                                Text("DefenseClaw")
+                GeometryReader { geo in
+                    // Collapse to the icon rail exactly when a full sidebar (260)
+                    // would no longer leave the detail its minimum width (~720).
+                    let compact = geo.size.width < 980
+                    NavigationSplitView {
+                        List(selection: selection) {
+                            Section {
+                                ForEach(OperatorSection.allCases) { section in
+                                    OperatorSidebarRow(section: section, compact: compact)
+                                        .tag(section)
+                                }
+                            } header: {
+                                if !compact {
+                                    Text("DefenseClaw")
+                                }
                             }
                         }
+                        .listStyle(.sidebar)
+                        .navigationSplitViewColumnWidth(compact ? 72 : 260)
+                    } detail: {
+                        detailView
+                            .navigationTitle(navigation.selection.title)
                     }
-                    .listStyle(.sidebar)
-                    .navigationSplitViewColumnWidth(sidebarCompact ? 64 : 260)
-                } detail: {
-                    detailView
-                        .navigationTitle(navigation.selection.title)
                 }
-                .background(
-                    GeometryReader { geo in
-                        Color.clear
-                            .onChange(of: geo.size.width) { _, width in
-                                updateSidebarCompaction(for: width)
-                            }
-                            .onAppear { updateSidebarCompaction(for: geo.size.width) }
-                    }
-                )
             } else {
                 FirstRunSetupView(navigation: navigation, appViewModel: appViewModel)
             }
         }
         .frame(minWidth: 800, minHeight: 720)
-    }
-
-    /// Auto-collapse the sidebar to an icon rail when the window is too narrow
-    /// to show it docked alongside the detail content (instead of overlaying).
-    private func updateSidebarCompaction(for width: CGFloat) {
-        let shouldCompact = width < 980
-        if shouldCompact != sidebarCompact {
-            withAnimation(.easeInOut(duration: 0.15)) {
-                sidebarCompact = shouldCompact
-            }
-        }
     }
 
     @ViewBuilder
@@ -157,15 +141,12 @@ private struct OperatorSidebarRow: View {
 
     var body: some View {
         if compact {
-            HStack {
-                Spacer(minLength: 0)
-                Image(systemName: section.systemImage)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 22)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 6)
-            .help(section.title)
+            Image(systemName: section.systemImage)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 6)
+                .help(section.title)
         } else {
             HStack(spacing: 10) {
                 Image(systemName: section.systemImage)
