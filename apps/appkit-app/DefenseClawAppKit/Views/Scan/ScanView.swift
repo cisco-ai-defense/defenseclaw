@@ -28,7 +28,6 @@ struct ScanView: View {
             VStack(alignment: .leading, spacing: 18) {
                 header
                 scanForm
-                resultsCard
             }
             .padding(24)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -91,6 +90,8 @@ struct ScanView: View {
                 .disabled(targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isScanning)
                 .help(runDisabledReason ?? "Run the \(scanType.label.lowercased()) scanner against the selected target")
             }
+
+            resultsCard
 
             targetCatalog
 
