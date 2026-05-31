@@ -32,6 +32,33 @@ struct LogsView: View {
     // MARK: - Toolbar
 
     private var toolbar: some View {
+        // One row when it fits; otherwise filters on one row and search +
+        // actions on the next. (No Spacer in the wide candidate — it would
+        // make the width infinite so ViewThatFits could never pick it.)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                logsFilterControls
+                logsSearchField
+                logsActions
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    logsFilterControls
+                    Spacer(minLength: 0)
+                }
+                HStack(spacing: 12) {
+                    logsSearchField
+                    logsActions
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private var logsFilterControls: some View {
         HStack(spacing: 12) {
             Text("LOGS")
                 .font(.system(.headline, design: .monospaced))
@@ -60,31 +87,34 @@ struct LogsView: View {
                 }
             }
             .frame(maxWidth: 130)
+        }
+    }
 
-            // Search
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search logs...", text: $searchText)
-                    .textFieldStyle(.plain)
-                if !searchText.isEmpty {
-                    Button {
-                        searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.borderless)
+    private var logsSearchField: some View {
+        HStack {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search logs...", text: $searchText)
+                .textFieldStyle(.plain)
+            if !searchText.isEmpty {
+                Button {
+                    searchText = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.borderless)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color(nsColor: .textBackgroundColor))
-            .cornerRadius(6)
-            .frame(maxWidth: 200)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .textBackgroundColor))
+        .cornerRadius(6)
+        .frame(maxWidth: 200)
+    }
 
-            Spacer()
-
+    private var logsActions: some View {
+        HStack(spacing: 12) {
             // Auto-scroll toggle
             Toggle(isOn: $autoScroll) {
                 Image(systemName: "arrow.down.to.line")
@@ -100,9 +130,6 @@ struct LogsView: View {
                     .font(.caption)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
 
     // MARK: - Log Table
