@@ -761,30 +761,20 @@ struct EnforcementView: View {
                 .disabled(isLoading)
             }
 
-            HStack(spacing: 10) {
-                countChip("Items", items.count, .blue)
-                countChip("Blocked", blockedList.count, .red)
-                countChip("Allowed", allowedList.count, .green)
-                countChip("Plugins", plugins.count, .purple)
-
-                Spacer()
-
-                Picker("Status", selection: $statusFilter) {
-                    ForEach(statusOptions, id: \.self) { option in
-                        Text(option).tag(option)
+            // One row when it fits; otherwise chips scroll horizontally and the
+            // filter controls drop to their own row. (No Spacer in the wide
+            // candidate — a Spacer makes its width infinite so ViewThatFits
+            // would never pick it.)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) {
+                    countChipsRow
+                    filterControls
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        countChipsRow
                     }
-                }
-                .frame(width: 140)
-
-                if isLoading {
-                    ProgressView()
-                        .controlSize(.small)
-                }
-
-                if !errorMessage.isEmpty {
-                    Label("Partial data", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.caption.weight(.semibold))
+                    filterControls
                 }
             }
 
@@ -799,8 +789,39 @@ struct EnforcementView: View {
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
         }
         .padding(18)
-        .padding(.leading, 72)
+        .padding(.leading, 18)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var countChipsRow: some View {
+        HStack(spacing: 10) {
+            countChip("Items", items.count, .blue)
+            countChip("Blocked", blockedList.count, .red)
+            countChip("Allowed", allowedList.count, .green)
+            countChip("Plugins", plugins.count, .purple)
+        }
+    }
+
+    private var filterControls: some View {
+        HStack(spacing: 10) {
+            Picker("Status", selection: $statusFilter) {
+                ForEach(statusOptions, id: \.self) { option in
+                    Text(option).tag(option)
+                }
+            }
+            .frame(width: 140)
+
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+            }
+
+            if !errorMessage.isEmpty {
+                Label("Partial data", systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                    .font(.caption.weight(.semibold))
+            }
+        }
     }
 
     private var enforcementUnavailable: some View {
