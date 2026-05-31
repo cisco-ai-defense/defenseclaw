@@ -728,7 +728,7 @@ struct EnforcementView: View {
                         .frame(minWidth: 340)
 
                     detailPanel
-                        .frame(minWidth: 280, idealWidth: 420)
+                        .frame(minWidth: 280, idealWidth: 300)
                 }
             }
         }
@@ -913,6 +913,37 @@ struct EnforcementView: View {
         }
     }
 
+    @ViewBuilder
+    private func enforcementActions(for item: EnforcementItem) -> some View {
+        Button {
+            Task { await block(item) }
+        } label: {
+            Label("Block", systemImage: "hand.raised.fill")
+        }
+        .disabled(item.isBlocked)
+
+        Button {
+            Task { await allow(item) }
+        } label: {
+            Label("Allow", systemImage: "checkmark.shield")
+        }
+        .disabled(item.isAllowed)
+
+        Button(role: .destructive) {
+            Task { await unblock(item) }
+        } label: {
+            Label("Unblock", systemImage: "xmark.shield")
+        }
+        .disabled(!item.isBlocked)
+
+        Button {
+            Task { await unallow(item) }
+        } label: {
+            Label("Remove Allow", systemImage: "minus.circle")
+        }
+        .disabled(!item.isAllowed)
+    }
+
     private var detailPanel: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -965,34 +996,13 @@ struct EnforcementView: View {
             }
             detailRow("Identifier", item.id)
 
-            HStack {
-                Button {
-                    Task { await block(item) }
-                } label: {
-                    Label("Block", systemImage: "hand.raised.fill")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    enforcementActions(for: item)
                 }
-                .disabled(item.isBlocked)
-
-                Button {
-                    Task { await allow(item) }
-                } label: {
-                    Label("Allow", systemImage: "checkmark.shield")
+                VStack(alignment: .leading, spacing: 8) {
+                    enforcementActions(for: item)
                 }
-                .disabled(item.isAllowed)
-
-                Button(role: .destructive) {
-                    Task { await unblock(item) }
-                } label: {
-                    Label("Unblock", systemImage: "xmark.shield")
-                }
-                .disabled(!item.isBlocked)
-
-                Button {
-                    Task { await unallow(item) }
-                } label: {
-                    Label("Remove Allow", systemImage: "minus.circle")
-                }
-                .disabled(!item.isAllowed)
             }
         }
         .padding(14)
