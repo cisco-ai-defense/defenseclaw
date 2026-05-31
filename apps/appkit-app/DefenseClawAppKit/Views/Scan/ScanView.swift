@@ -93,11 +93,11 @@ struct ScanView: View {
 
             resultsCard
 
-            targetCatalog
-
             if let selectedTarget {
                 ScanTargetDetail(item: selectedTarget)
             }
+
+            targetCatalog
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Target")
@@ -367,6 +367,12 @@ struct ScanView: View {
     }
 
     private func select(_ item: ScanTargetItem) {
+        // Toggle: clicking the selected item again deselects it.
+        if selectedTargetID == item.id {
+            selectedTargetID = nil
+            targetPath = ""
+            return
+        }
         scanType = item.kind
         selectedTargetID = item.id
         targetPath = item.target
