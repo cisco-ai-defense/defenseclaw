@@ -251,100 +251,113 @@ struct ManagedTextFileWorkspaceView: View {
         }
     }
 
+    @ViewBuilder
+    private func editorTitleBlock(for file: ManagedTextFile) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text(file.displayName)
+                    .font(.title3.weight(.semibold))
+                    .lineLimit(1)
+
+                fileBadge(file.kind.rawValue, color: .blue)
+                fileBadge(file.source.rawValue, color: sourceColor(file.source))
+                if !file.isEditable {
+                    fileBadge("Read-only", color: .secondary)
+                }
+                if model.isDirty {
+                    fileBadge("Unsaved", color: .orange)
+                }
+            }
+
+            Text(file.relativePath)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 12) {
+                Label(file.category, systemImage: "folder")
+                Label(file.group, systemImage: "square.grid.2x2")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func editorControls(for file: ManagedTextFile) -> some View {
+        HStack(spacing: 8) {
+            if supportsRichEditor(file) {
+                Picker("Editor", selection: $editorMode) {
+                    ForEach(ManagedDocumentEditorMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+                .help("Switch between rich controls and source editing")
+            }
+
+            Button {
+                reveal(file)
+            } label: {
+                Image(systemName: "folder")
+            }
+            .help("Reveal in Finder")
+
+            Button {
+                copyPath(file)
+            } label: {
+                Image(systemName: "doc.on.doc")
+            }
+            .help("Copy path")
+
+            Button {
+                model.loadSelectedFile()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .disabled(model.isLoading)
+            .help("Reload file")
+
+            Button {
+                model.validateContent()
+            } label: {
+                Image(systemName: "checkmark.seal")
+            }
+            .help("Validate")
+
+            Button {
+                model.revert()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .disabled(!model.isDirty)
+            .help("Revert changes")
+
+            if file.isEditable {
+                Button {
+                    model.save()
+                } label: {
+                    Image(systemName: "square.and.arrow.down")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.isDirty || model.isSaving)
+                .help("Save")
+            }
+        }
+    }
+
     private func editorHeader(for file: ManagedTextFile) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 8) {
-                        Text(file.displayName)
-                            .font(.title3.weight(.semibold))
-                            .lineLimit(1)
-
-                        fileBadge(file.kind.rawValue, color: .blue)
-                        fileBadge(file.source.rawValue, color: sourceColor(file.source))
-                        if !file.isEditable {
-                            fileBadge("Read-only", color: .secondary)
-                        }
-                        if model.isDirty {
-                            fileBadge("Unsaved", color: .orange)
-                        }
-                    }
-
-                    Text(file.relativePath)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-
-                    HStack(spacing: 12) {
-                        Label(file.category, systemImage: "folder")
-                        Label(file.group, systemImage: "square.grid.2x2")
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 12) {
+                    editorTitleBlock(for: file)
+                    editorControls(for: file)
                 }
-
-                Spacer()
-
-                    HStack(spacing: 8) {
-                    if supportsRichEditor(file) {
-                        Picker("Editor", selection: $editorMode) {
-                            ForEach(ManagedDocumentEditorMode.allCases) { mode in
-                                Text(mode.rawValue).tag(mode)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: 180)
-                        .help("Switch between rich controls and source editing")
-                    }
-
-                    Button {
-                        reveal(file)
-                    } label: {
-                        Image(systemName: "folder")
-                    }
-                    .help("Reveal in Finder")
-
-                    Button {
-                        copyPath(file)
-                    } label: {
-                        Image(systemName: "doc.on.doc")
-                    }
-                    .help("Copy path")
-
-                    Button {
-                        model.loadSelectedFile()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .disabled(model.isLoading)
-                    .help("Reload file")
-
-                    Button {
-                        model.validateContent()
-                    } label: {
-                        Image(systemName: "checkmark.seal")
-                    }
-                    .help("Validate")
-
-                    Button {
-                        model.revert()
-                    } label: {
-                        Image(systemName: "arrow.uturn.backward")
-                    }
-                    .disabled(!model.isDirty)
-                    .help("Revert changes")
-
-                    if file.isEditable {
-                        Button {
-                            model.save()
-                        } label: {
-                            Image(systemName: "square.and.arrow.down")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(!model.isDirty || model.isSaving)
-                        .help("Save")
-                    }
+                VStack(alignment: .leading, spacing: 10) {
+                    editorTitleBlock(for: file)
+                    editorControls(for: file)
                 }
             }
 
