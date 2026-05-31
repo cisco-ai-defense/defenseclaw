@@ -242,9 +242,9 @@ struct ScanView: View {
                     title: skill.name,
                     subtitle: skill.path ?? "No path reported",
                     target: skill.path ?? skill.name,
-                    badge: targetBadge(blocked: skill.blocked, quarantined: skill.quarantined, enabled: skill.enabled),
+                    badge: catalogBadge(blocked: skill.blocked, quarantined: skill.quarantined, enabled: skill.enabled),
                     isBlocked: skill.blocked || skill.quarantined,
-                    statusReason: targetReason(blocked: skill.blocked, quarantined: skill.quarantined, enabled: skill.enabled),
+                    statusReason: catalogReason(blocked: skill.blocked, quarantined: skill.quarantined, enabled: skill.enabled),
                     lastScan: skill.lastScan
                 )
             }
@@ -270,9 +270,9 @@ struct ScanView: View {
                     title: plugin.name,
                     subtitle: plugin.pluginDescription ?? plugin.path ?? plugin.source ?? "Plugin",
                     target: plugin.path ?? plugin.id,
-                    badge: targetBadge(blocked: plugin.blocked, quarantined: plugin.quarantined, enabled: plugin.enabled),
+                    badge: catalogBadge(blocked: plugin.blocked, quarantined: plugin.quarantined, enabled: plugin.enabled),
                     isBlocked: plugin.blocked || plugin.quarantined,
-                    statusReason: targetReason(blocked: plugin.blocked, quarantined: plugin.quarantined, enabled: plugin.enabled),
+                    statusReason: catalogReason(blocked: plugin.blocked, quarantined: plugin.quarantined, enabled: plugin.enabled),
                     lastScan: plugin.lastScan
                 )
             }
@@ -577,31 +577,6 @@ private enum ScanCommandError: LocalizedError {
     }
 }
 
-private func targetBadge(blocked: Bool, quarantined: Bool, enabled: Bool) -> String {
-    if blocked { return "Blocked" }
-    if quarantined { return "Quarantined" }
-    return enabled ? "Enabled" : "Disabled"
-}
-
-private func targetReason(blocked: Bool, quarantined: Bool, enabled: Bool) -> String? {
-    if quarantined { return "Quarantined — isolated by a scan or policy decision." }
-    if blocked { return "Blocked by policy or allowlist." }
-    if !enabled { return "Disabled — present but not active." }
-    return nil
-}
-
-/// Status-relevant color for a target badge so states are distinguishable at a glance.
-private func targetStatusColor(_ badge: String) -> Color {
-    switch badge {
-    case "Blocked": return .red
-    case "Quarantined": return .orange
-    case "Enabled", "Running": return .green
-    case "Configured": return .blue
-    case "Disabled": return .gray
-    default: return .secondary
-    }
-}
-
 private struct ScanTargetItem: Identifiable {
     let id: String
     let kind: ScanTarget
@@ -661,12 +636,7 @@ private struct ScanTargetCard: View {
             }
 
             HStack(spacing: 8) {
-                Text(item.badge)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(targetStatusColor(item.badge))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(targetStatusColor(item.badge).opacity(0.12), in: Capsule())
+                CatalogStatusPill(badge: item.badge)
                 Spacer()
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
@@ -696,12 +666,7 @@ private struct ScanTargetDetail: View {
                     .font(.headline)
                     .lineLimit(1)
                 Spacer()
-                Text(item.badge)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(targetStatusColor(item.badge))
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .background(targetStatusColor(item.badge).opacity(0.12), in: Capsule())
+                CatalogStatusPill(badge: item.badge)
             }
 
             detailRow("Path", item.target)
@@ -765,12 +730,7 @@ private struct ScanTargetRow: View {
 
             Spacer(minLength: 8)
 
-            Text(item.badge)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(targetStatusColor(item.badge))
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(targetStatusColor(item.badge).opacity(0.12), in: Capsule())
+            CatalogStatusPill(badge: item.badge)
 
             if isSelected {
                 Image(systemName: "checkmark.circle.fill")
