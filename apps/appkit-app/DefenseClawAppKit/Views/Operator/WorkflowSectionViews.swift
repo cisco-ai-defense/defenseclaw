@@ -30,7 +30,7 @@ struct ProtectionView: View {
                 }
                 .tag(ProtectionTab.advancedConfig)
         }
-        .frame(minWidth: 980, idealWidth: 1120, minHeight: 650, idealHeight: 760)
+        .frame(minWidth: 720, idealWidth: 1120, minHeight: 650, idealHeight: 760)
     }
 }
 
@@ -58,7 +58,7 @@ struct OperationsView: View {
                     Label("Services", systemImage: "network")
                 }
         }
-        .frame(minWidth: 980, idealWidth: 1120, minHeight: 650, idealHeight: 760)
+        .frame(minWidth: 720, idealWidth: 1120, minHeight: 650, idealHeight: 760)
     }
 }
 
@@ -108,7 +108,7 @@ struct AdvancedView: View {
                 }
                 .tag(AdvancedTab.tools)
         }
-        .frame(minWidth: 980, idealWidth: 1120, minHeight: 650, idealHeight: 760)
+        .frame(minWidth: 720, idealWidth: 1120, minHeight: 650, idealHeight: 760)
     }
 }
 
