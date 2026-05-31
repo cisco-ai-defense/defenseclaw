@@ -69,7 +69,7 @@ struct ScanView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 480)
+                .frame(maxWidth: 480)
                 .onChange(of: scanType) { _, _ in
                     selectedTargetID = nil
                 }

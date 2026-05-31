@@ -1606,12 +1606,14 @@ struct DiagnosticsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("System Diagnostics")
                         .font(.title2.weight(.semibold))
+                        .lineLimit(1)
                     Text("Install, backend health, subsystem status, logs, and repair commands for a self-contained macOS app.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
 
-                Spacer()
+                Spacer(minLength: 12)
 
                 if let lastRefresh {
                     Text("Updated \(lastRefresh.formatted(date: .omitted, time: .standard))")
