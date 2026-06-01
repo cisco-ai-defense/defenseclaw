@@ -31,7 +31,7 @@
 
 </div>
 
-| Govern | Inspect | Prove |
+| Govern | Inspect | Probe |
 |--------|---------|-------|
 | Skills, MCP servers, plugins, and generated code before they run | Prompts, completions, tool calls, and sandbox activity at runtime | SQLite audit history, JSONL, OTLP, Splunk, webhooks, and TUI views |
 
