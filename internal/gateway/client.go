@@ -95,7 +95,7 @@ func (c *Client) wsURL() string {
 	return u.String()
 }
 
-// Connect establishes the WebSocket connection and completes the protocol v3
+// Connect establishes the WebSocket connection and completes the protocol v3/v4
 // handshake including device challenge-response authentication.
 func (c *Client) Connect(ctx context.Context) error {
 	target := c.wsURL()
@@ -135,7 +135,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.startHandshakeEventBuffer()
 	go c.readLoop()
 
-	fmt.Fprintf(os.Stderr, "[gateway] sending connect (protocol=3, role=operator, device=%s) ...\n",
+	fmt.Fprintf(os.Stderr, "[gateway] sending connect (protocol=3-4, role=operator, device=%s) ...\n",
 		c.device.DeviceID)
 	hello, err := c.sendConnect(ctx, nonce)
 	buf := c.stopHandshakeEventBuffer()
@@ -262,7 +262,7 @@ func (c *Client) sendConnect(ctx context.Context, nonce string) (*HelloOK, error
 
 	params := map[string]interface{}{
 		"minProtocol": 3,
-		"maxProtocol": 3,
+		"maxProtocol": 4,
 		"client": map[string]interface{}{
 			"id":       clientID,
 			"version":  "1.0.0",
