@@ -349,6 +349,7 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 		}
 	}
 
+	extraHeaders := llm.ExtraHeaders
 	if inst != nil {
 		if baseURL == "" {
 			baseURL = strings.TrimRight(inst.BaseURL, "/")
@@ -361,6 +362,9 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 				CACertPEM:          inst.TLS.CACertPEM,
 				InsecureSkipVerify: inst.TLS.InsecureSkipVerify,
 			}
+		}
+		if len(inst.ExtraHeaders) > 0 && len(extraHeaders) == 0 {
+			extraHeaders = inst.ExtraHeaders
 		}
 		if effBedrock == nil && inst.Bedrock != nil {
 			effBedrock = &config.BedrockKeyConfig{
@@ -418,14 +422,15 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 	}
 
 	return &bifrostProvider{
-		providerKey: providerKey,
-		model:       modelID,
-		apiKey:      apiKey,
-		baseURL:     baseURL,
-		tls:         tls,
-		bedrock:     effBedrock,
-		vertex:      effVertex,
-		azure:       effAzure,
+		providerKey:  providerKey,
+		model:        modelID,
+		apiKey:       apiKey,
+		baseURL:      baseURL,
+		tls:          tls,
+		extraHeaders: extraHeaders,
+		bedrock:      effBedrock,
+		vertex:       effVertex,
+		azure:        effAzure,
 	}, nil
 }
 

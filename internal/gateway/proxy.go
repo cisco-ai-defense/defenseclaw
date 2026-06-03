@@ -34,6 +34,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/time/rate"
@@ -684,10 +685,16 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// X-DC-Target-URL. Ask the active connector to resolve the
 	// upstream from its provider snapshot before bailing.
 	connForwardKey := ""
+	connExtraHeaders := map[string]string{}
 	if targetOrigin == "" {
-		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
-			targetOrigin = connUpstream
-			connForwardKey = connKey
+		if cs := hydrateConnectorSignalsFull(p.connector, r, body); cs != nil {
+			if cs.RawUpstream != "" {
+				targetOrigin = cs.RawUpstream
+				connForwardKey = cs.RawAPIKey
+			}
+			if cs.ExtraHeaders != nil {
+				connExtraHeaders = cs.ExtraHeaders
+			}
 		}
 	}
 	// Direct-provider fallback: when neither the fetch interceptor nor a
@@ -1061,38 +1068,51 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// (notably Anthropic) reject the request with 400 "unexpected EOF".
 	upstreamReq.ContentLength = int64(len(body))
 
-	// Copy all original headers except proxy-hop, auth, and internal
-	// DefenseClaw correlation headers.
+	// Forward inbound headers to the upstream provider, minus a
+	// hardened blocklist (proxy-hop, auth, framework-internal,
+	// hop-by-hop, cookies, W3C trace context). See
+	// internal/gateway/forward_headers.go for the policy.
 	//
-	//   - Auth headers (Authorization, x-api-key, api-key) are stripped to
-	//     avoid duplicates — the resolved upstreamAuth is set as the single
-	//     canonical Authorization header below.
-	//   - Content-Length is stripped because notification injection can
-	//     change the body size; upstreamReq.ContentLength is the
-	//     authoritative value (set above) and the Go http client writes
-	//     the correct header automatically.
-	//   - Internal DefenseClaw correlation headers (x-dc-*, x-defenseclaw-*)
-	//     MUST NOT leak to third-party LLM providers — they carry session,
-	//     agent, policy, and destination identifiers that are internal
-	//     metadata, and echoing them in provider logs creates a privacy
-	//     and operational-security regression.
-	//   - W3C trace context (traceparent/tracestate) is also internal and
-	//     not meaningful to upstream providers; strip to avoid cross-tenant
-	//     trace correlation leakage.
-	for k, vs := range r.Header {
-		lk := strings.ToLower(k)
-		switch lk {
-		case "x-dc-target-url", "x-ai-auth", "x-dc-auth", "host",
-			"authorization", "x-api-key", "api-key", "content-length",
-			"traceparent", "tracestate":
-			continue
+	// Toggled by llm.forward_custom_headers (default on). When
+	// disabled, the upstream request gets only the canonical
+	// Authorization re-set below — useful for operators who want zero
+	// header leakage from the agent to the provider.
+	forwardedHeaderCount := 0
+	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
+		n, herr := CopyForwardableHeaders(upstreamReq.Header, r.Header)
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: header forwarding rejected: %v\n", herr)
+			p.otel.RecordForwardedHeaders(r.Context(), "passthrough", resultForHeaderError(herr), 1)
+			writeOpenAIError(w, httpStatusForHeaderError(herr), "invalid forwarded headers: "+herr.Error())
+			return
 		}
-		if strings.HasPrefix(lk, "x-dc-") || strings.HasPrefix(lk, "x-defenseclaw-") {
-			continue
+		forwardedHeaderCount += n
+		// Merge connector-supplied headers (currently unused by built-in
+		// connectors, but ZeptoClaw/Codex/etc. may declare per-provider
+		// headers via ConnectorSignals.ExtraHeaders). Connector-supplied
+		// values overwrite same-named inbound values; same blocklist
+		// applies. Failure here is a misconfigured connector — return
+		// the same error so the operator notices.
+		if len(connExtraHeaders) > 0 {
+			m, merr := MergeConnectorExtraHeaders(upstreamReq.Header, connExtraHeaders)
+			if merr != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] passthrough: connector-extra header rejected: %v\n", merr)
+				p.otel.RecordForwardedHeaders(r.Context(), "passthrough", resultForHeaderError(merr), 1)
+				writeOpenAIError(w, httpStatusForHeaderError(merr), "invalid connector-extra headers: "+merr.Error())
+				return
+			}
+			forwardedHeaderCount += m
 		}
-		for _, v := range vs {
-			upstreamReq.Header.Add(k, v)
+	}
+	if forwardedHeaderCount > 0 {
+		// Per-request count is debug-only by default. The OTel counter
+		// (defenseclaw.gateway.forwarded_headers) carries the steady-state
+		// signal; this stderr line is opt-in for local triage via
+		// DEFENSECLAW_DEBUG=1. Header names and values are never logged.
+		if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+			fmt.Fprintf(os.Stderr, "[guardrail] passthrough: forwarded_header_count=%d\n", forwardedHeaderCount)
 		}
+		p.otel.RecordForwardedHeaders(r.Context(), "passthrough", "ok", int64(forwardedHeaderCount))
 	}
 	// Set the single resolved auth header for the upstream provider.
 	if upstreamAuth != "" {
@@ -1725,14 +1745,26 @@ func (p *GuardrailProxy) resolveDirectProviderUpstreamKey(ctx context.Context, c
 // Returning ("", "") means "no opinion" — the caller must leave req.TargetURL
 // / req.TargetAPIKey alone so fetch-interceptor paths still work.
 func hydrateConnectorSignals(conn connector.Connector, r *http.Request, body []byte) (string, string) {
-	if conn == nil {
-		return "", ""
-	}
-	cs, err := conn.Route(r, body)
-	if err != nil || cs == nil {
+	cs := hydrateConnectorSignalsFull(conn, r, body)
+	if cs == nil {
 		return "", ""
 	}
 	return cs.RawUpstream, cs.RawAPIKey
+}
+
+// hydrateConnectorSignalsFull is the variant used by call sites that
+// also need ExtraHeaders (e.g. the header-forwarding path on both
+// chat/completions and passthrough). Returns nil when there is no
+// active connector or it returned an error.
+func hydrateConnectorSignalsFull(conn connector.Connector, r *http.Request, body []byte) *connector.ConnectorSignals {
+	if conn == nil {
+		return nil
+	}
+	cs, err := conn.Route(r, body)
+	if err != nil {
+		return nil
+	}
+	return cs
 }
 
 // resolveProviderFromHeaders selects the upstream LLMProvider for the given
@@ -1894,14 +1926,58 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	// request arrives without X-DC-Target-URL / X-AI-Auth. Ask the active
 	// connector to resolve them from its captured config snapshot. Existing
 	// header values win — fetch-interceptor paths are unchanged.
+	chatConnExtraHeaders := map[string]string{}
 	if !localKeyResolutionDisabled {
-		if connUpstream, connKey := hydrateConnectorSignals(p.connector, r, body); connUpstream != "" {
-			if req.TargetURL == "" {
-				req.TargetURL = connUpstream
+		if cs := hydrateConnectorSignalsFull(p.connector, r, body); cs != nil {
+			if cs.RawUpstream != "" {
+				if req.TargetURL == "" {
+					req.TargetURL = cs.RawUpstream
+				}
+				if req.TargetAPIKey == "" {
+					req.TargetAPIKey = cs.RawAPIKey
+				}
 			}
-			if req.TargetAPIKey == "" {
-				req.TargetAPIKey = connKey
+			if cs.ExtraHeaders != nil {
+				chatConnExtraHeaders = cs.ExtraHeaders
 			}
+		}
+	}
+
+	// Forward inbound HTTP headers to the upstream provider via
+	// Bifrost's per-request schemas.BifrostContextKeyExtraHeaders
+	// context value (honored by every Bifrost provider through
+	// providers/utils/utils.go:SetExtraHeaders). Same blocklist /
+	// validation / caps as the passthrough path. Toggled by
+	// llm.forward_custom_headers (default on).
+	if p.cfg != nil && p.cfg.LLM.ForwardCustomHeadersEnabled() {
+		fwd := http.Header{}
+		n, herr := CopyForwardableHeaders(fwd, r.Header)
+		if herr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] chat: header forwarding rejected: %v\n", herr)
+			p.otel.RecordForwardedHeaders(r.Context(), "chat-completions", resultForHeaderError(herr), 1)
+			writeOpenAIError(w, httpStatusForHeaderError(herr), "invalid forwarded headers: "+herr.Error())
+			return
+		}
+		if len(chatConnExtraHeaders) > 0 {
+			m, merr := MergeConnectorExtraHeaders(fwd, chatConnExtraHeaders)
+			if merr != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] chat: connector-extra header rejected: %v\n", merr)
+				p.otel.RecordForwardedHeaders(r.Context(), "chat-completions", resultForHeaderError(merr), 1)
+				writeOpenAIError(w, httpStatusForHeaderError(merr), "invalid connector-extra headers: "+merr.Error())
+				return
+			}
+			n += m
+		}
+		if len(fwd) > 0 {
+			r = r.WithContext(context.WithValue(r.Context(),
+				schemas.BifrostContextKeyExtraHeaders,
+				map[string][]string(fwd)))
+			// Debug-only per-request count; opt in with DEFENSECLAW_DEBUG=1.
+			// OTel counter carries the steady-state signal.
+			if os.Getenv("DEFENSECLAW_DEBUG") == "1" {
+				fmt.Fprintf(os.Stderr, "[guardrail] chat: forwarded_header_count=%d\n", n)
+			}
+			p.otel.RecordForwardedHeaders(r.Context(), "chat-completions", "ok", int64(n))
 		}
 	}
 
