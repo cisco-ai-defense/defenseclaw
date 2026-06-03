@@ -21,6 +21,7 @@ from rich.markup import escape as rich_escape
 
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
+    split_connector_token,
     structured_detail_rows,
 )
 from defenseclaw.tui.services.gateway_events import (
@@ -224,6 +225,11 @@ class AlertsPanelModel:
         self.detail_open = False
         self.cursor = 0
         self.filtered: list[AlertRow] = []
+        # 8.13 multi-connector: shared connector filter ("" = All) and the
+        # CONNECTOR column flag. Set by the app from the active connector
+        # count; single-connector installs keep defaults (no filter/column).
+        self.connector_filter = ""
+        self.show_connector_column = False
 
     def set_data_dir(self, data_dir: Path | str | None) -> None:
         """Late-bind the gateway.jsonl source after a config reload."""
@@ -293,18 +299,40 @@ class AlertsPanelModel:
 
     def apply_filter(self) -> None:
         query = self.filter_text.lower()
+        # E5: support the same ``connector:<name>`` token the Audit panel
+        # uses, so operators filter alerts by connector with one syntax
+        # across panels. The token is pulled out and matched against the
+        # event's kv connector; the remainder keeps the legacy substring
+        # search so existing free-text queries behave unchanged.
+        connector_value, remaining = split_connector_token(query)
         filtered: list[AlertRow] = []
         for row in self.flat_rows():
             event = row.event
             if self.severity_filter and _severity_bucket(event.severity) != self.severity_filter:
                 continue
-            if query:
+            ev_connector = parse_kv_details(event.details).get("connector", "").lower()
+            # 8.13: the shared connector filter (from the chip) is ANDed with
+            # the typed ``connector:`` token so both narrow the same way.
+            if self.connector_filter and self.connector_filter not in ev_connector:
+                continue
+            if connector_value and connector_value not in ev_connector:
+                continue
+            if remaining:
                 haystack = f"{event.severity} {event.action} {event.target} {event.details}".lower()
-                if query not in haystack:
+                if remaining not in haystack:
                     continue
             filtered.append(row)
         self.filtered = filtered
         self.cursor = min(self.cursor, max(len(self.filtered) - 1, 0))
+
+    def set_connector_filter(self, connector: str) -> None:
+        """Set the shared connector filter ("" = All) and re-apply filters."""
+
+        connector = (connector or "").strip().lower()
+        if connector == self.connector_filter:
+            return
+        self.connector_filter = connector
+        self.apply_filter()
 
     def set_filter(self, text: str) -> None:
         self.filter_text = text
@@ -536,6 +564,8 @@ class AlertsPanelModel:
         )
 
     def data_table_columns(self) -> tuple[str, ...]:
+        if self.show_connector_column:
+            return ("Sel", "Severity", "Time", "Action", "Connector", "Target", "Details")
         return ("Sel", "Severity", "Time", "Action", "Target", "Details")
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
@@ -554,14 +584,26 @@ class AlertsPanelModel:
                 marker = ">"
             target_cell = _alert_target_label(event)
             details_cell = _alert_details_label(event)
-            cells = (
-                marker,
-                event.severity,
-                event.timestamp.strftime("%b %d %H:%M"),
-                event.action,
-                target_cell,
-                details_cell,
-            )
+            if self.show_connector_column:
+                connector_cell = parse_kv_details(event.details).get("connector", "").strip() or "—"
+                cells = (
+                    marker,
+                    event.severity,
+                    event.timestamp.strftime("%b %d %H:%M"),
+                    event.action,
+                    connector_cell,
+                    target_cell,
+                    details_cell,
+                )
+            else:
+                cells = (
+                    marker,
+                    event.severity,
+                    event.timestamp.strftime("%b %d %H:%M"),
+                    event.action,
+                    target_cell,
+                    details_cell,
+                )
             rows.append(
                 AlertTableRow(
                     key=_alert_row_key(row),

@@ -158,22 +158,38 @@ def status(app: AppContext) -> None:
     )
     from defenseclaw.commands import hint
 
+    # Resolve the active-connector roster once. With 2+ connectors we render a
+    # single "Agents" section (one line per connector + effective mode, the
+    # primary annotated with live /health counters); with 0/1 we keep the
+    # historical single "Agent:" block so single-connector output is unchanged.
+    try:
+        actives = [c for c in (cfg.active_connectors() if hasattr(cfg, "active_connectors") else []) if c]
+    except Exception:
+        actives = []
+    multi = len(actives) > 1
+
     if client.is_running():
         _status_row("Sidecar", ux._style("running", fg="green"))
-        _print_connected_agent(bind, cfg.gateway.api_port)
+        if multi:
+            _print_agents(cfg, bind, cfg.gateway.api_port)
+        else:
+            _print_connected_agent(bind, cfg.gateway.api_port)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
         )
     else:
         _status_row("Sidecar", ux._style("not running", fg="yellow"))
-        # Even when the sidecar is down, show the *configured* agent
+        # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        configured = cfg.active_connector() if hasattr(cfg, "active_connector") else (cfg.claw.mode or "openclaw")
-        _status_row(
-            "Agent",
-            f"{_friendly_connector_name(configured)} ({configured})" + ux.dim(" — configured, not connected"),
-        )
+        if multi:
+            _print_agents(cfg)
+        else:
+            configured = cfg.active_connector() if hasattr(cfg, "active_connector") else (cfg.claw.mode or "openclaw")
+            _status_row(
+                "Agent",
+                f"{_friendly_connector_name(configured)} ({configured})" + ux.dim(" — configured, not connected"),
+            )
         hint("Start sidecar:  defenseclaw-gateway start")
 
 
@@ -221,14 +237,86 @@ def _connector_scope_text(cfg) -> str:
     return "global user config"
 
 
-def _print_connected_agent(host: str, port: int) -> None:
-    """Read /health and surface the active-connector block.
+def _print_agents(cfg, host: str | None = None, port: int | None = None) -> None:
+    """Render the multi-connector "Agents" roster as one section.
 
-    Failure modes are intentionally swallowed — the sidecar may have
-    just come up, or the operator may be on an old gateway build that
-    pre-dates the connector field. We never want `defenseclaw status`
-    to error because of an optional UX line.
+    Config-derived (``active_connectors()`` + ``GuardrailConfig.effective_mode``)
+    so it lists every active connector and its effective mode regardless of
+    sidecar state. A no-op for the common single-connector install (the caller
+    renders the legacy single ``Agent:`` block in that case).
+
+    When ``host``/``port`` are supplied and the sidecar is up, *every*
+    connector is annotated with its own live state and counters (read from
+    ``/health`` ``connectors[]``). There is no privileged "primary" — each
+    active agent reports its own tally. This folds what used to be a separate
+    single ``Agent:`` block plus a standalone ``Connectors:`` row into one
+    place to look.
     """
+    try:
+        actives = [c for c in (cfg.active_connectors() if hasattr(cfg, "active_connectors") else []) if c]
+    except Exception:
+        actives = []
+    if len(actives) <= 1:
+        return
+
+    health_map = _fetch_health_connectors(host, port) if host and port else {}
+
+    gc = getattr(cfg, "guardrail", None)
+
+    def _is_enabled(name: str) -> bool:
+        # An explicit ``enabled: false`` override (set by
+        # ``guardrail disable --connector X``) means the connector was torn
+        # down and is no longer enforcing. Default True so single-connector
+        # installs and never-disabled connectors keep reading as active.
+        if gc is None or not hasattr(gc, "effective_enabled"):
+            return True
+        try:
+            return bool(gc.effective_enabled(name))
+        except Exception:
+            return True
+
+    enabled_count = sum(1 for c in actives if _is_enabled(c))
+    disabled_count = len(actives) - enabled_count
+    header = f"{enabled_count} active"
+    if disabled_count:
+        header += f", {disabled_count} disabled"
+    _status_row("Agents", header)
+    for conn in actives:
+        mode = ""
+        if gc is not None and hasattr(gc, "effective_mode"):
+            try:
+                mode = (gc.effective_mode(conn) or "").strip()
+            except Exception:
+                mode = ""
+        friendly = _friendly_connector_name(conn)
+        if not _is_enabled(conn):
+            # Operator-disabled: hooks were torn down, so there is no live
+            # health entry. Mark it explicitly rather than letting it fall to
+            # the dim "not reporting" branch, which is indistinguishable from a
+            # connector the sidecar simply hasn't surfaced yet.
+            disabled_label = ux._style("DISABLED", fg="yellow")
+            click.echo(
+                f"                {ux.dim(f'{friendly} ({conn}) — mode={mode or '?'}')} — {disabled_label}"
+            )
+            continue
+        hc = health_map.get(conn.strip().lower())
+        if hc:
+            suffix = _connector_state_verb(str(hc.get("state") or ""))
+            click.echo(f"                {friendly} ({conn}) — mode={mode or '?'}{suffix}")
+            _print_agent_counters(hc, indent="                  ")
+        else:
+            click.echo(f"                {ux.dim(f'{friendly} ({conn}) — mode={mode or '?'}')}")
+
+
+def _fetch_health(host: str | None, port: int | None) -> dict | None:
+    """Return the parsed ``/health`` document (or ``None``).
+
+    Failures are intentionally swallowed — the sidecar may have just come up,
+    or the operator may be on an old gateway build. We never want
+    ``defenseclaw status`` to error because of an optional UX line.
+    """
+    if not host or not port:
+        return None
     try:
         import json as _json
         import urllib.request as _urlreq
@@ -238,35 +326,65 @@ def _print_connected_agent(host: str, port: int) -> None:
         with _urlreq.urlopen(req, timeout=3) as resp:  # noqa: S310 — loopback only
             data = _json.loads(resp.read().decode("utf-8"))
     except Exception:
-        return
+        return None
+    return data if isinstance(data, dict) else None
 
+
+def _fetch_health_connector(host: str | None, port: int | None) -> dict | None:
+    """Return the primary/active connector dict from ``/health`` (or ``None``)."""
+    data = _fetch_health(host, port)
     conn = data.get("connector") if isinstance(data, dict) else None
-    if not isinstance(conn, dict):
-        _status_row("Agent", ux.dim("(no active connector)"))
-        return
+    return conn if isinstance(conn, dict) else None
 
-    name = str(conn.get("name") or "").strip()
-    state = str(conn.get("state") or "").strip().upper()
-    friendly = _friendly_connector_name(name)
 
-    # Color the state verb to match the rest of the row family:
-    # RUNNING green, anything else yellow (dormant / starting / etc.).
-    # Errors are surfaced via the requests/errors line below; the
-    # state verb stays advisory.
-    state_text = ""
-    if state:
-        if state in ("RUNNING", "ACTIVE", "READY", "UP"):
-            state_text = " — " + ux._style(state, fg="green")
-        else:
-            state_text = " — " + ux._style(state, fg="yellow")
+def _fetch_health_connectors(host: str | None, port: int | None) -> dict[str, dict]:
+    """Map ``connector-name`` → its ``ConnectorHealth`` from ``/health``.
 
-    _status_row("Agent", f"{friendly} ({name}){state_text}")
+    Reads the per-connector ``connectors[]`` array so every active connector
+    can render its own live counters. Falls back to folding in the singular
+    ``connector`` field so an older gateway (which only reports the primary)
+    still surfaces at least that connector's counters.
+    """
+    data = _fetch_health(host, port)
+    if not isinstance(data, dict):
+        return {}
+    out: dict[str, dict] = {}
+    conns = data.get("connectors")
+    if isinstance(conns, list):
+        for c in conns:
+            if isinstance(c, dict):
+                nm = str(c.get("name") or "").strip().lower()
+                if nm:
+                    out[nm] = c
+    single = data.get("connector")
+    if isinstance(single, dict):
+        nm = str(single.get("name") or "").strip().lower()
+        if nm and nm not in out:
+            out[nm] = single
+    return out
 
+
+def _connector_state_verb(state: str) -> str:
+    """Format a connector state as a colored ``— STATE`` suffix.
+
+    RUNNING green, anything else yellow (dormant / starting / etc.). Empty
+    state yields an empty string so callers can append unconditionally.
+    """
+    s = (state or "").strip().upper()
+    if not s:
+        return ""
+    if s in ("RUNNING", "ACTIVE", "READY", "UP"):
+        return " — " + ux._style(s, fg="green")
+    return " — " + ux._style(s, fg="yellow")
+
+
+def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
+    """Print the tool-inspection + request/blocks counter lines for a connector."""
     tool_mode = str(conn.get("tool_inspection_mode") or "").strip()
     sub_policy = str(conn.get("subprocess_policy") or "").strip()
     if tool_mode or sub_policy:
         click.echo(
-            f"                {ux.dim('tool inspection:')} {tool_mode or 'n/a'}    "
+            f"{indent}{ux.dim('tool inspection:')} {tool_mode or 'n/a'}    "
             f"{ux.dim('subprocess:')} {sub_policy or 'n/a'}"
         )
 
@@ -286,10 +404,23 @@ def _print_connected_agent(host: str, port: int) -> None:
         else ux.dim(f"subprocess blocks: {sub_blocks}")
     )
     click.echo(
-        f"                {ux.dim(f'requests: {requests}')}  {err_text}  "
+        f"{indent}{ux.dim(f'requests: {requests}')}  {err_text}  "
         f"{ux.dim(f'tool inspections: {inspections}')}  {block_text_tool}  "
         f"{block_text_sub}"
     )
+
+
+def _print_connected_agent(host: str, port: int) -> None:
+    """Surface the single active-connector block (single-connector installs)."""
+    conn = _fetch_health_connector(host, port)
+    if not conn:
+        _status_row("Agent", ux.dim("(no active connector)"))
+        return
+
+    name = str(conn.get("name") or "").strip()
+    friendly = _friendly_connector_name(name)
+    _status_row("Agent", f"{friendly} ({name}){_connector_state_verb(str(conn.get('state') or ''))}")
+    _print_agent_counters(conn)
 
 
 def _print_observability_status(cfg) -> None:

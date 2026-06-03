@@ -58,6 +58,24 @@ def test_only_plugins_is_connector_gated() -> None:
         assert app._panel_hidden(panel) is False, panel
 
 
+def test_plugins_gate_follows_filter_in_multi_connector(monkeypatch) -> None:
+    """E3/8.13: in multi-connector the Plugins tab tracks the shared connector
+    filter — filtering to OpenClaw exposes the tab even when the primary
+    connector is Codex, and filtering to a non-OpenClaw connector hides it
+    (matching the body's openclaw-only notice)."""
+
+    app = DefenseClawTUI(config=_config_for("codex"))
+    monkeypatch.setattr(app, "_active_connector_names", lambda: ["codex", "openclaw"])
+
+    app.connector_filter = "openclaw"
+    assert app._panel_hidden("plugins") is False
+    assert "plugins" in app._visible_panels()
+
+    app.connector_filter = "codex"
+    assert app._panel_hidden("plugins") is True
+    assert "plugins" not in app._visible_panels()
+
+
 @pytest.mark.asyncio
 async def test_digit_five_is_noop_when_plugins_hidden() -> None:
     app = DefenseClawTUI(config=_config_for("claudecode"))

@@ -190,7 +190,65 @@ class TestSkillScan(SkillCommandTestBase):
         result = self.invoke(["scan", "--all"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False)
+        mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False, connector=None)
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_multi_connector_fans_out_per_connector(self, mock_scanner_cls, mock_scan_all):
+        # D1 parity: in a multi-connector install `scan --all` must scan
+        # EVERY active connector's skills, not just the primary's.
+        mock_scanner = MagicMock()
+        mock_scanner_cls.return_value = mock_scanner
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs["connector"] for c in mock_scan_all.call_args_list}
+        self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_connector_flag_targets_one(self, mock_scanner_cls, mock_scan_all):
+        # --connector targets exactly one connector even in a multi install.
+        mock_scanner = MagicMock()
+        mock_scanner_cls.return_value = mock_scanner
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_scan_all.assert_called_once_with(self.app, mock_scanner, False, enforce=False, connector="codex")
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_connector_flag_rejects_unknown(self, mock_scanner_cls):
+        # A typo'd --connector must fail loudly, not silently scan the primary.
+        mock_scanner_cls.return_value = MagicMock()
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--connector", "nope"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
+    def test_info_connector_flag_threads_connector(self, mock_info):
+        # D4 parity: `skill info --connector X` must inspect X's skill.
+        mock_info.return_value = {"name": "x"}
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["info", "x", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_info.call_args.kwargs.get("connector"), "codex")
+
+    def test_info_connector_flag_rejects_unknown(self):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["info", "x", "--connector", "nope"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
 
     @patch("defenseclaw.config.Config.skill_dirs")
     def test_scan_all_accepts_connector_filesystem_path_field(self, mock_skill_dirs):
@@ -953,6 +1011,26 @@ class TestVerdictBreakdown(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("CLEAN", result.output)
         self.assertNotIn("findings", result.output)
+
+
+class TestSkillListConnectorFlag(SkillCommandTestBase):
+    """WU13 L1: ``skill list --connector`` validates and threads the
+    override into the data fetch (TUI focus selector relies on this)."""
+
+    def test_unknown_connector_rejected(self):
+        result = self.invoke(["list", "--connector", "definitely-not-a-connector"])
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("not configured", result.output)
+
+    @patch(
+        "defenseclaw.commands.cmd_skill._list_openclaw_skills_full",
+        return_value={"skills": []},
+    )
+    def test_active_connector_threaded(self, mock_full):
+        active = self.app.cfg.active_connector()
+        result = self.invoke(["list", "--connector", active, "--json"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_full.call_args.kwargs.get("connector"), active)
 
 
 if __name__ == "__main__":

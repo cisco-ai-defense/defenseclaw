@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -789,5 +790,112 @@ func TestConnectorReason_PreservesUpstreamReason(t *testing.T) {
 	got = connectorReason("cursor", "block", "Bash", "   ")
 	if !strings.Contains(got, "DefenseClaw blocked Bash") {
 		t.Fatalf("whitespace reason should fall through to default, got %q", got)
+	}
+}
+
+// TestAgentHookEnabled_MultiConnectorSetMembership pins the multi-connector
+// fix: a secondary connector (a member of guardrail.connectors but NOT the
+// singular guardrail.connector primary, and with no explicit connector_hooks
+// flag) must be treated as enabled. Without this, the hook handler would
+// short-circuit to allow-without-scan and leave the connector unguarded.
+func TestAgentHookEnabled_MultiConnectorSetMembership(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex" // sorted-first primary mirror
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":  {},
+		"cursor": {},
+	}
+	a := &APIServer{scannerCfg: cfg}
+
+	if !a.agentHookEnabled("codex") {
+		t.Errorf("primary connector codex should be enabled")
+	}
+	if !a.agentHookEnabled("cursor") {
+		t.Errorf("secondary connector cursor (in guardrail.connectors) should be enabled, got allow-without-scan")
+	}
+	if a.agentHookEnabled("windsurf") {
+		t.Errorf("connector not in the active set must not be enabled")
+	}
+}
+
+// TestAgentHookEnabled_SingleConnectorUnchanged asserts the membership check
+// is a no-op for single-connector installs (empty guardrail.connectors): only
+// the singular primary is enabled, exactly as before the multi-connector work.
+func TestAgentHookEnabled_SingleConnectorUnchanged(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex"
+	a := &APIServer{scannerCfg: cfg}
+
+	if !a.agentHookEnabled("codex") {
+		t.Errorf("single-connector primary codex should be enabled")
+	}
+	if a.agentHookEnabled("cursor") {
+		t.Errorf("non-primary connector must be disabled when guardrail.connectors is empty")
+	}
+}
+
+// TestAgentHookEnabled_PerConnectorDisableShortCircuits pins the
+// defense-in-depth gate for `guardrail disable --connector X`: a connector
+// that is still a member of guardrail.connectors but explicitly disabled
+// (enabled=false) must gate to allow-without-scan, even though HasConnector
+// would otherwise opt it in. Its still-enabled sibling is unaffected.
+func TestAgentHookEnabled_PerConnectorDisableShortCircuits(t *testing.T) {
+	off := false
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex" // sorted-first primary mirror
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":  {Enabled: &off}, // explicitly disabled
+		"cursor": {},              // still active (unset pointer ⇒ default on)
+	}
+	a := &APIServer{scannerCfg: cfg}
+
+	if a.agentHookEnabled("codex") {
+		t.Errorf("explicitly disabled codex must gate to allow-without-scan despite map membership")
+	}
+	if !a.agentHookEnabled("cursor") {
+		t.Errorf("sibling cursor should remain enabled when only codex is disabled")
+	}
+}
+
+// TestAgentHookMode_HonorsPerConnectorOverride pins A2: agentHookMode resolves
+// through GuardrailConfig.EffectiveMode so a per-connector guardrail.connectors
+// override wins over the global mode. Connector A enforces, connector B only
+// monitors (inherits global observe) — they must not collapse to one mode.
+func TestAgentHookMode_HonorsPerConnectorOverride(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Mode = "observe" // global default
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":  {Mode: "action"}, // per-connector override → enforce
+		"cursor": {},               // inherits global → observe
+	}
+	a := &APIServer{scannerCfg: cfg}
+
+	if got := a.agentHookMode("codex"); got != "action" {
+		t.Errorf("codex per-connector mode override = %q, want action", got)
+	}
+	if got := a.agentHookMode("cursor"); got != "observe" {
+		t.Errorf("cursor should inherit global observe, got %q", got)
+	}
+}
+
+// TestGuardrailHasConnector_CaseInsensitiveAndNoopEmpty covers the new
+// membership helper directly: case-insensitive match, false on empty map.
+func TestGuardrailHasConnector_CaseInsensitiveAndNoopEmpty(t *testing.T) {
+	g := &config.GuardrailConfig{
+		Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {}},
+	}
+	if !g.HasConnector("codex") {
+		t.Errorf("exact match should report true")
+	}
+	if !g.HasConnector("CODEX") {
+		t.Errorf("case-insensitive match should report true")
+	}
+	if g.HasConnector("cursor") {
+		t.Errorf("absent connector should report false")
+	}
+	empty := &config.GuardrailConfig{}
+	if empty.HasConnector("codex") {
+		t.Errorf("empty connectors map must be a no-op (single-connector install)")
 	}
 }

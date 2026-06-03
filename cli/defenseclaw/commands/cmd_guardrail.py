@@ -95,6 +95,150 @@ def _connector_label(name: str) -> str:
     return _CONNECTOR_LABELS.get(name, name)
 
 
+def _active_connector_set(cfg, fallback: str) -> list[str]:
+    """Return the full active-connector set (multi-connector aware).
+
+    Falls back to ``[fallback]`` for older configs or single-connector
+    installs so enable/disable messaging stays accurate either way.
+    """
+    if cfg is not None and hasattr(cfg, "active_connectors"):
+        try:
+            names = list(cfg.active_connectors())
+            if names:
+                return names
+        except Exception:  # noqa: BLE001 — fall back to the primary connector.
+            pass
+    return [fallback]
+
+
+def _resolve_member_connector(app, requested: str) -> str | None:
+    """Return the canonical ``guardrail.connectors`` key matching
+    ``requested`` (case-insensitive), or ``None`` if it is not a member."""
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    req = requested.strip().lower()
+    for key in conns:
+        if key.strip().lower() == req:
+            return key
+    return None
+
+
+def _toggle_connector_guardrail(
+    app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
+) -> None:
+    """Enable/disable the guardrail for a SINGLE connector.
+
+    Per-connector analog of the global enable/disable: it flips
+    ``guardrail.connectors[X].enabled`` and (on restart) lets the Go boot
+    loop run that one connector's ``Setup``/``Teardown`` via the existing
+    set-difference path — the others are untouched. The connector's other
+    policy fields (mode/hilt/rule_pack_dir) are retained so re-enable
+    restores it with no re-prompt.
+
+    ``--connector`` is a multi-connector feature: on a single-connector
+    install (no ``guardrail.connectors`` map) it points the operator at the
+    global switch rather than silently creating a one-entry map.
+    """
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    verb = "enable" if enable else "disable"
+
+    if not conns:
+        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
+        ux.subhead(
+            f"This is a single-connector install; use 'defenseclaw guardrail {verb}' "
+            "(no --connector).",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
+    key = _resolve_member_connector(app, requested)
+    if key is None:
+        ux.err(f"Connector {requested!r} is not configured.", indent="  ")
+        ux.subhead("Configured connectors: " + ", ".join(sorted(conns)), indent="    ")
+        raise SystemExit(1)
+
+    label = _connector_label(key.strip().lower())
+
+    # No-op if already in the requested state.
+    if app.cfg.guardrail.effective_enabled(key) == enable:
+        state = "enabled" if enable else "disabled"
+        click.echo(f"  {ux.dim(f'Connector {label} is already {state}.')}")
+        return
+
+    # Disabling the last remaining enabled connector is effectively a global
+    # disable — warn so the operator can use the clearer command.
+    if not enable:
+        still_enabled = [
+            k
+            for k in conns
+            if k != key and app.cfg.guardrail.effective_enabled(k)
+        ]
+        if not still_enabled:
+            ux.subhead(
+                f"{label} is the only enabled connector; disabling it leaves the "
+                "gateway with nothing to enforce (equivalent to 'guardrail disable').",
+                indent="  ",
+            )
+
+    click.echo()
+    word = "Enabling" if enable else "Disabling"
+    click.echo(f"  {ux.bold(f'{word} guardrail')} for {label} ({key}) only")
+    action = "setup" if enable else "teardown"
+    if restart:
+        ux.subhead(
+            f"Will restart the gateway so the {label} connector {action} runs immediately.",
+            indent="  ",
+        )
+    else:
+        ux.subhead(
+            f"--no-restart specified: flag persisted but the connector {action} won't "
+            "run until you restart the gateway manually.",
+            indent="  ",
+        )
+    click.echo()
+
+    if not yes and not click.confirm("  Proceed?", default=True):
+        click.echo(f"  {ux.dim('Cancelled.')}")
+        raise SystemExit(1)
+
+    # Mutate the per-connector entry, preserving its other policy fields.
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    entry = conns.get(key)
+    if entry is None:
+        entry = PerConnectorGuardrailConfig()
+        conns[key] = entry
+    entry.enabled = bool(enable)
+    try:
+        app.cfg.save()
+        ux.ok(
+            f"Config saved (guardrail.connectors.{key}.enabled = {str(enable).lower()})",
+            indent="  ",
+        )
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise SystemExit(1)
+
+    if restart:
+        from defenseclaw.commands import cmd_setup
+
+        cmd_setup._restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=key,
+        )
+        ux.ok(f"{label} connector {action} complete", indent="  ")
+        click.echo()
+
+    if app.logger:
+        app.logger.log_action(
+            f"guardrail-{verb}",
+            "config",
+            f"connector={key} scope=per-connector "
+            f"enabled={str(enable).lower()} restart={restart}",
+        )
+
+
 @click.group("guardrail")
 def guardrail() -> None:
     """Toggle the LLM guardrail on or off.
@@ -120,6 +264,44 @@ def status_cmd(app: AppContext) -> None:
         f"  • {ux._style('connector:', fg='bright_black', bold=True)}  {_connector_label(connector)} ({connector})"
     )
     click.echo(f"  • {ux._style('mode:', fg='bright_black', bold=True)}       {gc.mode or 'observe'}")
+
+    # D7: in a multi-connector install, status MUST reflect EVERY active
+    # connector, not just the primary — each can carry its own effective
+    # mode / fail mode via guardrail.connectors. Single-connector installs
+    # skip this block, so their output is unchanged.
+    try:
+        actives = app.cfg.active_connectors() if hasattr(app.cfg, "active_connectors") else [connector]
+    except Exception:  # noqa: BLE001 — fall back to the primary connector.
+        actives = [connector]
+    if len(actives) > 1:
+        click.echo(
+            f"  • {ux._style('connectors:', fg='bright_black', bold=True)} {len(actives)} active"
+        )
+        for name in actives:
+            cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
+            cfm = (
+                gc.effective_hook_fail_mode(name)
+                if hasattr(gc, "effective_hook_fail_mode")
+                else fail_mode
+            )
+            # Per-connector on/off (D-parity with the global enabled bit):
+            # a connector turned off via `guardrail disable --connector X`
+            # is reported as disabled so the roster never implies it is
+            # enforcing when its hooks have been torn down.
+            c_enabled = (
+                gc.effective_enabled(name)
+                if hasattr(gc, "effective_enabled")
+                else True
+            )
+            state = (
+                ux._style("enabled", fg="green")
+                if c_enabled
+                else ux._style("disabled", fg="yellow")
+            )
+            click.echo(
+                f"      - {_connector_label(name)} ({name}): "
+                f"{state} mode={cmode or 'observe'} fail={cfm}"
+            )
     fm_display = ux._style(fail_mode, fg="yellow") if fail_mode == "closed" else fail_mode
     click.echo(
         f"  • {ux._style('fail mode:', fg='bright_black', bold=True)}  {fm_display}  "
@@ -141,16 +323,35 @@ def status_cmd(app: AppContext) -> None:
     help="Restart the gateway after disabling (default: on; needed to run connector teardown).",
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default=None,
+    help="Scope the disable to a single connector (multi-connector installs only). "
+    "Omit to disable the whole guardrail.",
+)
 @pass_ctx
-def disable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
+def disable_cmd(
+    app: AppContext, restart: bool, yes: bool, connector_flag: str | None
+) -> None:
     """Disable the LLM guardrail and run connector teardown.
 
-    Sets ``guardrail.enabled = false`` in ~/.defenseclaw/config.yaml
-    and (when --restart is on, the default) restarts the gateway so the
-    sidecar boot path runs ``Connector.Teardown`` for the active
-    connector. The teardown removes hook scripts, env shims, and
-    config patches that ``Connector.Setup`` originally installed.
+    Without ``--connector`` this is the global kill switch: it sets
+    ``guardrail.enabled = false`` in ~/.defenseclaw/config.yaml and (when
+    --restart is on, the default) restarts the gateway so the sidecar boot
+    path runs ``Connector.Teardown`` for EVERY active connector.
+
+    With ``--connector X`` it scopes the disable to one connector: the boot
+    loop drops X from the active set so only X's hooks/config are torn down
+    (the others keep running). X's policy is retained so a later
+    ``guardrail enable --connector X`` restores it with no re-prompt.
     """
+    if connector_flag:
+        _toggle_connector_guardrail(
+            app, connector_flag, enable=False, restart=restart, yes=yes
+        )
+        return
+
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
 
@@ -203,7 +404,18 @@ def disable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
             app.cfg.gateway.port,
             connector=connector,
         )
-        ux.ok(f"{_connector_label(connector)} connector teardown complete", indent="  ")
+        # In a multi-connector install the gateway boot loop tears down
+        # EVERY active connector on restart, so report them all rather
+        # than implying only the primary was affected.
+        _actives = _active_connector_set(app.cfg, connector)
+        if len(_actives) > 1:
+            ux.ok(
+                f"connector teardown complete for {len(_actives)} connectors: "
+                + ", ".join(_actives),
+                indent="  ",
+            )
+        else:
+            ux.ok(f"{_connector_label(connector)} connector teardown complete", indent="  ")
         click.echo()
 
     if app.logger:
@@ -221,16 +433,35 @@ def disable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
     help="Restart the gateway after enabling (default: on; needed to run connector setup).",
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default=None,
+    help="Scope the enable to a single connector (multi-connector installs only). "
+    "Omit to enable the whole guardrail.",
+)
 @pass_ctx
-def enable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
+def enable_cmd(
+    app: AppContext, restart: bool, yes: bool, connector_flag: str | None
+) -> None:
     """Re-enable the LLM guardrail using the existing config.
 
-    This is the inverse of ``defenseclaw guardrail disable``: it sets
-    ``guardrail.enabled = true`` and (when --restart is on) restarts
+    Without ``--connector`` this is the inverse of the global disable: it
+    sets ``guardrail.enabled = true`` and (when --restart is on) restarts
     the gateway so the sidecar runs ``Connector.Setup`` for the active
-    connector. Use ``defenseclaw setup guardrail`` instead when you
-    actually want to re-configure the model / scanner-mode / connector.
+    connector. Use ``defenseclaw setup guardrail`` instead when you actually
+    want to re-configure the model / scanner-mode / connector.
+
+    With ``--connector X`` it re-enables a single previously-disabled
+    connector: the boot loop runs X's ``Setup`` again while the others are
+    untouched.
     """
+    if connector_flag:
+        _toggle_connector_guardrail(
+            app, connector_flag, enable=True, restart=restart, yes=yes
+        )
+        return
+
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
 
@@ -284,7 +515,17 @@ def enable_cmd(app: AppContext, restart: bool, yes: bool) -> None:
             app.cfg.gateway.port,
             connector=connector,
         )
-        ux.ok(f"{_connector_label(connector)} connector setup complete", indent="  ")
+        # The boot loop runs Connector.Setup for EVERY active connector;
+        # report them all in a multi-connector install.
+        _actives = _active_connector_set(app.cfg, connector)
+        if len(_actives) > 1:
+            ux.ok(
+                f"connector setup complete for {len(_actives)} connectors: "
+                + ", ".join(_actives),
+                indent="  ",
+            )
+        else:
+            ux.ok(f"{_connector_label(connector)} connector setup complete", indent="  ")
         click.echo()
 
     if app.logger:

@@ -120,6 +120,33 @@ func TestEvaluateCodexHook_ExplicitEnableStillWorks(t *testing.T) {
 	}
 }
 
+// TestEvaluateCodexHook_PerConnectorDisableAllowsWithoutScan pins the
+// defense-in-depth gate: when codex is a member of guardrail.connectors but
+// explicitly disabled (`guardrail disable --connector codex`), a hook that
+// still calls in is allowed without scanning, even though the prompt carries
+// a block-worthy keyword.
+func TestEvaluateCodexHook_PerConnectorDisableAllowsWithoutScan(t *testing.T) {
+	off := false
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {Enabled: &off},
+	}
+
+	api := &APIServer{scannerCfg: cfg}
+
+	req := codexHookRequest{
+		HookEventName: "UserPromptSubmit",
+		Prompt:        trustExploitKeyword(),
+	}
+	resp := api.evaluateCodexHook(context.Background(), req)
+
+	if resp.RawAction != "allow" {
+		t.Errorf("RawAction = %q, want allow (disabled connector must not scan)", resp.RawAction)
+	}
+}
+
 func TestEvaluateCodexHook_HILTPreToolUseDoesNotAsk(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"

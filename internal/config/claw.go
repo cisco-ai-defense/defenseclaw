@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -104,10 +105,42 @@ func (c *Config) activeConnector() string {
 	return "openclaw"
 }
 
+// activeConnectors returns the resolved set of connector names for this
+// config, in deterministic (sorted) order. It is additive over
+// activeConnector(): when the multi-connector guardrail.connectors map
+// is populated its keys drive the set; otherwise it is the single
+// activeConnector() value, so the legacy single-connector behavior is
+// preserved byte-for-byte. The multi-connector boot loop iterates this
+// slice while every existing single-connector reader keeps calling
+// activeConnector() unchanged.
+func (c *Config) activeConnectors() []string {
+	if c != nil && len(c.Guardrail.Connectors) > 0 {
+		names := make([]string, 0, len(c.Guardrail.Connectors))
+		for name := range c.Guardrail.Connectors {
+			if trimmed := strings.TrimSpace(name); trimmed != "" {
+				names = append(names, trimmed)
+			}
+		}
+		if len(names) > 0 {
+			sort.Strings(names)
+			return names
+		}
+	}
+	return []string{c.activeConnector()}
+}
+
 // ActiveConnector returns the resolved connector name for external packages
 // that need to stamp connector-scoped telemetry/resource attributes.
 func (c *Config) ActiveConnector() string {
 	return c.activeConnector()
+}
+
+// ActiveConnectors returns the full resolved set of connector names
+// (sorted) for external packages — notably the gateway boot loop and the
+// TUI — that need to enumerate every active connector rather than just
+// the primary one.
+func (c *Config) ActiveConnectors() []string {
+	return c.activeConnectors()
 }
 
 // ReadMCPServers returns the MCP servers for the active connector.

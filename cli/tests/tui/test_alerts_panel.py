@@ -87,6 +87,71 @@ def test_alerts_slash_search_and_exact_severity_filter() -> None:
     assert model.filtered
 
 
+def test_alerts_connector_column_and_shared_filter() -> None:
+    """8.13: CONNECTOR column + shared connector filter on the Alerts panel."""
+
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(id="a1", severity="HIGH", action="connector-hook",
+                       target="preToolUse", details="connector=codex action=block"),
+            AlertEvent(id="a2", severity="MEDIUM", action="connector-hook",
+                       target="preToolUse", details="connector=cursor action=alert"),
+        ]
+    )
+
+    # Single-connector default: no CONNECTOR column.
+    assert model.data_table_columns() == ("Sel", "Severity", "Time", "Action", "Target", "Details")
+
+    model.show_connector_column = True
+    assert model.data_table_columns() == (
+        "Sel", "Severity", "Time", "Action", "Connector", "Target", "Details"
+    )
+    # Connector cell is index 4 (after Action).
+    connectors = {row[4] for row in model.data_table_rows()}
+    assert connectors == {"codex", "cursor"}
+
+    model.set_connector_filter("codex")
+    assert [row.event.id for row in model.filtered] == ["a1"]
+    model.set_connector_filter("")
+    assert {row.event.id for row in model.filtered} == {"a1", "a2"}
+
+
+def test_alerts_connector_token_filters_by_connector() -> None:
+    # E5: the Alerts panel honors the same ``connector:<name>`` search token
+    # as Audit, matching the kv connector in the event details. Free text in
+    # the same query still ANDs via the legacy substring search.
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(
+                id="h1",
+                severity="LOW",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=codex action=allow severity=NONE",
+            ),
+            AlertEvent(
+                id="h2",
+                severity="LOW",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=cursor action=block severity=HIGH",
+            ),
+        ]
+    )
+
+    model.set_filter("connector:codex")
+    assert [row.event.id for row in model.filtered] == ["h1"]
+
+    # token + free text ANDs (block only on cursor).
+    model.set_filter("connector:cursor block")
+    assert [row.event.id for row in model.filtered] == ["h2"]
+
+    model.set_filter("connector:nope")
+    assert model.filtered == []
+
+
 def test_alerts_refresh_ingests_scan_finding_from_gateway_jsonl(tmp_path) -> None:
     (tmp_path / "gateway.jsonl").write_text(
         (

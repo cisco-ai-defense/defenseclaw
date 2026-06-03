@@ -162,12 +162,14 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Tool:      "message",
 			Content:   req.Prompt,
 			Direction: "prompt",
+			Connector: "codex",
 		})
 	case "PreToolUse", "PermissionRequest":
 		verdict = a.inspectToolPolicy(&ToolInspectRequest{
 			Tool:      codexToolName(req),
 			Args:      codexToolArgs(req),
 			Direction: "tool_call",
+			Connector: "codex",
 		})
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -180,6 +182,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			Tool:      "message",
 			Content:   codexToolResponseString(req.ToolResponse),
 			Direction: "tool_result",
+			Connector: "codex",
 		})
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -292,7 +295,24 @@ func (a *APIServer) codexEnabled() bool {
 	if a.scannerCfg == nil {
 		return false
 	}
+	// Per-connector explicit disable wins over every enable signal below:
+	// an operator who ran `guardrail disable --connector codex` gets
+	// allow-without-scan even though codex is still a member of
+	// guardrail.connectors (its policy is retained for re-enable).
+	// Defense-in-depth — the boot loop already tears codex's hooks down,
+	// so this only matters in the window before a restart or if a hook
+	// still calls in. EffectiveEnabled defaults to true, so this is a
+	// no-op for single-connector installs and any connector never
+	// explicitly disabled.
+	if !a.scannerCfg.Guardrail.EffectiveEnabled("codex") {
+		return false
+	}
 	if a.scannerCfg.ConnectorHookConfig("codex").Enabled {
+		return true
+	}
+	// Multi-connector: membership in guardrail.connectors opts codex in
+	// even when it is not the singular primary (no-op for single).
+	if a.scannerCfg.Guardrail.HasConnector("codex") {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "codex")
@@ -303,7 +323,8 @@ func (a *APIServer) codexMode() string {
 	if a.scannerCfg != nil {
 		mode = strings.TrimSpace(a.scannerCfg.ConnectorHookConfig("codex").Mode)
 		if mode == "" || mode == "inherit" {
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
+			// Per-connector guardrail override wins over global mode.
+			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode("codex"))
 		}
 	}
 	return normalizeAgentHookMode(mode)

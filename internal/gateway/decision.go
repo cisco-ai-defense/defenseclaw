@@ -107,12 +107,30 @@ func guardrailRuntimeAction(cfg *config.Config, severity string, confirmable boo
 }
 
 func guardrailRuntimeActionForGuardrail(gc *config.GuardrailConfig, severity string, confirmable bool) string {
+	return guardrailRuntimeActionForGuardrailConnector(gc, "", severity, confirmable)
+}
+
+// guardrailRuntimeActionForConnector mirrors guardrailRuntimeAction but
+// resolves the block/alert threshold from the request connector's effective
+// rule pack (guardrail.connectors[X].rule_pack_dir, falling back to the
+// global pack). This gives each connector its own enforcement posture —
+// strict on one agent, permissive on another — matching single-connector
+// behavior where the pack IS the posture. An empty connector resolves to the
+// global pack, so existing single-connector callers are unaffected.
+func guardrailRuntimeActionForConnector(cfg *config.Config, connector, severity string, confirmable bool) string {
+	if cfg == nil {
+		return guardrailRuntimeActionForGuardrailConnector(nil, connector, severity, confirmable)
+	}
+	return guardrailRuntimeActionForGuardrailConnector(&cfg.Guardrail, connector, severity, confirmable)
+}
+
+func guardrailRuntimeActionForGuardrailConnector(gc *config.GuardrailConfig, connector, severity string, confirmable bool) string {
 	rank := guardrailSeverityRank(severity)
 	if rank <= severityNone {
 		return guardrailActionAllow
 	}
 
-	blockThreshold, alertThreshold := guardrailThresholds(gc)
+	blockThreshold, alertThreshold := guardrailThresholdsForConnector(gc, connector)
 	if rank >= blockThreshold {
 		return guardrailActionBlock
 	}
@@ -126,7 +144,11 @@ func guardrailRuntimeActionForGuardrail(gc *config.GuardrailConfig, severity str
 }
 
 func guardrailThresholds(gc *config.GuardrailConfig) (blockThreshold int, alertThreshold int) {
-	switch guardrailProfile(gc) {
+	return guardrailThresholdsForConnector(gc, "")
+}
+
+func guardrailThresholdsForConnector(gc *config.GuardrailConfig, connector string) (blockThreshold int, alertThreshold int) {
+	switch guardrailProfileForConnector(gc, connector) {
 	case "strict":
 		return severityMedium, severityLow
 	case "permissive":
@@ -137,10 +159,17 @@ func guardrailThresholds(gc *config.GuardrailConfig) (blockThreshold int, alertT
 }
 
 func guardrailProfile(gc *config.GuardrailConfig) string {
+	return guardrailProfileForConnector(gc, "")
+}
+
+// guardrailProfileForConnector resolves the posture profile from the
+// connector's effective rule pack (per-connector override > global pack).
+// connector="" yields the global pack, preserving single-connector behavior.
+func guardrailProfileForConnector(gc *config.GuardrailConfig, connector string) string {
 	if gc == nil {
 		return "default"
 	}
-	dir := strings.ToLower(strings.TrimSpace(gc.RulePackDir))
+	dir := strings.ToLower(strings.TrimSpace(gc.EffectiveRulePackDir(connector)))
 	if dir == "" {
 		return "default"
 	}

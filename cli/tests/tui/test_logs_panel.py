@@ -397,6 +397,64 @@ def test_logs_hooks_filter_keeps_only_connector_hook_lines() -> None:
     assert "HOOK" in filtered[0]
 
 
+def test_logs_connector_search_token_filters_by_connector() -> None:
+    # E5: the Logs search box honors the same ``connector:<name>`` token as
+    # Audit/Alerts. Connector-hook lines carry ``connector=<name>``, so the
+    # token matches that form; remaining free text keeps substring search.
+    panel = LogsPanelModel()
+    panel.source = "gateway"
+    panel.lines["gateway"] = [
+        "12:00:00 HOOK connector=codex action=allow preToolUse",
+        "12:00:01 HOOK connector=cursor action=block preToolUse",
+        "12:00:02 OTEL subsystem=otel transition=completed",
+    ]
+
+    panel.search_text = "connector:codex"
+    filtered = panel.filtered_lines()
+    assert len(filtered) == 1
+    assert "connector=codex" in filtered[0]
+
+    # token + free text ANDs.
+    panel.search_text = "connector:cursor block"
+    filtered = panel.filtered_lines()
+    assert len(filtered) == 1
+    assert "connector=cursor" in filtered[0]
+
+    panel.search_text = "connector:nope"
+    assert panel.filtered_lines() == []
+
+
+def test_logs_connector_column_and_shared_filter() -> None:
+    """8.13: CONNECTOR column + shared connector filter on the Logs panel."""
+
+    panel = LogsPanelModel()
+    panel.source = "gateway"
+    panel.filter_mode = FILTER_NONE
+    panel.lines["gateway"] = [
+        "12:00:00 HOOK connector=codex action=allow preToolUse",
+        "12:00:01 HOOK connector=cursor action=block preToolUse",
+        "12:00:02 OTEL subsystem=otel transition=completed",
+    ]
+
+    # Single-connector default: single Line column.
+    assert panel.data_table_columns() == ("Line",)
+
+    panel.show_connector_column = True
+    assert panel.data_table_columns() == ("Connector", "Line")
+    rows = panel.data_table_rows()
+    # First cell is the parsed connector; untagged lines show the em dash.
+    connectors = {row[0] for row in rows}
+    assert "codex" in connectors and "cursor" in connectors and "—" in connectors
+
+    # Shared filter narrows to one connector's lines.
+    panel.set_connector_filter("codex")
+    filtered = panel.filtered_lines()
+    assert len(filtered) == 1
+    assert "connector=codex" in filtered[0]
+    panel.set_connector_filter("")
+    assert len(panel.filtered_lines()) == 3
+
+
 def test_logs_hooks_filter_is_registered_and_reachable_via_cycle() -> None:
     assert FILTER_HOOKS in FILTER_PRESETS
     assert FILTER_LABELS[FILTER_HOOKS] == "Hooks"

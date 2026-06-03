@@ -287,7 +287,21 @@ var defaultRuleCategories = []ruleCategory{
 // allRuleCategories groups all rule slices for iteration. Seeded from the
 // compiled-in defaults; a rule pack can override individual categories by
 // name via ApplyRulePackOverrides without removing the others.
+//
+// In single-connector mode this is the one active rule set (the connector's
+// pack, or the compiled-in defaults). In multi-connector mode it is the
+// fallback used by ScanAllRulesForConnector when a connector has no
+// dedicated set registered.
 var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
+
+// connectorRuleCategories holds a per-connector compiled rule set so each
+// connector scans against its own EffectiveRulePackDir at runtime — the same
+// behavior single-connector installs get, lifted to N connectors. Populated
+// at boot by ApplyConnectorRulePackOverrides (one entry per connector that
+// resolved a pack). A connector with no entry falls back to
+// allRuleCategories, so this map is purely additive and leaves the
+// single-connector path untouched. Guarded by ruleCategoriesMu.
+var connectorRuleCategories = map[string][]ruleCategory{}
 
 // ApplyRulePackOverrides replaces the hardcoded rule categories with rules
 // loaded from the rule-pack's rules/*.yaml files. Each YAML file becomes
@@ -337,16 +351,59 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 		return
 	}
 
-	merged := make([]ruleCategory, len(defaultRuleCategories))
+	merged, overridden, added := mergeRulePackCategories(rp)
+
+	ruleCategoriesMu.Lock()
+	allRuleCategories = merged
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
+		overridden, added, len(defaultRuleCategories)-overridden)
+}
+
+// ApplyConnectorRulePackOverrides registers a connector-scoped rule set built
+// from that connector's effective rule pack. This is the multi-connector
+// analogue of ApplyRulePackOverrides: instead of mutating the single process
+// global, it stores the merged set keyed by connector so each connector's
+// hook lane scans against its own pack (closing the "primary wins" gap).
+//
+// Called once per connector at boot. A nil/empty pack still registers an
+// entry equal to the compiled-in defaults so the connector is explicitly
+// pinned to a known set rather than inheriting whatever the primary happened
+// to install. Connectors with no entry fall back to allRuleCategories via
+// ScanAllRulesForConnector. Empty connector names are ignored.
+func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
+	connector = strings.TrimSpace(connector)
+	if connector == "" {
+		return
+	}
+
+	merged, overridden, added := mergeRulePackCategories(rp)
+
+	ruleCategoriesMu.Lock()
+	connectorRuleCategories[connector] = merged
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
+		connector, overridden, added, len(defaultRuleCategories)-overridden)
+}
+
+// mergeRulePackCategories builds a full rule-category slice by merging the
+// rule-pack's rule files onto the compiled-in defaults. It is pure — it never
+// touches package globals — so both the single-connector global path
+// (ApplyRulePackOverrides) and the per-connector store
+// (ApplyConnectorRulePackOverrides) share identical merge semantics. A nil
+// pack or one with no rule files yields a copy of defaultRuleCategories.
+func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, overridden, added int) {
+	merged = make([]ruleCategory, len(defaultRuleCategories))
 	copy(merged, defaultRuleCategories)
+	if rp == nil || len(rp.RuleFiles) == 0 {
+		return merged, 0, 0
+	}
 
 	idx := make(map[string]int, len(merged))
 	for i, c := range merged {
 		idx[c.Name] = i
 	}
 
-	overridden := 0
-	added := 0
 	for _, rf := range rp.RuleFiles {
 		if rf == nil || rf.Category == "" {
 			continue
@@ -382,12 +439,7 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 			added++
 		}
 	}
-
-	ruleCategoriesMu.Lock()
-	allRuleCategories = merged
-	ruleCategoriesMu.Unlock()
-	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
-		overridden, added, len(defaultRuleCategories)-overridden)
+	return merged, overridden, added
 }
 
 // severityRank maps severity strings to numeric ranks for comparison.
@@ -476,7 +528,33 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 	ruleCategoriesMu.RLock()
 	cats := allRuleCategories
 	ruleCategoriesMu.RUnlock()
+	return scanRuleCategories(cats, text, toolName)
+}
 
+// ScanAllRulesForConnector scans against the named connector's registered
+// rule set (its EffectiveRulePackDir, installed at boot via
+// ApplyConnectorRulePackOverrides). When the connector has no dedicated set
+// — single-connector installs, the OpenClaw generic inspect endpoint, or a
+// connector that never resolved a pack — it falls back to the process-global
+// allRuleCategories, so the single-connector path is byte-for-byte unchanged.
+func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
+	connector = strings.TrimSpace(connector)
+	ruleCategoriesMu.RLock()
+	cats := allRuleCategories
+	if connector != "" {
+		if c, ok := connectorRuleCategories[connector]; ok {
+			cats = c
+		}
+	}
+	ruleCategoriesMu.RUnlock()
+	return scanRuleCategories(cats, text, toolName)
+}
+
+// scanRuleCategories runs every rule in cats against text, scanning both the
+// raw input and a shell-normalized copy to defeat obfuscation. It is the
+// shared core of ScanAllRules / ScanAllRulesForConnector — the only
+// difference between those entry points is which category set they select.
+func scanRuleCategories(cats []ruleCategory, text string, toolName string) []RuleFinding {
 	var findings []RuleFinding
 	seen := make(map[string]bool)
 

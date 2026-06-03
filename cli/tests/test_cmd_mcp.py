@@ -145,6 +145,99 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         mock_run_scan.assert_called_once()
 
+    @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
+    def test_scan_all_multi_connector_fans_out(self, mock_scan_all):
+        # D2 parity: `mcp scan --all` scans every active connector's servers.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fanned = {c.args[1] for c in mock_scan_all.call_args_list}
+        self.assertEqual(fanned, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
+    def test_scan_all_connector_flag_targets_one(self, mock_scan_all):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_scan_all.assert_called_once()
+        self.assertEqual(mock_scan_all.call_args.args[1], "codex")
+
+    def test_scan_all_connector_flag_rejects_unknown(self):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--connector", "nope"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+
+    @staticmethod
+    def _split_brain_servers():
+        # ``ctx7`` lives only in codex; the active connector (claudecode)
+        # has a different server. Used to prove --connector scopes the
+        # named-target lookup to the chosen connector's config.
+        def fake_servers(connector=None):
+            if connector == "codex":
+                return [MCPServerEntry(name="ctx7", url="http://codex-ctx7", transport="sse")]
+            return [MCPServerEntry(name="other", url="http://cc-other", transport="sse")]
+
+        return fake_servers
+
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_named_target_uses_connector_config(self, mock_scan):
+        # Option A: `mcp scan <name> --connector X` resolves the server
+        # name against X's MCP config (not the active connector's), so a
+        # server registered only to a non-active connector is scannable.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = self._split_brain_servers()  # type: ignore[method-assign]
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner",
+            target="http://codex-ctx7",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+
+        result = self.invoke(["scan", "ctx7", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("clean=1", result.output)
+        # Resolved against codex's config ⇒ codex's URL was scanned.
+        self.assertEqual(mock_scan.call_args.args[0], "http://codex-ctx7")
+
+    def test_scan_named_target_not_in_active_connector_fails_without_flag(self):
+        # Control: without --connector the name resolves against the active
+        # connector only, so a codex-only server is "not found" — proving
+        # the connector scoping is real, not cosmetic.
+        self.app.cfg.active_connector = lambda: "claudecode"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = self._split_brain_servers()  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "ctx7"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not found", result.output)
+        # The error must name the connector actually searched (the active
+        # one, claudecode) rather than the legacy hardcoded "openclaw.json".
+        self.assertIn("claudecode", result.output)
+        self.assertNotIn("openclaw.json", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_connector_flag_targets_one(self, mock_unset):
+        # D2 parity: `mcp unset --connector X` removes from X's config.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        result = self.invoke(["unset", "ctx7", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_unset.call_args.kwargs.get("connector"), "codex")
+
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_clean(self, mock_scan):
         mock_scan.return_value = ScanResult(

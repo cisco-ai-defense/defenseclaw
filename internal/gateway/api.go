@@ -122,6 +122,16 @@ type APIServer struct {
 	llmPromptBySourceSession     map[string]string
 	llmPromptBySourceSessionTurn map[string]string
 
+	// stepIdxMu guards stepIdxBySession, the per-session 1-indexed
+	// turn counter used to populate audit.Event.StepIdx. A "turn" is
+	// one prompt-response cycle within a session_id; all hook events
+	// emitted during the same turn share one StepIdx. See
+	// stepIndexForTurn for the boundary computation. Bounded to
+	// maxStepIdxSessions to keep a long-lived process from growing the
+	// map without limit.
+	stepIdxMu        sync.Mutex
+	stepIdxBySession map[string]*sessionStepState
+
 	connectorRegistry *connector.Registry
 
 	// ciscoInspector calls the Cisco AI Defense /api/v1/inspect/chat

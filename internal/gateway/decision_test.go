@@ -61,6 +61,44 @@ func TestGuardrailRuntimeActionStrictBlocksBeforeHILT(t *testing.T) {
 	}
 }
 
+// TestGuardrailRuntimeActionPerConnectorPosture pins the per-connector
+// rule-pack posture: a connector with a permissive override must enforce
+// the permissive threshold (CRITICAL-only) while a connector inheriting the
+// global strict pack still blocks MEDIUM+. This is the multi-connector parity
+// guarantee — the pack IS the posture, resolved per connector.
+func TestGuardrailRuntimeActionPerConnectorPosture(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePackDir = "/tmp/policies/guardrail/strict" // global = strict
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {RulePackDir: "/tmp/policies/guardrail/permissive"},
+	}
+
+	// codex has no override → inherits global strict → MEDIUM/HIGH block.
+	if got := guardrailRuntimeActionForConnector(cfg, "codex", "MEDIUM", true); got != "block" {
+		t.Fatalf("codex (strict) MEDIUM = %q, want block", got)
+	}
+	if got := guardrailRuntimeActionForConnector(cfg, "codex", "HIGH", true); got != "block" {
+		t.Fatalf("codex (strict) HIGH = %q, want block", got)
+	}
+
+	// claudecode override → permissive → HIGH is alert (not block), but
+	// CRITICAL still blocks.
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "HIGH", true); got != "alert" {
+		t.Fatalf("claudecode (permissive) HIGH = %q, want alert", got)
+	}
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "MEDIUM", true); got != "allow" {
+		t.Fatalf("claudecode (permissive) MEDIUM = %q, want allow", got)
+	}
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "CRITICAL", true); got != "block" {
+		t.Fatalf("claudecode (permissive) CRITICAL = %q, want block", got)
+	}
+
+	// Empty connector resolves to the global pack (single-connector parity).
+	if got := guardrailRuntimeActionForConnector(cfg, "", "MEDIUM", true); got != "block" {
+		t.Fatalf("empty connector MEDIUM = %q, want block (global strict)", got)
+	}
+}
+
 // TestClampPromptDirectionAction locks in the prompt-surface UX contract at
 // the lowest level: the pure helper that every other clamp callsite
 // composes with. The contract has three rules:

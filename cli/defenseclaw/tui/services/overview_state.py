@@ -46,6 +46,25 @@ class ConnectorHealth:
 
 
 @dataclass(frozen=True)
+class ConnectorOverviewRow:
+    """One row of the multi-connector Overview CONNECTORS table.
+
+    Combines config (mode + rule pack), live ``/health`` status, and
+    audit-derived activity counts so the operator can monitor every active
+    connector's posture and traffic at a glance.
+    """
+
+    connector: str
+    mode: str
+    rule_pack: str
+    last_activity: str
+    calls: int
+    blocks: int
+    alerts: int
+    status: str
+
+
+@dataclass(frozen=True)
 class HealthSnapshot:
     started_at: str = ""
     uptime_ms: int = 0
@@ -57,7 +76,15 @@ class HealthSnapshot:
     ai_discovery: SubsystemHealth = field(default_factory=SubsystemHealth)
     sinks: SubsystemHealth = field(default_factory=SubsystemHealth)
     sandbox: SubsystemHealth | None = None
+    # ``connector`` is the primary/active connector (single-connector
+    # back-compat). ``connectors`` lists every active connector with its own
+    # live counters — the gateway emits this as ``/health``'s ``connectors[]``
+    # array (see internal/gateway/health.go). The TUI uses it to render the
+    # per-connector CONNECTORS table with live status + counts. Empty for
+    # gateways that predate the array, in which case the Overview falls back
+    # to the config-derived roster.
     connector: ConnectorHealth | None = None
+    connectors: tuple[ConnectorHealth, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -83,6 +110,34 @@ class OverviewConfig:
     inspect_llm_provider: str = ""
     inspect_llm_model: str = ""
     cisco_ai_defense_endpoint: str = ""
+    # Multi-connector roster (WU10): ``(connector, effective_mode)`` pairs,
+    # populated by the adapter only when more than one connector is active
+    # (``Config.active_connectors()`` + ``GuardrailConfig.effective_mode``).
+    # Empty for the common single-connector install, so the Overview's
+    # single "Agent" line renders unchanged.
+    connector_modes: tuple[tuple[str, str], ...] = ()
+    # Per-connector effective rule-pack label (basename of
+    # ``GuardrailConfig.effective_rule_pack_dir(connector)``, e.g. "strict").
+    # Kept as a parallel ``(connector, pack)`` tuple — rather than widening
+    # ``connector_modes`` to a 3-tuple — so the many call sites that unpack
+    # ``(connector, mode)`` keep working untouched. Empty for single-connector
+    # installs. Surfaced on the roster rows so the Overview reflects that
+    # connectors can enforce different packs (block thresholds), which the
+    # process-global ``guardrail_strategy`` posture line cannot show.
+    connector_packs: tuple[tuple[str, str], ...] = ()
+    # Connectors that are configured + still in the roster (so their history
+    # stays filterable) but have enforcement turned off via
+    # ``guardrail disable --connector X`` (``GuardrailConfig.effective_enabled``
+    # is False). Stored normalized (lowercase). The Overview marks these
+    # DISABLED rather than hiding them; a *fully removed* connector simply
+    # leaves ``active_connectors()`` and never reaches the roster at all.
+    connector_disabled: tuple[str, ...] = ()
+
+    def connector_is_disabled(self, name: str) -> bool:
+        """True when ``name`` is in the roster but enforcement is disabled."""
+
+        want = (name or "").strip().lower()
+        return any(want == d.strip().lower() for d in self.connector_disabled)
 
 
 @dataclass(frozen=True)
@@ -544,6 +599,18 @@ class OverviewPanelModel:
             case "gateway":
                 return self.health.gateway.state
             case "agent":
+                # 8.13: a multi-connector install rolls the per-connector
+                # states up into one aggregate (the per-connector detail lives
+                # in the dedicated CONNECTORS table). Single-connector keeps the
+                # legacy single-connector state.
+                # Delegate to the aggregate when there are live connectors, or
+                # when every rostered connector is disabled (the gateway drops
+                # disabled connectors, so connectors[] is empty but the right
+                # answer is "disabled", not "unknown").
+                if self._is_multi_connector() and (
+                    self.health.connectors or self._all_connectors_disabled()
+                ):
+                    return self._aggregate_connector_state()
                 if self.health.connector is None:
                     return "unknown"
                 return self.health.connector.state or "unknown"
@@ -632,8 +699,111 @@ class OverviewPanelModel:
             return self.cfg.claw_mode.strip().lower()
         return "openclaw"
 
+    def multi_connector_rows(self) -> list[tuple[str, str]]:
+        """Per-connector ``(label, detail)`` rows for the Overview.
+
+        WU10: the single "Agent" line names only the primary connector,
+        so multi-connector installs get an additional config-derived
+        roster sourced from :attr:`OverviewConfig.connector_modes`
+        (``Config.active_connectors()`` + ``GuardrailConfig.effective_mode``,
+        resolved in the adapter). Returns ``[]`` when fewer than two
+        connectors are active, leaving the single-connector layout
+        untouched. ``label`` is the empty string so the existing
+        ``key:<16`` formatting renders each entry as an indented
+        sub-line under "Agent".
+
+        Each row also carries the connector's effective rule-pack label
+        (from :attr:`OverviewConfig.connector_packs`) when known, e.g.
+        ``Codex (codex) — mode=action, strict``. This is the only place
+        the Overview surfaces per-connector packs: the process-global
+        ``Policy posture`` line names just one pack and would otherwise
+        hide that connectors enforce different block thresholds.
+        """
+        if self.cfg is None or len(self.cfg.connector_modes) <= 1:
+            return []
+        packs = dict(self.cfg.connector_packs)
+        rows: list[tuple[str, str]] = []
+        for connector, mode in self.cfg.connector_modes:
+            label = friendly_connector_name(connector)
+            detail = f"{label} ({connector}) — mode={mode or '?'}"
+            pack = (packs.get(connector) or "").strip()
+            if pack:
+                detail += f", {pack}"
+            rows.append(("", detail))
+        return rows
+
+    _RUNNING_STATES = frozenset({"running", "active", "enabled"})
+
+    def _is_multi_connector(self) -> bool:
+        return self.cfg is not None and len([c for c, _m in self.cfg.connector_modes if c]) > 1
+
+    def _all_connectors_disabled(self) -> bool:
+        """True when every rostered connector has enforcement disabled."""
+
+        if self.cfg is None:
+            return False
+        rostered = [c for c, _m in self.cfg.connector_modes if c]
+        return bool(rostered) and all(self.cfg.connector_is_disabled(c) for c in rostered)
+
+    def _aggregate_connector_state(self) -> str:
+        """Roll per-connector states into one SERVICES "Agent" state.
+
+        ``running`` only when every live connector is up; ``degraded`` when
+        some (but not all) are up; otherwise the first connector's state (or
+        ``unknown``). Mirrors how an operator reads the CONNECTORS table.
+        """
+
+        states = [
+            (conn.state or "").strip().lower()
+            for conn in (self.health.connectors if self.health else ())
+        ]
+        if not states:
+            # No live connectors. If every rostered connector is disabled,
+            # say so explicitly instead of the generic "unknown".
+            if self.cfg is not None:
+                rostered = [c for c, _m in self.cfg.connector_modes if c]
+                if rostered and all(self.cfg.connector_is_disabled(c) for c in rostered):
+                    return "disabled"
+            return "unknown"
+        running = [state for state in states if state in self._RUNNING_STATES]
+        if len(running) == len(states):
+            return "running"
+        if running:
+            return "degraded"
+        return states[0] or "unknown"
+
     def agent_detail(self) -> str:
         configured = self.cfg.claw_mode if self.cfg else ""
+        # 8.13: in a multi-connector install the single connector name is
+        # misleading and the gateway-wide counters duplicate the CONNECTORS
+        # table, so the Agent row collapses to an "N connectors active" roll-up.
+        if self._is_multi_connector():
+            total = len([c for c, _m in self.cfg.connector_modes if c])
+            # Disabled connectors stay in the roster (history) but enforce
+            # nothing, so they're reported separately and excluded from the
+            # "active" denominator.
+            disabled_n = sum(
+                1 for c, _m in self.cfg.connector_modes if c and self.cfg.connector_is_disabled(c)
+            )
+            enabled_total = max(total - disabled_n, 0)
+            live = self.health.connectors if self.health else ()
+            running = sum(
+                1 for conn in live if (conn.state or "").strip().lower() in self._RUNNING_STATES
+            )
+            if not disabled_n:
+                # No kill switches → original phrasing, unchanged.
+                if not live:
+                    return f"{total} connectors configured"
+                if running == total:
+                    return f"{total} connectors active"
+                return f"{running}/{total} connectors running"
+            # One or more connectors disabled: report them separately.
+            suffix = f" · {disabled_n} disabled"
+            if enabled_total == 0:
+                return f"0 active{suffix}"
+            if live and running < enabled_total:
+                return f"{running}/{enabled_total} running{suffix}"
+            return f"{enabled_total} active{suffix}"
         if self.health is None or self.health.connector is None:
             if not configured:
                 return ""

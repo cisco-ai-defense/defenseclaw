@@ -107,6 +107,102 @@ def test_overview_service_cards_agent_detail_and_zero_request_guidance() -> None
     assert any("0 hook events" in notice.message for notice in notices)
     assert not any("gateway port" in notice.message for notice in notices)
 
+
+def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
+    # 8.13: in a multi-connector install the SERVICES "Agent" row collapses to
+    # an "N connectors active" roll-up (per-connector detail lives in the
+    # dedicated CONNECTORS table), and its state aggregates the per-connector
+    # health. Single-connector keeps the original name + counters.
+    single = OverviewPanelModel(
+        OverviewConfig(claw_mode="codex", guardrail_connector="codex"),
+        version="test",
+    )
+    single.set_health(
+        HealthSnapshot(connector=ConnectorHealth(name="codex", state="running", requests=5, tool_blocks=2))
+    )
+    assert single.agent_detail() == "Codex - 5 req - 2 tool blocks"
+    assert single.subsystem_state("agent") == "running"
+
+    multi = OverviewPanelModel(
+        OverviewConfig(
+            claw_mode="codex",
+            guardrail_connector="codex",
+            connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+        ),
+        version="test",
+    )
+    # Every connector up -> "running" + "N connectors active".
+    multi.set_health(
+        HealthSnapshot(
+            connector=ConnectorHealth(name="codex", state="running"),
+            connectors=(
+                ConnectorHealth(name="codex", state="running"),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+    assert multi.agent_detail() == "2 connectors active"
+    assert multi.subsystem_state("agent") == "running"
+
+    # One connector down -> "degraded" + "running/total" roll-up.
+    multi.set_health(
+        HealthSnapshot(
+            connector=ConnectorHealth(name="codex", state="running"),
+            connectors=(
+                ConnectorHealth(name="codex", state="running"),
+                ConnectorHealth(name="cursor", state="stopped"),
+            ),
+        )
+    )
+    assert multi.agent_detail() == "1/2 connectors running"
+    assert multi.subsystem_state("agent") == "degraded"
+
+    # Older gateway without a connectors[] array -> configured count fallback.
+    multi.set_health(HealthSnapshot(connector=ConnectorHealth(name="codex", state="running")))
+    assert multi.agent_detail() == "2 connectors configured"
+
+
+def test_agent_detail_reports_disabled_connectors_separately() -> None:
+    # A connector turned off via `guardrail disable --connector X` stays in the
+    # roster (history is filterable) but is excluded from the "active" count and
+    # reported as disabled. The gateway drops it from connectors[].
+    model = OverviewPanelModel(
+        OverviewConfig(
+            claw_mode="codex",
+            guardrail_connector="codex",
+            connector_modes=(("antigravity", "action"), ("codex", "action"), ("claudecode", "observe")),
+            connector_disabled=("codex",),
+        ),
+        version="test",
+    )
+    assert model.cfg.connector_is_disabled("codex") is True
+    assert model.cfg.connector_is_disabled("antigravity") is False
+
+    # Only the two enabled connectors are live; codex is disabled.
+    model.set_health(
+        HealthSnapshot(
+            connectors=(
+                ConnectorHealth(name="antigravity", state="running"),
+                ConnectorHealth(name="claudecode", state="running"),
+            ),
+        )
+    )
+    assert model.agent_detail() == "2 active · 1 disabled"
+    assert model.subsystem_state("agent") == "running"
+
+    # Every connector disabled -> the Agent row is explicitly "disabled".
+    all_off = OverviewPanelModel(
+        OverviewConfig(
+            claw_mode="codex",
+            connector_modes=(("codex", "action"), ("cursor", "observe")),
+            connector_disabled=("codex", "cursor"),
+        ),
+        version="test",
+    )
+    all_off.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    assert all_off.agent_detail() == "0 active · 2 disabled"
+    assert all_off.subsystem_state("agent") == "disabled"
+
     openclaw = OverviewPanelModel(
         OverviewConfig(claw_mode="openclaw", guardrail_connector="openclaw", guardrail_enabled=True),
         version="test",
@@ -309,3 +405,78 @@ def test_connector_labels_cover_hook_surface_connectors() -> None:
     health = HealthSnapshot(connector=ConnectorHealth(name="codex"))
     assert active_connector_name(health, "openclaw") == "codex"
     assert active_connector_name(None, "claudecode") == "claudecode"
+
+
+def test_multi_connector_rows_lists_each_connector_with_mode() -> None:
+    """WU10: when more than one connector is active the Overview gains a
+    config-derived roster (one indented sub-line per connector with its
+    effective mode), reusing ``friendly_connector_name`` for display."""
+
+    model = OverviewPanelModel(
+        OverviewConfig(
+            claw_mode="codex",
+            guardrail_connector="codex",
+            connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+        ),
+        version="test",
+    )
+    rows = model.multi_connector_rows()
+    assert [value for _, value in rows] == [
+        "Codex (codex) — mode=enforce",
+        "Cursor (cursor) — mode=observe",
+    ]
+    # Indented sub-lines: blank label so the key:<16 formatting nests
+    # them under the single "Agent" line.
+    assert all(label == "" for label, _ in rows)
+    # A connector with no resolvable mode still renders, marked unknown.
+    unknown = OverviewPanelModel(
+        OverviewConfig(connector_modes=(("codex", ""), ("cursor", "observe"))),
+        version="test",
+    )
+    assert unknown.multi_connector_rows()[0][1] == "Codex (codex) — mode=?"
+
+
+def test_multi_connector_rows_append_effective_rule_pack() -> None:
+    """Each roster row carries the connector's effective rule pack (from
+    ``connector_packs``) so the Overview surfaces per-connector enforcement
+    posture that the process-global ``Policy posture`` line cannot show."""
+
+    model = OverviewPanelModel(
+        OverviewConfig(
+            claw_mode="codex",
+            guardrail_connector="codex",
+            connector_modes=(("codex", "action"), ("claudecode", "action")),
+            connector_packs=(("codex", "strict"), ("claudecode", "permissive")),
+        ),
+        version="test",
+    )
+    assert [value for _, value in model.multi_connector_rows()] == [
+        "Codex (codex) — mode=action, strict",
+        "Claude Code (claudecode) — mode=action, permissive",
+    ]
+    # A connector missing from connector_packs (or with a blank pack) falls
+    # back to the mode-only row — no trailing comma.
+    partial = OverviewPanelModel(
+        OverviewConfig(
+            connector_modes=(("codex", "action"), ("cursor", "observe")),
+            connector_packs=(("codex", "strict"),),
+        ),
+        version="test",
+    )
+    assert partial.multi_connector_rows() == [
+        ("", "Codex (codex) — mode=action, strict"),
+        ("", "Cursor (cursor) — mode=observe"),
+    ]
+
+
+def test_multi_connector_rows_noop_for_single_connector() -> None:
+    """Single-connector installs (the common case) get no roster, so the
+    existing single "Agent" line is untouched."""
+
+    assert _model().multi_connector_rows() == []
+    one = OverviewPanelModel(
+        OverviewConfig(claw_mode="codex", connector_modes=(("codex", "enforce"),)),
+        version="test",
+    )
+    assert one.multi_connector_rows() == []
+    assert OverviewPanelModel(None, version="test").multi_connector_rows() == []

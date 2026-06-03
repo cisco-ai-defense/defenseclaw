@@ -2277,7 +2277,20 @@ def doctor(
     if not json_out:
         _doctor_subsection("Connector")
     active_connector = _active_connector(cfg)
-    _check_connector_inventory(cfg, active_connector, r)
+    # D6: inventory EVERY active connector so a multi-connector install
+    # surfaces each connector's skill/plugin/MCP layout (path drift is
+    # per-connector). Single-connector installs run exactly one pass, so
+    # their doctor output is unchanged. Primary is inventoried first.
+    try:
+        _actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else [active_connector]
+    except Exception:  # noqa: BLE001 — fall back to the primary connector.
+        _actives = [active_connector]
+    _inventory_order: list[str] = []
+    for _c in [active_connector, *_actives]:
+        if _c and _c not in _inventory_order:
+            _inventory_order.append(_c)
+    for _c in _inventory_order:
+        _check_connector_inventory(cfg, _c, r)
     _check_hook_contract_lock(cfg, active_connector, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
@@ -2285,6 +2298,10 @@ def doctor(
     # --agent <new>' get a silent half-state where the old adapter's
     # config patches are still on disk.
     _check_connector_residue(cfg, active_connector, r)
+    # WU9 — when >1 connector is active, surface a per-connector
+    # effective-policy + rule-pack + hook-contract block. No-op for
+    # single-connector installs, so their output is unchanged.
+    _check_multi_connector_policy(cfg, active_connector, r, json_out=json_out)
 
     if not json_out:
         _doctor_subsection("Scanners")
@@ -2525,9 +2542,10 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
     else:
         _emit("pass", "Connector scope", "global user config", r=r)
 
-    # Skill dirs.
+    # Skill dirs (scoped to this connector so a multi-connector loop
+    # inventories each connector's own layout, not just the primary's).
     try:
-        sdirs = cfg.skill_dirs() if hasattr(cfg, "skill_dirs") else []
+        sdirs = cfg.skill_dirs(connector) if hasattr(cfg, "skill_dirs") else []
     except Exception as exc:
         _emit("warn", "Skill paths", f"could not enumerate: {exc}", r=r)
         sdirs = []
@@ -2541,9 +2559,9 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
     else:
         _emit("skip", "Skill paths", f"no skill dirs configured for {label}", r=r)
 
-    # Plugin dirs.
+    # Plugin dirs (scoped to this connector).
     try:
-        pdirs = cfg.plugin_dirs() if hasattr(cfg, "plugin_dirs") else []
+        pdirs = cfg.plugin_dirs(connector) if hasattr(cfg, "plugin_dirs") else []
     except Exception as exc:
         _emit("warn", "Plugin paths", f"could not enumerate: {exc}", r=r)
         pdirs = []
@@ -2557,9 +2575,9 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
     else:
         _emit("skip", "Plugin paths", f"no plugin dirs configured for {label}", r=r)
 
-    # MCP servers.
+    # MCP servers (scoped to this connector).
     try:
-        servers = cfg.mcp_servers() if hasattr(cfg, "mcp_servers") else []
+        servers = cfg.mcp_servers(connector) if hasattr(cfg, "mcp_servers") else []
     except Exception as exc:
         _emit("warn", "MCP servers", f"could not enumerate: {exc}", r=r)
         servers = []
@@ -2629,6 +2647,71 @@ def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("pass", "Hook contract", detail, r=r)
     else:
         _emit("warn", "Hook contract", detail, r=r)
+
+
+def _check_multi_connector_policy(cfg, primary: str, r: _DoctorResult, *, json_out: bool = False) -> None:
+    """Per-connector effective-policy block for multi-connector installs.
+
+    WU9: when more than one connector is active, the single primary
+    inventory pass above doesn't tell the operator what *each* connector
+    resolves to. This loops ``Config.active_connectors()`` and surfaces,
+    per connector, the effective guardrail mode, the effective rule-pack
+    directory (warning when a configured dir is missing on disk), and the
+    hook-contract status for the non-primary connectors (the primary is
+    already covered by ``_check_hook_contract_lock`` above).
+
+    Deliberately a no-op for single-connector installs (the common case),
+    so their doctor output is unchanged. Path-inventory helpers
+    (``skill_dirs``/``plugin_dirs``/``mcp_servers``) remain primary-only —
+    they take no connector argument — and are intentionally not looped
+    here.
+    """
+    try:
+        actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else [primary]
+    except Exception:
+        actives = [primary]
+    actives = [c for c in actives if c]
+    if len(actives) <= 1:
+        return
+
+    if not json_out:
+        _doctor_subsection("Connectors (multi)")
+
+    gc = getattr(cfg, "guardrail", None)
+    for conn in actives:
+        label = _CONNECTOR_LABELS.get(conn, conn)
+
+        mode = ""
+        if gc is not None and hasattr(gc, "effective_mode"):
+            try:
+                mode = (gc.effective_mode(conn) or "").strip()
+            except Exception:
+                mode = ""
+        _emit("pass", f"Connector [{conn}]", f"{label} — mode={mode or '?'}", r=r)
+
+        rule_pack_dir = ""
+        if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
+            try:
+                rule_pack_dir = (gc.effective_rule_pack_dir(conn) or "").strip()
+            except Exception:
+                rule_pack_dir = ""
+        if rule_pack_dir:
+            if os.path.isdir(rule_pack_dir):
+                _emit("pass", f"Rule pack [{conn}]", rule_pack_dir, r=r)
+            else:
+                _emit(
+                    "warn",
+                    f"Rule pack [{conn}]",
+                    f"configured rule_pack_dir not found on disk: {rule_pack_dir}",
+                    r=r,
+                )
+        else:
+            _emit("skip", f"Rule pack [{conn}]", "built-in defaults (no rule_pack_dir set)", r=r)
+
+        # The primary's hook contract is already emitted by the single
+        # block above; only the additional connectors need it here.
+        if conn != primary:
+            _check_hook_contract_lock(cfg, conn, r)
 
 
 def _discovered_agent_version(data_dir: str, connector: str) -> str:

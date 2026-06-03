@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -29,8 +30,26 @@ import (
 const activeConnectorFile = "active_connector.json"
 const hookContractLockFile = "hook_contract_lock.json"
 
+// activeConnectorStateVersion is the schema version written by
+// SaveActiveConnectors. Version 2 introduced the multi-connector "names"
+// set; version-less / "name"-only files are the legacy pre-v2 layout that
+// LoadActiveConnectors migrates on read.
+const activeConnectorStateVersion = 2
+
+// connectorState is the on-disk shape of active_connector.json.
+//
+// Names is the canonical active-connector set (v2+). Name is retained as a
+// mirror of the primary (Names[0]) and is still WRITTEN so cross-language and
+// older readers keep working — notably the Python boot drift detector
+// (cli/defenseclaw/bootstrap.py::_running_connector_name reads "name") and any
+// pre-v2 gateway binary that only understands the single "name" field. On
+// read, Names wins; a legacy file with only "name" is surfaced as a
+// one-element set.
 type connectorState struct {
-	Name string `json:"name"`
+	Version   int      `json:"version,omitempty"`
+	Names     []string `json:"names,omitempty"`
+	UpdatedAt string   `json:"updated_at,omitempty"`
+	Name      string   `json:"name,omitempty"`
 }
 
 type hookContractLock struct {
@@ -62,26 +81,84 @@ type HookContractLockEntry struct {
 // <dataDir>/active_connector.json. Returns "" if the file does not
 // exist or is unreadable.
 func LoadActiveConnector(dataDir string) string {
+	names := LoadActiveConnectors(dataDir)
+	if len(names) == 0 {
+		return ""
+	}
+	return names[0]
+}
+
+// LoadActiveConnectors reads the full active-connector set from
+// <dataDir>/active_connector.json. Returns nil if the file is absent or
+// unreadable. A v2+ file is read from "names"; a legacy ("name"-only) file is
+// migrated on read into a one-element set so the next SaveActiveConnectors
+// rewrites it in v2 form.
+func LoadActiveConnectors(dataDir string) []string {
 	data, err := os.ReadFile(filepath.Join(dataDir, activeConnectorFile))
 	if err != nil {
-		return ""
+		return nil
 	}
 	var state connectorState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return ""
+		return nil
 	}
-	return state.Name
+	if len(state.Names) > 0 {
+		return normalizeConnectorSet(state.Names)
+	}
+	if trimmed := strings.TrimSpace(state.Name); trimmed != "" {
+		return []string{trimmed}
+	}
+	return nil
 }
 
-// SaveActiveConnector persists the active connector name to
-// <dataDir>/active_connector.json so the next sidecar boot can
-// detect a connector change and teardown the old one.
+// SaveActiveConnector persists a single active connector. It is a backward-
+// compatible shim over SaveActiveConnectors so existing callers (and the
+// single-connector boot path) keep their exact contract.
 func SaveActiveConnector(dataDir, name string) error {
-	data, err := json.Marshal(connectorState{Name: name})
+	return SaveActiveConnectors(dataDir, []string{name})
+}
+
+// SaveActiveConnectors persists the active-connector set to
+// <dataDir>/active_connector.json so the next sidecar boot can detect added
+// or removed connectors and reconcile teardown. Names are trimmed, de-duped,
+// and sorted for a stable representation. The primary (Names[0]) is mirrored
+// into the legacy "name" field for cross-language/older readers.
+func SaveActiveConnectors(dataDir string, names []string) error {
+	set := normalizeConnectorSet(names)
+	state := connectorState{
+		Version:   activeConnectorStateVersion,
+		Names:     set,
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(set) > 0 {
+		state.Name = set[0]
+	}
+	data, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
 	return atomicWriteFile(filepath.Join(dataDir, activeConnectorFile), data, 0o600)
+}
+
+// normalizeConnectorSet trims, drops empties, de-dupes, and sorts connector
+// names into a stable set. Case is preserved to keep the singular
+// save/load round-trip contract unchanged.
+func normalizeConnectorSet(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		if _, ok := seen[n]; ok {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ClearActiveConnector removes the state file (used on full teardown

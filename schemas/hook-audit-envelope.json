@@ -95,6 +95,20 @@
       },
       "maxProperties": 64,
       "description": "Connector-specific string dimensions. Keys and values are log-injection sanitized before emission."
+    },
+    "step_idx": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "1-indexed per-turn counter within a session. Mirrors audit_events.step_idx so the structured_json sink and the SQLite column agree."
+    },
+    "enforced": {
+      "type": "boolean",
+      "description": "True when the decision was an enforced block (not an observe-mode would-block). Mirrors audit_events.enforced."
+    },
+    "rule_pack_dir": {
+      "type": "string",
+      "maxLength": 4096,
+      "description": "Effective rule-pack directory the verdict used. Mirrors audit_events.rule_pack_dir."
     }
   },
   "additionalProperties": false

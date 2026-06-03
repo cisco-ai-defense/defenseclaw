@@ -119,6 +119,20 @@ class StatusCommandTests(unittest.TestCase):
         # check their posture without grep-ing config.yaml.
         self.assertIn("fail mode:  closed", result.output)
 
+    def test_status_multi_connector_roster(self):
+        # D7 parity: status must list every active connector + its mode.
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="codex")
+        gc = app.cfg.guardrail
+        gc.effective_mode = lambda name="": {"codex": "action", "claudecode": "observe"}.get(name, "observe")
+        gc.effective_hook_fail_mode = lambda name="": "open"
+        app.cfg.active_connectors = lambda: ["claudecode", "codex"]
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("2 active", result.output)
+        self.assertIn("claudecode", result.output)
+        self.assertIn("mode=action", result.output)
+
 
 class FailModeCommandTests(unittest.TestCase):
     def test_show_current_value_open(self):
@@ -328,6 +342,168 @@ class EnableCommandTests(unittest.TestCase):
             result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.guardrail.enabled)
+
+
+def make_multi_ctx(connectors, *, enabled: bool = True):
+    """AppContext whose guardrail is a real GuardrailConfig with a
+    populated connectors map, so ``effective_enabled`` resolves correctly.
+
+    ``connectors`` maps connector name -> enabled state, where ``None``
+    means "present but unset" (inherits the default = enabled).
+    """
+    from defenseclaw import config as dcconfig
+
+    gc = dcconfig.GuardrailConfig()
+    gc.enabled = enabled
+    gc.mode = "observe"
+    gc.connector = ""
+    gc.port = 4000
+    gc.model = "openai/gpt-4o"
+    gc.hook_fail_mode = "open"
+    conns: dict[str, object] = {}
+    for name, on in connectors.items():
+        pc = dcconfig.PerConnectorGuardrailConfig()
+        if on is not None:
+            pc.enabled = on
+        conns[name] = pc
+    gc.connectors = conns
+
+    cfg = SimpleNamespace(
+        guardrail=gc,
+        data_dir="/tmp/dc",
+        gateway=SimpleNamespace(host="127.0.0.1", port=18789),
+        llm=SimpleNamespace(model="", api_key_env=""),
+    )
+    cfg.active_connector = lambda: (sorted(conns)[0] if conns else "openclaw")
+    cfg.active_connectors = lambda: (sorted(conns) if conns else ["openclaw"])
+    cfg.save = MagicMock()
+
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    app.logger.log_action = MagicMock()
+    return app
+
+
+class PerConnectorToggleTests(unittest.TestCase):
+    """`guardrail {enable,disable} --connector X` — scoped per-connector."""
+
+    def test_disable_one_connector_persists_and_restarts_only_it(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services"
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        # Only codex's flag flips; claudecode is untouched.
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        self.assertTrue(app.cfg.guardrail.effective_enabled("claudecode"))
+        app.cfg.save.assert_called_once()
+        restart_mock.assert_called_once()
+        self.assertEqual(restart_mock.call_args.kwargs.get("connector"), "codex")
+
+    def test_enable_one_connector_flips_back(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.enable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
+        app.cfg.save.assert_called_once()
+
+    def test_disable_already_disabled_is_noop(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        result = runner.invoke(
+            cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("already disabled", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_case_insensitive_member_match(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd, ["--connector", "CODEX", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_connector_flag_rejected_on_single_connector_install(self):
+        runner = CliRunner()
+        app = make_multi_ctx({})  # empty connectors map = single-connector
+        result = runner.invoke(
+            cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("only valid on multi-connector", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_unknown_connector_rejected(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        result = runner.invoke(
+            cmd_guardrail.disable_cmd, ["--connector", "windsurf", "--yes"], obj=app
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_disabling_last_enabled_connector_warns(self):
+        runner = CliRunner()
+        # claudecode already off → codex is the only enabled one.
+        app = make_multi_ctx({"codex": None, "claudecode": False})
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd, ["--connector", "codex", "--yes"], obj=app
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("only enabled connector", result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_no_restart_persists_but_skips_gateway(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        with patch(
+            "defenseclaw.commands.cmd_setup._restart_services"
+        ) as restart_mock:
+            result = runner.invoke(
+                cmd_guardrail.disable_cmd,
+                ["--connector", "codex", "--yes", "--no-restart"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.effective_enabled("codex"))
+        restart_mock.assert_not_called()
+
+    def test_global_disable_unchanged_without_flag(self):
+        # The global kill switch must behave exactly as before when no
+        # --connector is passed: flip guardrail.enabled, leave the
+        # per-connector flags alone.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None}, enabled=True)
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_guardrail.disable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertFalse(app.cfg.guardrail.enabled)
+        self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
+
+    def test_status_roster_shows_disabled_state(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": False, "claudecode": None})
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("2 active", result.output)
+        # codex is disabled, claudecode enabled — both states surfaced.
+        self.assertIn("disabled", result.output)
+        self.assertIn("enabled", result.output)
 
 
 class CommandRegistrationTests(unittest.TestCase):

@@ -40,6 +40,36 @@ from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 from tests.helpers import cleanup_app, make_app_context
 
 
+class PluginConnectorFlagTest(unittest.TestCase):
+    """D3: --connector targeting for plugin scan (+ inconsistency fix)."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        self.app.cfg.plugin_dir = os.path.join(self.tmp_dir, "plugins")
+        os.makedirs(self.app.cfg.plugin_dir, exist_ok=True)
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.runner = CliRunner()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def invoke(self, args: list[str]):
+        return self.runner.invoke(plugin, args, obj=self.app, catch_exceptions=False)
+
+    @patch("defenseclaw.commands.cmd_plugin._resolve_plugin_dir", return_value=None)
+    def test_scan_connector_flag_resolves_target(self, mock_resolve):
+        # The resolved connector (not bare guardrail.connector) must drive
+        # plugin-dir resolution; an invalid plugin still exits 1.
+        result = self.invoke(["scan", "ghost", "--connector", "codex"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertEqual(mock_resolve.call_args.args[2], "codex")
+
+    def test_scan_connector_flag_rejects_unknown(self):
+        result = self.invoke(["scan", "ghost", "--connector", "nope"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not configured", result.output)
+
+
 class PluginCommandTestBase(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
@@ -1278,7 +1308,7 @@ class HostPluginEnumerationTests(unittest.TestCase):
         from defenseclaw.commands.cmd_plugin import _list_host_plugins
 
         class FakeCfg:
-            def plugin_dirs(self):
+            def plugin_dirs(self, connector=None):
                 return [self.tmp_dir]  # would normally contain plugins
 
         out = _list_host_plugins("openclaw", FakeCfg())
@@ -1304,7 +1334,7 @@ class HostPluginEnumerationTests(unittest.TestCase):
         outer_self = self
 
         class FakeCfg:
-            def plugin_dirs(self):
+            def plugin_dirs(self, connector=None):
                 return [a, b]  # noqa: F823 — closure over outer scope
 
         out = _list_host_plugins("claudecode", FakeCfg())
@@ -1344,7 +1374,7 @@ class MergeAllPluginsHostBranchTests(unittest.TestCase):
         outer = self
 
         class FakeCfg:
-            def plugin_dirs(self):
+            def plugin_dirs(self, connector=None):
                 return [outer.host_dir]
 
         return FakeCfg()

@@ -129,7 +129,34 @@ def _kv(details: str) -> dict[str, str]:
     return dict(tok.split("=", 1) for tok in (details or "").split() if "=" in tok)
 
 
-def _render_table(alert_list: list, store) -> None:
+# When --connector is set, scan a generous window of recent alerts so the
+# filter can surface up to --limit matches even when other connectors
+# dominate the most-recent rows. Bounded so a huge audit DB stays responsive.
+_CONNECTOR_SCAN_POOL = 2000
+
+
+def _event_connector(event) -> str:
+    """Connector attributed to an alert, from its ``connector=`` kv field.
+
+    Mirrors the TUI Alerts panel (``parse_kv_details(...).get("connector")``)
+    so CLI and TUI agree on attribution. Gateway-global alerts (e.g.
+    ``sink-failure``) carry no connector and return ""."""
+    return _kv(event.details or "").get("connector", "").lower()
+
+
+def _filter_by_connector(alert_list: list, connector: str | None) -> list:
+    """Keep only alerts whose connector matches ``connector`` (substring,
+    case-insensitive — same match rule as the TUI ``connector:`` token).
+
+    An empty/None ``connector`` is a no-op so single-connector and unfiltered
+    invocations behave exactly as before."""
+    needle = (connector or "").strip().lower()
+    if not needle:
+        return alert_list
+    return [e for e in alert_list if needle in _event_connector(e)]
+
+
+def _render_table(alert_list: list, store, connector: str | None = None) -> None:
     """Plain Rich table — the single renderer since the Textual TUI
     was retired in P3-#20. Kept in a helper so the deprecated
     ``--tui`` flag can fall through here without duplicating the
@@ -142,8 +169,9 @@ def _render_table(alert_list: list, store) -> None:
     term_width = console.size.width
     w_details = max(11, term_width - _OVERHEAD - _W_FIXED)
 
+    scope = f" — connector={connector}" if (connector or "").strip() else ""
     table = Table(
-        title=f"Security Alerts (last {len(alert_list)})",
+        title=f"Security Alerts (last {len(alert_list)}){scope}",
         caption=(
             "Run [bold]defenseclaw alerts --show #[/bold] for full details, "
             "or [bold]defenseclaw tui[/bold] for the interactive Alerts panel."
@@ -195,6 +223,17 @@ def _render_table(alert_list: list, store) -> None:
 @click.option("--show", "show_idx", default=None, type=int,
               help="Print full details for alert # and exit (non-interactive)")
 @click.option(
+    "--connector",
+    "connector",
+    default=None,
+    help=(
+        "Only show alerts attributed to this connector (e.g. codex, "
+        "claudecode, antigravity). Matches the per-event connector= field, "
+        "mirroring the TUI's `connector:` search token. No-op for "
+        "single-connector installs."
+    ),
+)
+@click.option(
     "--tui/--no-tui",
     default=False,
     help=(
@@ -203,26 +242,50 @@ def _render_table(alert_list: list, store) -> None:
     ),
 )
 @click.pass_context
-def alerts(ctx: click.Context, limit: int, show_idx: int | None, tui: bool) -> None:
+def alerts(
+    ctx: click.Context,
+    limit: int,
+    show_idx: int | None,
+    connector: str | None,
+    tui: bool,
+) -> None:
     """View and manage security alerts."""
     if ctx.invoked_subcommand is not None:
         return
     app = ctx.find_object(AppContext)
     if app is None:
         raise click.ClickException("internal error: AppContext missing")
-    _alerts_default(app, limit, show_idx, tui)
+    _alerts_default(app, limit, show_idx, tui, connector)
 
 
-def _alerts_default(app: AppContext, limit: int, show_idx: int | None, tui: bool) -> None:
+def _alerts_default(
+    app: AppContext,
+    limit: int,
+    show_idx: int | None,
+    tui: bool,
+    connector: str | None = None,
+) -> None:
     """View security alerts as a table (legacy ``defenseclaw alerts``)."""
     if not app.store:
         ux.warn("No audit store available. Run 'defenseclaw init' first.")
         return
 
-    alert_list = app.store.list_alerts(limit)
+    needle = (connector or "").strip()
+    if needle:
+        # Scan a wider window, then keep up to --limit matching the connector.
+        pool = app.store.list_alerts(max(limit, _CONNECTOR_SCAN_POOL))
+        alert_list = _filter_by_connector(pool, needle)[:limit]
+    else:
+        alert_list = app.store.list_alerts(limit)
 
     if not alert_list:
-        ux.ok("No alerts. All clear.")
+        if needle:
+            ux.ok(
+                f"No alerts from connector '{needle}' in the last "
+                f"{max(limit, _CONNECTOR_SCAN_POOL)} events."
+            )
+        else:
+            ux.ok("No alerts. All clear.")
         return
 
     if show_idx is not None:
@@ -275,7 +338,7 @@ def _alerts_default(app: AppContext, limit: int, show_idx: int | None, tui: bool
             "Launch `defenseclaw tui` and press 2 for the Alerts panel.",
         )
 
-    _render_table(alert_list, app.store)
+    _render_table(alert_list, app.store, connector=needle)
 
 
 @alerts.command("acknowledge")

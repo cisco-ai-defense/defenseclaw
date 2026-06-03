@@ -542,7 +542,16 @@ func (s *Sidecar) Run(ctx context.Context) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := s.runGuardrail(ctx); err != nil && ctx.Err() == nil {
+		// Guarded dispatch: the multi-connector boot loop runs ONLY when
+		// the operator configured more than one connector
+		// (guardrail.connectors has >1 entry). The single-connector path
+		// — every existing install — keeps calling runGuardrail unchanged,
+		// so its behavior is preserved byte-for-byte.
+		runGuardrailFn := s.runGuardrail
+		if len(s.cfg.ActiveConnectors()) > 1 {
+			runGuardrailFn = s.runGuardrailMulti
+		}
+		if err := runGuardrailFn(ctx); err != nil && ctx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] guardrail exited with error: %v\n", err)
 			errCh <- err
 		}
@@ -1542,6 +1551,298 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	return proxy.Run(ctx)
 }
 
+// runGuardrailMulti is the multi-connector boot loop. It activates ONLY when
+// the operator configured more than one connector (guardrail.connectors has
+// >1 entry); the guarded dispatch in Run() keeps every single-connector
+// install on the unchanged runGuardrail path.
+//
+// Scope (WU6c, Option 1 — boot-lifecycle):
+//   - Multi-connector is HOOK-ONLY. A fail-fast guard rejects boot if any
+//     configured connector requires a proxy binding (a single process can
+//     bind only one guardrail proxy port), so this loop never binds the
+//     proxy and runs in observability-only mode: hooks + OTel + audit flow
+//     through the always-on API server (runAPI), agents talk directly to
+//     their native upstreams.
+//   - Per-connector failure isolation (DN1): one connector's setup/verify
+//     failure is logged, rolled back for that connector only, and the loop
+//     continues. Boot fails as a whole only if EVERY connector fails.
+//   - Rule packs are loaded/validated per connector through a shared
+//     RulePackCache so connectors sharing a profile read disk once, and each
+//     connector's compiled rule set is registered via
+//     ApplyConnectorRulePackOverrides so its hook lane scans against its OWN
+//     EffectiveRulePackDir at runtime (per-connector parity with
+//     single-connector mode — see ScanAllRulesForConnector).
+//
+// Remaining global override: ApplyLocalPatternsOverride mutates the
+// process-global local-pattern lists used by the PROXY lane
+// (scanLocalPatterns). That lane only runs for proxy-binding connectors, and
+// multi-connector mode is hook-only (the fail-fast guard above rejects any
+// proxy-binding connector), so the proxy local-pattern globals are never
+// consumed here — there is no per-connector divergence to reconcile. The
+// hook lane (the only lane active in multi) uses the per-connector rule sets
+// described above.
+func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
+	// Reuse the primary rule pack already loaded by NewSidecar (it drives
+	// the process-global scanner overrides). The per-connector packs below
+	// are loaded separately via the cache.
+	primaryRP := s.router.rp
+	if primaryRP == nil {
+		primaryRP = guardrail.LoadRulePack(s.cfg.Guardrail.RulePackDir)
+		primaryRP.Validate()
+	}
+
+	// Route plugin-loader rejections into the audit pipeline before any
+	// DiscoverPlugins runs — identical to the single-connector path.
+	wirePluginAuditEmitter()
+
+	registry := connector.NewDefaultRegistry()
+	if s.cfg.PluginDir != "" {
+		if err := registry.DiscoverPlugins(s.cfg.PluginDir); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] plugin discovery: %v\n", err)
+		}
+	}
+
+	// configured is every connector in guardrail.connectors. names is the
+	// ENABLED subset: a connector explicitly disabled via
+	// `guardrail disable --connector X` (guardrail.connectors.X.enabled =
+	// false) is dropped here so it never gets set up and — because it was
+	// in the previous active set — the set-difference teardown below
+	// removes its hooks. This is the per-connector analog of the global
+	// `guardrail disable` teardown, scoped to one connector. EffectiveEnabled
+	// defaults to true, so a connector with no explicit override is
+	// unaffected and single-connector installs never reach this path.
+	configured := s.cfg.ActiveConnectors()
+	names := make([]string, 0, len(configured))
+	for _, name := range configured {
+		if s.cfg.Guardrail.EffectiveEnabled(strings.ToLower(strings.TrimSpace(name))) {
+			names = append(names, name)
+		} else {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector %s disabled (guardrail.connectors.%s.enabled=false) — excluded from active set; teardown will run\n", name, name)
+		}
+	}
+
+	// Resolve every enabled connector up front. An unknown connector
+	// name is an operator typo and aborts boot (fail fast) — silently
+	// dropping it would route that agent's traffic through nothing.
+	conns := make([]connector.Connector, 0, len(names))
+	for _, name := range names {
+		conn, err := resolveActiveConnector(registry, strings.ToLower(strings.TrimSpace(name)), "guardrail")
+		if err != nil {
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return fmt.Errorf("multi-connector boot: %w", err)
+		}
+		conns = append(conns, conn)
+	}
+
+	// Fail-fast proxy guard: multi-connector mode is hook-only. A single
+	// process can bind only one guardrail proxy port, so a proxy-binding
+	// connector in the set is a configuration error we surface at boot
+	// rather than silently dropping enforcement for it.
+	for _, conn := range conns {
+		if proxyShouldBindForConnector(conn, &s.cfg.Guardrail) {
+			err := fmt.Errorf("multi-connector mode supports hook-only connectors; %q requires a proxy binding and cannot share a process with other connectors", conn.Name())
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+	}
+
+	apiBind := "127.0.0.1"
+	if s.cfg.Gateway.APIBind != "" {
+		apiBind = s.cfg.Gateway.APIBind
+	}
+	apiAddr := fmt.Sprintf("%s:%d", apiBind, s.cfg.Gateway.APIPort)
+	proxyAddr := guardrailListenAddr(s.cfg.Guardrail.Port, s.cfg.Guardrail.Host)
+
+	// Synthesize a first-boot gateway token once for all connectors — the
+	// token is baked into every connector's hook scripts and is the shared
+	// secret the API server authenticates inbound hooks against.
+	dotenvPath := filepath.Join(s.cfg.DataDir, ".env")
+	apiToken := s.cfg.Gateway.ResolvedToken()
+	if apiToken == "" {
+		tok, err := EnsureGatewayToken(dotenvPath)
+		if err != nil {
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return fmt.Errorf("first-boot gateway token: %w", err)
+		}
+		s.cfg.Gateway.Token = tok
+		apiToken = tok
+		_ = os.Setenv("DEFENSECLAW_GATEWAY_TOKEN", tok)
+	}
+	masterKey := deriveMasterKey(s.cfg.DataDir)
+
+	// Set-difference teardown: any connector active on a previous boot but
+	// absent from the current set is torn down once, before setup. Uses a
+	// base opts carrying just the fields Teardown needs.
+	baseOpts := connector.SetupOpts{DataDir: s.cfg.DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
+	previous := connector.LoadActiveConnectors(s.cfg.DataDir)
+	teardownRemovedConnectors(registry, previous, names, baseOpts, ctx)
+
+	// Disabled short-circuit: tear every configured connector down, clear
+	// persisted state, and idle until shutdown.
+	if !s.cfg.Guardrail.Enabled {
+		for _, conn := range conns {
+			opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
+			if err := conn.Teardown(ctx, opts); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s teardown: %v\n", conn.Name(), err)
+			}
+			if err := conn.VerifyClean(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
+			}
+		}
+		connector.ClearActiveConnector(s.cfg.DataDir)
+		s.health.SetGuardrail(StateDisabled, "", nil)
+		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — tore down %d configured connector(s)\n", len(conns))
+		<-ctx.Done()
+		return nil
+	}
+
+	// All-disabled guard: the global guardrail is still enabled, but every
+	// configured connector was individually disabled
+	// (`guardrail disable --connector X` for each). The set-difference
+	// teardown above already removed their hooks; persist the now-empty
+	// active set so the next boot starts clean, report the state honestly,
+	// and idle. Without this we would fall through to the "all connectors
+	// failed setup" error below, which would misreport a deliberate
+	// per-connector disable as a boot failure.
+	if len(conns) == 0 {
+		if err := connector.SaveActiveConnectors(s.cfg.DataDir, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] save active connector set: %v\n", err)
+		}
+		s.health.SetGuardrail(StateDisabled, "all configured connectors are individually disabled", nil)
+		fmt.Fprintf(os.Stderr, "[guardrail] all %d configured connector(s) disabled per-connector — none active; idle until shutdown\n", len(configured))
+		<-ctx.Done()
+		return nil
+	}
+
+	// Per-connector setup with failure isolation (DN1). Each connector's
+	// rule pack is loaded/validated through the shared cache so connectors
+	// sharing a profile read disk once.
+	cache := guardrail.NewRulePackCache()
+	succeeded := s.setupConnectorsIsolated(ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache)
+
+	// Persist the set that actually came up so the next boot's
+	// set-difference teardown is accurate.
+	if err := connector.SaveActiveConnectors(s.cfg.DataDir, succeeded); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save active connector set: %v\n", err)
+	}
+
+	// Every connector failing is a real boot failure — surface it loudly
+	// rather than idling on a gateway that protects nothing.
+	if len(succeeded) == 0 {
+		err := fmt.Errorf("multi-connector boot: all %d configured connectors failed setup", len(conns))
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		<-ctx.Done()
+		return err
+	}
+
+	// Health: register every connector that came up so each appears in the
+	// roster with its own live counters, then mark the first (sorted) as the
+	// primary surfaced in the back-compat singular Connector field.
+	for _, name := range succeeded {
+		if c, ok := registry.Get(name); ok {
+			s.health.RegisterConnector(c.Name(), c.ToolInspectionMode(), c.SubprocessPolicy())
+		}
+	}
+	if primary, ok := registry.Get(succeeded[0]); ok {
+		s.health.SetConnector(primary.Name(), primary.ToolInspectionMode(), primary.SubprocessPolicy())
+	}
+	s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
+		"summary":             fmt.Sprintf("multi-connector observability (%d active)", len(succeeded)),
+		"connectors":          succeeded,
+		"enforcement_enabled": false,
+		"proxy_port":          "closed",
+		"hint":                "hook-only connectors talk directly to their native upstreams; the local guardrail proxy is not in the LLM data path",
+	})
+	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector observability mode: %d active connector(s): %s — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "))
+
+	<-ctx.Done()
+	return nil
+}
+
+// setupConnectorsIsolated runs setupOneConnector for each connector in turn
+// and returns the names that came up cleanly. It is the heart of the DN1
+// failure-isolation guarantee: a connector whose setup fails is logged and
+// skipped, and the remaining connectors are set up regardless, so one
+// connector's failure can never cascade and take the others down. The order
+// of the returned slice matches the input order (sorted by the caller).
+func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache) []string {
+	succeeded := make([]string, 0, len(conns))
+	for _, conn := range conns {
+		opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
+		if err := s.setupOneConnector(ctx, conn, opts, masterKey, cache); err != nil {
+			// Isolate: log, leave the other connectors untouched, continue.
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", conn.Name(), err)
+			continue
+		}
+		succeeded = append(succeeded, conn.Name())
+		fmt.Fprintf(os.Stderr, "[guardrail] connector ready: %s (%s)\n", conn.Name(), conn.Description())
+	}
+	return succeeded
+}
+
+// connectorSetupOpts builds the per-connector SetupOpts for the
+// multi-connector boot loop. It mirrors the single-connector setupOpts
+// construction in runGuardrail but resolves the fail mode per connector via
+// EffectiveHookFailModeFor so a per-connector hook_fail_mode override is
+// honored.
+func (s *Sidecar) connectorSetupOpts(conn connector.Connector, apiToken, proxyAddr, apiAddr string) connector.SetupOpts {
+	agentVersion := connector.LoadCachedAgentVersion(s.cfg.DataDir, conn.Name())
+	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
+	return connector.SetupOpts{
+		DataDir:          s.cfg.DataDir,
+		ProxyAddr:        proxyAddr,
+		APIAddr:          apiAddr,
+		APIToken:         apiToken,
+		WorkspaceDir:     s.cfg.ConnectorWorkspaceDir(),
+		HookFailMode:     s.cfg.Guardrail.EffectiveHookFailModeFor(conn.Name()),
+		HILTEnabled:      s.cfg.Guardrail.EffectiveHILT(conn.Name()).Enabled,
+		InstallCodeGuard: false,
+		AgentVersion:     agentVersion,
+		HookContractID:   contractResolution.Contract.ContractID,
+	}
+}
+
+// setupOneConnector performs the full setup-and-verify sequence for a single
+// connector in the multi-connector boot loop. It returns an error (rather
+// than aborting boot) so the caller can isolate the failure (DN1) and keep
+// the other connectors running. On a post-Setup verification failure it rolls
+// back just this connector's Setup before returning so a half-installed
+// connector never lingers.
+func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
+	// Inject credentials before Setup so probes keyed off them succeed.
+	conn.SetCredentials(opts.APIToken, masterKey)
+
+	// Load + validate this connector's effective rule pack through the
+	// shared cache. Connectors sharing a profile read disk once.
+	rp := cache.Load(s.cfg.Guardrail.EffectiveRulePackDir(conn.Name()))
+	if rp != nil {
+		rp.Validate()
+	}
+
+	// Register this connector's rule set so its hook lane scans against its
+	// own pack at runtime (per-connector parity with single-connector mode).
+	// A nil pack still pins the connector to the compiled-in defaults rather
+	// than inheriting whichever pack the primary installed into the global.
+	ApplyConnectorRulePackOverrides(conn.Name(), rp)
+
+	if err := conn.Setup(ctx, opts); err != nil {
+		return fmt.Errorf("connector %s setup failed: %w", conn.Name(), err)
+	}
+	if err := verifyHookScriptsOrRetry(ctx, opts, conn); err != nil {
+		// Roll back just this connector so a half-installed connector
+		// does not linger; failures during rollback are non-fatal.
+		if tdErr := conn.Teardown(ctx, opts); tdErr != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s after verification failure: %v\n", conn.Name(), tdErr)
+		}
+		return fmt.Errorf("connector %s hook verification failed: %w", conn.Name(), err)
+	}
+	lockEntry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	if err := connector.SaveHookContractLockEntry(s.cfg.DataDir, lockEntry); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] save hook contract lock for %s: %v\n", conn.Name(), err)
+	}
+	return nil
+}
+
 // proxyShouldBindForConnector returns true when the active connector
 // requires the proxy listener to be bound — i.e. the agent's data
 // path goes through DefenseClaw. Codex, Claude Code, and other
@@ -1788,6 +2089,51 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
 	return nil
+}
+
+// teardownRemovedConnectors tears down connectors that were active on a
+// previous boot but are absent from the current active set — the
+// set-difference generalization of teardownPreviousConnector for the
+// multi-connector boot path (removed = previous − current). It is intended to
+// run once, before the per-connector setup loop.
+//
+// Failures are logged and skipped (continue-on-error): stale state left by a
+// connector being REMOVED must never block bringing up the connectors that
+// are still active (DN1). Membership is compared case-insensitively so a case
+// mismatch can never tear down a connector that is in fact still active. A
+// removed name absent from the registry is skipped with a log, mirroring
+// teardownPreviousConnector.
+func teardownRemovedConnectors(registry *connector.Registry, previous, current []string, opts connector.SetupOpts, ctx context.Context) {
+	if registry == nil || len(previous) == 0 {
+		return
+	}
+	keep := make(map[string]struct{}, len(current))
+	for _, n := range current {
+		if trimmed := strings.TrimSpace(n); trimmed != "" {
+			keep[strings.ToLower(trimmed)] = struct{}{}
+		}
+	}
+	for _, prev := range previous {
+		prevName := strings.TrimSpace(prev)
+		if prevName == "" {
+			continue
+		}
+		if _, still := keep[strings.ToLower(prevName)]; still {
+			continue
+		}
+		old, ok := registry.Get(prevName)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry — skipping teardown\n", prevName)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down\n", prevName)
+		if err := old.Teardown(ctx, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", prevName, err)
+		}
+		if err := old.VerifyClean(opts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", prevName, err)
+		}
+	}
 }
 
 // failGuardrailWithRollback is the shared fail-loud path for connector

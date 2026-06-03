@@ -64,6 +64,17 @@ _TRUSTED_BIN_PREFIXES_DEFAULT: tuple[str, ...] = (
     "~/.local/bin",
     "~/.local/share/claude",
     "~/.local/share/uv/tools",
+    # Codex CLI standalone install root. The installer drops a launcher
+    # symlink in ~/.local/bin but the real binary lives under
+    # ~/.codex/packages/standalone/releases/<ver>/bin/codex, and
+    # _is_trusted_binary_path resolves symlinks before the prefix check —
+    # so without this entry the modern Codex CLI is rejected as "not in a
+    # trusted install prefix" and `setup codex --mode action` fails out of
+    # the box. Scoped to packages/ (not all of ~/.codex, which also holds
+    # auth.json, session DBs, and caches) and still subject to the
+    # world-writable-parent guard, so this is a user-owned tool root in
+    # the same category as the npm/cargo/volta entries below.
+    "~/.codex/packages",
     "~/.cargo/bin",
     "~/.npm-global/bin",
     "~/.volta/bin",

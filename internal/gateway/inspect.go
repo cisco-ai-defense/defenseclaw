@@ -67,6 +67,11 @@ type ToolInspectRequest struct {
 	Direction       string          `json:"direction,omitempty"`
 	SessionID       string          `json:"session_id,omitempty"`
 	ApprovalSurface string          `json:"approval_surface,omitempty"`
+	// Connector selects which connector's rule set the scan uses. The hook
+	// handlers stamp it (codex/claudecode/...) so each connector scans
+	// against its own EffectiveRulePackDir. Empty ⇒ process-global default
+	// set (single-connector installs and the generic inspect endpoint).
+	Connector string `json:"connector,omitempty"`
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -276,7 +281,9 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 	argsStr := string(req.Args)
 	toolName := req.Tool
 
-	ruleFindings := ScanAllRules(argsStr, toolName)
+	// Scan against the request connector's rule set so each connector
+	// enforces its own pack (empty ⇒ process-global default set).
+	ruleFindings := ScanAllRulesForConnector(req.Connector, argsStr, toolName)
 
 	// CodeGuard: scan file content for write_file/edit_file tools.
 	tool := strings.ToLower(toolName)
@@ -310,7 +317,7 @@ func (a *APIServer) inspectToolPolicy(req *ToolInspectRequest) *ToolInspectVerdi
 		}
 	}
 
-	action := guardrailRuntimeAction(a.scannerCfg, severity, true)
+	action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, true)
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {
@@ -394,8 +401,10 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 
-	// Outbound messages get the full scan — tool name "message" for context
-	ruleFindings := ScanAllRules(content, "message")
+	// Outbound messages get the full scan — tool name "message" for context.
+	// Routed through the request's connector so each connector scans against
+	// its own rule pack (empty ⇒ process-global default set).
+	ruleFindings := ScanAllRulesForConnector(req.Connector, content, "message")
 
 	if len(ruleFindings) == 0 {
 		// Regex found nothing locally. Give the AID lane a turn —
@@ -410,7 +419,7 @@ func (a *APIServer) inspectMessageContent(req *ToolInspectRequest) *ToolInspectV
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
 
-	action := guardrailRuntimeAction(a.scannerCfg, severity, strings.EqualFold(req.Direction, "outbound"))
+	action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, strings.EqualFold(req.Direction, "outbound"))
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {

@@ -557,5 +557,111 @@ class TestPickedConnectorHintAtomicity(unittest.TestCase):
         _write_picked_connector_hint("", "codex")
 
 
+class TestConnectorRulePackFlag(unittest.TestCase):
+    """`setup <connector> --rule-pack` parity with single-connector.
+
+    Single-connector parity: in single-connector mode the operator
+    selects the connector's rule pack with ``setup guardrail --rule-pack``.
+    The multi-connector equivalent is being able to give *each* connector
+    its own pack. These tests pin both shapes of the new flag:
+
+      * sole connector  -> writes the GLOBAL ``guardrail.rule_pack_dir``
+        (identical to single-connector behavior)
+      * one of several  -> writes a PER-CONNECTOR override so peers keep
+        their own pack / the global default, and each connector's
+        ``effective_rule_pack_dir`` resolves independently.
+    """
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+        # Start from a proxy-backed single connector so the first hook
+        # alias resolves write_mode="replace" (no hook peer present).
+        self.app.cfg.claw.mode = "openclaw"
+        self.app.cfg.guardrail.connector = "openclaw"
+        self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
+
+        def _save():
+            with open(self.cfg_path, "w") as fh:
+                fh.write("placeholder\n")
+
+        self.app.cfg.save = _save  # type: ignore[assignment]
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _run(self, *args):
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            return _invoke([*args], self.app)
+
+    def test_sole_connector_sets_global_rule_pack(self):
+        # Codex is the only (hook) connector -> replace -> global pack,
+        # matching single-connector `setup guardrail --rule-pack`.
+        result = self._run("codex", "--yes", "--no-restart", "--rule-pack", "strict")
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        gc = self.app.cfg.guardrail
+        self.assertTrue(
+            gc.rule_pack_dir.endswith(os.path.join("guardrail", "strict")),
+            f"global rule_pack_dir not set: {gc.rule_pack_dir!r}",
+        )
+        # No per-connector block written in the sole-connector shape.
+        self.assertEqual(gc.connectors, {})
+
+    def test_per_connector_packs_resolve_independently(self):
+        # codex strict (sole -> global), then claude-code permissive
+        # (now a peer -> per-connector override). Result: codex inherits
+        # the global strict pack, claudecode runs permissive.
+        r1 = self._run("codex", "--yes", "--no-restart", "--rule-pack", "strict")
+        self.assertEqual(r1.exit_code, 0, msg=r1.output)
+        r2 = self._run(
+            "claude-code", "--yes", "--no-restart", "--rule-pack", "permissive"
+        )
+        self.assertEqual(r2.exit_code, 0, msg=r2.output)
+
+        gc = self.app.cfg.guardrail
+        # Both connectors are in the multi map (codex seeded on the add).
+        self.assertEqual(set(gc.connectors), {"codex", "claudecode"})
+        # codex has no override -> inherits the global strict pack.
+        self.assertEqual(gc.connectors["codex"].rule_pack_dir, "")
+        # claudecode carries its own permissive override.
+        self.assertTrue(
+            gc.connectors["claudecode"].rule_pack_dir.endswith(
+                os.path.join("guardrail", "permissive")
+            )
+        )
+        # The resolver is what the gateway uses at boot — assert it.
+        self.assertTrue(
+            gc.effective_rule_pack_dir("codex").endswith(
+                os.path.join("guardrail", "strict")
+            )
+        )
+        self.assertTrue(
+            gc.effective_rule_pack_dir("claudecode").endswith(
+                os.path.join("guardrail", "permissive")
+            )
+        )
+
+    def test_rule_pack_omitted_leaves_packs_untouched(self):
+        # No --rule-pack -> neither global nor per-connector pack is set
+        # by the alias (regression guard against accidental writes).
+        result = self._run("codex", "--yes", "--no-restart")
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        gc = self.app.cfg.guardrail
+        self.assertEqual(gc.rule_pack_dir, "")
+        self.assertEqual(gc.connectors, {})
+
+
 if __name__ == "__main__":
     unittest.main()

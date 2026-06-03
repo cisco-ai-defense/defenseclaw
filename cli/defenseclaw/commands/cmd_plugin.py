@@ -69,6 +69,10 @@ def plugin() -> None:
 @click.option("--llm-consensus-runs", default=0, type=int, help="Number of LLM consensus runs (default: 1)")
 @click.option("--enable-meta/--no-meta", default=True, help="Enable/disable meta analyzer (default: enabled)")
 @click.option("--lenient", is_flag=True, help="Suppress low-confidence findings (sets min_confidence=0.5)")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Scan a specific connector's plugins (multi-connector installs)",
+)
 @pass_ctx
 def scan(
     app: AppContext,
@@ -82,6 +86,7 @@ def scan(
     llm_consensus_runs: int,
     enable_meta: bool,
     lenient: bool,
+    connector_flag: str,
 ) -> None:
     """Scan a plugin directory for security issues.
 
@@ -99,10 +104,14 @@ def scan(
       defenseclaw plugin scan my-plugin --policy ~/.defenseclaw/policies/custom.yaml\n
       defenseclaw plugin scan /path/to/plugin --profile strict --lenient
     """
-    from defenseclaw.commands import _scan_ui
+    from defenseclaw.commands import _scan_ui, resolve_list_connector
     from defenseclaw.scanner.plugin import PluginScannerWrapper
 
-    connector = app.cfg.guardrail.connector.lower() or "openclaw"
+    # resolve_list_connector validates --connector and falls back to the
+    # canonical active_connector() (guardrail.connector → claw.mode →
+    # openclaw). This also replaces the prior bare guardrail.connector read,
+    # which missed claw.mode-only installs and disagreed with `plugin list`.
+    connector = resolve_list_connector(app, connector_flag)
     scan_dir = _resolve_plugin_dir(name_or_path, app.cfg.plugin_dir, connector)
     if not scan_dir:
         click.echo(f"error: plugin not found: {name_or_path}", err=True)
@@ -123,11 +132,6 @@ def scan(
     # S6.2 — surface the connector and the concrete category list
     # before kicking off the scan, so operators see what's being
     # checked instead of an opaque "[plugin] scanning..." line.
-    connector = (
-        app.cfg.active_connector()
-        if hasattr(app.cfg, "active_connector")
-        else "openclaw"
-    )
     ctx = _scan_ui.ScanContext.for_plugin(
         connector=connector,
         paths=[scan_dir],
@@ -254,8 +258,12 @@ def _build_scan_options(
 @click.argument("name_or_path")
 @click.option("--force", is_flag=True, help="Force install (overwrites existing)")
 @click.option("--action", "take_action", is_flag=True, help="Apply plugin_actions policy based on scan severity")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Attribute install/enforcement to a specific connector (multi-connector installs)",
+)
 @pass_ctx
-def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) -> None:
+def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, connector_flag: str) -> None:
     """Install a plugin from a local path, npm registry, clawhub, or URL.
 
     Supports four source types (auto-detected):
@@ -272,6 +280,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
     """
     import tempfile
 
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.admission import evaluate_admission
     from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
@@ -285,6 +294,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
     )
     from defenseclaw.scanner.plugin import PluginScannerWrapper
 
+    connector = resolve_list_connector(app, connector_flag)
     plugin_dir = app.cfg.plugin_dir
     os.makedirs(plugin_dir, exist_ok=True)
 
@@ -312,7 +322,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
             name=plugin_name,
             source_path=pre_install_source,
             fallback_actions=app.cfg.plugin_actions,
-            connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+            connector=connector,
             asset_policy=app.cfg.asset_policy,
         )
 
@@ -408,7 +418,7 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool) 
                     source_path=provenance_path,
                     scan_result=result,
                     fallback_actions=app.cfg.plugin_actions,
-                    connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+                    connector=connector,
                     asset_policy=app.cfg.asset_policy,
                 )
 
@@ -504,17 +514,24 @@ def _print_install_result(name: str, result) -> None:
 
 @plugin.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="List plugins for a specific configured connector (multi-connector installs).",
+)
 @pass_ctx
-def list_plugins(app: AppContext, as_json: bool) -> None:
-    """List installed plugins for the active connector with scan severity."""
+def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
+    """List installed plugins for a connector with scan severity."""
     # Use ``active_connector()`` (guardrail.connector → claw.mode → openclaw)
     # so the connector string used for phantom-row gating matches what the
     # data layer (``cfg.plugin_dirs()``) is actually walking. The legacy
     # ``guardrail.connector``-only read missed installs configured solely
-    # via ``claw.mode``.
-    connector = (
-        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-    )
+    # via ``claw.mode``. A ``--connector`` override (multi-connector focus)
+    # targets a specific configured connector instead of the active one.
+    from defenseclaw.commands import resolve_list_connector
+
+    connector = resolve_list_connector(app, connector_flag)
     # Plan C6: pass the full cfg so _merge_all_plugins can consult
     # cfg.plugin_dirs() for host-side plugin enumeration. Falls back
     # to None for callers that have not migrated.
@@ -1017,7 +1034,7 @@ def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
     if name == "copilot":
         return _list_copilot_plugins()
     try:
-        dirs = cfg.plugin_dirs()
+        dirs = cfg.plugin_dirs(connector)
     except Exception:
         return []
     out: list[dict[str, Any]] = []
@@ -1466,21 +1483,41 @@ def restore(app: AppContext, name: str, restore_path: str) -> None:
 @plugin.command()
 @click.argument("name")
 @click.option("--json", "as_json", is_flag=True, help="Output plugin info as JSON")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Inspect a specific connector's plugin (multi-connector installs)",
+)
 @pass_ctx
-def info(app: AppContext, name: str, as_json: bool) -> None:
+def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None:
     """Show detailed information about a plugin.
 
     Displays plugin metadata, latest scan results from the DefenseClaw
     audit database, and enforcement actions.
     """
+    from defenseclaw.commands import resolve_list_connector
+
+    connector = resolve_list_connector(app, connector_flag)
     plugin_name = os.path.basename(name)
-    plugin_dir = app.cfg.plugin_dir
 
     info_map: dict = {"name": plugin_name}
 
-    # Check if installed
-    candidate = os.path.join(plugin_dir, plugin_name)
-    if os.path.isdir(candidate):
+    # Check if installed — consult the target connector's plugin dirs first
+    # (parity: inspect a non-primary connector's plugin), then fall back to
+    # the DefenseClaw-managed plugin_dir.
+    search_dirs: list[str] = []
+    try:
+        search_dirs.extend(app.cfg.plugin_dirs(connector))
+    except Exception:  # noqa: BLE001 — fall back to the single managed dir.
+        pass
+    if app.cfg.plugin_dir not in search_dirs:
+        search_dirs.append(app.cfg.plugin_dir)
+
+    candidate = next(
+        (os.path.join(d, plugin_name) for d in search_dirs
+         if os.path.isdir(os.path.join(d, plugin_name))),
+        "",
+    )
+    if candidate:
         info_map["installed"] = True
         info_map["path"] = candidate
         # Try to read package.json for metadata

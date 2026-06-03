@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -226,6 +227,23 @@ func auditDetailsToMap(e audit.Event) map[string]string {
 	}
 	if e.Action != "" {
 		out["action"] = e.Action
+	}
+	// C2/DN2: promote the multi-connector identity to first-class keys so
+	// gateway.jsonl is attributable per connector without string-parsing
+	// the free-form details tail. Mirrors the SQLite columns (migration
+	// 16) and the structured envelope. Zero/empty values are omitted so
+	// non-hook lifecycle rows stay unchanged (single-connector no-op).
+	if e.Connector != "" {
+		out["connector"] = e.Connector
+	}
+	if e.StepIdx > 0 {
+		out["step_idx"] = strconv.Itoa(e.StepIdx)
+	}
+	if e.Enforced {
+		out["enforced"] = "true"
+	}
+	if e.RulePackDir != "" {
+		out["rule_pack_dir"] = e.RulePackDir
 	}
 	if len(out) == 0 {
 		return nil

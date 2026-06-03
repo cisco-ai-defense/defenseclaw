@@ -106,6 +106,26 @@ type Event struct {
 	AgentID           string `json:"agent_id,omitempty"`
 	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
 
+	// Multi-connector identity + per-turn / enforcement fields
+	// (SQLite columns from migration 16). All optional and additive —
+	// older rows leave the columns NULL, and non-hook events (admin
+	// mutations, scanner results) simply don't populate them.
+	//
+	//   - Connector: the hook connector that produced this event
+	//     (codex, claudecode, antigravity, ...), recovered from the
+	//     request context. Empty for proxy / non-connector events.
+	//   - StepIdx: 1-indexed turn counter within a session_id. All hook
+	//     events emitted during the same agent turn share one StepIdx;
+	//     a new turn increments it. Zero means "not turn-anchored".
+	//   - Enforced: true when the guardrail decision was actually
+	//     enforced (blocked), as opposed to observe-mode would-block.
+	//   - RulePackDir: the effective rule-pack directory the verdict was
+	//     evaluated against (per-connector override or global).
+	Connector   string `json:"connector,omitempty"`
+	StepIdx     int    `json:"step_idx,omitempty"`
+	Enforced    bool   `json:"enforced,omitempty"`
+	RulePackDir string `json:"rule_pack_dir,omitempty"`
+
 	// Structured carries sanitized machine-readable data for sink fanout.
 	// It is intentionally not persisted in SQLite audit_events; callers that
 	// need durable structured records should use their native table/log path.
@@ -1162,6 +1182,48 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// Multi-connector support: per-connector identity + per-turn
+		// counter + enforcement + rule-pack provenance on every audit
+		// row. All columns are additive and optional — the ADD COLUMNs
+		// are guarded by hasColumnDB so re-running Init on an
+		// already-migrated DB is a no-op, and legacy rows keep their
+		// existing values with the new columns left NULL. This
+		// migration does NOT touch version.SchemaVersion (the v7
+		// provenance envelope constant); these are optional fields, not
+		// a breaking envelope change.
+		description: "multi-connector: add connector + step_idx + enforced + rule_pack_dir columns",
+		apply: func(ex dbExecer) error {
+			for _, spec := range []struct {
+				table, column, stmt string
+			}{
+				{"audit_events", "connector", `ALTER TABLE audit_events ADD COLUMN connector TEXT`},
+				{"audit_events", "step_idx", `ALTER TABLE audit_events ADD COLUMN step_idx INTEGER`},
+				{"audit_events", "enforced", `ALTER TABLE audit_events ADD COLUMN enforced INTEGER`},
+				{"audit_events", "rule_pack_dir", `ALTER TABLE audit_events ADD COLUMN rule_pack_dir TEXT`},
+			} {
+				exists, err := hasColumnDB(ex, spec.table, spec.column)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := ex.Exec(spec.stmt); err != nil {
+						return fmt.Errorf("alter %s.%s: %w", spec.table, spec.column, err)
+					}
+				}
+			}
+			// Connector is the primary new query dimension (per-connector
+			// dashboards, TUI filter chips); index it. step_idx is
+			// usually filtered alongside connector or session_id, so no
+			// standalone index is warranted yet.
+			if _, err := ex.Exec(
+				`CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`,
+			); err != nil {
+				return fmt.Errorf("create idx_audit_connector: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1362,14 +1424,17 @@ func (s *Store) LogEvent(e Event) error {
 		`INSERT INTO audit_events (id, timestamp, action, target, actor, details, structured_json, severity,
 			run_id, trace_id, request_id,
 			session_id, agent_name, agent_instance_id, policy_id, destination_app, tool_name, tool_id,
-			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			schema_version, content_hash, generation, binary_version, agent_id, sidecar_instance_id,
+			connector, step_idx, enforced, rule_pack_dir)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, ts, e.Action, e.Target, e.Actor, e.Details, structuredJSON, e.Severity,
 		nullStr(e.RunID), nullStr(e.TraceID), nullStr(e.RequestID),
 		nullStr(e.SessionID), nullStr(e.AgentName), nullStr(e.AgentInstanceID),
 		nullStr(e.PolicyID), nullStr(e.DestinationApp), nullStr(e.ToolName), nullStr(e.ToolID),
 		nullInt(e.SchemaVersion), nullStr(e.ContentHash), nullUint64(e.Generation),
 		nullStr(e.BinaryVersion), nullStr(e.AgentID), nullStr(e.SidecarInstanceID),
+		nullStr(e.Connector), nullInt(e.StepIdx), nullBool(e.Enforced),
+		nullStr(e.RulePackDir),
 	)
 	if err != nil {
 		return fmt.Errorf("audit: log event: %w", err)
@@ -1961,7 +2026,8 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 		        session_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
 		        schema_version, content_hash, generation, binary_version,
-		        agent_id, sidecar_instance_id
+		        agent_id, sidecar_instance_id,
+		        connector, step_idx, enforced, rule_pack_dir
 		 FROM audit_events ORDER BY timestamp DESC LIMIT ?`, limit,
 	)
 	if err != nil {
@@ -1996,6 +2062,8 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 		contentHashStr, binaryVerStr                    sql.NullString
 		generation                                      sql.NullInt64
 		agentID, sidecarInst                            sql.NullString
+		connector, rulePackDir                          sql.NullString
+		stepIdx, enforced                               sql.NullInt64
 	)
 	if err := rows.Scan(
 		&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity,
@@ -2004,6 +2072,7 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 		&destinationApp, &toolName, &toolID,
 		&schemaVerI, &contentHashStr, &generation, &binaryVerStr,
 		&agentID, &sidecarInst,
+		&connector, &stepIdx, &enforced, &rulePackDir,
 	); err != nil {
 		return Event{}, fmt.Errorf("audit: scan row: %w", err)
 	}
@@ -2042,6 +2111,18 @@ func scanAuditEventRow(rows rowScanner) (Event, error) {
 	}
 	if sidecarInst.Valid {
 		e.SidecarInstanceID = sidecarInst.String
+	}
+	if connector.Valid {
+		e.Connector = connector.String
+	}
+	if stepIdx.Valid {
+		e.StepIdx = int(stepIdx.Int64)
+	}
+	if enforced.Valid {
+		e.Enforced = enforced.Int64 == 1
+	}
+	if rulePackDir.Valid {
+		e.RulePackDir = rulePackDir.String
 	}
 	return e, nil
 }
@@ -2303,6 +2384,17 @@ func nullUint64(v uint64) sql.NullInt64 {
 	return sql.NullInt64{Int64: int64(v), Valid: true}
 }
 
+// nullBool persists a bool as a nullable INTEGER: true -> 1, false ->
+// NULL. NULL (rather than 0) for the false case keeps `WHERE enforced=1`
+// queries clean and lets legacy rows (which predate the column) and
+// non-enforcement events share the same "absent" representation.
+func nullBool(b bool) sql.NullInt64 {
+	if !b {
+		return sql.NullInt64{}
+	}
+	return sql.NullInt64{Int64: 1, Valid: true}
+}
+
 func anyString(s string) any {
 	if s == "" {
 		return nil
@@ -2469,7 +2561,8 @@ func (s *Store) ListEventsByTarget(target string, limit int) ([]Event, error) {
 		        session_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
 		        schema_version, content_hash, generation, binary_version,
-		        agent_id, sidecar_instance_id
+		        agent_id, sidecar_instance_id,
+		        connector, step_idx, enforced, rule_pack_dir
 		 FROM audit_events
 		 WHERE target = ?
 		 ORDER BY timestamp DESC LIMIT ?`, target, limit,

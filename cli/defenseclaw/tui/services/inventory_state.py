@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.overview_state import friendly_connector_name
 
 InventorySubTab = Literal["summary", "skills", "plugins", "mcp", "agents", "models", "memory"]
@@ -80,6 +81,10 @@ class InventorySkill:
     scan_findings: int = 0
     scan_severity: str = ""
     scan_target: str = ""
+    # 8.13 pass 2: connector this entity was inventoried from. Empty for
+    # single-connector installs; set when the app merges ``aibom scan`` across
+    # every active connector so the CONNECTOR column can attribute each row.
+    connector: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventorySkill:
@@ -112,6 +117,7 @@ class InventoryPlugin:
     scan_findings: int = 0
     scan_severity: str = ""
     scan_target: str = ""
+    connector: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryPlugin:
@@ -141,6 +147,7 @@ class InventoryMCP:
     transport: str = ""
     command: str = ""
     url: str = ""
+    connector: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryMCP:
@@ -166,6 +173,7 @@ class InventoryAgent:
     source: str = ""
     bindings: Mapping[str, Any] | None = None
     max_concurrent: int = 0
+    connector: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryAgent:
@@ -201,6 +209,7 @@ class InventoryModelProvider:
     allowed: tuple[str, ...] = ()
     config_path: str = ""
     status: str = ""
+    connector: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryModelProvider:
@@ -227,6 +236,7 @@ class InventoryMemory:
     workspace: str = ""
     fts_available: bool = False
     vector_enabled: bool = False
+    connector: str = ""
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryMemory:
@@ -424,6 +434,11 @@ class InventoryPanelModel:
     def __init__(self, *, connector: str = "") -> None:
         self.active_sub: InventorySubTab = "summary"
         self.loading = False
+        # E1: when the operator focuses a connector (TUI `m` in a
+        # multi-connector install) the Inventory view passes
+        # ``--connector <name>`` so it inventories THAT connector, not the
+        # primary. Off by default ⇒ single-connector behaviour unchanged.
+        self.connector_focus_enabled = False
         self.loaded = False
         self.inventory: InventorySnapshot | None = None
         self.cursor = 0
@@ -434,6 +449,15 @@ class InventoryPanelModel:
         self.connector = connector
         self.width = 0
         self.height = 0
+        # 8.13 pass 2: when the app merges the inventory across every active
+        # connector it sets ``show_connector_column = True`` and tags entities
+        # with their connector. ``connector_filter`` ("" = All) then narrows the
+        # merged rows in-memory, mirroring the catalog/signal panes.
+        self.show_connector_column = False
+        self.connector_filter = ""
+        # Per-connector snapshots kept so the Summary sub-tab can show a
+        # breakdown; ``inventory`` holds the merged view used by every tab.
+        self.connector_snapshots: tuple[tuple[str, InventorySnapshot], ...] = ()
 
     def set_size(self, width: int, height: int) -> None:
         self.width = width
@@ -441,6 +465,23 @@ class InventoryPanelModel:
 
     def set_connector(self, connector: str) -> None:
         self.connector = connector
+
+    def set_connector_filter(self, connector: str) -> None:
+        """Narrow the merged inventory to one connector ("" = All)."""
+
+        connector = (connector or "").strip().lower()
+        if connector == self.connector_filter:
+            return
+        self.connector_filter = connector
+        self.cursor = 0
+        self.detail_open = False
+
+    def _connector_keep(self, entity: object) -> bool:
+        if not self.connector_filter:
+            return True
+        return connector_filter_svc.filter_allows(
+            self.connector_filter, str(getattr(entity, "connector", "") or "")
+        )
 
     def set_active_subtab(self, subtab: InventorySubTab) -> None:
         if subtab not in INVENTORY_SUBTABS:
@@ -462,6 +503,9 @@ class InventoryPanelModel:
         args = ["aibom", "scan", "--json"]
         if self.category_scope:
             args.extend(("--only", ",".join(self.category_scope)))
+        # E1: follow the focused connector when one is selected.
+        if self.connector_focus_enabled and self.connector:
+            args.extend(("--connector", self.connector))
         return tuple(args)
 
     def load_intent(self) -> InventoryCommandIntent:
@@ -470,6 +514,24 @@ class InventoryPanelModel:
             args=self.load_args(),
             hint="Loading inventory...",
         )
+
+    def load_intent_for(self, connector: str) -> InventoryCommandIntent:
+        """``load_intent`` forced to a specific connector (merged loads).
+
+        Temporarily pins the connector + focus so ``load_args`` appends
+        ``--connector <name>``, then restores the prior state so single-
+        connector behaviour is untouched.
+        """
+
+        saved_connector = self.connector
+        saved_focus = self.connector_focus_enabled
+        try:
+            self.connector = connector
+            self.connector_focus_enabled = bool(connector)
+            return self.load_intent()
+        finally:
+            self.connector = saved_connector
+            self.connector_focus_enabled = saved_focus
 
     def start_loading(self) -> InventoryCommandIntent:
         self.loading = True
@@ -553,6 +615,82 @@ class InventoryPanelModel:
     def apply_json(self, text: str) -> None:
         self.apply_loaded(InventorySnapshot.from_json(text))
 
+    def apply_merged(self, results: Sequence[tuple[str, str | None]]) -> None:
+        """Merge per-connector ``aibom scan`` payloads into one snapshot.
+
+        ``results`` is ``[(connector, json_text_or_None)]``; a ``None`` payload
+        means that connector's scan failed and is skipped. Each surviving
+        snapshot has its entities tagged with the connector so the merged view
+        can attribute every row, and the per-connector snapshots are retained
+        for the Summary breakdown.
+        """
+
+        self.loading = False
+        snapshots: list[tuple[str, InventorySnapshot]] = []
+        for connector, text in results:
+            if not text:
+                continue
+            try:
+                snap = InventorySnapshot.from_json(text)
+            except Exception:  # noqa: BLE001 - a bad payload skips one connector.
+                continue
+            snapshots.append((connector, self._tag_snapshot(snap, connector)))
+        self.connector_snapshots = tuple(snapshots)
+        self.cursor = 0
+        self.detail_open = False
+        if not snapshots:
+            self.inventory = None
+            self.loaded = False
+            return
+        self.inventory = self._merge_snapshots([snap for _connector, snap in snapshots])
+        self.loaded = True
+        self.message = ""
+
+    @staticmethod
+    def _tag_snapshot(snap: InventorySnapshot, connector: str) -> InventorySnapshot:
+        return replace(
+            snap,
+            skills=tuple(replace(item, connector=connector) for item in snap.skills),
+            plugins=tuple(replace(item, connector=connector) for item in snap.plugins),
+            mcps=tuple(replace(item, connector=connector) for item in snap.mcps),
+            agents=tuple(replace(item, connector=connector) for item in snap.agents),
+            models=tuple(replace(item, connector=connector) for item in snap.models),
+            memory=tuple(replace(item, connector=connector) for item in snap.memory),
+        )
+
+    @staticmethod
+    def _merge_snapshots(snaps: Sequence[InventorySnapshot]) -> InventorySnapshot:
+        primary = snaps[0]
+        skills = tuple(item for snap in snaps for item in snap.skills)
+        plugins = tuple(item for snap in snaps for item in snap.plugins)
+        mcps = tuple(item for snap in snaps for item in snap.mcps)
+        agents = tuple(item for snap in snaps for item in snap.agents)
+        models = tuple(item for snap in snaps for item in snap.models)
+        memory = tuple(item for snap in snaps for item in snap.memory)
+        total_errors = sum(len(snap.errors) for snap in snaps)
+        total_items = len(skills) + len(plugins) + len(mcps) + len(agents) + len(models) + len(memory)
+        summary = InventorySummary(
+            total_items=total_items,
+            skills={"count": str(len(skills))},
+            plugins={"count": str(len(plugins))},
+            mcp={"count": str(len(mcps))},
+            agents={"count": str(len(agents))},
+            models={"count": str(len(models))},
+            memory={"count": str(len(memory))},
+            errors=str(total_errors),
+        )
+        return replace(
+            primary,
+            connector="",
+            skills=skills,
+            plugins=plugins,
+            mcps=mcps,
+            agents=agents,
+            models=models,
+            memory=memory,
+            summary=summary,
+        )
+
     def scroll_by(self, delta: int) -> None:
         self.set_cursor(self.cursor + delta)
 
@@ -589,46 +727,88 @@ class InventoryPanelModel:
             case "plugins":
                 return len(self.filtered_plugins())
             case "mcp":
-                return len(self.inventory.mcps)
+                return len(self.filtered_mcps())
             case "agents":
-                return len(self.inventory.agents)
+                return len(self.filtered_agents())
             case "models":
-                return len(self.inventory.models)
+                return len(self.filtered_models())
             case "memory":
-                return len(self.inventory.memory)
+                return len(self.filtered_memory())
             case _:
                 return 0
 
     def filtered_skills(self) -> tuple[InventorySkill, ...]:
         if self.inventory is None:
             return ()
+        skills = tuple(skill for skill in self.inventory.skills if self._connector_keep(skill))
         if not self.filter:
-            return self.inventory.skills
+            return skills
         if self.filter == "eligible":
-            return tuple(skill for skill in self.inventory.skills if skill.eligible)
+            return tuple(skill for skill in skills if skill.eligible)
         if self.filter == "warning":
-            return tuple(skill for skill in self.inventory.skills if skill.verdict == "warning")
+            return tuple(skill for skill in skills if skill.verdict == "warning")
         if self.filter == "blocked":
-            return tuple(skill for skill in self.inventory.skills if skill.verdict == "blocked")
-        return self.inventory.skills
+            return tuple(skill for skill in skills if skill.verdict == "blocked")
+        return skills
 
     def filtered_plugins(self) -> tuple[InventoryPlugin, ...]:
         if self.inventory is None:
             return ()
+        plugins = tuple(plugin for plugin in self.inventory.plugins if self._connector_keep(plugin))
         if not self.filter:
-            return self.inventory.plugins
+            return plugins
         if self.filter == "loaded":
-            return tuple(plugin for plugin in self.inventory.plugins if plugin.status == "loaded")
+            return tuple(plugin for plugin in plugins if plugin.status == "loaded")
         if self.filter == "disabled":
-            return tuple(plugin for plugin in self.inventory.plugins if plugin.status == "disabled")
+            return tuple(plugin for plugin in plugins if plugin.status == "disabled")
         if self.filter == "blocked":
-            return tuple(plugin for plugin in self.inventory.plugins if plugin.verdict == "blocked")
-        return self.inventory.plugins
+            return tuple(plugin for plugin in plugins if plugin.verdict == "blocked")
+        return plugins
 
-    def summary_state(self) -> InventorySummaryState | None:
+    def filtered_mcps(self) -> tuple[InventoryMCP, ...]:
+        if self.inventory is None:
+            return ()
+        return tuple(mcp for mcp in self.inventory.mcps if self._connector_keep(mcp))
+
+    def filtered_agents(self) -> tuple[InventoryAgent, ...]:
+        if self.inventory is None:
+            return ()
+        return tuple(agent for agent in self.inventory.agents if self._connector_keep(agent))
+
+    def filtered_models(self) -> tuple[InventoryModelProvider, ...]:
+        if self.inventory is None:
+            return ()
+        return tuple(model for model in self.inventory.models if self._connector_keep(model))
+
+    def filtered_memory(self) -> tuple[InventoryMemory, ...]:
+        if self.inventory is None:
+            return ()
+        return tuple(mem for mem in self.inventory.memory if self._connector_keep(mem))
+
+    def _summary_inventory(self) -> InventorySnapshot | None:
+        """Snapshot backing the Summary sub-tab, honoring the connector filter.
+
+        When the shared chip narrows to a single connector we surface *that*
+        connector's own scan snapshot (its real Source/Home/Config + per-
+        connector counts) instead of the merged roll-up — otherwise the
+        Summary would keep showing the primary connector's attributes no
+        matter which connector the operator selects. With no filter ("All")
+        the merged snapshot is used so the totals span every connector.
+        """
+
         if self.inventory is None:
             return None
-        inv = self.inventory
+        selected = (self.connector_filter or "").strip().lower()
+        if selected:
+            for connector, snap in self.connector_snapshots:
+                if connector.strip().lower() == selected:
+                    return snap
+        return self.inventory
+
+    def summary_state(self) -> InventorySummaryState | None:
+        inv = self._summary_inventory()
+        if inv is None:
+            return None
         connector = inv.connector or inv.claw_mode or self.connector
         source_label = friendly_connector_name(connector)
         if connector and source_label.lower() != connector.lower():
@@ -664,6 +844,7 @@ class InventoryPanelModel:
         summary = self.summary_state()
         if summary is None:
             return ()
+        inv = self._summary_inventory()
         rows: list[tuple[str, str]] = [
             ("AIBOM version", summary.version),
             ("Generated", summary.generated_at),
@@ -671,12 +852,12 @@ class InventoryPanelModel:
             ("Home", summary.home_path),
             ("Config", summary.config_path),
             ("Total items", summary.counts["total_items"]),
-            ("Skills", _count_with_suffix(summary.counts["skills"], "eligible", self.inventory.summary.skills)),
+            ("Skills", _count_with_suffix(summary.counts["skills"], "eligible", inv.summary.skills if inv else {})),
             (
                 "Plugins",
                 _plugin_count_summary(
                     summary.counts["plugins"],
-                    self.inventory.summary.plugins if self.inventory else {},
+                    inv.summary.plugins if inv else {},
                 ),
             ),
             ("MCPs", summary.counts["mcp"]),
@@ -740,9 +921,10 @@ class InventoryPanelModel:
                     ),
                 )
             case "mcp":
-                if not 0 <= self.cursor < len(self.inventory.mcps):
+                mcp_rows = self.filtered_mcps()
+                if not 0 <= self.cursor < len(mcp_rows):
                     return None
-                mcp = self.inventory.mcps[self.cursor]
+                mcp = mcp_rows[self.cursor]
                 return InventoryDetailInfo(
                     f"MCP: {mcp.id}",
                     (
@@ -753,9 +935,10 @@ class InventoryPanelModel:
                     ),
                 )
             case "agents":
-                if not 0 <= self.cursor < len(self.inventory.agents):
+                agent_rows = self.filtered_agents()
+                if not 0 <= self.cursor < len(agent_rows):
                     return None
-                agent = self.inventory.agents[self.cursor]
+                agent = agent_rows[self.cursor]
                 return InventoryDetailInfo(
                     f"AGENT: {agent.id}",
                     (
@@ -767,9 +950,10 @@ class InventoryPanelModel:
                     ),
                 )
             case "models":
-                if not 0 <= self.cursor < len(self.inventory.models):
+                model_rows = self.filtered_models()
+                if not 0 <= self.cursor < len(model_rows):
                     return None
-                provider = self.inventory.models[self.cursor]
+                provider = model_rows[self.cursor]
                 fields = [
                     ("Source", provider.source),
                     ("Default Model", provider.default_model),
@@ -782,9 +966,10 @@ class InventoryPanelModel:
                     fields.append(("Allowed", ", ".join(provider.allowed)))
                 return InventoryDetailInfo(f"MODEL: {provider.id}", tuple(fields))
             case "memory":
-                if not 0 <= self.cursor < len(self.inventory.memory):
+                memory_rows = self.filtered_memory()
+                if not 0 <= self.cursor < len(memory_rows):
                     return None
-                memory = self.inventory.memory[self.cursor]
+                memory = memory_rows[self.cursor]
                 fields = [
                     ("Backend", memory.backend),
                     ("Provider", memory.provider),
@@ -804,19 +989,29 @@ class InventoryPanelModel:
     def data_table_columns(self) -> tuple[str, ...]:
         match self.active_sub:
             case "skills":
-                return ("ID", "Verdict", "Enabled", "Severity", "Findings", "Source")
+                base = ("ID", "Verdict", "Enabled", "Severity", "Findings", "Source")
             case "plugins":
-                return ("Name", "Version", "Origin", "Status", "Verdict", "Findings", "Severity")
+                base = ("Name", "Version", "Origin", "Status", "Verdict", "Findings", "Severity")
             case "mcp":
-                return ("ID", "Source", "Transport", "Command/URL")
+                base = ("ID", "Source", "Transport", "Command/URL")
             case "agents":
-                return ("ID", "Source", "Model", "Workspace", "Default")
+                base = ("ID", "Source", "Model", "Workspace", "Default")
             case "models":
-                return ("ID", "Source", "Default Model", "Status")
+                base = ("ID", "Source", "Default Model", "Status")
             case "memory":
-                return ("ID", "Backend", "Provider", "Files", "Chunks", "Workspace")
+                base = ("ID", "Backend", "Provider", "Files", "Chunks", "Workspace")
             case _:
+                # The Summary sub-tab is a key/value list, not a per-connector
+                # entity table, so it never carries a CONNECTOR column.
                 return ("Metric", "Value")
+        if self.show_connector_column:
+            return ("Connector", *base)
+        return base
+
+    def _with_connector_cell(self, entity: object, cells: tuple[str, ...]) -> tuple[str, ...]:
+        if not self.show_connector_column:
+            return cells
+        return (str(getattr(entity, "connector", "") or "—"), *cells)
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
         if self.inventory is None:
@@ -824,52 +1019,69 @@ class InventoryPanelModel:
         match self.active_sub:
             case "skills":
                 return tuple(
-                    (
-                        skill.id,
-                        skill.verdict,
-                        "yes" if skill.enabled else "no",
-                        skill.scan_severity,
-                        str(skill.scan_findings),
-                        skill.source,
+                    self._with_connector_cell(
+                        skill,
+                        (
+                            skill.id,
+                            skill.verdict,
+                            "yes" if skill.enabled else "no",
+                            skill.scan_severity,
+                            str(skill.scan_findings),
+                            skill.source,
+                        ),
                     )
                     for skill in self.filtered_skills()
                 )
             case "plugins":
                 return tuple(
-                    (
-                        plugin.display_name,
-                        plugin.version,
-                        plugin.origin,
-                        plugin.status,
-                        plugin.verdict,
-                        str(plugin.scan_findings),
-                        plugin.scan_severity,
+                    self._with_connector_cell(
+                        plugin,
+                        (
+                            plugin.display_name,
+                            plugin.version,
+                            plugin.origin,
+                            plugin.status,
+                            plugin.verdict,
+                            str(plugin.scan_findings),
+                            plugin.scan_severity,
+                        ),
                     )
                     for plugin in self.filtered_plugins()
                 )
             case "mcp":
-                return tuple((mcp.id, mcp.source, mcp.transport, mcp.command_or_url) for mcp in self.inventory.mcps)
+                return tuple(
+                    self._with_connector_cell(mcp, (mcp.id, mcp.source, mcp.transport, mcp.command_or_url))
+                    for mcp in self.filtered_mcps()
+                )
             case "agents":
                 return tuple(
-                    (agent.id, agent.source, agent.model, agent.workspace, "yes" if agent.default else "no")
-                    for agent in self.inventory.agents
+                    self._with_connector_cell(
+                        agent,
+                        (agent.id, agent.source, agent.model, agent.workspace, "yes" if agent.default else "no"),
+                    )
+                    for agent in self.filtered_agents()
                 )
             case "models":
                 return tuple(
-                    (provider.id, provider.source, provider.default_model, provider.status)
-                    for provider in self.inventory.models
+                    self._with_connector_cell(
+                        provider, (provider.id, provider.source, provider.default_model, provider.status)
+                    )
+                    for provider in self.filtered_models()
                 )
             case "memory":
                 return tuple(
-                    (
-                        memory.id,
-                        memory.backend,
-                        memory.provider,
-                        str(memory.files),
-                        str(memory.chunks),
-                        memory.workspace,
+                    self._with_connector_cell(
+                        memory,
+                        (
+                            memory.id,
+                            memory.backend,
+                            memory.provider,
+                            str(memory.files),
+                            str(memory.chunks),
+                            memory.workspace,
+                        ),
                     )
-                    for memory in self.inventory.memory
+                    for memory in self.filtered_memory()
                 )
             case _:
                 return self.summary_table_rows()
@@ -943,13 +1155,18 @@ class InventoryPanelModel:
     def _subtab_counts(self) -> Mapping[InventorySubTab, int]:
         if self.inventory is None:
             return {}
+        # Badges reflect the connector filter (so they match the visible rows)
+        # but not the verdict/status sub-filter, which only narrows the list.
+        def _kept(items: Sequence[object]) -> int:
+            return sum(1 for item in items if self._connector_keep(item))
+
         return {
-            "skills": len(self.inventory.skills),
-            "plugins": len(self.inventory.plugins),
-            "mcp": len(self.inventory.mcps),
-            "agents": len(self.inventory.agents),
-            "models": len(self.inventory.models),
-            "memory": len(self.inventory.memory),
+            "skills": _kept(self.inventory.skills),
+            "plugins": _kept(self.inventory.plugins),
+            "mcp": _kept(self.inventory.mcps),
+            "agents": _kept(self.inventory.agents),
+            "models": _kept(self.inventory.models),
+            "memory": _kept(self.inventory.memory),
         }
 
 

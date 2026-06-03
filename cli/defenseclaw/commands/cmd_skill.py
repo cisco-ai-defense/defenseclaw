@@ -183,29 +183,40 @@ def _list_skills_via_sidecar(app: AppContext) -> dict[str, Any] | None:
         return None
 
 
-def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] | None:
-    """Get the full skill list, dispatching on the active connector.
+def _list_openclaw_skills_full(
+    app: AppContext | None = None, connector: str | None = None
+) -> dict[str, Any] | None:
+    """Get the full skill list, dispatching on the resolved connector.
 
     For ``openclaw`` (the historical default) we keep the sidecar →
     CLI fallback chain. For Codex / Claude Code / ZeptoClaw we walk
     the connector-specific skill directories via
     :func:`defenseclaw.skill_list.list_skills` (S4.4 adapter).
 
+    ``connector`` is the resolved multi-connector override
+    (``skill list --connector <name>``); it dispatches on that
+    connector instead of the active one. Defaults to the active
+    connector, so single-connector behaviour is unchanged.
+
     The returned shape stays ``{"skills": [...]}`` — same as
     ``openclaw skills list --json`` — so every downstream caller in
     this module continues to work unchanged.
     """
     if app is not None:
-        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-        if connector != "openclaw":
+        active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        resolved = connector or active
+        if resolved != "openclaw":
             from defenseclaw.skill_list import list_skills as _adapter_list
-            return {"skills": _adapter_list(app.cfg)}
+            return {"skills": _adapter_list(app.cfg, connector=resolved)}
 
         # OpenClaw: prefer the live sidecar — it sees runtime state
         # the static CLI doesn't (recently-toggled skills, etc.).
-        result = _list_skills_via_sidecar(app)
-        if result is not None:
-            return result
+        # The sidecar only reflects the active connector, so use it
+        # only when the resolved connector matches the active one.
+        if resolved == active:
+            result = _list_skills_via_sidecar(app)
+            if result is not None:
+                return result
 
     out = _run_openclaw("skills", "list", "--json")
     if out is None:
@@ -214,7 +225,7 @@ def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] 
         # `openclaw` binary isn't on PATH (sandbox installs, CI, etc.).
         if app is not None and hasattr(app.cfg, "skill_dirs"):
             from defenseclaw.skill_list import list_skills as _adapter_list
-            return {"skills": _adapter_list(app.cfg, prefer_cli=False)}
+            return {"skills": _adapter_list(app.cfg, prefer_cli=False, connector=connector or None)}
         return None
     try:
         return json.loads(out)
@@ -222,18 +233,26 @@ def _list_openclaw_skills_full(app: AppContext | None = None) -> dict[str, Any] 
         return None
 
 
-def _get_openclaw_skill_info(name: str, app: AppContext | None = None) -> dict[str, Any] | None:
+def _get_openclaw_skill_info(
+    name: str, app: AppContext | None = None, connector: str | None = None,
+) -> dict[str, Any] | None:
     """Get info for a single skill.
 
     For OpenClaw, prefers the sidecar → CLI fallback chain. For
     other connectors, walks the connector-specific skill
     directories — there is no per-connector ``info`` subcommand.
+
+    ``connector`` overrides the resolved connector so a multi-connector
+    caller (``skill info/scan --connector <name>``) can inspect a
+    non-primary connector's skill; defaults to the active connector.
     """
     if app is not None:
-        connector = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-        if connector != "openclaw":
+        resolved = connector or (
+            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        )
+        if resolved != "openclaw":
             from defenseclaw.skill_list import list_skills as _adapter_list
-            for s in _adapter_list(app.cfg):
+            for s in _adapter_list(app.cfg, connector=resolved):
                 if s.get("name") == name:
                     return s
             return None
@@ -353,11 +372,21 @@ def _skill_display_name(s: dict[str, Any]) -> str:
 
 @skill.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Output merged skill list as JSON")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="List skills for a specific configured connector (multi-connector installs).",
+)
 @pass_ctx
-def list_skills(app: AppContext, as_json: bool) -> None:
-    """List all skills for the active connector with their latest scan severity."""
+def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
+    """List all skills for a connector with their latest scan severity."""
 
-    oc_list = _list_openclaw_skills_full(app)
+    from defenseclaw.commands import resolve_list_connector
+
+    effective_connector = resolve_list_connector(app, connector_flag)
+
+    oc_list = _list_openclaw_skills_full(app, connector=effective_connector)
     skills = oc_list.get("skills", []) if oc_list else []
 
     scan_map = _build_scan_map(app.store)
@@ -372,17 +401,13 @@ def list_skills(app: AppContext, as_json: bool) -> None:
     # surface phantoms when the active connector is OpenClaw; for the
     # other connectors, the connector-aware filesystem walk
     # (skill_list.list_skills → cfg.skill_dirs()) is the source of truth.
-    show_audit_phantoms = (
-        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-    ) == "openclaw"
+    show_audit_phantoms = effective_connector == "openclaw"
 
     if not skills and (not show_audit_phantoms or (not actions_map and not scan_map)):
         if as_json:
             click.echo("[]")
             return
-        connector = (
-            app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
-        )
+        connector = effective_connector
         if connector == "openclaw":
             click.echo(ux.dim("No skills found. Is openclaw installed?"))
         else:
@@ -546,6 +571,10 @@ def _print_skill_list_table(
 @click.option("--remote", is_flag=True, help="Scan via sidecar API (for skills on a remote host)")
 @click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills")
 @click.option(
+    "--connector", "connector_flag", default="",
+    help="Scan a specific connector's skills (multi-connector installs)",
+)
+@click.option(
     "--action", is_flag=True, default=False,
     help="Apply enforcement actions (quarantine/block/disable) based on findings",
 )
@@ -557,6 +586,7 @@ def scan(
     scan_path: str,
     remote: bool,
     scan_all: bool,
+    connector_flag: str,
     action: bool,
 ) -> None:
     """Scan a skill by name, path, URL, or 'all' for all configured skills.
@@ -614,8 +644,24 @@ def scan(
     if scan_all or target == "all":
         if remote:
             _scan_all_remote(app, as_json)
+            return
+        # Resolve which connector(s) `--all` should fan out across. An
+        # explicit --connector targets exactly one; otherwise a
+        # multi-connector install scans every active connector (so "all
+        # skills" means every connector's skills, not just the primary's
+        # — the parity gap). Single-connector installs keep the original
+        # single pass (connector=None ⇒ _scan_all uses active_connector()).
+        from defenseclaw.commands import resolve_list_connector
+        if connector_flag:
+            connectors: list[str | None] = [resolve_list_connector(app, connector_flag)]
+        elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
+            connectors = list(app.cfg.active_connectors())
         else:
-            _scan_all(app, scanner, as_json, enforce=action)
+            connectors = [None]
+        for c in connectors:
+            if len(connectors) > 1 and not as_json:
+                click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
+            _scan_all(app, scanner, as_json, enforce=action, connector=c)
         return
 
     if not target:
@@ -624,7 +670,7 @@ def scan(
     # Resolve scan directory
     scan_dir = scan_path
     if not scan_dir:
-        info = _get_openclaw_skill_info(target, app)
+        info = _get_openclaw_skill_info(target, app, connector=connector_flag or None)
         if info and _skill_info_path(info):
             scan_dir = _skill_info_path(info) or ""
         else:
@@ -654,13 +700,12 @@ def scan(
         click.echo(ux._style(f"ALLOWED (skip scan): {name}", fg="green"))
         return
 
-    from defenseclaw.commands import _scan_ui
+    from defenseclaw.commands import _scan_ui, resolve_list_connector
 
-    connector = (
-        app.cfg.active_connector()
-        if hasattr(app.cfg, "active_connector")
-        else "openclaw"
-    )
+    # resolve_list_connector validates --connector against the active set
+    # and falls back to the active connector when unset (single-connector
+    # behaviour unchanged).
+    connector = resolve_list_connector(app, connector_flag)
     ctx = _scan_ui.ScanContext.for_skill(
         connector=connector,
         paths=[scan_dir],
@@ -724,14 +769,22 @@ def _apply_scan_enforcement(
     skill_name: str,
     skill_path: str,
     result,
+    connector: str | None = None,
 ) -> None:
     """Apply configured skill_actions policy based on scan severity.
 
     Allow-listed skills are exempt from auto-enforcement — only a manual
     ``skill block`` can override an allow entry.
+
+    ``connector`` attributes the enforcement to a specific connector during
+    multi-connector ``--all``/``--connector`` scans; defaults to the active
+    connector so single-connector behaviour is unchanged.
     """
     from defenseclaw.enforce.admission import evaluate_admission
 
+    resolved_connector = connector or (
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
+    )
     decision = evaluate_admission(
         pe,
         policy_dir=app.cfg.policy_dir,
@@ -740,7 +793,7 @@ def _apply_scan_enforcement(
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
-        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        connector=resolved_connector,
         asset_policy=app.cfg.asset_policy,
     )
 
@@ -805,11 +858,30 @@ def _enable_skill_via_gateway(app: AppContext, skill_name: str) -> bool:
     return True
 
 
-def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False) -> None:
+def _scan_all(
+    app: AppContext,
+    scanner,
+    as_json: bool,
+    *,
+    enforce: bool = False,
+    connector: str | None = None,
+) -> None:
     from defenseclaw.commands import _scan_ui
     from defenseclaw.enforce import PolicyEngine
 
-    oc_list = _list_openclaw_skills_full(app)
+    active = (
+        app.cfg.active_connector()
+        if hasattr(app.cfg, "active_connector")
+        else "openclaw"
+    )
+    # When an explicit connector is requested (multi-connector fan-out or
+    # --connector) and it is NOT the active one, the OpenClaw-specific
+    # skill listing does not apply — walk that connector's skill_dirs
+    # directly. The default single-connector path is byte-identical.
+    resolved_connector = connector or active
+    use_openclaw_list = resolved_connector == active
+
+    oc_list = _list_openclaw_skills_full(app) if use_openclaw_list else None
     if oc_list and oc_list.get("skills"):
         skill_names = [s["name"] for s in oc_list["skills"]]
     else:
@@ -819,11 +891,7 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
     verdicts = []
     errors = 0
 
-    connector = (
-        app.cfg.active_connector()
-        if hasattr(app.cfg, "active_connector")
-        else "openclaw"
-    )
+    connector = resolved_connector
 
     # Build the target list up front so we can render an accurate
     # preamble (count + sources) before the first scanner run.
@@ -840,8 +908,9 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
             targets.append((name, base_dir))
         sources = sorted({os.path.dirname(p) for _, p in targets if p})
     else:
-        # Fall back to directory scan
-        dirs = app.cfg.skill_dirs()
+        # Fall back to directory scan — resolve the target connector's
+        # skill dirs so a non-primary connector's skills are scanned.
+        dirs = app.cfg.skill_dirs(connector)
         sources = list(dirs)
         for skill_dir in dirs:
             if not os.path.isdir(skill_dir):
@@ -888,7 +957,7 @@ def _scan_all(app: AppContext, scanner, as_json: bool, *, enforce: bool = False)
                         findings=len(result.findings),
                     )
             if not result.is_clean() and enforce:
-                _apply_scan_enforcement(app, pe, name, base_dir, result)
+                _apply_scan_enforcement(app, pe, name, base_dir, result, connector=connector)
         except Exception as exc:
             errors += 1
             if not as_json:
@@ -1727,16 +1796,23 @@ def restore(app: AppContext, name: str, restore_path: str) -> None:
 @skill.command()
 @click.argument("name")
 @click.option("--json", "as_json", is_flag=True, help="Output skill info as JSON")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Inspect a specific connector's skill (multi-connector installs)",
+)
 @pass_ctx
-def info(app: AppContext, name: str, as_json: bool) -> None:
+def info(app: AppContext, name: str, as_json: bool, connector_flag: str) -> None:
     """Show detailed information about a skill.
 
     Displays merged skill metadata from OpenClaw, latest scan results from the
     DefenseClaw audit database, and enforcement actions.
     """
-    skill_name = os.path.basename(name)
+    from defenseclaw.commands import resolve_list_connector
 
-    info_map = _get_openclaw_skill_info(skill_name, app)
+    skill_name = os.path.basename(name)
+    connector = resolve_list_connector(app, connector_flag)
+
+    info_map = _get_openclaw_skill_info(skill_name, app, connector=connector)
     if info_map is None:
         info_map = {"name": skill_name}
 
@@ -1800,8 +1876,12 @@ def info(app: AppContext, name: str, as_json: bool) -> None:
 @click.argument("name")
 @click.option("--force", is_flag=True, help="Force install (overwrites existing)")
 @click.option("--action", "take_action", is_flag=True, help="Apply skill_actions policy based on scan severity")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Attribute install/enforcement to a specific connector (multi-connector installs)",
+)
 @pass_ctx
-def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
+def install(app: AppContext, name: str, force: bool, take_action: bool, connector_flag: str) -> None:
     """Install and scan an OpenClaw skill via clawhub.
 
     By default, install only runs the scan and reports findings — no enforcement
@@ -1810,12 +1890,14 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
 
     Use --force to overwrite an existing skill.
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.admission import evaluate_admission
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
     from defenseclaw.scanner.skill import SkillScannerWrapper
 
     skill_name = os.path.basename(name)
+    connector = resolve_list_connector(app, connector_flag)
     pe = PolicyEngine(app.store)
 
     pre_decision = evaluate_admission(
@@ -1825,7 +1907,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         name=skill_name,
         source_path=name,
         fallback_actions=app.cfg.skill_actions,
-        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        connector=connector,
         asset_policy=app.cfg.asset_policy,
     )
 
@@ -1885,7 +1967,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool) -> None:
         source_path=skill_path,
         scan_result=result,
         fallback_actions=app.cfg.skill_actions,
-        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        connector=connector,
         asset_policy=app.cfg.asset_policy,
     )
 

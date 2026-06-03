@@ -51,6 +51,31 @@ from defenseclaw.config import (
 )
 
 
+class DoctorMultiConnectorInventoryTests(unittest.TestCase):
+    """D6: the connector inventory check scopes paths per connector."""
+
+    @patch("defenseclaw.commands.cmd_doctor._workspace_dir", return_value="")
+    def test_inventory_scopes_dirs_to_connector(self, _mock_ws):
+        from defenseclaw.commands.cmd_doctor import (
+            _check_connector_inventory,
+            _DoctorResult,
+        )
+
+        seen: dict[str, list] = {"skill": [], "plugin": [], "mcp": []}
+        cfg = SimpleNamespace(
+            skill_dirs=lambda connector=None: (seen["skill"].append(connector) or []),
+            plugin_dirs=lambda connector=None: (seen["plugin"].append(connector) or []),
+            mcp_servers=lambda connector=None: (seen["mcp"].append(connector) or []),
+        )
+        r = _DoctorResult()
+
+        _check_connector_inventory(cfg, "codex", r)
+
+        self.assertEqual(seen["skill"], ["codex"])
+        self.assertEqual(seen["plugin"], ["codex"])
+        self.assertEqual(seen["mcp"], ["codex"])
+
+
 class DoctorGuardrailTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
     def test_empty_guardrail_model_is_warning_not_failure(self, _mock_probe):

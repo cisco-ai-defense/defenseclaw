@@ -50,6 +50,7 @@ from defenseclaw.commands.cmd_doctor import (
     _active_connector,
     _check_connector_inventory,
     _check_hook_contract_lock,
+    _check_multi_connector_policy,
     _check_scan_coverage,
     _DoctorResult,
 )
@@ -291,6 +292,75 @@ class TestCheckScanCoverage(unittest.TestCase):
         )
         for cat in _scan_ui.categories_for("plugin"):
             self.assertIn(cat, plugin_row["detail"])
+
+
+class TestCheckMultiConnectorPolicy(unittest.TestCase):
+    """WU9 — per-connector effective-policy block for multi-connector installs.
+
+    The block is a no-op for single-connector installs and, when >1
+    connector is active, surfaces each connector's effective mode plus a
+    rule-pack-dir warning when a configured dir is missing on disk.
+    """
+
+    def _cfg(self, actives, *, modes=None, rule_pack_dirs=None, data_dir="/tmp/unused"):
+        modes = modes or {}
+        rule_pack_dirs = rule_pack_dirs or {}
+        cfg = MagicMock()
+        cfg.active_connectors.return_value = list(actives)
+        cfg.data_dir = data_dir
+        cfg.guardrail.effective_mode.side_effect = lambda c: modes.get(c, "observe")
+        cfg.guardrail.effective_rule_pack_dir.side_effect = lambda c: rule_pack_dirs.get(c, "")
+        return cfg
+
+    def test_single_connector_is_noop(self):
+        cfg = self._cfg(["codex"])
+        r = _DoctorResult()
+        _check_multi_connector_policy(cfg, "codex", r, json_out=True)
+        self.assertEqual(r.checks, [])
+
+    def test_multi_emits_per_connector_mode(self):
+        cfg = self._cfg(["codex", "cursor"], modes={"codex": "observe", "cursor": "action"})
+        r = _DoctorResult()
+        _check_multi_connector_policy(cfg, "codex", r, json_out=True)
+        rows = {c["label"]: c["detail"] for c in r.checks if c["label"].startswith("Connector [")}
+        self.assertIn("Connector [codex]", rows)
+        self.assertIn("mode=observe", rows["Connector [codex]"])
+        self.assertIn("Connector [cursor]", rows)
+        self.assertIn("mode=action", rows["Connector [cursor]"])
+
+    def test_rule_pack_dir_missing_warns(self):
+        cfg = self._cfg(
+            ["codex", "cursor"],
+            rule_pack_dirs={"cursor": "/nonexistent/rule/pack/dir"},
+        )
+        r = _DoctorResult()
+        _check_multi_connector_policy(cfg, "codex", r, json_out=True)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack [cursor]")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("/nonexistent/rule/pack/dir", rp["detail"])
+
+    def test_rule_pack_dir_present_passes(self):
+        cfg = self._cfg(["codex", "cursor"], rule_pack_dirs={"cursor": os.getcwd()})
+        r = _DoctorResult()
+        _check_multi_connector_policy(cfg, "codex", r, json_out=True)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack [cursor]")
+        self.assertEqual(rp["status"], "pass")
+
+    def test_rule_pack_dir_empty_skips(self):
+        cfg = self._cfg(["codex", "cursor"])
+        r = _DoctorResult()
+        _check_multi_connector_policy(cfg, "codex", r, json_out=True)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack [codex]")
+        self.assertEqual(rp["status"], "skip")
+
+    def test_hook_contract_emitted_for_non_primary(self):
+        # cursor (non-primary) has no lock file → warn row from
+        # _check_hook_contract_lock. Confirms the loop reaches it.
+        cfg = self._cfg(["codex", "cursor"])
+        r = _DoctorResult()
+        _check_multi_connector_policy(cfg, "codex", r, json_out=True)
+        hook_rows = [c for c in r.checks if c["label"] == "Hook contract"]
+        self.assertTrue(hook_rows, "expected a Hook contract row for the non-primary connector")
 
 
 if __name__ == "__main__":

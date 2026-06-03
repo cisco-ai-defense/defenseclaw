@@ -59,13 +59,23 @@ def mcp() -> None:
 
 @mcp.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="List MCP servers for a specific configured connector (multi-connector installs).",
+)
 @pass_ctx
-def list_mcps(app: AppContext, as_json: bool) -> None:
-    """List MCP servers configured in OpenClaw."""
+def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
+    """List MCP servers configured for a connector."""
     from rich.console import Console
     from rich.table import Table
 
-    servers = app.cfg.mcp_servers()
+    from defenseclaw.commands import resolve_list_connector
+
+    effective_connector = resolve_list_connector(app, connector_flag)
+
+    servers = app.cfg.mcp_servers(effective_connector)
     scan_map = _build_mcp_scan_map(app.store, servers)
     actions_map = _build_mcp_actions_map(app.store)
 
@@ -93,7 +103,7 @@ def list_mcps(app: AppContext, as_json: bool) -> None:
         click.echo(json.dumps(out, indent=2))
         return
 
-    connector = app.cfg.active_connector()
+    connector = effective_connector
     if not servers:
         ux.warn(
             f"No MCP servers configured for connector={connector!r} "
@@ -226,24 +236,42 @@ def _build_mcp_actions_map(store) -> dict:
 # scan
 # ---------------------------------------------------------------------------
 
-def _resolve_scan_target(app: AppContext, target: str) -> tuple[str, MCPServerEntry | None]:
+def _resolve_scan_target(
+    app: AppContext, target: str, connector: str | None = None
+) -> tuple[str, MCPServerEntry | None]:
     """Resolve *target* to a scannable URL/spec and optional server entry.
 
     If *target* contains ``://`` it is treated as a URL and returned as-is.
-    Otherwise it is looked up in ``mcp.servers`` from openclaw.json.
+    Otherwise it is looked up in ``mcp.servers`` for *connector* (defaults
+    to the active connector when ``None``, so single-connector behaviour is
+    unchanged). Passing the resolved connector lets ``mcp scan <name>
+    --connector <c>`` find a server registered to a non-primary connector
+    instead of silently looking it up in the active connector's config.
     Returns (scan_target, server_entry) — server_entry is set for local
     stdio servers so the scanner can spawn them.
     """
     if "://" in target:
         return target, None
 
-    servers = app.cfg.mcp_servers()
+    servers = app.cfg.mcp_servers(connector)
     by_name = {s.name: s for s in servers}
     server = by_name.get(target)
     if server is None:
         names = sorted(by_name.keys())
         hint = f"  Available: {', '.join(names)}" if names else "  No MCP servers configured."
-        raise click.ClickException(f"MCP server {target!r} not found in openclaw.json.\n{hint}")
+        # Name the connector actually searched rather than a hardcoded
+        # "openclaw.json" — in a multi-connector install the source is the
+        # connector-specific config (e.g. claudecode → .claude/settings.json),
+        # so the legacy filename was misleading. ``connector`` may be None
+        # (single-connector default), in which case resolve the active one.
+        searched = connector or (
+            app.cfg.active_connector()
+            if hasattr(app.cfg, "active_connector")
+            else "openclaw"
+        )
+        raise click.ClickException(
+            f"MCP server {target!r} not found for connector {searched!r}.\n{hint}"
+        )
 
     if server.url:
         return server.url, server
@@ -332,6 +360,90 @@ def _print_scan_result(result: ScanResult, as_json: bool) -> None:
             click.echo(f"      {ux.dim('Fix:')} {f.remediation}")
 
 
+def _scan_all_mcp(
+    app: AppContext,
+    connector: str,
+    analyzers: str,
+    scan_prompts: bool,
+    scan_resources: bool,
+    scan_instructions: bool,
+    as_json: bool,
+) -> None:
+    """Scan every MCP server registered for ``connector``.
+
+    Extracted from ``mcp scan --all`` so a multi-connector install can fan
+    out across each active connector's servers (``cfg.mcp_servers(connector)``).
+    """
+    import time
+
+    from defenseclaw.commands import _scan_ui
+
+    servers = app.cfg.mcp_servers(connector)
+    if not servers:
+        if not as_json:
+            click.echo(f"No MCP servers configured for connector={connector!r}.")
+        return
+
+    scan_targets = [(s, s.url or s.name) for s in servers]
+    ctx = _scan_ui.ScanContext.for_mcp(
+        connector=connector,
+        paths=sorted({t for _, t in scan_targets}),
+        as_json=as_json,
+    )
+    _scan_ui.render_preamble(ctx, target_count=len(scan_targets))
+
+    clean = blocked = errored = 0
+    started = time.monotonic()
+
+    for s, scan_target in scan_targets:
+        result = _run_scan(
+            app, scan_target, analyzers,
+            scan_prompts, scan_resources, scan_instructions,
+            server_entry=s, quiet=as_json,
+        )
+        if result is None:
+            errored += 1
+            _scan_ui.render_per_target_status(
+                ctx, target=s.name, verdict=_scan_ui.VERDICT_ERROR,
+                detail="see error log above",
+            )
+            continue
+        if as_json:
+            _print_scan_result(result, as_json)
+        else:
+            if result.is_clean():
+                clean += 1
+                _scan_ui.render_per_target_status(
+                    ctx, target=s.name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                )
+            else:
+                blocked += 1
+                _scan_ui.render_per_target_status(
+                    ctx,
+                    target=s.name,
+                    verdict=_scan_ui.VERDICT_BLOCKED,
+                    detail=f"max severity: {result.max_severity()}",
+                    findings=len(result.findings),
+                )
+            _print_scan_result(result, as_json)
+
+    if not as_json:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        _scan_ui.render_summary(
+            ctx,
+            clean=clean,
+            blocked=blocked,
+            errored=errored,
+            total=clean + blocked + errored,
+            duration_ms=duration_ms,
+        )
+        from defenseclaw.commands import hint
+        if blocked:
+            hint("View alerts:  defenseclaw alerts")
+        else:
+            hint("Scan skills:  defenseclaw skill scan all")
+
+
 @mcp.command()
 @click.argument("target", required=False)
 @click.option("--json", "as_json", is_flag=True, help="Output results as JSON")
@@ -340,6 +452,10 @@ def _print_scan_result(result: ScanResult, as_json: bool) -> None:
 @click.option("--scan-resources", is_flag=True, help="Also scan MCP resources")
 @click.option("--scan-instructions", is_flag=True, help="Also scan server instructions")
 @click.option("--all", "scan_all", is_flag=True, help="Scan every server in openclaw.json")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Scan a specific connector's MCP servers (multi-connector installs)",
+)
 @pass_ctx
 def scan(
     app: AppContext,
@@ -350,6 +466,7 @@ def scan(
     scan_resources: bool,
     scan_instructions: bool,
     scan_all: bool,
+    connector_flag: str,
 ) -> None:
     """Scan an MCP server by name or URL.
 
@@ -358,86 +475,38 @@ def scan(
     """
     import time
 
-    from defenseclaw.commands import _scan_ui
+    from defenseclaw.commands import _scan_ui, resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
 
-    connector = (
-        app.cfg.active_connector()
-        if hasattr(app.cfg, "active_connector")
-        else "openclaw"
-    )
+    connector = resolve_list_connector(app, connector_flag)
 
     if scan_all:
-        servers = app.cfg.mcp_servers()
-        if not servers:
-            click.echo("No MCP servers configured.")
-            return
-
-        scan_targets = [(s, s.url or s.name) for s in servers]
-        ctx = _scan_ui.ScanContext.for_mcp(
-            connector=connector,
-            paths=sorted({t for _, t in scan_targets}),
-            as_json=as_json,
-        )
-        _scan_ui.render_preamble(ctx, target_count=len(scan_targets))
-
-        clean = blocked = errored = 0
-        started = time.monotonic()
-
-        for s, scan_target in scan_targets:
-            result = _run_scan(
-                app, scan_target, analyzers,
-                scan_prompts, scan_resources, scan_instructions,
-                server_entry=s, quiet=as_json,
+        # An explicit --connector targets exactly one connector; otherwise a
+        # multi-connector install scans every active connector's servers so
+        # "--all" means every connector, not just the primary (parity).
+        if connector_flag:
+            connectors: list[str] = [connector]
+        elif hasattr(app.cfg, "active_connectors") and len(app.cfg.active_connectors()) > 1:
+            connectors = list(app.cfg.active_connectors())
+        else:
+            connectors = [connector]
+        for c in connectors:
+            if len(connectors) > 1 and not as_json:
+                click.secho(f"\n── connector: {c} ──", fg="cyan")
+            _scan_all_mcp(
+                app, c, analyzers, scan_prompts, scan_resources, scan_instructions, as_json,
             )
-            if result is None:
-                errored += 1
-                _scan_ui.render_per_target_status(
-                    ctx, target=s.name, verdict=_scan_ui.VERDICT_ERROR,
-                    detail="see error log above",
-                )
-                continue
-            if as_json:
-                _print_scan_result(result, as_json)
-            else:
-                if result.is_clean():
-                    clean += 1
-                    _scan_ui.render_per_target_status(
-                        ctx, target=s.name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
-                    )
-                else:
-                    blocked += 1
-                    _scan_ui.render_per_target_status(
-                        ctx,
-                        target=s.name,
-                        verdict=_scan_ui.VERDICT_BLOCKED,
-                        detail=f"max severity: {result.max_severity()}",
-                        findings=len(result.findings),
-                    )
-                _print_scan_result(result, as_json)
-
-        if not as_json:
-            duration_ms = int((time.monotonic() - started) * 1000)
-            _scan_ui.render_summary(
-                ctx,
-                clean=clean,
-                blocked=blocked,
-                errored=errored,
-                total=clean + blocked + errored,
-                duration_ms=duration_ms,
-            )
-            from defenseclaw.commands import hint
-            if blocked:
-                hint("View alerts:  defenseclaw alerts")
-            else:
-                hint("Scan skills:  defenseclaw skill scan all")
         return
 
     if not target:
         raise click.UsageError("Missing argument 'TARGET'.")
 
     pe = PolicyEngine(app.store)
-    resolved, entry = _resolve_scan_target(app, target)
+    # Resolve the named target against the chosen connector's MCP config
+    # (``--connector``), not just the active connector's. ``connector`` is
+    # the active connector when no flag was passed, so single-connector
+    # behaviour is unchanged.
+    resolved, entry = _resolve_scan_target(app, target, connector)
 
     if pe.is_blocked("mcp", target):
         click.echo(f"BLOCKED: {target} — remove from block list first", err=True)
@@ -612,16 +681,18 @@ def _openclaw_config_unset(path: str) -> None:
         raise click.ClickException(f"openclaw config unset failed: {detail}")
 
 
-def _set_mcp_via_connector(cfg, name: str, entry: dict) -> None:
-    """Dispatch ``mcp set`` to the active connector's write surface.
+def _set_mcp_via_connector(cfg, name: str, entry: dict, connector: str | None = None) -> None:
+    """Dispatch ``mcp set`` to a connector's write surface.
 
-    Translates :class:`connector_paths.MCPWriteUnsupportedError` into a
-    user-friendly :class:`click.ClickException` so the CLI exits 1
+    ``connector`` targets a specific connector (``mcp set --connector``);
+    defaults to the active connector so single-connector behaviour is
+    unchanged. Translates :class:`connector_paths.MCPWriteUnsupportedError`
+    into a user-friendly :class:`click.ClickException` so the CLI exits 1
     with a clean error instead of a stack trace.
     """
     try:
         connector_paths.set_mcp_server(
-            cfg.active_connector(),
+            connector or cfg.active_connector(),
             name,
             entry,
             workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
@@ -631,13 +702,13 @@ def _set_mcp_via_connector(cfg, name: str, entry: dict) -> None:
         raise click.ClickException(str(e)) from e
 
 
-def _unset_mcp_via_connector(cfg, name: str) -> None:
-    """Dispatch ``mcp unset`` to the active connector's write surface.
+def _unset_mcp_via_connector(cfg, name: str, connector: str | None = None) -> None:
+    """Dispatch ``mcp unset`` to a connector's write surface.
     Symmetric with :func:`_set_mcp_via_connector`.
     """
     try:
         connector_paths.unset_mcp_server(
-            cfg.active_connector(),
+            connector or cfg.active_connector(),
             name,
             workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
             openclaw_config_unsetter=_openclaw_config_unset,
@@ -654,6 +725,10 @@ def _unset_mcp_via_connector(cfg, name: str) -> None:
 @click.option("--transport", default="", help="Transport type (stdio, sse)")
 @click.option("--env", "env_pairs", multiple=True, help="Env vars as KEY=VAL (repeatable)")
 @click.option("--skip-scan", is_flag=True, help="Skip security scan before adding")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Target a specific connector's MCP config (multi-connector installs)",
+)
 @pass_ctx
 def set_server(
     app: AppContext,
@@ -664,6 +739,7 @@ def set_server(
     transport: str,
     env_pairs: tuple[str, ...],
     skip_scan: bool,
+    connector_flag: str,
 ) -> None:
     """Add or update an MCP server in OpenClaw config.
 
@@ -678,9 +754,11 @@ def set_server(
       defenseclaw mcp set myserver --command node --args server.js --env API_KEY=xxx
       defenseclaw mcp set untrusted --url http://example.com/mcp --skip-scan
     """
+    from defenseclaw.commands import resolve_list_connector
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.admission import evaluate_admission
 
+    connector = resolve_list_connector(app, connector_flag)
     pe = PolicyEngine(app.store)
     pre_decision = evaluate_admission(
         pe,
@@ -689,7 +767,7 @@ def set_server(
         name=name,
         fallback_actions=app.cfg.mcp_actions,
         source_path="",
-        connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+        connector=connector,
         command=cmd,
         args=_parse_args(args_str) if args_str else [],
         url=url,
@@ -756,7 +834,7 @@ def set_server(
             scan_result=result,
             fallback_actions=app.cfg.mcp_actions,
             source_path=cmd or url or "",
-            connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+            connector=connector,
             command=cmd,
             args=_parse_args(args_str) if args_str else [],
             url=url,
@@ -783,7 +861,7 @@ def set_server(
         else:
             click.secho(f"Allowed override for {name} — skipping scan.", fg="yellow")
 
-    _set_mcp_via_connector(app.cfg, name, entry)
+    _set_mcp_via_connector(app.cfg, name, entry, connector=connector)
 
     if scan_required:
         post_decision = evaluate_admission(
@@ -794,7 +872,7 @@ def set_server(
             scan_result=result,
             fallback_actions=app.cfg.mcp_actions,
             source_path=cmd or url or "",
-            connector=app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "",
+            connector=connector,
             command=cmd,
             args=_parse_args(args_str) if args_str else [],
             url=url,
@@ -815,17 +893,23 @@ def set_server(
 
 @mcp.command("unset")
 @click.argument("name")
+@click.option(
+    "--connector", "connector_flag", default="",
+    help="Target a specific connector's MCP config (multi-connector installs)",
+)
 @pass_ctx
-def unset_server(app: AppContext, name: str) -> None:
+def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     """Remove an MCP server from OpenClaw config."""
-    servers = app.cfg.mcp_servers()
+    from defenseclaw.commands import resolve_list_connector
+
+    connector = resolve_list_connector(app, connector_flag)
+    servers = app.cfg.mcp_servers(connector)
     if not any(s.name == name for s in servers):
         raise click.ClickException(
-            f"MCP server {name!r} not found for connector="
-            f"{app.cfg.active_connector()!r}."
+            f"MCP server {name!r} not found for connector={connector!r}."
         )
 
-    _unset_mcp_via_connector(app.cfg, name)
+    _unset_mcp_via_connector(app.cfg, name, connector=connector)
     click.secho(f"Removed MCP server: {name}", fg="yellow")
 
     if app.logger:

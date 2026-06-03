@@ -33,6 +33,43 @@ def hint(*lines: str) -> None:
         click.echo(click.style(line, dim=True))
 
 
+def resolve_list_connector(app: Any, requested: str | None) -> str:
+    """Resolve and validate a ``--connector`` override for list commands.
+
+    Multi-connector installs let ``skill``/``mcp``/``plugin list`` target a
+    specific connector's catalog (the TUI focus selector relies on this).
+    When ``requested`` is empty the active connector is returned unchanged,
+    so single-connector behaviour is untouched. When supplied, it must be
+    one of the configured active connectors (case-insensitive) — otherwise
+    a ``UsageError`` is raised so a typo can't silently fall back to the
+    active connector and show the wrong catalog.
+    """
+    cfg = getattr(app, "cfg", None)
+    active = (
+        cfg.active_connector()
+        if cfg is not None and hasattr(cfg, "active_connector")
+        else "openclaw"
+    )
+    if not requested:
+        return active
+    requested = requested.strip()
+    try:
+        if cfg is not None and hasattr(cfg, "active_connectors"):
+            configured = list(cfg.active_connectors())
+        else:
+            configured = [active]
+    except Exception:  # noqa: BLE001 — fall back to the singular active connector.
+        configured = [active]
+    by_lower = {name.lower(): name for name in configured if name}
+    match = by_lower.get(requested.lower())
+    if match is None:
+        allowed = ", ".join(sorted(configured)) or active
+        raise click.UsageError(
+            f"connector {requested!r} is not configured. Active connectors: {allowed}."
+        )
+    return match
+
+
 def compute_verdict(
     action_entry: Any | None = None,
     scan_entry: dict[str, Any] | None = None,
