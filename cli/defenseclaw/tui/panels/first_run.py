@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from defenseclaw.platform_support import supported_connectors
 from defenseclaw.tui.services.setup_state import SetupCommandIntent
 
 FirstRunKind = Literal["choice", "bool"]
@@ -33,6 +34,17 @@ CONNECTOR_CHOICES: tuple[str, ...] = (
     "openhands",
     "antigravity",
 )
+
+
+def visible_connector_choices(os_name: str | None = None) -> tuple[str, ...]:
+    """``CONNECTOR_CHOICES`` supported on *os_name*.
+
+    Drops proxy connectors (openclaw/zeptoclaw) on Windows; a no-op on
+    macOS/Linux.
+    """
+    return tuple(supported_connectors(CONNECTOR_CHOICES, os_name))
+
+
 PROFILE_CHOICES: tuple[str, ...] = ("observe", "action")
 SCANNER_MODE_CHOICES: tuple[str, ...] = ("local", "remote", "both")
 FAIL_MODE_CHOICES: tuple[str, ...] = ("open", "closed")
@@ -166,7 +178,7 @@ def default_first_run_fields() -> tuple[FirstRunField, ...]:
             "Connector",
             "choice",
             "codex",
-            CONNECTOR_CHOICES,
+            visible_connector_choices(),
             "Agent framework to protect. OpenClaw is optional, not assumed.",
         ),
         FirstRunField("Profile", "choice", "observe", PROFILE_CHOICES, "observe=detect/log; action=block."),

@@ -392,7 +392,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 func (c *CodexConnector) SupportsComponentScanning() bool { return true }
 
 func (c *CodexConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
+	home := userHomeDir()
 	codexDir := filepath.Join(home, ".codex")
 
 	targets := map[string][]string{
@@ -416,7 +416,7 @@ func codexConfigPath() string {
 	if CodexConfigPathOverride != "" {
 		return CodexConfigPathOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".codex", "config.toml")
+	return filepath.Join(userHomeDir(), ".codex", "config.toml")
 }
 
 // codexConfigBackup captures the pre-DefenseClaw shape of the three
@@ -518,6 +518,9 @@ func isDefenseClawCodexProxyRedirect(v string) bool {
 }
 
 func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) error {
+	// filepath.ToSlash is a no-op on Unix (already uses '/'). On Windows it
+	// converts backslashes so bash (Git Bash / MSYS2) can resolve the path.
+	hookScript = filepath.ToSlash(hookScript)
 	configPath := codexConfigPath()
 	if err := captureManagedFileBackup(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
 		return fmt.Errorf("capture codex config backup: %w", err)
@@ -590,7 +593,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	// In observability mode the hook handler logs but never
 	// blocks; in enforcement mode it can also block based on the
 	// subprocess sandbox policy.
-	cfg["hooks"] = buildCodexHooksTable(configPath, hookScript)
+	cfg["hooks"] = buildCodexHooksTable(configPath, hookInvocationCommand("codex", hookScript))
 
 	features, _ := cfg["features"].(map[string]interface{})
 	if features == nil {
@@ -663,7 +666,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 // The generated hook script decides fail-open vs fail-closed from
 // SetupOpts: observability-only installs allow the tool when the
 // gateway is unavailable, while enforcement installs can block.
-func buildCodexHooksTable(configPath, hookScript string) map[string]interface{} {
+func buildCodexHooksTable(configPath, hookCommand string) map[string]interface{} {
 	out := map[string]interface{}{}
 	state := map[string]interface{}{}
 	keySource := codexHookStateKeySource(configPath)
@@ -672,7 +675,7 @@ func buildCodexHooksTable(configPath, hookScript string) map[string]interface{} 
 			"hooks": []interface{}{
 				map[string]interface{}{
 					"type":    "command",
-					"command": hookScript,
+					"command": hookCommand,
 					"timeout": group.timeout,
 				},
 			},
@@ -682,8 +685,10 @@ func buildCodexHooksTable(configPath, hookScript string) map[string]interface{} 
 		}
 		out[group.eventType] = []interface{}{matcherGroup}
 		eventKey := codexHookEventKeyLabel(group.eventType)
+		// The trust hash is computed over the SAME command Codex executes, so
+		// Codex recognizes the entry and teardown can reproduce the fingerprint.
 		state[codexHookStateKey(keySource, eventKey, 0, 0)] = map[string]interface{}{
-			"trusted_hash": codexCommandHookHash(eventKey, group.matcher, hookScript, group.timeout),
+			"trusted_hash": codexCommandHookHash(eventKey, group.matcher, hookCommand, group.timeout),
 		}
 	}
 	out["state"] = state
@@ -964,8 +969,10 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) {
 				hookEventsRemain = true
 			}
 		}
-		hookScript := filepath.Join(opts.DataDir, "hooks", "codex-hook.sh")
-		if removeOwnedCodexHookState(hooks, configPath, hookScript) {
+		// Reproduce the exact command used at setup (Unix: ToSlash'd .sh path;
+		// Windows: native Go invocation) so the trust-hash fingerprint matches.
+		hookCommand := hookInvocationCommand("codex", filepath.ToSlash(filepath.Join(opts.DataDir, "hooks", "codex-hook.sh")))
+		if removeOwnedCodexHookState(hooks, configPath, hookCommand) {
 			removedOwnedHooks = true
 		}
 		if len(hooks) == 0 {
@@ -1052,7 +1059,7 @@ func codexHookEntryCount(v interface{}) int {
 	return len(list)
 }
 
-func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hookScript string) bool {
+func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hookCommand string) bool {
 	state, ok := hooks["state"].(map[string]interface{})
 	if !ok {
 		return false
@@ -1066,7 +1073,7 @@ func removeOwnedCodexHookState(hooks map[string]interface{}, configPath, hookScr
 		if !ok {
 			continue
 		}
-		expectedHash := codexCommandHookHash(eventKey, group.matcher, hookScript, group.timeout)
+		expectedHash := codexCommandHookHash(eventKey, group.matcher, hookCommand, group.timeout)
 		if trustedHash, _ := entry["trusted_hash"].(string); trustedHash == expectedHash {
 			delete(state, key)
 			removed = true

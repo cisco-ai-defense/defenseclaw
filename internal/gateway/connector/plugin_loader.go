@@ -20,7 +20,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -29,7 +28,6 @@ import (
 	"plugin"
 	"runtime"
 	"strings"
-	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -59,8 +57,7 @@ func SetPluginAuditEmitter(e PluginAuditEmitter) {
 }
 
 // pluginGetUID is overridable for tests. Returns the effective UID of
-// the running process. The default delegates to os.Getuid().
-var pluginGetUID = os.Getuid
+// the running process. Defined in platform-specific files.
 
 func emitPluginRejection(code, msg, soPath string, cause error) {
 	if pluginAuditEmitter != nil {
@@ -221,26 +218,8 @@ func validatePluginPermissions(soPath string) error {
 // the gateway daemon reads, set mode 0o755, and have it loaded with
 // the daemon's privileges. This gate closes that path.
 //
-// Plan B3 / S0.1: skipped on Windows (file ownership semantics differ
-// and the code path uses syscall.Stat_t which is unix-only).
-func validatePluginOwner(soPath string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	info, err := os.Lstat(soPath)
-	if err != nil {
-		return fmt.Errorf("stat %s: %w", soPath, err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return errors.New("could not extract owner UID from FileInfo (non-unix FS?)")
-	}
-	want := uint32(pluginGetUID())
-	if stat.Uid != want {
-		return fmt.Errorf("%s owner uid=%d does not match running process uid=%d", soPath, stat.Uid, want)
-	}
-	return nil
-}
+// validatePluginOwner is implemented in platform-specific files
+// (plugin_owner_unix.go / plugin_owner_windows.go).
 
 // validatePluginHash computes the SHA-256 digest of the file and compares it
 // against the expected hex string from the manifest.

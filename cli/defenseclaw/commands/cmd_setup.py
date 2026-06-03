@@ -35,7 +35,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import ux
+from defenseclaw import platform_support, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_CONNECTOR_MODE,
     ACTION_SETUP_GATEWAY,
@@ -2173,19 +2173,20 @@ def _fetch_connector_names(cfg=None) -> list[str]:
         host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
         port = getattr(cfg.guardrail, "port", 0) or 0
     if not port:
-        return list(_CONNECTOR_NAMES_FALLBACK)
+        return platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
     try:
         url = f"http://{host}:{port}/v1/connectors"
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=2) as resp:
             data = _json.loads(resp.read())
             names = [c.get("name") or c.get("id") for c in data.get("connectors", [])]
-            return [n for n in names if n] or list(_CONNECTOR_NAMES_FALLBACK)
+            resolved = [n for n in names if n] or list(_CONNECTOR_NAMES_FALLBACK)
+            return platform_support.supported_connectors(resolved)
     except Exception:
-        return list(_CONNECTOR_NAMES_FALLBACK)
+        return platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
 
 
-_CONNECTOR_NAMES = _CONNECTOR_NAMES_FALLBACK
+_CONNECTOR_NAMES = platform_support.supported_connectors(_CONNECTOR_NAMES_FALLBACK)
 _HILT_MIN_SEVERITIES = ["HIGH", "MEDIUM", "LOW", "CRITICAL"]
 
 _CONNECTOR_META: dict[str, dict[str, str]] = {

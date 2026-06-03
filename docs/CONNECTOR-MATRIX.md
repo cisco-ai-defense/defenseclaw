@@ -33,6 +33,22 @@ redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
 
+## Platform support
+
+| Connector | macOS | Linux | Windows |
+| --------- | ----- | ----- | ------- |
+| OpenClaw, ZeptoClaw (proxy) | OK | OK | not supported |
+| Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, OpenHands (hook-based) | OK | OK | OK |
+
+Windows is **hook-only**: the eight hook-based connectors run their hook
+decisions natively in the `defenseclaw` binary (the agent invokes
+`defenseclaw hook --connector <name> --event <event>`), so no Git Bash, `jq`,
+or shell shims are required. The proxy connectors (OpenClaw, ZeptoClaw) need
+the local guardrail proxy, which DefenseClaw does not host on Windows; they are
+hidden from the connector pickers and rejected by setup there. The Go registry
+(`connectorSupportedOnOS`) and the Python `platform_support` module are the two
+sources of truth for this gating, kept in sync by a parity test.
+
 ## Versioned Hook Contracts
 
 The machine-readable compatibility source lives at
@@ -125,6 +141,121 @@ non-CodeGuard paths require `--replace`.
 | Copilot CLI | native traces/metrics via documented env vars | header token | hook telemetry |
 | OpenHands | no documented native OTLP | header token | hook telemetry |
 | Hermes / Cursor / Windsurf | no documented native OTLP | n/a | hook-generated logs, spans, counters |
+
+---
+
+## Live E2E coverage
+
+The [`.github/workflows/connector-live-e2e.yml`](../.github/workflows/connector-live-e2e.yml)
+workflow proves each hook connector end-to-end against real upstream agents
+and flags when an upstream release breaks a hook. It is intentionally
+separate from `e2e.yml` so it can go red on an upstream regression without
+blocking the OpenClaw stack gate. The harness lives under
+[`scripts/live-connector-e2e/`](../scripts/live-connector-e2e).
+
+### Two layers
+
+| Layer | What it proves | LLM? | Secrets? | OSes | When |
+| ----- | -------------- | ---- | -------- | ---- | ---- |
+| **A — Contract matrix** | Feeds golden stdin payloads into the *installed* hook entrypoint and asserts the gateway received the event, the verdict was shaped correctly, and teardown is clean. | no | no | linux, macos, windows | every run; fork-safe |
+| **B — Live agent matrix** | Installs the real agent at its latest version, runs `defenseclaw setup`, drives lifecycle + forced tool calls through the real harness, and asserts observe / block / OTLP / teardown. | yes (deterministic prompts) | yes | per the reality matrix below | nightly + manual dispatch |
+
+Layer A targets `~/.defenseclaw/hooks/<connector>-hook.sh` on Linux/macOS and
+the native `defenseclaw-gateway hook --connector <c> --event <e>` subcommand on
+Windows. Both forward the payload to the local gateway, so every assertion
+works against `~/.defenseclaw/gateway.jsonl` + `audit.db` regardless of OS.
+
+Hooks are **harness-driven**, not LLM-driven: the agent fires
+`SessionStart` / `PreToolUse` / etc. as a function of its lifecycle, so Layer B
+only needs the model to run the one shell command it is explicitly told to.
+Enforcement is proven with a filesystem **sentinel**: the allow probe runs a
+benign command that creates a marker file; the block probe asks the agent to
+read `/etc/shadow` (rule `PATH-ETC-SHADOW`, CRITICAL) — if the marker ever
+appears, the command ran and the block regressed. Reading `/etc/shadow` is
+harmless (permission denied) if a regression ever lets it through.
+
+### Per-connector reality matrix (Layer B)
+
+| Connector | Linux | macOS | Windows | Live driver headless invocation | Notes |
+| --------- | ----- | ----- | ------- | ------------------------------- | ----- |
+| Codex | live | live | live\* | `codex exec --json --full-auto` | native OTLP asserted |
+| Claude Code | live | live | live\* | `claude -p` | native OTLP asserted; native-ask is Layer A only |
+| Gemini CLI | live | live | live\* | `gemini -p -o json --approval-mode yolo` | advisory events cannot block |
+| Cursor | live | live | live\* | `cursor-agent -p --force` | gated on a one-time headless-hook validation |
+| Copilot CLI | live\* | live\* | live\* | `copilot -p` | user-level hooks only; entitled token |
+| OpenHands | live | — | — | `openhands --headless --json` | Docker runtime, Linux-only |
+| Hermes | contract-only | contract-only | contract-only | — | only `pre_tool_call` mapped |
+| Windsurf | contract-only | contract-only | contract-only | — | no headless CLI/SDK |
+| Antigravity | contract-only | contract-only | contract-only | — | headless auth is OAuth, no API key |
+
+`\*` = advisory cell (`continue-on-error`) until it goes consistently green.
+All Windows live cells and every Copilot cell start advisory; they are promoted
+to gating once stable. Contract-only connectors run Layer A on every OS and are
+intentionally absent from Layer B.
+
+> **Current rollout:** the nightly schedule runs **Layer A only**. Layer B is
+> manual-dispatch-only and presently scoped to the connectors we can
+> authenticate with Azure OpenAI / Amazon Bedrock — **Codex, Claude Code, and
+> OpenHands**. **Gemini CLI, Cursor, and Copilot live cells are deferred** until
+> their native keys (`GOOGLE_API_KEY`, `CURSOR_API_KEY`, `COPILOT_CLI_TOKEN`)
+> are configured; all three still get full Layer A coverage in the meantime.
+
+### Alternative LLM auth (Azure OpenAI / Amazon Bedrock)
+
+The live drivers can source the model from a non-default backend. This only
+changes where the agent's LLM traffic goes — the hook bus, verdicts, and OTLP
+are unaffected, so hook coverage is identical. Selection is per backend, not
+global: set the repo Variable (`DC_USE_AZURE` / `DC_USE_BEDROCK` = `1`) to make
+it the nightly default, or flip the `use_azure` / `use_bedrock` dispatch toggle.
+
+| Connector | Default | Azure OpenAI (`DC_USE_AZURE=1`) | Amazon Bedrock (`DC_USE_BEDROCK=1`) |
+| --------- | ------- | ------------------------------- | ----------------------------------- |
+| Codex | `OPENAI_API_KEY` | yes — seeds `[model_providers.azure]` in `~/.codex/config.toml` | no (Codex is OpenAI-only) |
+| Claude Code | `ANTHROPIC_API_KEY` | no | yes — `CLAUDE_CODE_USE_BEDROCK=1` + AWS chain |
+| OpenHands | `LLM_API_KEY` | yes — `azure/<deployment>` via LiteLLM | yes — `bedrock/<profile>` via LiteLLM (wins if both set) |
+| Gemini CLI / Cursor / Copilot | native key | — | — |
+
+Required inputs per backend:
+
+- **Azure**: secret `AZURE_OPENAI_API_KEY`; Variables `AZURE_OPENAI_ENDPOINT`
+  (resource URL), `AZURE_OPENAI_DEPLOYMENT` (used as the model id),
+  optional `AZURE_OPENAI_API_VERSION` (OpenHands only; defaults to a recent
+  preview). The deployment must be a model the connector supports (Codex needs
+  a Responses-API-capable deployment).
+- **Bedrock**: secret `AWS_BEARER_TOKEN_BEDROCK` *or* the pair
+  `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ optional
+  `AWS_SESSION_TOKEN`); Variable `AWS_REGION` (defaults to `us-east-1`).
+  Optional model-id overrides: `CLAUDE_BEDROCK_MODEL`, `OPENHANDS_BEDROCK_MODEL`.
+
+Gemini CLI, Cursor, and Copilot have **no** Azure/Bedrock substitute — they
+require their native provider key (`GOOGLE_API_KEY`, `CURSOR_API_KEY`,
+`COPILOT_CLI_TOKEN`) to run live.
+
+### Version policy (alert-only)
+
+The workflow is an **evidence engine, not an auto-bumper**. Each live cell
+records the resolved upstream version into the job summary. On any live-cell
+failure the `report` job opens or updates a GitHub issue labeled
+`connector-regression` listing the failing connector / OS / event / version,
+and links the uploaded log artifact. It never edits a version file.
+
+Setting the highest approved version stays a deliberate human action:
+
+1. A maintainer triages whether DefenseClaw's decode/map/respond needs a fix or
+   the upstream agent changed its hook contract.
+2. If DefenseClaw must drop support for the new release, raise `min_inclusive`
+   or set `max_exclusive` in
+   [`cli/defenseclaw/inventory/hook_contracts.json`](../cli/defenseclaw/inventory/hook_contracts.json)
+   and [`internal/gateway/connector/hook_contract.go`](../internal/gateway/connector/hook_contract.go).
+3. Once green again, record the validated version in
+   [`cli/defenseclaw/inventory/validated_versions.json`](../cli/defenseclaw/inventory/validated_versions.json)
+   (per connector × OS: `last_validated_version`, `last_validated_at`,
+   `run_url`). This file is human-reviewed only; the workflow reads it for
+   context but never writes it.
+
+The runtime drift guard (`hook_contract_lock.json` + the action-mode
+fail-closed behavior described above) is unchanged — this workflow is what
+generates the evidence a maintainer uses to update the floors and ceilings.
 
 ---
 

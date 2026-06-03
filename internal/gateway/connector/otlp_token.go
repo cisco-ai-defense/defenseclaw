@@ -26,7 +26,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"syscall"
 )
 
 // OTLPPathTokenScope identifies a connector-bound OTLP token used in
@@ -154,7 +153,7 @@ func EnsureOTLPPathToken(dataDir string, scope OTLPPathTokenScope) (string, erro
 	tmp := tokenPath + ".tmp"
 	_ = os.Remove(tmp)
 	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
-	if nofollow := syscall.O_NOFOLLOW; nofollow != 0 {
+	if nofollow := otlpOpenNoFollow(); nofollow != 0 {
 		flags |= nofollow
 	}
 	f, err := os.OpenFile(tmp, flags, 0o600)
@@ -260,15 +259,13 @@ func readSecureOTLPPathTokenFile(dataDir, path string) (string, error) {
 	if !info.Mode().IsRegular() {
 		return "", fmt.Errorf("OTLP path-token %s is not a regular file", path)
 	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		return "", fmt.Errorf("OTLP path-token %s has mode %o, want 600", path, mode)
+	if err := otlpValidatePerm(path, info); err != nil {
+		return "", err
 	}
-	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		if int(stat.Uid) != os.Getuid() {
-			return "", fmt.Errorf("OTLP path-token %s uid %d does not match current uid %d", path, stat.Uid, os.Getuid())
-		}
+	if err := otlpValidateOwner(path, info); err != nil {
+		return "", err
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY|otlpOpenNoFollow(), 0)
 	if err != nil {
 		return "", err
 	}

@@ -27,6 +27,8 @@ the parity guarantee.
 
 from __future__ import annotations
 
+from defenseclaw.platform_support import supported_connectors
+
 # Connectors the TUI knows how to set up. The order here drives the
 # wizard's connector picker, so put first-class proxies (openclaw,
 # zeptoclaw) first and hook-based connectors after.
@@ -49,6 +51,16 @@ CONNECTORS: tuple[str, ...] = (
 # ``--scanner-mode`` and ``--with-local-stack``; the other connectors
 # are hook-based and only take ``--mode``.
 GUARDRAIL_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
+
+
+def supported_connector_choices(os_name: str | None = None) -> tuple[str, ...]:
+    """``CONNECTORS`` filtered to those supported on *os_name*.
+
+    DefenseClaw is hook-only on Windows, so the proxy connectors
+    (openclaw/zeptoclaw) are dropped there; a no-op on macOS/Linux. Use this
+    wherever the connector list is presented to or chosen by the operator.
+    """
+    return tuple(supported_connectors(CONNECTORS, os_name))
 
 # Full provider catalogue accepted by ``_configure_llm`` in
 # ``cmd_setup.py``. Cloud providers first, then local runtimes. Tests

@@ -343,6 +343,10 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 	}
 
+	if err := writeHookConfigSidecar(hookDir, apiAddr, defaultHookFailMode); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -396,6 +400,34 @@ func writeHookScriptsCommonWithFailMode(hookDir, apiAddr, token, failMode string
 		if err := os.WriteFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
+	}
+	if err := writeHookConfigSidecar(hookDir, apiAddr, normalizeHookFailMode(failMode)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// hookConfigSidecarName is the file the native Go hook entrypoint reads on
+// Windows for the gateway address + fail mode. It lets the agent hook command
+// stay free of per-install flags (so its trust-hash / match string is stable),
+// while still conveying the operator's enforcement choice and a non-default
+// API port. The Bash hooks (Unix) bake these values into the script and ignore
+// this file.
+const hookConfigSidecarName = ".hookcfg"
+
+// writeHookConfigSidecar persists the gateway address and fail mode the native
+// Go hook entrypoint resolves at runtime. It is only written on Windows, where
+// the native entrypoint replaces the Bash hooks; Unix keeps the .sh hooks
+// unchanged and never reads this file.
+func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
+	if runtime.GOOS != "windows" {
+		return nil
+	}
+	body := fmt.Sprintf("DEFENSECLAW_GATEWAY_ADDR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+		apiAddr, normalizeHookFailMode(failMode))
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		return fmt.Errorf("write hook config sidecar: %w", err)
 	}
 	return nil
 }

@@ -2232,14 +2232,29 @@ class DefenseClawTUI(App[None]):
             self._refresh_hint()
 
     def _render_chrome(self) -> None:
-        self.query_one("#tabs", Tabs).active = f"tab-{self.active_panel}"
+        try:
+            tabs = self.query_one("#tabs", Tabs)
+        except NoMatches:
+            return
+        tab_id = f"tab-{self.active_panel}"
+        if tabs.query(f"#{tab_id}"):
+            tabs.active = tab_id
         # Refresh unread "(N)" badges on every tab whenever chrome
         # re-renders. Cheap (≤ 14 string updates) and keeps the tab
         # strip honest after refresh loops add new alerts / audit
         # entries while the operator is parked on a different panel.
         self._update_tab_labels()
-        self.query_one("#activity", RichLog).set_class(self.active_panel != "activity", "hidden")
-        body_widget = self.query_one("#body", Static)
+        # A catalog-load worker (or the periodic refresh) can reach here
+        # after the screen has begun tearing down, at which point #activity
+        # and #body are gone and query_one raises NoMatches — surfacing as
+        # WorkerFailed and intermittently failing the TUI catalog tests.
+        # Bail out quietly; there is nothing left to render.
+        try:
+            activity = self.query_one("#activity", RichLog)
+            body_widget = self.query_one("#body", Static)
+        except NoMatches:
+            return
+        activity.set_class(self.active_panel != "activity", "hidden")
         if self.active_panel == "overview" and not self.help_open:
             renderable = self._overview_renderable()
             body_widget.update(renderable)
@@ -4340,6 +4355,21 @@ class DefenseClawTUI(App[None]):
         panel.set_class(hidden, "hidden")
         panel.display = not hidden
         if hidden:
+            return
+
+        # The #command-progress container can briefly exist without its child
+        # widgets during a panel-switch re-render: Textual mounts the parent
+        # before (re)attaching the composed children, and the 0.25s
+        # _tick_command_strip timer can fire inside that window. The child
+        # queries below would then raise NoMatches and take down the worker
+        # (the parent guard above only covers the container). Probe the first
+        # child up front and bail if the inner DOM isn't ready yet — the
+        # children compose as one unit and this method is synchronous, so once
+        # the probe resolves they all stay mounted for the rest of the render.
+        # The next tick repaints cleanly once the DOM settles.
+        try:
+            self.query_one("#command-progress-icon", Static)
+        except NoMatches:
             return
 
         panel.set_class(self._strip_state == "running", "running")

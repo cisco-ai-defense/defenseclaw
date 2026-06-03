@@ -13,6 +13,10 @@
 # span).
 set -euo pipefail
 
+# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
+HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
+export HOME
+
 # Fail-open guard. See inspect-request.sh for rationale.
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
@@ -138,14 +142,14 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-OUTPUT=$(echo "$RESULT" | jq -c '.codex_output // empty' 2>/dev/null) || {
+OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 
-ACTION=$(echo "$RESULT" | jq -r '.action // "allow"' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
 
@@ -167,11 +171,15 @@ if [ "$ACTION" = "block" ]; then
     # decision=block. Exit 0 so Codex honors it.
     exit 0
   fi
-  REASON=$(echo "$RESULT" | jq -r '.reason // empty' 2>/dev/null)
+  # codex_output was not extractable (no jq/python3 for object fields).
+  # Construct minimal structured block JSON so Codex sees exit 0 + JSON
+  # rather than exit 2 — newer Codex versions (v0.130+) treat exit 2 on
+  # UserPromptSubmit as "hook failed" rather than "hook blocked".
+  REASON=$(echo "$RESULT" | _dc_jq -r '.reason // empty' 2>/dev/null)
   if [ -z "$REASON" ]; then
     REASON="Blocked by DefenseClaw Codex policy."
   fi
-  printf '%s\n' "$REASON" >&2
-  exit 2
+  printf '{"decision":"block","reason":"%s"}\n' "$(defenseclaw_json_escape "$REASON")"
+  exit 0
 fi
 exit 0

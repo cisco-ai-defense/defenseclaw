@@ -36,6 +36,20 @@ On **macOS**, OpenShell is not available. DefenseClaw still works for scanning, 
 
 **For sandbox setup on Linux**, see [SANDBOX.md](SANDBOX.md) for full architecture, configuration, and troubleshooting.
 
+### Windows support
+
+On **Windows**, DefenseClaw is **hook-only**. The hook-based connectors —
+Claude Code, Codex, Hermes, Cursor, Windsurf, Gemini CLI, Copilot CLI, and
+OpenHands — are fully supported. Their hook decisions run **natively in the
+`defenseclaw` binary** (the agent invokes `defenseclaw hook --connector <name>
+--event <event>`), so Windows needs **no Git Bash, no `jq`, and no shell
+shims** — there are zero external prerequisites beyond the binary itself.
+
+The proxy connectors **OpenClaw** and **ZeptoClaw** are **not supported on
+Windows**: they require the local guardrail proxy, which DefenseClaw does not
+host there. They are hidden from the TUI/CLI connector pickers and rejected by
+setup on Windows with a clear error. Use them on macOS or Linux instead.
+
 ## Splunk Terms And Scope For The Local Preset
 
 If you enable the bundled local Splunk workflow through `DefenseClaw`, you are

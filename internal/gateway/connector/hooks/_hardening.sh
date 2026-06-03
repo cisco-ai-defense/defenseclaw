@@ -27,6 +27,17 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        (no helper signatures changed), so a downgrade to v3 only
 #        loses the stale-dir sweep — older hook scripts that source
 #        either version keep working unmodified.
+#   v6 — adds the _dc_jq shim: real jq when available (unchanged on
+#        Mac/Linux), python3 fallback for object + string fields, then a
+#        pure-shell string-only last resort.  This makes block decisions
+#        parse-able on hosts without jq.  No helper signatures changed;
+#        hook scripts just replace bare `jq` calls with `_dc_jq`.
+#        NOTE: an earlier iteration of v6 also restored curl/jq directories
+#        from the pre-lockdown PATH after hardening. That was removed because
+#        the pre-lockdown PATH is agent-controlled and restoring one of its
+#        directories could re-admit an agent-planted binary. Windows no
+#        longer uses these bash hooks (it runs the hook natively in the Go
+#        binary), so the Git Bash /mingw64 workaround is no longer needed.
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -75,6 +86,15 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 # beyond setting env / ulimit. They MUST NOT call out to the agent or
 # the gateway.
 
+# Windows compatibility: some agent runtimes (e.g. Codex on Windows) do
+# not set HOME when spawning hook subprocesses. Without this, `set -u`
+# causes an immediate "unbound variable" exit 1. Fall back to USERPROFILE
+# (standard on Windows) or ~ expansion.
+if [ -z "${HOME:-}" ]; then
+  HOME="${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}"
+  export HOME
+fi
+
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
 # Use ulimit -S (soft) so the hook doesn't try to exceed kernel maxima
@@ -116,6 +136,15 @@ defenseclaw_harden_env() {
   # inherit the agent environment, so runtime DEFENSECLAW_HOOK_PATH (or
   # a companion "trusted" flag) is intentionally ignored; otherwise a
   # compromised agent could prepend trojan curl/jq/head.
+  #
+  # We deliberately do NOT restore any directory derived from the
+  # pre-lockdown PATH. That PATH is agent-controlled, so adding one of its
+  # directories back (to recover a curl/jq not on the hardened PATH) could
+  # re-admit an agent-planted binary and defeat this lockdown. Tools that
+  # are missing from the standard dirs are handled by the _dc_jq parsing
+  # fallback below, not by widening PATH. On Windows the hook runs natively
+  # in the DefenseClaw Go binary (no bash), so the previous Git Bash
+  # /mingw64 special-casing is unnecessary here.
   unset DEFENSECLAW_HOOK_PATH DEFENSECLAW_HOOK_PATH_TRUSTED
   if [ -n "$DEFENSECLAW_BAKED_HOOK_PATH" ]; then
     export PATH="$DEFENSECLAW_BAKED_HOOK_PATH"
@@ -221,6 +250,96 @@ defenseclaw_json_escape() {
     printf '%s' "${1:-}" | tr '\000-\037' ' ' | sed 's/\\/\\\\/g; s/"/\\"/g'
   } 2>/dev/null || printf unavailable
   return 0
+}
+
+# defenseclaw_json_string_field extracts a simple top-level JSON string field.
+# It is intentionally small: hook block/allow parsing only needs fields like
+# "action" and "reason" when jq is unavailable (common in Git Bash on Windows).
+defenseclaw_json_string_field() {
+  local json="${1:-}"
+  local field="${2:-}"
+  if [ -z "$field" ]; then
+    return 1
+  fi
+  printf '%s' "$json" | tr '\n\r' '  ' | sed -nE \
+    's/.*"'"$field"'"[[:space:]]*:[[:space:]]*"(([^"\\]|\\.)*)".*/\1/p' |
+    sed 's/\\"/"/g; s/\\\\/\\/g; s/\\n/ /g; s/\\r/ /g; s/\\t/ /g'
+}
+
+# _dc_jq is a drop-in shim for jq covering the small subset of filters
+# used by DefenseClaw hook scripts.  When the real jq binary is present
+# (all Unix installs; some Windows installs) it is used unchanged.
+# When jq is absent the shim tries python3 (handles both string and
+# object fields such as claude_code_output), then falls back to
+# defenseclaw_json_string_field for string-only fields.  Object fields
+# (e.g. claude_code_output) return empty from the string-only fallback;
+# hook scripts handle empty output correctly (fall through to exit-2
+# block path).
+#
+# Supported filter forms (covers all patterns in DefenseClaw hooks):
+#   .field                    — raw value
+#   .field // empty           — value or nothing on null/missing
+#   .field // "default"       — value or literal default string
+#
+# Flags honored: -r (raw string output), -c (compact JSON output)
+# shellcheck disable=SC2120
+_dc_jq() {
+  if command -v jq >/dev/null 2>&1; then
+    jq "$@"
+    return
+  fi
+  local _dcjq_raw=0 _dcjq_compact=0 _dcjq_filter=""
+  for _dcjq_a in "$@"; do
+    case "$_dcjq_a" in
+      -r)   _dcjq_raw=1 ;;
+      -c)   _dcjq_compact=1 ;;
+      # Handle accidental merged forms: -r.field or -c.field (no space)
+      -r.*) _dcjq_raw=1;     _dcjq_filter="${_dcjq_a#-r}" ;;
+      -c.*) _dcjq_compact=1; _dcjq_filter="${_dcjq_a#-c}" ;;
+      *)    _dcjq_filter="$_dcjq_a" ;;
+    esac
+  done
+  # Python3 fallback: handles both string scalars and nested objects.
+  # All values are passed via env to avoid shell quoting issues.
+  # The script uses only double-quoted Python strings so it is safe
+  # inside shell single quotes.
+  if command -v python3 >/dev/null 2>&1; then
+    DCJQ_FILTER="$_dcjq_filter" DCJQ_RAW="$_dcjq_raw" DCJQ_COMPACT="$_dcjq_compact" \
+      python3 -c \
+'import json,sys,os,re
+f=os.environ.get("DCJQ_FILTER","")
+raw=os.environ.get("DCJQ_RAW","0")=="1"
+compact=os.environ.get("DCJQ_COMPACT","0")=="1"
+try:
+  data=json.load(sys.stdin)
+except Exception:
+  sys.exit(1)
+m=re.match(r"^\.(\w+)\s*(?://\s*(.+))?$",f.strip())
+if not m:
+  sys.exit(1)
+field=m.group(1)
+dflt=(m.group(2) or "").strip()
+val=data.get(field)
+if val is None:
+  if dflt in ("empty","null",""):
+    sys.exit(0)
+  dm=re.match(r"^\"(.*)\"$",dflt)
+  sys.stdout.write((dm.group(1) if dm else dflt)+"\n")
+  sys.exit(0)
+if isinstance(val,str):
+  sys.stdout.write(val+"\n")
+else:
+  sep=(",",":") if compact else (", ",": ")
+  sys.stdout.write(json.dumps(val,separators=sep)+"\n")'
+    return
+  fi
+  # String-only last resort: covers action / reason / block_reason.
+  # Object fields (claude_code_output, codex_output, hook_output) return
+  # empty; callers already handle the empty case correctly.
+  local _dcjq_field
+  _dcjq_field="${_dcjq_filter#.}"
+  _dcjq_field="${_dcjq_field%%[[:space:]]*}"
+  defenseclaw_json_string_field "$(cat)" "$_dcjq_field"
 }
 
 # defenseclaw_log_hook_failure writes a structured JSON line to

@@ -612,10 +612,19 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("%s hook script: %w", c.name, err)
 	}
-	if err := c.patchConfig(opts, filepath.Join(hookDir, c.scriptName)); err != nil {
+	if err := c.patchConfig(opts, c.hookCommand(opts)); err != nil {
 		return fmt.Errorf("%s hook config: %w", c.name, err)
 	}
 	return nil
+}
+
+// hookCommand returns the command an agent runs for this connector's hook. On
+// Unix it is the bundled .sh path; on Windows it is the native DefenseClaw
+// `hook` subcommand invocation. The same value is used at setup, teardown, and
+// VerifyClean so the JSON/YAML hook removers (which match on the exact command
+// string) recognize the entries DefenseClaw inserted.
+func (c *hookOnlyConnector) hookCommand(opts SetupOpts) string {
+	return hookInvocationCommand(c.name, filepath.Join(opts.DataDir, "hooks", c.scriptName))
 }
 
 // Teardown restores the host agent's config (or removes our entries
@@ -645,8 +654,7 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	case err != nil:
 		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
 	case !restored:
-		hookScript := filepath.Join(opts.DataDir, "hooks", c.scriptName)
-		if err := c.removeConfigEntries(path, hookScript); err != nil {
+		if err := c.removeConfigEntries(path, c.hookCommand(opts)); err != nil {
 			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
 		} else {
 			discardManagedFileBackup(opts.DataDir, c.name, "config")
@@ -672,7 +680,7 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		}
 		return err
 	}
-	needle := filepath.Join(opts.DataDir, "hooks", c.scriptName)
+	needle := c.hookCommand(opts)
 	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 	}
@@ -952,7 +960,7 @@ func workspaceRootOutsideDataDir(root, dataDir string) bool {
 }
 
 func homePath(parts ...string) string {
-	home := strings.TrimSpace(os.Getenv("HOME"))
+	home := strings.TrimSpace(userHomeDir())
 	if home == "" {
 		if h, err := os.UserHomeDir(); err == nil {
 			home = strings.TrimSpace(h)
@@ -1712,6 +1720,13 @@ func containsHookScript(raw interface{}, hookScript string) bool {
 func shellWord(s string) string {
 	if s == "" {
 		return "''"
+	}
+	// Native Go hook commands (Windows) are already a complete, correctly
+	// quoted command line (`"<exe>" hook --connector <name>`). bash-style
+	// single-quoting would corrupt the executable path and break invocation,
+	// so pass these through unchanged. Unix .sh paths still get quoted.
+	if isNativeHookCommand(s) {
+		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

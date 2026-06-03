@@ -22,13 +22,13 @@ so that the Go orchestrator and Python CLI share the same config file.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import platform
 import stat
 import subprocess
 import sys
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -85,6 +85,44 @@ LEGACY_DEPLOYMENT_MODE_ALIASES = {
     "ci": "ci_cd",
     "edge": "server",
 }
+
+if os.name == "nt":
+    import msvcrt
+
+    # msvcrt.locking() locks a byte range starting at the file pointer's
+    # CURRENT position. To get mutual exclusion we must lock the SAME byte
+    # (offset 0) on every acquisition, so we seek(0) immediately before each
+    # lock/unlock call and we never write to the lock file. Writing (in any
+    # mode) can advance the pointer or grow the file, which would make
+    # concurrent holders lock disjoint ranges and silently defeat the lock.
+    def _lock_file_exclusive(file_obj) -> None:
+        while True:
+            file_obj.seek(0)
+            try:
+                # LK_LOCK blocks for ~10s then raises; retry so this behaves
+                # like a blocking exclusive lock (fcntl.flock(LOCK_EX)).
+                msvcrt.locking(file_obj.fileno(), msvcrt.LK_LOCK, 1)
+                return
+            except OSError:
+                time.sleep(0.05)
+
+    def _unlock_file(file_obj) -> None:
+        file_obj.seek(0)
+        try:
+            msvcrt.locking(file_obj.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            # Lock already released (e.g. handle closed); don't crash
+            # teardown/save paths.
+            pass
+
+else:
+    import fcntl
+
+    def _lock_file_exclusive(file_obj) -> None:
+        fcntl.flock(file_obj.fileno(), fcntl.LOCK_EX)
+
+    def _unlock_file(file_obj) -> None:
+        fcntl.flock(file_obj.fileno(), fcntl.LOCK_UN)
 
 
 def _home() -> Path:
@@ -1586,16 +1624,19 @@ def locked_config_yaml(path: str):
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(lock_path, flags, 0o600)
     try:
-        lock = os.fdopen(fd, "w")
+        # "r+" (not "a+"): the lock file is a pure sentinel we never write to,
+        # and append mode would force the file pointer to EOF, breaking the
+        # offset-0 byte-range lock used on Windows (see _lock_file_exclusive).
+        lock = os.fdopen(fd, "r+")
     except BaseException:
         os.close(fd)
         raise
     try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _lock_file_exclusive(lock)
         try:
             yield
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            _unlock_file(lock)
     finally:
         lock.close()
 

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -119,6 +120,13 @@ func (c *ZeptoClawConnector) AllowedHosts() []string {
 }
 
 func (c *ZeptoClawConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	// Proxy connectors require the local guardrail proxy, which DefenseClaw
+	// does not host on Windows (hook-only there). Fail clearly instead of
+	// planting a half-configured proxy connector.
+	if !ConnectorSupportedOnHostOS(c.Name()) {
+		return errConnectorUnsupportedOnOS(c.Name(), runtime.GOOS)
+	}
+
 	// Surface 1: Patch ZeptoClaw config to route api_base through proxy.
 	if err := c.patchZeptoClawConfig(opts); err != nil {
 		return fmt.Errorf("zeptoclaw config patch: %w", err)
@@ -524,11 +532,12 @@ func zeptoClawConfigPath() string {
 
 // zeptoClawHomeDir returns the ZeptoClaw home directory. Priority:
 // ZEPTOCLAW_HOME env (custom override) → $HOME/.zeptoclaw (default).
+// userHomeDir keeps this cross-platform (e.g. %USERPROFILE% on Windows).
 func zeptoClawHomeDir() string {
 	if home := os.Getenv("ZEPTOCLAW_HOME"); home != "" {
 		return home
 	}
-	return filepath.Join(os.Getenv("HOME"), ".zeptoclaw")
+	return filepath.Join(userHomeDir(), ".zeptoclaw")
 }
 
 // patchZeptoClawConfig reads ZeptoClaw's config.json, backs up the original

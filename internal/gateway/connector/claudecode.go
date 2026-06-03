@@ -351,7 +351,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 func (c *ClaudeCodeConnector) SupportsComponentScanning() bool { return true }
 
 func (c *ClaudeCodeConnector) ComponentTargets(cwd string) map[string][]string {
-	home := os.Getenv("HOME")
+	home := userHomeDir()
 	userDir := filepath.Join(home, ".claude")
 	workspaceDir := filepath.Join(cwd, ".claude")
 
@@ -424,7 +424,7 @@ func claudeCodeSettingsPath() string {
 	if ClaudeCodeSettingsPathOverride != "" {
 		return ClaudeCodeSettingsPathOverride
 	}
-	return filepath.Join(os.Getenv("HOME"), ".claude", "settings.json")
+	return filepath.Join(userHomeDir(), ".claude", "settings.json")
 }
 
 // fileChangedMatcher targets config files that affect Claude Code's
@@ -489,6 +489,12 @@ var hookGroups = []struct {
 // The read-modify-write cycle is protected by an advisory file lock to
 // prevent corruption from concurrent gateway starts.
 func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript string) error {
+	// On Unix the agent runs the bundled .sh hook (ToSlash is a no-op there).
+	// On Windows there is no Bash/.cmd chain: the agent invokes the DefenseClaw
+	// binary's native `hook` subcommand directly. hookInvocationCommand returns
+	// the platform-correct command, which is used verbatim as the agent's hook
+	// command and recognized on teardown by isOwnedHook.
+	hookCommand := hookInvocationCommand("claudecode", filepath.ToSlash(hookScript))
 	settingsPath := claudeCodeSettingsPath()
 
 	return withFileLock(settingsPath, func() error {
@@ -535,7 +541,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 				"hooks": []interface{}{
 					map[string]interface{}{
 						"type":    "command",
-						"command": hookScript,
+						"command": hookCommand,
 						"timeout": group.timeout,
 					},
 				},
@@ -834,6 +840,12 @@ func isOwnedHook(hookEntry interface{}, hooksDir string) bool {
 			continue
 		}
 		if hooksDir != "" && strings.HasPrefix(cmd, hooksDir+"/") {
+			return true
+		}
+		// Native Go hook commands (Windows) are not a file path under hooksDir
+		// and carry no on-disk marker, so recognize them by their entrypoint
+		// invocation fragment.
+		if isNativeHookCommand(cmd) {
 			return true
 		}
 		if scriptHasMarker(cmd) {

@@ -40,6 +40,11 @@ async def test_catalog_control_bar_visible_on_panel(panel: str) -> None:
         await pilot.pause()
         app.action_switch_panel(panel)
         await pilot.pause()
+        # Cancel background _load_catalog_model workers spawned by
+        # action_switch_panel — in CI they can outlive the test context
+        # and crash _render_chrome during teardown.
+        app.workers.cancel_all()
+        await pilot.pause()
         bar = app.query_one(f"#{panel}-controls", Horizontal)
         assert bar.has_class("hidden") is False, (
             f"{panel}-controls should be visible while the {panel} panel is active"
@@ -52,6 +57,8 @@ async def test_catalog_control_bar_visible_on_panel(panel: str) -> None:
         if other == "plugins" and not app.plugins_model.is_visible_for_connector():
             return
         app.action_switch_panel(other)
+        await pilot.pause()
+        app.workers.cancel_all()
         await pilot.pause()
         assert bar.has_class("hidden") is True, (
             f"{panel}-controls must be hidden after switching to {other}"
