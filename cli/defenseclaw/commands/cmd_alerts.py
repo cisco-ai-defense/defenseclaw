@@ -227,10 +227,10 @@ def _render_table(alert_list: list, store, connector: str | None = None) -> None
     "connector",
     default=None,
     help=(
+        "Filter alerts by connector attribution (optional on any install). "
         "Only show alerts attributed to this connector (e.g. codex, "
         "claudecode, antigravity). Matches the per-event connector= field, "
-        "mirroring the TUI's `connector:` search token. No-op for "
-        "single-connector installs."
+        "mirroring the TUI's `connector:` search token."
     ),
 )
 @click.option(

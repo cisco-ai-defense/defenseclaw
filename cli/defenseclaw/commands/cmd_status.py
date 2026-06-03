@@ -77,7 +77,8 @@ def status(app: AppContext) -> None:
     """Show DefenseClaw status.
 
     Displays environment, sandbox health, scanner availability,
-    enforcement counts, and activity summary.
+    enforcement counts, and activity summary. On multi-connector installs
+    it also lists the active connector roster with each peer's mode.
     """
     cfg = app.cfg
 
@@ -158,39 +159,28 @@ def status(app: AppContext) -> None:
     )
     from defenseclaw.commands import hint
 
-    # Resolve the active-connector roster once. With 2+ connectors we render a
-    # single "Agents" section (one line per connector + effective mode, the
-    # primary annotated with live /health counters); with 0/1 we keep the
-    # historical single "Agent:" block so single-connector output is unchanged.
-    try:
-        actives = [c for c in (cfg.active_connectors() if hasattr(cfg, "active_connectors") else []) if c]
-    except Exception:
-        actives = []
-    multi = len(actives) > 1
-
+    # Render the "Agents" roster uniformly — one section that lists every
+    # active connector with its effective mode (and, when the sidecar is up,
+    # live /health counters per connector). The same code path drives a
+    # single-connector install (one row) and a fan-out install (N rows), so the
+    # output never branches on connector count.
     if client.is_running():
         _status_row("Sidecar", ux._style("running", fg="green"))
-        if multi:
-            _print_agents(cfg, bind, cfg.gateway.api_port)
-        else:
-            _print_connected_agent(bind, cfg.gateway.api_port)
+        _print_agents(cfg, bind, cfg.gateway.api_port)
         hint(
             "Dashboard:     defenseclaw alerts",
             "Health check:  defenseclaw doctor",
+            "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
         )
     else:
         _status_row("Sidecar", ux._style("not running", fg="yellow"))
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        if multi:
-            _print_agents(cfg)
-        else:
-            configured = cfg.active_connector() if hasattr(cfg, "active_connector") else (cfg.claw.mode or "openclaw")
-            _status_row(
-                "Agent",
-                f"{_friendly_connector_name(configured)} ({configured})" + ux.dim(" — configured, not connected"),
-            )
-        hint("Start sidecar:  defenseclaw-gateway start")
+        _print_agents(cfg)
+        hint(
+            "Start sidecar:  defenseclaw-gateway start",
+            "Operator overview: defenseclaw status | Sidecar subsystems: defenseclaw-gateway status",
+        )
 
 
 _FRIENDLY_CONNECTOR_NAMES = {
@@ -238,25 +228,29 @@ def _connector_scope_text(cfg) -> str:
 
 
 def _print_agents(cfg, host: str | None = None, port: int | None = None) -> None:
-    """Render the multi-connector "Agents" roster as one section.
+    """Render the "Agents" roster as one section, for ANY connector count.
 
     Config-derived (``active_connectors()`` + ``GuardrailConfig.effective_mode``)
     so it lists every active connector and its effective mode regardless of
-    sidecar state. A no-op for the common single-connector install (the caller
-    renders the legacy single ``Agent:`` block in that case).
+    sidecar state. The exact same section is rendered whether the install has
+    zero, one, or many connectors — there is no separate single-connector
+    ``Agent:`` block. ``active_connectors()`` returns one name on a
+    single-connector install and N on a fan-out install, so the same loop
+    drives both.
 
     When ``host``/``port`` are supplied and the sidecar is up, *every*
     connector is annotated with its own live state and counters (read from
     ``/health`` ``connectors[]``). There is no privileged "primary" — each
-    active agent reports its own tally. This folds what used to be a separate
-    single ``Agent:`` block plus a standalone ``Connectors:`` row into one
-    place to look.
+    active agent reports its own tally.
     """
     try:
         actives = [c for c in (cfg.active_connectors() if hasattr(cfg, "active_connectors") else []) if c]
     except Exception:
         actives = []
-    if len(actives) <= 1:
+    if not actives:
+        # Uniform empty state — same "Agents" section whether the install has
+        # zero, one, or many connectors (no separate single-connector block).
+        _status_row("Agents", ux.dim("(no active connector)"))
         return
 
     health_map = _fetch_health_connectors(host, port) if host and port else {}
@@ -330,13 +324,6 @@ def _fetch_health(host: str | None, port: int | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _fetch_health_connector(host: str | None, port: int | None) -> dict | None:
-    """Return the primary/active connector dict from ``/health`` (or ``None``)."""
-    data = _fetch_health(host, port)
-    conn = data.get("connector") if isinstance(data, dict) else None
-    return conn if isinstance(conn, dict) else None
-
-
 def _fetch_health_connectors(host: str | None, port: int | None) -> dict[str, dict]:
     """Map ``connector-name`` → its ``ConnectorHealth`` from ``/health``.
 
@@ -408,19 +395,6 @@ def _print_agent_counters(conn: dict, indent: str = "                ") -> None:
         f"{ux.dim(f'tool inspections: {inspections}')}  {block_text_tool}  "
         f"{block_text_sub}"
     )
-
-
-def _print_connected_agent(host: str, port: int) -> None:
-    """Surface the single active-connector block (single-connector installs)."""
-    conn = _fetch_health_connector(host, port)
-    if not conn:
-        _status_row("Agent", ux.dim("(no active connector)"))
-        return
-
-    name = str(conn.get("name") or "").strip()
-    friendly = _friendly_connector_name(name)
-    _status_row("Agent", f"{friendly} ({name}){_connector_state_verb(str(conn.get('state') or ''))}")
-    _print_agent_counters(conn)
 
 
 def _print_observability_status(cfg) -> None:

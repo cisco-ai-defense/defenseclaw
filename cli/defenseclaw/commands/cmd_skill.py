@@ -37,7 +37,14 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group()
 def skill() -> None:
-    """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore."""
+    """Manage agent skills — search, install, scan, block, allow, disable, enable, quarantine, restore.
+
+    Multi-connector: skills are tracked per-connector. ``skill list``
+    shows every active connector's skills by default (pass ``--connector
+    X`` to narrow to one peer). The other subcommands take ``--connector
+    X`` to target a configured peer (default: the active connector);
+    ``skill scan --all`` fans out across every active connector.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -376,21 +383,86 @@ def _skill_display_name(s: dict[str, Any]) -> str:
     "--connector",
     "connector_flag",
     default="",
-    help="List skills for a specific configured connector (multi-connector installs).",
+    help=(
+        "List skills for a specific configured connector. "
+        "Default: every active connector (on a single-connector install, "
+        "just that one). Pass --connector <name> to narrow the listing to "
+        "one configured peer."
+    ),
 )
 @pass_ctx
 def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
-    """List all skills for a connector with their latest scan severity."""
+    """List skills with their latest scan severity.
 
-    from defenseclaw.commands import resolve_list_connector
+    By default this lists **every active connector's** skills — on a
+    multi-connector install each connector gets its own connector-tagged
+    section/table, so you no longer have to re-run with ``--connector``
+    per peer. ``--connector <name>`` narrows the listing to one configured
+    connector. Single-connector installs are unchanged (one table).
+    """
+    from defenseclaw.commands import resolve_list_connectors
 
-    effective_connector = resolve_list_connector(app, connector_flag)
-
-    oc_list = _list_openclaw_skills_full(app, connector=effective_connector)
-    skills = oc_list.get("skills", []) if oc_list else []
+    connectors = resolve_list_connectors(app, connector_flag)
 
     scan_map = _build_scan_map(app.store)
     actions_map = _build_actions_map(app.store)
+
+    if as_json:
+        if len(connectors) > 1:
+            groups = [
+                {
+                    "connector": c,
+                    "skills": _skill_list_json_items(
+                        _collect_skills_for_connector(app, c, scan_map, actions_map),
+                        scan_map,
+                        actions_map,
+                    ),
+                }
+                for c in connectors
+            ]
+            click.echo(json.dumps(groups, indent=2, default=str))
+        else:
+            skills = _collect_skills_for_connector(app, connectors[0], scan_map, actions_map)
+            if not skills:
+                click.echo("[]")
+            else:
+                _print_skill_list_json(skills, scan_map, actions_map)
+        return
+
+    shown_any = False
+    for connector in connectors:
+        skills = _collect_skills_for_connector(app, connector, scan_map, actions_map)
+        if not skills:
+            if connector == "openclaw":
+                click.echo(ux.dim("No skills found. Is openclaw installed?"))
+            else:
+                click.echo(
+                    f"No skills found for connector={connector!r} "
+                    f"{ux.dim('(checked the connector-specific skill directories).')}",
+                )
+            continue
+        _print_skill_list_table(skills, scan_map, actions_map, connector)
+        shown_any = True
+
+    if shown_any:
+        from defenseclaw.commands import hint
+        hint("Scan all skills:  defenseclaw skill scan all")
+
+
+def _collect_skills_for_connector(
+    app: AppContext,
+    connector: str,
+    scan_map: dict[str, dict[str, Any]],
+    actions_map: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Resolve the merged skill list for a single connector.
+
+    Returns the post-phantom skill list. OpenClaw-only audit-DB phantoms
+    (enforcement-only / scan-history-only entries) are folded in exactly
+    as the single-connector path did.
+    """
+    oc_list = _list_openclaw_skills_full(app, connector=connector)
+    skills = oc_list.get("skills", []) if oc_list else []
 
     # The ``actions`` and ``scan_results`` tables are connector-untagged in
     # the shared audit DB (see cli/defenseclaw/db.py). Phantom rows from
@@ -398,73 +470,51 @@ def list_skills(app: AppContext, as_json: bool, connector_flag: str) -> None:
     # non-OpenClaw connector (codex, claudecode, zeptoclaw) would surface
     # skills that the active framework does not actually have on disk —
     # which is exactly the leak users were seeing in the Skills tab. Only
-    # surface phantoms when the active connector is OpenClaw; for the
-    # other connectors, the connector-aware filesystem walk
-    # (skill_list.list_skills → cfg.skill_dirs()) is the source of truth.
-    show_audit_phantoms = effective_connector == "openclaw"
-
-    if not skills and (not show_audit_phantoms or (not actions_map and not scan_map)):
-        if as_json:
-            click.echo("[]")
-            return
-        connector = effective_connector
-        if connector == "openclaw":
-            click.echo(ux.dim("No skills found. Is openclaw installed?"))
-        else:
-            click.echo(
-                f"No skills found for connector={connector!r} "
-                f"{ux.dim('(checked the connector-specific skill directories).')}",
-            )
-        return
+    # surface phantoms when the connector is OpenClaw; for the others the
+    # connector-aware filesystem walk (skill_list.list_skills →
+    # cfg.skill_dirs()) is the source of truth.
+    if connector != "openclaw":
+        return skills
 
     known_names = {s.get("name", "") for s in skills}
+    for name, ae in actions_map.items():
+        if name not in known_names:
+            skills.append({
+                "name": name,
+                "description": "",
+                "emoji": "",
+                "eligible": False,
+                "disabled": ae.actions.runtime == "disable",
+                "blockedByAllowlist": False,
+                "source": "enforcement",
+                "bundled": False,
+                "homepage": "",
+            })
+            known_names.add(name)
 
-    if show_audit_phantoms:
-        for name, ae in actions_map.items():
-            if name not in known_names:
-                skills.append({
-                    "name": name,
-                    "description": "",
-                    "emoji": "",
-                    "eligible": False,
-                    "disabled": ae.actions.runtime == "disable",
-                    "blockedByAllowlist": False,
-                    "source": "enforcement",
-                    "bundled": False,
-                    "homepage": "",
-                })
-                known_names.add(name)
+    for name in scan_map:
+        if name not in known_names:
+            skills.append({
+                "name": name,
+                "description": "",
+                "emoji": "",
+                "eligible": False,
+                "disabled": False,
+                "blockedByAllowlist": False,
+                "source": "scan-history",
+                "bundled": False,
+                "homepage": "",
+            })
+            known_names.add(name)
 
-        for name in scan_map:
-            if name not in known_names:
-                skills.append({
-                    "name": name,
-                    "description": "",
-                    "emoji": "",
-                    "eligible": False,
-                    "disabled": False,
-                    "blockedByAllowlist": False,
-                    "source": "scan-history",
-                    "bundled": False,
-                    "homepage": "",
-                })
-                known_names.add(name)
-
-    if as_json:
-        _print_skill_list_json(skills, scan_map, actions_map)
-        return
-
-    _print_skill_list_table(skills, scan_map, actions_map)
-
-    from defenseclaw.commands import hint
-    hint("Scan all skills:  defenseclaw skill scan all")
+    return skills
 
 
-def _print_skill_list_json(
+def _skill_list_json_items(
     skills: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
-) -> None:
+) -> list[dict[str, Any]]:
     items = []
     for s in skills:
         name = s.get("name", "")
@@ -489,23 +539,44 @@ def _print_skill_list_json(
         verdict_label, _ = _compute_verdict(actions_map.get(name), scan_map.get(name))
         item["verdict"] = verdict_label
         items.append(item)
-    click.echo(json.dumps(items, indent=2, default=str))
+    return items
+
+
+def _print_skill_list_json(
+    skills: list[dict[str, Any]],
+    scan_map: dict[str, dict[str, Any]],
+    actions_map: dict[str, Any],
+) -> None:
+    click.echo(json.dumps(
+        _skill_list_json_items(skills, scan_map, actions_map),
+        indent=2,
+        default=str,
+    ))
 
 
 def _print_skill_list_table(
     skills: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
+    connector: str = "",
 ) -> None:
     from rich.console import Console
     from rich.table import Table
+
+    from defenseclaw.commands import list_scope_title
 
     ready_count = sum(
         1 for s in skills if s.get("eligible") and not s.get("disabled")
     )
 
+    detail = f"({ready_count}/{len(skills)} ready)"
+    title = (
+        list_scope_title("Skills", connector, detail)
+        if connector
+        else f"Skills {detail}"
+    )
     console = Console()
-    table = Table(title=f"Skills ({ready_count}/{len(skills)} ready)")
+    table = Table(title=title)
     table.add_column("Status", style="bold", no_wrap=True)
     table.add_column("Skill", no_wrap=True, overflow="ellipsis", max_width=24)
     table.add_column("Description", no_wrap=True, overflow="ellipsis", max_width=34)
@@ -572,7 +643,11 @@ def _print_skill_list_table(
 @click.option("--all", "scan_all", is_flag=True, help="Scan all configured skills")
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Scan a specific connector's skills (multi-connector installs)",
+    help=(
+        "Scan a specific connector's skills. Default for 'skill scan all' "
+        "on multi-connector installs: every active connector (use "
+        "--connector <name> to narrow to one)."
+    ),
 )
 @click.option(
     "--action", is_flag=True, default=False,

@@ -981,6 +981,18 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// a different session than the inbound header (the synthetic
 	// codex-notify path is the canonical case) takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
+	// Stamp the connector identity onto the audit envelope so every
+	// downstream surface (audit rows via applyEnvelope, gateway.jsonl
+	// events via stampEventCorrelation, sinks/Splunk) can filter by
+	// connector with the same identity. The hook payload's connector is
+	// authoritative on multi-connector installs.
+	if conn := strings.TrimSpace(req.ConnectorName); conn != "" {
+		env := audit.EnvelopeFromContext(ctx)
+		if env.Connector != conn {
+			env.Connector = conn
+			ctx = audit.ContextWithEnvelope(ctx, env)
+		}
+	}
 	enrichHTTPSpanFromContext(ctx)
 	return ctx
 }

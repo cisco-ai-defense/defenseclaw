@@ -201,6 +201,11 @@ type splunkAuditEvent struct {
 	DestinationApp    string         `json:"destination_app,omitempty"`
 	ToolName          string         `json:"tool_name,omitempty"`
 	ToolID            string         `json:"tool_id,omitempty"`
+	// Connector is the hook connector identity (codex/claudecode/…) on
+	// multi-connector installs, surfaced top-level so Splunk searches and
+	// dashboards can `... connector="codex"` without coalescing from the
+	// structured payload. Empty for non-connector rows.
+	Connector         string         `json:"connector,omitempty"`
 	SchemaVersion     int            `json:"schema_version,omitempty"`
 	ContentHash       string         `json:"content_hash,omitempty"`
 	Generation        uint64         `json:"generation,omitempty"`
@@ -431,6 +436,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			DestinationApp:    e.DestinationApp,
 			ToolName:          e.ToolName,
 			ToolID:            e.ToolID,
+			Connector:         e.Connector,
 			SchemaVersion:     e.SchemaVersion,
 			ContentHash:       e.ContentHash,
 			Generation:        e.Generation,

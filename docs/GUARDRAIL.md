@@ -289,6 +289,33 @@ Mode is set in `~/.defenseclaw/config.yaml` (`guardrail.mode`) and passed into
 `NewGuardrailProxy` when the sidecar starts the guardrail proxy; hot-reload
 updates come from `guardrail_runtime.json`.
 
+### Per-connector overrides (`guardrail.connectors`)
+
+A single gateway can enforce guardrail policy for several **hook** connectors
+at once. Each active connector gets a `guardrail.connectors.<name>` block in
+`config.yaml` carrying any of `enabled`, `mode`, `hook_fail_mode`,
+`block_message`, `rule_pack_dir`, and `hilt` — every field is optional and
+inherits the corresponding global `guardrail.*` value when unset. The gateway
+resolves policy per connector at request time (`EffectiveMode(connector)`,
+`EffectiveHookFailModeFor(connector)`, …), falling back to the global value.
+`claw.mode` is set to `multi` once more than one connector is active. Proxy
+connectors (OpenClaw, ZeptoClaw) cannot be entries — multi-connector is
+hook-only. Operators manage these with `defenseclaw setup <connector>`
+(choosing **Add**) and the per-connector CLI:
+
+```bash
+defenseclaw guardrail status     --connector codex
+defenseclaw guardrail fail-mode  closed --connector codex
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail block-message "Codex policy blocked this" --connector codex
+defenseclaw guardrail disable --connector codex   # scoped kill switch; `enable` restores
+```
+
+Omit `--connector` to operate on the global default. The egress firewall is
+**not** part of this per-connector surface — it stays one host-wide ruleset
+(see `docs/ARCHITECTURE.md` → Firewall scope). Full operator how-to lives in
+the docs site under Setup → Multi-connector.
+
 Mode can be changed at runtime via hot-reload (no restart required):
 
 ```bash

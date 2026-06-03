@@ -205,6 +205,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 			Details:   details,
 			Severity:  "WARN",
 			AgentName: source,
+			Connector: source,
 		}
 		_ = persistAuditEvent(a.logger, a.store, ev)
 		a.otel.RecordOTelIngest(ctx, string(signal), source, "malformed", 0, bodyBytes)
@@ -237,6 +238,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 			Severity:  "WARN",
 			AgentName: source,
 			SessionID: sessionID,
+			Connector: source,
 		}
 		_ = persistAuditEvent(a.logger, a.store, ev)
 		// Record metrics + emit OTel log for the malformed branch.
@@ -260,6 +262,7 @@ func (a *APIServer) handleOTLPSignal(w http.ResponseWriter, r *http.Request, sig
 		Severity:  "INFO",
 		AgentName: source,
 		SessionID: sessionID,
+		Connector: source,
 	}
 	if signal == otelSignalLogs {
 		if events := otlpLogRecordsForSplunkHEC(body, source, ev.Timestamp); len(events) > 0 {
@@ -1625,6 +1628,7 @@ func (a *APIServer) handleCodexNotify(w http.ResponseWriter, r *http.Request) {
 		Severity:  severity,
 		AgentName: "codex",
 		SessionID: sessionID,
+		Connector: "codex",
 	}
 	if err := persistAuditEventCtx(r.Context(), a.logger, a.store, ev); err != nil {
 		fmt.Fprintf(otelIngestLogSink(), "[codex-notify] persist failed: %v\n", err)

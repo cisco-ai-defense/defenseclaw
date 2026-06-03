@@ -206,6 +206,9 @@ func stampEventCorrelation(ev *gatewaylog.Event, ctx context.Context) {
 	if ev.ToolID == "" {
 		ev.ToolID = env.ToolID
 	}
+	if ev.Connector == "" {
+		ev.Connector = env.Connector
+	}
 }
 
 func emitEvent(ctx context.Context, e gatewaylog.Event) {

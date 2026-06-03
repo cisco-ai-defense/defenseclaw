@@ -16,9 +16,13 @@
 
 """defenseclaw mcp — Manage MCP servers (scan, block, allow, list, set, unset).
 
-Reads MCP server configuration from OpenClaw's ``mcp.servers`` key in
-``~/.openclaw/openclaw.json``.  Writes go through the ``openclaw config``
-CLI so OpenClaw validates the schema and hot-reloads cleanly.
+Reads MCP server configuration from the active connector(s)'
+connector-specific config (openclaw.json, .codex/config.toml,
+.claude/settings.json, .zeptoclaw/config.json, …). For OpenClaw, writes
+go through the ``openclaw config`` CLI so OpenClaw validates the schema
+and hot-reloads cleanly; other connectors are written to their own
+config files. ``list`` defaults to every active connector; ``scan --all``
+fans out to every active connector.
 """
 
 from __future__ import annotations
@@ -50,7 +54,14 @@ def _parse_args(raw: str) -> list[str]:
 
 @click.group()
 def mcp() -> None:
-    """Manage MCP servers — scan, block, allow, list, set, unset."""
+    """Manage MCP servers — scan, block, allow, list, set, unset.
+
+    Multi-connector: MCP config is read per-connector. ``mcp list`` shows
+    every active connector's MCP servers by default (pass ``--connector
+    X`` to narrow to one peer). The other subcommands take ``--connector
+    X`` to target a configured peer (default: the active connector);
+    ``mcp scan --all`` fans out across every active connector.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -63,55 +74,126 @@ def mcp() -> None:
     "--connector",
     "connector_flag",
     default="",
-    help="List MCP servers for a specific configured connector (multi-connector installs).",
+    help=(
+        "List MCP servers for a specific configured connector. "
+        "Default: every active connector (on a single-connector install, "
+        "just that one). Pass --connector <name> to narrow to one peer."
+    ),
 )
 @pass_ctx
 def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
-    """List MCP servers configured for a connector."""
-    from rich.console import Console
-    from rich.table import Table
+    """List MCP servers configured for a connector.
 
-    from defenseclaw.commands import resolve_list_connector
+    By default this lists **every active connector's** MCP servers — each
+    connector gets its own connector-tagged table — so the output reads
+    the same whether one or many connectors are active. ``--connector
+    <name>`` narrows the listing to one configured peer.
+    """
+    from defenseclaw.commands import resolve_list_connectors
 
-    effective_connector = resolve_list_connector(app, connector_flag)
-
-    servers = app.cfg.mcp_servers(effective_connector)
-    scan_map = _build_mcp_scan_map(app.store, servers)
+    connectors = resolve_list_connectors(app, connector_flag)
     actions_map = _build_mcp_actions_map(app.store)
 
     if as_json:
-        out = []
-        for s in servers:
-            entry: dict = {"name": s.name, "transport": s.transport or "stdio"}
-            if s.command:
-                entry["command"] = s.command
-            if s.args:
-                entry["args"] = s.args
-            if s.url:
-                entry["url"] = s.url
-            if s.name in scan_map:
-                entry["severity"] = scan_map[s.name]["max_severity"]
-            if s.name in actions_map:
-                ae = actions_map[s.name]
-                if not ae.actions.is_empty():
-                    entry["actions"] = ae.actions.to_dict()
-            verdict_label, _ = _compute_verdict(
-                actions_map.get(s.name), scan_map.get(s.name),
-            )
-            entry["verdict"] = verdict_label
-            out.append(entry)
-        click.echo(json.dumps(out, indent=2))
+        if len(connectors) > 1:
+            groups = []
+            for c in connectors:
+                servers = _collect_mcps_for_connector(app, c)
+                scan_map = _build_mcp_scan_map(app.store, servers)
+                groups.append({
+                    "connector": c,
+                    "mcp_servers": _mcp_list_json_items(servers, scan_map, actions_map),
+                })
+            click.echo(json.dumps(groups, indent=2, default=str))
+        else:
+            servers = _collect_mcps_for_connector(app, connectors[0])
+            scan_map = _build_mcp_scan_map(app.store, servers)
+            # Flat shape (no per-connector wrapper) keeps single-connector
+            # installs byte-compatible with the pre-fan-out output.
+            click.echo(json.dumps(
+                _mcp_list_json_items(servers, scan_map, actions_map),
+                indent=2,
+            ))
         return
 
-    connector = effective_connector
-    if not servers:
-        ux.warn(
-            f"No MCP servers configured for connector={connector!r} "
-            "(checked the connector-specific source: openclaw.json / "
-            ".claude/settings.json / .codex/config.toml / "
-            ".zeptoclaw/config.json / user-global hook connector MCP files).",
+    shown_any = False
+    for connector in connectors:
+        servers = _collect_mcps_for_connector(app, connector)
+        scan_map = _build_mcp_scan_map(app.store, servers)
+        if not servers:
+            ux.warn(
+                f"No MCP servers configured for connector={connector!r} "
+                "(checked the connector-specific source: openclaw.json / "
+                ".claude/settings.json / .codex/config.toml / "
+                ".zeptoclaw/config.json / user-global hook connector MCP files).",
+            )
+            continue
+        _print_mcp_list_table(servers, scan_map, actions_map, connector)
+        shown_any = True
+
+    if shown_any:
+        from defenseclaw.commands import hint
+        hint("Scan all servers:  defenseclaw mcp scan --all")
+
+
+def _collect_mcps_for_connector(
+    app: AppContext, connector: str,
+) -> list[MCPServerEntry]:
+    """Return the per-connector MCP server list.
+
+    The connector-aware ``cfg.mcp_servers(connector)`` reads the
+    connector-specific source (openclaw.json / .claude/settings.json /
+    .codex/config.toml / .zeptoclaw/config.json / user-global hook
+    connector MCP files), so each active connector resolves its own
+    catalog when ``mcp list`` fans out.
+    """
+    return app.cfg.mcp_servers(connector)
+
+
+def _mcp_list_json_items(
+    servers: list[MCPServerEntry],
+    scan_map: dict[str, dict],
+    actions_map: dict,
+) -> list[dict]:
+    """Build the flat JSON item list for one connector's MCP servers.
+
+    This is the per-connector payload; the multi-connector default wraps
+    these in ``{"connector": ..., "mcp_servers": [...]}`` groups while a
+    single-connector install emits the bare list (byte-compatible with
+    the pre-fan-out shape).
+    """
+    out = []
+    for s in servers:
+        entry: dict = {"name": s.name, "transport": s.transport or "stdio"}
+        if s.command:
+            entry["command"] = s.command
+        if s.args:
+            entry["args"] = s.args
+        if s.url:
+            entry["url"] = s.url
+        if s.name in scan_map:
+            entry["severity"] = scan_map[s.name]["max_severity"]
+        if s.name in actions_map:
+            ae = actions_map[s.name]
+            if not ae.actions.is_empty():
+                entry["actions"] = ae.actions.to_dict()
+        verdict_label, _ = _compute_verdict(
+            actions_map.get(s.name), scan_map.get(s.name),
         )
-        return
+        entry["verdict"] = verdict_label
+        out.append(entry)
+    return out
+
+
+def _print_mcp_list_table(
+    servers: list[MCPServerEntry],
+    scan_map: dict[str, dict],
+    actions_map: dict,
+    connector: str,
+) -> None:
+    """Render one connector-tagged MCP server table."""
+    from rich.console import Console
+    from rich.table import Table
 
     console = Console()
     table = Table(title=f"MCP Servers (connector={connector})")
@@ -180,9 +262,6 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             )
 
     console.print(table)
-
-    from defenseclaw.commands import hint
-    hint("Scan all servers:  defenseclaw mcp scan --all")
 
 
 def _build_mcp_scan_map(store, servers: list[MCPServerEntry]) -> dict[str, dict]:
@@ -454,7 +533,11 @@ def _scan_all_mcp(
 @click.option("--all", "scan_all", is_flag=True, help="Scan every server in openclaw.json")
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Scan a specific connector's MCP servers (multi-connector installs)",
+    help=(
+        "Scan a specific connector's MCP servers. Default for 'mcp scan "
+        "--all' on multi-connector installs: every active connector (use "
+        "--connector <name> to narrow to one)."
+    ),
 )
 @pass_ctx
 def scan(

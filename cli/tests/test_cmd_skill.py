@@ -449,6 +449,21 @@ class TestSkillList(SkillCommandTestBase):
         self.assertIn("code-review", result.output)
 
     @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_list_table_title_shows_connector_in_scope(self, mock_list):
+        # Mirror the MCP table's (connector=...) banner so the active
+        # connector the list is scoped to is discoverable.
+        mock_list.return_value = {
+            "skills": [
+                {"name": "web-search", "description": "Search", "emoji": "",
+                 "eligible": True, "disabled": False, "blockedByAllowlist": False,
+                 "source": "bundled", "bundled": True, "homepage": ""},
+            ]
+        }
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=openclaw", result.output)
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
     def test_list_uses_single_visual_row_per_skill_on_narrow_terminals(self, mock_list):
         mock_list.return_value = {
             "skills": [
@@ -1031,6 +1046,87 @@ class TestSkillListConnectorFlag(SkillCommandTestBase):
         result = self.invoke(["list", "--connector", active, "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(mock_full.call_args.kwargs.get("connector"), active)
+
+
+class TestSkillListMultiConnectorDefault(SkillCommandTestBase):
+    """Default ``skill list`` (no --connector) fans out across every active
+    connector on a multi-connector install, while a single-connector install
+    keeps its single-table behaviour."""
+
+    @staticmethod
+    def _per_connector_skills(app=None, connector=None):
+        return {
+            "skills": [
+                {
+                    "name": f"{connector}-skill",
+                    "description": f"{connector} only",
+                    "emoji": "",
+                    "eligible": True,
+                    "disabled": False,
+                    "blockedByAllowlist": False,
+                    "source": "user",
+                    "bundled": False,
+                    "homepage": "",
+                }
+            ]
+        }
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_default_lists_every_active_connector(self, mock_list):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        mock_list.side_effect = self._per_connector_skills
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Each connector gets its own connector-tagged table (skill names
+        # themselves may be ellipsized by rich's column width — the exact
+        # per-connector names are asserted in the --json test below).
+        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("connector=codex", result.output)
+        fetched = {c.kwargs.get("connector") for c in mock_list.call_args_list}
+        self.assertEqual(fetched, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_default_json_groups_by_connector(self, mock_list):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        mock_list.side_effect = self._per_connector_skills
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        self.assertEqual([g["connector"] for g in data], ["claudecode", "codex"])
+        self.assertEqual(data[0]["skills"][0]["name"], "claudecode-skill")
+        self.assertEqual(data[1]["skills"][0]["name"], "codex-skill")
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_connector_flag_still_narrows_to_one(self, mock_list):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        mock_list.side_effect = self._per_connector_skills
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("codex-skill", result.output)
+        self.assertNotIn("claudecode-skill", result.output)
+        fetched = {c.kwargs.get("connector") for c in mock_list.call_args_list}
+        self.assertEqual(fetched, {"codex"})
+
+    @patch("defenseclaw.commands.cmd_skill._list_openclaw_skills_full")
+    def test_single_connector_install_keeps_flat_json(self, mock_list):
+        # Default single-connector install: active_connectors() returns one
+        # name, so JSON stays a flat list (no per-connector grouping).
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+        mock_list.side_effect = self._per_connector_skills
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        data = json.loads(result.output)
+        self.assertIsInstance(data, list)
+        self.assertEqual(data[0]["name"], "claudecode-skill")
+        self.assertNotIn("connector", data[0])
 
 
 if __name__ == "__main__":

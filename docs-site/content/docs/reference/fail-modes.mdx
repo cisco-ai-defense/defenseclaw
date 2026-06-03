@@ -74,6 +74,16 @@ defenseclaw guardrail fail-mode closed --yes     # CI / TUI form
 
 Flipping the knob regenerates every hook script (codex-hook, claude-code-hook, inspect-*) so the `FAIL_MODE` template variable picks up the new value, and restarts the gateway by default. `defenseclaw setup guardrail` and `defenseclaw init` / `quickstart` also accept `--fail-mode <open|closed>` for non-interactive flows.
 
+On a **multi-connector** install you can scope the fail mode to a single connector with `--connector` — it writes `guardrail.connectors.<name>.hook_fail_mode` and leaves the global default (and every other connector) untouched:
+
+```bash
+defenseclaw guardrail fail-mode closed --connector codex   # Codex blocks on bad hook responses
+defenseclaw guardrail fail-mode open   --connector claudecode
+defenseclaw guardrail fail-mode                            # bare = global default all connectors inherit
+```
+
+Omit `--connector` to set the global default. The flag is rejected on a single-connector install — there's only one posture to set. See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
+
 ## Knob 2: `DEFENSECLAW_STRICT_AVAILABILITY` (transport-layer)
 
 Set in the **agent's** environment (the shell that launches Claude Code, Codex, OpenClaw, etc.):

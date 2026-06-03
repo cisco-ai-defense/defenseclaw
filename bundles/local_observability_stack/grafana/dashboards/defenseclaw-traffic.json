@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Proxy-mode traffic surface: HTTP requests, SSE streams, tool calls, admission decisions, LLM bridge, Cisco Inspect, and the LLM judge + verdict cache. These panels only show data when DefenseClaw runs in proxy/router mode (openclaw, zeptoclaw).",
+  "description": "Proxy-mode traffic surface: HTTP requests, SSE streams, tool calls, admission decisions, LLM bridge, Cisco Inspect, and the LLM judge + verdict cache. These panels only show data when DefenseClaw runs in proxy/router mode (openclaw, zeptoclaw). NOTE: this board is intentionally GLOBAL and deliberately has no $connector template variable \u2014 the HTTP / tool / judge / admission metrics here are emitted per proxy process and are not tagged with a hook connector / source / tool=<connector>:<event> dimension. For per-connector breakdowns use the Hook Connectors and Connector Detail dashboards.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,

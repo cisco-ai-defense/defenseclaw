@@ -40,6 +40,44 @@
   "templating": {
     "list": [
       {
+        "name": "connector",
+        "label": "Connector",
+        "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. The per-rule scan metric (defenseclaw_scan_findings_by_rule_total) is rule/scanner scoped and carries no connector label, so this var only narrows the finding\u2192verdict correlation panel (which sources defenseclaw_inspect_evaluations_total, tool=<connector>:<event>) via tool=~\"$connector:.*\". Defaults to All (.+).",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+        "query": {
+          "query": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
         "name": "scanner",
         "label": "Scanner",
         "type": "query",
@@ -721,7 +759,7 @@
       },
       "targets": [
         {
-          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{action!=\"allow\"}[1h]))) and on() (sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id=~\"$rule_id\"}[1h])) > 0)",
+          "expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{action!=\"allow\", tool=~\"$connector:.*\"}[1h]))) and on() (sum(increase(defenseclaw_scan_findings_by_rule_total{rule_id=~\"$rule_id\"}[1h])) > 0)",
           "instant": true,
           "format": "table",
           "refId": "A"

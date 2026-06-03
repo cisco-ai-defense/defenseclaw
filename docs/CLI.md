@@ -35,6 +35,26 @@ Use `<binary> --help` for any command.
 | `setup geminicli` / `setup copilot` | Configure observability aliases with native OTel where supported |
 | `setup splunk` | Configure Splunk O11y, local Splunk bridge, or remote Splunk Enterprise HEC |
 
+### guardrail
+
+Per-connector guardrail controls. Each verb prints the current value when run
+bare and mutates it when given an argument. `--connector X` scopes the change
+to one connector on a **multi-connector** install (writes
+`guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`); omit it to set
+the **global default** every connector inherits. On a single-connector install
+`--connector` is rejected (only one posture exists). Proxy connectors
+(OpenClaw, ZeptoClaw) are not valid `--connector` targets — multi-connector is
+hook-only.
+
+| Command | Description |
+|---------|-------------|
+| `guardrail status [--connector X]` | Show resolved guardrail posture (enabled, mode, fail mode, HILT, block message); with `--connector X`, the effective posture for that connector after inheritance |
+| `guardrail enable [--connector X]` | Turn the guardrail on globally, or re-enable a single previously-disabled connector (restores its hooks, no re-prompt) |
+| `guardrail disable [--connector X]` | Kill switch: global, or drop one connector from the active set and remove its hooks |
+| `guardrail fail-mode [open\|closed] [--connector X] [--yes] [--restart/--no-restart]` | Show/set the response-layer hook fail mode (e.g. `guardrail fail-mode closed --connector codex`) |
+| `guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X] [--yes] [--restart/--no-restart]` | Show/set human-in-the-loop approval policy |
+| `guardrail block-message "<text>" [--connector X]` | Show/set the message shown to the agent when an action is blocked |
+
 ### agent
 
 | Command | Description |

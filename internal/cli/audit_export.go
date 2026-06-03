@@ -107,7 +107,7 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
-destination_app, tool_name, tool_id, policy_id
+destination_app, tool_name, tool_id, policy_id, connector
 FROM audit_events ORDER BY timestamp ASC`
 	args := []any{}
 	// When a connector filter is active the cap must apply to *matching*
@@ -144,19 +144,21 @@ FROM audit_events ORDER BY timestamp ASC`
 			contentHash, binVer                             sql.NullString
 			gen                                             sql.NullInt64
 			destApp, toolName, toolID, policyID             sql.NullString
+			connectorCol                                    sql.NullString
 		)
 		if err := rows.Scan(
 			&id, &ts, &action, &target, &actor, &details, &structuredRaw, &severity, &runID,
 			&sessionID, &traceID,
 			&agentID, &agentName, &agentInst, &sidecarInst,
 			&schemaVer, &contentHash, &gen, &binVer,
-			&destApp, &toolName, &toolID, &policyID,
+			&destApp, &toolName, &toolID, &policyID, &connectorCol,
 		); err != nil {
 			return fmt.Errorf("audit export: scan: %w", err)
 		}
 
+		connector := resolveAuditEventConnector(ns(connectorCol), ns(details), ns(structuredRaw))
 		if connFilter != "" {
-			if auditEventConnector(ns(details), ns(structuredRaw)) != connFilter {
+			if connector != connFilter {
 				continue
 			}
 		}
@@ -169,6 +171,7 @@ FROM audit_events ORDER BY timestamp ASC`
 			ns(agentID), ns(agentName), ns(agentInst), ns(sidecarInst),
 			schemaVer, ns(contentHash), gen, ns(binVer),
 			ns(destApp), ns(toolName), ns(toolID), ns(policyID),
+			connector,
 			prov,
 		)
 		if err != nil {
@@ -194,6 +197,19 @@ FROM audit_events ORDER BY timestamp ASC`
 		}
 	}
 	return nil
+}
+
+// resolveAuditEventConnector returns the lowercased connector an audit row
+// is attributed to, or "" if none. The dedicated `connector` column
+// (migration 16) is authoritative; when it is blank (older rows, non-hook
+// writers that only set the structured payload) it falls back to the
+// structured `connector` field and finally the `connector=<name>` details
+// token — mirroring the attribution the TUI and `alerts --connector` use.
+func resolveAuditEventConnector(connectorCol, details, structuredRaw string) string {
+	if c := strings.ToLower(strings.TrimSpace(connectorCol)); c != "" {
+		return c
+	}
+	return auditEventConnector(details, structuredRaw)
 }
 
 // auditEventConnector returns the lowercased connector an audit row is
@@ -242,7 +258,8 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 		}
 		// Legacy projection has no structured_json column; attribution is
 		// best-effort from the details connector= token only.
-		if connFilter != "" && auditEventConnector(ns(details), "") != connFilter {
+		conn := auditEventConnector(ns(details), "")
+		if connFilter != "" && conn != connFilter {
 			continue
 		}
 		line, err := buildAuditEventLine(id, ts, action,
@@ -253,6 +270,7 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 			"", "", "", "",
 			sql.NullInt64{}, "", sql.NullInt64{}, "",
 			"", "", "", "",
+			conn,
 			prov,
 		)
 		if err != nil {
@@ -284,6 +302,7 @@ func buildAuditEventLine(
 	agentID, agentName, agentInst, sidecarInst string,
 	schemaVer sql.NullInt64, contentHash string, gen sql.NullInt64, binVer string,
 	destApp, toolName, toolID, policyID string,
+	connector string,
 	prov version.Provenance,
 ) ([]byte, error) {
 	actionOut, detailsOut := normalizeAuditAction(action, details)
@@ -338,6 +357,7 @@ func buildAuditEventLine(
 		"tool_name":           strPtr(toolName),
 		"tool_id":             strPtr(toolID),
 		"policy_id":           strPtr(policyID),
+		"connector":           strPtr(connector),
 	}
 	if err := validateAuditEventMap(ev); err != nil {
 		return nil, fmt.Errorf("audit export: %w", err)

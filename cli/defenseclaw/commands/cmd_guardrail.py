@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""``defenseclaw guardrail {enable,disable}`` — connector-agnostic toggle.
+"""``defenseclaw guardrail`` — day-to-day guardrail policy controls.
 
 Today operators have to use ``defenseclaw setup guardrail [--disable]``,
 which interleaves "I want to flip the enabled bit" with "I want to
@@ -22,18 +22,24 @@ re-prompt for model / scanner-mode / Cisco endpoint / judge config".
 That works for first-time setup but feels heavy for the very common
 case of "the guardrail is acting up, give me a quick off switch".
 
-This command surfaces the toggle directly:
+This command surfaces the common policy levers directly:
 
-  defenseclaw guardrail disable    # turn off + connector teardown
-  defenseclaw guardrail enable     # turn on + connector setup
-  defenseclaw guardrail status     # is it on, which connector, which mode
+  defenseclaw guardrail status         # enabled? roster of active connectors + their modes
+  defenseclaw guardrail enable         # turn on + connector setup
+  defenseclaw guardrail disable        # turn off + connector teardown
+  defenseclaw guardrail fail-mode      # open vs closed on hook failures
+  defenseclaw guardrail hilt           # human-in-the-loop prompting
+  defenseclaw guardrail block-message  # message shown when an action is blocked
 
-Both ``enable`` and ``disable`` are connector-agnostic. They resolve
-the active connector from ``Config.active_connector()`` and delegate
-the actual config-patch work to the Go sidecar's ``Connector.Setup``
-/ ``Connector.Teardown`` (running at sidecar boot when the
-``guardrail.enabled`` flag flips). The Python side never has to know
-how Codex / Claude Code / ZeptoClaw configure themselves.
+All of these accept ``--connector X`` to scope the change to one
+configured peer on a multi-connector install (one gateway enforces N
+hook connectors). Without ``--connector`` the change applies globally
+(legacy single-connector behaviour, unchanged). They resolve the active
+connector(s) from ``Config.active_connector(s)()`` and delegate the
+actual config-patch work to the Go sidecar's ``Connector.Setup`` /
+``Connector.Teardown`` (running at sidecar boot when the relevant flag
+flips). The Python side never has to know how Codex / Claude Code /
+Antigravity / ZeptoClaw configure themselves.
 """
 
 from __future__ import annotations
@@ -241,18 +247,41 @@ def _toggle_connector_guardrail(
 
 @click.group("guardrail")
 def guardrail() -> None:
-    """Toggle the LLM guardrail on or off.
+    """Control guardrail policy: status, enable/disable, fail-mode, hilt, block-message.
 
-    Wraps ``defenseclaw setup guardrail`` with quick on/off subcommands
-    so day-to-day operators don't have to navigate the full setup flow
-    just to flip the ``guardrail.enabled`` switch.
+    Quick day-to-day levers that wrap ``defenseclaw setup guardrail`` so
+    operators don't have to navigate the full setup flow just to adjust
+    posture. Subcommands:
+
+    \b
+      status         show enabled state + the roster of active connectors
+      enable/disable flip enforcement on/off
+      fail-mode      open vs closed when a hook fails
+      hilt           human-in-the-loop prompting
+      block-message  message shown when an action is blocked
+
+    \b
+    Multi-connector: one gateway enforces N hook connectors. Each policy
+    subcommand takes ``--connector X`` to scope the change to a single
+    configured peer (e.g. 'guardrail disable --connector codex'); omit it
+    to apply globally. 'guardrail --connector' scopes policy to a peer that
+    'setup' has already configured — it does not add new connectors.
     """
 
 
 @guardrail.command("status")
 @pass_ctx
 def status_cmd(app: AppContext) -> None:
-    """Show whether the guardrail is enabled and which connector is active."""
+    """Show whether the guardrail is enabled and the active connector roster.
+
+    The roster is rendered UNIFORMLY: one per-connector block for EACH
+    active connector, with that connector's own (possibly differing)
+    enabled state, mode, and fail mode. ``Config.active_connectors()``
+    returns one name on a single-connector install and N on a fan-out
+    install, so the exact same layout covers both — the operator never has
+    to reason about connector count. There is no separate single-vs-multi
+    rendering and no "primary" connector line.
+    """
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
     fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
@@ -260,64 +289,49 @@ def status_cmd(app: AppContext) -> None:
     enabled_txt = "yes" if gc.enabled else "no"
     enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
     click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
-    # A multi-connector install has no meaningful "primary" connector, so
-    # showing a singular connector / mode / fail-mode line alongside the
-    # per-connector roster is redundant and misleading (it implies one
-    # connector's posture is THE posture). Resolve the active set first and
-    # render exactly one coherent view: the roster for multi, the legacy
-    # singular lines for single. Single-connector output is unchanged.
+    # Resolve the full active set and render exactly one coherent view: a
+    # per-connector block for EACH active connector. active_connectors()
+    # returns [connector] on a single-connector install and the full set on
+    # a fan-out install, so the same loop drives both — no len()-based
+    # branching, no singular "connector / mode / fail-mode" lines that would
+    # imply one connector's posture is THE posture.
     try:
         actives = app.cfg.active_connectors() if hasattr(app.cfg, "active_connectors") else [connector]
     except Exception:  # noqa: BLE001 — fall back to the primary connector.
         actives = [connector]
+    if not actives:
+        actives = [connector]
 
-    if len(actives) > 1:
-        # D7: list EVERY active connector with its own effective mode / fail
-        # mode (each can differ via guardrail.connectors). No singular
-        # connector/mode/fail-mode lines here — they would only show one.
-        click.echo(
-            f"  • {ux._style('connectors:', fg='bright_black', bold=True)} {len(actives)} active  "
-            f"{ux.dim('(mode / fail are per connector below)')}"
+    click.echo(f"  • {ux._style('connectors:', fg='bright_black', bold=True)}")
+    for name in actives:
+        cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
+        cfm = (
+            gc.effective_hook_fail_mode(name)
+            if hasattr(gc, "effective_hook_fail_mode")
+            else fail_mode
         )
-        for name in actives:
-            cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
-            cfm = (
-                gc.effective_hook_fail_mode(name)
-                if hasattr(gc, "effective_hook_fail_mode")
-                else fail_mode
-            )
-            # Per-connector on/off (D-parity with the global enabled bit):
-            # a connector turned off via `guardrail disable --connector X`
-            # is reported as disabled so the roster never implies it is
-            # enforcing when its hooks have been torn down.
-            c_enabled = (
-                gc.effective_enabled(name)
-                if hasattr(gc, "effective_enabled")
-                else True
-            )
-            state = (
-                ux._style("enabled", fg="green")
-                if c_enabled
-                else ux._style("disabled", fg="yellow")
-            )
-            cfm_display = ux._style(cfm, fg="yellow") if cfm == "closed" else cfm
-            click.echo(
-                f"      - {_connector_label(name)} ({name}): "
-                f"{state} mode={cmode or 'observe'} fail={cfm_display}"
-            )
-        click.echo(
-            f"  • {ux.dim('fail = hook response-layer failures (4xx / bad JSON / missing action)')}"
+        # Per-connector on/off: a connector turned off via
+        # `guardrail disable --connector X` is reported as disabled so the
+        # roster never implies it is enforcing when its hooks have been torn
+        # down.
+        c_enabled = (
+            gc.effective_enabled(name)
+            if hasattr(gc, "effective_enabled")
+            else True
         )
-    else:
-        click.echo(
-            f"  • {ux._style('connector:', fg='bright_black', bold=True)}  {_connector_label(connector)} ({connector})"
+        state = (
+            ux._style("enabled", fg="green")
+            if c_enabled
+            else ux._style("disabled", fg="yellow")
         )
-        click.echo(f"  • {ux._style('mode:', fg='bright_black', bold=True)}       {gc.mode or 'observe'}")
-        fm_display = ux._style(fail_mode, fg="yellow") if fail_mode == "closed" else fail_mode
+        cfm_display = ux._style(cfm, fg="yellow") if cfm == "closed" else cfm
         click.echo(
-            f"  • {ux._style('fail mode:', fg='bright_black', bold=True)}  {fm_display}  "
-            f"{ux.dim('(hook response-layer failures)')}"
+            f"      - {_connector_label(name)} ({name}): "
+            f"{state} mode={cmode or 'observe'} fail={cfm_display}"
         )
+    click.echo(
+        f"  • {ux.dim('fail = hook response-layer failures (4xx / bad JSON / missing action)')}"
+    )
 
     click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()

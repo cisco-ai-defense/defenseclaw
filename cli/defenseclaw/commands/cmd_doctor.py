@@ -22,6 +22,7 @@ misconfiguration before the user discovers them at runtime.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -185,8 +186,29 @@ def _write_doctor_cache(cfg, result: _DoctorResult) -> None:
 
 _json_mode = False
 
+# Optional per-row label suffix (e.g. ``"[codex]"``). Defaults to empty so
+# single-connector output is byte-identical; the Services section sets it
+# around each connector's hook check on multi-connector installs so the
+# rows ("Codex hooks [codex]", "Claude Code hooks [claudecode]", …) are
+# attributable instead of reading as one primary connector.
+_label_suffix = ""
+
+
+@contextlib.contextmanager
+def _doctor_label_suffix(suffix: str):
+    """Append ``suffix`` to every :func:`_emit` row label within the block."""
+    global _label_suffix
+    prev = _label_suffix
+    _label_suffix = suffix
+    try:
+        yield
+    finally:
+        _label_suffix = prev
+
 
 def _emit(tag: str, label: str, detail: str = "", *, r: _DoctorResult | None = None) -> None:
+    if label and _label_suffix:
+        label = f"{label} {_label_suffix}"
     if not _json_mode:
         marker = _doctor_marker(tag)
         # Marker + label form the row's primary signal. We bold the
@@ -810,6 +832,29 @@ def _check_codex_hooks(cfg, r: _DoctorResult) -> None:
         _emit("pass", "Codex hooks", f"hook script at {hook_script}", r=r)
     else:
         _emit("fail", "Codex hooks", f"hook script not found at {hook_script}", r=r)
+
+
+def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
+    """Run the Services hook/health check matching *connector*.
+
+    Single dispatch point so the Services section can iterate every active
+    connector (multi-connector installs) instead of probing only the
+    primary. Unknown connectors are skipped silently (no new failure row).
+    """
+    if connector == "openclaw":
+        _check_openclaw_gateway(cfg, r)
+    elif connector == "claudecode":
+        _check_claudecode_hooks(cfg, r)
+    elif connector == "codex":
+        _check_codex_hooks(cfg, r)
+    elif connector == "zeptoclaw":
+        _check_zeptoclaw_config(cfg, r)
+    elif connector == "copilot":
+        _check_copilot_hooks(cfg, r)
+    elif connector == "openhands":
+        _check_openhands_hooks(cfg, r)
+    elif connector == "antigravity":
+        _check_antigravity_hooks(cfg, r)
 
 
 def _workspace_dir(cfg) -> str:
@@ -2245,7 +2290,9 @@ def doctor(
     """Verify credentials, endpoints, and connectivity.
 
     Runs a series of checks against every configured service and API key
-    to catch problems before they surface at runtime.
+    to catch problems before they surface at runtime. On multi-connector
+    installs it inventories and runs hook/health checks for every active
+    connector (each row tagged ``[<connector>]``), not just the primary.
 
     Use ``--fix`` to auto-repair safe issues (stale sidecar PID files,
     OpenClaw gateway token drift, missing .env file, and unpatched
@@ -2275,12 +2322,15 @@ def doctor(
     # has stale openclaw.json paths under .openclaw/extensions; a
     # per-connector inventory pass catches that drift.
     if not json_out:
-        _doctor_subsection("Connector")
+        _doctor_subsection("Connectors")
     active_connector = _active_connector(cfg)
-    # D6: inventory EVERY active connector so a multi-connector install
-    # surfaces each connector's skill/plugin/MCP layout (path drift is
-    # per-connector). Single-connector installs run exactly one pass, so
-    # their doctor output is unchanged. Primary is inventoried first.
+    # Inventory EVERY active connector uniformly — there is no separate
+    # "single" vs "multi" rendering. ``active_connectors()`` returns one
+    # name on a single-connector install and N on a fan-out install, so the
+    # same loop covers both: each connector gets its own block tagged
+    # "[<connector>]" carrying its paths, effective policy, rule pack, and
+    # hook contract. The operator never has to reason about connector count
+    # — they just read down the list of whatever is active.
     try:
         _actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else [active_connector]
     except Exception:  # noqa: BLE001 — fall back to the primary connector.
@@ -2290,18 +2340,16 @@ def doctor(
         if _c and _c not in _inventory_order:
             _inventory_order.append(_c)
     for _c in _inventory_order:
-        _check_connector_inventory(cfg, _c, r)
-    _check_hook_contract_lock(cfg, active_connector, r)
+        with _doctor_label_suffix(f"[{_c}]"):
+            _check_connector_inventory(cfg, _c, r)
+            _check_hook_contract_lock(cfg, _c, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
     # operators who switch connectors via 'defenseclaw setup guardrail
     # --agent <new>' get a silent half-state where the old adapter's
-    # config patches are still on disk.
+    # config patches are still on disk. This is a global filesystem sweep
+    # (not per-active-connector), so it runs once against the install.
     _check_connector_residue(cfg, active_connector, r)
-    # WU9 — when >1 connector is active, surface a per-connector
-    # effective-policy + rule-pack + hook-contract block. No-op for
-    # single-connector installs, so their output is unchanged.
-    _check_multi_connector_policy(cfg, active_connector, r, json_out=json_out)
 
     if not json_out:
         _doctor_subsection("Scanners")
@@ -2313,20 +2361,26 @@ def doctor(
     _check_sidecar(cfg, r)
     _check_gateway_token_env_alignment(cfg, r)
     _check_gateway_token_drift(cfg, r)
-    if active_connector == "openclaw":
-        _check_openclaw_gateway(cfg, r)
-    elif active_connector == "claudecode":
-        _check_claudecode_hooks(cfg, r)
-    elif active_connector == "codex":
-        _check_codex_hooks(cfg, r)
-    elif active_connector == "zeptoclaw":
-        _check_zeptoclaw_config(cfg, r)
-    elif active_connector == "copilot":
-        _check_copilot_hooks(cfg, r)
-    elif active_connector == "openhands":
-        _check_openhands_hooks(cfg, r)
-    elif active_connector == "antigravity":
-        _check_antigravity_hooks(cfg, r)
+    # Run the per-connector hook/health check for EVERY active connector,
+    # not just the primary. active_connectors() returns [active_connector]
+    # on single-connector installs, so their Services output is unchanged
+    # (no label suffix is applied when only one connector is active). On
+    # multi-connector installs each row is tagged "[<connector>]" so the
+    # codex/claudecode/antigravity rows are individually attributable.
+    try:
+        _hook_connectors = (
+            list(cfg.active_connectors())
+            if hasattr(cfg, "active_connectors")
+            else []
+        )
+    except Exception:
+        _hook_connectors = []
+    if not _hook_connectors:
+        _hook_connectors = [active_connector]
+    _multi_hooks = len(_hook_connectors) > 1
+    for _conn in _hook_connectors:
+        with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
+            _check_connector_hooks(cfg, _conn, r)
     _check_hilt_support(cfg, active_connector, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
@@ -2515,8 +2569,10 @@ _CONNECTOR_LABELS = {
 }
 
 
-def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
-    """Surface the active connector and the directories it points at.
+def _check_connector_inventory(
+    cfg, connector: str, r: _DoctorResult
+) -> None:
+    """Surface one connector and everything it resolves to.
 
     Each connector has its own conventions for where skills, plugins,
     and MCP server registrations live. ``Config.skill_dirs()`` /
@@ -2524,17 +2580,34 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
     connector (S4.1), so this check makes that mapping visible to the
     operator: if Codex is active but skill_dirs() still points at
     ``~/.openclaw/skills``, that's a config bug doctor should flag.
+
+    Rendered identically for every active connector (the caller tags each
+    block with a "[<connector>]" suffix) so the output reads the same
+    whether one or many connectors are active — there is no separate
+    single- vs multi-connector layout. Alongside the path inventory this
+    also surfaces the connector's effective guardrail mode and rule pack.
     """
     label = _CONNECTOR_LABELS.get(connector, connector)
     if connector not in _CONNECTOR_LABELS:
         _emit(
             "warn",
-            "Active connector",
+            "Connector",
             f"unknown connector {connector!r} — known: " + ", ".join(sorted(_CONNECTOR_LABELS)),
             r=r,
         )
     else:
-        _emit("pass", "Active connector", label, r=r)
+        _emit("pass", "Connector", label, r=r)
+
+    # Effective guardrail mode for this connector (falls back to the
+    # global guardrail.mode when the connector sets no override).
+    gc = getattr(cfg, "guardrail", None)
+    if gc is not None and hasattr(gc, "effective_mode"):
+        try:
+            mode = (gc.effective_mode(connector) or "").strip()
+        except Exception:  # noqa: BLE001
+            mode = ""
+        if mode:
+            _emit("pass", "Mode", mode, r=r)
 
     workspace = _workspace_dir(cfg)
     if workspace:
@@ -2588,6 +2661,27 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("pass", "MCP servers", f"{count} configured: {names}{more}", r=r)
     else:
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
+
+    # Effective rule pack for this connector (falls back to built-in
+    # defaults when no rule_pack_dir is configured). Warn when a configured
+    # directory is missing on disk — that silently degrades enforcement.
+    if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
+        try:
+            rule_pack_dir = (gc.effective_rule_pack_dir(connector) or "").strip()
+        except Exception:  # noqa: BLE001
+            rule_pack_dir = ""
+        if rule_pack_dir:
+            if os.path.isdir(rule_pack_dir):
+                _emit("pass", "Rule pack", rule_pack_dir, r=r)
+            else:
+                _emit(
+                    "warn",
+                    "Rule pack",
+                    f"configured rule_pack_dir not found on disk: {rule_pack_dir}",
+                    r=r,
+                )
+        else:
+            _emit("skip", "Rule pack", "built-in defaults (no rule_pack_dir set)", r=r)
 
 
 def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
@@ -2647,71 +2741,6 @@ def _check_hook_contract_lock(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("pass", "Hook contract", detail, r=r)
     else:
         _emit("warn", "Hook contract", detail, r=r)
-
-
-def _check_multi_connector_policy(cfg, primary: str, r: _DoctorResult, *, json_out: bool = False) -> None:
-    """Per-connector effective-policy block for multi-connector installs.
-
-    WU9: when more than one connector is active, the single primary
-    inventory pass above doesn't tell the operator what *each* connector
-    resolves to. This loops ``Config.active_connectors()`` and surfaces,
-    per connector, the effective guardrail mode, the effective rule-pack
-    directory (warning when a configured dir is missing on disk), and the
-    hook-contract status for the non-primary connectors (the primary is
-    already covered by ``_check_hook_contract_lock`` above).
-
-    Deliberately a no-op for single-connector installs (the common case),
-    so their doctor output is unchanged. Path-inventory helpers
-    (``skill_dirs``/``plugin_dirs``/``mcp_servers``) remain primary-only —
-    they take no connector argument — and are intentionally not looped
-    here.
-    """
-    try:
-        actives = cfg.active_connectors() if hasattr(cfg, "active_connectors") else [primary]
-    except Exception:
-        actives = [primary]
-    actives = [c for c in actives if c]
-    if len(actives) <= 1:
-        return
-
-    if not json_out:
-        _doctor_subsection("Connectors (multi)")
-
-    gc = getattr(cfg, "guardrail", None)
-    for conn in actives:
-        label = _CONNECTOR_LABELS.get(conn, conn)
-
-        mode = ""
-        if gc is not None and hasattr(gc, "effective_mode"):
-            try:
-                mode = (gc.effective_mode(conn) or "").strip()
-            except Exception:
-                mode = ""
-        _emit("pass", f"Connector [{conn}]", f"{label} — mode={mode or '?'}", r=r)
-
-        rule_pack_dir = ""
-        if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
-            try:
-                rule_pack_dir = (gc.effective_rule_pack_dir(conn) or "").strip()
-            except Exception:
-                rule_pack_dir = ""
-        if rule_pack_dir:
-            if os.path.isdir(rule_pack_dir):
-                _emit("pass", f"Rule pack [{conn}]", rule_pack_dir, r=r)
-            else:
-                _emit(
-                    "warn",
-                    f"Rule pack [{conn}]",
-                    f"configured rule_pack_dir not found on disk: {rule_pack_dir}",
-                    r=r,
-                )
-        else:
-            _emit("skip", f"Rule pack [{conn}]", "built-in defaults (no rule_pack_dir set)", r=r)
-
-        # The primary's hook contract is already emitted by the single
-        # block above; only the additional connectors need it here.
-        if conn != primary:
-            _check_hook_contract_lock(cfg, conn, r)
 
 
 def _discovered_agent_version(data_dir: str, connector: str) -> str:

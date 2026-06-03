@@ -522,7 +522,7 @@ func (l *Logger) LogScanWithCorrelation(
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -580,6 +580,21 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 	}, action, target, details)
 }
 
+// LogActionWithCorrelationConnector is LogActionWithCorrelation plus a
+// connector attribution stamp. The proxy guardrail-verdict path knows
+// which connector produced the decision (p.connectorName()); threading
+// it here lets the verdict row carry the dedicated connector column on
+// SQLite and the top-level connector field on every sink, instead of
+// forcing SIEM consumers to scrape a `connector=` token out of details.
+// An empty connector behaves exactly like LogActionWithCorrelation.
+func (l *Logger) LogActionWithCorrelationConnector(action, target, details, traceID, requestID, connector string) error {
+	return l.logActionWithEnvelope(CorrelationEnvelope{
+		TraceID:   traceID,
+		RequestID: requestID,
+		Connector: connector,
+	}, action, target, details)
+}
+
 // logActionWithEnvelope is the shared implementation for every LogAction*
 // variant. Centralizing here guarantees that LogAction, LogActionCtx, and
 // LogActionWithCorrelation all thread the same audit-event shape onto
@@ -631,7 +646,7 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		return storeErr
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -688,7 +703,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -740,7 +755,7 @@ func (l *Logger) LogEvent(event Event) error {
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -784,6 +799,7 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		DestinationApp:    e.DestinationApp,
 		ToolName:          e.ToolName,
 		ToolID:            e.ToolID,
+		Connector:         e.Connector,
 		SchemaVersion:     e.SchemaVersion,
 		ContentHash:       e.ContentHash,
 		Generation:        e.Generation,

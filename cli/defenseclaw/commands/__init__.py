@@ -70,6 +70,57 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
     return match
 
 
+def resolve_list_connectors(app: Any, requested: str | None) -> list[str]:
+    """Resolve which connector(s) a *list* command should cover.
+
+    This is the plural companion to :func:`resolve_list_connector` and
+    encodes the uniform UX rule for ``skill``/``mcp``/``plugin list``:
+
+    * An explicit ``--connector X`` narrows to exactly that one validated
+      peer.
+    * With no flag the listing covers **every active connector**.
+      ``Config.active_connectors()`` returns a single name on a
+      single-connector install and N names on a fan-out install, so the
+      caller renders the same way regardless of count — the operator never
+      has to think about "single vs multi".
+    """
+    if requested and requested.strip():
+        return [resolve_list_connector(app, requested)]
+    cfg = getattr(app, "cfg", None)
+    try:
+        if cfg is not None and hasattr(cfg, "active_connectors"):
+            names = [n for n in cfg.active_connectors() if n]
+            if names:
+                return names
+    except Exception:  # noqa: BLE001 — fall back to the singular active connector.
+        pass
+    return [resolve_list_connector(app, "")]
+
+
+def list_scope_title(label: str, connector: str, detail: str = "") -> str:
+    """Build a rich table title that names the connector in scope.
+
+    Mirrors the MCP list table's ``(connector=...)`` banner so Skills and
+    Plugins list output also makes the active-connector default
+    discoverable on multi-connector installs. ``detail`` is the existing
+    count suffix (e.g. ``"(2/3 ready)"``) appended after the connector tag.
+    """
+    head = f"{label} (connector={connector})"
+    return f"{head} {detail}" if detail else head
+
+
+# Shared ``--connector`` help text for the *list* commands (skill/mcp/plugin
+# list). Their default scope is the single active connector — unlike the
+# *scan* commands, whose bare/``--all`` form fans out to every active
+# connector. Stating the default here makes that asymmetry discoverable
+# without changing any actual default behaviour.
+LIST_CONNECTOR_HELP = (
+    "List for a specific configured connector. "
+    "Default: the active connector; on multi-connector installs pass "
+    "--connector <name> to target a configured peer."
+)
+
+
 def compute_verdict(
     action_entry: Any | None = None,
     scan_entry: dict[str, Any] | None = None,

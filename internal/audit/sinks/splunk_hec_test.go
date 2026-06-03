@@ -118,6 +118,47 @@ func TestSplunkHECSink_AppliesDefaultsAndAuthHeader(t *testing.T) {
 	}
 }
 
+// TestSplunkHECSink_EmitsTopLevelConnector pins the multi-connector
+// contract: a connector-attributed audit event must surface the
+// connector as a first-class top-level field on the indexed HEC event
+// so Splunk searches can `... connector="codex"` without coalescing it
+// out of the structured payload.
+func TestSplunkHECSink_EmitsTopLevelConnector(t *testing.T) {
+	srv, records, mu, _ := httpEchoServer(t, http.StatusOK)
+	sink, err := NewSplunkHECSink(SplunkHECConfig{
+		Endpoint:       srv.URL,
+		Token:          "t",
+		BatchSize:      1,
+		FlushIntervalS: 60,
+	})
+	if err != nil {
+		t.Fatalf("NewSplunkHECSink err=%v", err)
+	}
+	defer sink.Close()
+
+	_ = sink.Forward(context.Background(), Event{
+		ID: "hook-1", Action: "connector-hook", Severity: "INFO",
+		Connector: "codex", Timestamp: time.Unix(1700000000, 0).UTC(),
+	})
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*records) != 1 {
+		t.Fatalf("records=%d want 1", len(*records))
+	}
+	var envelope struct {
+		Event struct {
+			Connector string `json:"connector"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal((*records)[0].body, &envelope); err != nil {
+		t.Fatalf("envelope JSON: %v (%s)", err, (*records)[0].body)
+	}
+	if envelope.Event.Connector != "codex" {
+		t.Fatalf("top-level connector = %q, want codex", envelope.Event.Connector)
+	}
+}
+
 func TestSplunkHECSink_RequeuesOnNon200(t *testing.T) {
 	srv, records, mu, code := httpEchoServer(t, http.StatusForbidden)
 	sink, err := NewSplunkHECSink(SplunkHECConfig{

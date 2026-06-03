@@ -116,29 +116,66 @@ class StatusCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         # The fail mode is the most-asked-about UX knob now that hooks
         # default open: status MUST surface it so operators can sanity-
-        # check their posture without grep-ing config.yaml.
-        self.assertIn("fail mode:  closed", result.output)
+        # check their posture without grep-ing config.yaml. It is folded
+        # into the (uniform) per-connector block as ``fail=...``.
+        self.assertIn("fail=closed", result.output)
 
-    def test_status_multi_connector_roster(self):
-        # D7 parity: status must list every active connector + its mode.
+    def test_status_single_connector_uses_uniform_per_connector_block(self):
+        # A single-connector install renders the SAME per-connector block
+        # layout as a fan-out install: one "connectors:" section with one
+        # tagged block. No singular "connector / mode / fail mode" lines.
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="openclaw")
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("connectors:", result.output)
+        # Uniform per-connector block: "<label> (<name>): <state> mode=... fail=...".
+        self.assertIn("OpenClaw (openclaw): ", result.output)
+        self.assertIn("mode=observe", result.output)
+        self.assertIn("fail=open", result.output)
+        # The retired singular lines (and the "multi-connector"-only
+        # footer hint) must NOT appear — there is exactly one rendering.
+        self.assertNotIn("• connector:", result.output)
+        self.assertNotIn("• mode:", result.output)
+        self.assertNotIn("• fail mode:", result.output)
+        self.assertNotIn("--connector", result.output)
+
+    def test_status_multi_connector_uses_same_layout(self):
+        # The fan-out install lists EVERY active connector with its own
+        # effective mode / fail mode, using the identical layout as the
+        # single-connector case — one block per connector, no count
+        # banner, no "primary" line, no special footer.
         runner = CliRunner()
         app = make_ctx(enabled=True, connector="codex")
         gc = app.cfg.guardrail
         gc.effective_mode = lambda name="": {"codex": "action", "claudecode": "observe"}.get(name, "observe")
         gc.effective_hook_fail_mode = lambda name="": "open"
-        app.cfg.active_connectors = lambda: ["claudecode", "codex"]
+        # Forcing active_connectors INSIDE the test method (setUp does not
+        # reliably stick): two active connectors must both be listed.
+        self.app = app  # keep a handle for parity with the harness idiom
+        app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("2 active", result.output)
-        self.assertIn("claudecode", result.output)
+        # Both connectors' blocks are present, each tagged by name.
+        self.assertIn("Claude Code (claudecode): ", result.output)
+        self.assertIn("Codex (codex): ", result.output)
         self.assertIn("mode=action", result.output)
-        # In multi-connector mode there is no meaningful "primary": the
-        # singular connector / mode / top-level fail-mode lines MUST be
-        # dropped so the roster is the single source of truth (no
-        # "primary vs all" confusion).
+        self.assertIn("mode=observe", result.output)
+        # No count banner, no singular lines, no per-connector footer hint.
+        self.assertNotIn("2 active", result.output)
         self.assertNotIn("• connector:", result.output)
         self.assertNotIn("• mode:", result.output)
         self.assertNotIn("• fail mode:", result.output)
+        self.assertNotIn("--connector", result.output)
+
+
+class GroupHelpTests(unittest.TestCase):
+    def test_group_help_lists_policy_subcommands_and_connector(self):
+        runner = CliRunner()
+        result = runner.invoke(cmd_guardrail.guardrail, ["--help"])
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        for token in ("fail-mode", "hilt", "block-message", "--connector"):
+            self.assertIn(token, result.output)
 
 
 class FailModeCommandTests(unittest.TestCase):
@@ -507,8 +544,11 @@ class PerConnectorToggleTests(unittest.TestCase):
         app = make_multi_ctx({"codex": False, "claudecode": None})
         result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("2 active", result.output)
-        # codex is disabled, claudecode enabled — both states surfaced.
+        # Both connectors get their own block in the uniform roster, each
+        # tagged by name with its own effective enabled state: codex was
+        # turned off (disabled), claudecode inherits the default (enabled).
+        self.assertIn("Codex (codex): ", result.output)
+        self.assertIn("Claude Code (claudecode): ", result.output)
         self.assertIn("disabled", result.output)
         self.assertIn("enabled", result.output)
 

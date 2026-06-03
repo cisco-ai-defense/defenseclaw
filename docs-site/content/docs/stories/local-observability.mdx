@@ -1,6 +1,6 @@
 ---
 title: Pin local observability in 60 seconds
-description: defenseclaw setup local-observability up brings the bundled Prom/Loki/Tempo/Grafana stack online and points the gateway's OTLP exporter at it. One command, four containers, three signals.
+description: defenseclaw setup local-observability up brings the bundled OTel Collector + Prom/Loki/Tempo/Grafana stack online and points the gateway's OTLP exporter at it. One command, five containers, three signals.
 keywords:
   - DefenseClaw local observability
   - DefenseClaw OTLP local stack
@@ -38,8 +38,9 @@ For the full deep-dive on flags, dashboards, and tear-down, see [Observability â
 defenseclaw setup local-observability up
 ```
 
-Brings up four containers via Docker Compose:
+Brings up five containers via Docker Compose:
 
+- `otel-collector` on `:4317` (gRPC) / `:4318` (HTTP) â€” the OTLP receiver that fans out to Prom/Loki/Tempo
 - `prometheus:latest` on `:9090`
 - `loki:latest` on `:3100`
 - `tempo:latest` on `:3200`

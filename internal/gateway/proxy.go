@@ -3861,13 +3861,14 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			Details:   redaction.ForSinkReason(details),
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
+			Connector: p.connectorName(),
 		}
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(ctx))
 		_ = p.store.LogEvent(evt)
 	}
 
 	if p.logger != nil {
-		_ = p.logger.LogActionWithCorrelation(string(audit.ActionGuardrailVerdict), model, details, "", requestID)
+		_ = p.logger.LogActionWithCorrelationConnector(string(audit.ActionGuardrailVerdict), model, details, "", requestID, p.connectorName())
 	}
 	_ = persistAuditEvent(p.logger, p.store, audit.Event{
 		Action:    string(audit.ActionGuardrailInspection),
@@ -3876,6 +3877,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		Details:   details,
 		Timestamp: time.Now().UTC(),
 		RequestID: requestID,
+		Connector: p.connectorName(),
 	})
 
 	if p.otel != nil {
@@ -3905,6 +3907,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			Actor:     "defenseclaw-guardrail",
 			Details:   details,
 			Severity:  verdict.Severity,
+			Connector: p.connectorName(),
 		}
 		// v7: webhook payloads are one of the five external-facing
 		// surfaces; Splunk/PagerDuty/Slack consumers pivot on the same

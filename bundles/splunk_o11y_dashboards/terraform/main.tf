@@ -45,10 +45,14 @@ locals {
 
   dashboard_variables = {
     executive = concat(local.common_dashboard_variables, [
+      { property = "source", alias = "connector source" },
+      { property = "connector", alias = "hook connector" },
       { property = "gen_ai.agent.name", alias = "agent" },
     ])
     guardrail_inspection = concat(local.common_dashboard_variables, [
       { property = "sf_service", alias = "service" },
+      { property = "source", alias = "connector source" },
+      { property = "connector", alias = "hook connector" },
       { property = "gen_ai.agent.name", alias = "agent" },
     ])
     connector_ingest = concat(local.common_dashboard_variables, [
@@ -58,6 +62,8 @@ locals {
       { property = "gen_ai.agent.name", alias = "agent" },
     ])
     security_policy = concat(local.common_dashboard_variables, [
+      { property = "source", alias = "connector source" },
+      { property = "connector", alias = "hook connector" },
       { property = "policy.domain", alias = "policy domain" },
       { property = "verdict.stage", alias = "verdict stage" },
     ])

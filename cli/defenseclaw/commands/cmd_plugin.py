@@ -54,7 +54,13 @@ def _sidecar_client(app: AppContext):
 
 @click.group()
 def plugin() -> None:
-    """Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore."""
+    """Manage DefenseClaw plugins — install, list, remove, scan, block, allow, disable, enable, quarantine, restore.
+
+    Multi-connector: plugins are tracked per-connector. ``plugin list``
+    shows every active connector's plugins by default (pass ``--connector
+    X`` to narrow to one peer). The other subcommands take ``--connector
+    X`` to target a configured peer (default: the active connector).
+    """
 
 
 @plugin.command()
@@ -71,7 +77,11 @@ def plugin() -> None:
 @click.option("--lenient", is_flag=True, help="Suppress low-confidence findings (sets min_confidence=0.5)")
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Scan a specific connector's plugins (multi-connector installs)",
+    help=(
+        "Scan a specific connector's plugins. "
+        "Default: the active connector; on multi-connector installs pass "
+        "--connector <name> to target a configured peer."
+    ),
 )
 @pass_ctx
 def scan(
@@ -518,60 +528,89 @@ def _print_install_result(name: str, result) -> None:
     "--connector",
     "connector_flag",
     default="",
-    help="List plugins for a specific configured connector (multi-connector installs).",
+    help=(
+        "List plugins for a specific configured connector. "
+        "Default: every active connector (on a single-connector install, "
+        "just that one). Pass --connector <name> to narrow to one peer."
+    ),
 )
 @pass_ctx
 def list_plugins(app: AppContext, as_json: bool, connector_flag: str) -> None:
-    """List installed plugins for a connector with scan severity."""
-    # Use ``active_connector()`` (guardrail.connector → claw.mode → openclaw)
-    # so the connector string used for phantom-row gating matches what the
-    # data layer (``cfg.plugin_dirs()``) is actually walking. The legacy
-    # ``guardrail.connector``-only read missed installs configured solely
-    # via ``claw.mode``. A ``--connector`` override (multi-connector focus)
-    # targets a specific configured connector instead of the active one.
-    from defenseclaw.commands import resolve_list_connector
+    """List installed plugins with scan severity.
 
-    connector = resolve_list_connector(app, connector_flag)
-    # Plan C6: pass the full cfg so _merge_all_plugins can consult
-    # cfg.plugin_dirs() for host-side plugin enumeration. Falls back
-    # to None for callers that have not migrated.
-    plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
+    By default this lists **every active connector's** plugins — each
+    connector gets its own connector-tagged table — so the output reads
+    the same whether one or many connectors are active. ``--connector
+    <name>`` narrows the listing to one configured peer.
+    """
+    from defenseclaw.commands import resolve_list_connectors
+
+    connectors = resolve_list_connectors(app, connector_flag)
     scan_map = _build_plugin_scan_map(app.store)
     actions_map = _build_plugin_actions_map(app.store)
 
-    if not plugins and (connector != "openclaw" or not scan_map):
-        click.echo(f"No plugins found. Check your {connector} installation and plugin directories.")
-        return
-
-    known_ids = {p["id"] for p in plugins}
-    # Phantom scan-history rows are connector-untagged in the shared audit
-    # DB and were historically OpenClaw-owned. Showing them on a
-    # non-OpenClaw connector would leak OpenClaw plugins into the Codex /
-    # Claude Code / ZeptoClaw view (the bug users reported on the Skills
-    # tab also applies to Plugins). Only inject them when the active
-    # connector is OpenClaw.
-    if connector == "openclaw":
-        for scan_id in scan_map:
-            if scan_id not in known_ids:
-                plugins.append({
-                    "id": scan_id,
-                    "name": scan_id,
-                    "description": "",
-                    "version": "",
-                    "origin": "scan-history",
-                    "enabled": False,
-                    "source": "scan-history",
-                })
-                known_ids.add(scan_id)
-
     if as_json:
-        _print_plugin_list_json(plugins, scan_map, actions_map)
+        if len(connectors) > 1:
+            groups = [
+                {
+                    "connector": c,
+                    "plugins": _plugin_list_json_items(
+                        _collect_plugins_for_connector(app, c, scan_map),
+                        scan_map,
+                        actions_map,
+                    ),
+                }
+                for c in connectors
+            ]
+            click.echo(json.dumps(groups, indent=2, default=str))
+        else:
+            plugins = _collect_plugins_for_connector(app, connectors[0], scan_map)
+            _print_plugin_list_json(plugins, scan_map, actions_map)
         return
 
-    _print_plugin_list_table(plugins, scan_map, actions_map)
+    shown_any = False
+    for connector in connectors:
+        plugins = _collect_plugins_for_connector(app, connector, scan_map)
+        if not plugins:
+            click.echo(f"No plugins found. Check your {connector} installation and plugin directories.")
+            continue
+        _print_plugin_list_table(plugins, scan_map, actions_map, connector)
+        shown_any = True
 
-    from defenseclaw.commands import hint
-    hint("Scan a plugin:  defenseclaw plugin scan <name>")
+    if shown_any:
+        from defenseclaw.commands import hint
+        hint("Scan a plugin:  defenseclaw plugin scan <name>")
+
+
+def _collect_plugins_for_connector(
+    app: AppContext,
+    connector: str,
+    scan_map: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the merged plugin list for a single connector.
+
+    OpenClaw-only audit-DB phantom (scan-history) rows are folded in just
+    as the single-connector path did. Other connectors get only the
+    connector-aware filesystem enumeration so OpenClaw plugins never leak
+    into a Codex / Claude Code / ZeptoClaw view.
+    """
+    plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
+    if connector != "openclaw":
+        return plugins
+    known_ids = {p["id"] for p in plugins}
+    for scan_id in scan_map:
+        if scan_id not in known_ids:
+            plugins.append({
+                "id": scan_id,
+                "name": scan_id,
+                "description": "",
+                "version": "",
+                "origin": "scan-history",
+                "enabled": False,
+                "source": "scan-history",
+            })
+            known_ids.add(scan_id)
+    return plugins
 
 
 def _merge_all_plugins(
@@ -652,11 +691,11 @@ def _plugin_status_display(p: dict[str, Any], action_entry: Any = None) -> str:
     return "\u2717 disabled"
 
 
-def _print_plugin_list_json(
+def _plugin_list_json_items(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
-) -> None:
+) -> list[dict[str, Any]]:
     items = []
     for p in plugins:
         pid = p["id"]
@@ -679,21 +718,42 @@ def _print_plugin_list_json(
         verdict_label, _ = _compute_verdict(actions_map.get(pid), scan_map.get(pid))
         item["verdict"] = verdict_label
         items.append(item)
-    click.echo(json.dumps(items, indent=2, default=str))
+    return items
+
+
+def _print_plugin_list_json(
+    plugins: list[dict[str, Any]],
+    scan_map: dict[str, dict[str, Any]],
+    actions_map: dict[str, Any],
+) -> None:
+    click.echo(json.dumps(
+        _plugin_list_json_items(plugins, scan_map, actions_map),
+        indent=2,
+        default=str,
+    ))
 
 
 def _print_plugin_list_table(
     plugins: list[dict[str, Any]],
     scan_map: dict[str, dict[str, Any]],
     actions_map: dict[str, Any],
+    connector: str = "",
 ) -> None:
     from rich.console import Console
     from rich.table import Table
 
+    from defenseclaw.commands import list_scope_title
+
     enabled_count = sum(1 for p in plugins if p.get("enabled"))
 
+    detail = f"({enabled_count}/{len(plugins)} enabled)"
+    title = (
+        list_scope_title("Plugins", connector, detail)
+        if connector
+        else f"Plugins {detail}"
+    )
     console = Console()
-    table = Table(title=f"Plugins ({enabled_count}/{len(plugins)} enabled)")
+    table = Table(title=title)
     table.add_column("Status", style="bold")
     table.add_column("ID")
     table.add_column("Plugin")

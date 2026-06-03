@@ -149,21 +149,26 @@ func TestRunAuditExport_ConnectorFilter(t *testing.T) {
 		session_id TEXT, trace_id TEXT, agent_id TEXT, agent_name TEXT,
 		agent_instance_id TEXT, sidecar_instance_id TEXT, schema_version INTEGER,
 		content_hash TEXT, generation INTEGER, binary_version TEXT,
-		destination_app TEXT, tool_name TEXT, tool_id TEXT, policy_id TEXT)`); err != nil {
+		destination_app TEXT, tool_name TEXT, tool_id TEXT, policy_id TEXT,
+		connector TEXT)`); err != nil {
 		t.Fatalf("create table: %v", err)
 	}
-	insert := func(id, ts, details, structured string) {
+	insert := func(id, ts, details, structured, connector string) {
 		if _, err := db.Exec(
-			`INSERT INTO audit_events (id,timestamp,action,actor,details,structured_json,severity,schema_version,generation)
-			 VALUES (?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO audit_events (id,timestamp,action,actor,details,structured_json,severity,schema_version,generation,connector)
+			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
 			id, ts, string(audit.ActionConnectorHook), "defenseclaw", details, structured, "INFO", 7, 0,
+			sqlNullableConnector(connector),
 		); err != nil {
 			t.Fatalf("insert %s: %v", id, err)
 		}
 	}
-	insert("11111111-1111-1111-1111-111111111111", "2026-05-19T12:00:00Z", `connector=codex`, `{"connector":"codex"}`)
-	insert("22222222-2222-2222-2222-222222222222", "2026-05-19T12:00:01Z", `connector=claudecode`, `{"connector":"claudecode"}`)
-	insert("33333333-3333-3333-3333-333333333333", "2026-05-19T12:00:02Z", `connector=codex`, `{"connector":"codex"}`)
+	// Row 1 uses the dedicated connector column (authoritative). Row 2 is a
+	// non-matching connector. Row 3 leaves the column NULL to prove the
+	// structured/details fallback still resolves to codex.
+	insert("11111111-1111-1111-1111-111111111111", "2026-05-19T12:00:00Z", `connector=codex`, `{"connector":"codex"}`, "codex")
+	insert("22222222-2222-2222-2222-222222222222", "2026-05-19T12:00:01Z", `connector=claudecode`, `{"connector":"claudecode"}`, "claudecode")
+	insert("33333333-3333-3333-3333-333333333333", "2026-05-19T12:00:02Z", `connector=codex`, `{"connector":"codex"}`, "")
 	db.Close()
 
 	// Drive runAuditExport via its package-level state.
@@ -204,6 +209,15 @@ func TestRunAuditExport_ConnectorFilter(t *testing.T) {
 	}
 }
 
+// sqlNullableConnector maps an empty connector to a SQL NULL so test rows
+// can exercise the column-absent fallback path.
+func sqlNullableConnector(c string) any {
+	if c == "" {
+		return nil
+	}
+	return c
+}
+
 func TestBuildAuditEventLineIncludesStructuredPayload(t *testing.T) {
 	line, err := buildAuditEventLine(
 		"00000000-0000-0000-0000-000000000001",
@@ -229,6 +243,7 @@ func TestBuildAuditEventLineIncludesStructuredPayload(t *testing.T) {
 		"shell",
 		"tool-1",
 		"policy-1",
+		"codex",
 		version.Provenance{SchemaVersion: 7, ContentHash: "hash-1", Generation: 2, BinaryVersion: "0.0.0-test"},
 	)
 	if err != nil {
@@ -238,6 +253,9 @@ func TestBuildAuditEventLineIncludesStructuredPayload(t *testing.T) {
 	var got map[string]any
 	if err := json.Unmarshal(line, &got); err != nil {
 		t.Fatalf("export line is not JSON: %v\n%s", err, string(line))
+	}
+	if got["connector"] != "codex" {
+		t.Fatalf("top-level connector = %#v, want \"codex\"", got["connector"])
 	}
 	structured, ok := got["structured"].(map[string]any)
 	if !ok {

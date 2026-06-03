@@ -25,6 +25,10 @@ Connectors are the adapter layer between agent frameworks and DefenseClaw's guar
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
+<Callout type="info">
+**One gateway, many hook connectors.** A single DefenseClaw gateway can serve several hook connectors at once, each with its own guardrail posture under `guardrail.connectors.<name>` — pick **Add** (not Replace) when you run a second `setup <connector>`. Proxy connectors (OpenClaw, ZeptoClaw) bind a listener and own the traffic plane, so they can't be multi peers. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+</Callout>
+
 ## Pick yours
 
 <Cards>

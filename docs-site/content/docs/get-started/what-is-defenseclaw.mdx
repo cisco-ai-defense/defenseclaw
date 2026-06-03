@@ -28,7 +28,7 @@ Inserting an inspection step inside the agent process means every agent has to g
 
 - The agent does not need to be modified — connectors are written *for* the agent (Claude Code's hooks, Codex's `config.toml`, Cursor's `hooks.json`, OpenClaw's plugin).
 - One audit log covers every agent the operator runs.
-- One policy file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`.
+- One config file serves every connector — there is exactly one `~/.defenseclaw/config.yaml`. The OPA admission policy is **shared** across all connectors, while guardrail *posture* (mode, fail mode, HILT, block message, rule pack) can optionally be set **per connector** when one gateway serves several hook connectors at once. See [Multi-connector](/docs/setup/guardrail/multi-connector).
 
 ## Where DefenseClaw sits
 

@@ -112,7 +112,20 @@ def _safe_mtime(path: str | None) -> float | None:
 @click.group()
 @click.pass_context
 def setup(ctx: click.Context) -> None:
-    """Configure DefenseClaw components."""
+    """Configure DefenseClaw components.
+
+    \b
+    Multi-connector:
+      One gateway enforces N hook connectors (codex, claudecode,
+      antigravity, openclaw) tracked under guardrail.connectors. Add one
+      with 'defenseclaw setup <connector>' (choose Add when prompted),
+      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
+      with 'defenseclaw guardrail ... --connector X', and inspect the
+      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
+      'setup --connector' / '--agent' selects WHICH agent to configure;
+      'guardrail --connector' scopes policy to an already-configured peer.
+      Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
+    """
     # Snapshot config.yaml's mtime before the subcommand runs. The
     # result callback below (``_auto_restart_sidecar_after_setup``)
     # compares this to the post-invocation mtime and only restarts the
@@ -3599,12 +3612,37 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
     enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
+
+    # Multi-connector awareness: a singular claw.mode row + a global
+    # "setup guardrail --disable" revert line both read as if this one
+    # connector IS the whole install. When more than one connector is
+    # configured, show the roster (marking the primary) and point revert /
+    # mode guidance at the per-connector commands. Single-connector output
+    # is unchanged.
+    actives: list[str] = []
+    if cfg is not None and hasattr(cfg, "active_connectors"):
+        try:
+            actives = list(cfg.active_connectors())
+        except Exception:  # noqa: BLE001 — fall back to single-connector view.
+            actives = []
+    multi = len(actives) > 1
+    primary = (
+        (getattr(getattr(cfg, "claw", None), "mode", "") or connector).strip().lower()
+        if cfg is not None
+        else connector
+    ) or connector
+
     click.echo()
     click.echo("  Summary")
     click.echo("  ───────")
+    if multi:
+        connectors_val = ", ".join(actives) + f"  (primary: {primary})"
+        mode_row = ("connectors", connectors_val)
+    else:
+        mode_row = ("claw.mode", connector)
     rows = [
         ("connector", f"{label} ({connector})"),
-        ("claw.mode", connector),
+        mode_row,
         (
             "scope",
             (
@@ -3631,9 +3669,20 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
         f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
         f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
     )
+    if multi:
+        click.echo(
+            f"    • Change this connector's mode: defenseclaw setup {connector} --mode observe|action"
+        )
     click.echo()
-    click.echo("  To revert and restore direct LLM access:")
-    click.echo("    defenseclaw setup guardrail --disable")
+    if multi:
+        click.echo(f"  This install now has {len(actives)} connectors: {', '.join(actives)}.")
+        click.echo("  To revert just this connector (the others keep running):")
+        click.echo(f"    defenseclaw setup remove {connector}")
+        click.echo("  Or keep it configured but stop enforcing it:")
+        click.echo(f"    defenseclaw guardrail disable --connector {connector}")
+    else:
+        click.echo("  To revert and restore direct LLM access:")
+        click.echo("    defenseclaw setup guardrail --disable")
     click.echo()
 
 

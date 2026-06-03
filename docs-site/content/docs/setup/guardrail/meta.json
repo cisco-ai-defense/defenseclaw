@@ -1,4 +1,4 @@
 {
   "title": "Guardrail",
-  "pages": ["index", "aliases", "switching-connectors", "disabling"]
+  "pages": ["index", "aliases", "multi-connector", "switching-connectors", "disabling"]
 }

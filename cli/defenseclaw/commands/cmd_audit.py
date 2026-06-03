@@ -19,7 +19,15 @@ from defenseclaw.context import AppContext, pass_context
 
 @click.group("audit")
 def audit() -> None:
-    """Audit trail helpers (activity logging)."""
+    """Audit trail helpers (activity logging).
+
+    \b
+    Exporting the audit log (incl. per-connector filtering) lives on the
+    gateway binary, not here:
+        defenseclaw-gateway audit export [--connector X]
+    This 'defenseclaw audit' group only records operator/config activity
+    (see 'log-activity').
+    """
 
 
 @audit.command("log-activity")

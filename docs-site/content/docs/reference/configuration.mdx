@@ -49,7 +49,11 @@ The shape below mirrors the dataclasses in `cli/defenseclaw/config.py` and the m
 
 ```yaml
 claw:
-  mode: claudecode             # active connector; pinned by setup aliases
+  mode: claudecode             # active connector; pinned by setup aliases.
+                               # Set to `multi` automatically when more than one
+                               # connector is active (see guardrail.connectors below).
+                               # This value is mirrored to the OTel resource attr
+                               # `defenseclaw.claw.mode`.
 
 gateway:
   host: 127.0.0.1              # gateway proxy bind host
@@ -161,6 +165,29 @@ guardrail:
     enabled: false
     min_severity: HIGH         # stored uppercase; CLI accepts high|medium|low|critical
 
+  # Multi-connector overlay. One gateway can enforce guardrail policy for
+  # several hook connectors at once; each key under `connectors` is a
+  # connector name (codex, claudecode, antigravity, ...) carrying a
+  # subset of the guardrail knobs above. Every field is OPTIONAL and
+  # inherits the global `guardrail.*` value when unset. The singular
+  # `guardrail.connector` above keeps working for single-connector
+  # installs; this map is purely additive. Proxy connectors (openclaw,
+  # zeptoclaw) cannot appear here — multi-connector is hook-only.
+  # Managed by `defenseclaw setup <connector>` (choosing "Add") and the
+  # `defenseclaw guardrail ... --connector X` command group.
+  connectors:
+    codex:
+      enabled: true            # pointer field: omit = inherit (enabled); false = explicitly off
+      mode: action             # observe | action; inherits guardrail.mode when unset
+      hook_fail_mode: closed   # open | closed; inherits guardrail.hook_fail_mode
+      block_message: ""        # custom; inherits guardrail.block_message
+      rule_pack_dir: ~/.defenseclaw/policies/guardrail/strict  # inherits guardrail.rule_pack_dir
+      hilt:
+        enabled: true
+        min_severity: HIGH
+    claudecode:
+      mode: observe            # only logs; everything else inherits the global default
+
 # Top-level redaction switches; persistent kill-switches are deliberately
 # top-level so multi-tenant operators can audit them without grepping the
 # guardrail block.
@@ -197,6 +224,21 @@ webhooks:
 ```
 
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/setup/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
+
+## `guardrail.connectors` and `claw.mode: multi`
+
+A single gateway can enforce guardrail policy for several **hook** connectors at once. Each connector that's active gets a `guardrail.connectors.<name>` block; the gateway resolves policy per connector and falls back to the global `guardrail.*` values for anything a block leaves unset.
+
+| Per-connector key | Type | Inherits when unset |
+| --- | --- | --- |
+| `enabled` | bool pointer — omit = inherit (on); `false` = explicitly off (drops it from the active set, removes its hooks) | on |
+| `mode` | `observe` \| `action` | `guardrail.mode` |
+| `hook_fail_mode` | `open` \| `closed` | `guardrail.hook_fail_mode` |
+| `block_message` | string | `guardrail.block_message` |
+| `rule_pack_dir` | path | `guardrail.rule_pack_dir` |
+| `hilt` | `{ enabled, min_severity }` | `guardrail.hilt` |
+
+`claw.mode` becomes **`multi`** automatically once more than one connector is active. That sentinel is mirrored onto the OTel resource attribute `defenseclaw.claw.mode`, so a fan-out gateway is distinguishable from a single-connector one in dashboards and SIEM. The singular `guardrail.connector` is untouched and still drives single-connector installs — the map is purely additive. Proxy connectors (OpenClaw, ZeptoClaw) cannot be entries here; multi-connector is hook-only. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector).
 
 ## Custom-provider overlay (`~/.defenseclaw/custom-providers.json`)
 

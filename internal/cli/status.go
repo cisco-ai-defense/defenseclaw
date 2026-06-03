@@ -132,22 +132,50 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		printSubsystem("Sandbox", *snap.Sandbox)
 	}
 
-	printConnector(snap.Connector)
+	printConnectors(&snap)
 
 	return nil
 }
 
-func printConnector(c *gateway.ConnectorHealth) {
-	if c == nil {
-		printGatewayKV("Agent", Dim("(no active connector)"))
+// printConnectors renders the active-connector roster. The HealthSnapshot
+// carries every active connector in Connectors; Connector is retained only
+// as a back-compat pointer for older sidecars that populated the singular
+// field. The roster is rendered the SAME way regardless of how many
+// connectors are active — one connector and N connectors share an identical
+// "Agents: N active" header and per-connector body — so operators never have
+// to reason about a "single vs multi" distinction. Each connector lists its
+// own live counters, keeping the Agent view consistent with the Guardrail
+// "N active" summary instead of showing only an arbitrary primary.
+func printConnectors(snap *gateway.HealthSnapshot) {
+	conns := snap.Connectors
+	// Back-compat: older sidecars only populate the singular Connector
+	// pointer. Promote it into the roster so the rendering path is
+	// count-agnostic and identical regardless of which field was filled.
+	if len(conns) == 0 && snap.Connector != nil {
+		conns = []gateway.ConnectorHealth{*snap.Connector}
+	}
+
+	if len(conns) == 0 {
+		printGatewayKV("Agents", Dim("(no active connector)"))
 		fmt.Println()
 		return
 	}
 
-	stateStr := strings.ToUpper(string(c.State))
-	line := fmt.Sprintf("%s (%s)%s", friendlyConnectorName(c.Name), c.Name, styledConnectorStateVerb(stateStr))
-	printGatewayKV("Agent", line)
+	printGatewayKV("Agents", fmt.Sprintf("%d active", len(conns)))
+	for i := range conns {
+		c := conns[i]
+		stateStr := strings.ToUpper(string(c.State))
+		header := fmt.Sprintf("%s (%s)%s",
+			friendlyConnectorName(c.Name), c.Name, styledConnectorStateVerb(stateStr))
+		fmt.Printf("             %s\n", header)
+		printConnectorBody(&c)
+	}
+	fmt.Println()
+}
 
+// printConnectorBody renders the per-connector since/mode/counter lines
+// under each "Agents:" roster entry.
+func printConnectorBody(c *gateway.ConnectorHealth) {
 	if !c.Since.IsZero() {
 		fmt.Printf("             %s%s\n", Dim("since "), c.Since.Format(time.RFC3339))
 	}
@@ -181,7 +209,6 @@ func printConnector(c *gateway.ConnectorHealth) {
 		Dim(fmt.Sprintf("tool inspections: %d", insp)),
 		toolBlk,
 		subBlk)
-	fmt.Println()
 }
 
 // friendlyConnectorName mirrors internal/tui/connector_label.go::FriendlyConnectorName
@@ -307,6 +334,12 @@ func formatDetailValue(v interface{}) (string, bool) {
 	case nil:
 		return "", false
 	default:
+		// Slices/maps (e.g. Guardrail's "connectors" roster or the
+		// per-sink array) are intentionally not rendered here: the
+		// authoritative per-connector enumeration lives in the "Agents"
+		// section, so re-listing names in every subsystem would just
+		// duplicate it. Subsystems convey multi-connector state via a
+		// count/scope detail instead.
 		return "", false
 	}
 }

@@ -15,9 +15,9 @@
 is running. The standalone ``Connectors:`` row was folded into a single
 ``Agents`` section. These tests pin:
 
-* When >1 connector is active, one line per connector with its effective
-  mode under a single ``Agents`` header; a no-op for the common
-  single-connector install (the caller renders the legacy ``Agent:`` block).
+* One line per connector with its effective mode under a single ``Agents``
+  header, for ANY connector count — a single-connector install renders the
+  same section (one row), not a separate legacy ``Agent:`` block.
 * Called with no host/port (config-only), no ``/health`` fetch occurs, so the
   roster lists connectors + mode without live counters.
 """
@@ -56,11 +56,19 @@ def _render(cfg) -> str:
 
 
 class TestPrintAgentsRoster(unittest.TestCase):
-    def test_single_connector_is_noop(self):
-        self.assertEqual(_render(_cfg(["codex"])), "")
+    def test_single_connector_uses_same_roster(self):
+        # Uniform UX: a single-connector install renders the SAME "Agents"
+        # section as a fan-out install (one row), not a special "Agent:" block.
+        out = _render(_cfg(["codex"], modes={"codex": "action"}))
+        self.assertIn("Agents", out)
+        self.assertIn("1 active", out)
+        self.assertIn("Codex (codex)", out)
+        self.assertIn("mode=action", out)
 
-    def test_zero_connectors_is_noop(self):
-        self.assertEqual(_render(_cfg([])), "")
+    def test_zero_connectors_shows_no_active(self):
+        out = _render(_cfg([]))
+        self.assertIn("Agents", out)
+        self.assertIn("no active connector", out)
 
     def test_multi_lists_each_connector_with_mode(self):
         out = _render(_cfg(["codex", "cursor"], modes={"codex": "observe", "cursor": "action"}))

@@ -16,7 +16,8 @@
 
 """defenseclaw aibom — AI Bill of Materials commands.
 
-``scan``      — query live OpenClaw to index skills, plugins, MCP, agents, tools, models, memory
+``scan``      — query the active connector(s) to index skills, plugins, MCP,
+                agents, tools, models, memory
 """
 
 from __future__ import annotations
@@ -32,10 +33,16 @@ from defenseclaw.provenance import stamp_aibom_inventory
 
 @click.group()
 def aibom() -> None:
-    """AI Bill of Materials — scan live OpenClaw inventory."""
+    """AI Bill of Materials — scan the active connector(s)' live inventory.
+
+    A bare ``aibom scan`` inventories every active connector (a complete
+    bill of materials); pass ``--connector X`` to narrow to one. Inventory
+    is read from each connector's own source (openclaw.json,
+    .codex/config.toml, .claude/settings.json, …).
+    """
 
 
-# ── scan (live OpenClaw inventory) ────────────────────────────────────────
+# ── scan (live connector inventory) ───────────────────────────────────────
 
 
 @aibom.command()
@@ -49,7 +56,10 @@ def aibom() -> None:
 )
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Inventory only a specific connector (default: every active connector)",
+    help=(
+        "Inventory only a specific connector. Default: every active "
+        "connector (a complete bill of materials across all of them)."
+    ),
 )
 @pass_ctx
 def scan(
@@ -59,10 +69,10 @@ def scan(
     categories: str | None,
     connector_flag: str,
 ) -> None:
-    """Index a live OpenClaw install (skills, plugins, MCP, agents, tools, models, memory).
+    """Index a live install (skills, plugins, MCP, agents, tools, models, memory).
 
-    Calls ``openclaw`` CLI commands in parallel and builds a unified inventory.
-    Results are stored in the audit DB.
+    Builds a unified inventory from the active connector(s)' own
+    configuration sources. Results are stored in the audit DB.
 
     Use --only to restrict which categories are collected (faster).
     Use --summary to show only the summary table.

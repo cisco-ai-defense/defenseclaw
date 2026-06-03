@@ -1337,15 +1337,35 @@ func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source 
 	))
 }
 
+// guardrailConnectorFromScanner extracts the connector identity from a
+// composite guardrail scanner label. Connector-scoped evaluations use a
+// `<connector>:<role>` convention (e.g. "codex:guardrail-proxy",
+// "claudecode:policy-rules", "openclaw:hilt"); global/proxy-internal
+// scanners ("cisco-ai-defense", "codeguard", "opa-guardrail") have no
+// colon and return "". Surfacing this as a parallel `guardrail.connector`
+// dimension lets dashboards pivot guardrail metrics by connector with the
+// same label name the hook metrics use, instead of regex-splitting the
+// composite scanner label.
+func guardrailConnectorFromScanner(scanner string) string {
+	if c, _, found := strings.Cut(scanner, ":"); found {
+		return strings.TrimSpace(c)
+	}
+	return ""
+}
+
 // RecordGuardrailEvaluation records a guardrail evaluation metric.
 func (p *Provider) RecordGuardrailEvaluation(ctx context.Context, scanner, actionTaken string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("guardrail.scanner", scanner),
 		attribute.String("guardrail.action_taken", actionTaken),
-	))
+	}
+	if c := guardrailConnectorFromScanner(scanner); c != "" {
+		attrs = append(attrs, attribute.String("guardrail.connector", c))
+	}
+	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordGuardrailLatency records guardrail evaluation latency.
@@ -1353,9 +1373,13 @@ func (p *Provider) RecordGuardrailLatency(ctx context.Context, scanner string, d
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.guardrailLatency.Record(ctx, durationMs, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("guardrail.scanner", scanner),
-	))
+	}
+	if c := guardrailConnectorFromScanner(scanner); c != "" {
+		attrs = append(attrs, attribute.String("guardrail.connector", c))
+	}
+	p.metrics.guardrailLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))
 }
 
 // RecordScanError records a scanner invocation failure.
@@ -1793,15 +1817,25 @@ func (p *Provider) RecordAuditDBError(ctx context.Context, operation string) {
 	))
 }
 
-// RecordAuditEvent records that an audit event was persisted.
-func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string) {
+// RecordAuditEvent records that an audit event was persisted. An optional
+// connector argument adds a `connector` dimension so dashboards can count
+// audit-event volume per hook connector on multi-connector installs;
+// callers without connector context (admin actions, network-egress) omit
+// it and the series stays connector-agnostic.
+func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string, connector ...string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("action", action),
 		attribute.String("severity", severity),
-	))
+	}
+	if len(connector) > 0 {
+		if c := strings.TrimSpace(connector[0]); c != "" {
+			attrs = append(attrs, attribute.String("connector", c))
+		}
+	}
+	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordConfigLoadError records a config load or validation error and emits
@@ -2655,9 +2689,15 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 		result = "ok"
 	}
 
+	// `connector` mirrors `source` so OTLP-ingest metrics share the same
+	// connector label name the hook metrics use; dashboards can filter
+	// every connector telemetry surface on a single `connector` variable
+	// instead of switching between `source` (ingest) and `connector`
+	// (hooks). `source` is retained for backward compatibility.
 	requestAttrs := metric.WithAttributes(
 		attribute.String("signal", signal),
 		attribute.String("source", source),
+		attribute.String("connector", source),
 		attribute.String("result", result),
 	)
 	p.metrics.otelIngestRequests.Add(ctx, 1, requestAttrs)
@@ -2665,12 +2705,14 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 		p.metrics.otelIngestMalformed.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("signal", signal),
 			attribute.String("source", source),
+			attribute.String("connector", source),
 		))
 	}
 
 	volumeAttrs := metric.WithAttributes(
 		attribute.String("signal", signal),
 		attribute.String("source", source),
+		attribute.String("connector", source),
 	)
 	if records > 0 {
 		p.metrics.otelIngestRecords.Add(ctx, records, volumeAttrs)

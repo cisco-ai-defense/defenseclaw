@@ -90,6 +90,10 @@ tail -n 100 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connecto
   <Edge from="policy" to="new" variant="dashed" label="shared" />
 </Flow>
 
+<Callout type="info">
+**Switch vs add.** `setup mode <connector>` *replaces* the active connector — only one stays wired. If you run multiple agents and want guardrail policy on each at the same time, use the **add** flow instead: one gateway keeps all connectors wired, each under its own `guardrail.connectors.<name>` policy, and `claw.mode` becomes `multi`. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+</Callout>
+
 ## When to switch
 
 - Trying a different agent. Operators switch connectors more often than they realise; the typical operator runs both Claude Code and Codex during a normal week.

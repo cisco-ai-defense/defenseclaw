@@ -361,6 +361,67 @@ class TestMCPList(MCPCommandTestBase):
         self.assertEqual(data[0]["name"], "test-srv")
 
 
+class TestMcpListMultiConnectorDefault(MCPCommandTestBase):
+    """Default ``mcp list`` (no --connector) fans out across every active
+    connector — one connector-tagged table each — mirroring ``skill list``
+    and ``plugin list``. A single-connector install keeps its flat JSON
+    shape."""
+
+    @staticmethod
+    def _one_server():
+        return [
+            MCPServerEntry(name="ctx7", command="uvx", args=["context7-mcp"], url="", transport="stdio"),
+        ]
+
+    def test_default_lists_every_active_connector(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("connector=codex", result.output)
+
+    def test_default_json_groups_by_connector(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        self.assertEqual({g["connector"] for g in payload}, {"claudecode", "codex"})
+        # Each group carries its own server list under "mcp_servers".
+        for g in payload:
+            self.assertIn("mcp_servers", g)
+            self.assertEqual(g["mcp_servers"][0]["name"], "ctx7")
+
+    def test_connector_flag_still_narrows_to_one(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("connector=claudecode", result.output)
+
+    def test_single_connector_install_keeps_flat_json(self):
+        self.app.cfg.mcp_servers = lambda connector=None: self._one_server()  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        # Flat list of server dicts (no per-connector grouping wrapper).
+        self.assertEqual(payload[0]["name"], "ctx7")
+        self.assertTrue(all("mcp_servers" not in item for item in payload))
+
+
 # ---------------------------------------------------------------------------
 # _parse_args
 # ---------------------------------------------------------------------------

@@ -701,13 +701,24 @@ func (s *Sidecar) Run(ctx context.Context) error {
 func (s *Sidecar) runGatewayLoop(ctx context.Context) error {
 	if !gatewayShouldConnectForConfiguredConnector(s.cfg) {
 		connName := configuredConnectorName(s.cfg)
-		s.health.SetGateway(StateDisabled, "", map[string]interface{}{
-			"summary":   "no OpenClaw fleet configured (standalone mode)",
-			"connector": connName,
-			"host":      s.cfg.Gateway.Host,
-			"port":      s.cfg.Gateway.Port,
-			"hint":      "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
-		})
+		details := map[string]interface{}{
+			"summary": "no OpenClaw fleet configured (standalone mode)",
+			"host":    s.cfg.Gateway.Host,
+			"port":    s.cfg.Gateway.Port,
+			"hint":    "telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream and restart to enable fleet integration",
+		}
+		// The fleet uplink is a single process-global WebSocket dial
+		// (gateway.host:port / gateway.fleet_mode) — NOT a per-connector
+		// setting. Every active connector runs hook-only against its own
+		// native upstream and shares this one uplink decision, so we state
+		// the global scope by count for EVERY install — one connector or N
+		// — rather than naming an arbitrary connector when there is exactly
+		// one. The wording is identical regardless of count so operators
+		// never see a "single vs multi" distinction. The authoritative
+		// per-connector roster is the status command's "Agents" section, so
+		// we deliberately do NOT re-enumerate connector names here.
+		details["scope"] = fmt.Sprintf("process-global — fleet uplink is shared across all %d connectors, not per-connector (see Agents)", len(s.cfg.ActiveConnectors()))
+		s.health.SetGateway(StateDisabled, "", details)
 		fmt.Fprintf(os.Stderr,
 			"[sidecar] gateway client disabled: connector=%q + loopback gateway.host=%q — no OpenClaw fleet to dial. Hooks + local audit continue normally.\n",
 			connName, s.cfg.Gateway.Host)

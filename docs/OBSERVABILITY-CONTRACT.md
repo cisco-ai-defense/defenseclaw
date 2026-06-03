@@ -166,6 +166,20 @@ Connector hook rows (`action=connector-hook` and `connector-hook-synthetic`) use
 
 ---
 
+## Connector dimension fields
+
+A single gateway can serve N hook connectors at once (multi-connector), so every tier carries a connector dimension. SIEM rules and dashboards should break telemetry down on these fields. When more than one connector is active, the OTel **resource** attribute `defenseclaw.claw.mode` reports `multi`.
+
+| Field / attribute | Tier | On which rows | Meaning |
+|-------------------|------|---------------|---------|
+| `connector` | SQLite audit rows, Gateway JSONL, Splunk HEC, OTLP-ingest audit rows | All audit rows (top-level, first-class) | Connector source the event is attributed to (`codex`, `claudecode`, `antigravity`, …). |
+| `structured.connector` | SQLite `structured_json` / sink `structured` | Connector hook rows (`schema="defenseclaw.hook.v1"`) | Connector name inside the machine-readable hook envelope. Mirrors the top-level `connector`. |
+| `defenseclaw.connector.source` | OTel spans + logs (incl. connector-telemetry log contract) | Connector ingest / hook / notify records | Span/log attribute SIEM rules join on to break down telemetry rate per connector. |
+| `connector` (metric label) | OTel metrics | `defenseclaw.connector.hook.*`, `defenseclaw.otel.ingest.*` | Bounded metric label for per-connector rate/latency. |
+| `defenseclaw.claw.mode` | OTel resource attribute | All emissions from the process | `multi` when >1 connector is active; otherwise the single connector name. |
+
+---
+
 ## Surface matrix (five observability tiers)
 
 | Tier | Mechanism |

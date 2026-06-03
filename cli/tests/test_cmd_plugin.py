@@ -180,6 +180,71 @@ class TestPluginList(PluginCommandTestBase):
         self.assertIn("alpha", result.output)
         self.assertIn("beta", result.output)
 
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_list_table_title_shows_connector_in_scope(self, _mock_oc):
+        # Mirror the MCP/Skills tables: the list title names the connector
+        # in scope so the active-connector default is discoverable.
+        dest = os.path.join(self.app.cfg.plugin_dir, "alpha")
+        os.makedirs(dest)
+        result = self.invoke(["list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=openclaw", result.output)
+
+
+class TestPluginListMultiConnectorDefault(PluginCommandTestBase):
+    """Default ``plugin list`` (no --connector) fans out across every active
+    connector — one connector-tagged table each — mirroring ``skill list``.
+    A single-connector install keeps its flat JSON shape."""
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_default_lists_every_active_connector(self, _mock_oc):
+        # A DC-managed plugin lives in the shared plugin_dir, so it surfaces for
+        # each active connector; the per-connector tables must both appear.
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=claudecode", result.output)
+        self.assertIn("connector=codex", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_default_json_groups_by_connector(self, _mock_oc):
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        self.assertEqual({g["connector"] for g in payload}, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_connector_flag_still_narrows_to_one(self, _mock_oc):
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("connector=claudecode", result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    def test_single_connector_install_keeps_flat_json(self, _mock_oc):
+        os.makedirs(os.path.join(self.app.cfg.plugin_dir, "alpha"))
+        self.app.cfg.active_connectors = lambda: ["claudecode"]  # type: ignore[method-assign]
+
+        result = self.invoke(["list", "--json"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertIsInstance(payload, list)
+        # Flat list of plugin dicts (no per-connector grouping wrapper).
+        self.assertTrue(all("connector" not in item or "plugins" not in item for item in payload))
+
 
 class TestPluginRemove(PluginCommandTestBase):
     def test_remove_installed_plugin(self):

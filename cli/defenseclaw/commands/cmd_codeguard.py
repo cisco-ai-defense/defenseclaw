@@ -26,19 +26,35 @@ from defenseclaw.context import AppContext, pass_ctx
 
 @click.group()
 def codeguard() -> None:
-    """CodeGuard native skill/rule asset management."""
+    """CodeGuard native skill/rule asset management.
+
+    ``codeguard status`` reports every active connector by default; the
+    install subcommands take ``--connector X`` to target one configured peer.
+    """
 
 
 @codeguard.command("status")
-@click.option("--connector", default="", help="Connector to inspect (default: active connector).")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Inspect a single configured connector (default: every active connector).",
+)
 @click.option("--target", type=click.Choice(["skill", "rule"]), default="skill", show_default=True)
 @pass_ctx
-def status_cmd(app: AppContext, connector: str, target: str) -> None:
-    """Show whether a native CodeGuard asset is installed."""
-    from defenseclaw.codeguard_skill import codeguard_status
+def status_cmd(app: AppContext, connector_flag: str, target: str) -> None:
+    """Show whether a native CodeGuard asset is installed.
 
-    status = codeguard_status(app.cfg, connector=connector or None, target=target)
-    click.echo(f"CodeGuard {target} [{status.connector}]: {status.format()}")
+    Lists every active connector by default — one line each, tagged with the
+    connector name — so the output reads the same whether one or many
+    connectors are active. ``--connector <name>`` narrows to a single peer.
+    """
+    from defenseclaw.codeguard_skill import codeguard_status
+    from defenseclaw.commands import resolve_list_connectors
+
+    for connector in resolve_list_connectors(app, connector_flag):
+        status = codeguard_status(app.cfg, connector=connector, target=target)
+        click.echo(f"CodeGuard {target} [{status.connector}]: {status.format()}")
 
 
 @codeguard.command("install")

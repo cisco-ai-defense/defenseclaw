@@ -54,6 +54,28 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
 | `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
 
+## Guardrail
+
+Per-connector guardrail controls. Each verb shows the current value when run bare and mutates it when given an argument. `--connector X` scopes the change to one connector on a **multi-connector** install (writes `guardrail.connectors.<name>`); omit it to set the **global default** every connector inherits. On a single-connector install `--connector` is rejected — there's only one posture. All of these are on the Python `defenseclaw` CLI.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw guardrail status [--connector X]` | Show the resolved guardrail posture (enabled, mode, fail mode, HILT, block message). With `--connector X`, the effective posture for that connector after inheritance. |
+| `defenseclaw guardrail enable [--connector X]` | Turn the guardrail on. Global, or re-enable a single previously-disabled connector (restores its hooks with no re-prompt). |
+| `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
+| `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set the response-layer hook fail mode. See [Reference → Fail modes](/docs/reference/fail-modes). |
+| `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. |
+| `defenseclaw guardrail block-message "<text>" [--connector X]` | Show/set the message the agent sees when an action is blocked. |
+
+```bash
+defenseclaw guardrail status                              # global posture
+defenseclaw guardrail fail-mode closed --connector codex  # scope to one connector
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
+```
+
+See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) for the full multi-connector model.
+
 ## Audit & alerts
 
 | Command | Use it for |
