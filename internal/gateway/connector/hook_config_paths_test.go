@@ -5,7 +5,9 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,5 +117,43 @@ func TestOwnedHooksPresent_ProxyConnectorReportsPresent(t *testing.T) {
 	}
 	if !present {
 		t.Fatal("OwnedHooksPresent=false for proxy connector; want true (inert)")
+	}
+}
+
+// TestOwnedHookNeedles_WindowsSurvivesConfigEscaping guards the Windows
+// presence-detection path. On Windows the agent config stores the native
+// invocation (`"C:\...\defenseclaw-gateway.exe" hook --connector <name>`),
+// whose backslashes and quotes are escaped when serialized into JSON/TOML.
+// The needle must therefore key on an escaping-invariant marker, not the full
+// command, or OwnedHooksPresent would false-negative on every check and the
+// guard would spuriously re-install hooks. This test runs on any host because
+// the OS is parameterized.
+func TestOwnedHookNeedles_WindowsSurvivesConfigEscaping(t *testing.T) {
+	opts := SetupOpts{DataDir: `C:\Users\me\AppData\Local\defenseclaw`}
+	conn := NewCursorConnector()
+
+	needles := ownedHookCommandNeedlesFor("windows", opts, conn)
+	if len(needles) != 1 || needles[0] != nativeHookFlag+conn.Name() {
+		t.Fatalf("windows needles = %v, want [%q]", needles, nativeHookFlag+conn.Name())
+	}
+
+	// What Setup actually writes on Windows: the native command embedded in a
+	// JSON config, where the exe path's backslashes/quotes get escaped.
+	winCmd := `"C:\Users\me\AppData\Local\defenseclaw\defenseclaw-gateway.exe" ` + nativeHookFlag + conn.Name()
+	encoded, err := json.Marshal(map[string]string{"command": winCmd})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// The full raw command must NOT appear in the escaped bytes (this is the
+	// failure mode the marker avoids) ...
+	if bytes.Contains(encoded, []byte(winCmd)) {
+		t.Fatalf("precondition: expected JSON to escape the windows command, but it appeared verbatim:\n%s", encoded)
+	}
+	// ... while the escaping-invariant marker IS present.
+	for _, n := range needles {
+		if !bytes.Contains(encoded, []byte(n)) {
+			t.Fatalf("windows needle %q not found in escaped config:\n%s", n, encoded)
+		}
 	}
 }

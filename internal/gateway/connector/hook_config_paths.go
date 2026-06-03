@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // HookConfigPathsForConnector returns the absolute agent config file path(s)
@@ -34,26 +35,49 @@ func HookConfigPathsForConnector(conn Connector, opts SetupOpts) []string {
 	return uniqueNonEmptyStrings(ResolvedConnectorLocations(opts, conn).HookConfigPaths)
 }
 
-// ownedHookCommandNeedles returns the exact hook command string(s) the
-// connector writes into its agent config. On Unix this is the absolute hook
-// script path under <DataDir>/hooks/; on Windows it is the native
-// `defenseclaw-gateway hook --connector <name>` invocation. These are the
-// strings the JSON/TOML/YAML patchers insert, so a substring match against
-// the live config file reliably reports whether our hook entry survives.
+// ownedHookCommandNeedles returns escaping-invariant marker string(s) that the
+// connector writes into its agent config, used for a raw-bytes substring match
+// against the live config file. See ownedHookCommandNeedlesFor for the
+// platform rationale.
 //
 // Returns nil for connectors that own no vendor hook script (openclaw,
 // zeptoclaw), keeping the self-heal guard inert for them.
 func ownedHookCommandNeedles(opts SetupOpts, conn Connector) []string {
+	return ownedHookCommandNeedlesFor(runtime.GOOS, opts, conn)
+}
+
+// ownedHookCommandNeedlesFor is the OS-parameterized core of
+// ownedHookCommandNeedles, split out so the Windows marker can be exercised by
+// tests on any host.
+//
+// The needle must survive serialization into the agent config file, because
+// OwnedHooksPresent matches it against the raw file bytes (not a decoded
+// value). That constraint differs by platform:
+//
+//   - Unix: the agent runs the bundled .sh hook, so the config stores the
+//     absolute script path under <DataDir>/hooks/. Forward-slash paths contain
+//     no characters JSON/TOML/YAML escape, so the path appears verbatim.
+//
+//   - Windows: the config stores the native invocation
+//     (`"C:\...\defenseclaw-gateway.exe" hook --connector <name>`). The
+//     absolute exe path's backslashes and the surrounding quotes ARE escaped on
+//     serialization (`\"C:\\...\\..exe\"`), so the full command would never
+//     match the raw bytes. We therefore key on `hook --connector <name>` — the
+//     same distinctive marker isNativeHookCommand recognizes — which contains
+//     no escaped characters and survives verbatim across JSON/TOML/YAML.
+func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []string {
 	owner, ok := conn.(HookScriptOwner)
 	if !ok {
 		return nil
 	}
+	if goos == "windows" {
+		return []string{nativeHookFlag + conn.Name()}
+	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	var needles []string
 	for _, name := range owner.HookScriptNames(opts) {
-		cmd := hookInvocationCommand(conn.Name(), filepath.Join(hookDir, name))
-		if cmd != "" {
-			needles = append(needles, cmd)
+		if path := filepath.Join(hookDir, name); path != "" {
+			needles = append(needles, path)
 		}
 	}
 	return needles
