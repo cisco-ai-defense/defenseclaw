@@ -895,6 +895,13 @@ type WatchConfig struct {
 	AllowListBypassScan bool `mapstructure:"allow_list_bypass_scan" yaml:"allow_list_bypass_scan"`
 	RescanEnabled       bool `mapstructure:"rescan_enabled"         yaml:"rescan_enabled"`
 	RescanIntervalMin   int  `mapstructure:"rescan_interval_min"    yaml:"rescan_interval_min"`
+	// RescanContentGated skips the scanner during a periodic re-scan when a
+	// target's content hash and scanner fingerprint are both unchanged since
+	// the stored baseline. This avoids re-running the (expensive) scanner and
+	// writing a fresh scan_results row every cycle for targets that did not
+	// change. Set to false to restore the legacy "scan every target every
+	// cycle" behavior.
+	RescanContentGated bool `mapstructure:"rescan_content_gated"   yaml:"rescan_content_gated"`
 }
 
 type InspectLLMConfig struct {
@@ -2242,6 +2249,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("watch.allow_list_bypass_scan", true)
 	viper.SetDefault("watch.rescan_enabled", true)
 	viper.SetDefault("watch.rescan_interval_min", 60)
+	viper.SetDefault("watch.rescan_content_gated", true)
 
 	viper.SetDefault("audit_sinks", []AuditSink{})
 

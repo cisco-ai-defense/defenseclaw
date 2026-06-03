@@ -218,6 +218,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Watch.RescanIntervalMin != 60 {
 		t.Errorf("expected rescan interval 60 min, got %d", cfg.Watch.RescanIntervalMin)
 	}
+	if !cfg.Watch.RescanContentGated {
+		t.Error("expected rescan content-gated enabled by default")
+	}
 	if cfg.Scanners.PluginScanner != "defenseclaw" {
 		t.Errorf("expected plugin scanner binary %q, got %q", "defenseclaw", cfg.Scanners.PluginScanner)
 	}

@@ -837,3 +837,49 @@ func TestMigrationApplyUsesTransaction(t *testing.T) {
 		t.Errorf("version 2 rows = %d, want 1", v2)
 	}
 }
+
+func TestTargetSnapshotScannerFingerprintColumn(t *testing.T) {
+	store, err := NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	ok, err := store.hasColumn("target_snapshots", "scanner_fingerprint")
+	if err != nil {
+		t.Fatalf("hasColumn(target_snapshots, scanner_fingerprint): %v", err)
+	}
+	if !ok {
+		t.Fatal("expected target_snapshots.scanner_fingerprint after migration")
+	}
+
+	// An empty fingerprint round-trips as "" (the column default).
+	if err := store.SetTargetSnapshot("skill", "/p/a", "ch", "{}", "{}", "[]", "scan-1", ""); err != nil {
+		t.Fatalf("SetTargetSnapshot: %v", err)
+	}
+	row, err := store.GetTargetSnapshot("skill", "/p/a")
+	if err != nil {
+		t.Fatalf("GetTargetSnapshot: %v", err)
+	}
+	if row.ScannerFingerprint != "" {
+		t.Errorf("ScannerFingerprint = %q, want empty", row.ScannerFingerprint)
+	}
+
+	// A non-empty fingerprint persists and is updated on upsert.
+	if err := store.SetTargetSnapshot("skill", "/p/a", "ch2", "{}", "{}", "[]", "scan-2", "fp-abc"); err != nil {
+		t.Fatalf("SetTargetSnapshot upsert: %v", err)
+	}
+	row, err = store.GetTargetSnapshot("skill", "/p/a")
+	if err != nil {
+		t.Fatalf("GetTargetSnapshot after upsert: %v", err)
+	}
+	if row.ScannerFingerprint != "fp-abc" {
+		t.Errorf("ScannerFingerprint = %q, want fp-abc", row.ScannerFingerprint)
+	}
+	if row.ScanID != "scan-2" {
+		t.Errorf("ScanID = %q, want scan-2", row.ScanID)
+	}
+}

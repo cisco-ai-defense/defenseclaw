@@ -155,6 +155,7 @@ func DefaultConfig() *Config {
 			AllowListBypassScan: true,
 			RescanEnabled:       true,
 			RescanIntervalMin:   60,
+			RescanContentGated:  true,
 		},
 		AIDiscovery: AIDiscoveryConfig{
 			Enabled:                  true,

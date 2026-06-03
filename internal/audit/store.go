@@ -1132,6 +1132,36 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// The watcher's periodic re-scan stores a baseline content hash
+		// per target. Adding the scanner_fingerprint lets the watcher
+		// invalidate that baseline when the scanner binary, ruleset, or
+		// scan-affecting config changes — so an upgraded scanner re-runs
+		// even on byte-identical content, while unchanged content + an
+		// unchanged scanner is skipped entirely.
+		description: "watcher: add scanner_fingerprint to target_snapshots for drift-gated rescans",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "target_snapshots")
+			if err != nil {
+				return err
+			}
+			if !present {
+				return nil
+			}
+			exists, err := hasColumnDB(ex, "target_snapshots", "scanner_fingerprint")
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if _, err := ex.Exec(
+					`ALTER TABLE target_snapshots ADD COLUMN scanner_fingerprint TEXT NOT NULL DEFAULT ''`,
+				); err != nil {
+					return fmt.Errorf("alter target_snapshots.scanner_fingerprint: %w", err)
+				}
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2736,23 +2766,29 @@ type SnapshotRow struct {
 	NetworkEndpoints string    `json:"network_endpoints"`
 	ScanID           string    `json:"scan_id"`
 	CapturedAt       time.Time `json:"captured_at"`
+	// ScannerFingerprint identifies the scanner binary + ruleset +
+	// scan-affecting config that produced ScanID. The watcher
+	// re-scans when it no longer matches the current fingerprint so
+	// an upgraded scanner re-evaluates byte-identical content.
+	ScannerFingerprint string `json:"scanner_fingerprint"`
 }
 
 // SetTargetSnapshot upserts a snapshot baseline for drift comparison.
-func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID string) error {
+func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, scannerFingerprint string) error {
 	id := uuid.New().String()
 	now := time.Now().UTC()
 	_, err := s.execDB(context.Background(), "audit",
-		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at, scanner_fingerprint)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(target_type, target_path) DO UPDATE SET
 		 	content_hash = excluded.content_hash,
 		 	dependency_hashes = excluded.dependency_hashes,
 		 	config_hashes = excluded.config_hashes,
 		 	network_endpoints = excluded.network_endpoints,
 		 	scan_id = excluded.scan_id,
-		 	captured_at = excluded.captured_at`,
-		id, targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, now,
+		 	captured_at = excluded.captured_at,
+		 	scanner_fingerprint = excluded.scanner_fingerprint`,
+		id, targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, now, scannerFingerprint,
 	)
 	if err != nil {
 		return fmt.Errorf("audit: set target snapshot: %w", err)
@@ -2831,10 +2867,10 @@ func (s *Store) GetTargetSnapshot(targetType, targetPath string) (*SnapshotRow, 
 	var ts string
 	err := s.scanRow(context.Background(), "get_target_snapshot",
 		s.db.QueryRowContext(context.Background(),
-			`SELECT id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at
+			`SELECT id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at, scanner_fingerprint
 		 FROM target_snapshots WHERE target_type = ? AND target_path = ?`,
 			targetType, targetPath,
-		), &r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts)
+		), &r.ID, &r.TargetType, &r.TargetPath, &r.ContentHash, &r.DependencyHashes, &r.ConfigHashes, &r.NetworkEndpoints, &r.ScanID, &ts, &r.ScannerFingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("audit: get target snapshot: %w", err)
 	}

@@ -113,6 +113,20 @@ type InstallWatcher struct {
 	policyFileMu     sync.Mutex
 	policyFileHashes map[string]string   // path → sha256 hex of file contents (policy / list YAML watch)
 	policyListSnap   map[string][]string // path → sorted rule keys for list YAML diffs
+
+	// scannerFactory resolves the scanner for an event. Defaults to
+	// scannerFor; tests inject a fake to observe scan invocations without
+	// shelling out to the real scanner binaries.
+	scannerFactory func(InstallEvent) scanner.Scanner
+}
+
+// newScanner resolves the scanner for evt via the injectable factory, falling
+// back to the config-driven scannerFor when no factory is installed.
+func (w *InstallWatcher) newScanner(evt InstallEvent) scanner.Scanner {
+	if w.scannerFactory != nil {
+		return w.scannerFactory(evt)
+	}
+	return w.scannerFor(evt)
 }
 
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
@@ -426,7 +440,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	}
 
 	// Phase 2: Scan.
-	s := w.scannerFor(evt)
+	s := w.newScanner(evt)
 	if s == nil {
 		w.recordAdmission(ctx, "scan-error", targetType)
 		res = AdmissionResult{Event: evt, Verdict: VerdictScanError, Reason: "no scanner available"}
