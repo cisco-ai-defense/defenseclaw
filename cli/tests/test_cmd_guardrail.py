@@ -552,6 +552,28 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertIn("disabled", result.output)
         self.assertIn("enabled", result.output)
 
+    def test_status_global_disable_overrides_per_connector_enabled(self):
+        # Regression: when the GLOBAL guardrail kill switch is off, no
+        # connector may render a green "enabled" line — the gateway tears
+        # every connector down, so the per-connector effective_enabled
+        # (which only tracks individual overrides) must not contradict the
+        # top-level "enabled: no". Both connectors should read as disabled
+        # with an explicit "(guardrail off)" reason.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": True, "claudecode": None}, enabled=False)
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("enabled:    no", result.output)
+        self.assertIn("Codex (codex): ", result.output)
+        self.assertIn("Claude Code (claudecode): ", result.output)
+        # The off-because-global reason is shown and NOT a bare green enabled.
+        self.assertIn("disabled (guardrail off)", result.output)
+        # Sanity: the roster must not render a standalone "enabled" state for
+        # any connector while global is off (it would be misleading).
+        for line in result.output.splitlines():
+            if "(codex):" in line or "(claudecode):" in line:
+                self.assertNotIn(": enabled ", line, msg=line)
+
 
 class PerConnectorFailModeTests(unittest.TestCase):
     """`guardrail fail-mode [open|closed] --connector X` — scoped override."""
@@ -633,6 +655,22 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(app.cfg.guardrail.hook_fail_mode, "closed")
 
+    def test_bare_show_fans_out_to_all_active_connectors(self):
+        # No value AND no --connector: the bare read MUST show EVERY active
+        # connector's effective fail mode (not just the global/active one),
+        # so a 3-connector install shows all three.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("per connector", result.output)
+        self.assertIn("(codex)", result.output)
+        self.assertIn("(claudecode)", result.output)
+        # codex carries a closed override; claudecode inherits the open global.
+        self.assertIn("closed", result.output)
+        app.cfg.save.assert_not_called()
+
 
 class HILTCommandTests(unittest.TestCase):
     """`guardrail hilt [on|off] [--min-severity X] [--connector Y]`."""
@@ -646,6 +684,20 @@ class HILTCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("min_severity", result.output)
         self.assertIn("HIGH", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_bare_show_fans_out_to_all_active_connectors(self):
+        # Bare read on a multi-connector install MUST list each active
+        # connector's effective HILT posture, not just the global default.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.hilt.enabled = True
+        app.cfg.guardrail.hilt.min_severity = "HIGH"
+        result = runner.invoke(cmd_guardrail.hilt_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("per connector", result.output)
+        self.assertIn("(codex)", result.output)
+        self.assertIn("(claudecode)", result.output)
         app.cfg.save.assert_not_called()
 
     def test_set_global_on_with_min_severity(self):
@@ -777,6 +829,22 @@ class BlockMessageCommandTests(unittest.TestCase):
         result = runner.invoke(cmd_guardrail.block_message_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("default", result.output)
+        app.cfg.save.assert_not_called()
+
+    def test_bare_show_fans_out_to_all_active_connectors(self):
+        # Bare read on a multi-connector install MUST list each active
+        # connector's effective block message, not just the global one.
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.block_message = "global msg"
+        app.cfg.guardrail.connectors["codex"].block_message = "codex msg"
+        result = runner.invoke(cmd_guardrail.block_message_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("per connector", result.output)
+        self.assertIn("(codex)", result.output)
+        self.assertIn("(claudecode)", result.output)
+        # codex shows its override; claudecode inherits the global message.
+        self.assertIn("codex msg", result.output)
         app.cfg.save.assert_not_called()
 
     def test_set_global_message(self):

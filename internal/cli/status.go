@@ -117,8 +117,8 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 	printGatewayKV("Uptime", formatDuration(uptime))
 	fmt.Println()
 
-	if mode := fetchConnectorMode(client, bind, cfg.Gateway.APIPort); mode != nil {
-		printConnectorMode(mode)
+	if modes := fetchConnectorModes(client, bind, cfg.Gateway.APIPort); len(modes) > 0 {
+		printConnectorModes(modes)
 	}
 
 	Section("Subsystems")
@@ -211,9 +211,13 @@ func printConnectorBody(c *gateway.ConnectorHealth) {
 		subBlk)
 }
 
-// friendlyConnectorName mirrors internal/tui/connector_label.go::FriendlyConnectorName
-// for the CLI text output. Kept duplicated to avoid pulling the TUI
-// package (and Bubble Tea) into the CLI binary import graph.
+// friendlyConnectorName renders a human-friendly connector label for the
+// CLI text output. The table is kept in sync with the Python CLI's
+// _FRIENDLY_CONNECTOR_NAMES (cli/defenseclaw/commands/cmd_status.py) so the
+// Go gateway status and the Python `defenseclaw status` agree on every
+// connector's display name instead of title-casing the raw id (e.g.
+// "geminicli" -> "Gemini CLI", not "Geminicli"). Duplicated rather than
+// shared to avoid pulling the TUI/Bubble Tea graph into the CLI binary.
 func friendlyConnectorName(name string) string {
 	switch strings.TrimSpace(name) {
 	case "", "openclaw":
@@ -224,6 +228,20 @@ func friendlyConnectorName(name string) string {
 		return "Claude Code"
 	case "codex":
 		return "Codex"
+	case "hermes":
+		return "Hermes"
+	case "cursor":
+		return "Cursor"
+	case "windsurf":
+		return "Windsurf"
+	case "geminicli":
+		return "Gemini CLI"
+	case "copilot":
+		return "GitHub Copilot CLI"
+	case "openhands":
+		return "OpenHands"
+	case "antigravity":
+		return "Antigravity"
 	default:
 		s := strings.TrimSpace(name)
 		if s == "" {
@@ -247,7 +265,12 @@ type connectorModeSummary struct {
 	ProxyIntercept bool     `json:"proxy_intercept"`
 }
 
-func fetchConnectorMode(client *http.Client, bind string, port int) *connectorModeSummary {
+// fetchConnectorModes returns one mode summary per active connector. It
+// prefers the gateway's plural connector_modes roster (every active
+// connector) and falls back to the singular connector_mode field for older
+// sidecars that predate the roster — so a single-connector install and an
+// N-connector install both yield a non-empty slice rendered the same way.
+func fetchConnectorModes(client *http.Client, bind string, port int) []connectorModeSummary {
 	addr := fmt.Sprintf("http://%s:%d/status", bind, port)
 	resp, err := client.Get(addr)
 	if err != nil {
@@ -258,18 +281,43 @@ func fetchConnectorMode(client *http.Client, bind string, port int) *connectorMo
 		return nil
 	}
 	var envelope struct {
-		ConnectorMode *connectorModeSummary `json:"connector_mode"`
+		ConnectorMode  *connectorModeSummary  `json:"connector_mode"`
+		ConnectorModes []connectorModeSummary `json:"connector_modes"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil
 	}
-	return envelope.ConnectorMode
+	if len(envelope.ConnectorModes) > 0 {
+		return envelope.ConnectorModes
+	}
+	if envelope.ConnectorMode != nil {
+		return []connectorModeSummary{*envelope.ConnectorMode}
+	}
+	return nil
 }
 
-func printConnectorMode(m *connectorModeSummary) {
+// printConnectorModes renders the "Connector Mode" section for EVERY active
+// connector. One connector and N connectors share the identical per-entry
+// layout (the section header appears once), so operators never reason about
+// a "single vs multi" distinction — mirroring the "Agents" roster above.
+func printConnectorModes(modes []connectorModeSummary) {
 	Section("Connector Mode")
+	for i := range modes {
+		if i > 0 {
+			fmt.Println()
+		}
+		printConnectorModeEntry(&modes[i])
+	}
+	fmt.Println()
+}
+
+func printConnectorModeEntry(m *connectorModeSummary) {
 	modeLabel := Style(fmt.Sprintf("%-18s", "Connector:"), "fg=bright_black", "bold")
-	fmt.Printf("    %s%s\n", modeLabel, m.Connector)
+	connectorName := m.Connector
+	if connectorName != "" {
+		connectorName = fmt.Sprintf("%s (%s)", friendlyConnectorName(m.Connector), m.Connector)
+	}
+	fmt.Printf("    %s%s\n", modeLabel, connectorName)
 	modeLine := Style(fmt.Sprintf("%-18s", "Mode:"), "fg=bright_black", "bold")
 	fmt.Printf("    %s%s\n", modeLine, m.Mode)
 	if len(m.Telemetry) > 0 {
@@ -282,7 +330,6 @@ func printConnectorMode(m *connectorModeSummary) {
 	}
 	pxLabel := Style(fmt.Sprintf("%-18s", "Proxy intercept:"), "fg=bright_black", "bold")
 	fmt.Printf("    %s%s\n", pxLabel, intercept)
-	fmt.Println()
 }
 
 func printSubsystem(name string, h gateway.SubsystemHealth) {

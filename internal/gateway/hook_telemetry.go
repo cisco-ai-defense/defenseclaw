@@ -134,11 +134,20 @@ func (a *APIServer) logConnectorHookAuditEnvelope(ctx context.Context, env HookA
 	})
 }
 
-func (a *APIServer) logAssetPolicyAudit(ctx context.Context, target, details string) {
+func (a *APIServer) logAssetPolicyAudit(ctx context.Context, connector, target, details string) {
 	if a.logger == nil {
 		return
 	}
-	_ = a.logger.LogActionCtx(ctx, string(audit.ActionAssetPolicy), target, details)
+	// Stamp the connector onto the dedicated column (and let LogEventCtx
+	// fill the rest of the correlation envelope) so asset-policy decisions
+	// are filterable per connector — previously the connector lived only
+	// inside the free-form details string and never reached Event.Connector.
+	_ = a.logger.LogEventCtx(ctx, audit.Event{
+		Action:    string(audit.ActionAssetPolicy),
+		Target:    target,
+		Details:   details,
+		Connector: connector,
+	})
 }
 
 // enrichConnectorHookIdentitySpan stamps the per-connector forensic

@@ -46,7 +46,7 @@ func init() {
 	auditExportCmd.Flags().StringVarP(&auditExportOut, "output", "o", "-", "Output file path, or '-' for stdout")
 	auditExportCmd.Flags().BoolVar(&auditExportIncludeActivity, "include-activity", false, "Append activity_events payloads (activity-event.json) after audit lines")
 	auditExportCmd.Flags().IntVar(&auditExportLimit, "limit", 0, "Max audit rows (0 = unlimited)")
-	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches structured.connector or the details connector= field). Activity rows are omitted when set.")
+	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches the authoritative connector column, then structured.connector, then the details connector= field). Activity rows are omitted when set.")
 
 	auditCmd.AddCommand(auditExportCmd)
 	rootCmd.AddCommand(auditCmd)

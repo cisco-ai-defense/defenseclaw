@@ -2620,7 +2620,72 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 					t.Errorf("telemetry[%d] = %v, want %s", i, tel[i], want)
 				}
 			}
+
+			// connector_modes is the plural per-connector roster. On a
+			// single-connector install it must still be present with exactly
+			// one entry mirroring the singular connector_mode, so consumers
+			// can always read the fan-out field.
+			modes, ok := result["connector_modes"].([]interface{})
+			if !ok || len(modes) == 0 {
+				t.Fatalf("connector_modes missing or empty: %T %v", result["connector_modes"], result["connector_modes"])
+			}
+			first, _ := modes[0].(map[string]interface{})
+			if first["connector"] != c.connector {
+				t.Errorf("connector_modes[0].connector = %v, want %s", first["connector"], c.connector)
+			}
+			if first["mode"] != c.wantMode {
+				t.Errorf("connector_modes[0].mode = %v, want %s", first["mode"], c.wantMode)
+			}
 		})
+	}
+}
+
+// TestAPIStatusConnectorModesFansOut is the multi-connector counterpart:
+// /status MUST emit one connector_modes entry per active connector (from
+// guardrail.connectors), each with its OWN mode — not just the primary's.
+// This is the API-contract guard behind the gateway-status "Connector Mode"
+// fan-out so a 3-connector install never collapses to a single posture.
+func TestAPIStatusConnectorModesFansOut(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":    {},
+		"openclaw": {},
+	}
+
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	api.handleStatus(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	modes, ok := result["connector_modes"].([]interface{})
+	if !ok {
+		t.Fatalf("connector_modes missing or wrong type: %T", result["connector_modes"])
+	}
+	if len(modes) != 2 {
+		t.Fatalf("connector_modes len = %d, want 2 (one per active connector): %v", len(modes), modes)
+	}
+	got := map[string]string{}
+	for _, m := range modes {
+		mm, _ := m.(map[string]interface{})
+		name, _ := mm["connector"].(string)
+		mode, _ := mm["mode"].(string)
+		got[name] = mode
+	}
+	// codex is observability-only; openclaw always enforces (guardrail) —
+	// the two connectors carry DIFFERENT modes, so a single summary would
+	// have to drop one. The roster must preserve both.
+	if got["codex"] != "observability" {
+		t.Errorf("codex mode = %q, want observability (got roster %v)", got["codex"], got)
+	}
+	if got["openclaw"] != "guardrail" {
+		t.Errorf("openclaw mode = %q, want guardrail (got roster %v)", got["openclaw"], got)
 	}
 }
 

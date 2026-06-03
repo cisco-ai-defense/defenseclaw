@@ -1746,6 +1746,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		return err
 	}
 
+	hookGuards := s.startMultiHookConfigGuards(ctx, registry, succeeded, apiToken, proxyAddr, apiAddr)
+	defer stopHookConfigGuards(hookGuards)
+
 	// Health: register every connector that came up so each appears in the
 	// roster with its own live counters, then mark the first (sorted) as the
 	// primary surfaced in the back-compat singular Connector field.
@@ -1768,6 +1771,53 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 
 	<-ctx.Done()
 	return nil
+}
+
+// startMultiHookConfigGuards starts one hook self-heal guard per connector
+// that successfully came up in multi-connector mode. The single-connector path
+// owns its guard through GuardrailProxy; multi-connector mode has no proxy, so
+// the sidecar owns these guards directly.
+func (s *Sidecar) startMultiHookConfigGuards(ctx context.Context, registry *connector.Registry, connectorNames []string, apiToken, proxyAddr, apiAddr string) []*HookConfigGuard {
+	if s == nil || s.cfg == nil || registry == nil || !s.cfg.Guardrail.Enabled || !s.cfg.Guardrail.HookSelfHeal {
+		return nil
+	}
+	debounce := time.Duration(s.cfg.Guardrail.HookSelfHealDebounceMs) * time.Millisecond
+	guards := make([]*HookConfigGuard, 0, len(connectorNames))
+	for _, name := range connectorNames {
+		conn, ok := registry.Get(name)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "[guardrail] hook self-heal: connector %s not found in registry, skipping guard\n", name)
+			continue
+		}
+		opts := s.connectorSetupOpts(conn, apiToken, proxyAddr, apiAddr)
+		guard := NewHookConfigGuard(s.logger, s.otel, debounce)
+		guard.SetHealNotifier(s.notifyHookHealed)
+		guard.Start(ctx, conn, opts)
+		guards = append(guards, guard)
+	}
+	return guards
+}
+
+func stopHookConfigGuards(guards []*HookConfigGuard) {
+	for _, guard := range guards {
+		guard.Stop()
+	}
+}
+
+// notifyHookHealed fans a successful multi-connector hook re-install out to
+// webhooks. The durable audit row and OTel metric are emitted by the guard.
+func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
+	if s == nil || s.webhooks == nil {
+		return
+	}
+	s.webhooks.Dispatch(audit.Event{
+		Timestamp: time.Now().UTC(),
+		Action:    string(audit.ActionConnectorHookRepaired),
+		Target:    connectorName,
+		Actor:     "defenseclaw-hook-guard",
+		Details:   fmt.Sprintf("re-installed connector hook config after manual removal: %s", strings.Join(paths, ", ")),
+		Severity:  "HIGH",
+	})
 }
 
 // setupConnectorsIsolated runs setupOneConnector for each connector in turn

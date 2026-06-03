@@ -330,7 +330,9 @@ func (h *SidecarHealth) RecordToolInspectionFor(name string) { h.statsFor(name).
 func (h *SidecarHealth) RecordToolBlockFor(name string) { h.statsFor(name).toolBlocks.Add(1) }
 
 // RecordSubprocessBlockFor increments the subprocess-block counter for a connector.
-func (h *SidecarHealth) RecordSubprocessBlockFor(name string) { h.statsFor(name).subprocessBlocks.Add(1) }
+func (h *SidecarHealth) RecordSubprocessBlockFor(name string) {
+	h.statsFor(name).subprocessBlocks.Add(1)
+}
 
 // Back-compat no-arg variants route to the primary connector. Prefer the
 // *For(name) variants from hook handlers so counters stay per-connector.

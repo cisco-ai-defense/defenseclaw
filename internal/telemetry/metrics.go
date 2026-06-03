@@ -1174,10 +1174,15 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	return &ms, nil
 }
 
-// RecordScan records scan-related metrics.
-func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict string, durationMs float64, findings map[string]int) {
+// RecordScan records scan-related metrics. connector is the originating
+// connector when the scan ran in a connector-scoped context; "" records
+// connector="unknown" on the scan-findings total so the label stays present.
+func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict string, durationMs float64, findings map[string]int, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 
 	baseAttrs := metric.WithAttributes(
@@ -1198,6 +1203,7 @@ func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict 
 				attribute.String("scanner", scanner),
 				attribute.String("target_type", targetType),
 				attribute.String("severity", severity),
+				attribute.String("connector", connector),
 			))
 			p.metrics.scanFindingsGauge.Add(ctx, int64(count), metric.WithAttributes(
 				attribute.String("target_type", targetType),
@@ -1326,14 +1332,23 @@ func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, provide
 }
 
 // RecordAlert records a runtime alert metric.
-func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source string) {
+// RecordAlert records a runtime/guardrail alert. connector is the
+// originating connector when known (e.g. derived from a "<connector>:<role>"
+// guardrail scanner); pass "" for genuinely global alerts (network-egress,
+// process runtime) — it normalizes to "unknown" so the label is present on
+// every series and connector-scoped dashboard selectors still match.
+func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.alertCount.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("alert.type", alertType),
 		attribute.String("alert.severity", severity),
 		attribute.String("alert.source", source),
+		attribute.String("connector", connector),
 	))
 }
 
@@ -1454,9 +1469,28 @@ func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, se
 	}
 	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("tool", NormalizeMetricTextLabel(tool)),
+		attribute.String("connector", connectorFromInspectTool(tool)),
 		attribute.String("action", normalizeHookActionMetricLabel(action)),
 		attribute.String("severity", severity),
 	))
+}
+
+// connectorFromInspectTool derives the connector identity from the composite
+// inspect `tool` label. Hook paths build it as "<connector>:<event>" (see
+// hookMetricToolLabel), so the prefix before the first colon is the
+// connector — the exact convention dashboards already encode as
+// `tool=~"$connector:.*"`. Exposing it as a first-class `connector`
+// dimension lets PromQL and (crucially) SignalFlow group/split by connector
+// without a string-split, which SignalFlow cannot express. Bare tool labels
+// with no colon (e.g. a passthrough "Bash") resolve to "unknown" to keep the
+// label present on every series so "All"/regex selectors still match.
+func connectorFromInspectTool(tool string) string {
+	if c, _, found := strings.Cut(tool, ":"); found {
+		if c = strings.TrimSpace(c); c != "" {
+			return c
+		}
+	}
+	return "unknown"
 }
 
 // RecordInspectLatency records tool/message inspect latency.
@@ -1466,6 +1500,7 @@ func (p *Provider) RecordInspectLatency(ctx context.Context, tool string, durati
 	}
 	p.metrics.inspectLatency.Record(ctx, durationMs, metric.WithAttributes(
 		attribute.String("tool", NormalizeMetricTextLabel(tool)),
+		attribute.String("connector", connectorFromInspectTool(tool)),
 	))
 }
 
@@ -1939,14 +1974,18 @@ func (p *Provider) RecordSinkFailure(sinkKind, sinkName, reason string) {
 // can rank hot rules per scanner/severity. The body is small
 // enough that scanner emit loops can call this on the hot path
 // without measurable cost.
-func (p *Provider) RecordScanFindingByRule(ctx context.Context, scanner, ruleID, severity string) {
+func (p *Provider) RecordScanFindingByRule(ctx context.Context, scanner, ruleID, severity, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.scanFindingsByRule.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("scanner", scanner),
 		attribute.String("rule_id", ruleID),
 		attribute.String("severity", severity),
+		attribute.String("connector", connector),
 	))
 }
 

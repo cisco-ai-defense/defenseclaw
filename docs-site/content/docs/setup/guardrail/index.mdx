@@ -430,7 +430,7 @@ defenseclaw status
 defenseclaw alerts --limit 25
 ```
 
-`doctor` prints the full health report. `status` shows the resolved connector + enforcement flags (it has no flags of its own — it always reports the active connector from config and `/health`). `alerts` lists recent decisions as a table; pass `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
+`doctor` prints the full health report. `status` shows enforcement flags plus a per-connector block for every active connector (it has no flags of its own — it always reports the full Agents roster from config and `/health`, identical layout whether one or N connectors are wired). `alerts` lists recent decisions as a table; pass `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
 
 ## Interactive vs non-interactive — every command
 

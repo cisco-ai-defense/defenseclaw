@@ -319,11 +319,17 @@ def status_cmd(app: AppContext) -> None:
             if hasattr(gc, "effective_enabled")
             else True
         )
-        state = (
-            ux._style("enabled", fg="green")
-            if c_enabled
-            else ux._style("disabled", fg="yellow")
-        )
+        # A connector only enforces when the GLOBAL guardrail is on AND it
+        # has not been individually disabled. Folding the global kill switch
+        # in here stops the roster from rendering a green "enabled" connector
+        # while the top-level line (and the gateway, which tears every
+        # connector down when guardrail.enabled is false) report it off.
+        if not gc.enabled:
+            state = ux._style("disabled (guardrail off)", fg="yellow")
+        elif c_enabled:
+            state = ux._style("enabled", fg="green")
+        else:
+            state = ux._style("disabled", fg="yellow")
         cfm_display = ux._style(cfm, fg="yellow") if cfm == "closed" else cfm
         click.echo(
             f"      - {_connector_label(name)} ({name}): "
@@ -768,6 +774,22 @@ def fail_mode_cmd(
     if mode is None:
         click.echo()
         click.echo(f"  {ux.bold('guardrail.hook_fail_mode:')} {ux.accent(current)}")
+        # Per-connector effective fail mode: one line per active connector so
+        # a 3-connector install shows all three (and a single-connector install
+        # shows exactly that one). Mirrors `guardrail status`; the global value
+        # above is the fallback each connector inherits unless it carries a
+        # `--connector` override.
+        _actives = _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        click.echo()
+        click.echo(f"  {ux._style('per connector:', fg='bright_black', bold=True)}")
+        for _name in _actives:
+            _eff = (
+                gc.effective_hook_fail_mode(_name)
+                if hasattr(gc, "effective_hook_fail_mode")
+                else current
+            )
+            _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
+            click.echo(f"      - {_connector_label(_name)} ({_name}): {_eff_disp}")
         click.echo()
         if current == "open":
             ux.subhead(
@@ -1077,6 +1099,25 @@ def hilt_cmd(
         click.echo(
             f"  {ux.bold('guardrail.hilt.min_severity:')} {ux.accent(cur_min)}"
         )
+        # Per-connector effective HILT: one block per active connector so a
+        # 3-connector install shows all three (a single-connector install
+        # shows exactly that one). The global values above are what each
+        # connector inherits unless it carries a `--connector` override.
+        _actives = _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        click.echo()
+        click.echo(f"  {ux._style('per connector:', fg='bright_black', bold=True)}")
+        for _name in _actives:
+            _eff = (
+                gc.effective_hilt(_name)
+                if hasattr(gc, "effective_hilt")
+                else gc.hilt
+            )
+            _e_enabled = bool(getattr(_eff, "enabled", False))
+            _e_min = (getattr(_eff, "min_severity", "") or "HIGH").upper()
+            click.echo(
+                f"      - {_connector_label(_name)} ({_name}): "
+                f"enabled={str(_e_enabled).lower()} min_severity={_e_min}"
+            )
         click.echo()
         ux.subhead(
             "CRITICAL findings always block; HILT confirms risky confirmable "
@@ -1347,6 +1388,21 @@ def block_message_cmd(
             click.echo(
                 f"  {ux.bold('guardrail.block_message:')} {ux.dim('(built-in default)')}"
             )
+        # Per-connector effective block message: one line per active connector
+        # so a 3-connector install shows all three (a single-connector install
+        # shows exactly that one). The global value above is what each connector
+        # inherits unless it carries a `--connector` override.
+        _actives = _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        click.echo()
+        click.echo(f"  {ux._style('per connector:', fg='bright_black', bold=True)}")
+        for _name in _actives:
+            _eff = (
+                gc.effective_block_message(_name)
+                if hasattr(gc, "effective_block_message")
+                else current
+            )
+            _shown = ux.accent(_eff) if _eff else ux.dim("(built-in default)")
+            click.echo(f"      - {_connector_label(_name)} ({_name}): {_shown}")
         click.echo()
         return
 

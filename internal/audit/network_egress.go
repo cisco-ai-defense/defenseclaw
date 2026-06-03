@@ -202,7 +202,9 @@ func (l *Logger) LogNetworkEgress(ctx context.Context, e NetworkEgressEvent) err
 
 	// Emit OTel alert counter.
 	if otel != nil {
-		otel.RecordAlert(ctx, "network-egress-blocked", "HIGH", "network-policy")
+		// Egress enforcement is a gateway-global control, not attributable
+		// to one connector; record connector="unknown".
+		otel.RecordAlert(ctx, "network-egress-blocked", "HIGH", "network-policy", "")
 	}
 
 	return nil

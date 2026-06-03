@@ -222,7 +222,7 @@ func TestEmitScanResult_RedactsFindingDescriptionAndLocation(t *testing.T) {
 		},
 	}
 
-	p.EmitScanResult(result, "scan-test", "repo", "blocked")
+	p.EmitScanResult(result, "scan-test", "repo", "blocked", "codex")
 
 	recs := exp.snapshot()
 	if len(recs) < 2 {

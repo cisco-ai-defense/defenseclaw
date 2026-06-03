@@ -3822,6 +3822,20 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 	}
 	details = appendRawTelemetryFields(details, rawFields...)
 
+	// Stamp the proxy's connector onto the request envelope so every
+	// ctx-aware audit write below (the LogActionCtx verdict row and the
+	// ApplyEnvelope store twin) carries connector attribution. MergeEnvelope
+	// preserves all the dimensions the CorrelationMiddleware already
+	// stamped and only fills in the connector. Without this the
+	// LogActionCtx verdict row reached SQLite/sinks with an empty
+	// connector in a multi-connector install.
+	if name := p.connectorName(); name != "" {
+		ctx = audit.ContextWithEnvelope(ctx, audit.MergeEnvelope(
+			audit.CorrelationEnvelope{Connector: name},
+			audit.EnvelopeFromContext(ctx),
+		))
+	}
+
 	if p.logger != nil {
 		// v7: route the verdict audit row through the context-aware
 		// path so every envelope dimension the CorrelationMiddleware

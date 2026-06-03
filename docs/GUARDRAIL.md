@@ -304,14 +304,19 @@ hook-only. Operators manage these with `defenseclaw setup <connector>`
 (choosing **Add**) and the per-connector CLI:
 
 ```bash
-defenseclaw guardrail status     --connector codex
+defenseclaw guardrail status                      # read-only; per-connector blocks for ALL actives (no --connector flag)
 defenseclaw guardrail fail-mode  closed --connector codex
 defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
 defenseclaw guardrail block-message "Codex policy blocked this" --connector codex
 defenseclaw guardrail disable --connector codex   # scoped kill switch; `enable` restores
 ```
 
-Omit `--connector` to operate on the global default. The egress firewall is
+Omit `--connector` on the mutating verbs to operate on the global default;
+`guardrail status` is read-only and always fans out to every active connector.
+The plural `connector_modes` array on the gateway `/status` endpoint exposes the
+same per-connector view to API clients (one entry per active connector with
+`connector`, `mode`, `telemetry`, `proxy_intercept`), alongside the singular
+back-compat `connector_mode` for the active connector. The egress firewall is
 **not** part of this per-connector surface — it stays one host-wide ruleset
 (see `docs/ARCHITECTURE.md` → Firewall scope). Full operator how-to lives in
 the docs site under Setup → Multi-connector.

@@ -96,10 +96,16 @@ func (b *auditBridge) EmitAudit(e audit.Event) {
 		AgentName:         e.AgentName,
 		AgentInstanceID:   e.AgentInstanceID,
 		SidecarInstanceID: e.SidecarInstanceID,
-		PolicyID:          e.PolicyID,
-		DestinationApp:    e.DestinationApp,
-		ToolName:          e.ToolName,
-		ToolID:            e.ToolID,
+		// Carry connector attribution onto the bridged lifecycle row so
+		// gateway.jsonl (and anything tailing it) can filter bridged
+		// audit twins by connector in a multi-connector install — without
+		// this the JSONL bridge silently dropped the connector the audit
+		// Event already carried.
+		Connector:      e.Connector,
+		PolicyID:       e.PolicyID,
+		DestinationApp: e.DestinationApp,
+		ToolName:       e.ToolName,
+		ToolID:         e.ToolID,
 		Lifecycle: &gatewaylog.LifecyclePayload{
 			Subsystem:  subsystemForAction(e.Action),
 			Transition: transitionForAction(e.Action),

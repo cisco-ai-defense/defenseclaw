@@ -348,6 +348,7 @@ func TestAuditBridge_ForwardsV6CorrelationFields(t *testing.T) {
 		DestinationApp:  "mcp:github",
 		ToolName:        "github.create_pr",
 		ToolID:          "call_abc123",
+		Connector:       "codex",
 	})
 	_ = w.Close()
 
@@ -370,6 +371,9 @@ func TestAuditBridge_ForwardsV6CorrelationFields(t *testing.T) {
 		{"destination_app", got.DestinationApp, "mcp:github"},
 		{"tool_name", got.ToolName, "github.create_pr"},
 		{"tool_id", got.ToolID, "call_abc123"},
+		// Connector attribution must survive the bridge so gateway.jsonl
+		// twins are filterable per connector in a multi-connector install.
+		{"connector", got.Connector, "codex"},
 	}
 	for _, tc := range cases {
 		if tc.got != tc.want {

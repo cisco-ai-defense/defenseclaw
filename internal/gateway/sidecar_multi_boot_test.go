@@ -182,6 +182,43 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	}
 }
 
+func TestStartMultiHookConfigGuards_StartsOnePerSuccessfulConnector(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Enabled = true
+	s.cfg.Guardrail.HookSelfHeal = true
+	s.cfg.Guardrail.HookSelfHealDebounceMs = 1
+	reg := connector.NewRegistry()
+	reg.RegisterBuiltin(&bootStubConnector{stubConnector: stubConnector{name: "codex"}})
+	reg.RegisterBuiltin(&bootStubConnector{stubConnector: stubConnector{name: "cursor"}})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guards := s.startMultiHookConfigGuards(ctx, reg, []string{"codex", "cursor"}, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	defer stopHookConfigGuards(guards)
+
+	if len(guards) != 2 {
+		t.Fatalf("guards=%d, want 2", len(guards))
+	}
+	got := []string{guards[0].conn.Name(), guards[1].conn.Name()}
+	want := []string{"codex", "cursor"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("guard connectors=%v, want %v", got, want)
+	}
+}
+
+func TestStartMultiHookConfigGuards_DisabledSelfHealStartsNone(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Enabled = true
+	s.cfg.Guardrail.HookSelfHeal = false
+	reg := connector.NewRegistry()
+	reg.RegisterBuiltin(&bootStubConnector{stubConnector: stubConnector{name: "codex"}})
+
+	guards := s.startMultiHookConfigGuards(context.Background(), reg, []string{"codex"}, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	if len(guards) != 0 {
+		t.Fatalf("guards=%d, want 0", len(guards))
+	}
+}
+
 // TestRunGuardrailMulti_FailFastProxyGuard verifies that a proxy-binding
 // connector in a multi-connector set aborts boot with a clear error before any
 // connector is set up. Multi-connector mode is hook-only: a single process can

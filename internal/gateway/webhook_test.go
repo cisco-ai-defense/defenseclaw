@@ -133,6 +133,81 @@ func TestFormatGenericPayload(t *testing.T) {
 	}
 }
 
+// TestFormatPayloads_IncludeConnector pins multi-connector attribution on
+// outbound webhook alerts: when the audit event carries a connector, every
+// payload formatter must surface it so operators can route/triage per
+// connector. Single-connector events (empty Connector) keep their original
+// shape — asserted by the generic-payload omission check below.
+func TestFormatPayloads_IncludeConnector(t *testing.T) {
+	evt := testEvent()
+	evt.Connector = "codex"
+
+	t.Run("generic", func(t *testing.T) {
+		payload, err := formatGenericPayload(evt)
+		if err != nil {
+			t.Fatalf("formatGenericPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		event := m["event"].(map[string]interface{})
+		if event["connector"] != "codex" {
+			t.Errorf("generic payload connector=%v, want codex", event["connector"])
+		}
+	})
+
+	t.Run("generic_omits_when_empty", func(t *testing.T) {
+		payload, err := formatGenericPayload(testEvent()) // no connector
+		if err != nil {
+			t.Fatalf("formatGenericPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		event := m["event"].(map[string]interface{})
+		if _, present := event["connector"]; present {
+			t.Errorf("connector key should be omitted when unset, got %v", event["connector"])
+		}
+	})
+
+	t.Run("slack", func(t *testing.T) {
+		payload, err := formatSlackPayload(evt)
+		if err != nil {
+			t.Fatalf("formatSlackPayload error: %v", err)
+		}
+		if !strings.Contains(string(payload), "codex") {
+			t.Errorf("slack payload missing connector: %s", payload)
+		}
+	})
+
+	t.Run("pagerduty", func(t *testing.T) {
+		payload, err := formatPagerDutyPayload(evt, "rk")
+		if err != nil {
+			t.Fatalf("formatPagerDutyPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		cd := m["payload"].(map[string]interface{})["custom_details"].(map[string]interface{})
+		if cd["connector"] != "codex" {
+			t.Errorf("pagerduty custom_details.connector=%v, want codex", cd["connector"])
+		}
+	})
+
+	t.Run("webex", func(t *testing.T) {
+		payload, err := formatWebexPayload(evt, "")
+		if err != nil {
+			t.Fatalf("formatWebexPayload error: %v", err)
+		}
+		if !strings.Contains(string(payload), "codex") {
+			t.Errorf("webex payload missing connector: %s", payload)
+		}
+	})
+}
+
 func TestSeverityFiltering(t *testing.T) {
 	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
 	tests := []struct {

@@ -310,13 +310,28 @@ def _check_config(cfg, r: _DoctorResult) -> None:
 
 def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
     guardrail = getattr(cfg, "guardrail", None)
+    # Resolve the connector's EFFECTIVE hilt + mode (per-connector override >
+    # global default) so a multi-connector install reports each connector's
+    # own human-approval posture, not just the primary's. Falls back to the
+    # global block for older configs without the effective_* resolvers.
     hilt = getattr(guardrail, "hilt", None)
+    mode_src = getattr(guardrail, "mode", "") or "observe"
+    if guardrail is not None and hasattr(guardrail, "effective_hilt"):
+        try:
+            hilt = guardrail.effective_hilt(connector)
+        except Exception:  # noqa: BLE001 — keep the global hilt block.
+            pass
+    if guardrail is not None and hasattr(guardrail, "effective_mode"):
+        try:
+            mode_src = guardrail.effective_mode(connector) or mode_src
+        except Exception:  # noqa: BLE001 — keep the global mode.
+            pass
     if not bool(getattr(hilt, "enabled", False)):
         _emit("pass", "Human approval", "disabled (default)", r=r)
         return
 
     min_sev = (getattr(hilt, "min_severity", "") or "HIGH").upper()
-    mode = (getattr(guardrail, "mode", "") or "observe").lower()
+    mode = mode_src.lower()
     if mode != "action":
         _emit("warn", "Human approval", f"enabled at {min_sev}, but guardrail.mode is observe", r=r)
         return
@@ -2381,7 +2396,11 @@ def doctor(
     for _conn in _hook_connectors:
         with _doctor_label_suffix(f"[{_conn}]" if _multi_hooks else ""):
             _check_connector_hooks(cfg, _conn, r)
-    _check_hilt_support(cfg, active_connector, r)
+            # Human-approval (HILT) support is per-connector: each connector
+            # has a different native ask surface AND may carry its own hilt
+            # override, so run it for EVERY active connector (tagged like the
+            # hook rows) instead of only the primary.
+            _check_hilt_support(cfg, _conn, r)
     _check_guardrail_proxy(cfg, r)
     if not json_out:
         _doctor_subsection("Credentials")

@@ -127,6 +127,8 @@
             "guardrail-disable",
             "guardrail-enable",
             "guardrail-fail-mode",
+            "guardrail-hilt",
+            "guardrail-block-message",
             "llm-judge-response",
             "inspect-tool-confirm",
             "inspect-tool-block",

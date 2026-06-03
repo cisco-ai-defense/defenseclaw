@@ -814,6 +814,16 @@ locals {
         A = histogram('defenseclaw.inspect.latency').percentile(pct=95).publish(label='p95 inspect ms')
       EOT
     }
+    inspections_by_connector = {
+      name        = "Inspect evaluations by connector"
+      description = "Guardrail inspect-evaluation rate grouped by connector. defenseclaw.inspect.evaluations now carries a first-class 'connector' dimension (alongside the composite tool=<connector>:<event>), so SignalFlow can group by connector directly without a string-split. Connector-agnostic evaluations record connector='unknown'. Respects the dashboard's connector filter variable."
+      plot_type   = "ColumnChart"
+      stacked     = true
+      axis_label  = "inspections / min"
+      program     = <<-EOT
+        A = data('defenseclaw.inspect.evaluations', rollup='rate').sum(by=['connector']).scale(60).publish(label='Inspections / min')
+      EOT
+    }
     audit_events_by_action = {
       name        = "Audit Events by Action"
       description = "All audit events grouped by action type - auto-discovers new event types as they appear."
@@ -1447,6 +1457,7 @@ locals {
     guardrail_evaluations_by_action = "guardrail.action_taken"
     inspections_by_tool             = "tool"
     inspections_by_severity         = "severity"
+    inspections_by_connector        = "connector"
     blocked_inspections_by_tool     = "tool"
     alert_inspections_by_tool       = "tool"
     audit_events_by_action          = "action"
@@ -1604,6 +1615,7 @@ locals {
       { type = "time", key = "genai_tokens_by_agent_type", row = 3, column = 0, width = 4, height = 2 },
       { type = "time", key = "llm_events_by_type", row = 3, column = 4, width = 4, height = 2 },
       { type = "table", key = "verdict_breakdown", row = 3, column = 8, width = 4, height = 2 },
+      { type = "time", key = "inspections_by_connector", row = 5, column = 0, width = 4, height = 2 },
     ]
     guardrail_inspection = [
       { type = "single", key = "guardrail_total_evaluations", row = 0, column = 0, width = 2, height = 1 },
@@ -1620,6 +1632,7 @@ locals {
       { type = "time", key = "audit_events_by_action", row = 3, column = 8, width = 4, height = 2 },
       { type = "time", key = "guardrail_latency_p95", row = 5, column = 0, width = 6, height = 2 },
       { type = "time", key = "inspect_latency_p95", row = 5, column = 6, width = 6, height = 2 },
+      { type = "time", key = "inspections_by_connector", row = 7, column = 0, width = 6, height = 2 },
     ]
     connector_ingest = [
       { type = "single", key = "connector_total_otel_requests", row = 0, column = 0, width = 3, height = 1 },

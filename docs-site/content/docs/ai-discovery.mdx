@@ -233,6 +233,10 @@ defenseclaw aibom scan --json
 
 For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each category (skills, plugins, MCP, agents+config, models, memory) and merges the results. For non-OpenClaw connectors it falls back to filesystem inventory.
 
+<Callout type="info">
+On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
+</Callout>
+
 The output is a custom JSON document with **per-item provenance** stamped by `stamp_aibom_inventory`:
 
 ```json title="defenseclaw aibom scan --json (excerpt)"

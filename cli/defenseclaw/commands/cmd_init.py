@@ -28,9 +28,7 @@ import subprocess
 
 import click
 
-from defenseclaw import ux
-from defenseclaw import connector_paths
-from defenseclaw.connector_paths import KNOWN_CONNECTORS
+from defenseclaw import connector_paths, ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import (
@@ -398,7 +396,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"    {ux.accent('defenseclaw doctor')}           " + ux.dim("Verify connectivity and credentials"))
     click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
     click.echo(f"    {ux.accent('defenseclaw mcp scan --all')}   " + ux.dim("Scan configured MCP servers"))
-    click.echo(f"    {ux.accent('defenseclaw setup <connector>')} " + ux.dim("Add another agent (codex, claudecode, …)"))
+    click.echo(f"    {ux.accent('defenseclaw setup <connector>')} " + ux.dim("Add another agent (codex, claudecode)"))
 
     store.close()
 

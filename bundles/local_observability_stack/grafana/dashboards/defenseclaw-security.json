@@ -101,7 +101,7 @@
       "title": "Verdicts (1h)",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", action=~\"$action\", severity=~\"$severity\"}[1h])) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(increase(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])) or vector(0)", "refId": "A"}],
       "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "colorMode": "value"}
     },
     {
@@ -109,7 +109,7 @@
       "title": "Block rate (1h)",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 4, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.05}, {"color": "red", "value": 0.25}]}}}
     },
     {
@@ -118,7 +118,7 @@
       "description": "Fraction of verdicts requesting human approval.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 8, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit"}}
     },
     {
@@ -126,7 +126,7 @@
       "title": "Warn+Alert rate (1h)",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total[1h])), 0.0001) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=~\"warn|alert\", tool=~\"$connector:.*\"}[1h])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[1h])), 0.0001) or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "percentunit"}}
     },
     {
@@ -135,7 +135,7 @@
       "description": "95th percentile guardrail evaluation latency across all hook events.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 16, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket[5m])) by (le)) or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[5m])) by (le)) or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ms", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 50}, {"color": "red", "value": 200}]}}}
     },
     {
@@ -144,7 +144,7 @@
       "description": "Runtime security alerts fired in the last 5 minutes.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 20, "y": 1, "w": 4, "h": 4},
-      "targets": [{"expr": "sum(rate(defenseclaw_alert_count_total[5m])) * 60 or vector(0)", "refId": "A"}],
+      "targets": [{"expr": "sum(rate(defenseclaw_alert_count_total{connector=~\"$connector\"}[5m])) * 60 or vector(0)", "refId": "A"}],
       "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 1}, {"color": "red", "value": 10}]}}}
     },
 
@@ -156,7 +156,7 @@
       "description": "Total verdicts (1h) for each (hook event, action) pair. Long bars on action=block show where traffic is being denied.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 6, "w": 24, "h": 8},
-      "targets": [{"expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", action=~\"$action\", severity=~\"$severity\"}[1h])))", "instant": true, "format": "time_series", "legendFormat": "{{tool}} -> {{action}}", "refId": "A"}],
+      "targets": [{"expr": "sort_desc(sum by (tool, action) (increase(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", action=~\"$action\", severity=~\"$severity\"}[1h])))", "instant": true, "format": "time_series", "legendFormat": "{{tool}} -> {{action}}", "refId": "A"}],
       "options": {"displayMode": "gradient", "valueMode": "color", "showUnfilled": true, "orientation": "horizontal"}
     },
     {
@@ -164,7 +164,7 @@
       "title": "Action mix over time (stacked)",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 14, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", severity=~\"$severity\"}[$__rate_interval]))", "legendFormat": "{{action}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", severity=~\"$severity\"}[$__rate_interval]))", "legendFormat": "{{action}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
     },
     {
@@ -172,7 +172,7 @@
       "title": "Verdicts by hook event (stacked)",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 14, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{action=~\"$action\", severity=~\"$severity\"}[$__rate_interval]))", "legendFormat": "{{tool}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (tool) (rate(defenseclaw_inspect_evaluations_total{action=~\"$action\", severity=~\"$severity\", tool=~\"$connector:.*\"}[$__rate_interval]))", "legendFormat": "{{tool}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
     },
 
@@ -183,7 +183,7 @@
       "title": "Verdicts by severity",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", action=~\"$action\"}[$__rate_interval]))", "legendFormat": "{{severity}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$stage\", tool=~\"$connector:.*\", action=~\"$action\"}[$__rate_interval]))", "legendFormat": "{{severity}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
     },
     {
@@ -192,7 +192,7 @@
       "description": "Evaluations that resulted in alert/block/confirm, broken by which hook event triggered them.",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 23, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (tool, action) (rate(defenseclaw_inspect_evaluations_total{action!=\"allow\"}[$__rate_interval]))", "legendFormat": "{{tool}} -> {{action}}", "refId": "A"}],
+      "targets": [{"expr": "sum by (tool, action) (rate(defenseclaw_inspect_evaluations_total{action!=\"allow\", tool=~\"$connector:.*\"}[$__rate_interval]))", "legendFormat": "{{tool}} -> {{action}}", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "ops", "custom": {"stacking": {"mode": "normal"}, "fillOpacity": 25}}}
     },
 
@@ -204,7 +204,7 @@
       "description": "Runtime alerts from all detection engines (local-pattern, local-guardrail, ai-defense, opa-policy, codeguard).",
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 0, "y": 32, "w": 12, "h": 8},
-      "targets": [{"expr": "sum by (alert_type, alert_severity) (rate(defenseclaw_alert_count_total[$__rate_interval]))", "legendFormat": "{{alert_type}} [{{alert_severity}}]", "refId": "A"}],
+      "targets": [{"expr": "sum by (alert_type, alert_severity) (rate(defenseclaw_alert_count_total{connector=~\"$connector\"}[$__rate_interval]))", "legendFormat": "{{alert_type}} [{{alert_severity}}]", "refId": "A"}],
       "fieldConfig": {"defaults": {"unit": "cps", "custom": {"fillOpacity": 20}}}
     },
     {
@@ -214,9 +214,9 @@
       "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
       "gridPos": {"x": 12, "y": 32, "w": 12, "h": 8},
       "targets": [
-        {"expr": "histogram_quantile(0.50, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{tool}} p50", "refId": "p50"},
-        {"expr": "histogram_quantile(0.95, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{tool}} p95", "refId": "p95"},
-        {"expr": "histogram_quantile(0.99, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket[$__rate_interval])))", "legendFormat": "{{tool}} p99", "refId": "p99"}
+        {"expr": "histogram_quantile(0.50, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[$__rate_interval])))", "legendFormat": "{{tool}} p50", "refId": "p50"},
+        {"expr": "histogram_quantile(0.95, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[$__rate_interval])))", "legendFormat": "{{tool}} p95", "refId": "p95"},
+        {"expr": "histogram_quantile(0.99, sum by (le, tool) (rate(defenseclaw_inspect_latency_milliseconds_bucket{tool=~\"$connector:.*\"}[$__rate_interval])))", "legendFormat": "{{tool}} p99", "refId": "p99"}
       ],
       "fieldConfig": {"defaults": {"unit": "ms"}}
     },
@@ -260,7 +260,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 50, "w": 24, "h": 12},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=\"ai-governance\"} | json | __error__=\"\" | event_type=~\"verdict|scan|scan_finding|error\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=\"ai-governance\"} | json | __error__=\"\" | event_type=~\"verdict|scan|scan_finding|error\" | connector=~\"$connector\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

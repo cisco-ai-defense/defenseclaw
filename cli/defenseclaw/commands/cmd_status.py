@@ -289,9 +289,8 @@ def _print_agents(cfg, host: str | None = None, port: int | None = None) -> None
             # the dim "not reporting" branch, which is indistinguishable from a
             # connector the sidecar simply hasn't surfaced yet.
             disabled_label = ux._style("DISABLED", fg="yellow")
-            click.echo(
-                f"                {ux.dim(f'{friendly} ({conn}) — mode={mode or '?'}')} — {disabled_label}"
-            )
+            disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}")
+            click.echo(f"                {disabled_text} — {disabled_label}")
             continue
         hc = health_map.get(conn.strip().lower())
         if hc:
@@ -299,7 +298,8 @@ def _print_agents(cfg, host: str | None = None, port: int | None = None) -> None
             click.echo(f"                {friendly} ({conn}) — mode={mode or '?'}{suffix}")
             _print_agent_counters(hc, indent="                  ")
         else:
-            click.echo(f"                {ux.dim(f'{friendly} ({conn}) — mode={mode or '?'}')}")
+            dim_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}")
+            click.echo(f"                {dim_text}")
 
 
 def _fetch_health(host: str | None, port: int | None) -> dict | None:

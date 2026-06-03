@@ -6,13 +6,37 @@ package cli
 
 import (
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 )
+
+// splitHostPort parses an httptest server URL into the (host, port) pair
+// fetchConnectorModes expects.
+func splitHostPort(t *testing.T, rawURL string) (string, int) {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse url %q: %v", rawURL, err)
+	}
+	host, portStr, err := net.SplitHostPort(u.Host)
+	if err != nil {
+		t.Fatalf("split host:port %q: %v", u.Host, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("atoi port %q: %v", portStr, err)
+	}
+	return host, port
+}
 
 // captureStdout runs fn and returns everything it wrote to os.Stdout.
 func captureStdout(t *testing.T, fn func()) string {
@@ -177,4 +201,71 @@ func TestPrintConnectors_NoConnector(t *testing.T) {
 	if !strings.Contains(out, "no active connector") {
 		t.Errorf("expected '(no active connector)', got:\n%s", out)
 	}
+}
+
+// TestPrintConnectorModes_ListsAll pins the "Connector Mode" fan-out: every
+// active connector's mode/telemetry must render under one section header,
+// not just the primary connector's.
+func TestPrintConnectorModes_ListsAll(t *testing.T) {
+	modes := []connectorModeSummary{
+		{Connector: "codex", Mode: "observability", Telemetry: []string{"hooks", "otel", "notify"}, ProxyIntercept: false},
+		{Connector: "openclaw", Mode: "guardrail", Telemetry: []string{"hooks"}, ProxyIntercept: true},
+	}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+
+	if !strings.Contains(out, "Connector Mode") {
+		t.Fatalf("missing 'Connector Mode' section header:\n%s", out)
+	}
+	for _, name := range []string{"codex", "openclaw"} {
+		if !strings.Contains(out, name) {
+			t.Errorf("connector %q missing from Connector Mode section:\n%s", name, out)
+		}
+	}
+	// Both DIFFERING modes must appear — the whole point of fanning out.
+	if !strings.Contains(out, "observability") || !strings.Contains(out, "guardrail") {
+		t.Errorf("expected both per-connector modes rendered, got:\n%s", out)
+	}
+}
+
+// TestPrintConnectorModes_SingleEntry confirms a single connector renders
+// through the same per-entry layout (header once, one entry).
+func TestPrintConnectorModes_SingleEntry(t *testing.T) {
+	modes := []connectorModeSummary{
+		{Connector: "codex", Mode: "observability", Telemetry: []string{"hooks"}, ProxyIntercept: false},
+	}
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+	if !strings.Contains(out, "Connector Mode") || !strings.Contains(out, "codex") {
+		t.Errorf("single-entry Connector Mode render missing header/connector:\n%s", out)
+	}
+}
+
+// TestFetchConnectorModes_PrefersPluralFallsBackToSingular verifies the
+// client reads the plural roster when present and degrades to the singular
+// connector_mode for older sidecars that predate connector_modes.
+func TestFetchConnectorModes_PrefersPluralFallsBackToSingular(t *testing.T) {
+	t.Run("plural", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"connector_mode":{"connector":"codex","mode":"observability"},`+
+				`"connector_modes":[{"connector":"codex","mode":"observability"},{"connector":"openclaw","mode":"guardrail"}]}`)
+		}))
+		defer srv.Close()
+		bind, port := splitHostPort(t, srv.URL)
+		modes := fetchConnectorModes(srv.Client(), bind, port)
+		if len(modes) != 2 {
+			t.Fatalf("want 2 modes from plural field, got %d: %v", len(modes), modes)
+		}
+	})
+
+	t.Run("singular_fallback", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"connector_mode":{"connector":"codex","mode":"observability"}}`)
+		}))
+		defer srv.Close()
+		bind, port := splitHostPort(t, srv.URL)
+		modes := fetchConnectorModes(srv.Client(), bind, port)
+		if len(modes) != 1 || modes[0].Connector != "codex" {
+			t.Fatalf("want 1 fallback mode for codex, got %v", modes)
+		}
+	})
 }

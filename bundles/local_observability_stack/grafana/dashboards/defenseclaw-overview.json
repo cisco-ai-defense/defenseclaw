@@ -354,7 +354,7 @@
       },
       "targets": [
         {
-          "expr": "clamp_min(sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_requested\"}[5m])) - sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])), 0) or vector(0)",
+          "expr": "clamp_min(sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=~\"$connector:hilt\", guardrail_action_taken=\"approval_requested\"}[5m])) - sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=~\"$connector:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])), 0) or vector(0)",
           "refId": "A"
         }
       ],

@@ -428,6 +428,11 @@ type ScanCorrelation struct {
 	AgentID         string
 	AgentName       string
 	AgentInstanceID string
+
+	// Connector attributes the scan to its originating connector so
+	// EmitScanResult can record per-connector scan-finding metrics. Empty
+	// for connector-agnostic scans (CLI file scans, background rescans).
+	Connector string
 }
 
 // LogScan persists a scan result to SQLite, forwards to Splunk HEC,
@@ -486,6 +491,7 @@ func (l *Logger) LogScanWithCorrelation(
 		RequestID:         corr.RequestID,
 		SessionID:         corr.SessionID,
 		TraceID:           corr.TraceID,
+		Connector:         corr.Connector,
 	}
 	scanID, err := scanner.EmitScanResult(ctx, l.gatewayWriterSnapshot(), l.store, tel, result, agent)
 	if err != nil {
@@ -529,7 +535,7 @@ func (l *Logger) LogScanWithCorrelation(
 
 	if otel != nil {
 		targetType := inferTargetType(result.Scanner)
-		otel.EmitScanResult(result, scanID, targetType, verdict)
+		otel.EmitScanResult(result, scanID, targetType, verdict, agent.Connector)
 	}
 
 	return nil
@@ -916,7 +922,9 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 
 	_, otel, emitter := l.snapshot()
 	if otel != nil {
-		otel.RecordAlert(context.Background(), "runtime", severity, source)
+		// Runtime alerts are process-global (not tied to a single
+		// connector); pass "" so the metric records connector="unknown".
+		otel.RecordAlert(context.Background(), "runtime", severity, source, "")
 	}
 	gwEv := gatewaylog.Event{
 		Timestamp: time.Now().UTC(),

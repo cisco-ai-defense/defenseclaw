@@ -442,6 +442,7 @@ func ScanCorrelationFromContext(ctx context.Context) audit.ScanCorrelation {
 		AgentID:         aid.AgentID,
 		AgentName:       aid.AgentName,
 		AgentInstanceID: aid.AgentInstanceID,
+		Connector:       audit.EnvelopeFromContext(ctx).Connector,
 	}
 }
 

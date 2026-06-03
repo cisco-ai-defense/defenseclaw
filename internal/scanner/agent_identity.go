@@ -32,4 +32,11 @@ type AgentIdentity struct {
 	// scanner-invocation paths (skill, mcp, plugin, aibom,
 	// codeguard CLI/file scans) leave it empty.
 	EvaluationID string
+
+	// Connector is the originating connector (codex, claudecode, …) when
+	// the scan was triggered in a connector-scoped context, so EmitScanResult
+	// can attribute scan-finding metrics per connector. Empty for
+	// connector-agnostic scans (CLI file scans, background rescans), which
+	// record connector="unknown".
+	Connector string
 }

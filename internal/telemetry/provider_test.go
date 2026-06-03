@@ -103,7 +103,7 @@ func TestDisabledProvider_EmitScanResult_NoPanic(t *testing.T) {
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
 	}
-	p.EmitScanResult(result, "scan-123", "skill", "clean")
+	p.EmitScanResult(result, "scan-123", "skill", "clean", "codex")
 }
 
 func TestDisabledProvider_EmitRuntimeAlert_NoPanic(t *testing.T) {
@@ -311,14 +311,14 @@ func TestStartLLMSpan_EmitsRunID(t *testing.T) {
 func TestDisabledProvider_Metrics_NoPanic(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")
 	ctx := context.Background()
-	p.RecordScan(ctx, "test", "skill", "clean", 100, map[string]int{"HIGH": 1})
+	p.RecordScan(ctx, "test", "skill", "clean", 100, map[string]int{"HIGH": 1}, "codex")
 	p.RecordToolCall(ctx, "shell", "builtin", false)
 	p.RecordToolDuration(ctx, "shell", "builtin", 50)
 	p.RecordToolError(ctx, "shell", 1)
 	p.RecordApproval(ctx, "approved", true, false)
 	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "", "", "", 100, 200)
 	p.RecordLLMDuration(ctx, "chat", "openai", "gpt-4", "", "", 0.5)
-	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern")
+	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern", "codex")
 	p.RecordGuardrailEvaluation(ctx, "ai-defense", "block")
 	p.RecordGuardrailLatency(ctx, "ai-defense", 100)
 }

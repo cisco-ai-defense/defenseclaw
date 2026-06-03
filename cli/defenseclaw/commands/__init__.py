@@ -110,14 +110,14 @@ def list_scope_title(label: str, connector: str, detail: str = "") -> str:
 
 
 # Shared ``--connector`` help text for the *list* commands (skill/mcp/plugin
-# list). Their default scope is the single active connector — unlike the
-# *scan* commands, whose bare/``--all`` form fans out to every active
-# connector. Stating the default here makes that asymmetry discoverable
-# without changing any actual default behaviour.
+# list). Bare (no flag) these fan out to EVERY active connector via
+# ``resolve_list_connectors``; passing ``--connector X`` narrows to one
+# validated peer. Stating that here keeps the flag help consistent with the
+# actual default if this constant is reused.
 LIST_CONNECTOR_HELP = (
-    "List for a specific configured connector. "
-    "Default: the active connector; on multi-connector installs pass "
-    "--connector <name> to target a configured peer."
+    "Narrow the listing to one configured connector. "
+    "Default: every active connector; pass --connector <name> to scope to a "
+    "single configured peer."
 )
 
 

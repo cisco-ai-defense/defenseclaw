@@ -100,6 +100,7 @@ from defenseclaw.tui.screens.setup_resource_editor import (
 )
 from defenseclaw.tui.screens.theme_picker import ThemePickerScreen
 from defenseclaw.tui.screens.uninstall import UninstallScreen
+from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.catalog_state import (
     CatalogCommandIntent,
     CatalogListModel,
@@ -108,7 +109,6 @@ from defenseclaw.tui.services.catalog_state import (
     catalog_detail_text,
     friendly_connector_name,
 )
-from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.cli_choices import CONNECTORS as _KNOWN_CONNECTORS
 from defenseclaw.tui.services.overview_state import (
     ConnectorHealth,

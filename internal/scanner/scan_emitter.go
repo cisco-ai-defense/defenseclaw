@@ -24,7 +24,7 @@ type ScanPersistence interface {
 
 // ScanTelemetry records per-finding metrics. Implemented by *telemetry.Provider.
 type ScanTelemetry interface {
-	RecordScanFindingByRule(ctx context.Context, scannerName, ruleID, severity string)
+	RecordScanFindingByRule(ctx context.Context, scannerName, ruleID, severity, connector string)
 }
 
 // Correlator runs after findings are persisted to detect multi-step
@@ -294,7 +294,7 @@ func EmitScanResult(
 	if tel != nil {
 		for i := range result.Findings {
 			f := &result.Findings[i]
-			tel.RecordScanFindingByRule(ctx, result.Scanner, f.RuleID, string(f.Severity))
+			tel.RecordScanFindingByRule(ctx, result.Scanner, f.RuleID, string(f.Severity), agent.Connector)
 		}
 	}
 
