@@ -255,6 +255,12 @@ func TestDefaultConfigGuardrail(t *testing.T) {
 	if cfg.Guardrail.ScannerMode != "both" {
 		t.Errorf("expected guardrail scanner_mode %q, got %q", "both", cfg.Guardrail.ScannerMode)
 	}
+	if !cfg.Guardrail.HookSelfHeal {
+		t.Error("expected guardrail.hook_self_heal enabled by default")
+	}
+	if cfg.Guardrail.HookSelfHealDebounceMs != 500 {
+		t.Errorf("expected guardrail.hook_self_heal_debounce_ms 500, got %d", cfg.Guardrail.HookSelfHealDebounceMs)
+	}
 	if cfg.Guardrail.BlockMessage != "" {
 		t.Errorf("expected empty block_message by default, got %q", cfg.Guardrail.BlockMessage)
 	}

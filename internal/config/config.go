@@ -1248,6 +1248,22 @@ type GuardrailConfig struct {
 	// per-connector one. See AgentHookConfig docs for the full
 	// rationale.
 	HookFailMode string `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
+
+	// HookSelfHeal enables the connector hook self-heal guard
+	// (internal/gateway/hook_config_guard.go). When true (the default),
+	// the sidecar watches the active connector's agent config file
+	// (e.g. ~/.cursor/hooks.json, ~/.claude/settings.json,
+	// ~/.codex/config.toml) and immediately re-installs the DefenseClaw
+	// hook block if a user deletes or strips it while the gateway is
+	// running. Set to false to allow operators to remove hooks by hand
+	// without the gateway restoring them; enforcement then lapses until
+	// the next setup/restart, which is the pre-self-heal behavior.
+	HookSelfHeal bool `mapstructure:"hook_self_heal" yaml:"hook_self_heal,omitempty"`
+
+	// HookSelfHealDebounceMs coalesces a burst of filesystem events into
+	// a single presence check before deciding whether to re-install.
+	// <= 0 falls back to the built-in default (500ms).
+	HookSelfHealDebounceMs int `mapstructure:"hook_self_heal_debounce_ms" yaml:"hook_self_heal_debounce_ms,omitempty"`
 }
 
 // EffectiveHookFailMode returns the operator-chosen hook fail mode,
@@ -2340,6 +2356,12 @@ func setDefaults(dataDir string) {
 	// guardrail` (which prompts) or `defenseclaw guardrail fail-mode
 	// closed`.
 	viper.SetDefault("guardrail.hook_fail_mode", "open")
+	// Self-heal connector hook configs by default: if a user deletes
+	// the DefenseClaw hook block while the gateway is running, the
+	// hook config guard re-installs it. Operators can opt out with
+	// `guardrail.hook_self_heal: false`.
+	viper.SetDefault("guardrail.hook_self_heal", true)
+	viper.SetDefault("guardrail.hook_self_heal_debounce_ms", 500)
 	viper.SetDefault("guardrail.scanner_mode", "both")
 	viper.SetDefault("guardrail.connector", "")
 	viper.SetDefault("guardrail.host", "")

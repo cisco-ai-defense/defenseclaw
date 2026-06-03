@@ -127,6 +127,13 @@ type GuardrailProxy struct {
 	registry  *connector.Registry
 	setupOpts connector.SetupOpts
 
+	// hookGuard auto-heals the active connector's agent config file when
+	// a user manually deletes the DefenseClaw hook block while the
+	// gateway is running. nil when guardrail.hook_self_heal is disabled.
+	// Repointed on runtime connector switch so it follows the active
+	// connector.
+	hookGuard *HookConfigGuard
+
 	// Observability defaults set at bootstrap. defaultAgentName
 	// falls back to cfg.Claw.Mode ("openclaw") when the request
 	// does not carry an agent identifier; defaultPolicyID is the
@@ -433,6 +440,45 @@ func NewGuardrailProxy(
 func (p *GuardrailProxy) SetConnectorSwitchState(reg *connector.Registry, opts connector.SetupOpts) {
 	p.registry = reg
 	p.setupOpts = opts
+}
+
+// StartHookConfigGuard launches the connector hook self-heal guard bound to
+// ctx. It must be called after the connector's initial Setup so the watched
+// config files already exist. The guard is owned by the proxy and repointed on
+// runtime connector switch. The guard goroutine stops when ctx is cancelled.
+//
+// Started for both proxy-bound and observability-only connectors: hook-native
+// connectors (codex, claudecode, cursor, ...) never reach proxy.Run, so the
+// caller (runGuardrail) is responsible for invoking this before the
+// observability short-circuit.
+func (p *GuardrailProxy) StartHookConfigGuard(ctx context.Context, conn connector.Connector, opts connector.SetupOpts) {
+	if p == nil {
+		return
+	}
+	debounce := time.Duration(p.cfg.HookSelfHealDebounceMs) * time.Millisecond
+	guard := NewHookConfigGuard(p.logger, p.otel, debounce)
+	guard.SetHealNotifier(p.notifyHookHealed)
+	p.hookGuard = guard
+	guard.Start(ctx, conn, opts)
+}
+
+// notifyHookHealed fans a successful hook re-install out to the configured
+// webhook endpoints, mirroring the watchdog health-event path. The durable
+// audit row and OTel metric are emitted by the guard itself; this adds the
+// outbound notifier channel so operators learn that a connector hook was
+// tampered with and restored.
+func (p *GuardrailProxy) notifyHookHealed(connectorName string, paths []string) {
+	if p == nil || p.webhooks == nil {
+		return
+	}
+	p.webhooks.Dispatch(audit.Event{
+		Timestamp: time.Now().UTC(),
+		Action:    string(audit.ActionConnectorHookRepaired),
+		Target:    connectorName,
+		Actor:     "defenseclaw-hook-guard",
+		Details:   fmt.Sprintf("re-installed connector hook config after manual removal: %s", strings.Join(paths, ", ")),
+		Severity:  "HIGH",
+	})
 }
 
 // SetWebhookDispatcher attaches a webhook dispatcher for guardrail block notifications.
@@ -3416,6 +3462,13 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 
 	newConn.SetCredentials(p.gatewayToken, p.masterKey)
 
+	// Pause self-heal across the swap. Teardown below strips the outgoing
+	// connector's hook entries, which must NOT be auto-restored; without
+	// this the guard (still pointed at oldConn until Repoint) could race the
+	// teardown and re-install hooks for a connector we just deactivated.
+	// Repoint at the end re-targets the guard at newConn.
+	p.hookGuard.SuppressHealing(hookGuardSwitchSuppressWindow)
+
 	if oldConn != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] runtime connector switch: tearing down %s\n", oldConn.Name())
 		if err := oldConn.Teardown(ctx, p.setupOpts); err != nil {
@@ -3441,6 +3494,10 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	if err := connector.SaveActiveConnector(p.setupOpts.DataDir, newName); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 	}
+
+	// Follow the active connector so self-heal watches the new
+	// connector's config file rather than the torn-down one's.
+	p.hookGuard.Repoint(newConn, p.setupOpts)
 
 	if p.health != nil {
 		p.health.SetConnector(newConn.Name(), newConn.ToolInspectionMode(), newConn.SubprocessPolicy())

@@ -112,6 +112,16 @@ const (
 	ActionConnectorHookSynthetic Action = "connector-hook-synthetic"
 	ActionAssetPolicy            Action = "asset-policy"
 
+	// Connector hook self-heal. The hook config guard
+	// (internal/gateway/hook_config_guard.go) watches each active
+	// connector's agent config file (e.g. ~/.cursor/hooks.json,
+	// ~/.claude/settings.json, ~/.codex/config.toml) and re-installs
+	// the DefenseClaw hook block when a user removes it while the
+	// gateway is running. Tampered records the detection; Repaired
+	// records the successful re-install.
+	ActionConnectorHookTampered Action = "connector-hook-tampered"
+	ActionConnectorHookRepaired Action = "connector-hook-repaired"
+
 	// Codex notify webhook (agent-turn-complete et al.). The
 	// notify-bridge.sh shim installed by the codex connector POSTs
 	// codex's raw JSON arg to /api/v1/codex/notify after every
@@ -341,6 +351,8 @@ func AllActions() []Action {
 		ActionConnectorHook,
 		ActionConnectorHookSynthetic,
 		ActionAssetPolicy,
+		ActionConnectorHookTampered,
+		ActionConnectorHookRepaired,
 		ActionCodexNotify,
 		ActionCodexNotifyAgentTurnComplete,
 		ActionCodexNotifyMalformed,

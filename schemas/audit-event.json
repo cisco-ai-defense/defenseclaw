@@ -58,6 +58,8 @@
             "connector-hook",
             "connector-hook-synthetic",
             "asset-policy",
+            "connector-hook-tampered",
+            "connector-hook-repaired",
             "codex.notify",
             "codex.notify.agent-turn-complete",
             "codex.notify.malformed",

@@ -102,6 +102,13 @@ ACTION_CONNECTOR_HOOK: Final[str]              = "connector-hook"
 ACTION_CONNECTOR_HOOK_SYNTHETIC: Final[str]    = "connector-hook-synthetic"
 ACTION_ASSET_POLICY: Final[str]                = "asset-policy"
 
+# Connector hook self-heal. Mirrors
+# internal/audit/actions.go::ActionConnectorHook{Tampered,Repaired}.
+# The hook config guard re-installs a connector's hook block after a
+# user manually removes it while the gateway is running.
+ACTION_CONNECTOR_HOOK_TAMPERED: Final[str]     = "connector-hook-tampered"
+ACTION_CONNECTOR_HOOK_REPAIRED: Final[str]     = "connector-hook-repaired"
+
 # Codex notify webhook (agent-turn-complete et al.). The notify
 # bridge POSTs codex's JSON arg to /api/v1/codex/notify; the
 # gateway derives the action key from the payload's `type` field.
@@ -306,6 +313,8 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_CONNECTOR_HOOK,
     ACTION_CONNECTOR_HOOK_SYNTHETIC,
     ACTION_ASSET_POLICY,
+    ACTION_CONNECTOR_HOOK_TAMPERED,
+    ACTION_CONNECTOR_HOOK_REPAIRED,
     ACTION_CODEX_NOTIFY,
     ACTION_CODEX_NOTIFY_AGENT_TURN_COMPLETE,
     ACTION_CODEX_NOTIFY_MALFORMED,
