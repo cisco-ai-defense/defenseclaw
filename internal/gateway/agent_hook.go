@@ -1377,7 +1377,16 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock, evalCtx)
 	}
-	resp := agentHookResponseForProfile(profile, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+	// A configured block message overrides the user-facing reason on block
+	// verdicts only. The audit row + notification dispatched above keep the
+	// original verdict reason, so telemetry retains the "why" while the agent
+	// shows the operator's message. Resolved per connector.
+	var blockMsgCfg *config.GuardrailConfig
+	if a.scannerCfg != nil {
+		blockMsgCfg = &a.scannerCfg.Guardrail
+	}
+	responseReason := resolveHookBlockReason(blockMsgCfg, req.ConnectorName, action, reason)
+	resp := agentHookResponseForProfile(profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps)
 	// Stamp the unified-pipeline correlation keys so the HTTP
 	// response, the audit envelope (HookAuditEnvelope.EvaluationID
 	// / RuleIDs), and the scan_finding events all join on the same
@@ -1816,6 +1825,26 @@ func genericHookAdditionalContext(connectorName, rawAction, severity, reason str
 // renders inside an OS-level approval prompt where long sentences
 // get truncated. tool may be empty (e.g. UserPromptSubmit-class
 // events); in that case we fall back to a tool-agnostic phrase.
+// resolveHookBlockReason returns the user-facing reason for a hook response.
+// For block verdicts it lets a configured block message replace the verdict
+// text — a per-connector guardrail.connectors[X].block_message override takes
+// precedence over the global guardrail.block_message, resolved via
+// EffectiveBlockMessage. This mirrors the proxy path's blockMessage()
+// semantics (a configured message replaces the default). For non-block actions
+// or when no message is configured, the original reason passes through
+// unchanged, so existing behavior (surfacing the live verdict reason) is
+// preserved. A nil config or empty connector resolves to the global value,
+// keeping single-connector installs unaffected.
+func resolveHookBlockReason(gc *config.GuardrailConfig, connector, action, reason string) string {
+	if action != "block" || gc == nil {
+		return reason
+	}
+	if custom := strings.TrimSpace(gc.EffectiveBlockMessage(connector)); custom != "" {
+		return custom
+	}
+	return reason
+}
+
 func connectorReason(connectorName, action, tool, reason string) string {
 	if r := strings.TrimSpace(reason); r != "" {
 		return r

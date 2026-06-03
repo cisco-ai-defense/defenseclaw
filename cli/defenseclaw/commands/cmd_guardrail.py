@@ -260,22 +260,24 @@ def status_cmd(app: AppContext) -> None:
     enabled_txt = "yes" if gc.enabled else "no"
     enabled_val = ux._style(enabled_txt, fg="green") if gc.enabled else ux._style(enabled_txt, fg="yellow")
     click.echo(f"  • {ux._style('enabled:', fg='bright_black', bold=True)}    {enabled_val}")
-    click.echo(
-        f"  • {ux._style('connector:', fg='bright_black', bold=True)}  {_connector_label(connector)} ({connector})"
-    )
-    click.echo(f"  • {ux._style('mode:', fg='bright_black', bold=True)}       {gc.mode or 'observe'}")
-
-    # D7: in a multi-connector install, status MUST reflect EVERY active
-    # connector, not just the primary — each can carry its own effective
-    # mode / fail mode via guardrail.connectors. Single-connector installs
-    # skip this block, so their output is unchanged.
+    # A multi-connector install has no meaningful "primary" connector, so
+    # showing a singular connector / mode / fail-mode line alongside the
+    # per-connector roster is redundant and misleading (it implies one
+    # connector's posture is THE posture). Resolve the active set first and
+    # render exactly one coherent view: the roster for multi, the legacy
+    # singular lines for single. Single-connector output is unchanged.
     try:
         actives = app.cfg.active_connectors() if hasattr(app.cfg, "active_connectors") else [connector]
     except Exception:  # noqa: BLE001 — fall back to the primary connector.
         actives = [connector]
+
     if len(actives) > 1:
+        # D7: list EVERY active connector with its own effective mode / fail
+        # mode (each can differ via guardrail.connectors). No singular
+        # connector/mode/fail-mode lines here — they would only show one.
         click.echo(
-            f"  • {ux._style('connectors:', fg='bright_black', bold=True)} {len(actives)} active"
+            f"  • {ux._style('connectors:', fg='bright_black', bold=True)} {len(actives)} active  "
+            f"{ux.dim('(mode / fail are per connector below)')}"
         )
         for name in actives:
             cmode = gc.effective_mode(name) if hasattr(gc, "effective_mode") else (gc.mode or "observe")
@@ -298,15 +300,25 @@ def status_cmd(app: AppContext) -> None:
                 if c_enabled
                 else ux._style("disabled", fg="yellow")
             )
+            cfm_display = ux._style(cfm, fg="yellow") if cfm == "closed" else cfm
             click.echo(
                 f"      - {_connector_label(name)} ({name}): "
-                f"{state} mode={cmode or 'observe'} fail={cfm}"
+                f"{state} mode={cmode or 'observe'} fail={cfm_display}"
             )
-    fm_display = ux._style(fail_mode, fg="yellow") if fail_mode == "closed" else fail_mode
-    click.echo(
-        f"  • {ux._style('fail mode:', fg='bright_black', bold=True)}  {fm_display}  "
-        f"{ux.dim('(hook response-layer failures)')}"
-    )
+        click.echo(
+            f"  • {ux.dim('fail = hook response-layer failures (4xx / bad JSON / missing action)')}"
+        )
+    else:
+        click.echo(
+            f"  • {ux._style('connector:', fg='bright_black', bold=True)}  {_connector_label(connector)} ({connector})"
+        )
+        click.echo(f"  • {ux._style('mode:', fg='bright_black', bold=True)}       {gc.mode or 'observe'}")
+        fm_display = ux._style(fail_mode, fg="yellow") if fail_mode == "closed" else fail_mode
+        click.echo(
+            f"  • {ux._style('fail mode:', fg='bright_black', bold=True)}  {fm_display}  "
+            f"{ux.dim('(hook response-layer failures)')}"
+        )
+
     click.echo(f"  • {ux._style('port:', fg='bright_black', bold=True)}       {gc.port}")
     click.echo()
     if gc.enabled:
@@ -536,6 +548,145 @@ def enable_cmd(
         )
 
 
+def _set_connector_fail_mode(
+    app: AppContext, requested: str, mode: str | None, *, restart: bool, yes: bool
+) -> None:
+    """Show or set the hook fail mode for a SINGLE connector.
+
+    Per-connector analog of the global ``guardrail fail-mode``: writes
+    ``guardrail.connectors[X].hook_fail_mode`` so one connector can run a
+    different response-layer fail posture than its peers. On restart the Go
+    boot loop regenerates that connector's hook with the new ``FAIL_MODE``;
+    the others are untouched.
+
+    ``--connector`` is a multi-connector feature: on a single-connector
+    install (no ``guardrail.connectors`` map) it points the operator at the
+    global command rather than silently creating a one-entry map.
+    """
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
+        ux.subhead(
+            "This is a single-connector install; use 'defenseclaw guardrail fail-mode' "
+            "(no --connector) to set the global fail mode.",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
+    key = _resolve_member_connector(app, requested)
+    if key is None:
+        ux.err(f"Connector {requested!r} is not configured.", indent="  ")
+        ux.subhead("Configured connectors: " + ", ".join(sorted(conns)), indent="    ")
+        raise SystemExit(1)
+
+    gc = app.cfg.guardrail
+    label = _connector_label(key.strip().lower())
+    global_fm = (gc.hook_fail_mode or "open").lower()
+    current = (
+        gc.effective_hook_fail_mode(key)
+        if hasattr(gc, "effective_hook_fail_mode")
+        else global_fm
+    ).lower()
+    if current not in ("open", "closed"):
+        current = "open"
+
+    entry = conns.get(key)
+    has_override = bool(getattr(entry, "hook_fail_mode", "")) if entry is not None else False
+
+    # No mode argument → just report this connector's effective value and
+    # whether it is an override or inherited from the global default.
+    if mode is None:
+        click.echo()
+        click.echo(
+            f"  {ux.bold(f'{label} ({key}) hook_fail_mode:')} {ux.accent(current)}"
+        )
+        if has_override:
+            ux.subhead(
+                f"per-connector override (global default: {global_fm}).", indent="  "
+            )
+        else:
+            ux.subhead(
+                f"inherited from global default ({global_fm}).", indent="  "
+            )
+        click.echo()
+        return
+
+    if mode == current:
+        click.echo(
+            f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} "
+            f"{ux.dim('— nothing to do.')}"
+        )
+        return
+
+    click.echo()
+    click.echo(
+        f"  {ux.bold(f'Changing {label} hook fail mode:')} {current} "
+        f"{ux.dim('→')} {ux.accent(mode)}"
+    )
+    if mode == "closed":
+        ux.warn(f"Response-layer failures will now BLOCK {label}.", indent="  ")
+        ux.subhead(
+            "A misconfigured gateway response (4xx, bad JSON) will exit 2 from this "
+            "connector's hooks. Make sure your gateway is healthy first.",
+            indent="    ",
+        )
+    else:
+        ux.subhead(
+            f"Response-layer failures will now ALLOW {label} and log the failure to "
+            "~/.defenseclaw/logs/hook-failures.jsonl.",
+            indent="  ",
+        )
+    click.echo()
+
+    if not yes and not click.confirm("  Proceed?", default=True):
+        click.echo(f"  {ux.dim('Cancelled.')}")
+        raise click.Abort()
+
+    # Mutate the per-connector entry, preserving its other policy fields.
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    if entry is None:
+        entry = PerConnectorGuardrailConfig()
+        conns[key] = entry
+    entry.hook_fail_mode = mode
+    try:
+        app.cfg.save()
+        ux.ok(
+            f"Config saved (guardrail.connectors.{key}.hook_fail_mode = {mode})",
+            indent="  ",
+        )
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise click.Abort()
+
+    if restart and gc.enabled:
+        from defenseclaw.commands import cmd_setup
+
+        cmd_setup._restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=key,
+        )
+        ux.ok(
+            f"Gateway restarted, {label} hook regenerated with fail={mode}.", indent="  "
+        )
+        click.echo()
+    elif not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "guardrail-fail-mode",
+            "config",
+            f"connector={key} scope=per-connector new={mode} restart={restart}",
+        )
+
+
 @guardrail.command("fail-mode")
 @click.argument("mode", required=False, type=click.Choice(["open", "closed"]))
 @click.option(
@@ -544,8 +695,21 @@ def enable_cmd(
     help="Restart the gateway so hooks are regenerated with the new fail mode (default: on).",
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default=None,
+    help="Scope the fail mode to a single connector (multi-connector installs only). "
+    "Omit to show/set the global default.",
+)
 @pass_ctx
-def fail_mode_cmd(app: AppContext, mode: str | None, restart: bool, yes: bool) -> None:
+def fail_mode_cmd(
+    app: AppContext,
+    mode: str | None,
+    restart: bool,
+    yes: bool,
+    connector_flag: str | None,
+) -> None:
     """Show or change the hook fail mode (response-layer behavior).
 
     The hook fail mode controls what generated hooks do when the
@@ -571,7 +735,17 @@ def fail_mode_cmd(app: AppContext, mode: str | None, restart: bool, yes: bool) -
     ``open`` or ``closed`` it persists the choice to ~/.defenseclaw/
     config.yaml and (when --restart is on) restarts the gateway so
     the regenerated hooks pick up the new value immediately.
+
+    With ``--connector X`` it scopes the fail mode to a single connector
+    (multi-connector installs only), writing a per-connector override
+    while the global default and the other connectors are left untouched.
     """
+    if connector_flag:
+        _set_connector_fail_mode(
+            app, connector_flag, mode, restart=restart, yes=yes
+        )
+        return
+
     gc = app.cfg.guardrail
     current = (gc.hook_fail_mode or "open").lower()
     if current not in ("open", "closed"):
@@ -668,4 +842,547 @@ def fail_mode_cmd(app: AppContext, mode: str | None, restart: bool, yes: bool) -
             "guardrail-fail-mode",
             "config",
             f"old={current} new={mode} restart={restart}",
+        )
+
+
+_HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+def _set_connector_hilt(
+    app: AppContext,
+    requested: str,
+    state: str | None,
+    min_severity: str | None,
+    *,
+    restart: bool,
+    yes: bool,
+) -> None:
+    """Show or set the HILT (human-in-the-loop) policy for ONE connector.
+
+    Per-connector analog of the global ``guardrail hilt``: writes a full
+    ``guardrail.connectors[X].hilt`` block so one connector can prompt for
+    approval at a different severity (or not at all) than its peers. The
+    hook decision path reads it via ``EffectiveHILT(connector)``; a present
+    block fully replaces the global one, an absent block inherits it.
+
+    ``--connector`` is a multi-connector feature: on a single-connector
+    install it points the operator at the global command instead of
+    silently creating a one-entry map.
+    """
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
+        ux.subhead(
+            "This is a single-connector install; use 'defenseclaw guardrail hilt' "
+            "(no --connector) to set the global HILT policy.",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
+    key = _resolve_member_connector(app, requested)
+    if key is None:
+        ux.err(f"Connector {requested!r} is not configured.", indent="  ")
+        ux.subhead("Configured connectors: " + ", ".join(sorted(conns)), indent="    ")
+        raise SystemExit(1)
+
+    gc = app.cfg.guardrail
+    label = _connector_label(key.strip().lower())
+    eff = gc.effective_hilt(key)
+    cur_enabled = bool(eff.enabled)
+    cur_min = (eff.min_severity or "HIGH").upper()
+    entry = conns.get(key)
+    has_override = entry is not None and getattr(entry, "hilt", None) is not None
+
+    # No change requested → report this connector's effective HILT and
+    # whether it is an explicit override or inherited from the global block.
+    if state is None and min_severity is None:
+        click.echo()
+        click.echo(
+            f"  {ux.bold(f'{label} ({key}) hilt:')} "
+            f"enabled={ux.accent(str(cur_enabled).lower())} "
+            f"min_severity={ux.accent(cur_min)}"
+        )
+        if has_override:
+            gm = (gc.hilt.min_severity or "HIGH").upper()
+            ux.subhead(
+                f"per-connector override (global: enabled={str(bool(gc.hilt.enabled)).lower()} "
+                f"min_severity={gm}).",
+                indent="  ",
+            )
+        else:
+            ux.subhead("inherited from the global HILT block.", indent="  ")
+        click.echo()
+        return
+
+    # Start from the effective values so a partial change (e.g. only
+    # --min-severity) preserves the other field.
+    new_enabled = cur_enabled if state is None else (state == "on")
+    new_min = cur_min if min_severity is None else min_severity.upper()
+
+    if has_override and new_enabled == cur_enabled and new_min == cur_min:
+        click.echo(
+            f"  {ux.dim(f'{label} HILT is already')} "
+            f"enabled={str(new_enabled).lower()} min_severity={new_min} "
+            f"{ux.dim('— nothing to do.')}"
+        )
+        return
+
+    click.echo()
+    click.echo(
+        f"  {ux.bold(f'Updating {label} HILT:')} "
+        f"enabled={ux.accent(str(new_enabled).lower())} "
+        f"min_severity={ux.accent(new_min)}"
+    )
+    if new_enabled:
+        ux.subhead(
+            f"{label} will prompt for approval on confirmable actions at/above "
+            f"{new_min} (CRITICAL findings still block outright).",
+            indent="  ",
+        )
+    else:
+        ux.subhead(
+            f"{label} will NOT prompt — actions resolve straight to allow/alert/block.",
+            indent="  ",
+        )
+    click.echo()
+
+    if not yes and not click.confirm("  Proceed?", default=True):
+        click.echo(f"  {ux.dim('Cancelled.')}")
+        raise click.Abort()
+
+    from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig
+
+    if entry is None:
+        entry = PerConnectorGuardrailConfig()
+        conns[key] = entry
+    entry.hilt = HILTConfig(enabled=new_enabled, min_severity=new_min)
+    try:
+        app.cfg.save()
+        ux.ok(
+            f"Config saved (guardrail.connectors.{key}.hilt: "
+            f"enabled={str(new_enabled).lower()} min_severity={new_min})",
+            indent="  ",
+        )
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise click.Abort()
+
+    if restart and gc.enabled:
+        from defenseclaw.commands import cmd_setup
+
+        cmd_setup._restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=key,
+        )
+        ux.ok(f"Gateway restarted, {label} HILT policy applied.", indent="  ")
+        click.echo()
+    elif not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "guardrail-hilt",
+            "config",
+            f"connector={key} scope=per-connector "
+            f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+        )
+
+
+@guardrail.command("hilt")
+@click.argument("state", required=False, type=click.Choice(["on", "off"]))
+@click.option(
+    "--min-severity",
+    "min_severity",
+    default=None,
+    type=click.Choice(_HILT_SEVERITIES, case_sensitive=False),
+    help="Severity at/above which a confirmable action prompts for approval.",
+)
+@click.option(
+    "--connector",
+    "connector_flag",
+    default=None,
+    help="Scope HILT to a single connector (multi-connector installs only). "
+    "Omit to show/set the global default.",
+)
+@click.option(
+    "--restart/--no-restart",
+    default=True,
+    help="Restart the gateway so the new HILT policy takes effect (default: on).",
+)
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def hilt_cmd(
+    app: AppContext,
+    state: str | None,
+    min_severity: str | None,
+    connector_flag: str | None,
+    restart: bool,
+    yes: bool,
+) -> None:
+    """Show or change the human-in-the-loop (HILT) approval policy.
+
+    HILT pauses a *confirmable* action whose severity is at/above the
+    minimum and asks the operator to approve it, instead of silently
+    allowing it or hard-blocking. CRITICAL findings always block outright.
+
+    \b
+    Examples:
+      defenseclaw guardrail hilt                          # show global HILT
+      defenseclaw guardrail hilt on --min-severity HIGH
+      defenseclaw guardrail hilt off
+      defenseclaw guardrail hilt on --connector codex     # per-connector override
+
+    Without an argument this prints the current value. ``on``/``off``
+    toggles it and ``--min-severity`` sets the threshold; either may be
+    given alone (the other field is preserved). With ``--connector X`` it
+    writes a per-connector override (multi-connector installs only) while
+    the global default and the other connectors are left untouched.
+    """
+    if connector_flag:
+        _set_connector_hilt(
+            app, connector_flag, state, min_severity, restart=restart, yes=yes
+        )
+        return
+
+    gc = app.cfg.guardrail
+    cur_enabled = bool(gc.hilt.enabled)
+    cur_min = (gc.hilt.min_severity or "HIGH").upper()
+
+    if state is None and min_severity is None:
+        click.echo()
+        click.echo(
+            f"  {ux.bold('guardrail.hilt.enabled:')} "
+            f"{ux.accent(str(cur_enabled).lower())}"
+        )
+        click.echo(
+            f"  {ux.bold('guardrail.hilt.min_severity:')} {ux.accent(cur_min)}"
+        )
+        click.echo()
+        ux.subhead(
+            "CRITICAL findings always block; HILT confirms risky confirmable "
+            "actions at/above min_severity.",
+            indent="  ",
+        )
+        click.echo()
+        return
+
+    new_enabled = cur_enabled if state is None else (state == "on")
+    new_min = cur_min if min_severity is None else min_severity.upper()
+
+    if new_enabled == cur_enabled and new_min == cur_min:
+        click.echo(
+            f"  {ux.dim('HILT is already')} "
+            f"enabled={str(new_enabled).lower()} min_severity={new_min} "
+            f"{ux.dim('— nothing to do.')}"
+        )
+        return
+
+    click.echo()
+    click.echo(
+        f"  {ux.bold('Updating HILT:')} "
+        f"enabled={str(cur_enabled).lower()} {ux.dim('→')} "
+        f"{ux.accent(str(new_enabled).lower())}, "
+        f"min_severity={cur_min} {ux.dim('→')} {ux.accent(new_min)}"
+    )
+    click.echo()
+
+    if not yes and not click.confirm("  Proceed?", default=True):
+        click.echo(f"  {ux.dim('Cancelled.')}")
+        raise click.Abort()
+
+    gc.hilt.enabled = new_enabled
+    gc.hilt.min_severity = new_min
+    try:
+        app.cfg.save()
+        ux.ok(
+            f"Config saved (guardrail.hilt: enabled={str(new_enabled).lower()} "
+            f"min_severity={new_min})",
+            indent="  ",
+        )
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise click.Abort()
+
+    # Mirror the global HILT block into the OPA Rego data.json so the
+    # Rego/proxy fallback path stays consistent with config.yaml (parity
+    # with `setup guardrail`). Best-effort; the gateway reads config.yaml
+    # directly for correctness. Per-connector overrides are hook-path only
+    # and intentionally not mirrored (data.json is global).
+    from defenseclaw.commands import cmd_setup
+
+    cmd_setup._sync_guardrail_hilt_to_opa(getattr(app.cfg, "policy_dir", ""), gc)
+
+    if restart and gc.enabled:
+        cmd_setup._restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=_resolve_active_connector(app.cfg),
+        )
+        ux.ok("Gateway restarted, HILT policy applied.", indent="  ")
+        click.echo()
+    elif not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "guardrail-hilt",
+            "config",
+            f"enabled={str(new_enabled).lower()} min_severity={new_min} restart={restart}",
+        )
+
+
+def _set_connector_block_message(
+    app: AppContext,
+    requested: str,
+    message: str | None,
+    *,
+    clear: bool,
+    restart: bool,
+    yes: bool,
+) -> None:
+    """Show or set the custom block message for ONE connector.
+
+    Per-connector analog of the global ``guardrail block-message``: writes
+    ``guardrail.connectors[X].block_message``. The hook block path resolves
+    it via ``EffectiveBlockMessage(connector)`` — a per-connector message
+    wins over the global one, and an empty value inherits the global / the
+    built-in default.
+
+    ``--connector`` is a multi-connector feature: on a single-connector
+    install it points the operator at the global command instead of
+    silently creating a one-entry map.
+    """
+    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
+    if not conns:
+        ux.err("--connector is only valid on multi-connector installs.", indent="  ")
+        ux.subhead(
+            "This is a single-connector install; use 'defenseclaw guardrail "
+            "block-message' (no --connector) to set the global message.",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
+    key = _resolve_member_connector(app, requested)
+    if key is None:
+        ux.err(f"Connector {requested!r} is not configured.", indent="  ")
+        ux.subhead("Configured connectors: " + ", ".join(sorted(conns)), indent="    ")
+        raise SystemExit(1)
+
+    gc = app.cfg.guardrail
+    label = _connector_label(key.strip().lower())
+    entry = conns.get(key)
+    cur = entry.block_message if entry is not None else ""
+    has_override = bool(cur)
+    eff = gc.effective_block_message(key)
+
+    if message is None and not clear:
+        click.echo()
+        if eff:
+            click.echo(f"  {ux.bold(f'{label} ({key}) block_message:')} {ux.accent(eff)}")
+        else:
+            click.echo(
+                f"  {ux.bold(f'{label} ({key}) block_message:')} {ux.dim('(built-in default)')}"
+            )
+        if has_override:
+            ux.subhead("per-connector override.", indent="  ")
+        else:
+            ux.subhead("inherited from the global message / built-in default.", indent="  ")
+        click.echo()
+        return
+
+    new_msg = "" if clear else message
+    if new_msg == cur:
+        click.echo(
+            f"  {ux.dim(f'{label} block message unchanged — nothing to do.')}"
+        )
+        return
+
+    click.echo()
+    if new_msg:
+        click.echo(f"  {ux.bold(f'Setting {label} block message:')} {ux.accent(new_msg)}")
+    else:
+        click.echo(
+            f"  {ux.bold(f'Clearing {label} block message')} "
+            f"{ux.dim('(inherit global / built-in default)')}"
+        )
+    click.echo()
+
+    if not yes and not click.confirm("  Proceed?", default=True):
+        click.echo(f"  {ux.dim('Cancelled.')}")
+        raise click.Abort()
+
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    if entry is None:
+        entry = PerConnectorGuardrailConfig()
+        conns[key] = entry
+    entry.block_message = new_msg
+    try:
+        app.cfg.save()
+        ux.ok(
+            f"Config saved (guardrail.connectors.{key}.block_message updated)",
+            indent="  ",
+        )
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise click.Abort()
+
+    if restart and gc.enabled:
+        from defenseclaw.commands import cmd_setup
+
+        cmd_setup._restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=key,
+        )
+        ux.ok(f"Gateway restarted, {label} block message applied.", indent="  ")
+        click.echo()
+    elif not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "guardrail-block-message",
+            "config",
+            f"connector={key} scope=per-connector cleared={clear} restart={restart}",
+        )
+
+
+@guardrail.command("block-message")
+@click.argument("message", required=False)
+@click.option(
+    "--clear",
+    is_flag=True,
+    help="Clear the custom message (revert to the global / built-in default).",
+)
+@click.option(
+    "--connector",
+    "connector_flag",
+    default=None,
+    help="Scope the message to a single connector (multi-connector installs only). "
+    "Omit to show/set the global default.",
+)
+@click.option(
+    "--restart/--no-restart",
+    default=True,
+    help="Restart the gateway so the new message takes effect (default: on).",
+)
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def block_message_cmd(
+    app: AppContext,
+    message: str | None,
+    clear: bool,
+    connector_flag: str | None,
+    restart: bool,
+    yes: bool,
+) -> None:
+    """Show or change the custom message shown when an action is blocked.
+
+    On a block verdict the live verdict reason is shown when present; this
+    custom message is used as the user-facing text for block verdicts that
+    carry no specific reason (and on the proxy path it replaces the default
+    text). An empty message falls back to the built-in default. Audit rows
+    and notifications always keep the real verdict reason.
+
+    \b
+    Examples:
+      defenseclaw guardrail block-message
+      defenseclaw guardrail block-message "Blocked by Acme Security — see #sec-help"
+      defenseclaw guardrail block-message --clear
+      defenseclaw guardrail block-message "Codex policy" --connector codex
+
+    With ``--connector X`` it writes a per-connector override (multi-connector
+    installs only) while the global default and the other connectors are
+    left untouched.
+    """
+    if message is not None and clear:
+        ux.err("Pass a message or --clear, not both.", indent="  ")
+        raise click.Abort()
+
+    if connector_flag:
+        _set_connector_block_message(
+            app, connector_flag, message, clear=clear, restart=restart, yes=yes
+        )
+        return
+
+    gc = app.cfg.guardrail
+    current = gc.block_message or ""
+
+    if message is None and not clear:
+        click.echo()
+        if current:
+            click.echo(f"  {ux.bold('guardrail.block_message:')} {ux.accent(current)}")
+        else:
+            click.echo(
+                f"  {ux.bold('guardrail.block_message:')} {ux.dim('(built-in default)')}"
+            )
+        click.echo()
+        return
+
+    new_msg = "" if clear else message
+    if new_msg == current:
+        click.echo(f"  {ux.dim('Block message unchanged — nothing to do.')}")
+        return
+
+    click.echo()
+    if new_msg:
+        click.echo(f"  {ux.bold('Setting block message:')} {ux.accent(new_msg)}")
+    else:
+        click.echo(
+            f"  {ux.bold('Clearing block message')} {ux.dim('(revert to built-in default)')}"
+        )
+    click.echo()
+
+    if not yes and not click.confirm("  Proceed?", default=True):
+        click.echo(f"  {ux.dim('Cancelled.')}")
+        raise click.Abort()
+
+    gc.block_message = new_msg
+    try:
+        app.cfg.save()
+        ux.ok("Config saved (guardrail.block_message updated)", indent="  ")
+    except OSError as exc:
+        ux.err(f"Failed to save config: {exc}", indent="  ")
+        raise click.Abort()
+
+    if restart and gc.enabled:
+        from defenseclaw.commands import cmd_setup
+
+        cmd_setup._restart_services(
+            app.cfg.data_dir,
+            app.cfg.gateway.host,
+            app.cfg.gateway.port,
+            connector=_resolve_active_connector(app.cfg),
+        )
+        ux.ok("Gateway restarted, block message applied.", indent="  ")
+        click.echo()
+    elif not gc.enabled:
+        ux.warn(
+            "guardrail is currently disabled — value will take effect "
+            "the next time you run 'defenseclaw guardrail enable'.",
+            indent="  ",
+        )
+
+    if app.logger:
+        app.logger.log_action(
+            "guardrail-block-message",
+            "config",
+            f"cleared={clear} restart={restart}",
         )

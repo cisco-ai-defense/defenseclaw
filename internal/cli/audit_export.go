@@ -25,6 +25,7 @@ var (
 	auditExportOut             string
 	auditExportIncludeActivity bool
 	auditExportLimit           int
+	auditExportConnector       string
 )
 
 var auditCmd = &cobra.Command{
@@ -45,6 +46,7 @@ func init() {
 	auditExportCmd.Flags().StringVarP(&auditExportOut, "output", "o", "-", "Output file path, or '-' for stdout")
 	auditExportCmd.Flags().BoolVar(&auditExportIncludeActivity, "include-activity", false, "Append activity_events payloads (activity-event.json) after audit lines")
 	auditExportCmd.Flags().IntVar(&auditExportLimit, "limit", 0, "Max audit rows (0 = unlimited)")
+	auditExportCmd.Flags().StringVar(&auditExportConnector, "connector", "", "Only export rows attributed to this connector (matches structured.connector or the details connector= field). Activity rows are omitted when set.")
 
 	auditCmd.AddCommand(auditExportCmd)
 	rootCmd.AddCommand(auditCmd)
@@ -100,13 +102,18 @@ func runAuditExport(_ *cobra.Command, _ []string) error {
 		out = f
 	}
 
+	connFilter := strings.ToLower(strings.TrimSpace(auditExportConnector))
+
 	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
 destination_app, tool_name, tool_id, policy_id
 FROM audit_events ORDER BY timestamp ASC`
 	args := []any{}
-	if auditExportLimit > 0 {
+	// When a connector filter is active the cap must apply to *matching*
+	// rows, so we filter in Go and bound the count there. Without a filter
+	// we push LIMIT into SQL (cheaper, unchanged behavior).
+	if auditExportLimit > 0 && connFilter == "" {
 		q += ` LIMIT ?`
 		args = append(args, auditExportLimit)
 	}
@@ -114,16 +121,19 @@ FROM audit_events ORDER BY timestamp ASC`
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		// Older DBs may miss v7 columns — fall back to minimal projection.
-		if err := exportAuditEventsFallback(db, out, prov); err != nil {
+		if err := exportAuditEventsFallback(db, out, prov, connFilter); err != nil {
 			return err
 		}
-		if auditExportIncludeActivity {
+		// Activity rows are operator config mutations, not connector-scoped,
+		// so they are omitted whenever a connector filter is requested.
+		if auditExportIncludeActivity && connFilter == "" {
 			return exportActivityLines(db, out, prov)
 		}
 		return nil
 	}
 	defer rows.Close()
 
+	emitted := 0
 	for rows.Next() {
 		var (
 			id, ts, action, actor                           string
@@ -145,6 +155,12 @@ FROM audit_events ORDER BY timestamp ASC`
 			return fmt.Errorf("audit export: scan: %w", err)
 		}
 
+		if connFilter != "" {
+			if auditEventConnector(ns(details), ns(structuredRaw)) != connFilter {
+				continue
+			}
+		}
+
 		line, err := buildAuditEventLine(id, ts, action,
 			ns(target), ns(details), ns(severity), ns(runID),
 			ns(structuredRaw),
@@ -161,12 +177,18 @@ FROM audit_events ORDER BY timestamp ASC`
 		if _, err := fmt.Fprintln(out, string(line)); err != nil {
 			return err
 		}
+		emitted++
+		if connFilter != "" && auditExportLimit > 0 && emitted >= auditExportLimit {
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
-	if auditExportIncludeActivity {
+	// Activity rows are operator config mutations, not connector-scoped, so
+	// they are omitted whenever a connector filter is requested.
+	if auditExportIncludeActivity && connFilter == "" {
 		if err := exportActivityLines(db, out, prov); err != nil {
 			return err
 		}
@@ -174,17 +196,54 @@ FROM audit_events ORDER BY timestamp ASC`
 	return nil
 }
 
-func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenance) error {
+// auditEventConnector returns the lowercased connector an audit row is
+// attributed to, or "" if none. It mirrors the attribution the TUI and
+// `alerts --connector` use: the structured payload's "connector" field is
+// authoritative; otherwise it falls back to a `connector=<name>` token in
+// the free-form details string.
+func auditEventConnector(details, structuredRaw string) string {
+	if s := strings.TrimSpace(structuredRaw); s != "" {
+		var m map[string]any
+		if json.Unmarshal([]byte(s), &m) == nil {
+			if c, ok := m["connector"].(string); ok {
+				if c = strings.TrimSpace(c); c != "" {
+					return strings.ToLower(c)
+				}
+			}
+		}
+	}
+	return strings.ToLower(auditDetailsKV(details, "connector"))
+}
+
+// auditDetailsKV extracts a single `key=value` token from a space-separated
+// details string. Connector names are single tokens (no spaces), so a simple
+// field split is sufficient for best-effort filtering.
+func auditDetailsKV(details, key string) string {
+	for _, tok := range strings.Fields(details) {
+		if eq := strings.IndexByte(tok, '='); eq > 0 && tok[:eq] == key {
+			return strings.TrimSpace(tok[eq+1:])
+		}
+	}
+	return ""
+}
+
+func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenance, connFilter string) error {
 	rows, err := db.Query(`SELECT id, timestamp, action, target, actor, details, severity, run_id FROM audit_events ORDER BY timestamp ASC`)
 	if err != nil {
 		return fmt.Errorf("audit export: %w", err)
 	}
 	defer rows.Close()
+	emitted := 0
 	for rows.Next() {
 		var id, ts, action, actor string
 		var target, details, severity, runID sql.NullString
 		if err := rows.Scan(&id, &ts, &action, &target, &actor, &details, &severity, &runID); err != nil {
 			return fmt.Errorf("audit export: scan: %w", err)
+		}
+		// Legacy projection has no structured_json column; attribution is
+		// best-effort from the details connector= token only.
+		if connFilter != "" && auditEventConnector(ns(details), "") != connFilter {
+			continue
 		}
 		line, err := buildAuditEventLine(id, ts, action,
 			ns(target), ns(details), ns(severity), ns(runID),
@@ -201,6 +260,10 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 		}
 		if _, err := fmt.Fprintln(out, string(line)); err != nil {
 			return err
+		}
+		emitted++
+		if connFilter != "" && auditExportLimit > 0 && emitted >= auditExportLimit {
+			break
 		}
 	}
 	return rows.Err()

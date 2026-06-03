@@ -191,6 +191,8 @@ ACTION_GUARDRAIL_TOOL_CALL_INSPECT: Final[str] = "guardrail-tool-call-inspect"
 ACTION_GUARDRAIL_DISABLE: Final[str] = "guardrail-disable"
 ACTION_GUARDRAIL_ENABLE: Final[str] = "guardrail-enable"
 ACTION_GUARDRAIL_FAIL_MODE: Final[str] = "guardrail-fail-mode"
+ACTION_GUARDRAIL_HILT: Final[str] = "guardrail-hilt"
+ACTION_GUARDRAIL_BLOCK_MESSAGE: Final[str] = "guardrail-block-message"
 ACTION_LLM_JUDGE_RESPONSE: Final[str] = "llm-judge-response"
 ACTION_INSPECT_TOOL_CONFIRM: Final[str] = "inspect-tool-confirm"
 ACTION_INSPECT_TOOL_BLOCK: Final[str] = "inspect-tool-block"
@@ -382,6 +384,8 @@ ALL_ACTIONS: Final[tuple[str, ...]] = (
     ACTION_GUARDRAIL_DISABLE,
     ACTION_GUARDRAIL_ENABLE,
     ACTION_GUARDRAIL_FAIL_MODE,
+    ACTION_GUARDRAIL_HILT,
+    ACTION_GUARDRAIL_BLOCK_MESSAGE,
     ACTION_LLM_JUDGE_RESPONSE,
     ACTION_INSPECT_TOOL_CONFIRM,
     ACTION_INSPECT_TOOL_BLOCK,

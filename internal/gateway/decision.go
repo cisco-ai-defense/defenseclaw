@@ -134,7 +134,7 @@ func guardrailRuntimeActionForGuardrailConnector(gc *config.GuardrailConfig, con
 	if rank >= blockThreshold {
 		return guardrailActionBlock
 	}
-	if hiltEnabled(gc) && confirmable && rank >= hiltMinRank(gc) {
+	if hiltEnabled(gc, connector) && confirmable && rank >= hiltMinRank(gc, connector) {
 		return guardrailActionConfirm
 	}
 	if rank >= alertThreshold {
@@ -185,15 +185,23 @@ func guardrailProfileForConnector(gc *config.GuardrailConfig, connector string) 
 	}
 }
 
-func hiltEnabled(gc *config.GuardrailConfig) bool {
-	return gc != nil && gc.HILT.Enabled
+// hiltEnabled reports whether human-in-the-loop confirmation is active for
+// the request's connector. It resolves through EffectiveHILT so a
+// per-connector override (guardrail.connectors[X].hilt) takes precedence over
+// the global HILT block; an empty connector resolves to the global HILT, so
+// single-connector callers are unaffected.
+func hiltEnabled(gc *config.GuardrailConfig, connector string) bool {
+	return gc != nil && gc.EffectiveHILT(connector).Enabled
 }
 
-func hiltMinRank(gc *config.GuardrailConfig) int {
+// hiltMinRank returns the minimum severity rank that triggers a HILT confirm
+// for the request's connector, resolved via EffectiveHILT (per-connector
+// override → global). Defaults to HIGH when unset.
+func hiltMinRank(gc *config.GuardrailConfig, connector string) int {
 	if gc == nil {
 		return severityHigh
 	}
-	rank := guardrailSeverityRank(gc.HILT.MinSeverity)
+	rank := guardrailSeverityRank(gc.EffectiveHILT(connector).MinSeverity)
 	if rank <= severityNone {
 		return severityHigh
 	}
