@@ -381,7 +381,9 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
     def test_rotate_token_help_is_connector_agnostic(self):
         result = _invoke(["rotate-token", "--help"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("active agent connector", result.output)
+        # Connector-agnostic: the refresh spans every active connector and
+        # never pins to a specific one (the token is a shared secret).
+        self.assertIn("active connector", result.output)
         self.assertNotIn("Claude", result.output)
         self.assertNotIn("Codex", result.output)
 

@@ -810,7 +810,7 @@ def _unset_mcp_via_connector(cfg, name: str, connector: str | None = None) -> No
 @click.option("--skip-scan", is_flag=True, help="Skip security scan before adding")
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Target a specific connector's MCP config (multi-connector installs)",
+    help="Scope to one connector's MCP config (default: every active connector)",
 )
 @pass_ctx
 def set_server(
@@ -837,11 +837,16 @@ def set_server(
       defenseclaw mcp set myserver --command node --args server.js --env API_KEY=xxx
       defenseclaw mcp set untrusted --url http://example.com/mcp --skip-scan
     """
-    from defenseclaw.commands import resolve_list_connector
+    from defenseclaw.commands import resolve_list_connectors
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.admission import evaluate_admission
 
-    connector = resolve_list_connector(app, connector_flag)
+    # Without --connector, set the server on EVERY active connector; with it,
+    # scope to one. Scan + admission are connector-independent (the server spec
+    # is identical), so they run once against the primary; only the config
+    # WRITE fans out across connectors below.
+    connectors = resolve_list_connectors(app, connector_flag)
+    connector = connectors[0]
     pe = PolicyEngine(app.store)
     pre_decision = evaluate_admission(
         pe,
@@ -944,7 +949,8 @@ def set_server(
         else:
             click.secho(f"Allowed override for {name} — skipping scan.", fg="yellow")
 
-    _set_mcp_via_connector(app.cfg, name, entry, connector=connector)
+    for c in connectors:
+        _set_mcp_via_connector(app.cfg, name, entry, connector=c)
 
     if scan_required:
         post_decision = evaluate_admission(
@@ -965,10 +971,16 @@ def set_server(
         if post_decision.action.install == "allow":
             pe.allow("mcp", name, "scan clean or within policy")
 
-    click.secho(f"Added MCP server: {name}", fg="green")
+    if len(connectors) > 1:
+        click.secho(
+            f"Added MCP server: {name} to {len(connectors)} connectors: {', '.join(connectors)}",
+            fg="green",
+        )
+    else:
+        click.secho(f"Added MCP server: {name}", fg="green")
 
     if app.logger:
-        app.logger.log_action("mcp-set", name, f"command={cmd} url={url}")
+        app.logger.log_action("mcp-set", name, f"command={cmd} url={url} connectors={','.join(connectors)}")
 
     from defenseclaw.commands import hint
     hint(f"Scan it now:  defenseclaw mcp scan {name}")
@@ -978,22 +990,35 @@ def set_server(
 @click.argument("name")
 @click.option(
     "--connector", "connector_flag", default="",
-    help="Target a specific connector's MCP config (multi-connector installs)",
+    help="Scope to one connector's MCP config (default: every active connector)",
 )
 @pass_ctx
 def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
-    """Remove an MCP server from OpenClaw config."""
-    from defenseclaw.commands import resolve_list_connector
+    """Remove an MCP server from connector config.
 
-    connector = resolve_list_connector(app, connector_flag)
-    servers = app.cfg.mcp_servers(connector)
-    if not any(s.name == name for s in servers):
+    Without --connector the server is removed from EVERY active connector that
+    has it; --connector scopes the removal to one. Connectors that don't have
+    the server are skipped (not an error) so one missing entry never blocks the
+    rest.
+    """
+    from defenseclaw.commands import resolve_list_connectors
+
+    connectors = resolve_list_connectors(app, connector_flag)
+    removed: list[str] = []
+    for c in connectors:
+        if any(s.name == name for s in app.cfg.mcp_servers(c)):
+            _unset_mcp_via_connector(app.cfg, name, connector=c)
+            removed.append(c)
+
+    if not removed:
         raise click.ClickException(
-            f"MCP server {name!r} not found for connector={connector!r}."
+            f"MCP server {name!r} not found for any of: {', '.join(connectors)}."
         )
 
-    _unset_mcp_via_connector(app.cfg, name, connector=connector)
-    click.secho(f"Removed MCP server: {name}", fg="yellow")
+    if len(removed) > 1:
+        click.secho(f"Removed MCP server: {name} from {', '.join(removed)}", fg="yellow")
+    else:
+        click.secho(f"Removed MCP server: {name}", fg="yellow")
 
     if app.logger:
-        app.logger.log_action("mcp-unset", name, "")
+        app.logger.log_action("mcp-unset", name, f"connectors={','.join(removed)}")

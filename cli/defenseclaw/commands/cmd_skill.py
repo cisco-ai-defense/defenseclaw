@@ -717,15 +717,12 @@ def scan(
     )
 
     if scan_all or target == "all":
-        if remote:
-            _scan_all_remote(app, as_json)
-            return
-        # Resolve which connector(s) `--all` should fan out across. An
-        # explicit --connector targets exactly one; otherwise a
-        # multi-connector install scans every active connector (so "all
-        # skills" means every connector's skills, not just the primary's
-        # — the parity gap). Single-connector installs keep the original
-        # single pass (connector=None ⇒ _scan_all uses active_connector()).
+        # Resolve which connector(s) `--all` should fan out across — for BOTH
+        # the local and --remote paths. An explicit --connector targets exactly
+        # one; otherwise a multi-connector install scans every active connector
+        # (so "all skills" means every connector's skills, not just the
+        # primary's). Single-connector installs keep the original single pass
+        # (connector=None ⇒ the active connector).
         from defenseclaw.commands import resolve_list_connector
         if connector_flag:
             connectors: list[str | None] = [resolve_list_connector(app, connector_flag)]
@@ -736,7 +733,10 @@ def scan(
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
-            _scan_all(app, scanner, as_json, enforce=action, connector=c)
+            if remote:
+                _scan_all_remote(app, as_json, connector=c)
+            else:
+                _scan_all(app, scanner, as_json, enforce=action, connector=c)
         return
 
     if not target:
@@ -1074,6 +1074,30 @@ def _resolve_path(app: AppContext, target: str) -> str | None:
     return None
 
 
+def _all_active_skill_dirs(app: AppContext) -> list[str]:
+    """Union of skill directories across every active connector.
+
+    Quarantine/restore resolve and validate against this union so a skill that
+    lives in a NON-primary connector can still be managed; single-connector
+    installs collapse to that one connector's dirs, so their behavior is
+    unchanged. Order-preserving and de-duplicated.
+    """
+    cfg = app.cfg
+    if hasattr(cfg, "active_connectors"):
+        try:
+            connectors: list[str | None] = list(cfg.active_connectors()) or [None]
+        except Exception:  # noqa: BLE001 — fall back to the active connector.
+            connectors = [None]
+    else:
+        connectors = [None]
+    dirs: list[str] = []
+    for c in connectors:
+        for d in cfg.skill_dirs(c):
+            if d not in dirs:
+                dirs.append(d)
+    return dirs
+
+
 def _skill_info_path(info: dict[str, Any] | None) -> str:
     if not info:
         return ""
@@ -1138,9 +1162,15 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
             click.echo(f" {title}")
 
 
-def _scan_all_remote(app: AppContext, as_json: bool) -> None:
-    """Scan all skills via the sidecar API."""
-    oc_list = _list_openclaw_skills_full(app)
+def _scan_all_remote(app: AppContext, as_json: bool, connector: str | None = None) -> None:
+    """Scan all skills via the sidecar API.
+
+    ``connector`` selects whose skill list to scan; when None it falls back to
+    the active connector. The caller fans this out over every active connector
+    so ``skill scan --all --remote`` covers the whole fleet, matching the local
+    ``--all`` path.
+    """
+    oc_list = _list_openclaw_skills_full(app, connector=connector)
     if not oc_list or not oc_list.get("skills"):
         click.echo("No skills found via sidecar.")
         return
@@ -1742,13 +1772,25 @@ def enable(app: AppContext, name: str) -> None:
 
 @skill.command()
 @click.argument("name")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Connector whose copy of the skill to quarantine "
+    "(default: search every active connector; required to disambiguate when "
+    "the same skill name exists under more than one).",
+)
 @click.option("--reason", default="", help="Reason for quarantine")
 @pass_ctx
-def quarantine(app: AppContext, name: str, reason: str) -> None:
+def quarantine(app: AppContext, name: str, connector_flag: str, reason: str) -> None:
     """Quarantine a skill's files to the quarantine area.
 
     Moves the skill's directory to ~/.defenseclaw/quarantine/skills/ and records
     the action. The skill can be restored with 'skill restore'.
+
+    On a multi-connector install the skill is located across EVERY active
+    connector's skill directories; pass --connector to scope the search (and to
+    disambiguate when the same name exists under more than one connector).
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
@@ -1758,10 +1800,18 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
         click.echo(f"error: invalid skill name {name!r}", err=True)
         raise SystemExit(1)
 
+    # Search scope: one connector (--connector) or the union of every active
+    # connector's skill dirs, so a non-primary connector's skill is reachable.
+    if connector_flag:
+        from defenseclaw.commands import resolve_list_connector
+        scope_dirs = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
+    else:
+        scope_dirs = _all_active_skill_dirs(app)
+
     if os.path.isabs(name):
         # Validate absolute paths resolve inside a configured skill directory
         real = os.path.realpath(name)
-        allowed_roots = [os.path.realpath(c) for c in app.cfg.skill_dirs()]
+        allowed_roots = [os.path.realpath(c) for c in scope_dirs]
         if any(real == root for root in allowed_roots):
             click.echo(
                 f"error: path {name!r} must point to a specific skill directory, not the skill root",
@@ -1777,7 +1827,22 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
             raise SystemExit(1)
         skill_path: str | None = real
     else:
-        skill_path = _resolve_path(app, skill_name)
+        # Locate the named skill across the scope. If it exists under more than
+        # one connector, refuse and ask for --connector rather than guessing.
+        matches: list[str] = []
+        for d in scope_dirs:
+            candidate = os.path.join(d, skill_name)
+            if os.path.isdir(candidate) and candidate not in matches:
+                matches.append(candidate)
+        if len(matches) > 1:
+            click.echo(
+                f"error: skill {skill_name!r} exists under multiple connectors:\n"
+                + "\n".join(f"  - {m}" for m in matches)
+                + "\n  Pass --connector <name> to choose which one.",
+                err=True,
+            )
+            raise SystemExit(1)
+        skill_path = matches[0] if matches else None
 
     if not skill_path:
         click.echo(f"error: could not locate skill {skill_name!r} — provide an absolute path", err=True)
@@ -1808,13 +1873,24 @@ def quarantine(app: AppContext, name: str, reason: str) -> None:
 
 @skill.command()
 @click.argument("name")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Connector whose skill dirs the restore destination must fall within "
+    "(default: any active connector).",
+)
 @click.option("--path", "restore_path", default="", help="Override restore destination (defaults to original path)")
 @pass_ctx
-def restore(app: AppContext, name: str, restore_path: str) -> None:
+def restore(app: AppContext, name: str, connector_flag: str, restore_path: str) -> None:
     """Restore a quarantined skill to its original location.
 
     By default restores to the original path recorded during quarantine.
     Use --path to override the restore destination.
+
+    The destination is validated against every active connector's skill
+    directories (so a non-primary connector's skill restores correctly);
+    pass --connector to scope the validation to one connector.
     """
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.skill_enforcer import SkillEnforcer
@@ -1838,7 +1914,13 @@ def restore(app: AppContext, name: str, restore_path: str) -> None:
             raise SystemExit(1)
         restore_path = entry.source_path
 
-    allowed_roots = app.cfg.skill_dirs() if hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs) else None
+    if not (hasattr(app.cfg, "skill_dirs") and callable(app.cfg.skill_dirs)):
+        allowed_roots = None
+    elif connector_flag:
+        from defenseclaw.commands import resolve_list_connector
+        allowed_roots = app.cfg.skill_dirs(resolve_list_connector(app, connector_flag))
+    else:
+        allowed_roots = _all_active_skill_dirs(app)
     real_restore = os.path.realpath(restore_path)
     if allowed_roots:
         if not any(

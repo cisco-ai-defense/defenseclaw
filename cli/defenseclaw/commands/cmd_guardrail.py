@@ -44,6 +44,8 @@ Antigravity / ZeptoClaw configure themselves.
 
 from __future__ import annotations
 
+import os
+
 import click
 
 from defenseclaw import ux
@@ -115,6 +117,19 @@ def _active_connector_set(cfg, fallback: str) -> list[str]:
         except Exception:  # noqa: BLE001 — fall back to the primary connector.
             pass
     return [fallback]
+
+
+def _active_connector_display(cfg, fallback: str) -> str:
+    """Render the active-connector set as a ``Label (name)`` list.
+
+    A global guardrail change (enable/disable without ``--connector``) affects
+    EVERY active connector, so the messaging names them all; single-connector
+    installs collapse to one ``Label (name)`` via the ``_active_connector_set``
+    fallback. Keeps the user-facing scope honest on multi-connector installs.
+    """
+    return ", ".join(
+        f"{_connector_label(n)} ({n})" for n in _active_connector_set(cfg, fallback)
+    )
 
 
 def _resolve_member_connector(app, requested: str) -> str | None:
@@ -331,9 +346,26 @@ def status_cmd(app: AppContext) -> None:
         else:
             state = ux._style("disabled", fg="yellow")
         cfm_display = ux._style(cfm, fg="yellow") if cfm == "closed" else cfm
+        # Each connector can scan against its OWN rule pack (per-connector
+        # override, else the global pack); surface it so the roster shows which
+        # policy each peer is enforcing. Empty dir = the built-in default pack.
+        rp_dir = (
+            gc.effective_rule_pack_dir(name)
+            if hasattr(gc, "effective_rule_pack_dir")
+            else ""
+        )
+        rule_pack = os.path.basename(rp_dir.rstrip("/")) if rp_dir.strip() else "default"
+        # Per-connector HILT (human-in-the-loop): on@<min-severity> or off, so
+        # the roster reflects `guardrail hilt --connector X` overrides.
+        hilt_eff = gc.effective_hilt(name) if hasattr(gc, "effective_hilt") else None
+        if hilt_eff is not None and getattr(hilt_eff, "enabled", False):
+            hilt_str = f"hilt=on@{(getattr(hilt_eff, 'min_severity', '') or 'HIGH').upper()}"
+        else:
+            hilt_str = "hilt=off"
         click.echo(
             f"      - {_connector_label(name)} ({name}): "
-            f"{state} mode={cmode or 'observe'} fail={cfm_display}"
+            f"{state} mode={cmode or 'observe'} fail={cfm_display} "
+            f"rule-pack={rule_pack} {hilt_str}"
         )
     click.echo(
         f"  • {ux.dim('fail = hook response-layer failures (4xx / bad JSON / missing action)')}"
@@ -388,11 +420,11 @@ def disable_cmd(
     connector = _resolve_active_connector(app.cfg)
 
     if not gc.enabled:
-        click.echo(f"  {ux.dim('Guardrail is already disabled')} ({_connector_label(connector)} connector).")
+        click.echo(f"  {ux.dim('Guardrail is already disabled')} ({_active_connector_display(app.cfg, connector)}).")
         return
 
     click.echo()
-    click.echo(f"  {ux.bold('Disabling guardrail')} for {_connector_label(connector)} ({connector})")
+    click.echo(f"  {ux.bold('Disabling guardrail')} for {_active_connector_display(app.cfg, connector)}")
     if restart:
         ux.subhead(
             "Will restart the gateway so the connector teardown runs immediately.",
@@ -435,6 +467,7 @@ def disable_cmd(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
+            connectors=_active_connector_set(app.cfg, connector),
         )
         # In a multi-connector install the gateway boot loop tears down
         # EVERY active connector on restart, so report them all rather
@@ -498,7 +531,7 @@ def enable_cmd(
     connector = _resolve_active_connector(app.cfg)
 
     if gc.enabled:
-        click.echo(f"  {ux.dim('Guardrail is already enabled')} ({_connector_label(connector)} connector).")
+        click.echo(f"  {ux.dim('Guardrail is already enabled')} ({_active_connector_display(app.cfg, connector)}).")
         return
 
     # Sanity-check that there's enough config for re-enable to actually
@@ -511,7 +544,7 @@ def enable_cmd(
         raise SystemExit(1)
 
     click.echo()
-    click.echo(f"  {ux.bold('Enabling guardrail')} for {_connector_label(connector)} ({connector})")
+    click.echo(f"  {ux.bold('Enabling guardrail')} for {_active_connector_display(app.cfg, connector)}")
     if restart:
         ux.subhead(
             "Will restart the gateway so the connector setup runs immediately.",
@@ -546,6 +579,7 @@ def enable_cmd(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
+            connectors=_active_connector_set(app.cfg, connector),
         )
         # The boot loop runs Connector.Setup for EVERY active connector;
         # report them all in a multi-connector install.
@@ -863,6 +897,7 @@ def fail_mode_cmd(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=connector,
+            connectors=_active_connector_set(app.cfg, connector),
         )
         ux.ok("Gateway restarted, hooks regenerated with the new fail mode.", indent="  ")
         click.echo()
@@ -1179,6 +1214,7 @@ def hilt_cmd(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=_resolve_active_connector(app.cfg),
+            connectors=_active_connector_set(app.cfg, _resolve_active_connector(app.cfg)),
         )
         ux.ok("Gateway restarted, HILT policy applied.", indent="  ")
         click.echo()
@@ -1440,6 +1476,7 @@ def block_message_cmd(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=_resolve_active_connector(app.cfg),
+            connectors=_active_connector_set(app.cfg, _resolve_active_connector(app.cfg)),
         )
         ux.ok("Gateway restarted, block message applied.", indent="  ")
         click.echo()

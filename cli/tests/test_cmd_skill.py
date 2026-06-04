@@ -231,6 +231,31 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("not configured", result.output)
 
+    @patch("defenseclaw.commands.cmd_skill._scan_all_remote")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_remote_fans_out_per_connector(self, mock_scanner_cls, mock_remote):
+        # Parity with the local --all path: --all --remote must scan EVERY
+        # active connector's skills, not just the primary's.
+        mock_scanner_cls.return_value = MagicMock()
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--remote"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs.get("connector") for c in mock_remote.call_args_list}
+        self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all_remote")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_scan_all_remote_connector_flag_targets_one(self, mock_scanner_cls, mock_remote):
+        mock_scanner_cls.return_value = MagicMock()
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--remote", "--connector", "codex"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_remote.assert_called_once_with(self.app, False, connector="codex")
+
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
     def test_info_connector_flag_threads_connector(self, mock_info):
         # D4 parity: `skill info --connector X` must inspect X's skill.
@@ -422,6 +447,56 @@ class TestSkillQuarantine(SkillCommandTestBase):
         self.app.cfg.quarantine_dir = os.path.join(self.tmp_dir, "quarantine")
         result = self.invoke(["restore", "not-quarantined"])
         self.assertNotEqual(result.exit_code, 0)
+
+    def _wire_two_connectors(self):
+        """Point skill_dirs at per-connector dirs for codex + claudecode."""
+        codex_dir = os.path.join(self.tmp_dir, ".codex", "skills")
+        claude_dir = os.path.join(self.tmp_dir, ".claude", "skills")
+        os.makedirs(codex_dir, exist_ok=True)
+        os.makedirs(claude_dir, exist_ok=True)
+        self.app.cfg.quarantine_dir = os.path.join(self.tmp_dir, "quarantine")
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = lambda connector=None: {  # type: ignore[method-assign]
+            "codex": [codex_dir],
+            "claudecode": [claude_dir],
+        }.get(connector, [codex_dir])
+        return codex_dir, claude_dir
+
+    def test_quarantine_finds_skill_in_non_primary_connector(self):
+        # A skill living ONLY in a non-primary connector's dir must still be
+        # quarantine-able by name (union search across active connectors).
+        _codex_dir, claude_dir = self._wire_two_connectors()
+        peer = os.path.join(claude_dir, "peer-skill")
+        os.makedirs(peer)
+        with open(os.path.join(peer, "main.py"), "w") as f:
+            f.write("pass\n")
+
+        result = self.invoke(["quarantine", "peer-skill", "--reason", "sus"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("quarantined", result.output)
+        self.assertFalse(os.path.isdir(peer))
+
+    def test_quarantine_ambiguous_name_requires_connector(self):
+        # Same skill name under two connectors → refuse and ask for --connector
+        # rather than silently quarantining one.
+        codex_dir, claude_dir = self._wire_two_connectors()
+        for d in (codex_dir, claude_dir):
+            os.makedirs(os.path.join(d, "dup-skill"))
+
+        result = self.invoke(["quarantine", "dup-skill"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("multiple connectors", result.output)
+        # Both copies untouched.
+        self.assertTrue(os.path.isdir(os.path.join(codex_dir, "dup-skill")))
+        self.assertTrue(os.path.isdir(os.path.join(claude_dir, "dup-skill")))
+
+        # --connector resolves the ambiguity and quarantines just that one.
+        result2 = self.invoke(["quarantine", "dup-skill", "--connector", "codex"])
+        self.assertEqual(result2.exit_code, 0, result2.output)
+        self.assertFalse(os.path.isdir(os.path.join(codex_dir, "dup-skill")))
+        self.assertTrue(os.path.isdir(os.path.join(claude_dir, "dup-skill")))
 
 
 class TestSkillList(SkillCommandTestBase):

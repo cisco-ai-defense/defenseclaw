@@ -238,6 +238,62 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(mock_unset.call_args.kwargs.get("connector"), "codex")
 
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_fans_out_to_all_active_connectors(self, mock_set):
+        # Without --connector, `mcp set` writes the server to EVERY active
+        # connector's config (parity with codeguard install / the list reads).
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs.get("connector") for c in mock_set.call_args_list}
+        self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_connector_flag_targets_one(self, mock_set):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(
+            ["set", "ctx7", "--url", "https://x/mcp", "--skip-scan", "--connector", "codex"]
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs.get("connector") for c in mock_set.call_args_list}
+        self.assertEqual(called, {"codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_fans_out_to_all_connectors_with_the_server(self, mock_unset):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        result = self.invoke(["unset", "ctx7"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = {c.kwargs.get("connector") for c in mock_unset.call_args_list}
+        self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_skips_connectors_without_the_server(self, mock_unset):
+        # Fan-out with isolation: a connector that doesn't have the server is
+        # skipped, not an error, so one missing entry never blocks the rest.
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _servers(connector=None):
+            if connector == "codex":
+                return [MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+            return []
+
+        self.app.cfg.mcp_servers = _servers  # type: ignore[method-assign]
+
+        result = self.invoke(["unset", "ctx7"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        called = [c.kwargs.get("connector") for c in mock_unset.call_args_list]
+        self.assertEqual(called, ["codex"])
+
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_clean(self, mock_scan):
         mock_scan.return_value = ScanResult(

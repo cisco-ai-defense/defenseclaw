@@ -601,12 +601,35 @@ func (l *Logger) LogActionWithCorrelationConnector(action, target, details, trac
 	}, action, target, details)
 }
 
+// LogActionSeverityConnector persists an action event with an explicit
+// severity and connector attribution. Most lifecycle rows are fine at the
+// INFO default LogAction applies, but security-relevant call sites — like
+// the hook self-heal guard, where a runtime enforcement-hook tamper/repair
+// is the event — must land at the right severity on every surface AND carry
+// the dedicated connector column so SIEM consumers can filter by connector
+// without scraping a token out of details. An empty severity falls back to
+// INFO; an empty connector behaves exactly like LogAction.
+func (l *Logger) LogActionSeverityConnector(action, target, details, severity, connector string) error {
+	return l.logActionWithEnvelopeSeverity(CorrelationEnvelope{Connector: connector}, action, target, details, severity)
+}
+
 // logActionWithEnvelope is the shared implementation for every LogAction*
 // variant. Centralizing here guarantees that LogAction, LogActionCtx, and
 // LogActionWithCorrelation all thread the same audit-event shape onto
 // SQLite, sinks, and OTel — a regression in one surface can no longer
 // diverge from the others.
 func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, details string) error {
+	return l.logActionWithEnvelopeSeverity(env, action, target, details, "INFO")
+}
+
+// logActionWithEnvelopeSeverity is logActionWithEnvelope with a caller-chosen
+// severity. logActionWithEnvelope delegates here with "INFO" so the default
+// path is unchanged; only call sites that explicitly need a non-INFO row
+// (via LogActionSeverityConnector) reach this with a different value.
+func (l *Logger) logActionWithEnvelopeSeverity(env CorrelationEnvelope, action, target, details, severity string) error {
+	if severity == "" {
+		severity = "INFO"
+	}
 	sinksMgr, otel, structured := l.snapshot()
 	event := Event{
 		ID:        uuid.New().String(),
@@ -615,7 +638,7 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		Target:    target,
 		Actor:     "defenseclaw",
 		Details:   details,
-		Severity:  "INFO",
+		Severity:  severity,
 		RunID:     currentRunID(),
 		// Process-scoped identifier — never collapses onto
 		// agent_instance_id (per-session) per the three-tier contract.

@@ -1828,70 +1828,18 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     os.replace(tmp, dotenv_path)
 
 
-_ROTATE_TOKEN_TIMEOUT_S = 60.0
-_ROTATE_TOKEN_MAX_OUTPUT_BYTES = 256 * 1024
-
-
-def _rotate_token_run_gateway(args: list[str]) -> tuple[int, str, str]:
-    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr).
-
-    Bounded by ``_ROTATE_TOKEN_TIMEOUT_S`` (a hung gateway during a
-    teardown/setup cycle must not wedge the rotate-token CLI forever)
-    and by ``_ROTATE_TOKEN_MAX_OUTPUT_BYTES`` (a runaway subprocess
-    must not balloon the CLI's resident memory). Hitting either limit
-    raises ``ClickException`` so the operator sees the failure rather
-    than a silent kill.
-    """
-    binary = shutil.which("defenseclaw-gateway")
-    if not binary:
-        raise click.ClickException(
-            "defenseclaw-gateway binary not found on PATH. Install it before running rotate-token "
-            "(the connector teardown/setup hooks need it to refresh hook scripts)."
-        )
-    try:
-        proc = subprocess.run(
-            [binary, *args],
-            capture_output=True,
-            check=False,
-            timeout=_ROTATE_TOKEN_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as exc:
-        # Surface partial output so the operator can see how far the
-        # subprocess got before the timeout fired.
-        head = (exc.stdout or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
-        tail = (exc.stderr or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
-        raise click.ClickException(
-            f"defenseclaw-gateway {' '.join(args)!r} timed out after "
-            f"{_ROTATE_TOKEN_TIMEOUT_S:.0f}s. Partial stderr: "
-            f"{tail.decode('utf-8', errors='replace')[:512]} "
-            f"(stdout: {head.decode('utf-8', errors='replace')[:256]})"
-        ) from exc
-
-    stdout = proc.stdout or b""
-    stderr = proc.stderr or b""
-    if len(stdout) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES or len(stderr) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES:
-        raise click.ClickException(
-            f"defenseclaw-gateway {' '.join(args)!r} produced "
-            f"{len(stdout) + len(stderr)} bytes of output (cap "
-            f"{_ROTATE_TOKEN_MAX_OUTPUT_BYTES} per stream); refusing to buffer."
-        )
-    return (
-        proc.returncode,
-        stdout.decode("utf-8", errors="replace"),
-        stderr.decode("utf-8", errors="replace"),
-    )
-
-
 @setup.command("rotate-token")
 @click.option(
     "--connector",
     default=None,
-    help="Override the active connector (default: read from config).",
+    help="Override the connector used for the restart hint (the token is shared, "
+    "so ALL active connectors are refreshed regardless).",
 )
 @click.option(
     "--no-restart",
     is_flag=True,
-    help="Skip the connector teardown/setup that refreshes hook .token files.",
+    help="Skip the gateway restart that re-bakes the new token into every "
+    "connector's hook .token file.",
 )
 @click.option(
     "--yes",
@@ -1903,20 +1851,37 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     """Rotate the DEFENSECLAW_GATEWAY_TOKEN.
 
     Generates a new 32-byte CSPRNG hex token, rewrites
-    ~/.defenseclaw/.env atomically (mode 0o600), and refreshes the
-    per-connector hook scripts so they pick up the new token. The
-    operator must restart their active agent connector for the new
-    credential to take effect.
+    ~/.defenseclaw/.env atomically (mode 0o600), then restarts the
+    gateway so its boot loop re-runs Setup for EVERY active connector and
+    re-bakes the new token into each connector's hook ``.token`` file.
+
+    The token is a single shared secret baked into every connector's hook
+    scripts, so rotation is inherently global: refreshing only one
+    connector would leave the others authenticating with the now-invalid
+    old token. On a multi-connector install all active connectors are
+    refreshed in one restart.
 
     Plan B5 / S0.5.
     """
     import secrets
 
     dotenv_path = _rotate_token_dotenv_path(app)
+
+    actives = (
+        list(app.cfg.active_connectors())
+        if hasattr(app.cfg, "active_connectors")
+        else []
+    )
+    if not actives:
+        single = connector or (app.cfg.guardrail.connector or "").strip()
+        actives = [single] if single else []
+
     if not yes:
+        scope = ", ".join(actives) if actives else "no active connector"
         click.confirm(
             f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path}\n"
-            "and refresh hook scripts for the active connector. Continue?",
+            f"and restart the gateway so every active connector ({scope}) re-bakes\n"
+            "the new token into its hook scripts. Continue?",
             abort=True,
         )
 
@@ -1924,32 +1889,35 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     _rotate_token_atomic_write(dotenv_path, new_token)
     ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
 
-    active = connector or (app.cfg.guardrail.connector if app.cfg.guardrail.connector else None)
-    if not active:
-        ux.subhead("(no active connector configured; skipping hook refresh)")
+    if not actives:
+        ux.subhead("(no active connector configured; nothing to refresh)")
         return
 
     if no_restart:
         ux.subhead("--no-restart specified; hook .token files were NOT refreshed.")
-        ux.subhead("Run `defenseclaw-gateway connector setup` manually to apply the new token.")
+        ux.subhead(
+            "The new token takes effect only once the gateway restarts and re-runs "
+            "Setup for every connector:"
+        )
+        ux.subhead("  defenseclaw-gateway restart")
         return
 
-    # Bounce the connector so the hook scripts pick up the new token.
-    click.echo(f"  {ux.dim('Refreshing hook scripts for')} connector={active!r}…")
-    rc1, _so, se = _rotate_token_run_gateway(["connector", "teardown"])
-    if rc1 != 0:
-        ux.warn(f"connector teardown returned non-zero; old hook scripts may persist.\n  stderr: {se.strip()}")
-    rc2, _so, se = _rotate_token_run_gateway(["connector", "setup"])
-    if rc2 != 0:
-        raise click.ClickException(
-            "connector setup failed after token rotation; the gateway may be in an inconsistent state.\n"
-            f"stderr: {se.strip()}"
-        )
-
-    ux.ok("Hook scripts refreshed.")
+    # Restart the gateway: its boot loop re-runs Connector.Setup for ALL active
+    # connectors, which rewrites each connector's hook .token file from the
+    # freshly-rotated .env. A full restart (not a per-connector teardown) is
+    # what keeps every connector's shared token in lockstep.
+    click.echo(f"  {ux.dim('Refreshing hook scripts for')} {', '.join(actives)}…")
+    _restart_services(
+        app.cfg.data_dir,
+        app.cfg.gateway.host,
+        app.cfg.gateway.port,
+        connector=connector or app.cfg.active_connector(),
+        connectors=actives,
+    )
+    ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
     click.echo()
-    ux.subhead("Next step: restart the active agent connector so")
-    ux.subhead("the new token is picked up by its inspect / hook subprocess invocations.")
+    ux.subhead("Next step: restart each agent so it picks up the new token in its")
+    ux.subhead("inspect / hook subprocess invocations.")
 
 
 # ---------------------------------------------------------------------------
@@ -5071,6 +5039,7 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
             cfg.gateway.host,
             cfg.gateway.port,
             connector=cfg.active_connector(),
+            connectors=cfg.active_connectors(),
         )
     else:
         ux.warn(
@@ -5211,6 +5180,7 @@ def setup_notifications(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=cfg.active_connector(),
+            connectors=cfg.active_connectors(),
         )
     else:
         # Operator opted out of the restart explicitly; suppress the
@@ -5351,6 +5321,7 @@ def setup_notifications_set(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=cfg.active_connector(),
+            connectors=cfg.active_connectors(),
         )
     else:
         ctx = click.get_current_context(silent=True)
@@ -6219,15 +6190,38 @@ def _restart_services(
     oc_host: str = "127.0.0.1",
     oc_port: int = 18789,
     connector: str = "openclaw",
+    connectors: list[str] | None = None,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
     freshly-registered defenseclaw plugin. Other connectors manage
     their own processes; defenseclaw-gateway is the only process we
-    always need to bounce."""
+    always need to bounce.
+
+    ``connector`` selects the single connector whose post-restart hint is
+    shown (and, for OpenClaw, whether its own gateway is bounced). For a
+    GLOBAL change on a multi-connector install (e.g. ``guardrail hilt`` with no
+    ``--connector``), pass the full active set as ``connectors`` so the
+    hook-bus hint names every affected connector instead of just the primary —
+    the gateway restart itself is always global regardless."""
     ux.section("Restarting services")
 
     _restart_defense_gateway(data_dir)
+
+    # Multi-connector global change: every active hook connector is affected
+    # by the gateway bounce, so enumerate them rather than naming the primary.
+    hook_multi = [
+        c for c in (connectors or []) if c in _HOOK_ENFORCED_CONNECTORS
+    ]
+    if connector != "openclaw" and len(hook_multi) > 1:
+        names = ", ".join(sorted(hook_multi))
+        ux.subhead(
+            f"{len(hook_multi)} hook connectors ({names}): enforcement via the hook "
+            f"bus on the sidecar API port. No proxy listener — each talks directly "
+            f"to its native upstream."
+        )
+        click.echo()
+        return
 
     if connector == "openclaw":
         _restart_openclaw_gateway()

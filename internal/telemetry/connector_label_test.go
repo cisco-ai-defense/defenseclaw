@@ -125,6 +125,29 @@ func TestRecordScanFindingByRule_EmitsConnector(t *testing.T) {
 	}
 }
 
+func TestRecordWatcherEvent_EmitsConnector(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	p, err := NewProviderForTest(reader)
+	if err != nil {
+		t.Fatalf("NewProviderForTest: %v", err)
+	}
+	defer p.Shutdown(context.Background())
+
+	ctx := context.Background()
+	// Connector-scoped: hook self-heal carries the originating connector.
+	p.RecordWatcherEvent(ctx, "hook-heal", "codex", "codex")
+	// Global watcher events (rescan/drift) pass "" -> normalized to "unknown".
+	p.RecordWatcherEvent(ctx, "rescan_scan", "skill", "")
+
+	sum := sumOf(t, collect(t, p, reader), "defenseclaw.watcher.events")
+	if v := counterValueByAttr(sum, "connector", "codex"); v != 1 {
+		t.Errorf("connector=codex count = %d, want 1", v)
+	}
+	if v := counterValueByAttr(sum, "connector", "unknown"); v != 1 {
+		t.Errorf("connector=unknown count = %d, want 1", v)
+	}
+}
+
 func TestRecordScan_FindingsTotalEmitsConnector(t *testing.T) {
 	reader := sdkmetric.NewManualReader()
 	p, err := NewProviderForTest(reader)

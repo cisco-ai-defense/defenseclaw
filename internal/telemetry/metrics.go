@@ -1436,13 +1436,22 @@ func (p *Provider) RecordAdmissionDecision(ctx context.Context, decision, target
 }
 
 // RecordWatcherEvent records a filesystem watcher event.
-func (p *Provider) RecordWatcherEvent(ctx context.Context, eventType, targetType string) {
+func (p *Provider) RecordWatcherEvent(ctx context.Context, eventType, targetType, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	// Connector-scoped events (e.g. hook self-heal) carry the originating
+	// connector; genuinely global watcher events (rescan/drift) pass "".
+	// Normalize empty to "unknown" so the label is present on every series
+	// and connector-scoped dashboard selectors still match — same contract
+	// as RecordAlert / RecordScanFindingByRule.
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.watcherEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventType),
 		attribute.String("target_type", targetType),
+		attribute.String("connector", connector),
 	))
 }
 

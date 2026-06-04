@@ -204,6 +204,28 @@ def _resolve_active_connector(cfg) -> str:
     return "openclaw"
 
 
+def _resolve_active_connectors(cfg) -> list[str]:
+    """Return the FULL active-connector set for ``cfg``, lowercased.
+
+    Uninstall/reset must tear down EVERY configured connector on a
+    multi-connector install — otherwise a non-primary connector keeps its
+    hook scripts after ``~/.defenseclaw`` is wiped, leaving dangling hooks
+    that point at a deleted data dir. Prefers ``Config.active_connectors()``
+    (the authoritative multi-connector set); falls back to the singular
+    active connector for older / single-connector configs.
+    """
+    if cfg is not None and hasattr(cfg, "active_connectors") and callable(cfg.active_connectors):
+        try:
+            names = [(n or "").strip().lower() for n in cfg.active_connectors()]
+            names = [n for n in names if n]
+            if names:
+                return names
+        except Exception:  # noqa: BLE001 — fall back to the singular connector.
+            pass
+    single = _resolve_active_connector(cfg)
+    return [single] if single else []
+
+
 def _build_plan(
     *,
     wipe_data: bool,
@@ -229,7 +251,7 @@ def _build_plan(
 
     connector = _resolve_active_connector(cfg)
     connectors = _teardown_connectors(
-        connector,
+        _resolve_active_connectors(cfg),
         data_dir=data_dir,
         openclaw_config_file=openclaw_config_file,
         include_openclaw=revert_openclaw,
@@ -250,7 +272,7 @@ def _build_plan(
 
 
 def _teardown_connectors(
-    active_connector: str,
+    active_connectors: str | list[str] | tuple[str, ...],
     *,
     data_dir: str,
     openclaw_config_file: str,
@@ -258,11 +280,15 @@ def _teardown_connectors(
 ) -> tuple[str, ...]:
     """Return connector names that uninstall should restore before cleanup.
 
-    Active connector state is necessary but not sufficient: operators can
-    switch connectors, crash during handoff, or lose active_connector.json.
-    Backup markers are the durable evidence that DefenseClaw touched an
-    agent-owned config file, so uninstall sweeps those inactive connectors
-    too before data/binary removal.
+    The configured active set — EVERY connector under ``guardrail.connectors``,
+    not just the primary — is the authoritative source: on a multi-connector
+    install all of them must be torn down or their hook scripts outlive the
+    wiped data dir. Backup markers are layered on top as durable evidence that
+    DefenseClaw touched an agent-owned config in the past, so inactive
+    connectors from a previous boot, crash, or connector switch are swept too.
+
+    A bare string is accepted (and treated as a single-element set) for
+    backward compatibility with single-connector callers.
     """
     out: list[str] = []
 
@@ -275,7 +301,10 @@ def _teardown_connectors(
         if name not in out:
             out.append(name)
 
-    add(active_connector)
+    if isinstance(active_connectors, str):
+        active_connectors = [active_connectors]
+    for connector_name in active_connectors:
+        add(connector_name)
     for name, markers in _CONNECTOR_BACKUP_MARKERS.items():
         for marker in markers:
             if os.path.isfile(os.path.join(data_dir, marker)):
@@ -291,8 +320,16 @@ def _teardown_connectors(
 
 
 def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
-    ux.banner("Uninstall plan")
-    click.echo(f"  • {ux.bold('active connector:')}    {plan.connector}")
+    # "Plan" (not "Uninstall plan") — the command banner above already names
+    # the operation (Uninstall / Reset), so repeating it here is redundant and,
+    # for reset, was an outright mismatch ("Uninstall plan" under a Reset).
+    ux.banner("Plan")
+    if len(plan.connectors) > 1:
+        # Multi-connector installs serve N equal peers — there is no "primary",
+        # so list them all without singling one out.
+        click.echo(f"  • {ux.bold('active connectors:')}   {', '.join(plan.connectors)}")
+    else:
+        click.echo(f"  • {ux.bold('active connector:')}    {plan.connector}")
     display_connectors = plan.connectors or ((plan.connector,) if plan.revert_openclaw else ())
     teardown = ", ".join(display_connectors) if display_connectors else "no"
     click.echo(f"  • {ux.bold('connector teardown:')}  {teardown}")

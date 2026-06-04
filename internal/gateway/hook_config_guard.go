@@ -351,8 +351,11 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 		baseCtx = context.Background()
 	}
 	if g.logger != nil {
-		_ = g.logger.LogAction(string(audit.ActionConnectorHookTampered), connName,
-			fmt.Sprintf("hook config missing owned entries: %s", detail))
+		// Connector is the multi-connector dimension we add; severity is left
+		// at the logger's default (empty -> INFO) — the original severity of
+		// these rows is not ours to redesign.
+		_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookTampered), connName,
+			fmt.Sprintf("hook config missing owned entries: %s", detail), "", connName)
 	}
 	emitLifecycle(baseCtx, "hook_guard", "tampered", map[string]string{
 		"connector": connName,
@@ -364,11 +367,11 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 
 	if err := conn.Setup(hctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[hook-guard] re-install %s hooks failed: %v\n", connName, err)
-		emitError(baseCtx, "hook_guard", "self-heal-failed",
+		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
 			fmt.Sprintf("failed to re-install %s hook config", connName), err)
 		if g.logger != nil {
-			_ = g.logger.LogAction(string(audit.ActionGuardrailDegraded), connName,
-				fmt.Sprintf("hook self-heal Setup failed: %v", err))
+			_ = g.logger.LogActionSeverityConnector(string(audit.ActionGuardrailDegraded), connName,
+				fmt.Sprintf("hook self-heal Setup failed: %v", err), "", connName)
 		}
 		return
 	}
@@ -381,11 +384,11 @@ func (g *HookConfigGuard) heal(conn connector.Connector, opts connector.SetupOpt
 
 	fmt.Fprintf(os.Stderr, "[hook-guard] re-installed %s hook config after manual removal (%s)\n", connName, detail)
 	if g.otel != nil {
-		g.otel.RecordWatcherEvent(baseCtx, "hook-heal", connName)
+		g.otel.RecordWatcherEvent(baseCtx, "hook-heal", connName, connName)
 	}
 	if g.logger != nil {
-		_ = g.logger.LogAction(string(audit.ActionConnectorHookRepaired), connName,
-			fmt.Sprintf("re-installed hook entries removed from: %s", detail))
+		_ = g.logger.LogActionSeverityConnector(string(audit.ActionConnectorHookRepaired), connName,
+			fmt.Sprintf("re-installed hook entries removed from: %s", detail), "", connName)
 	}
 	emitLifecycle(baseCtx, "hook_guard", "repaired", map[string]string{
 		"connector": connName,

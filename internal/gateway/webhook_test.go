@@ -133,6 +133,46 @@ func TestFormatGenericPayload(t *testing.T) {
 	}
 }
 
+// TestNotifyHookHealed_WebhookCarriesConnector pins connector attribution on
+// the hook self-heal webhook. Regression guard for the gap where
+// notifyHookHealed set only Target (not the first-class Connector field), so
+// the dispatched payload's connector dimension was empty. The heal webhook
+// must carry connector=<name> end-to-end like every other connector-scoped
+// alert.
+func TestNotifyHookHealed_WebhookCarriesConnector(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	var mu sync.Mutex
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = b
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	s := &Sidecar{webhooks: NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: srv.URL, Type: "generic", Enabled: true},
+	})}
+	s.notifyHookHealed("codex", []string{"/Users/x/.codex/config.toml"})
+	s.webhooks.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(body) == 0 {
+		t.Fatal("hook-heal webhook delivered no payload")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal generic payload: %v", err)
+	}
+	event, _ := payload["event"].(map[string]any)
+	if event["connector"] != "codex" {
+		t.Errorf("hook-heal webhook connector=%v, want codex", event["connector"])
+	}
+}
+
 // TestFormatPayloads_IncludeConnector pins multi-connector attribution on
 // outbound webhook alerts: when the audit event carries a connector, every
 // payload formatter must surface it so operators can route/triage per

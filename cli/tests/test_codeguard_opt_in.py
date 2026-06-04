@@ -215,3 +215,43 @@ def test_codeguard_status_single_connector_unchanged(tmp_path, monkeypatch):
     status_lines = [ln for ln in result.output.splitlines() if ln.startswith("CodeGuard ")]
     assert len(status_lines) == 1, result.output
     assert "[cursor]" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Uniform-UX: `codeguard install` is a *mutating* command that, with no
+# `--connector`, fans out over every active connector (matching `status`),
+# so installing on a multi-connector box never silently lands on just the
+# primary. `--connector X` scopes the install to one validated peer.
+# ---------------------------------------------------------------------------
+
+def test_codeguard_install_fans_out_to_all_active_connectors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(codeguard, ["install", "--target", "skill"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    # One install line per active connector — not just the primary.
+    install_lines = [ln for ln in result.output.splitlines() if ln.startswith("CodeGuard skill [")]
+    assert len(install_lines) == 2, result.output
+    assert "[claudecode]" in result.output
+    assert "[codex]" in result.output
+
+
+def test_codeguard_install_connector_flag_narrows_to_one(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(
+        codeguard, ["install", "--connector", "codex", "--target", "skill"], obj=app
+    )
+
+    assert result.exit_code == 0, result.output
+    install_lines = [ln for ln in result.output.splitlines() if ln.startswith("CodeGuard skill [")]
+    assert len(install_lines) == 1, result.output
+    assert "[codex]" in result.output
+    assert "[claudecode]" not in result.output

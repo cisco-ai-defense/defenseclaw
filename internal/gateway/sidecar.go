@@ -1814,6 +1814,11 @@ func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
 		Timestamp: time.Now().UTC(),
 		Action:    string(audit.ActionConnectorHookRepaired),
 		Target:    connectorName,
+		// Connector is the first-class attribution field every sink and
+		// webhook payload carries; without it the heal notification's
+		// connector dimension is empty and SIEM consumers must scrape
+		// Target. Mirrors the audit-row fix in hook_config_guard.heal.
+		Connector: connectorName,
 		Actor:     "defenseclaw-hook-guard",
 		Details:   fmt.Sprintf("re-installed connector hook config after manual removal: %s", strings.Join(paths, ", ")),
 		Severity:  "HIGH",

@@ -539,6 +539,30 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertFalse(app.cfg.guardrail.enabled)
         self.assertTrue(app.cfg.guardrail.effective_enabled("codex"))
 
+    def test_global_disable_message_names_every_active_connector(self):
+        # The global kill switch tears down EVERY active connector, so the
+        # upfront message must name them all — not just the primary. Regression
+        # for the single-connector-blind display (it printed only "codex").
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None}, enabled=True)
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_guardrail.disable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Disabling guardrail for", result.output)
+        self.assertIn("Claude Code (claudecode)", result.output)
+        self.assertIn("Codex (codex)", result.output)
+
+    def test_global_enable_message_names_every_active_connector(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None}, enabled=False)
+        app.cfg.guardrail.model = "gpt-4o"
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(cmd_guardrail.enable_cmd, ["--yes"], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Enabling guardrail for", result.output)
+        self.assertIn("Claude Code (claudecode)", result.output)
+        self.assertIn("Codex (codex)", result.output)
+
     def test_status_roster_shows_disabled_state(self):
         runner = CliRunner()
         app = make_multi_ctx({"codex": False, "claudecode": None})
@@ -551,6 +575,23 @@ class PerConnectorToggleTests(unittest.TestCase):
         self.assertIn("Claude Code (claudecode): ", result.output)
         self.assertIn("disabled", result.output)
         self.assertIn("enabled", result.output)
+
+    def test_status_roster_shows_per_connector_rule_pack_and_hilt(self):
+        # Each connector can scan against its OWN rule pack AND HILT policy; the
+        # roster surfaces both. codex gets a custom pack + per-connector HILT;
+        # claudecode inherits the defaults.
+        from defenseclaw import config as dcconfig
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "claudecode": None})
+        app.cfg.guardrail.connectors["codex"].rule_pack_dir = "/packs/strict"
+        app.cfg.guardrail.connectors["codex"].hilt = dcconfig.HILTConfig(
+            enabled=True, min_severity="LOW"
+        )
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("rule-pack=strict", result.output)   # codex's own pack
+        self.assertIn("rule-pack=default", result.output)  # claudecode inherits
+        self.assertIn("hilt=on@LOW", result.output)        # codex's own HILT
 
     def test_status_global_disable_overrides_per_connector_enabled(self):
         # Regression: when the GLOBAL guardrail kill switch is off, no
