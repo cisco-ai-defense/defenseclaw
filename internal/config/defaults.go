@@ -186,6 +186,8 @@ func DefaultConfig() *Config {
 			ScannerMode:                 "both",
 			Host:                        "",
 			Port:                        4000,
+			HookSelfHeal:                true,
+			HookSelfHealDebounceMs:      500,
 			DetectionStrategy:           "regex_judge",
 			DetectionStrategyCompletion: "regex_only",
 			Judge: JudgeConfig{

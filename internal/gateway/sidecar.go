@@ -1483,6 +1483,14 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetConnectorSwitchState(registry, setupOpts)
 		proxy.SetHILTApprovalManager(s.hilt)
 		proxy.SetNotifier(s.osNotifier)
+		// Start connector hook self-heal before the observability-only
+		// short-circuit below. Hook-native connectors (codex, claudecode,
+		// cursor, ...) never reach proxy.Run, so the guard MUST be started
+		// here to cover both the observability and proxy-bound paths. The
+		// guard goroutine stops when ctx is cancelled.
+		if s.cfg.Guardrail.Enabled && s.cfg.Guardrail.HookSelfHeal {
+			proxy.StartHookConfigGuard(ctx, conn, setupOpts)
+		}
 	}
 	if err != nil {
 		s.health.SetGuardrail(StateError, err.Error(), nil)
