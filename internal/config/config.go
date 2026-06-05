@@ -373,6 +373,11 @@ type LLMConfig struct {
 	// Azure holds optional per-role Azure OpenAI posture. Same merge
 	// semantics as Bedrock.
 	Azure *AzureKeyConfig `mapstructure:"azure"   yaml:"azure,omitempty"`
+
+	// ExtraHeaders are additional HTTP headers sent on every request to
+	// this provider (e.g. {"llm-model": "gpt-5-5"} for Circuit routing).
+	// Forwarded to Bifrost's NetworkConfig.ExtraHeaders.
+	ExtraHeaders map[string]string `mapstructure:"extra_headers" yaml:"extra_headers,omitempty"`
 }
 
 // TLSConfig captures per-instance TLS overrides on a role-level

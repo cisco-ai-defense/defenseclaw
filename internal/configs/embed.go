@@ -81,6 +81,11 @@ type Provider struct {
 	// Azure holds per-instance Azure OpenAI posture (endpoint / API
 	// version / auth / deployment aliases). Same omitempty semantics.
 	Azure *ProviderAzure `json:"azure,omitempty"`
+
+	// ExtraHeaders are additional HTTP headers sent on every request to
+	// this provider (e.g. {"llm-model": "gpt-5-5"} for Circuit routing).
+	// Forwarded to Bifrost's NetworkConfig.ExtraHeaders.
+	ExtraHeaders map[string]string `json:"extra_headers,omitempty"`
 }
 
 // ProviderTLS describes how the gateway should validate the provider's

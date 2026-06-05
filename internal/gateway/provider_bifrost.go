@@ -39,11 +39,12 @@ import (
 // endpoints, regional posture, and TLS posture for one tenant are isolated
 // from other in-flight requests.
 type bifrostProvider struct {
-	providerKey schemas.ModelProvider
-	model       string
-	apiKey      string
-	baseURL     string
-	tls         tlsOverrides
+	providerKey  schemas.ModelProvider
+	model        string
+	apiKey       string
+	baseURL      string
+	tls          tlsOverrides
+	extraHeaders map[string]string
 	// Effective per-provider sub-blocks (role wins, overlay fills
 	// blanks; see NewProviderForLLMConfig). Pointer-typed so an
 	// absent block contributes nothing to the Bifrost Key.
@@ -188,6 +189,7 @@ func newTenantAccount(
 	bedrock *config.BedrockKeyConfig,
 	vertex *config.VertexKeyConfig,
 	azure *config.AzureKeyConfig,
+	extraHeaders map[string]string,
 ) *tenantAccount {
 	key := schemas.Key{
 		ID:     keyID,
@@ -279,6 +281,9 @@ func newTenantAccount(
 	if tls.CACertPEM != "" {
 		nc.CACertPEM = tls.CACertPEM
 	}
+	if len(extraHeaders) > 0 {
+		nc.ExtraHeaders = extraHeaders
+	}
 	return &tenantAccount{
 		provider: providerKey,
 		keys:     []schemas.Key{key},
@@ -342,6 +347,7 @@ func getBifrostClient(
 	bedrock *config.BedrockKeyConfig,
 	vertex *config.VertexKeyConfig,
 	azure *config.AzureKeyConfig,
+	extraHeaders map[string]string,
 ) (*bifrost.Bifrost, error) {
 	tk := tenantKey{
 		provider: providerKey,
@@ -364,7 +370,7 @@ func getBifrostClient(
 		return c, nil
 	}
 
-	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, tls, bedrock, vertex, azure)
+	acct := newTenantAccount(providerKey, apiKey, tk.keyID, baseURL, tls, bedrock, vertex, azure, extraHeaders)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{Account: acct})
@@ -422,7 +428,7 @@ func mapProviderKey(provider string) (schemas.ModelProvider, error) {
 }
 
 func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest) (*ChatResponse, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -438,7 +444,7 @@ func (bp *bifrostProvider) ChatCompletion(ctx context.Context, req *ChatRequest)
 }
 
 func (bp *bifrostProvider) ChatCompletionStream(ctx context.Context, req *ChatRequest, chunkCb func(StreamChunk)) (*ChatUsage, error) {
-	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure)
+	client, err := getBifrostClient(bp.providerKey, bp.apiKey, bp.baseURL, bp.tls, bp.bedrock, bp.vertex, bp.azure, bp.extraHeaders)
 	if err != nil {
 		return nil, err
 	}
