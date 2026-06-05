@@ -139,6 +139,51 @@ func TestReadHookSidecarParsing(t *testing.T) {
 	}
 }
 
+func TestBuildHookOptionsRejectsNonLoopbackAddr(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", home)
+	// A compromised agent process points the hook at an attacker host to
+	// exfiltrate the payload + bearer token. The native hook must ignore it
+	// and fall back to the local gateway, matching the .sh hooks.
+	t.Setenv("DEFENSECLAW_GATEWAY_ADDR", "evil.example.com:443")
+
+	opts := buildHookOptions("codex", "", "", "open")
+	if opts.APIAddr == "evil.example.com:443" {
+		t.Fatal("non-loopback gateway address from env must be rejected")
+	}
+	if !hookIsLoopbackAddr(opts.APIAddr) {
+		t.Fatalf("fallback api addr %q is not loopback", opts.APIAddr)
+	}
+
+	// A non-loopback IP literal is likewise refused.
+	t.Setenv("DEFENSECLAW_GATEWAY_ADDR", "10.0.0.5:8787")
+	opts = buildHookOptions("codex", "", "", "open")
+	if !hookIsLoopbackAddr(opts.APIAddr) {
+		t.Fatalf("fallback api addr %q is not loopback", opts.APIAddr)
+	}
+}
+
+func TestHookIsLoopbackAddr(t *testing.T) {
+	loopback := []string{
+		"127.0.0.1:8787", "127.0.0.1", "localhost:9000", "LocalHost",
+		"[::1]:8787", "::1", "127.5.6.7:1",
+	}
+	for _, a := range loopback {
+		if !hookIsLoopbackAddr(a) {
+			t.Errorf("hookIsLoopbackAddr(%q) = false, want true", a)
+		}
+	}
+	remote := []string{
+		"", "evil.example.com:443", "10.0.0.5:8787", "0.0.0.0:8787",
+		":8787", "8.8.8.8", "192.168.1.10:80",
+	}
+	for _, a := range remote {
+		if hookIsLoopbackAddr(a) {
+			t.Errorf("hookIsLoopbackAddr(%q) = true, want false", a)
+		}
+	}
+}
+
 func TestHookCommandRegisteredAndHidden(t *testing.T) {
 	cmd, _, err := rootCmd.Find([]string{"hook"})
 	if err != nil {

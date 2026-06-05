@@ -18,6 +18,7 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -99,6 +100,20 @@ func buildHookOptions(connector, event, apiAddr, failMode string) hookexec.Optio
 		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultConfig().Gateway.APIPort)
 	}
 
+	// The gateway is always a local, loopback-bound sidecar: setup bakes
+	// 127.0.0.1:<port> into every hook (connector_cmd.go) and the daemon binds
+	// loopback. This native path, unlike the .sh hooks, resolves its address
+	// partly from the process environment (DEFENSECLAW_GATEWAY_ADDR) and the
+	// .hookcfg sidecar, so a compromised agent process could otherwise redirect
+	// it to a remote host and exfiltrate hook payloads plus the bearer token.
+	// Refuse any non-loopback target and fall back to the safe default, matching
+	// the .sh hooks which bake the loopback address and ignore the environment.
+	if !hookIsLoopbackAddr(apiAddr) {
+		fmt.Fprintf(os.Stderr,
+			"defenseclaw: ignoring non-loopback gateway address %q; using local gateway\n", apiAddr)
+		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultConfig().Gateway.APIPort)
+	}
+
 	// Precedence mirrors the .sh `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-baked}"`:
 	// the env var wins, then the explicit flag, then the sidecar's baked value,
 	// and finally hookexec's "open" default for an empty string.
@@ -171,6 +186,31 @@ func readHookSidecar(path string) map[string]string {
 		}
 	}
 	return out
+}
+
+// hookIsLoopbackAddr reports whether addr ("host:port" or a bare host) targets
+// the local loopback interface. The hook only ever talks to the local gateway,
+// so any other host is treated as untrusted (see buildHookOptions).
+func hookIsLoopbackAddr(addr string) bool {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return false
+	}
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // hookEnvTrue mirrors defenseclaw_should_fail_closed_on_unreachable's truthy
