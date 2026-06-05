@@ -811,6 +811,30 @@ class TestMigrate040SeedHookFailMode(unittest.TestCase):
         self.assertEqual(data["guardrail"]["hook_fail_mode"], "open")
         self.assertTrue(any("hook_fail_mode" in c for c in ctx.changes))
 
+    def test_seeds_open_in_crlf_config(self):
+        """A CRLF-terminated config.yaml (Windows operator) must still get
+        the seed, and the inserted line must use CRLF so the file does not
+        end up with mixed line endings."""
+        cfg_path = os.path.join(self.data_dir, "config.yaml")
+        # newline="" keeps our explicit \r\n bytes verbatim on write.
+        with open(cfg_path, "w", newline="") as f:
+            f.write(
+                "claw:\r\n  mode: openclaw\r\n"
+                "guardrail:\r\n  enabled: true\r\n  mode: observe\r\n"
+            )
+
+        ctx = _ctx(self.tmp, self.data_dir)
+        _migrate_0_4_0(ctx)
+
+        with open(cfg_path, newline="") as f:
+            raw = f.read()
+        self.assertIn("  hook_fail_mode: open\r\n", raw)
+        # No mixed endings: every LF in the file is part of a CRLF pair.
+        self.assertEqual(raw.count("\n"), raw.count("\r\n"))
+        data = self._read_yaml()
+        self.assertEqual(data["guardrail"]["hook_fail_mode"], "open")
+        self.assertTrue(any("hook_fail_mode" in c for c in ctx.changes))
+
     def test_does_not_overwrite_explicit_open(self):
         cfg_path = os.path.join(self.data_dir, "config.yaml")
         with open(cfg_path, "w") as f:

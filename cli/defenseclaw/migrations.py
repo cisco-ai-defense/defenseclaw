@@ -526,7 +526,10 @@ _GUARDRAIL_BLOCK_RE = re.compile(
     # the substitution callback in _migrate_0_4_0_seed_hook_fail_mode,
     # which preserves every comment, blank line, and scalar quoting
     # choice the operator made under ``guardrail:``.
-    r"^guardrail:[ \t]*\n",
+    # ``\r?\n`` so a CRLF-terminated config.yaml (Windows operator) is
+    # matched too — ``[ \t]*`` does not consume ``\r``, so a bare ``\n``
+    # anchor would silently skip the seed on CRLF files.
+    r"^guardrail:[ \t]*\r?\n",
     flags=re.MULTILINE,
 )
 
@@ -538,7 +541,7 @@ _GUARDRAIL_BLOCK_RE = re.compile(
 # ``hook_fail_mode:`` under another section (e.g. a hand-edited
 # alternative-config dump) from suppressing the seed.
 _GUARDRAIL_HOOK_FAIL_MODE_RE = re.compile(
-    r"^guardrail:[ \t]*\n"
+    r"^guardrail:[ \t]*\r?\n"
     r"(?P<body>(?:[ \t]+[^\n]*\n|\n)*)",
     flags=re.MULTILINE,
 )
@@ -582,7 +585,10 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
         return
 
     try:
-        with open(cfg_path) as f:
+        # newline="" preserves the file's existing line endings (CRLF on a
+        # Windows operator's config) so the surgical insert below does not
+        # silently normalize the whole file to LF.
+        with open(cfg_path, newline="") as f:
             text = f.read()
     except OSError as exc:
         ux.warn(f"could not read {cfg_path}: {exc}", indent="    ")
@@ -602,7 +608,10 @@ def _migrate_0_4_0_seed_hook_fail_mode(ctx: MigrationContext) -> None:
         return
 
     indent = _detect_block_indent(body)
-    insertion = f"{indent}hook_fail_mode: open\n"
+    # Match the file's line-ending style so we don't splice an LF line into
+    # a CRLF file (which would leave mixed terminators under guardrail:).
+    terminator = "\r\n" if block_match.group(0).endswith("\r\n") else "\n"
+    insertion = f"{indent}hook_fail_mode: open{terminator}"
     new_text = _GUARDRAIL_BLOCK_RE.sub(
         lambda m: m.group(0) + insertion, text, count=1,
     )
@@ -846,7 +855,10 @@ def _atomic_write_text(path: str, body: str, *, mode: int = 0o644) -> bool:
             return False
     tmp = path + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        # newline="" writes ``body`` byte-for-byte (no \n -> os.linesep
+        # translation), so a caller that preserved a file's CRLF endings
+        # does not get them doubled to \r\r\n on Windows.
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
             f.write(body)
         os.chmod(tmp, mode)
         os.replace(tmp, path)
