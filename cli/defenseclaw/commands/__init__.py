@@ -60,8 +60,14 @@ def resolve_list_connector(app: Any, requested: str | None) -> str:
             configured = [active]
     except Exception:  # noqa: BLE001 — fall back to the singular active connector.
         configured = [active]
-    by_lower = {name.lower(): name for name in configured if name}
-    match = by_lower.get(requested.lower())
+    # Match connector-name-insensitively: fold case AND the hyphen/underscore
+    # aliases (e.g. "open-hands" → "openhands") via connector_paths.normalize
+    # so a user passing a documented alias resolves the configured canonical
+    # peer instead of hitting "not configured".
+    from defenseclaw import connector_paths
+
+    by_norm = {connector_paths.normalize(name): name for name in configured if name}
+    match = by_norm.get(connector_paths.normalize(requested))
     if match is None:
         allowed = ", ".join(sorted(configured)) or active
         raise click.UsageError(

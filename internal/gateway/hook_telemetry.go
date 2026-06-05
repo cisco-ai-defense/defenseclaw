@@ -217,6 +217,17 @@ func enrichConnectorHookTelemetrySpan(ctx context.Context, connectorName, eventT
 // its step counter, which is benign.
 const maxStepIdxSessions = 8192
 
+// maxStepIdxTurnsPerSession bounds how many distinct TurnIDs a single
+// session remembers for StepIdx de-duplication. maxStepIdxSessions caps
+// the number of sessions, but on its own a single long-lived session
+// that supplies a unique TurnID per turn would grow turnToStep without
+// limit. Repeat hook events for a turn arrive while that turn is current,
+// so only recent turns need retaining; when the cap is hit the oldest
+// (lowest-step) turn is evicted. The only consequence is that a repeat
+// event for a long-superseded turn restarts at a fresh index, which is
+// benign (same trade-off as session eviction).
+const maxStepIdxTurnsPerSession = 1024
+
 // sessionStepState is the per-session turn bookkeeping behind StepIdx.
 // step is the highest 1-indexed turn assigned so far; turnToStep maps a
 // connector-supplied TurnID to the index it was assigned so repeated
@@ -224,6 +235,24 @@ const maxStepIdxSessions = 8192
 type sessionStepState struct {
 	step       int
 	turnToStep map[string]int
+}
+
+// evictOldestTurnLocked drops the lowest-step (oldest) TurnID from the
+// session's turnToStep map to keep it bounded. Caller must hold
+// stepIdxMu. Step values are assigned monotonically, so the smallest
+// value is the oldest turn.
+func (st *sessionStepState) evictOldestTurnLocked() {
+	oldestTurn := ""
+	oldestStep := 0
+	first := true
+	for turn, step := range st.turnToStep {
+		if first || step < oldestStep {
+			oldestTurn, oldestStep, first = turn, step, false
+		}
+	}
+	if !first {
+		delete(st.turnToStep, oldestTurn)
+	}
 }
 
 // stepIndexForTurn returns the 1-indexed per-turn step counter for the
@@ -261,6 +290,9 @@ func (a *APIServer) stepIndexForTurn(sessionID, turnID, hookEvent string) int {
 	if turnID = strings.TrimSpace(turnID); turnID != "" {
 		if idx, ok := st.turnToStep[turnID]; ok {
 			return idx
+		}
+		if len(st.turnToStep) >= maxStepIdxTurnsPerSession {
+			st.evictOldestTurnLocked()
 		}
 		st.step++
 		st.turnToStep[turnID] = st.step

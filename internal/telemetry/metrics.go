@@ -1870,14 +1870,22 @@ func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
+	// Always emit the connector label so the audit_events series shape is
+	// stable. An unattributed event (variadic arg omitted, or empty/blank)
+	// normalizes to "unknown" rather than dropping the label — matching every
+	// other connector-labelled counter in this file (scan findings, guardrail/
+	// inspect evaluations, token usage) so `sum by (connector)` and
+	// `connector="..."` filters stay consistent across metrics.
+	conn := "unknown"
+	if len(connector) > 0 {
+		if c := strings.TrimSpace(connector[0]); c != "" {
+			conn = c
+		}
+	}
 	attrs := []attribute.KeyValue{
 		attribute.String("action", action),
 		attribute.String("severity", severity),
-	}
-	if len(connector) > 0 {
-		if c := strings.TrimSpace(connector[0]); c != "" {
-			attrs = append(attrs, attribute.String("connector", c))
-		}
+		attribute.String("connector", conn),
 	}
 	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(attrs...))
 }

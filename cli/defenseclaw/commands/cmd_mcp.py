@@ -911,6 +911,7 @@ def set_server(
     skipped: list[str] = []          # connector has no writable MCP surface
     policy_blocked: list[str] = []   # rejected by block list / asset rule
     scan_rejected: list[str] = []    # rejected by scan-findings policy
+    write_failed: list[tuple[str, Exception]] = []  # unexpected write error
     for c in connectors:
         pre_c = pre[c]
         if pre_c.verdict == "blocked":
@@ -945,6 +946,18 @@ def set_server(
         except connector_paths.MCPWriteUnsupportedError as exc:
             click.secho(f"  skipped [{c}]: {exc}", fg="yellow")
             skipped.append(c)
+        except Exception as exc:  # noqa: BLE001 — isolate unexpected per-connector write
+            # MCPWriteUnsupportedError above is the *expected* "no write surface"
+            # case (benign skip). Any other error is unexpected — a disk-full,
+            # locked-config, or serialization failure. A single-connector target
+            # keeps fail-loud, pre-fan-out behavior (propagate verbatim); with
+            # multiple targets one connector's failure must not abort the rest or
+            # leave a silent partial write, so it is isolated and surfaced via a
+            # non-zero exit below.
+            if len(connectors) == 1:
+                raise
+            click.secho(f"  failed [{c}]: {exc}", fg="red")
+            write_failed.append((c, exc))
 
     if not applied:
         # Universal scan rejection (connector-independent bad server): record
@@ -964,20 +977,29 @@ def set_server(
             reasons.append(f"scan-rejected: {', '.join(scan_rejected)}")
         if skipped:
             reasons.append(f"no MCP write surface: {', '.join(skipped)}")
+        if write_failed:
+            reasons.append(f"write failed: {', '.join(c for c, _ in write_failed)}")
         raise click.ClickException(
             f"MCP set failed: no connector accepted {name!r} ({'; '.join(reasons)})."
         )
 
-    not_applied = policy_blocked + scan_rejected + skipped
+    not_applied = policy_blocked + scan_rejected + skipped + [c for c, _ in write_failed]
+    # Always name the connectors that did NOT receive the server, even when the
+    # server landed on 2+ connectors — otherwise a partial fan-out (e.g. 2
+    # applied, 1 policy-blocked) prints a green "Added to 2 connectors" line
+    # that silently omits the blocked/skipped peer.
+    not_applied_suffix = (
+        f" ({len(not_applied)} not applied: {', '.join(not_applied)})" if not_applied else ""
+    )
     if len(applied) > 1:
         click.secho(
-            f"Added MCP server: {name} to {len(applied)} connectors: {', '.join(applied)}",
+            f"Added MCP server: {name} to {len(applied)} connectors: "
+            f"{', '.join(applied)}{not_applied_suffix}",
             fg="green",
         )
     elif not_applied:
         click.secho(
-            f"Added MCP server: {name} to {applied[0]} "
-            f"({len(not_applied)} not applied: {', '.join(not_applied)})",
+            f"Added MCP server: {name} to {applied[0]}{not_applied_suffix}",
             fg="green",
         )
     else:
@@ -985,6 +1007,16 @@ def set_server(
 
     if app.logger:
         app.logger.log_action("mcp-set", name, f"command={cmd} url={url} connectors={','.join(applied)}")
+
+    # An unexpected per-connector write failure (not the benign "no write
+    # surface" skip) is surfaced with a non-zero exit so scripts/CI notice the
+    # partial application, while the connectors that did land are kept.
+    if write_failed:
+        if app.logger:
+            app.logger.log_action(
+                "mcp-set-failed", name, f"connectors={','.join(c for c, _ in write_failed)}"
+            )
+        raise SystemExit(1)
 
     from defenseclaw.commands import hint
     hint(f"Scan it now:  defenseclaw mcp scan {name}")
@@ -1010,6 +1042,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     connectors = resolve_list_connectors(app, connector_flag)
     removed: list[str] = []
     skipped: list[str] = []
+    write_failed: list[tuple[str, Exception]] = []  # unexpected write error
     for c in connectors:
         if not any(s.name == name for s in app.cfg.mcp_servers(c)):
             continue
@@ -1019,8 +1052,22 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
         except connector_paths.MCPWriteUnsupportedError as exc:
             click.secho(f"  skipped [{c}]: {exc}", fg="yellow")
             skipped.append(c)
+        except Exception as exc:  # noqa: BLE001 — isolate unexpected per-connector write
+            # Parity with ``mcp set``: the benign "no write surface" case is
+            # handled above; any other removal failure is unexpected. Re-raise
+            # verbatim for a single-connector target, otherwise isolate it so a
+            # writable peer is still cleaned up (surfaced via non-zero exit).
+            if len(connectors) == 1:
+                raise
+            click.secho(f"  failed [{c}]: {exc}", fg="red")
+            write_failed.append((c, exc))
 
     if not removed:
+        if write_failed:
+            raise click.ClickException(
+                f"MCP server {name!r} removal failed on: "
+                f"{', '.join(c for c, _ in write_failed)}."
+            )
         if skipped:
             raise click.ClickException(
                 f"MCP server {name!r} is present but not removable on: "
@@ -1043,3 +1090,13 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
 
     if app.logger:
         app.logger.log_action("mcp-unset", name, f"connectors={','.join(removed)}")
+
+    # Surface an unexpected per-connector removal failure with a non-zero exit
+    # so scripts/CI notice the partial removal, while peers that were cleaned
+    # up are kept.
+    if write_failed:
+        if app.logger:
+            app.logger.log_action(
+                "mcp-unset-failed", name, f"connectors={','.join(c for c, _ in write_failed)}"
+            )
+        raise SystemExit(1)

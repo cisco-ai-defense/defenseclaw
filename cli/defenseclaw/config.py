@@ -1244,12 +1244,24 @@ class GuardrailConfig:
         """Return the override block for ``connector`` if configured.
 
         An empty connector name or empty map yields ``None`` so callers
-        uniformly fall through to the global value. Mirrors
+        uniformly fall through to the global value. Lookup is
+        connector-name-insensitive: an exact key hit is the fast path,
+        otherwise keys are compared after ``connector_paths.normalize`` so
+        a request for the canonical name (e.g. ``"openhands"``) resolves an
+        override written with different case or a hyphen/underscore alias
+        (e.g. ``"OpenHands"``, ``"open-hands"``). Mirrors
         ``GuardrailConfig.connectorOverride`` in Go.
         """
         if not connector or not self.connectors:
             return None
-        return self.connectors.get(connector)
+        pc = self.connectors.get(connector)
+        if pc is not None:
+            return pc
+        want = connector_paths.normalize(connector)
+        for name, entry in self.connectors.items():
+            if connector_paths.normalize(name) == want:
+                return entry
+        return None
 
     def effective_mode(self, connector: str = "") -> str:
         """Per-connector override > global mode > ``"observe"``."""

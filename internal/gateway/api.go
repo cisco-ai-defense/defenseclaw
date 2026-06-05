@@ -126,9 +126,10 @@ type APIServer struct {
 	// turn counter used to populate audit.Event.StepIdx. A "turn" is
 	// one prompt-response cycle within a session_id; all hook events
 	// emitted during the same turn share one StepIdx. See
-	// stepIndexForTurn for the boundary computation. Bounded to
-	// maxStepIdxSessions to keep a long-lived process from growing the
-	// map without limit.
+	// stepIndexForTurn for the boundary computation. Bounded on both
+	// axes so a long-lived process cannot grow memory without limit:
+	// maxStepIdxSessions caps the number of sessions, and
+	// maxStepIdxTurnsPerSession caps the per-session turn map.
 	stepIdxMu        sync.Mutex
 	stepIdxBySession map[string]*sessionStepState
 

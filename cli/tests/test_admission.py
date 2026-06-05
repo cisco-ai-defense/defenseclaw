@@ -148,6 +148,23 @@ class TestEvaluateAdmissionAssetPolicy(_StoreTestBase):
         self.assertEqual(d.verdict, "scan")
         self.assertEqual(d.source, "scan-required")
 
+    def test_denied_rule_matches_connector_alias(self):
+        # A denied rule keyed on the documented alias "open-hands" must still
+        # fire against the registry-canonical active connector "openhands". A
+        # literal lower-case compare silently skipped the rule, letting a
+        # server through that policy meant to block.
+        policy = self._asset_policy(
+            denied=[SimpleNamespace(name="risky", connector="open-hands")],
+        )
+        d = evaluate_admission(
+            self.pe, policy_dir=self.policy_dir,
+            target_type="mcp", name="risky",
+            connector="openhands",
+            asset_policy=policy,
+        )
+        self.assertEqual(d.verdict, "blocked")
+        self.assertEqual(d.source, "asset-policy-deny")
+
     def test_registry_required_blocks_unregistered(self):
         policy = self._asset_policy(
             registry_required=True,

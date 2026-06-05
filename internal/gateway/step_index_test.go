@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -87,6 +88,41 @@ func TestStepIndexForTurn_EmptySession(t *testing.T) {
 	}
 	if got := api.stepIndexForTurn("   ", "", "UserPromptSubmit"); got != 0 {
 		t.Errorf("whitespace session = %d, want 0", got)
+	}
+}
+
+// TestStepIndexForTurn_TurnMapBounded ensures a single long-lived
+// session that supplies a unique TurnID per turn cannot grow its
+// per-session turnToStep map without limit: the map is capped at
+// maxStepIdxTurnsPerSession by evicting the oldest turn. The current
+// turn must still keep returning a stable index within the same turn.
+func TestStepIndexForTurn_TurnMapBounded(t *testing.T) {
+	api := &APIServer{}
+	const sess = "long-lived"
+
+	// Drive more distinct turns than the cap.
+	for i := 0; i < maxStepIdxTurnsPerSession*2; i++ {
+		turn := fmt.Sprintf("turn-%d", i)
+		want := i + 1
+		if got := api.stepIndexForTurn(sess, turn, "pre_tool_call"); got != want {
+			t.Fatalf("turn %d first event = %d, want %d", i, got, want)
+		}
+		// Repeat event in the same (current) turn returns the same index.
+		if got := api.stepIndexForTurn(sess, turn, "post_tool_call"); got != want {
+			t.Fatalf("turn %d repeat event = %d, want %d (same turn)", i, got, want)
+		}
+	}
+
+	api.stepIdxMu.Lock()
+	st := api.stepIdxBySession[sess]
+	n := 0
+	if st != nil {
+		n = len(st.turnToStep)
+	}
+	api.stepIdxMu.Unlock()
+
+	if n > maxStepIdxTurnsPerSession {
+		t.Errorf("turnToStep size = %d, want <= %d (bounded)", n, maxStepIdxTurnsPerSession)
 	}
 }
 

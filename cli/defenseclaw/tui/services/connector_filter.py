@@ -104,12 +104,16 @@ def chip_segments(current: str, names: list[str]) -> list[tuple[str, bool]]:
 def filter_allows(current: str, connector: str) -> bool:
     """True when a row/event for ``connector`` should be shown under ``current``.
 
-    ALL shows everything. Otherwise match by case-insensitive substring, the
-    same semantics the existing ``connector:`` search token uses (so a row
-    whose attributed connector is empty is hidden under an explicit filter).
+    ALL shows everything. Otherwise the row's attributed connector must match
+    the selection exactly (case-insensitive). ``current`` is always a full
+    connector name here — it comes from the chip / connector-filter picker, not
+    free-text — so an exact compare is correct and avoids cross-matching
+    overlapping names (e.g. a ``"claw"``-style selection bleeding into
+    ``"openclaw"``/``"zeptoclaw"``). A row whose attributed connector is empty
+    is hidden under an explicit filter.
     """
 
     current = (current or "").strip().lower()
     if not current:
         return True
-    return current in (connector or "").strip().lower()
+    return current == (connector or "").strip().lower()

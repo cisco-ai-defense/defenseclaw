@@ -57,7 +57,7 @@ def test_chip_segments_marks_active() -> None:
     assert segs_all[0] == ("All", True)
 
 
-def test_filter_allows_substring_and_all() -> None:
+def test_filter_allows_exact_and_all() -> None:
     assert cf.filter_allows(cf.ALL, "codex") is True
     assert cf.filter_allows(cf.ALL, "") is True
     assert cf.filter_allows("codex", "codex") is True
@@ -65,3 +65,13 @@ def test_filter_allows_substring_and_all() -> None:
     assert cf.filter_allows("codex", "antigravity") is False
     # explicit filter hides rows with no attributed connector
     assert cf.filter_allows("codex", "") is False
+
+
+def test_filter_allows_is_exact_not_substring() -> None:
+    # The chip selection is always a full connector name, so a selection must
+    # not bleed into a different connector whose name contains it as a
+    # substring (regression: "claw" used to match "openclaw"/"zeptoclaw").
+    assert cf.filter_allows("claw", "openclaw") is False
+    assert cf.filter_allows("claw", "zeptoclaw") is False
+    assert cf.filter_allows("openclaw", "zeptoclaw") is False
+    assert cf.filter_allows("openclaw", "openclaw") is True

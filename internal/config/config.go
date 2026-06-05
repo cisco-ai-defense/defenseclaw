@@ -1318,39 +1318,67 @@ type PerConnectorGuardrailConfig struct {
 	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
 }
 
+// normalizeConnectorKey canonicalizes a connector name for
+// guardrail.connectors map lookups: trim, lowercase, and fold the known
+// hyphen/underscore aliases onto their canonical registry name. It is
+// the leaf-package counterpart of the Python connector_paths.normalize
+// alias table and must be kept in sync with it. Unlike that helper this
+// one returns "" for an empty/whitespace input rather than defaulting to
+// "openclaw": callers (connectorOverride / HasConnector) guard the empty
+// case separately so an unset connector falls through to the global
+// value instead of accidentally matching the openclaw override.
+func normalizeConnectorKey(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "open-hands", "open_hands":
+		return "openhands"
+	default:
+		return n
+	}
+}
+
 // connectorOverride returns the per-connector override block for the
 // named connector, if one is configured. It is the single internal
 // lookup point shared by every Effective*(connector) resolver: an empty
 // connector name, a nil receiver, or an empty map all yield (zero,
 // false) so callers uniformly fall through to the global value.
+//
+// Lookup is connector-name-insensitive: an exact key hit is the fast
+// path, otherwise keys are compared after normalizeConnectorKey so that
+// a request for the registry-canonical name (e.g. "openhands") resolves
+// an override written with different case or a hyphen/underscore alias
+// (e.g. "OpenHands", "open-hands"). This matches HasConnector and keeps
+// every Effective*() resolver consistent with the boot loop, which keys
+// connectors by their canonical registry name.
 func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuardrailConfig, bool) {
 	if g == nil || connector == "" || len(g.Connectors) == 0 {
 		return PerConnectorGuardrailConfig{}, false
 	}
-	pc, ok := g.Connectors[connector]
-	return pc, ok
+	if pc, ok := g.Connectors[connector]; ok {
+		return pc, true
+	}
+	want := normalizeConnectorKey(connector)
+	if want == "" {
+		return PerConnectorGuardrailConfig{}, false
+	}
+	for name, pc := range g.Connectors {
+		if normalizeConnectorKey(name) == want {
+			return pc, true
+		}
+	}
+	return PerConnectorGuardrailConfig{}, false
 }
 
 // HasConnector reports whether the named connector is a member of the
-// multi-connector guardrail.connectors set (case-insensitive). In a
-// multi-connector install every configured connector is active and
+// multi-connector guardrail.connectors set (connector-name-insensitive).
+// In a multi-connector install every configured connector is active and
 // therefore opted into hook evaluation, so the gateway treats set
 // membership as a sufficient enablement signal. Returns false for a nil
 // receiver or an empty map, so single-connector installs (which never
 // populate guardrail.connectors) are unaffected. Pure lookup.
 func (g *GuardrailConfig) HasConnector(connector string) bool {
-	if g == nil || connector == "" || len(g.Connectors) == 0 {
-		return false
-	}
-	if _, ok := g.Connectors[connector]; ok {
-		return true
-	}
-	for name := range g.Connectors {
-		if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(connector)) {
-			return true
-		}
-	}
-	return false
+	_, ok := g.connectorOverride(connector)
+	return ok
 }
 
 // EffectiveMode returns the guardrail mode for the named connector:
