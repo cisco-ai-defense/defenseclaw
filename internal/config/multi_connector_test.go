@@ -353,6 +353,22 @@ func TestGuardrailValidate(t *testing.T) {
 			}},
 			wantErr: "",
 		},
+		{
+			name: "duplicate_normalized_alias",
+			cfg: GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{
+				"openhands":  {Mode: "action"},
+				"open-hands": {Mode: "observe"},
+			}},
+			wantErr: "refer to the same connector",
+		},
+		{
+			name: "duplicate_normalized_case",
+			cfg: GuardrailConfig{Connectors: map[string]PerConnectorGuardrailConfig{
+				"codex": {Mode: "action"},
+				"Codex": {Mode: "observe"},
+			}},
+			wantErr: "refer to the same connector",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

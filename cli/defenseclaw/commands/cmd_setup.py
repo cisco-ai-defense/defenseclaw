@@ -3456,6 +3456,13 @@ def _apply_hook_connector_setup(
 
     Returns True on success, False on any persistence error.
     """
+    # Canonicalize the connector name at the boundary so the
+    # guardrail.connectors key and the singular guardrail.connector / claw.mode
+    # mirror are always the registry name (e.g. "claude-code" -> "claudecode").
+    # Without this a caller passing an alias could write a second map entry that
+    # collides with the canonical one — which GuardrailConfig.Validate now
+    # rejects at load, so an un-normalized write would brick config loading.
+    connector = normalize_connector(connector)
     if connector not in _HOOK_ENFORCED_CONNECTORS:
         click.echo(
             f"  ✗ hook-driven setup is only supported for {sorted(_HOOK_ENFORCED_CONNECTORS)} (got {connector!r})",

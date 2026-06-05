@@ -1334,11 +1334,25 @@ class GuardrailConfig:
         loop. Raises :class:`ValueError` with a named message on the
         first violation.
         """
+        seen: dict[str, str] = {}
         for name in sorted(self.connectors):
             if not name.strip():
                 raise ValueError(
                     "guardrail.connectors: empty connector name is not allowed"
                 )
+            # Reject two distinct keys that canonicalize to the same connector
+            # (e.g. "claude-code" + "claudecode", or "OpenHands" + "openhands").
+            # connector_override()/active_connectors() resolve keys through
+            # connector_paths.normalize, so a duplicate would make per-connector
+            # lookups and the active-connector roster ambiguous. Mirrors the Go
+            # GuardrailConfig.Validate duplicate-key guard.
+            norm = connector_paths.normalize(name)
+            if norm in seen:
+                raise ValueError(
+                    f"guardrail.connectors: {seen[norm]!r} and {name!r} refer to "
+                    f"the same connector {norm!r}; keep only one"
+                )
+            seen[norm] = name
             pc = self.connectors[name]
             try:
                 _validate_guardrail_mode(pc.mode)
@@ -1565,10 +1579,16 @@ class Config:
         single-connector callers keep using :meth:`active_connector`.
         """
         if self.guardrail.connectors:
+            # Dedupe after normalization so two alias keys (e.g. "claude-code"
+            # and "claudecode") can never make the boot loop iterate the same
+            # connector twice. validate() rejects such configs at load, but
+            # this stays robust for any caller that bypasses validation.
             names = sorted(
-                connector_paths.normalize(name)
-                for name in self.guardrail.connectors
-                if name.strip()
+                {
+                    connector_paths.normalize(name)
+                    for name in self.guardrail.connectors
+                    if name.strip()
+                }
             )
             if names:
                 return names

@@ -191,6 +191,26 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "codex")
         self.assertEqual(self.app.cfg.guardrail.mode, "observe")
 
+    def test_alias_connector_writes_canonical_key(self) -> None:
+        """Passing an alias (e.g. "claude-code") must persist the canonical
+        registry name so guardrail.connectors / guardrail.connector never hold
+        an alias that would collide with the canonical key (which
+        GuardrailConfig.Validate now rejects at load)."""
+        with patch(
+            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+            return_value=_discovery("claudecode", installed=True, version="2.1.144"),
+        ):
+            ok = _apply_hook_connector_setup(
+                self.app,
+                connector="claude-code",
+                mode="observe",
+                restart=False,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
+        self.assertEqual(self.app.cfg.claw.mode, "claudecode")
+
     def test_action_mode_allows_supported_installed_version(self) -> None:
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",

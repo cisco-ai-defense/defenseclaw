@@ -77,6 +77,20 @@ class TestActiveConnectors(unittest.TestCase):
         )
         self.assertEqual(cfg.active_connectors(), ["codex"])
 
+    def test_alias_keys_deduped(self):
+        # Two keys that normalize to the same connector must not make the
+        # boot loop iterate that connector twice.
+        cfg = Config(
+            guardrail=GuardrailConfig(
+                connector="codex",
+                connectors={
+                    "open-hands": PerConnectorGuardrailConfig(),
+                    "openhands": PerConnectorGuardrailConfig(),
+                },
+            )
+        )
+        self.assertEqual(cfg.active_connectors(), ["openhands"])
+
 
 class TestEffectiveResolvers(unittest.TestCase):
     def _cfg(self) -> GuardrailConfig:
@@ -242,6 +256,16 @@ class TestGuardrailValidate(unittest.TestCase):
                 )
             }
         ).validate()
+
+    def test_duplicate_normalized_alias_keys_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            GuardrailConfig(
+                connectors={
+                    "openhands": PerConnectorGuardrailConfig(mode="action"),
+                    "open-hands": PerConnectorGuardrailConfig(mode="observe"),
+                }
+            ).validate()
+        self.assertIn("refer to the same connector", str(ctx.exception))
 
 
 class TestMergeConnectors(unittest.TestCase):

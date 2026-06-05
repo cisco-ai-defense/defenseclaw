@@ -1482,10 +1482,26 @@ func (g *GuardrailConfig) Validate() error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
+	// Reject two distinct keys that canonicalize to the same connector
+	// (e.g. "OpenHands" + "openhands", or "open-hands" + "openhands").
+	// connectorOverride() resolves keys through normalizeConnectorKey, so a
+	// duplicate would make per-connector lookups (mode, fail mode, HILT) and
+	// the active-connector roster depend on Go map iteration order — a
+	// nondeterministic, security-relevant ambiguity in action mode. Fail loud
+	// at config load instead.
+	seen := make(map[string]string, len(names))
 	for _, name := range names {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("guardrail.connectors: empty connector name is not allowed")
 		}
+		if norm := normalizeConnectorKey(name); norm != "" {
+			if prev, dup := seen[norm]; dup {
+				return fmt.Errorf("guardrail.connectors: %q and %q refer to the same connector %q; keep only one", prev, name, norm)
+			}
+			seen[norm] = name
+		}
+	}
+	for _, name := range names {
 		pc := g.Connectors[name]
 		if err := validateGuardrailMode(pc.Mode); err != nil {
 			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
