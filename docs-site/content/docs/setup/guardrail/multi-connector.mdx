@@ -11,6 +11,11 @@ keywords:
 
 A single DefenseClaw gateway can enforce guardrail policy for **several hook connectors at once** — Codex, Claude Code, Antigravity, and the other hook-based agents — each with its own independent posture. This is the multi-connector model. It replaces the older "one active connector at a time" mental model: you no longer have to switch wiring to protect a second agent.
 
+<Video
+  src="multi-connector"
+  caption="One gateway governing Claude Code and Antigravity at once. The same three actions run against each agent: a benign `echo` flows through (action=allow / severity=NONE); a `chmod 777` HIGH-severity hit triggers a human-in-the-loop approval prompt via each connector's native ask surface; and reading a credential file matches a CRITICAL rule → decision=deny. Every verdict is attributed per connector in the Splunk pane. The demo closes by deleting each agent's hook config and watching DefenseClaw's self-heal detect the tamper and reinstall the hooks automatically (connector-hook-tampered → connector-hook-repaired)."
+/>
+
 <Callout type="info">
 Multi-connector is a **hook-connector** feature. The proxy-backed connectors (OpenClaw, ZeptoClaw) **cannot** be multi peers — they bind a proxy listener and own the agent traffic plane, so only one runs at a time. Hook connectors post structured events to the gateway and never contend for a listener, which is what lets the gateway fan out to N of them.
 </Callout>
