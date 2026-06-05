@@ -20,39 +20,75 @@ from __future__ import annotations
 
 import click
 
-from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
 
 
 @click.group()
 def codeguard() -> None:
-    """CodeGuard native skill/rule asset management."""
+    """CodeGuard native skill/rule asset management.
+
+    ``codeguard status`` reports every active connector by default; the
+    install subcommands take ``--connector X`` to target one configured peer.
+    """
 
 
 @codeguard.command("status")
-@click.option("--connector", default="", help="Connector to inspect (default: active connector).")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Inspect a single configured connector (default: every active connector).",
+)
 @click.option("--target", type=click.Choice(["skill", "rule"]), default="skill", show_default=True)
 @pass_ctx
-def status_cmd(app: AppContext, connector: str, target: str) -> None:
-    """Show whether a native CodeGuard asset is installed."""
-    from defenseclaw.codeguard_skill import codeguard_status
+def status_cmd(app: AppContext, connector_flag: str, target: str) -> None:
+    """Show whether a native CodeGuard asset is installed.
 
-    status = codeguard_status(app.cfg, connector=connector or None, target=target)
-    click.echo(f"CodeGuard {target} [{status.connector}]: {status.format()}")
+    Lists every active connector by default — one line each, tagged with the
+    connector name — so the output reads the same whether one or many
+    connectors are active. ``--connector <name>`` narrows to a single peer.
+    """
+    from defenseclaw.codeguard_skill import codeguard_status
+    from defenseclaw.commands import resolve_list_connectors
+
+    for connector in resolve_list_connectors(app, connector_flag):
+        status = codeguard_status(app.cfg, connector=connector, target=target)
+        click.echo(f"CodeGuard {target} [{status.connector}]: {status.format()}")
 
 
 @codeguard.command("install")
-@click.option("--connector", default="", help="Connector to install into (default: active connector).")
+@click.option(
+    "--connector",
+    "connector_flag",
+    default="",
+    help="Connector to install into (default: every active connector).",
+)
 @click.option("--target", type=click.Choice(["skill", "rule"]), default="skill", show_default=True)
 @click.option("--replace", is_flag=True, help="Replace an existing non-CodeGuard asset at the target path.")
 @pass_ctx
-def install_cmd(app: AppContext, connector: str, target: str, replace: bool) -> None:
-    """Install a native CodeGuard skill or rule asset explicitly."""
-    from defenseclaw.codeguard_skill import install_codeguard_asset
+def install_cmd(app: AppContext, connector_flag: str, target: str, replace: bool) -> None:
+    """Install a native CodeGuard skill or rule asset.
 
-    status = install_codeguard_asset(app.cfg, connector=connector or None, target=target, replace=replace)
-    _raise_install_error_if_needed(target, status)
-    click.echo(f"CodeGuard {target}: {status}")
+    Without ``--connector`` the asset is installed into EVERY active connector
+    (mirroring ``codeguard status``); ``--connector <name>`` scopes the install
+    to one configured peer. Per-connector failures are isolated and reported
+    together so one connector's conflict never silently skips the rest.
+    """
+    from defenseclaw.codeguard_skill import install_codeguard_asset
+    from defenseclaw.commands import resolve_list_connectors
+
+    failures: list[str] = []
+    for connector in resolve_list_connectors(app, connector_flag):
+        status = install_codeguard_asset(app.cfg, connector=connector, target=target, replace=replace)
+        click.echo(f"CodeGuard {target} [{connector}]: {status}")
+        if _is_codeguard_install_error(status):
+            failures.append(connector)
+
+    if failures:
+        raise click.ClickException(
+            f"CodeGuard {target} install failed for: {', '.join(failures)} "
+            "(see per-connector status above)"
+        )
 
     from defenseclaw.commands import hint
     hint("Scan code now:  defenseclaw scan code <path>")
@@ -61,18 +97,33 @@ def install_cmd(app: AppContext, connector: str, target: str, replace: bool) -> 
 @codeguard.command("install-skill")
 @pass_ctx
 def install_skill_cmd(app: AppContext) -> None:
-    """Backward-compatible alias for ``codeguard install --target skill``."""
-    from defenseclaw.codeguard_skill import install_codeguard_skill
+    """Backward-compatible alias for ``codeguard install --target skill``.
 
-    click.echo(f"{ux.bold('CodeGuard skill:')} installing...", nl=False)
-    status = install_codeguard_skill(app.cfg)
-    _raise_install_error_if_needed("skill", status)
-    click.echo(f" {status}")
+    Like ``codeguard install``, installs into every active connector.
+    """
+    from defenseclaw.codeguard_skill import install_codeguard_skill
+    from defenseclaw.commands import resolve_list_connectors
+
+    failures: list[str] = []
+    for connector in resolve_list_connectors(app, ""):
+        status = install_codeguard_skill(app.cfg, connector=connector)
+        click.echo(f"CodeGuard skill [{connector}]: {status}")
+        if _is_codeguard_install_error(status):
+            failures.append(connector)
+
+    if failures:
+        raise click.ClickException(
+            f"CodeGuard skill install failed for: {', '.join(failures)} "
+            "(see per-connector status above)"
+        )
 
     from defenseclaw.commands import hint
     hint("Scan code now:  defenseclaw scan code <path>")
 
 
-def _raise_install_error_if_needed(target: str, status: str) -> None:
-    if status.startswith("conflict at ") or status.startswith("unsupported"):
-        raise click.ClickException(f"CodeGuard {target}: {status}")
+def _is_codeguard_install_error(status: str) -> bool:
+    # ``unsupported`` means the connector has no skill/rule install target by
+    # design (e.g. antigravity) — that is a SKIP, not a failure, so it must not
+    # fail an otherwise-successful multi-connector install. Only a genuine
+    # conflict (an existing non-DefenseClaw asset in the way) is an error.
+    return status.startswith("conflict at ")

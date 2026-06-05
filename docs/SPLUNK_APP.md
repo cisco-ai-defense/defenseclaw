@@ -13,6 +13,14 @@ For an existing remote Splunk Enterprise deployment, use
 `defenseclaw setup splunk --enterprise` instead. That path forwards audit
 events to an existing HEC endpoint and does not install this local Splunk app.
 
+> **Multi-connector indexing.** A single gateway can serve several hook
+> connectors at once. Enterprise HEC consumers should index the connector
+> dimension so events can be sliced per connector: the top-level `connector`
+> field (first-class on every audit row) and `structured.connector` on hook
+> rows (`action="connector-hook"`). Example:
+> `index=<your-index> action="connector-hook" structured.connector="codex"`.
+> See `docs/OBSERVABILITY-CONTRACT.md` → Connector dimension fields.
+
 For the legal and local-scope guardrails for this workflow, see
 [INSTALL.md](INSTALL.md).
 

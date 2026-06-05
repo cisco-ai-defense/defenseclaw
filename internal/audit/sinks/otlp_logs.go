@@ -192,6 +192,9 @@ func (s *OTLPLogsSink) Forward(ctx context.Context, e Event) error {
 	if e.ToolID != "" {
 		record.AddAttributes(otellog.String("audit.tool_id", e.ToolID))
 	}
+	if e.Connector != "" {
+		record.AddAttributes(otellog.String("audit.connector", e.Connector))
+	}
 	if e.SchemaVersion != 0 {
 		record.AddAttributes(otellog.Int64("audit.schema_version", int64(e.SchemaVersion)))
 	}

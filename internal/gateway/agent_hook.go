@@ -278,16 +278,52 @@ func (a *APIServer) finalizeAgentHook(
 		fn()
 	}
 
+	// Build + stamp the audit envelope ONCE, up front, so every sink —
+	// OTel signals, structured logs, and the SQLite row — carries the
+	// SAME per-connector identity (connector/step_idx/enforced/
+	// rule_pack_dir). step_idx has a per-turn side effect, so it MUST be
+	// computed exactly once; stamping here (rather than per-sink) keeps
+	// the OTel log/span and the audit row in agreement (DN2 parity).
+	envResult := "ok"
+	if panicked {
+		envResult = "panic"
+	}
+	env := HookAuditEnvelope{
+		Connector:    connectorName,
+		Event:        req.HookEventName,
+		Result:       envResult,
+		Action:       resp.Action,
+		RawAction:    resp.RawAction,
+		Severity:     resp.Severity,
+		Mode:         resp.Mode,
+		Reason:       resp.Reason,
+		WouldBlock:   resp.WouldBlock,
+		ElapsedMs:    elapsed.Milliseconds(),
+		BodyBytes:    int64(len(rawBody)),
+		RawOrigin:    rawOriginIfHook(rawEventIDs),
+		RawEventIDs:  rawEventIDs,
+		EvaluationID: resp.EvaluationID,
+		RuleIDs:      resp.RuleIDs,
+	}
+	if panicked {
+		env.Extra = map[string]string{"panic": "true"}
+	}
+	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
+	attachRawPayload(&env, rawBody)
+	safeSection("identity", func() {
+		a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
+	})
+
 	safeSection("health", func() {
 		if a.health == nil {
 			return
 		}
-		a.health.RecordConnectorRequest()
+		a.health.RecordConnectorRequestFor(connectorName)
 		if resp.Action == "block" {
-			a.health.RecordToolBlock()
+			a.health.RecordToolBlockFor(connectorName)
 		}
 		if isGenericToolInspectionEvent(req.HookEventName) {
-			a.health.RecordToolInspection()
+			a.health.RecordToolInspectionFor(connectorName)
 		}
 	})
 
@@ -332,37 +368,15 @@ func (a *APIServer) finalizeAgentHook(
 		usage := extractHookPayloadTokenUsage(req.Payload)
 		a.otel.RecordHookTokenUsage(ctx, connectorName, usage.Model, usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens)
 		a.otel.EmitConnectorTelemetryLog(ctx, "hook", connectorName, result, 1, int64(len(rawBody)),
-			fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d result=%s",
-				hookLogLabel(connectorName), eventLabel, hookLogLabel(req.ToolName), decisionLabel, rawActionLabel, resp.WouldBlock, hookLogLabel(resp.Mode), elapsed.Milliseconds(), result))
+			fmt.Sprintf("source=hook connector=%s event=%s tool=%s decision=%s raw_action=%s would_block=%v mode=%s duration_ms=%d step_idx=%d enforced=%v rule_pack_dir=%s result=%s",
+				hookLogLabel(connectorName), eventLabel, hookLogLabel(req.ToolName), decisionLabel, rawActionLabel, resp.WouldBlock, hookLogLabel(resp.Mode), elapsed.Milliseconds(), env.StepIdx, env.Enforced, env.RulePackDir, result))
+		// DN2/C1: mirror the per-connector identity (step_idx/enforced/
+		// rule_pack_dir) onto the active span so the OTel sink reaches
+		// parity with the SQLite row and structured log.
+		enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 	})
 
 	safeSection("audit", func() {
-		envResult := "ok"
-		if panicked {
-			envResult = "panic"
-		}
-		env := HookAuditEnvelope{
-			Connector:    connectorName,
-			Event:        req.HookEventName,
-			Result:       envResult,
-			Action:       resp.Action,
-			RawAction:    resp.RawAction,
-			Severity:     resp.Severity,
-			Mode:         resp.Mode,
-			Reason:       resp.Reason,
-			WouldBlock:   resp.WouldBlock,
-			ElapsedMs:    elapsed.Milliseconds(),
-			BodyBytes:    int64(len(rawBody)),
-			RawOrigin:    rawOriginIfHook(rawEventIDs),
-			RawEventIDs:  rawEventIDs,
-			EvaluationID: resp.EvaluationID,
-			RuleIDs:      resp.RuleIDs,
-		}
-		if panicked {
-			env.Extra = map[string]string{"panic": "true"}
-		}
-		env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
-		attachRawPayload(&env, rawBody)
 		a.logConnectorHookAuditEnvelope(ctx, env)
 	})
 }
@@ -517,9 +531,9 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	}
 
 	if a.health != nil {
-		a.health.RecordConnectorRequest()
+		a.health.RecordConnectorRequestFor(connectorName)
 		if resp.Action == "block" {
-			a.health.RecordToolBlock()
+			a.health.RecordToolBlockFor(connectorName)
 		}
 	}
 
@@ -590,6 +604,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		Extra:               mergeHookEnvelopeExtra(extra, hookCompatibilityExtra(profile)),
 	}
 	attachRawPayload(&env, rawBody)
+	a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
 	a.logConnectorHookAuditEnvelope(ctx, env)
 	return resp
 }
@@ -966,6 +981,18 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// a different session than the inbound header (the synthetic
 	// codex-notify path is the canonical case) takes precedence.
 	ctx = refreshAuditEnvelopeFromHook(ctx, req, identity)
+	// Stamp the connector identity onto the audit envelope so every
+	// downstream surface (audit rows via applyEnvelope, gateway.jsonl
+	// events via stampEventCorrelation, sinks/Splunk) can filter by
+	// connector with the same identity. The hook payload's connector is
+	// authoritative on multi-connector installs.
+	if conn := strings.TrimSpace(req.ConnectorName); conn != "" {
+		env := audit.EnvelopeFromContext(ctx)
+		if env.Connector != conn {
+			env.Connector = conn
+			ctx = audit.ContextWithEnvelope(ctx, env)
+		}
+	}
 	enrichHTTPSpanFromContext(ctx)
 	return ctx
 }
@@ -1300,9 +1327,9 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	var assetDecisions []runtimeAssetDecision
 	switch {
 	case isPromptLikeEvent(req.HookEventName):
-		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt"})
+		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):
-		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result"})
+		verdict = a.inspectMessageContent(&ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
 		// Asset policy still runs on result-shaped events so a
 		// PostToolUse referencing an unregistered MCP server gets
 		// captured in audit / would-block telemetry. mergeAssetDecision
@@ -1310,7 +1337,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	case isGenericToolInspectionEvent(req.HookEventName):
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: req.ToolName, Args: req.ToolArgs, Direction: "tool_call"})
+		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: req.ToolName, Args: req.ToolArgs, Direction: "tool_call", Connector: req.ConnectorName})
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
 
@@ -1362,7 +1389,16 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
 		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock, evalCtx)
 	}
-	resp := agentHookResponseForProfile(profile, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+	// A configured block message overrides the user-facing reason on block
+	// verdicts only. The audit row + notification dispatched above keep the
+	// original verdict reason, so telemetry retains the "why" while the agent
+	// shows the operator's message. Resolved per connector.
+	var blockMsgCfg *config.GuardrailConfig
+	if a.scannerCfg != nil {
+		blockMsgCfg = &a.scannerCfg.Guardrail
+	}
+	responseReason := resolveHookBlockReason(blockMsgCfg, req.ConnectorName, action, reason)
+	resp := agentHookResponseForProfile(profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps)
 	// Stamp the unified-pipeline correlation keys so the HTTP
 	// response, the audit envelope (HookAuditEnvelope.EvaluationID
 	// / RuleIDs), and the scan_finding events all join on the same
@@ -1507,7 +1543,24 @@ func (a *APIServer) agentHookEnabled(name string) bool {
 	if a.scannerCfg == nil {
 		return false
 	}
+	// Per-connector explicit disable wins over every enable signal below:
+	// `guardrail disable --connector <name>` yields allow-without-scan even
+	// though the connector stays in guardrail.connectors (policy retained
+	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
+	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
+	// installs and any connector never explicitly disabled.
+	if !a.scannerCfg.Guardrail.EffectiveEnabled(name) {
+		return false
+	}
 	if a.scannerCfg.ConnectorHookConfig(name).Enabled {
+		return true
+	}
+	// Multi-connector: every member of guardrail.connectors is active
+	// and opted into evaluation. Without this, a secondary connector
+	// (not the singular guardrail.connector primary, and with no
+	// explicit connector_hooks flag) would fall through to allow-
+	// without-scan. No-op for single-connector installs (empty map).
+	if a.scannerCfg.Guardrail.HasConnector(name) {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), name)
@@ -1519,7 +1572,10 @@ func (a *APIServer) agentHookMode(name string) string {
 		hookCfg := a.scannerCfg.ConnectorHookConfig(name)
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || strings.EqualFold(mode, "inherit") {
-			mode = strings.TrimSpace(a.scannerCfg.Guardrail.Mode)
+			// Per-connector guardrail override (guardrail.connectors[name].mode)
+			// wins over the global mode; EffectiveMode encapsulates that
+			// precedence and falls back to the global mode then "observe".
+			mode = strings.TrimSpace(a.scannerCfg.Guardrail.EffectiveMode(name))
 		}
 	}
 	return normalizeAgentHookMode(mode)
@@ -1781,6 +1837,26 @@ func genericHookAdditionalContext(connectorName, rawAction, severity, reason str
 // renders inside an OS-level approval prompt where long sentences
 // get truncated. tool may be empty (e.g. UserPromptSubmit-class
 // events); in that case we fall back to a tool-agnostic phrase.
+// resolveHookBlockReason returns the user-facing reason for a hook response.
+// For block verdicts it lets a configured block message replace the verdict
+// text — a per-connector guardrail.connectors[X].block_message override takes
+// precedence over the global guardrail.block_message, resolved via
+// EffectiveBlockMessage. This mirrors the proxy path's blockMessage()
+// semantics (a configured message replaces the default). For non-block actions
+// or when no message is configured, the original reason passes through
+// unchanged, so existing behavior (surfacing the live verdict reason) is
+// preserved. A nil config or empty connector resolves to the global value,
+// keeping single-connector installs unaffected.
+func resolveHookBlockReason(gc *config.GuardrailConfig, connector, action, reason string) string {
+	if action != "block" || gc == nil {
+		return reason
+	}
+	if custom := strings.TrimSpace(gc.EffectiveBlockMessage(connector)); custom != "" {
+		return custom
+	}
+	return reason
+}
+
 func connectorReason(connectorName, action, tool, reason string) string {
 	if r := strings.TrimSpace(reason); r != "" {
 		return r

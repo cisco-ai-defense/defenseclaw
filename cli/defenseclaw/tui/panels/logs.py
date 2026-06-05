@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from defenseclaw.tui.panels.audit import split_connector_token
 from defenseclaw.tui.services.gateway_log_views import (
     ACTION_FILTERS,
     ACTION_LABELS,
@@ -280,6 +282,11 @@ class LogsPanelModel:
         self.cursor: dict[LogSource, int] = {source: 0 for source in LOG_SOURCES}
         self.cursor_moved: dict[LogSource, bool] = {source: False for source in LOG_SOURCES}
         self.scroll: dict[LogSource, int] = {source: 0 for source in LOG_SOURCES}
+        # 8.13 multi-connector: shared connector filter ("" = All) + the
+        # CONNECTOR column flag, set by the app from the active connector
+        # count. Connector is parsed from ``connector=<name>`` in each line.
+        self.connector_filter = ""
+        self.show_connector_column = False
         # Per-source baseline captured when the user paused. The
         # difference between current line count and this baseline is
         # what the hint bar should show as "+N since pause" so the
@@ -497,14 +504,31 @@ class LogsPanelModel:
             "Space pause; / search; e errors; w warnings; R redaction."
         )
 
+    def set_connector_filter(self, connector: str) -> None:
+        """Set the shared connector filter ("" = All).
+
+        Log lines are filtered on the fly (no cached ``filtered`` list), so
+        this only stores the value; the next render re-evaluates
+        :meth:`line_matches_current_filter`.
+        """
+
+        self.connector_filter = (connector or "").strip().lower()
+
     def data_table_columns(self) -> tuple[str, ...]:
         """Return a stable table shape for the Textual shell."""
 
+        if self.show_connector_column:
+            return ("Connector", "Line")
         return ("Line",)
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
         """Return active filtered rows in the table shape consumed by Textual."""
 
+        if self.show_connector_column:
+            return tuple(
+                (_line_connector(row.cells[0]) or "—", *row.cells)
+                for row in self.data_table_row_models()
+            )
         return tuple(row.cells for row in self.data_table_row_models())
 
     def data_table_row_models(self) -> tuple[LogTableRow, ...]:
@@ -611,7 +635,7 @@ class LogsPanelModel:
     def filtered_lines(self, source: LogSource | None = None) -> list[str]:
         active = source or self.source
         rows = self.lines[active]
-        if self.filter_mode == FILTER_NONE and not self.search_text:
+        if self.filter_mode == FILTER_NONE and not self.search_text and not self.connector_filter:
             return list(rows)
         return [line for line in rows if self.line_matches_current_filter(line.lower())]
 
@@ -830,8 +854,30 @@ class LogsPanelModel:
         )
 
     def line_matches_current_filter(self, lower_line: str) -> bool:
-        if self.search_text and self.search_text.lower() not in lower_line:
-            return False
+        # 8.13: the shared connector filter (from the chip) narrows lines to a
+        # single connector. Lines carry ``connector=<name>``; lines without
+        # any connector tag are hidden under an explicit filter.
+        if self.connector_filter:
+            if (
+                f"connector={self.connector_filter}" not in lower_line
+                and self.connector_filter not in lower_line
+            ):
+                return False
+        if self.search_text:
+            # E5: recognize the same ``connector:<name>`` token as the Audit
+            # and Alerts panels. Connector-hook log lines carry the connector
+            # as ``connector=<name>`` (gateway.jsonl / OTEL render), so match
+            # that form first and fall back to a bare substring; the remaining
+            # free text keeps the legacy substring search.
+            connector_value, remaining = split_connector_token(self.search_text.lower())
+            if connector_value:
+                if (
+                    f"connector={connector_value}" not in lower_line
+                    and connector_value not in lower_line
+                ):
+                    return False
+            if remaining and remaining not in lower_line:
+                return False
         if self.filter_mode == FILTER_NONE:
             return True
         if self.filter_mode == FILTER_NO_NOISE:
@@ -1011,6 +1057,21 @@ def _filter_change(filter_type: str, old: str, new: str) -> LogFilterChange | No
     if old == new:
         return None
     return LogFilterChange(panel="logs", filter_type=filter_type, old=old, new=new)
+
+
+_CONNECTOR_LINE_RE = re.compile(r"connector[=:]\s*\"?([A-Za-z0-9._-]+)\"?", re.IGNORECASE)
+
+
+def _line_connector(line: str) -> str:
+    """Extract the connector name from a ``connector=<name>`` log line.
+
+    Returns "" when the line has no connector tag (rendered as ``—`` in the
+    CONNECTOR column). Handles both ``connector=foo`` (text logs) and
+    ``"connector":"foo"`` style JSON via the ``[=:]`` alternation.
+    """
+
+    match = _CONNECTOR_LINE_RE.search(line or "")
+    return match.group(1) if match else ""
 
 
 def _log_row_key(source: LogSource, index: int, row: GatewayLogRow | None, line: str) -> str:

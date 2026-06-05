@@ -171,22 +171,37 @@ A few defaults are intentionally fixed unless you edit `~/.defenseclaw/config.ya
 
 If you need to change any of these, edit `~/.defenseclaw/config.yaml` directly and `defenseclaw config validate` confirms the schema.
 
-## Per-connector overrides
+## Per-connector overrides (`guardrail.connectors`)
 
-You can override per-connector in `~/.defenseclaw/config.yaml` for the small number of cases where one agent needs different behaviour:
+When you run more than one hook connector from a single gateway, override guardrail policy per connector under `guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`. Every field is optional and **inherits the global `guardrail.*` value when unset**, so a connector block only carries what differs:
+
+```yaml
+guardrail:
+  mode: action                   # global default
+  hook_fail_mode: open
+
+  connectors:
+    claudecode:
+      mode: action               # enforce for Claude Code
+    codex:
+      mode: observe              # softer for Codex than for Claude Code
+      hook_fail_mode: closed
+```
+
+`claw.mode` flips to `multi` automatically once more than one connector is active. Manage these blocks with `defenseclaw setup <connector>` (choosing **Add**) and the `defenseclaw guardrail ... --connector X` command group — see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) and [Reference → Configuration](/docs/reference/configuration). The OPA admission policy is still global — there's no per-connector policy override surface yet.
+
+<Callout type="warn" title="Legacy top-level connector blocks are deprecated">
+Older installs used top-level `claude_code:` / `codex:` blocks (the `AgentHookConfig` fields) for per-connector overrides:
 
 ```yaml
 claude_code:
   enabled: true
   mode: action
-  fail_mode: open                # LEGACY hint, not consumed by hooks; see Reference → Fail modes
-
-codex:
-  enabled: true
-  mode: observe                  # softer for Codex than for Claude Code
+  fail_mode: open                # LEGACY hint, NOT consumed by hooks; see Reference → Fail modes
 ```
 
-The connector overlay is shallow-merged on top of the global config, so you only need to specify what changes. (As of this writing, the OPA policy is global — there's no per-connector policy override surface yet.)
+These are still parsed for backward compatibility, but `fail_mode` here does **nothing** at runtime (see [Reference → Fail modes](/docs/reference/fail-modes#foot-gun-claude_codefail_mode-and-codexfail_mode-legacy-not-consumed-by-hook-scripts)). Prefer `guardrail.connectors.<name>` for new configuration — it's the surface the per-connector CLI writes and the gateway resolves at request time.
+</Callout>
 
 ## Inspect the active defaults
 

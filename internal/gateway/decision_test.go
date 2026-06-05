@@ -61,6 +61,130 @@ func TestGuardrailRuntimeActionStrictBlocksBeforeHILT(t *testing.T) {
 	}
 }
 
+// TestGuardrailRuntimeActionPerConnectorPosture pins the per-connector
+// rule-pack posture: a connector with a permissive override must enforce
+// the permissive threshold (CRITICAL-only) while a connector inheriting the
+// global strict pack still blocks MEDIUM+. This is the multi-connector parity
+// guarantee — the pack IS the posture, resolved per connector.
+func TestGuardrailRuntimeActionPerConnectorPosture(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.RulePackDir = "/tmp/policies/guardrail/strict" // global = strict
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {RulePackDir: "/tmp/policies/guardrail/permissive"},
+	}
+
+	// codex has no override → inherits global strict → MEDIUM/HIGH block.
+	if got := guardrailRuntimeActionForConnector(cfg, "codex", "MEDIUM", true); got != "block" {
+		t.Fatalf("codex (strict) MEDIUM = %q, want block", got)
+	}
+	if got := guardrailRuntimeActionForConnector(cfg, "codex", "HIGH", true); got != "block" {
+		t.Fatalf("codex (strict) HIGH = %q, want block", got)
+	}
+
+	// claudecode override → permissive → HIGH is alert (not block), but
+	// CRITICAL still blocks.
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "HIGH", true); got != "alert" {
+		t.Fatalf("claudecode (permissive) HIGH = %q, want alert", got)
+	}
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "MEDIUM", true); got != "allow" {
+		t.Fatalf("claudecode (permissive) MEDIUM = %q, want allow", got)
+	}
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "CRITICAL", true); got != "block" {
+		t.Fatalf("claudecode (permissive) CRITICAL = %q, want block", got)
+	}
+
+	// Empty connector resolves to the global pack (single-connector parity).
+	if got := guardrailRuntimeActionForConnector(cfg, "", "MEDIUM", true); got != "block" {
+		t.Fatalf("empty connector MEDIUM = %q, want block (global strict)", got)
+	}
+}
+
+// TestResolveHookBlockReason pins the block-message wiring: a configured
+// block message (per-connector override → global) replaces the user-facing
+// reason on block verdicts only, while non-block actions, the no-config case,
+// and the no-message case pass the original verdict reason through unchanged.
+func TestResolveHookBlockReason(t *testing.T) {
+	gc := &config.GuardrailConfig{BlockMessage: "global msg"}
+	gc.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex": {BlockMessage: "codex msg"},
+	}
+
+	cases := []struct {
+		name      string
+		gc        *config.GuardrailConfig
+		connector string
+		action    string
+		reason    string
+		want      string
+	}{
+		{"per-connector override on block", gc, "codex", "block", "rule X matched", "codex msg"},
+		{"global block message when no override", gc, "claudecode", "block", "rule Y matched", "global msg"},
+		{"empty connector uses global", gc, "", "block", "rule Z", "global msg"},
+		{"non-block action keeps verdict reason", gc, "codex", "confirm", "needs approval", "needs approval"},
+		{"alert keeps verdict reason", gc, "codex", "alert", "flagged", "flagged"},
+		{"nil config passes reason through", nil, "codex", "block", "rule X", "rule X"},
+		{
+			"no configured message keeps verdict reason",
+			&config.GuardrailConfig{}, "codex", "block", "rule X", "rule X",
+		},
+	}
+	for _, tc := range cases {
+		if got := resolveHookBlockReason(tc.gc, tc.connector, tc.action, tc.reason); got != tc.want {
+			t.Errorf("%s: resolveHookBlockReason(%q,%q,%q)=%q want %q",
+				tc.name, tc.connector, tc.action, tc.reason, got, tc.want)
+		}
+	}
+}
+
+// TestGuardrailRuntimeActionPerConnectorHILT pins per-connector
+// human-in-the-loop resolution: a connector's hilt override
+// (guardrail.connectors[X].hilt) must take precedence over the global HILT
+// block at decision time, while connectors without an override and the
+// empty (single-connector) path keep using the global HILT. Guards the
+// EffectiveHILT(connector) wiring in hiltEnabled/hiltMinRank.
+func TestGuardrailRuntimeActionPerConnectorHILT(t *testing.T) {
+	cfg := &config.Config{}
+	// Global HILT: ON, confirm at HIGH+. (Balanced pack: alert=HIGH, block=CRITICAL.)
+	cfg.Guardrail.HILT.Enabled = true
+	cfg.Guardrail.HILT.MinSeverity = "HIGH"
+
+	hiltOff := config.HILTConfig{Enabled: false}
+	hiltMedium := config.HILTConfig{Enabled: true, MinSeverity: "MEDIUM"}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":       {HILT: &hiltOff},    // override: HILT disabled
+		"antigravity": {HILT: &hiltMedium}, // override: confirm at MEDIUM+
+	}
+
+	// claudecode has no hilt override → inherits global ON@HIGH.
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "HIGH", true); got != "confirm" {
+		t.Fatalf("claudecode (inherit HILT) HIGH = %q, want confirm", got)
+	}
+	// Global min is HIGH, so MEDIUM stays below the confirm threshold and
+	// falls through to the balanced pack's alert tier (NOT confirm).
+	if got := guardrailRuntimeActionForConnector(cfg, "claudecode", "MEDIUM", true); got != "alert" {
+		t.Fatalf("claudecode (inherit HILT) MEDIUM = %q, want alert", got)
+	}
+
+	// codex override disables HILT → HIGH confirmable falls through to alert.
+	if got := guardrailRuntimeActionForConnector(cfg, "codex", "HIGH", true); got != "alert" {
+		t.Fatalf("codex (HILT off) HIGH = %q, want alert", got)
+	}
+	// HILT off must NOT disable hard blocks: CRITICAL still blocks.
+	if got := guardrailRuntimeActionForConnector(cfg, "codex", "CRITICAL", true); got != "block" {
+		t.Fatalf("codex (HILT off) CRITICAL = %q, want block", got)
+	}
+
+	// antigravity override lowers the confirm threshold to MEDIUM.
+	if got := guardrailRuntimeActionForConnector(cfg, "antigravity", "MEDIUM", true); got != "confirm" {
+		t.Fatalf("antigravity (HILT@MEDIUM) MEDIUM = %q, want confirm", got)
+	}
+
+	// Empty connector resolves to the global HILT (single-connector parity).
+	if got := guardrailRuntimeActionForConnector(cfg, "", "HIGH", true); got != "confirm" {
+		t.Fatalf("empty connector HIGH = %q, want confirm (global HILT)", got)
+	}
+}
+
 // TestClampPromptDirectionAction locks in the prompt-surface UX contract at
 // the lowest level: the pure helper that every other clamp callsite
 // composes with. The contract has three rules:

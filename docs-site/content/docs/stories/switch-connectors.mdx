@@ -22,7 +22,7 @@ defenseclaw alerts --limit 25
 tail -n 200 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connector' | sort | uniq -c
 ```
 
-`status` shows the active connector and enforcement flags. `alerts` lists the most recent decisions as a table. The third command is a quick by-connector histogram of recent events from the gateway's JSONL fan-out — replace `tail -n 200` with `cat` for a full-DB view, or open `defenseclaw tui` for the interactive Audit panel.
+`status` shows enforcement flags plus a per-connector block for every active connector — after a replace that's just the new one; on a multi-connector install it's the whole roster. `alerts` lists the most recent decisions as a table. The third command is a quick by-connector histogram of recent events from the gateway's JSONL fan-out — replace `tail -n 200` with `cat` for a full-DB view, or open `defenseclaw tui` for the interactive Audit panel.
 
 </Step>
 
@@ -65,7 +65,7 @@ tail -n 100 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connecto
 
 | Stays put | Moves |
 | --- | --- |
-| Audit DB (`~/.defenseclaw/audit.db`) | Active connector (`guardrail.connector`) |
+| Audit DB (`~/.defenseclaw/audit.db`) | Active connector wiring (`guardrail.connector`) — a replace swaps it; an add appends to the active roster instead |
 | Rule packs (`~/.defenseclaw/policies/`) | Hook scripts wired in agent config |
 | Sinks (OTLP / Splunk / webhooks) | `claw.mode` (drives source-of-truth files) |
 | `~/.defenseclaw/config.yaml` (selectively rewritten) | Backed-up agent files (restored to original) |
@@ -89,6 +89,10 @@ tail -n 100 ~/.defenseclaw/gateway.jsonl | jq -r 'select(.connector) | .connecto
   <Edge from="policy" to="old" variant="dashed" label="shared" />
   <Edge from="policy" to="new" variant="dashed" label="shared" />
 </Flow>
+
+<Callout type="info">
+**Switch vs add.** `setup mode <connector>` *replaces* the active connector — only one stays wired. If you run multiple agents and want guardrail policy on each at the same time, use the **add** flow instead: one gateway keeps all connectors wired, each under its own `guardrail.connectors.<name>` policy, and `claw.mode` becomes `multi`. See [Multi-connector](/docs/setup/guardrail/multi-connector).
+</Callout>
 
 ## When to switch
 

@@ -168,7 +168,7 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s would_block=%v reason=%s",
 			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, decision.WouldBlock, decision.Reason)
 		details = appendHookEvaluationDetails(details, evalCtx)
-		a.logAssetPolicyAudit(ctx, "mcp:"+decision.TargetName, details)
+		a.logAssetPolicyAudit(ctx, connector, "mcp:"+decision.TargetName, details)
 	}
 	a.dispatchAssetPolicyNotification(decision, "mcp", connector, hookEvent, evalCtx)
 	return decision, true
@@ -224,7 +224,7 @@ func (a *APIServer) evaluateRuntimeSkillAssetPolicy(ctx context.Context, connect
 		details := fmt.Sprintf("action=%s source=%s registry_status=%s registry_configured=%v surface=%s hook=%s tool=%s connector=%s skill_name_raw=%q source_path=%q would_block=%v reason=%s",
 			decision.Action, decision.Source, decision.RegistryStatus, decision.RegistryConfigured, probe.Surface, hookEvent, probe.ToolName, connector, probe.RawName, probe.SourcePath, decision.WouldBlock, decision.Reason)
 		details = appendHookEvaluationDetails(details, evalCtx)
-		a.logAssetPolicyAudit(ctx, "skill:"+decision.TargetName, details)
+		a.logAssetPolicyAudit(ctx, connector, "skill:"+decision.TargetName, details)
 	}
 	a.dispatchAssetPolicyNotification(decision, "skill", connector, hookEvent, evalCtx)
 	return decision, true

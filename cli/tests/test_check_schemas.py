@@ -62,6 +62,10 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "copilot",
                 "openhands",
                 "antigravity",
+                # Sentinel set by telemetry/resource.go when more than one
+                # connector is active (multi-connector install). Not a
+                # connector name — see buildResource / WU4.
+                "multi",
                 "",
             },
             "drift in defenseclaw.claw.mode enum — update Connector.Name() "

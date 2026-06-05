@@ -23,6 +23,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 
@@ -132,7 +133,13 @@ type AgentConfig struct {
 // into the matching LLMConfig slots, then the legacy fields are left
 // alone so hand-edited configs keep round-tripping. `defenseclaw setup
 // migrate-llm` writes the canonical v5 shape back to disk.
-const CurrentConfigVersion = 5
+//
+// v6: introduces the optional `guardrail.connectors:` map for
+// per-connector guardrail overrides (multi-connector support). The
+// legacy singular `guardrail.connector` field stays valid and keeps
+// driving the single-connector path, so the v5→v6 step is a no-op
+// normalization — no field rewrite is required.
+const CurrentConfigVersion = 6
 
 type Config struct {
 	ConfigVersion int `mapstructure:"config_version"        yaml:"config_version"`
@@ -1264,6 +1271,268 @@ type GuardrailConfig struct {
 	// a single presence check before deciding whether to re-install.
 	// <= 0 falls back to the built-in default (500ms).
 	HookSelfHealDebounceMs int `mapstructure:"hook_self_heal_debounce_ms" yaml:"hook_self_heal_debounce_ms,omitempty"`
+
+	// Connectors holds per-connector guardrail overrides keyed by
+	// connector name. Scope is HOOK-BASED connectors only (codex,
+	// claudecode, antigravity, ...); the proxy connectors (openclaw,
+	// zeptoclaw) are never listed here. An empty or absent map
+	// preserves the legacy single-connector behavior driven by the
+	// singular Connector field.
+	//
+	// Each entry inherits any unset field from the global
+	// GuardrailConfig — resolution goes through the Effective*(connector)
+	// methods, never by reading map entries directly. This struct does
+	// NOT validate connector identity against the registry (config is a
+	// leaf package); the "must implement HookEndpoint" guard lives in the
+	// gateway boot loop where the registry is available.
+	Connectors map[string]PerConnectorGuardrailConfig `mapstructure:"connectors" yaml:"connectors,omitempty"`
+}
+
+// PerConnectorGuardrailConfig carries the subset of guardrail policy
+// that an operator may override on a single hook-based connector. Every
+// field is optional: an unset (zero-value) field inherits the global
+// GuardrailConfig value via the Effective*(connector) resolvers. The
+// HILT block is a pointer so a nil block means "inherit the global HILT"
+// while a present-but-empty block means "explicitly override".
+type PerConnectorGuardrailConfig struct {
+	Mode         string      `mapstructure:"mode"           yaml:"mode,omitempty"`
+	HILT         *HILTConfig `mapstructure:"hilt"           yaml:"hilt,omitempty"`
+	HookFailMode string      `mapstructure:"hook_fail_mode" yaml:"hook_fail_mode,omitempty"`
+	BlockMessage string      `mapstructure:"block_message"  yaml:"block_message,omitempty"`
+	RulePackDir  string      `mapstructure:"rule_pack_dir"  yaml:"rule_pack_dir,omitempty"`
+
+	// Enabled is the per-connector on/off switch toggled by
+	// `defenseclaw guardrail disable --connector X` (and its enable
+	// counterpart). It is a pointer so that an unset (nil) field means
+	// "inherit the default (enabled)" — the overwhelming majority case,
+	// which keeps the connector active exactly as before. A non-nil
+	// false means the operator explicitly disabled this connector: the
+	// boot loop drops it from the active set so the existing
+	// set-difference teardown removes its hooks (parity with the global
+	// `guardrail disable`, scoped to one connector), and the hook gates
+	// short-circuit it to allow-without-scan as defense-in-depth.
+	// Resolved via EffectiveEnabled(connector); never read directly.
+	// Unlike a full `setup remove`, the connector's other policy fields
+	// (mode/hilt/rule_pack_dir) are retained so re-enable restores it
+	// with no re-prompt.
+	Enabled *bool `mapstructure:"enabled" yaml:"enabled,omitempty"`
+}
+
+// normalizeConnectorKey canonicalizes a connector name for
+// guardrail.connectors map lookups: trim, lowercase, and fold the known
+// hyphen/underscore aliases onto their canonical registry name. It is
+// the leaf-package counterpart of the Python connector_paths.normalize
+// alias table and must be kept in sync with it. Unlike that helper this
+// one returns "" for an empty/whitespace input rather than defaulting to
+// "openclaw": callers (connectorOverride / HasConnector) guard the empty
+// case separately so an unset connector falls through to the global
+// value instead of accidentally matching the openclaw override.
+func normalizeConnectorKey(name string) string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "open-hands", "open_hands":
+		return "openhands"
+	default:
+		return n
+	}
+}
+
+// connectorOverride returns the per-connector override block for the
+// named connector, if one is configured. It is the single internal
+// lookup point shared by every Effective*(connector) resolver: an empty
+// connector name, a nil receiver, or an empty map all yield (zero,
+// false) so callers uniformly fall through to the global value.
+//
+// Lookup is connector-name-insensitive: an exact key hit is the fast
+// path, otherwise keys are compared after normalizeConnectorKey so that
+// a request for the registry-canonical name (e.g. "openhands") resolves
+// an override written with different case or a hyphen/underscore alias
+// (e.g. "OpenHands", "open-hands"). This matches HasConnector and keeps
+// every Effective*() resolver consistent with the boot loop, which keys
+// connectors by their canonical registry name.
+func (g *GuardrailConfig) connectorOverride(connector string) (PerConnectorGuardrailConfig, bool) {
+	if g == nil || connector == "" || len(g.Connectors) == 0 {
+		return PerConnectorGuardrailConfig{}, false
+	}
+	if pc, ok := g.Connectors[connector]; ok {
+		return pc, true
+	}
+	want := normalizeConnectorKey(connector)
+	if want == "" {
+		return PerConnectorGuardrailConfig{}, false
+	}
+	for name, pc := range g.Connectors {
+		if normalizeConnectorKey(name) == want {
+			return pc, true
+		}
+	}
+	return PerConnectorGuardrailConfig{}, false
+}
+
+// HasConnector reports whether the named connector is a member of the
+// multi-connector guardrail.connectors set (connector-name-insensitive).
+// In a multi-connector install every configured connector is active and
+// therefore opted into hook evaluation, so the gateway treats set
+// membership as a sufficient enablement signal. Returns false for a nil
+// receiver or an empty map, so single-connector installs (which never
+// populate guardrail.connectors) are unaffected. Pure lookup.
+func (g *GuardrailConfig) HasConnector(connector string) bool {
+	_, ok := g.connectorOverride(connector)
+	return ok
+}
+
+// EffectiveMode returns the guardrail mode for the named connector:
+// per-connector override (when non-empty) > global Mode > "observe".
+// Pure lookup — never errors, never mutates, never touches I/O.
+func (g *GuardrailConfig) EffectiveMode(connector string) string {
+	if g == nil {
+		return "observe"
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if m := strings.TrimSpace(pc.Mode); m != "" {
+			return m
+		}
+	}
+	if m := strings.TrimSpace(g.Mode); m != "" {
+		return m
+	}
+	return "observe"
+}
+
+// EffectiveEnabled reports whether the named connector should be brought
+// up and enforced. The default is true: a nil receiver, an empty
+// connector name, no override entry, or an entry with an unset (nil)
+// Enabled pointer all resolve to true, so single-connector installs and
+// every connector that was never explicitly disabled keep running
+// exactly as before. Only an explicit `enabled: false` in the
+// per-connector override returns false — that is the signal the boot
+// loop uses to drop the connector from the active set (triggering the
+// existing set-difference teardown) and the hook gates use to
+// short-circuit it to allow-without-scan. Pure lookup — never errors,
+// never mutates, never touches I/O.
+func (g *GuardrailConfig) EffectiveEnabled(connector string) bool {
+	if g == nil {
+		return true
+	}
+	if pc, ok := g.connectorOverride(connector); ok && pc.Enabled != nil {
+		return *pc.Enabled
+	}
+	return true
+}
+
+// EffectiveHILT returns the HILT config for the named connector. A
+// per-connector hilt block (when present) fully replaces the global
+// block; otherwise the global HILT is returned. Pure lookup.
+func (g *GuardrailConfig) EffectiveHILT(connector string) HILTConfig {
+	if g == nil {
+		return HILTConfig{}
+	}
+	if pc, ok := g.connectorOverride(connector); ok && pc.HILT != nil {
+		return *pc.HILT
+	}
+	return g.HILT
+}
+
+// EffectiveBlockMessage returns the per-connector block message when
+// set, else the global BlockMessage (which may be empty — the gateway
+// substitutes its built-in default downstream). Pure lookup.
+func (g *GuardrailConfig) EffectiveBlockMessage(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if pc.BlockMessage != "" {
+			return pc.BlockMessage
+		}
+	}
+	return g.BlockMessage
+}
+
+// EffectiveRulePackDir returns the per-connector rule-pack directory
+// when set, else the global RulePackDir. Pure lookup — path existence
+// is validated elsewhere (rule-pack load), not here.
+func (g *GuardrailConfig) EffectiveRulePackDir(connector string) string {
+	if g == nil {
+		return ""
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if strings.TrimSpace(pc.RulePackDir) != "" {
+			return pc.RulePackDir
+		}
+	}
+	return g.RulePackDir
+}
+
+// Validate checks per-connector guardrail VALUE invariants only — the
+// NEW guardrail.connectors map. For each override it inspects enum
+// values (mode, hook_fail_mode, hilt.min_severity) and rejects empty
+// connector names. It deliberately does NOT re-validate the global
+// guardrail fields: those predate multi-connector support and were
+// never gated by Load(), so validating them here could reject configs
+// that load fine today. It never imports the connector registry — the
+// "entries must be hook connectors" guard lives in the gateway boot
+// loop, where the registry is in hand. Wired into Load().
+func (g *GuardrailConfig) Validate() error {
+	if g == nil {
+		return nil
+	}
+	// Per-connector overrides, in sorted order for deterministic errors.
+	names := make([]string, 0, len(g.Connectors))
+	for name := range g.Connectors {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("guardrail.connectors: empty connector name is not allowed")
+		}
+		pc := g.Connectors[name]
+		if err := validateGuardrailMode(pc.Mode); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+		}
+		if err := validateGuardrailHookFailMode(pc.HookFailMode); err != nil {
+			return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+		}
+		if pc.HILT != nil {
+			if err := validateGuardrailMinSeverity(pc.HILT.MinSeverity); err != nil {
+				return fmt.Errorf("guardrail.connectors[%q]: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// validateGuardrailMode accepts the empty string (inherit/default) and
+// the canonical guardrail modes. Anything else is a named error.
+func validateGuardrailMode(mode string) error {
+	switch strings.TrimSpace(mode) {
+	case "", "observe", "action":
+		return nil
+	default:
+		return fmt.Errorf("invalid guardrail mode %q (want \"observe\" or \"action\")", mode)
+	}
+}
+
+// validateGuardrailHookFailMode accepts the empty string (inherit/
+// default) plus the two canonical hook fail-mode sentinels.
+func validateGuardrailHookFailMode(mode string) error {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case "", "open", "closed":
+		return nil
+	default:
+		return fmt.Errorf("invalid hook_fail_mode %q (want \"open\" or \"closed\")", mode)
+	}
+}
+
+// validateGuardrailMinSeverity accepts the empty string (inherit/
+// default) plus the canonical severity ladder.
+func validateGuardrailMinSeverity(sev string) error {
+	switch strings.TrimSpace(strings.ToUpper(sev)) {
+	case "", "LOW", "MEDIUM", "HIGH", "CRITICAL":
+		return nil
+	default:
+		return fmt.Errorf("invalid hilt.min_severity %q (want LOW, MEDIUM, HIGH, or CRITICAL)", sev)
+	}
 }
 
 // EffectiveHookFailMode returns the operator-chosen hook fail mode,
@@ -1278,6 +1547,29 @@ func (g *GuardrailConfig) EffectiveHookFailMode() string {
 		return "closed"
 	}
 	return "open"
+}
+
+// EffectiveHookFailModeFor returns the hook fail mode for the named
+// connector: a per-connector override (when set) wins, otherwise it
+// falls back to the global EffectiveHookFailMode(). This is the additive
+// multi-connector sibling — the global EffectiveHookFailMode() keeps its
+// original no-arg signature and behavior so existing single-connector
+// callers (sidecar boot, config-edit surfaces) are untouched; only the
+// per-connector boot loop calls this variant. Pass "" to resolve the
+// global value. Pure lookup — never errors, never mutates.
+func (g *GuardrailConfig) EffectiveHookFailModeFor(connector string) string {
+	if g == nil {
+		return "open"
+	}
+	if pc, ok := g.connectorOverride(connector); ok {
+		if strings.TrimSpace(pc.HookFailMode) != "" {
+			if strings.EqualFold(strings.TrimSpace(pc.HookFailMode), "closed") {
+				return "closed"
+			}
+			return "open"
+		}
+	}
+	return g.EffectiveHookFailMode()
 }
 
 // EffectiveStrategy returns the detection strategy for the given direction,
@@ -1694,6 +1986,13 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	if err := cfg.Guardrail.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "guardrail_invalid")
+		}
+		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+
 	// Validate registry source kind/content shapes. The Python CLI
 	// is the authoritative writer for ``registries.sources`` (it
 	// drives ``defenseclaw registry add/edit``), but any operator
@@ -1999,6 +2298,16 @@ func migrateConfig(cfg *Config) {
 	// migrate-llm` is the tool that actually rewrites the file.
 	if cfg.ConfigVersion < 5 {
 		migrateLLMConfigFields(cfg)
+	}
+
+	// v5 → v6: multi-connector support adds the optional
+	// `guardrail.connectors:` map. The legacy singular
+	// `guardrail.connector` field is still valid and keeps driving the
+	// single-connector path, so there is nothing to rewrite in-process —
+	// this is a pure version-stamp normalization. The opt-in rewrite to
+	// the plural shape is performed explicitly by `setup migrate-connectors`.
+	if cfg.ConfigVersion < 6 {
+		// no-op: singular connector config remains valid as-is.
 	}
 
 	cfg.ConfigVersion = CurrentConfigVersion
@@ -2364,6 +2673,7 @@ func setDefaults(dataDir string) {
 	viper.SetDefault("guardrail.hook_self_heal_debounce_ms", 500)
 	viper.SetDefault("guardrail.scanner_mode", "both")
 	viper.SetDefault("guardrail.connector", "")
+	viper.SetDefault("guardrail.connectors", map[string]any{})
 	viper.SetDefault("guardrail.host", "")
 	viper.SetDefault("guardrail.port", 4000)
 	viper.SetDefault("guardrail.stream_buffer_bytes", 1024)

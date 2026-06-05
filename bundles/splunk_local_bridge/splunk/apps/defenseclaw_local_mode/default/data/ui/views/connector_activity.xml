@@ -9,10 +9,18 @@
         <latest>now</latest>
       </default>
     </input>
-    <input type="text" token="connector" searchWhenChanged="true">
+    <input type="dropdown" token="connector" searchWhenChanged="true">
       <label>Connector</label>
+      <choice value="*">All</choice>
       <default>*</default>
       <initialValue>*</initialValue>
+      <search>
+        <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" | stats count by connector | sort - count</query>
+        <earliest>$time.earliest$</earliest>
+        <latest>$time.latest$</latest>
+      </search>
+      <fieldForLabel>connector</fieldForLabel>
+      <fieldForValue>connector</fieldForValue>
     </input>
   </fieldset>
   <row>

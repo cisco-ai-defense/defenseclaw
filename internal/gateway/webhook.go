@@ -584,6 +584,11 @@ func formatSlackPayload(event audit.Event) ([]byte, error) {
 		{"type": "mrkdwn", "text": fmt.Sprintf("*Severity:* %s", event.Severity)},
 		{"type": "mrkdwn", "text": fmt.Sprintf("*Target:* %s", event.Target)},
 	}
+	if event.Connector != "" {
+		fields = append(fields, map[string]interface{}{
+			"type": "mrkdwn", "text": fmt.Sprintf("*Connector:* %s", event.Connector),
+		})
+	}
 	if event.Details != "" {
 		details := event.Details
 		if len(details) > 500 {
@@ -641,11 +646,12 @@ func formatPagerDutyPayload(event audit.Event, routingKey string) ([]byte, error
 			"severity":  pdSeverity,
 			"timestamp": event.Timestamp.Format(time.RFC3339),
 			"custom_details": map[string]string{
-				"action":   event.Action,
-				"target":   event.Target,
-				"severity": event.Severity,
-				"details":  event.Details,
-				"event_id": event.ID,
+				"action":    event.Action,
+				"target":    event.Target,
+				"severity":  event.Severity,
+				"details":   event.Details,
+				"event_id":  event.ID,
+				"connector": event.Connector,
 			},
 		},
 	}
@@ -662,6 +668,9 @@ func formatWebexPayload(event audit.Event, roomID string) ([]byte, error) {
 			"- **Actor:** %s\n",
 		icon, event.Action, severity, event.Target, event.Actor,
 	)
+	if event.Connector != "" {
+		markdown += fmt.Sprintf("- **Connector:** %s\n", event.Connector)
+	}
 	if event.Details != "" {
 		details := event.Details
 		if len(details) > 500 {
@@ -691,6 +700,12 @@ func formatGenericPayload(event audit.Event) ([]byte, error) {
 		"severity":  event.Severity,
 		"run_id":    event.RunID,
 		"trace_id":  event.TraceID,
+	}
+	// Attribute the alert to the originating connector so operators can
+	// route/triage per connector in a multi-connector install. Omitted
+	// when unknown to keep single-connector payloads unchanged.
+	if event.Connector != "" {
+		eventData["connector"] = event.Connector
 	}
 	if strings.Contains(strings.ToLower(event.Action), "block") {
 		eventData["defenseclaw_blocked"] = true

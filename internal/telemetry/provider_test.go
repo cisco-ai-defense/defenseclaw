@@ -103,7 +103,7 @@ func TestDisabledProvider_EmitScanResult_NoPanic(t *testing.T) {
 		Timestamp: time.Now(),
 		Duration:  100 * time.Millisecond,
 	}
-	p.EmitScanResult(result, "scan-123", "skill", "clean")
+	p.EmitScanResult(result, "scan-123", "skill", "clean", "codex")
 }
 
 func TestDisabledProvider_EmitRuntimeAlert_NoPanic(t *testing.T) {
@@ -311,14 +311,14 @@ func TestStartLLMSpan_EmitsRunID(t *testing.T) {
 func TestDisabledProvider_Metrics_NoPanic(t *testing.T) {
 	p, _ := NewProvider(context.Background(), disabledCfg(), "test")
 	ctx := context.Background()
-	p.RecordScan(ctx, "test", "skill", "clean", 100, map[string]int{"HIGH": 1})
+	p.RecordScan(ctx, "test", "skill", "clean", 100, map[string]int{"HIGH": 1}, "codex")
 	p.RecordToolCall(ctx, "shell", "builtin", false)
 	p.RecordToolDuration(ctx, "shell", "builtin", 50)
 	p.RecordToolError(ctx, "shell", 1)
 	p.RecordApproval(ctx, "approved", true, false)
 	p.RecordLLMTokens(ctx, "chat", "openai", "gpt-4", "", "", "", 100, 200)
 	p.RecordLLMDuration(ctx, "chat", "openai", "gpt-4", "", "", 0.5)
-	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern")
+	p.RecordAlert(ctx, "dangerous-command", "HIGH", "local-pattern", "codex")
 	p.RecordGuardrailEvaluation(ctx, "ai-defense", "block")
 	p.RecordGuardrailLatency(ctx, "ai-defense", 100)
 }
@@ -1011,6 +1011,61 @@ func TestBuildResource_AgentWatchContextAttributes(t *testing.T) {
 		if got[key] != want {
 			t.Errorf("%s=%q, want %q", key, got[key], want)
 		}
+	}
+}
+
+// resourceAttrs flattens a built resource into a key->value map for assertions.
+func resourceAttrs(t *testing.T, cfg *config.Config) map[string]string {
+	t.Helper()
+	res := buildResource(cfg, "1.0.0")
+	got := map[string]string{}
+	iter := res.Iter()
+	for iter.Next() {
+		kv := iter.Attribute()
+		got[string(kv.Key)] = kv.Value.AsString()
+	}
+	return got
+}
+
+// TestBuildResource_SingleConnectorMode pins the unchanged single-connector
+// behavior: claw.mode names the active connector and home_dir is its resolved
+// path. This is the regression guard for the Option-A multi-connector branch.
+func TestBuildResource_SingleConnectorMode(t *testing.T) {
+	cfg := disabledCfg()
+
+	got := resourceAttrs(t, cfg)
+
+	wantMode := cfg.ActiveConnector()
+	if wantMode == "multi" {
+		t.Fatalf("test fixture resolves to the multi sentinel; want a single connector")
+	}
+	if got["defenseclaw.claw.mode"] != wantMode {
+		t.Errorf("claw.mode=%q, want %q", got["defenseclaw.claw.mode"], wantMode)
+	}
+	if want := cfg.ConnectorHomeDir(wantMode); got["defenseclaw.claw.home_dir"] != want {
+		t.Errorf("claw.home_dir=%q, want %q", got["defenseclaw.claw.home_dir"], want)
+	}
+}
+
+// TestBuildResource_MultiConnectorMode verifies that when more than one
+// connector is active the process-level descriptor reports the "multi"
+// sentinel with an empty home_dir. The true per-event connector is carried by
+// the `connector` metric label / `defenseclaw.connector.source` span attribute,
+// which are emitted independently of the resource.
+func TestBuildResource_MultiConnectorMode(t *testing.T) {
+	cfg := disabledCfg()
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":  {},
+		"cursor": {},
+	}
+
+	got := resourceAttrs(t, cfg)
+
+	if got["defenseclaw.claw.mode"] != "multi" {
+		t.Errorf("claw.mode=%q, want %q", got["defenseclaw.claw.mode"], "multi")
+	}
+	if got["defenseclaw.claw.home_dir"] != "" {
+		t.Errorf("claw.home_dir=%q, want empty in multi mode", got["defenseclaw.claw.home_dir"])
 	}
 }
 

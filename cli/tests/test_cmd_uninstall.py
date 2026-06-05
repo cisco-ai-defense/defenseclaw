@@ -223,6 +223,39 @@ class BuildPlanConnectorTests(unittest.TestCase):
         self.assertEqual(plan.connector, "codex")
         self.assertIn("codex", plan.connectors)
 
+    def test_plan_tears_down_all_active_connectors_on_multi(self):
+        # Regression: on a multi-connector install reset/uninstall must sweep
+        # EVERY configured connector, not just the primary — even with no
+        # backup markers on disk (setUp points data_dir at an empty tempdir).
+        # Previously only the singular active connector + on-disk markers were
+        # swept, so non-primary connectors kept their hook scripts after the
+        # data dir was wiped.
+        class Guardrail:
+            connector = "antigravity"
+
+        class Claw:
+            home_dir = "~/.gemini"
+            config_file = "~/.gemini/config/openclaw.json"
+
+        class Cfg:
+            guardrail = Guardrail()
+            claw = Claw()
+
+            def active_connectors(self):
+                return ["antigravity", "claudecode", "codex"]
+
+        with patch("defenseclaw.commands.cmd_uninstall.config_module.load",
+                   return_value=Cfg()):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=False,
+                revert_openclaw=False,
+                remove_plugin=False,
+            )
+        # Primary pointer unchanged; teardown set covers ALL active connectors.
+        self.assertEqual(plan.connector, "antigravity")
+        self.assertEqual(set(plan.connectors), {"antigravity", "claudecode", "codex"})
+
     def test_keep_openclaw_still_tears_down_non_openclaw_active_connector(self):
         class Guardrail:
             connector = "codex"
@@ -267,6 +300,23 @@ class RenderPlanConnectorTests(unittest.TestCase):
         self.assertIn("active connector:    codex", text)
         self.assertIn("connector teardown:  codex", text)
         self.assertNotIn("revert openclaw.json", text)
+
+    def test_render_lists_all_active_connectors_on_multi(self):
+        # Multi-connector: the active line names every peer (no singular
+        # "active connector: <primary>"), and surfaces no "primary" — the
+        # connectors are equal peers.
+        plan = cmd_uninstall.UninstallPlan(
+            connector="antigravity",
+            connectors=("antigravity", "claudecode", "codex"),
+            data_dir="/tmp/dc",
+        )
+        with capture_click_output() as buf:
+            cmd_uninstall._render_plan(plan, dry_run=True)
+        text = buf.getvalue()
+        self.assertIn("active connectors:", text)
+        self.assertIn("antigravity, claudecode, codex", text)
+        self.assertNotIn("primary", text)
+        self.assertIn("connector teardown:  antigravity, claudecode, codex", text)
 
     def test_render_shows_openclaw_revert_for_openclaw(self):
         plan = cmd_uninstall.UninstallPlan(

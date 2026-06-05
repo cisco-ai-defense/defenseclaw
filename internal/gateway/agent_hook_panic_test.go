@@ -78,6 +78,35 @@ func TestSafeEvaluateHook_RecoversAndReturnsFailOpen(t *testing.T) {
 	api.handleHookPanic(context.Background(), "codex", "PreToolUse", "stack trace")
 }
 
+// TestHandleAgentHookSynthetic_PropagatesConnector proves the
+// codex-notify bridge path carries the connector name through to the
+// fail-open response. We force a panic in the generic evaluator; the
+// fail-open response's AdditionalContext names the connector, which is
+// sourced from the connectorName parameter threaded into
+// safeEvaluateSyntheticHook, so a present name proves the synthetic
+// path propagates connector identity.
+func TestHandleAgentHookSynthetic_PropagatesConnector(t *testing.T) {
+	prev := hookEvaluatorPanicHook
+	hookEvaluatorPanicHook = func() { panic("synthetic connector-propagation test panic") }
+	defer func() { hookEvaluatorPanicHook = prev }()
+
+	api := &APIServer{}
+	req := agentHookRequest{
+		HookEventName: "Stop",
+		SessionID:     "sess-syn",
+		ToolName:      "codex-notify",
+		Direction:     "tool_result",
+		Payload:       map[string]interface{}{},
+	}
+	resp := api.handleAgentHookSynthetic(context.Background(), "codex", req, []byte(`{}`))
+	if resp.Action != "allow" || !resp.WouldBlock {
+		t.Fatalf("synthetic panic response = %+v, want fail-open allow + would_block", resp)
+	}
+	if !strings.Contains(resp.AdditionalContext, "codex") {
+		t.Errorf("AdditionalContext = %q, want it to name connector codex (synthetic connector propagation lost)", resp.AdditionalContext)
+	}
+}
+
 // TestHandleAgentHook_PanicReturnsSafeResponse drives a full HTTP
 // request through handleAgentHook with an evaluator that panics. The
 // HTTP response must remain 200 with a valid JSON body so the agent

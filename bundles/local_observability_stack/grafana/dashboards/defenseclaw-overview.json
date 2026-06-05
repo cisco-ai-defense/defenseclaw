@@ -108,7 +108,25 @@
   ],
   "liveNow": false,
   "templating": {
-    "list": []
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "description": "Optional connector filter. Sourced from defenseclaw_connector_hook_invocations_total{connector}. Applied to the guardrail-evaluation panels (which carry the tool=<connector>:<event> label) via tool=~\"$connector:.*\". Defaults to All (.+) so single-connector installs are unaffected; global panels (alerts, gateway/audit events, findings, errors) stay cross-connector.",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+        "definition": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+        "query": {"query": "label_values(defenseclaw_connector_hook_invocations_total, connector)", "refId": "PrometheusVariableQueryEditor-VariableQuery"},
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {"text": ["All"], "value": ["$__all"], "selected": true},
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
   },
   "panels": [
     {
@@ -189,7 +207,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
           "refId": "A"
         }
       ],
@@ -219,7 +237,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\"}[5m])) * 60 or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"block\", tool=~\"$connector:.*\"}[5m])) * 60 or vector(0)",
           "refId": "A"
         }
       ],
@@ -276,7 +294,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\"}[5m])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total[5m])), 0.0001) or vector(0)",
+          "expr": "sum(rate(defenseclaw_inspect_evaluations_total{action=\"confirm\", tool=~\"$connector:.*\"}[5m])) / clamp_min(sum(rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[5m])), 0.0001) or vector(0)",
           "refId": "A"
         }
       ],
@@ -336,7 +354,7 @@
       },
       "targets": [
         {
-          "expr": "clamp_min(sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=\"approval_requested\"}[5m])) - sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=\"openclaw:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])), 0) or vector(0)",
+          "expr": "clamp_min(sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=~\"$connector:hilt\", guardrail_action_taken=\"approval_requested\"}[5m])) - sum(increase(defenseclaw_guardrail_evaluations_total{guardrail_scanner=~\"$connector:hilt\", guardrail_action_taken=~\"approval_approved|approval_denied|approval_timeout\"}[5m])), 0) or vector(0)",
           "refId": "A"
         }
       ],
@@ -833,7 +851,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total[$__rate_interval]))",
+          "expr": "sum by (action) (rate(defenseclaw_inspect_evaluations_total{tool=~\"$connector:.*\"}[$__rate_interval]))",
           "legendFormat": "{{action}}",
           "refId": "A"
         }

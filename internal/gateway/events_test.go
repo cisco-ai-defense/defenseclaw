@@ -124,6 +124,32 @@ func TestInspect_SuppressesVerdictForCleanInput(t *testing.T) {
 	}
 }
 
+// TestEmitLifecycleAndError_PromoteConnectorToEnvelope pins the first-class
+// connector dimension on gateway.jsonl lifecycle + error events. Regression
+// guard for the gap where the heal path's lifecycle/error events carried the
+// connector only in details (lifecycle) or not at all (error), leaving the
+// envelope `connector` field — the one Splunk-local/AgentWatch filter on —
+// empty.
+func TestEmitLifecycleAndError_PromoteConnectorToEnvelope(t *testing.T) {
+	events := withCapturedEvents(t)
+
+	emitLifecycle(t.Context(), "hook_guard", "tampered", map[string]string{
+		"connector": "codex",
+		"paths":     "/Users/x/.codex/config.toml",
+	})
+	emitErrorConnector(t.Context(), "hook_guard", "self-heal-failed", "codex",
+		"failed to re-install codex hook config", nil)
+
+	if len(*events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(*events))
+	}
+	for _, e := range *events {
+		if e.Connector != "codex" {
+			t.Errorf("%s event envelope connector = %q, want codex", e.EventType, e.Connector)
+		}
+	}
+}
+
 func TestDeriveSeverity(t *testing.T) {
 	tests := []struct {
 		in   string

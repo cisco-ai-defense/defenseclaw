@@ -223,7 +223,7 @@
       "datasource": {"type": "loki", "uid": "defenseclaw-loki"},
       "gridPos": {"x": 0, "y": 60, "w": 24, "h": 14},
       "timeFrom": "1h",
-      "targets": [{"expr": "{service_namespace=\"ai-governance\"} | json | __error__=\"\" | agent_name=\"$connector\"", "refId": "A"}],
+      "targets": [{"expr": "{service_namespace=\"ai-governance\"} | json | __error__=\"\" | connector=\"$connector\"", "refId": "A"}],
       "options": {"showTime": true, "wrapLogMessage": true, "dedupStrategy": "none", "enableLogDetails": true}
     }
   ],

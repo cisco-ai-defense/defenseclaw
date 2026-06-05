@@ -28,7 +28,7 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw init` | Interactive first-run wizard. Asks about scanner mode, judge, HITL. |
 | `defenseclaw quickstart` | Zero-prompt first-run with safe defaults. See [Quickstart](/docs/get-started/quickstart). |
 | `defenseclaw doctor` | Health check. Run this first whenever something feels off. |
-| `defenseclaw status` | Resolved active connector, enforcement flags, gateway state. |
+| `defenseclaw status` | Enforcement flags and gateway state, plus a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. |
 
 ## Setup
 
@@ -53,6 +53,44 @@ Tables below tag each row with the binary that owns it.
 | `defenseclaw setup splunk` | Configure the Splunk audit sink. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
 | `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage audit-log fan-out destinations (OTLP logs, Splunk HEC, generic HTTP JSONL). Distinct from `setup webhook`, which manages notifier webhooks. |
+
+## Guardrail
+
+Per-connector guardrail controls. The **mutating** verbs show the current value when run bare and change it when given an argument. `--connector X` scopes the change to one connector on a **multi-connector** install (writes `guardrail.connectors.<name>`); omit it to set the **global default** every connector inherits. On a single-connector install `--connector` is rejected — there's only one posture. The **read** verb (`guardrail status`) takes no `--connector` and always reports the full active roster. All of these are on the Python `defenseclaw` CLI.
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw guardrail status` | Read-only. Shows the resolved guardrail posture (enabled, mode, fail mode, HILT, block message) as one per-connector block for **every** active connector. There is **no** `--connector` flag — the full roster always prints, one identical layout whether one or N connectors are active. |
+| `defenseclaw guardrail enable [--connector X]` | Turn the guardrail on. Global, or re-enable a single previously-disabled connector (restores its hooks with no re-prompt). |
+| `defenseclaw guardrail disable [--connector X]` | Kill switch. Global disables everything; `--connector X` drops just that connector from the active set and removes its hooks. |
+| `defenseclaw guardrail fail-mode [open\|closed] [--connector X]` | Show/set the response-layer hook fail mode. Run bare it prints the global value **plus a per-connector breakdown** of every active connector's effective value. See [Reference → Fail modes](/docs/reference/fail-modes). |
+| `defenseclaw guardrail hilt [on\|off] [--min-severity high\|medium\|low\|critical] [--connector X]` | Show/set human-in-the-loop approval policy. Run bare it prints the global value **plus a per-connector breakdown**. |
+| `defenseclaw guardrail block-message "<text>" [--connector X]` | Show/set the message the agent sees when an action is blocked. Run bare it prints the global value **plus a per-connector breakdown**. |
+
+```bash
+defenseclaw guardrail status                              # full per-connector roster (no --connector flag)
+defenseclaw guardrail fail-mode closed --connector codex  # scope to one connector
+defenseclaw guardrail hilt on --min-severity HIGH --connector claudecode
+defenseclaw guardrail disable --connector codex           # then `enable --connector codex` to restore
+```
+
+See [Setup → Multi-connector](/docs/setup/guardrail/multi-connector) for the full multi-connector model.
+
+## Multi-connector
+
+One gateway can protect N hook connectors at once (see [Setup → Multi-connector](/docs/setup/guardrail/multi-connector)). That splits the CLI into two contracts:
+
+- **Read / status / inventory — fan out to all active connectors.** `defenseclaw status`, `defenseclaw doctor`, `defenseclaw guardrail status`, the bare `guardrail fail-mode` / `hilt` / `block-message` reads, and the list commands (`skill list`, `mcp list`, `plugin list`) all render every active connector. The layout is identical whether one or N connectors are wired — there's no separate single-vs-multi view and no "primary" connector line.
+- **Mutating guardrail commands — single-target via `--connector`.** `guardrail enable` / `disable` / `fail-mode` / `hilt` / `block-message` change one connector when given `--connector X` (default = the active connector) and the global default when omitted. `guardrail status` is read-only and has no `--connector`.
+- **Scan commands — default to all actives, narrow with flags.** `skill scan --all`, `mcp scan --all`, and `aibom scan` cover every active connector; pass a positional target (or `--connector` where supported) to scope to one.
+
+These list/inventory verbs read across the full active roster:
+
+| Command | Default scope |
+| --- | --- |
+| `defenseclaw skill list` | All active connectors. |
+| `defenseclaw mcp list` | All active connectors. |
+| `defenseclaw plugin list` | All active connectors. |
 
 ## Audit & alerts
 
@@ -88,7 +126,7 @@ The sidecar is the Go binary; the Python CLI does not own a `gateway` group. Mos
 | `defenseclaw-gateway start` | `defenseclaw-gateway` | Start the sidecar as a background daemon. |
 | `defenseclaw-gateway stop` | `defenseclaw-gateway` | Stop the running sidecar. |
 | `defenseclaw-gateway restart` | `defenseclaw-gateway` | Restart the sidecar. |
-| `defenseclaw-gateway status` | `defenseclaw-gateway` | One-line health snapshot of the running daemon. |
+| `defenseclaw-gateway status` | `defenseclaw-gateway` | Health snapshot of the running daemon. On a multi-connector install it also renders a per-connector **"Connector Mode"** section (one row per active connector) sourced from the `/status` endpoint's `connector_modes` array. |
 | `defenseclaw-gateway policy reload` | `defenseclaw-gateway` | Re-read OPA policies from disk without bouncing the daemon. |
 | `defenseclaw-gateway watchdog [start\|stop\|status]` | `defenseclaw-gateway` | Health-watchdog daemon that notifies when the gateway is down. |
 | `tail -f ~/.defenseclaw/gateway.jsonl \| jq` | shell | Tail the gateway's JSONL fan-out — every decision and event is appended here. There is **no** built-in `gateway logs` subcommand; the JSONL fan-out is the canonical decision log. |

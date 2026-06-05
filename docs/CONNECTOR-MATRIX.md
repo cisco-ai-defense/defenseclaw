@@ -33,6 +33,22 @@ redirect LLM traffic through the proxy in v1. They are still first-class
 connectors with explicit hook, MCP, skill/rule/plugin/agent, CodeGuard, and
 telemetry capability rows where the vendor has documented local surfaces.
 
+### Observability dimension (multi-connector)
+
+Every hook connector emits a connector dimension on all telemetry rails, so a
+single gateway serving several connectors at once can be sliced per connector:
+the OTel metric label `connector`, the span/log attribute
+`defenseclaw.connector.source`, and the first-class `connector` field on audit
+rows / Splunk HEC / OTLP-ingest rows (plus `structured.connector` on hook
+rows). When more than one connector is active, `claw.mode` (and the OTel
+resource attribute `defenseclaw.claw.mode`) is set to `multi`. Per-connector
+*guardrail policy* lives under `guardrail.connectors.<name>` (hook connectors
+only; proxy connectors can't be multi peers). The egress **firewall** is the
+one cross-connector exception: it is global by design — a single host-wide
+ruleset filtering by destination, with per-connector allowed hosts merged into
+one allowlist at boot (see [`ARCHITECTURE.md` → Firewall scope](ARCHITECTURE.md)
+and [`OBSERVABILITY-CONTRACT.md` → Connector dimension fields](OBSERVABILITY-CONTRACT.md)).
+
 ## Platform support
 
 | Connector | macOS | Linux | Windows |

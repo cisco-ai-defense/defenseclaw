@@ -45,7 +45,19 @@ func resolveServiceName(attrs map[string]string) string {
 func buildResource(cfg *config.Config, version string) *resource.Resource {
 	hostname, _ := os.Hostname()
 	serviceName := resolveServiceName(cfg.OTel.Resource.Attributes)
-	activeConnector := cfg.ActiveConnector()
+
+	// Process-level connector descriptor. In single-connector mode this is the
+	// active connector name and its resolved home dir (unchanged behavior). When
+	// the process serves more than one connector, no single name/home dir
+	// describes it, so the resource reports the "multi" sentinel and an empty
+	// home dir; the true connector is carried per-event by the `connector`
+	// metric label and `defenseclaw.connector.source` span attribute.
+	clawMode := cfg.ActiveConnector()
+	clawHomeDir := cfg.ConnectorHomeDir(clawMode)
+	if len(cfg.ActiveConnectors()) > 1 {
+		clawMode = "multi"
+		clawHomeDir = ""
+	}
 
 	attrs := []attribute.KeyValue{
 		attribute.String("service.name", serviceName),
@@ -55,8 +67,8 @@ func buildResource(cfg *config.Config, version string) *resource.Resource {
 		attribute.String("host.name", hostname),
 		attribute.String("host.arch", runtime.GOARCH),
 		attribute.String("os.type", runtime.GOOS),
-		attribute.String("defenseclaw.claw.mode", activeConnector),
-		attribute.String("defenseclaw.claw.home_dir", cfg.ConnectorHomeDir(activeConnector)),
+		attribute.String("defenseclaw.claw.mode", clawMode),
+		attribute.String("defenseclaw.claw.home_dir", clawHomeDir),
 		attribute.String("defenseclaw.gateway.host", cfg.Gateway.Host),
 		attribute.Int("defenseclaw.gateway.port", cfg.Gateway.Port),
 		attribute.String("defenseclaw.instance.id", uuid.New().String()),

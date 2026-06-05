@@ -64,6 +64,10 @@ EXPECTED_CLAW_MODE_ENUM = {
     "copilot",
     "openhands",
     "antigravity",
+    # Sentinel emitted when one gateway process serves >1 connector at once.
+    # Not a connector name: the true connector is carried per-event by the
+    # `connector` metric label / `defenseclaw.connector.source` span attribute.
+    "multi",
     "",
 }
 
@@ -349,6 +353,51 @@ def check_metrics_catalog(doc: dict) -> bool:
 
 
 GATEWAYLOG_SCHEMA_DIR = ROOT / "internal" / "gatewaylog" / "schemas"
+CLI_EMBED_SCHEMA_DIR = ROOT / "internal" / "cli" / "embed"
+
+# Schemas the CLI embeds (go:embed) and must keep byte-identical to the
+# canonical copies under schemas/. The embed dir also holds CLI-only
+# assets, so we gate an explicit allow-list rather than the whole dir.
+CLI_EMBED_MIRRORED = ("audit-event.json", "hook-audit-envelope.json")
+
+
+def check_cli_embed_mirrors() -> bool:
+    """Verify the CLI-embedded schema copies match schemas/ byte-for-byte.
+
+    The Go CLI embeds audit-event.json / hook-audit-envelope.json via
+    go:embed for offline validation. If these drift from the canonical
+    schemas/ copies the CLI validates against a stale contract while the
+    gateway and docs use another — exactly the kind of multi-connector
+    field drift (connector/step_idx/enforced/rule_pack_dir) this gate
+    exists to catch. Mirrors the gatewaylog check below.
+    """
+    if not CLI_EMBED_SCHEMA_DIR.is_dir():
+        print(
+            "check_schemas: warning — internal/cli/embed not present; skipping CLI embed check",
+            file=sys.stderr,
+        )
+        return True
+
+    ok = True
+    for name in CLI_EMBED_MIRRORED:
+        embed_path = CLI_EMBED_SCHEMA_DIR / name
+        canonical_path = SCHEMA_DIR / name
+        if not embed_path.exists() or not canonical_path.exists():
+            print(
+                f"check_schemas: CLI embed mirror missing for {name}",
+                file=sys.stderr,
+            )
+            ok = False
+            continue
+        if canonical_path.read_bytes() != embed_path.read_bytes():
+            print(
+                f"check_schemas: CLI embed drift between schemas/{name} and internal/cli/embed/{name}",
+                file=sys.stderr,
+            )
+            ok = False
+        else:
+            print(f"check_schemas: CLI embed {name} OK")
+    return ok
 
 
 def check_schema_mirrors() -> bool:
@@ -450,6 +499,9 @@ def main() -> int:
         ok = False
 
     if not check_schema_mirrors():
+        ok = False
+
+    if not check_cli_embed_mirrors():
         ok = False
 
     return 0 if ok else 1

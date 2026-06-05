@@ -16,7 +16,8 @@
 
 """defenseclaw aibom — AI Bill of Materials commands.
 
-``scan``      — query live OpenClaw to index skills, plugins, MCP, agents, tools, models, memory
+``scan``      — query the active connector(s) to index skills, plugins, MCP,
+                agents, tools, models, memory
 """
 
 from __future__ import annotations
@@ -32,10 +33,16 @@ from defenseclaw.provenance import stamp_aibom_inventory
 
 @click.group()
 def aibom() -> None:
-    """AI Bill of Materials — scan live OpenClaw inventory."""
+    """AI Bill of Materials — scan the active connector(s)' live inventory.
+
+    A bare ``aibom scan`` inventories every active connector (a complete
+    bill of materials); pass ``--connector X`` to narrow to one. Inventory
+    is read from each connector's own source (openclaw.json,
+    .codex/config.toml, .claude/settings.json, …).
+    """
 
 
-# ── scan (live OpenClaw inventory) ────────────────────────────────────────
+# ── scan (live connector inventory) ───────────────────────────────────────
 
 
 @aibom.command()
@@ -47,15 +54,89 @@ def aibom() -> None:
     default=None,
     help="Comma-separated categories to scan: skills,plugins,mcp,agents,tools,models,memory",
 )
+@click.option(
+    "--connector", "connector_flag", default="",
+    help=(
+        "Inventory only a specific connector. Default: every active "
+        "connector (a complete bill of materials across all of them)."
+    ),
+)
 @pass_ctx
-def scan(app: AppContext, as_json: bool, summary_only: bool, categories: str | None) -> None:
-    """Index a live OpenClaw install (skills, plugins, MCP, agents, tools, models, memory).
+def scan(
+    app: AppContext,
+    as_json: bool,
+    summary_only: bool,
+    categories: str | None,
+    connector_flag: str,
+) -> None:
+    """Index a live install (skills, plugins, MCP, agents, tools, models, memory).
 
-    Calls ``openclaw`` CLI commands in parallel and builds a unified inventory.
-    Results are stored in the audit DB.
+    Builds a unified inventory from the active connector(s)' own
+    configuration sources. Results are stored in the audit DB.
 
     Use --only to restrict which categories are collected (faster).
     Use --summary to show only the summary table.
+
+    An AIBOM (AI Bill of Materials) is meant to be complete, so a bare
+    ``aibom scan`` inventories EVERY active connector. On a single-connector
+    install that is just the one connector (unchanged behaviour); on a
+    multi-connector install it produces a full BOM across all of them. Pass
+    ``--connector X`` to narrow the report to a single connector.
+    """
+    from defenseclaw.commands import resolve_list_connector
+
+    cats: set[str] | None = None
+    if categories:
+        cats = {c.strip().lower() for c in categories.split(",") if c.strip()}
+
+    # Resolve which connector(s) to inventory.
+    #   --connector X  → just X
+    #   (no flag)      → every active connector. active_connectors() returns
+    #                    [active] on a single-connector install, so a bare
+    #                    scan is byte-for-byte unchanged there; on multi it
+    #                    fans out to a complete bill of materials.
+    if connector_flag:
+        connectors: list[str | None] = [resolve_list_connector(app, connector_flag)]
+    elif hasattr(app.cfg, "active_connectors"):
+        connectors = list(app.cfg.active_connectors())
+    else:
+        connectors = [None]
+
+    invs: list[dict] = []
+    for c in connectors:
+        if len(connectors) > 1 and not as_json:
+            click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
+        invs.append(_scan_one_connector(app, c, cats, as_json, summary_only))
+
+    if as_json:
+        # Emit a bare object when exactly one connector resolved (unchanged
+        # single-connector contract); a list when several so automation can
+        # attribute each blob to its connector.
+        if len(invs) == 1:
+            click.echo(json.dumps(invs[0], indent=2))
+        else:
+            click.echo(json.dumps(invs, indent=2))
+        return
+
+    if not as_json:
+        from defenseclaw.commands import hint
+        hint(
+            "View alerts:  defenseclaw alerts",
+            "Scan skills:  defenseclaw skill scan all",
+        )
+
+
+def _scan_one_connector(
+    app: AppContext,
+    connector: str | None,
+    cats: set[str] | None,
+    as_json: bool,
+    summary_only: bool,
+) -> dict:
+    """Build, enrich, log and render the inventory for a single connector.
+
+    Returns the inventory dict so the caller can aggregate every active
+    connector into a single JSON payload (the default multi-connector BOM).
     """
     from defenseclaw.inventory.claw_inventory import (
         build_claw_aibom,
@@ -64,13 +145,12 @@ def scan(app: AppContext, as_json: bool, summary_only: bool, categories: str | N
         format_claw_aibom_human,
     )
 
-    cats: set[str] | None = None
-    if categories:
-        cats = {c.strip().lower() for c in categories.split(",") if c.strip()}
-
+    label = connector or (
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+    )
     if not as_json:
-        click.echo(ux.dim("Scanning live OpenClaw environment …"), err=True)
-    inv = build_claw_aibom(app.cfg, live=True, categories=cats)
+        click.echo(ux.dim(f"Scanning live {label} environment …"), err=True)
+    inv = build_claw_aibom(app.cfg, live=True, categories=cats, connector=connector)
 
     enrich_with_policy(
         inv, app.store, app.cfg.skill_actions,
@@ -89,15 +169,12 @@ def scan(app: AppContext, as_json: bool, summary_only: bool, categories: str | N
         else:
             ux.warn(f"{len(errors)} openclaw command(s) failed")
 
+    stamp_aibom_inventory(inv, app.cfg)
     if as_json:
-        stamp_aibom_inventory(inv, app.cfg)
-        click.echo(json.dumps(inv, indent=2))
-        return
+        # The caller aggregates every connector's inventory and prints once
+        # (a bare object for one connector, a list for several), so just
+        # hand the dict back here.
+        return inv
 
     format_claw_aibom_human(inv, summary_only=summary_only)
-
-    from defenseclaw.commands import hint
-    hint(
-        "View alerts:  defenseclaw alerts",
-        "Scan skills:  defenseclaw skill scan all",
-    )
+    return inv

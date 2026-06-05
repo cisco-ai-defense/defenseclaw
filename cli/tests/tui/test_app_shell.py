@@ -21,7 +21,13 @@ from types import SimpleNamespace
 import pytest
 from defenseclaw.config import RegistrySource
 from defenseclaw.models import Event
-from defenseclaw.tui.app import DefenseClawTUI, _event_histogram, _fetch_ai_usage
+from defenseclaw.tui.app import (
+    DefenseClawTUI,
+    _enforcement_label,
+    _event_histogram,
+    _fetch_ai_usage,
+    _policy_posture,
+)
 from defenseclaw.tui.executor import CommandEvent
 from defenseclaw.tui.panels.ai_discovery import (
     AIDiscoveryPanelModel,
@@ -3233,6 +3239,93 @@ def test_event_histogram_handles_empty_and_naive_timestamps() -> None:
 
 
 @pytest.mark.asyncio
+async def test_overview_lists_all_active_connectors_in_rendered_panel() -> None:
+    """8.13: with more than one connector active the *visible* Overview shows
+    a dedicated CONNECTORS table listing every connector with its mode, while
+    the CONFIGURATION panel collapses to an "Agents: N active" header."""
+
+    from rich.console import Console
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+        connector_packs=(("codex", "strict"), ("cursor", "permissive")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+        # Rich's Console.size only honors an explicit width when height is also
+        # set; otherwise it falls back to an 80-col terminal and crops cells.
+        console = Console(width=170, height=80, record=True)
+        console.print(app._overview_renderable())
+        text = console.export_text()
+
+    # CONFIGURATION collapses to the unified count header.
+    assert "2 active" in text
+    assert "Agents" in text
+    # The dedicated CONNECTORS table lists every connector + its mode/pack.
+    assert "CONNECTORS" in text
+    assert "Codex" in text and "codex" in text
+    assert "Cursor" in text
+    assert "enforce" in text
+    assert "observe" in text
+    assert "strict" in text and "permissive" in text
+
+
+def test_policy_posture_multi_connector() -> None:
+    """Multi-connector posture reflects the roster, not one global pack:
+    divergent packs/modes point at the roster; a uniform install names the
+    shared mode + pack. Single-connector keeps the original wording."""
+
+    # Divergent rule packs -> defer to the roster.
+    divergent = OverviewConfig(
+        guardrail_mode="action",
+        connector_modes=(("codex", "action"), ("claudecode", "action")),
+        connector_packs=(("codex", "strict"), ("claudecode", "permissive")),
+    )
+    assert _policy_posture(divergent) == "per-connector (see roster)"
+
+    # Divergent modes (same/blank packs) also defer.
+    divergent_modes = OverviewConfig(
+        guardrail_mode="action",
+        connector_modes=(("codex", "action"), ("cursor", "observe")),
+    )
+    assert _policy_posture(divergent_modes) == "per-connector (see roster)"
+
+    # Uniform multi-connector: one mode + one pack across the roster.
+    uniform = OverviewConfig(
+        guardrail_mode="action",
+        connector_modes=(("codex", "action"), ("claudecode", "action")),
+        connector_packs=(("codex", "strict"), ("claudecode", "strict")),
+    )
+    assert _policy_posture(uniform) == "all connectors: action (strict)"
+
+    # Single-connector wording is unchanged.
+    single = OverviewConfig(guardrail_mode="action", guardrail_strategy="default")
+    assert _policy_posture(single) == "action: block CRIT, alert MED+ (default)"
+
+
+def test_enforcement_label_multi_connector() -> None:
+    """Multi-connector enforcement reports the connector count instead of
+    naming a single primary; single-connector keeps the named-connector form."""
+
+    multi = OverviewConfig(
+        guardrail_connector="codex",
+        guardrail_mode="action",
+        connector_modes=(("codex", "action"), ("claudecode", "action")),
+    )
+    assert _enforcement_label(multi) == "2 connectors (hook observability)"
+
+    single = OverviewConfig(guardrail_connector="codex", guardrail_mode="action")
+    assert _enforcement_label(single) == "codex hook observability (action)"
+
+
+@pytest.mark.asyncio
 async def test_hook_calls_tile_counts_audit_events_and_deeplinks_to_logs() -> None:
     """Hook Calls reflects connector-hook audit events (not the gateway
     ``requests`` counter, which stays zero for hook connectors) and the
@@ -3279,3 +3372,538 @@ async def test_hook_calls_tile_counts_audit_events_and_deeplinks_to_logs() -> No
         assert app.active_panel == "logs"
         assert logs.source == "otel"
         assert logs.filter_mode == FILTER_HOOKS
+
+
+@pytest.mark.asyncio
+async def test_hook_calls_tile_splits_stats_per_connector_in_multi() -> None:
+    """D1=B: with >1 connector active, the Hook Calls tile relabels to the
+    connector count and its detail attributes allow/block counts to each
+    connector — instead of mislabelling every connector's activity under
+    the single primary. The Blocks tile lists only connectors that blocked.
+    """
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    audit = AuditPanelModel()
+    events = [
+        Event(id=f"cx-a{i}", action="connector-hook", target="preToolUse",
+              severity="INFO", details="connector=codex action=allow")
+        for i in range(2)
+    ]
+    events.append(Event(id="cx-b", action="connector-hook", target="afterShellExecution",
+                        severity="HIGH", details="connector=codex action=block"))
+    events.append(Event(id="cu-a", action="connector-hook", target="preToolUse",
+                        severity="INFO", details="connector=cursor action=allow"))
+    audit.set_events(events)
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+
+        metrics = {m.key: m for m in app._overview_metric_data()}
+        hook_tile = metrics["hook_calls"]
+        # Honest label reflecting the roster, not the primary connector.
+        assert hook_tile.label == "Hook Calls (2 connectors)"
+        # Per-connector split: codex got 2 allows + 1 block, cursor 1 allow.
+        assert "codex" in hook_tile.detail
+        assert "a2" in hook_tile.detail
+        assert "b1" in hook_tile.detail
+        assert "cursor" in hook_tile.detail
+        # The lone block is attributed to codex only.
+        blocks_tile = metrics["blocks"]
+        assert "codex" in blocks_tile.detail
+        assert "cursor" not in blocks_tile.detail
+
+
+@pytest.mark.asyncio
+async def test_connector_filter_defaults_to_all_and_narrows() -> None:
+    """8.13: in a multi-connector install the shared connector filter defaults
+    to All (""), and selecting a connector re-targets the catalog models
+    (connector + --connector flag) and marks them for reload."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+
+        # Default filter = All connectors ("").
+        assert app._connector_filter() == ""
+        assert app._active_connector_names() == ["codex", "cursor"]
+
+        app._set_connector_filter("cursor")
+        assert app._connector_filter() == "cursor"
+        # Catalog models now target cursor with the focus flag enabled.
+        for model in (app.skills_model, app.mcps_model, app.plugins_model):
+            assert model.connector == "cursor"
+            assert model.connector_focus_enabled is True
+            assert model.load_intent().args[-2:] == ("--connector", "cursor")
+
+        # Clearing the filter (All) drops the per-connector scoping.
+        app._set_connector_filter("")
+        assert app._connector_filter() == ""
+        for model in (app.skills_model, app.mcps_model, app.plugins_model):
+            assert model.connector_focus_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_catalog_inventory_show_connector_column_in_multi() -> None:
+    """8.13 pass 2: a multi-connector install turns on the CONNECTOR column for
+    the merged catalog + inventory panels and narrows them via the shared
+    filter, without forcing a reload."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app._sync_catalog_connector_filters()
+        for model in (
+            app.skills_model,
+            app.mcps_model,
+            app.plugins_model,
+            app.inventory_model,
+        ):
+            assert model.show_connector_column is True
+
+        app._set_connector_filter("cursor")
+        for model in (app.skills_model, app.mcps_model, app.plugins_model):
+            assert model.connector_filter == "cursor"
+        assert app.inventory_model.connector_filter == "cursor"
+
+
+@pytest.mark.asyncio
+async def test_catalog_inventory_no_connector_column_in_single() -> None:
+    """Single-connector installs keep the CONNECTOR column off everywhere."""
+
+    cfg = OverviewConfig(data_dir="/tmp/dc", claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app._sync_catalog_connector_filters()
+        for model in (
+            app.skills_model,
+            app.mcps_model,
+            app.plugins_model,
+            app.inventory_model,
+        ):
+            assert model.show_connector_column is False
+
+
+@pytest.mark.asyncio
+async def test_connector_pill_multi_connector_reflects_filter() -> None:
+    """E4/8.13: the status-strip connector pill shows "All connectors (N)" in
+    the multi-connector landing state and "<connector> (filtered)" once the
+    operator narrows the shared filter."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        # Default = All connectors, count of 2.
+        assert app._hint_status_model().connector == "All connectors (2)"
+        app._set_connector_filter("cursor")
+        assert app._hint_status_model().connector == "cursor (filtered)"
+
+
+@pytest.mark.asyncio
+async def test_connector_pill_single_connector_unchanged() -> None:
+    """E4 no-op: single-connector installs show the bare connector name."""
+
+    cfg = OverviewConfig(data_dir="/tmp/dc", claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        assert app._hint_status_model().connector == "cursor"
+
+
+@pytest.mark.asyncio
+async def test_catalog_body_shows_connector_chip_in_multi() -> None:
+    """8.13: the Skills/MCPs/Plugins body shows the shared connector filter
+    chip (All + each connector) and how to change it when more than one
+    connector is active."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app._set_connector_filter("cursor")
+        app.active_panel = "skills"
+        body = app._body_text()
+        assert "Connector:" in body
+        assert "All" in body
+        assert "cursor" in body
+        assert "press" in body and "m" in body
+
+
+@pytest.mark.asyncio
+async def test_catalog_body_no_connector_chip_single_connector() -> None:
+    """8.13 no-op: single-connector installs show no connector chip."""
+
+    cfg = OverviewConfig(data_dir="/tmp/dc", claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.active_panel = "skills"
+        body = app._body_text()
+        assert "Connector:" not in body
+
+
+@pytest.mark.asyncio
+async def test_connector_filter_noop_for_single_connector() -> None:
+    """8.13: single-connector installs have no filter concept — the catalog
+    list commands stay flag-free so behaviour is unchanged."""
+
+    cfg = OverviewConfig(data_dir="/tmp/dc", claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        assert app._connector_filter() == ""
+        assert app.skills_model.load_intent().args == ("skill", "list", "--json")
+
+
+@pytest.mark.asyncio
+async def test_hook_calls_tile_single_connector_unchanged() -> None:
+    """D1=B is a no-op for single-connector installs: the label keeps the
+    connector name and the detail keeps its existing aggregate form."""
+
+    cfg = OverviewConfig(data_dir="/tmp/dc", claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    audit = AuditPanelModel()
+    audit.set_events([
+        Event(id=f"h{i}", action="connector-hook", target="preToolUse",
+              severity="INFO", details="connector=cursor action=allow")
+        for i in range(3)
+    ])
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        metrics = {m.key: m for m in app._overview_metric_data()}
+        assert metrics["hook_calls"].label == "Hook Calls (cursor)"
+        # No per-connector roster ⇒ helpers return empty, aggregate unchanged.
+        assert app._active_connector_names() == []
+        assert app._multi_connector_tile_details() == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_rows_combine_config_health_and_audit() -> None:
+    """8.13: the Overview CONNECTORS table rows combine config (mode + pack),
+    audit-derived CALLS/BLOCKS/ALERTS, and live /health status."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "action"), ("cursor", "observe")),
+        connector_packs=(("codex", "strict"), ("cursor", "permissive")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connector=ConnectorHealth(name="codex", state="running"),
+            connectors=(
+                ConnectorHealth(name="codex", state="running"),
+                ConnectorHealth(name="cursor", state="degraded"),
+            ),
+        )
+    )
+    audit = AuditPanelModel()
+    audit.set_events(
+        [
+            Event(id="c1", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=codex action=allow"),
+            Event(id="c2", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=codex action=block"),
+            Event(id="c3", action="connector-hook", target="postToolUse",
+                  severity="MEDIUM", details="connector=codex action=alert"),
+            Event(id="x1", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=cursor action=allow"),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        assert set(rows) == {"codex", "cursor"}
+
+        codex = rows["codex"]
+        assert codex.mode == "action"
+        assert codex.rule_pack == "strict"
+        assert codex.status == "running"
+        assert codex.calls == 3
+        assert codex.blocks == 1
+        assert codex.alerts == 1
+        assert codex.last_activity.endswith("ago")
+
+        cursor = rows["cursor"]
+        assert cursor.mode == "observe"
+        assert cursor.rule_pack == "permissive"
+        assert cursor.status == "degraded"
+        assert cursor.calls == 1
+        assert cursor.blocks == 0
+
+
+@pytest.mark.asyncio
+async def test_overview_disabled_connector_marked_but_still_filterable() -> None:
+    """A guardrail-disabled connector keeps its history filterable (stays in
+    the chip + roster) but is marked DISABLED — its CONNECTORS row status is
+    forced to 'disabled' even though the gateway drops it from connectors[],
+    and the chip annotates it '(off)'."""
+
+    import re
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "action"), ("cursor", "observe")),
+        connector_packs=(("codex", "strict"), ("cursor", "permissive")),
+        connector_disabled=("codex",),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    # Gateway drops disabled codex from connectors[] — only cursor is live, and
+    # the gateway itself is running (so the naive fallback would be "active").
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connectors=(ConnectorHealth(name="cursor", state="running"),),
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        # codex stays in the roster (history) but is forced to disabled, not the
+        # running gateway-state fallback.
+        assert rows["codex"].status == "disabled"
+        assert rows["cursor"].status == "running"
+
+        # Still selectable in the shared filter (history is preserved).
+        assert "codex" in app._active_connector_names()
+
+        chip = re.sub(r"\[/?[^\]]*\]", "", app._connector_chip_text())
+        assert "codex (off)" in chip
+        assert "cursor" in chip
+
+        # Filtering by the disabled connector still works.
+        app._set_connector_filter("codex")
+        assert app._connector_filter() == "codex"
+
+
+@pytest.mark.asyncio
+async def test_overview_enforcement_narrows_to_selected_connector() -> None:
+    """8.13: ENFORCEMENT shows global stats under "All", and narrows to the
+    selected connector when picked — hook-attributed Alerts/Hook calls/Blocks
+    plus Skills/MCPs/scan coverage from that connector's own aibom snapshot
+    (not gateway-wide totals). SCANNERS gains a per-connector policy row."""
+
+    import json as _json
+
+    from rich.console import Console
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "action"), ("cursor", "observe")),
+        connector_packs=(("codex", "strict"), ("cursor", "permissive")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            gateway=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(name="codex", state="running"),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+    audit = AuditPanelModel()
+    audit.set_events(
+        [
+            Event(id="c1", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=codex action=allow"),
+            Event(id="c2", action="connector-hook", target="preToolUse",
+                  severity="HIGH", details="connector=codex action=block"),
+            Event(id="c3", action="connector-hook", target="postToolUse",
+                  severity="MEDIUM", details="connector=codex action=alert"),
+            Event(id="x1", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=cursor action=allow"),
+        ]
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=audit)
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+
+        # Seed per-connector aibom snapshots so ENFORCEMENT can show real
+        # per-connector Skills/MCPs/scan numbers (no live scan in tests).
+        codex_inv = _json.dumps(
+            {
+                "connector": "codex",
+                "skills": [
+                    {"id": "a", "policy_verdict": "block", "scan_target": "a"},
+                    {"id": "b", "policy_verdict": "allow"},
+                    {"id": "c"},
+                ],
+                "mcp": [{"id": "m1"}, {"id": "m2"}],
+            }
+        )
+        cursor_inv = _json.dumps(
+            {"connector": "cursor", "skills": [{"id": "z", "policy_verdict": "allow"}]}
+        )
+        app.inventory_model.show_connector_column = True
+        app.inventory_model.apply_merged([("codex", codex_inv), ("cursor", cursor_inv)])
+        # Snapshots are loaded, so the one-shot auto-load must stay dormant.
+        app._enforcement_inventory_requested = True
+
+        def render() -> str:
+            console = Console(width=170, height=80, record=True)
+            console.print(app._overview_renderable())
+            return console.export_text()
+
+        # "All": global posture, no per-connector framing.
+        app._set_connector_filter("")
+        all_text = render()
+        assert "ENFORCEMENT" in all_text
+        assert "ENFORCEMENT · " not in all_text
+        assert "Hook calls" not in all_text
+
+        # Narrow to codex: connector-scoped hook metrics + per-connector
+        # Skills/MCPs/scan coverage from codex's aibom snapshot.
+        app._set_connector_filter("codex")
+        codex_text = render()
+        assert "ENFORCEMENT · codex" in codex_text
+        assert "Hook calls" in codex_text
+        # codex snapshot: 3 skills (1 blocked / 1 allowed), 2 mcps, 1/3 scanned.
+        assert "blocked" in codex_text and "allowed" in codex_text
+        assert "Scanned" in codex_text
+        assert "1/3 assets" in codex_text
+        assert "(gateway-wide)" not in codex_text
+        # SCANNERS surfaces the connector's enforcement policy.
+        assert "policy" in codex_text
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_rows_status_falls_back_to_gateway() -> None:
+    """When the gateway omits connectors[] (older builds), each row's STATUS
+    falls back to the gateway state so the column is never blank."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "action"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(HealthSnapshot(gateway=SubsystemHealth(state="running")))
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+
+    async with app.run_test(size=(170, 50)) as pilot:
+        await pilot.pause()
+        rows = app._overview_connector_rows()
+        assert rows  # multi-connector
+        assert all(row.status == "active" for row in rows)
+
+
+@pytest.mark.asyncio
+async def test_overview_connector_rows_empty_for_single_connector() -> None:
+    """8.13 no-op: single-connector installs render no CONNECTORS table."""
+
+    cfg = OverviewConfig(data_dir="/tmp/dc", claw_mode="cursor", guardrail_connector="cursor")
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        assert app._overview_connector_rows() == []
+        assert app._overview_connectors_text([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_overview_enter_drills_into_filtered_alerts() -> None:
+    """8.13 drill-down: with a connector selected, Enter on the Overview jumps
+    to Alerts, which the shared filter has already scoped to that connector."""
+
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="codex",
+        guardrail_connector="codex",
+        connector_modes=(("codex", "action"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+
+    async with app.run_test(size=(170, 44)) as pilot:
+        await pilot.pause()
+        app.active_panel = "overview"
+        app._set_connector_filter("cursor")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.active_panel == "alerts"
+        assert app.alerts_model.connector_filter == "cursor"
+
+
+def test_connectors_health_array_parsed() -> None:
+    """The /health connectors[] array maps into HealthSnapshot.connectors."""
+
+    from defenseclaw.tui.app import _health_snapshot_from_mapping
+
+    snap = _health_snapshot_from_mapping(
+        {
+            "gateway": {"state": "running"},
+            "connector": {"name": "codex", "state": "running"},
+            "connectors": [
+                {"name": "codex", "state": "running", "requests": 5},
+                {"name": "cursor", "state": "degraded"},
+                {"state": "running"},  # nameless entry is skipped
+            ],
+        }
+    )
+    names = [c.name for c in snap.connectors]
+    assert names == ["codex", "cursor"]
+    assert snap.connectors[0].requests == 5

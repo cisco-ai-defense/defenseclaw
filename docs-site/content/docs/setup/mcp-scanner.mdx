@@ -56,7 +56,7 @@ Each server is scanned independently and findings are tagged with the connector 
 defenseclaw mcp scan --all --json | jq -s '[.[].findings[]]'
 ```
 
-CI-friendly. Walks every server discovered in `openclaw.json` and emits **one JSON object per server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
+CI-friendly. Walks every server discovered across **all active connectors'** config files — not just `openclaw.json`, but every connector's MCP source (`claude_desktop_config.json`, `~/.cursor/mcp.json`, Codex, Copilot, …) — and emits **one JSON object per server** as a stream of top-level values (NDJSON-shaped, not wrapped in an array). `jq -s` slurps the stream into an array so a single pipeline can iterate findings across servers; for line-oriented tools use `--json | jq -c '.findings[]'` instead.
   </Tab>
   <Tab value="Specific server">
 ```bash

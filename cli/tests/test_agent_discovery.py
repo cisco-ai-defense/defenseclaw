@@ -313,6 +313,51 @@ def test_trust_check_follows_symlinks(monkeypatch, tmp_path):
     assert ad._is_trusted_binary_path(str(link)) is False
 
 
+def test_default_trusted_prefixes_includes_codex_standalone_root():
+    # Regression guard for the actual shipped default: the modern Codex
+    # CLI symlinks ~/.local/bin/codex to a real binary under
+    # ~/.codex/packages/standalone/..., and the trust check resolves
+    # symlinks before matching. Without this entry, out-of-the-box
+    # `setup codex --mode action` fails with "not in a trusted install
+    # prefix". Keep it scoped to packages/ (not all of ~/.codex).
+    assert "~/.codex/packages" in ad._TRUSTED_BIN_PREFIXES_DEFAULT
+    assert "~/.codex" not in ad._TRUSTED_BIN_PREFIXES_DEFAULT
+
+
+def test_trust_check_accepts_codex_standalone_symlink_target(monkeypatch, tmp_path):
+    # End-to-end against the *real* default prefix list (only the env
+    # override is cleared): reproduce the Codex standalone layout under a
+    # fake HOME and assert the launcher symlink resolves as trusted.
+    # realpath() the tmp dir up front so macOS's /var -> /private/var
+    # symlink doesn't desync the resolved binary path from the abspath'd
+    # prefix.
+    home = Path(os.path.realpath(str(tmp_path)))
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+
+    real = (
+        home
+        / ".codex"
+        / "packages"
+        / "standalone"
+        / "releases"
+        / "0.136.0-aarch64-apple-darwin"
+        / "bin"
+        / "codex"
+    )
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_text("#!/bin/sh\nexit 0\n")
+    real.chmod(0o755)
+    real.parent.chmod(0o755)
+
+    link_dir = home / ".local" / "bin"
+    link_dir.mkdir(parents=True, exist_ok=True)
+    link = link_dir / "codex"
+    link.symlink_to(real)
+
+    assert ad._is_trusted_binary_path(str(link)) is True
+
+
 def test_first_installed_precedence():
     assert ad.first_installed(_discovery("claudecode"), "claudecode") == "claudecode"
     assert ad.first_installed(_discovery(*KNOWN_CONNECTORS), "codex") == "codex"

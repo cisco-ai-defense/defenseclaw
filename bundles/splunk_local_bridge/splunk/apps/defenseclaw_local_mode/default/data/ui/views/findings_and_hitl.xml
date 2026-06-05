@@ -19,13 +19,26 @@
       <default>*</default>
       <initialValue>*</initialValue>
     </input>
+    <input type="dropdown" token="connector" searchWhenChanged="true">
+      <label>Connector</label>
+      <choice value="*">All</choice>
+      <default>*</default>
+      <initialValue>*</initialValue>
+      <search>
+        <query>`defenseclaw_demo_connector_events` | where connector!="(unknown)" | stats count by connector | sort - count</query>
+        <earliest>$time.earliest$</earliest>
+        <latest>$time.latest$</latest>
+      </search>
+      <fieldForLabel>connector</fieldForLabel>
+      <fieldForValue>connector</fieldForValue>
+    </input>
   </fieldset>
   <row>
     <panel>
       <title>Findings</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_finding_events` | where ("$severity$"="*" OR severity="$severity$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | stats count as findings</query>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$severity$"="*" OR severity="$severity$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | stats count as findings</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -36,7 +49,7 @@
       <title>Critical Or High</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_finding_events` | where severity="CRITICAL" OR severity="critical" OR severity="HIGH" OR severity="high" | stats count as critical_or_high</query>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND (severity="CRITICAL" OR severity="critical" OR severity="HIGH" OR severity="high") | stats count as critical_or_high</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -47,7 +60,7 @@
       <title>HITL Requests</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_hitl_events` | where like(action, "%requested%") OR decision="confirm" | stats count as hitl_requests</query>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") AND (like(action, "%requested%") OR decision="confirm") | stats count as hitl_requests</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -58,7 +71,7 @@
       <title>HITL Denials</title>
       <single>
         <search>
-          <query>`defenseclaw_demo_hitl_events` | where like(action, "%denied%") OR decision="deny" | stats count as hitl_denials</query>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") AND (like(action, "%denied%") OR decision="deny") | stats count as hitl_denials</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -71,7 +84,7 @@
       <title>Findings By Severity</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_finding_events` | where ("$rule_id$"="*" OR rule_id="$rule_id$") | timechart span=15m count by severity limit=8 useother=t</query>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | timechart span=15m count by severity limit=8 useother=t</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -84,7 +97,7 @@
       <title>HITL Outcomes</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_hitl_events` | timechart span=15m count by decision limit=8 useother=t</query>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") | timechart span=15m count by decision limit=8 useother=t</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -98,7 +111,7 @@
       <title>Top Rules</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_finding_events` | where ("$severity$"="*" OR severity="$severity$") AND rule_id!="(none)" | stats count as findings values(severity) as severities values(connector) as connectors values(target) as targets by rule_id | sort - findings | head 20</query>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$severity$"="*" OR severity="$severity$") AND rule_id!="(none)" | stats count as findings values(severity) as severities values(connector) as connectors values(target) as targets by rule_id | sort - findings | head 20</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -110,7 +123,7 @@
       <title>Recent HITL Events</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_hitl_events` | table timestamp connector action decision severity run_id session_id target message | sort - timestamp | head 25</query>
+          <query>`defenseclaw_demo_hitl_events` | where ("$connector$"="*" OR connector="$connector$") | table timestamp connector action decision severity run_id session_id target message | sort - timestamp | head 25</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -124,7 +137,7 @@
       <title>Recent Findings</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_finding_events` | where ("$severity$"="*" OR severity="$severity$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | table timestamp connector rule_id severity run_id session_id target message | sort - timestamp | head 50</query>
+          <query>`defenseclaw_demo_finding_events` | where ("$connector$"="*" OR connector="$connector$") AND ("$severity$"="*" OR severity="$severity$") AND ("$rule_id$"="*" OR rule_id="$rule_id$") | table timestamp connector rule_id severity run_id session_id target message | sort - timestamp | head 50</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>

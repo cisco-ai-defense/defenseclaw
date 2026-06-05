@@ -38,6 +38,23 @@ const (
 )
 
 // FirewallConfig is the top-level firewall configuration.
+//
+// Global by design: the egress firewall is a single host-wide control,
+// not a per-connector one. It compiles from one firewall.yaml into one
+// OS-level packet-filter ruleset (pf on macOS, iptables on Linux) that
+// filters strictly by destination (domain / IP / port). The kernel
+// cannot attribute an outbound connection back to the connector that
+// originated it — every DefenseClaw-managed agent egresses through the
+// same network namespace — so there is deliberately no per-connector
+// firewall surface. Multi-connector installs still serve N hook
+// connectors from one gateway, but they all share this one allowlist.
+//
+// Per-connector network needs are satisfied additively, not by
+// splitting the ruleset: each connector's
+// connector.AllowedHostsProvider.AllowedHosts() is folded into this
+// single allowlist via MergeAllowedHosts (a set union) at sidecar boot.
+// Hook-only connectors never open a proxy listener, so their agent
+// traffic does not traverse the firewall at all.
 type FirewallConfig struct {
 	Version       string          `yaml:"version"`
 	DefaultAction string          `yaml:"default_action"` // allow or deny

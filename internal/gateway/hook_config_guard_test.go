@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -188,6 +189,82 @@ func TestHookConfigGuard_DisabledDoesNotHeal(t *testing.T) {
 	}
 	if present {
 		t.Fatal("hook block restored even though no guard was started")
+	}
+}
+
+// TestHookConfigGuard_HealAuditRowsCarryConnectorAndSeverity locks in the
+// connector-attribution contract for the self-heal audit rows. Regression
+// guard for the gap where heal rows used the bare LogAction helper so the
+// connector name only reached the `target` column and the dedicated
+// `connector` column stayed empty. Both the tamper and repair rows must carry
+// the connector column so SIEM consumers can filter by connector. Severity is
+// deliberately left at the logger default (INFO) — the original severity of
+// these rows is not the multi-connector feature's to redesign.
+func TestHookConfigGuard_HealAuditRowsCarryConnector(t *testing.T) {
+	conn, opts, cfgPath := installedCursorConnector(t)
+
+	store, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("audit.NewStore: %v", err)
+	}
+	if err := store.Init(); err != nil {
+		t.Fatalf("store.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	logger := audit.NewLogger(store)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := NewHookConfigGuard(logger, nil, guardTestDebounce)
+	guard.Start(ctx, conn, opts)
+	defer guard.Stop()
+
+	waitForPresence(t, conn, opts, true, time.Second)
+	if err := os.WriteFile(cfgPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("strip hook block: %v", err)
+	}
+	waitForPresence(t, conn, opts, true, 3*time.Second)
+
+	// The audit rows are written inside heal() around the presence flip;
+	// poll briefly so the assertion does not race the heal's DB writes.
+	var tampered, repaired *audit.Event
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		events, err := store.ListEvents(50)
+		if err != nil {
+			t.Fatalf("ListEvents: %v", err)
+		}
+		tampered, repaired = nil, nil
+		for i := range events {
+			switch events[i].Action {
+			case string(audit.ActionConnectorHookTampered):
+				tampered = &events[i]
+			case string(audit.ActionConnectorHookRepaired):
+				repaired = &events[i]
+			}
+		}
+		if tampered != nil && repaired != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if tampered == nil {
+		t.Fatal("no connector-hook-tampered audit row was written")
+	}
+	if repaired == nil {
+		t.Fatal("no connector-hook-repaired audit row was written")
+	}
+	for _, ev := range []*audit.Event{tampered, repaired} {
+		if ev.Connector != conn.Name() {
+			t.Errorf("%s row connector column = %q, want %q", ev.Action, ev.Connector, conn.Name())
+		}
+		// Severity is intentionally the logger default (INFO), not an
+		// elevated level — the multi-connector work adds the connector
+		// dimension without redesigning the original severity.
+		if ev.Severity != "INFO" {
+			t.Errorf("%s row severity = %q, want INFO (default; not redesigned)", ev.Action, ev.Severity)
+		}
 	}
 }
 

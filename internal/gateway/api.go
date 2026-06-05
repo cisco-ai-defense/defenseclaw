@@ -122,6 +122,17 @@ type APIServer struct {
 	llmPromptBySourceSession     map[string]string
 	llmPromptBySourceSessionTurn map[string]string
 
+	// stepIdxMu guards stepIdxBySession, the per-session 1-indexed
+	// turn counter used to populate audit.Event.StepIdx. A "turn" is
+	// one prompt-response cycle within a session_id; all hook events
+	// emitted during the same turn share one StepIdx. See
+	// stepIndexForTurn for the boundary computation. Bounded on both
+	// axes so a long-lived process cannot grow memory without limit:
+	// maxStepIdxSessions caps the number of sessions, and
+	// maxStepIdxTurnsPerSession caps the per-session turn map.
+	stepIdxMu        sync.Mutex
+	stepIdxBySession map[string]*sessionStepState
+
 	connectorRegistry *connector.Registry
 
 	// ciscoInspector calls the Cisco AI Defense /api/v1/inspect/chat
@@ -767,7 +778,13 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// summary in health.proxy mirrors this but the structured
 		// field below is what programmatic consumers (CLI status,
 		// dashboards) should read.
-		"connector_mode": a.connectorModeSummary(),
+		//
+		// connector_mode is the active-connector view (back-compat).
+		// connector_modes fans the same shape out across every active
+		// connector so multi-connector status can show each one's
+		// enforcement/observability posture, not just the primary's.
+		"connector_mode":  a.connectorModeSummary(),
+		"connector_modes": a.connectorModesSummary(),
 	}
 
 	if a.client != nil && a.client.Hello() != nil {
@@ -793,8 +810,41 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 // the gateway only ingests telemetry. Telemetry channels reflect
 // what Setup() actually wired (hooks always on; otel + notify are
 // codex/claude-only; openclaw/zeptoclaw enumerate "hooks" alone).
+//
+// This is the singular (active-connector) view kept for back-compat;
+// connectorModesSummary fans the same shape out across every active
+// connector for the multi-connector status surface.
 func (a *APIServer) connectorModeSummary() map[string]interface{} {
-	name := a.connectorName()
+	return connectorModeFor(a.connectorName())
+}
+
+// connectorModesSummary returns one connectorModeFor entry per active
+// connector so multi-connector status output can show every connector's
+// enforcement/observability posture rather than only the primary's. The
+// roster is sourced from the config's ActiveConnectors() (sorted), which
+// returns a single name on a single-connector install — so the shape is
+// identical regardless of count. Falls back to the singular active
+// connector when the config is unavailable.
+func (a *APIServer) connectorModesSummary() []map[string]interface{} {
+	var names []string
+	if a.scannerCfg != nil {
+		names = a.scannerCfg.ActiveConnectors()
+	}
+	if len(names) == 0 {
+		names = []string{a.connectorName()}
+	}
+	out := make([]map[string]interface{}, 0, len(names))
+	for _, name := range names {
+		out = append(out, connectorModeFor(strings.ToLower(strings.TrimSpace(name))))
+	}
+	return out
+}
+
+// connectorModeFor derives the enforcement/observability mode summary for a
+// single connector name. Pure function of the name so it can be mapped over
+// the whole active set (connectorModesSummary) or applied to just the
+// primary (connectorModeSummary).
+func connectorModeFor(name string) map[string]interface{} {
 	mode := "guardrail"
 	intercept := true
 	var telemetry []string
@@ -1911,6 +1961,17 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		// dedicated Event.RequestID column below.
 		details += fmt.Sprintf(" request_id=%s", requestID)
 	}
+	// Attribute every guardrail-evaluate audit row to the proxy connector
+	// so the REST path reaches connector parity with the inline proxy path.
+	// MergeEnvelope keeps the dimensions the middleware already stamped and
+	// only fills in the connector.
+	auditCtx := r.Context()
+	if name := a.connectorName(); name != "" {
+		auditCtx = audit.ContextWithEnvelope(auditCtx, audit.MergeEnvelope(
+			audit.CorrelationEnvelope{Connector: name},
+			audit.EnvelopeFromContext(auditCtx),
+		))
+	}
 	if a.logger != nil {
 		// v7 envelope threading: see review finding C1. The previous
 		// LogActionWithCorrelation carried only trace_id + request_id
@@ -1919,8 +1980,8 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		// tool_*) was silently dropped before the row reached
 		// SQLite/sinks/OTel. LogActionCtx routes through the same
 		// ctx envelope the middleware already stamped for this
-		// request so all five surfaces agree.
-		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionGuardrailVerdict), req.Model, details)
+		// request (now also carrying connector) so all surfaces agree.
+		_ = a.logger.LogActionCtx(auditCtx, string(audit.ActionGuardrailVerdict), req.Model, details)
 	}
 	if a.store != nil {
 		evt := audit.Event{
@@ -1933,7 +1994,7 @@ func (a *APIServer) handleGuardrailEvent(w http.ResponseWriter, r *http.Request)
 		}
 		// Store-level twin row (TUI-only surface) — ApplyEnvelope
 		// keeps it in lockstep with the logger row above.
-		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(r.Context()))
+		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(auditCtx))
 		_ = a.store.LogEvent(evt)
 	}
 	_ = persistAuditEvent(a.logger, a.store, audit.Event{

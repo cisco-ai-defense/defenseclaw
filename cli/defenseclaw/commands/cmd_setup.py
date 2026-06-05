@@ -55,7 +55,7 @@ from defenseclaw.bundle_refresh import (
     refresh_splunk_bridge,
 )
 from defenseclaw.commands.redaction_status import print_redaction_status_hint
-from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV
+from defenseclaw.config import DEFENSECLAW_LLM_KEY_ENV, PerConnectorGuardrailConfig
 from defenseclaw.connector_contracts import (
     STATUS_KNOWN,
     STATUS_NOT_GATED,
@@ -112,7 +112,20 @@ def _safe_mtime(path: str | None) -> float | None:
 @click.group()
 @click.pass_context
 def setup(ctx: click.Context) -> None:
-    """Configure DefenseClaw components."""
+    """Configure DefenseClaw components.
+
+    \b
+    Multi-connector:
+      One gateway enforces N hook connectors (codex, claudecode,
+      antigravity, openclaw) tracked under guardrail.connectors. Add one
+      with 'defenseclaw setup <connector>' (choose Add when prompted),
+      remove with 'defenseclaw setup remove <name>'. Scope policy per peer
+      with 'defenseclaw guardrail ... --connector X', and inspect the
+      roster with 'defenseclaw status' / 'defenseclaw guardrail status'.
+      'setup --connector' / '--agent' selects WHICH agent to configure;
+      'guardrail --connector' scopes policy to an already-configured peer.
+      Note: OpenClaw/ZeptoClaw use the proxy path and cannot be multi peers.
+    """
     # Snapshot config.yaml's mtime before the subcommand runs. The
     # result callback below (``_auto_restart_sidecar_after_setup``)
     # compares this to the post-invocation mtime and only restarts the
@@ -1815,70 +1828,18 @@ def _rotate_token_atomic_write(dotenv_path: str, new_token: str) -> None:
     os.replace(tmp, dotenv_path)
 
 
-_ROTATE_TOKEN_TIMEOUT_S = 60.0
-_ROTATE_TOKEN_MAX_OUTPUT_BYTES = 256 * 1024
-
-
-def _rotate_token_run_gateway(args: list[str]) -> tuple[int, str, str]:
-    """Run a defenseclaw-gateway subcommand. Returns (rc, stdout, stderr).
-
-    Bounded by ``_ROTATE_TOKEN_TIMEOUT_S`` (a hung gateway during a
-    teardown/setup cycle must not wedge the rotate-token CLI forever)
-    and by ``_ROTATE_TOKEN_MAX_OUTPUT_BYTES`` (a runaway subprocess
-    must not balloon the CLI's resident memory). Hitting either limit
-    raises ``ClickException`` so the operator sees the failure rather
-    than a silent kill.
-    """
-    binary = shutil.which("defenseclaw-gateway")
-    if not binary:
-        raise click.ClickException(
-            "defenseclaw-gateway binary not found on PATH. Install it before running rotate-token "
-            "(the connector teardown/setup hooks need it to refresh hook scripts)."
-        )
-    try:
-        proc = subprocess.run(
-            [binary, *args],
-            capture_output=True,
-            check=False,
-            timeout=_ROTATE_TOKEN_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as exc:
-        # Surface partial output so the operator can see how far the
-        # subprocess got before the timeout fired.
-        head = (exc.stdout or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
-        tail = (exc.stderr or b"")[:_ROTATE_TOKEN_MAX_OUTPUT_BYTES]
-        raise click.ClickException(
-            f"defenseclaw-gateway {' '.join(args)!r} timed out after "
-            f"{_ROTATE_TOKEN_TIMEOUT_S:.0f}s. Partial stderr: "
-            f"{tail.decode('utf-8', errors='replace')[:512]} "
-            f"(stdout: {head.decode('utf-8', errors='replace')[:256]})"
-        ) from exc
-
-    stdout = proc.stdout or b""
-    stderr = proc.stderr or b""
-    if len(stdout) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES or len(stderr) > _ROTATE_TOKEN_MAX_OUTPUT_BYTES:
-        raise click.ClickException(
-            f"defenseclaw-gateway {' '.join(args)!r} produced "
-            f"{len(stdout) + len(stderr)} bytes of output (cap "
-            f"{_ROTATE_TOKEN_MAX_OUTPUT_BYTES} per stream); refusing to buffer."
-        )
-    return (
-        proc.returncode,
-        stdout.decode("utf-8", errors="replace"),
-        stderr.decode("utf-8", errors="replace"),
-    )
-
-
 @setup.command("rotate-token")
 @click.option(
     "--connector",
     default=None,
-    help="Override the active connector (default: read from config).",
+    help="Override the connector used for the restart hint (the token is shared, "
+    "so ALL active connectors are refreshed regardless).",
 )
 @click.option(
     "--no-restart",
     is_flag=True,
-    help="Skip the connector teardown/setup that refreshes hook .token files.",
+    help="Skip the gateway restart that re-bakes the new token into every "
+    "connector's hook .token file.",
 )
 @click.option(
     "--yes",
@@ -1890,20 +1851,37 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     """Rotate the DEFENSECLAW_GATEWAY_TOKEN.
 
     Generates a new 32-byte CSPRNG hex token, rewrites
-    ~/.defenseclaw/.env atomically (mode 0o600), and refreshes the
-    per-connector hook scripts so they pick up the new token. The
-    operator must restart their active agent connector for the new
-    credential to take effect.
+    ~/.defenseclaw/.env atomically (mode 0o600), then restarts the
+    gateway so its boot loop re-runs Setup for EVERY active connector and
+    re-bakes the new token into each connector's hook ``.token`` file.
+
+    The token is a single shared secret baked into every connector's hook
+    scripts, so rotation is inherently global: refreshing only one
+    connector would leave the others authenticating with the now-invalid
+    old token. On a multi-connector install all active connectors are
+    refreshed in one restart.
 
     Plan B5 / S0.5.
     """
     import secrets
 
     dotenv_path = _rotate_token_dotenv_path(app)
+
+    actives = (
+        list(app.cfg.active_connectors())
+        if hasattr(app.cfg, "active_connectors")
+        else []
+    )
+    if not actives:
+        single = connector or (app.cfg.guardrail.connector or "").strip()
+        actives = [single] if single else []
+
     if not yes:
+        scope = ", ".join(actives) if actives else "no active connector"
         click.confirm(
             f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path}\n"
-            "and refresh hook scripts for the active connector. Continue?",
+            f"and restart the gateway so every active connector ({scope}) re-bakes\n"
+            "the new token into its hook scripts. Continue?",
             abort=True,
         )
 
@@ -1911,32 +1889,35 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
     _rotate_token_atomic_write(dotenv_path, new_token)
     ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600).")
 
-    active = connector or (app.cfg.guardrail.connector if app.cfg.guardrail.connector else None)
-    if not active:
-        ux.subhead("(no active connector configured; skipping hook refresh)")
+    if not actives:
+        ux.subhead("(no active connector configured; nothing to refresh)")
         return
 
     if no_restart:
         ux.subhead("--no-restart specified; hook .token files were NOT refreshed.")
-        ux.subhead("Run `defenseclaw-gateway connector setup` manually to apply the new token.")
+        ux.subhead(
+            "The new token takes effect only once the gateway restarts and re-runs "
+            "Setup for every connector:"
+        )
+        ux.subhead("  defenseclaw-gateway restart")
         return
 
-    # Bounce the connector so the hook scripts pick up the new token.
-    click.echo(f"  {ux.dim('Refreshing hook scripts for')} connector={active!r}…")
-    rc1, _so, se = _rotate_token_run_gateway(["connector", "teardown"])
-    if rc1 != 0:
-        ux.warn(f"connector teardown returned non-zero; old hook scripts may persist.\n  stderr: {se.strip()}")
-    rc2, _so, se = _rotate_token_run_gateway(["connector", "setup"])
-    if rc2 != 0:
-        raise click.ClickException(
-            "connector setup failed after token rotation; the gateway may be in an inconsistent state.\n"
-            f"stderr: {se.strip()}"
-        )
-
-    ux.ok("Hook scripts refreshed.")
+    # Restart the gateway: its boot loop re-runs Connector.Setup for ALL active
+    # connectors, which rewrites each connector's hook .token file from the
+    # freshly-rotated .env. A full restart (not a per-connector teardown) is
+    # what keeps every connector's shared token in lockstep.
+    click.echo(f"  {ux.dim('Refreshing hook scripts for')} {', '.join(actives)}…")
+    _restart_services(
+        app.cfg.data_dir,
+        app.cfg.gateway.host,
+        app.cfg.gateway.port,
+        connector=connector or app.cfg.active_connector(),
+        connectors=actives,
+    )
+    ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
     click.echo()
-    ux.subhead("Next step: restart the active agent connector so")
-    ux.subhead("the new token is picked up by its inspect / hook subprocess invocations.")
+    ux.subhead("Next step: restart each agent so it picks up the new token in its")
+    ux.subhead("inspect / hook subprocess invocations.")
 
 
 # ---------------------------------------------------------------------------
@@ -3150,32 +3131,67 @@ def setup_guardrail(
     # --- Summary ---
     click.echo()
     connector_label = _CONNECTOR_META.get(gc.connector or "openclaw", {}).get("label", gc.connector)
-    rows = [
-        ("guardrail.connector", f"{connector_label} ({gc.connector})"),
-        (
-            "scope",
-            (
-                f"workspace ({app.cfg.claw.workspace_dir})"
-                if getattr(app.cfg.claw, "workspace_dir", "")
-                else "global user config"
-            ),
-        ),
-        ("guardrail.mode", gc.mode),
-        ("guardrail.port", str(gc.port)),
-        ("guardrail.model", gc.model),
-        ("guardrail.model_name", gc.model_name),
-        ("guardrail.api_key_env", gc.api_key_env),
-        ("guardrail.detection_strategy", gc.detection_strategy),
-        ("guardrail.rule_pack_dir", gc.rule_pack_dir),
-    ]
-    if gc.api_base:
-        rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
-    if gc.block_message:
-        truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
-        rows.append(("guardrail.block_message", truncated))
-    rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
-    rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
-    rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+    _actives = list(app.cfg.active_connectors()) if hasattr(app.cfg, "active_connectors") else []
+    _multi = len(_actives) > 1
+    scope_val = (
+        f"workspace ({app.cfg.claw.workspace_dir})"
+        if getattr(app.cfg.claw, "workspace_dir", "")
+        else "global user config"
+    )
+    if _multi:
+        # All connectors are peers. Show each connector's *effective*
+        # per-connector policy (override > global) instead of collapsing
+        # the summary to the singular guardrail.connector. The genuinely
+        # global fields (port/model/scanner/judge/redaction) are listed
+        # once below since they apply to every connector.
+        rows = [
+            ("guardrail.connectors", ", ".join(_actives)),
+            ("scope", scope_val),
+        ]
+        for c in _actives:
+            hilt_c = gc.effective_hilt(c)
+            # Empty rule-pack dir = the built-in default pack — render it the
+            # same way `guardrail status` does (basename, or "default").
+            _rp = gc.effective_rule_pack_dir(c)
+            rp_label = os.path.basename(_rp.rstrip("/")) if _rp.strip() else "default"
+            rows.append((f"  [{c}] mode", gc.effective_mode(c)))
+            rows.append((f"  [{c}] rule_pack", rp_label))
+            rows.append((f"  [{c}] hook_fail_mode", gc.effective_hook_fail_mode(c) or "open"))
+            rows.append(
+                (
+                    f"  [{c}] hilt",
+                    f"{str(bool(hilt_c.enabled)).lower()} (min {hilt_c.min_severity or 'HIGH'})",
+                )
+            )
+        rows += [
+            ("guardrail.port", str(gc.port)),
+            ("guardrail.model", gc.model),
+            ("guardrail.model_name", gc.model_name),
+            ("guardrail.api_key_env", gc.api_key_env),
+            ("guardrail.detection_strategy", gc.detection_strategy),
+        ]
+        if gc.api_base:
+            rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
+    else:
+        rows = [
+            ("guardrail.connector", f"{connector_label} ({gc.connector})"),
+            ("scope", scope_val),
+            ("guardrail.mode", gc.mode),
+            ("guardrail.port", str(gc.port)),
+            ("guardrail.model", gc.model),
+            ("guardrail.model_name", gc.model_name),
+            ("guardrail.api_key_env", gc.api_key_env),
+            ("guardrail.detection_strategy", gc.detection_strategy),
+            ("guardrail.rule_pack_dir", gc.rule_pack_dir),
+        ]
+        if gc.api_base:
+            rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
+        if gc.block_message:
+            truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
+            rows.append(("guardrail.block_message", truncated))
+        rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
+        rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
+        rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
     rows.append(("privacy.disable_redaction", str(bool(app.cfg.privacy.disable_redaction)).lower()))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
@@ -3212,6 +3228,7 @@ def setup_guardrail(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=gc.connector or "openclaw",
+            connectors=app.cfg.active_connectors(),
         )
     else:
         click.echo("  Next steps:")
@@ -3327,6 +3344,80 @@ def _configure_connector_workspace(cfg, workspace_dir: str | None = None) -> str
     return workspace
 
 
+def _configured_connector_set(gc) -> list[str]:
+    """Return the connectors already configured, in stable sorted order.
+
+    Prefers the multi-connector ``guardrail.connectors`` map keys when
+    populated; otherwise falls back to the singular ``guardrail.connector``
+    field. Empty when nothing is configured yet.
+    """
+    connectors = getattr(gc, "connectors", None)
+    if connectors:
+        return sorted(name for name in connectors if (name or "").strip())
+    single = (getattr(gc, "connector", "") or "").strip()
+    return [single] if single else []
+
+
+def _prompt_add_replace_cancel(connector: str, others: list[str]) -> str | None:
+    """Three-choice interactive prompt for the additive-setup decision (WU7 D1).
+
+    Returns ``"add"``, ``"replace"``, or ``None`` (cancel).
+    """
+    others_label = ", ".join(others)
+    click.echo()
+    click.echo(f"  DefenseClaw is already configured for: {others_label}")
+    click.echo(f"  You are setting up: {connector}")
+    click.echo("    [a] Add     — run it alongside the existing connector(s) (multi-connector)")
+    click.echo("    [r] Replace — switch to only this connector")
+    click.echo("    [c] Cancel  — make no changes")
+    choice = click.prompt(
+        "  Choose",
+        type=click.Choice(["a", "r", "c"], case_sensitive=False),
+        default="a",
+        show_default=True,
+    ).lower()
+    return {"a": "add", "r": "replace", "c": None}[choice]
+
+
+def _write_connector_identity(cfg, connector: str, write_mode: str) -> None:
+    """Persist the active-connector identity honoring the WU7 write mode.
+
+    ``replace`` (default, legacy behavior): this connector becomes the sole
+    active connector — the ``guardrail.connectors`` map is cleared and the
+    singular ``guardrail.connector`` / ``claw.mode`` fields are pinned to it.
+
+    ``add`` (WU7 D2=A): merge this connector into ``guardrail.connectors``
+    alongside the existing one(s). On the first add the existing singular
+    connector is seeded into the map so BOTH are represented. The singular
+    ``guardrail.connector`` and ``claw.mode`` fields are kept pointing at the
+    primary (sorted-first) connector so backward-compat readers — older Go
+    binaries and the Python single-connector paths — keep working.
+    """
+    gc = cfg.guardrail
+    if write_mode == "add":
+        if not getattr(gc, "connectors", None):
+            gc.connectors = {}
+        existing_single = (getattr(gc, "connector", "") or "").strip()
+        # Only seed a HOOK-enforced predecessor into the multi map — a
+        # proxy-backed connector cannot be a multi-connector peer (D4=A).
+        if (
+            existing_single
+            and existing_single != connector
+            and existing_single in _HOOK_ENFORCED_CONNECTORS
+            and existing_single not in gc.connectors
+        ):
+            gc.connectors[existing_single] = PerConnectorGuardrailConfig()
+        if connector not in gc.connectors:
+            gc.connectors[connector] = PerConnectorGuardrailConfig()
+        primary = sorted(gc.connectors)[0]
+        gc.connector = primary
+        cfg.claw.mode = primary
+    else:  # replace
+        gc.connectors = {}
+        gc.connector = connector
+        cfg.claw.mode = connector
+
+
 def _apply_hook_connector_setup(
     app: AppContext,
     *,
@@ -3334,6 +3425,8 @@ def _apply_hook_connector_setup(
     mode: str = "observe",
     restart: bool,
     workspace_dir: str | None = None,
+    write_mode: str = "replace",
+    rule_pack: str | None = None,
 ) -> bool:
     """Pin DefenseClaw to *connector* in hook-driven mode.
 
@@ -3387,9 +3480,35 @@ def _apply_hook_connector_setup(
     cfg = app.cfg
     gc = cfg.guardrail
 
-    cfg.claw.mode = connector
     workspace = _configure_connector_workspace(cfg, workspace_dir)
-    gc.connector = connector
+    # WU7: honor the resolved write mode — "replace" pins this as the sole
+    # connector (legacy behavior); "add" merges it into guardrail.connectors
+    # alongside the existing one(s) while keeping the singular field as a
+    # backward-compatible primary mirror.
+    _write_connector_identity(cfg, connector, write_mode)
+    # Per-connector rule pack (parity with single-connector --rule-pack).
+    # Each connector scans against its own EffectiveRulePackDir at boot, so
+    # this lets one connector run strict while a peer runs permissive.
+    #
+    #   * multi (write_mode == "add"): the pack is written to THIS
+    #     connector's per-connector override block, so peers keep their own
+    #     pack (or inherit the global default). The existing connector that
+    #     gets seeded into the map on the first add keeps an empty block and
+    #     therefore inherits the global pack — unchanged.
+    #   * sole connector (replace / first-ever single): there is no
+    #     per-connector block, so it sets the global rule_pack_dir exactly
+    #     like `setup guardrail --rule-pack` does for a single-connector
+    #     install. "Set this connector's pack" thus means the same thing in
+    #     both shapes.
+    if rule_pack is not None:
+        policy_root = cfg.policy_dir or os.path.join(cfg.data_dir, "policies")
+        pack_dir = os.path.join(policy_root, "guardrail", rule_pack)
+        if write_mode == "add" and connector in gc.connectors:
+            gc.connectors[connector].rule_pack_dir = pack_dir
+            click.echo(f"  ✓ {connector} rule pack: {rule_pack} (per-connector override)")
+        else:
+            gc.rule_pack_dir = pack_dir
+            click.echo(f"  ✓ rule pack: {rule_pack} (global)")
     gc.enabled = True
     gc.mode = desired_mode
     gc.scanner_mode = "local"
@@ -3412,7 +3531,17 @@ def _apply_hook_connector_setup(
         return False
 
     _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
-    click.echo(f"  ✓ Active connector set to {connector!r} (claw.mode={connector})")
+    _actives = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else [connector]
+    if len(_actives) > 1:
+        click.echo(
+            f"  ✓ Connector {connector!r} configured — "
+            f"{len(_actives)} connectors active: {', '.join(_actives)}"
+        )
+    else:
+        click.echo(
+            f"  ✓ Active connector set to {connector!r} "
+            f"(claw.mode={getattr(cfg.claw, 'mode', '') or connector})"
+        )
     if workspace:
         click.echo(f"  ✓ Workspace root pinned to {workspace}")
     else:
@@ -3497,12 +3626,31 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
     enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
+
+    # Multi-connector awareness: a singular claw.mode row + a global
+    # "setup guardrail --disable" revert line both read as if this one
+    # connector IS the whole install. When more than one connector is
+    # configured, show the full roster (all connectors are peers) and point
+    # revert / mode guidance at the per-connector commands. Single-connector
+    # output is unchanged.
+    actives: list[str] = []
+    if cfg is not None and hasattr(cfg, "active_connectors"):
+        try:
+            actives = list(cfg.active_connectors())
+        except Exception:  # noqa: BLE001 — fall back to single-connector view.
+            actives = []
+    multi = len(actives) > 1
+
     click.echo()
     click.echo("  Summary")
     click.echo("  ───────")
+    if multi:
+        mode_row = ("connectors", ", ".join(actives))
+    else:
+        mode_row = ("claw.mode", connector)
     rows = [
         ("connector", f"{label} ({connector})"),
-        ("claw.mode", connector),
+        mode_row,
         (
             "scope",
             (
@@ -3529,9 +3677,20 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
         f"    • Recent alerts as a table: defenseclaw alerts --limit 25  "
         f"(filter to this connector with: jq 'select(.connector == \"{connector}\")')"
     )
+    if multi:
+        click.echo(
+            f"    • Change this connector's mode: defenseclaw setup {connector} --mode observe|action"
+        )
     click.echo()
-    click.echo("  To revert and restore direct LLM access:")
-    click.echo("    defenseclaw setup guardrail --disable")
+    if multi:
+        click.echo(f"  This install now has {len(actives)} connectors: {', '.join(actives)}.")
+        click.echo("  To revert just this connector (the others keep running):")
+        click.echo(f"    defenseclaw setup remove {connector}")
+        click.echo("  Or keep it configured but stop enforcing it:")
+        click.echo(f"    defenseclaw guardrail disable --connector {connector}")
+    else:
+        click.echo("  To revert and restore direct LLM access:")
+        click.echo("    defenseclaw setup guardrail --disable")
     click.echo()
 
 
@@ -3615,6 +3774,8 @@ def _setup_observability_alias(
     with_local_stack: bool,
     mode: str = "observe",
     workspace_dir: str | None = None,
+    replace: bool = False,
+    rule_pack: str | None = None,
 ) -> None:
     """Shared body for hook-based connector setup aliases.
 
@@ -3649,12 +3810,50 @@ def _setup_observability_alias(
     normalized_mode = "action" if (mode or "").strip().lower() == "action" else "observe"
     _print_connector_observability_banner(connector, mode=normalized_mode)
 
-    if not yes:
-        verb = "enforcement" if normalized_mode == "action" else "observability"
-        if not click.confirm(
-            f"  Configure DefenseClaw for {_CONNECTOR_META[connector]['label']} {verb} now?",
-            default=True,
+    # WU7: resolve add-vs-replace. Only HOOK-ENFORCED peers count as valid
+    # multi-connector neighbors (D4=A) — proxy-backed connectors
+    # (openclaw/zeptoclaw) bind the proxy and cannot coexist, so an existing
+    # proxy connector is treated as "no additive peer" and this stays the
+    # legacy confirm-then-replace flow byte-for-byte. When another HOOK
+    # connector is configured this becomes the multi-connector decision point.
+    gc = app.cfg.guardrail
+    existing_others = [
+        c
+        for c in _configured_connector_set(gc)
+        if c != connector and c in _HOOK_ENFORCED_CONNECTORS
+    ]
+    if not existing_others:
+        if not yes:
+            verb = "enforcement" if normalized_mode == "action" else "observability"
+            if not click.confirm(
+                f"  Configure DefenseClaw for {_CONNECTOR_META[connector]['label']} {verb} now?",
+                default=True,
+            ):
+                click.echo("  Aborted — no changes made.")
+                return
+        # Preserve an existing per-connector override block on re-run;
+        # otherwise pin as the sole connector.
+        if getattr(gc, "connectors", None) and connector in gc.connectors:
+            write_mode = "add"
+        else:
+            write_mode = "replace"
+    elif replace:
+        # --replace with other connectors configured: confirm the
+        # destructive switch unless running non-interactively.
+        if not yes and not click.confirm(
+            f"  Replace {', '.join(existing_others)} with {connector}? This removes the other connector(s).",
+            default=False,
         ):
+            click.echo("  Aborted — no changes made.")
+            return
+        write_mode = "replace"
+    elif yes:
+        # WU7 D3=A: the non-interactive default is ADD (backward-incompatible
+        # — previously --yes overwrote). Use --replace to overwrite.
+        write_mode = "add"
+    else:
+        write_mode = _prompt_add_replace_cancel(connector, existing_others)
+        if write_mode is None:
             click.echo("  Aborted — no changes made.")
             return
 
@@ -3664,6 +3863,8 @@ def _setup_observability_alias(
         mode=normalized_mode,
         restart=restart,
         workspace_dir=workspace_dir,
+        write_mode=write_mode,
+        rule_pack=rule_pack,
     )
     if not ok:
         raise click.ClickException(f"failed to configure {connector} (mode={normalized_mode}) — see errors above")
@@ -3717,6 +3918,28 @@ def _setup_observability_alias(
     default=None,
     help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
 )
+@click.option(
+    "--replace",
+    is_flag=True,
+    help=(
+        "Replace the currently configured connector(s) with this one instead "
+        "of adding alongside them. When other connectors are configured the "
+        "default (and the --yes default) is to ADD; pass --replace to switch."
+    ),
+)
+@click.option(
+    "--rule-pack",
+    type=click.Choice(["default", "strict", "permissive"]),
+    default=None,
+    help=(
+        "Rule-pack profile for THIS connector. In a multi-connector install "
+        "this writes a per-connector override so Codex can run a different "
+        "pack than its peers (each connector scans against its own pack at "
+        "boot); when Codex is the only connector it sets the global pack, "
+        "matching `setup guardrail --rule-pack`. Omit to leave unchanged "
+        "(inherits the global pack)."
+    ),
+)
 @pass_ctx
 def setup_codex(
     app: AppContext,
@@ -3725,6 +3948,8 @@ def setup_codex(
     with_local_stack: bool,
     mode: str,
     workspace_dir: str | None,
+    replace: bool,
+    rule_pack: str | None,
 ) -> None:
     """Configure DefenseClaw for Codex via the hook bus.
 
@@ -3757,6 +3982,8 @@ def setup_codex(
         with_local_stack=with_local_stack,
         mode=mode,
         workspace_dir=workspace_dir,
+        replace=replace,
+        rule_pack=rule_pack,
     )
 
 
@@ -3805,6 +4032,28 @@ def setup_codex(
     default=None,
     help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
 )
+@click.option(
+    "--replace",
+    is_flag=True,
+    help=(
+        "Replace the currently configured connector(s) with this one instead "
+        "of adding alongside them. When other connectors are configured the "
+        "default (and the --yes default) is to ADD; pass --replace to switch."
+    ),
+)
+@click.option(
+    "--rule-pack",
+    type=click.Choice(["default", "strict", "permissive"]),
+    default=None,
+    help=(
+        "Rule-pack profile for THIS connector. In a multi-connector install "
+        "this writes a per-connector override so Claude Code can run a "
+        "different pack than its peers (each connector scans against its own "
+        "pack at boot); when it is the only connector it sets the global "
+        "pack, matching `setup guardrail --rule-pack`. Omit to leave "
+        "unchanged (inherits the global pack)."
+    ),
+)
 @pass_ctx
 def setup_claude_code(
     app: AppContext,
@@ -3813,6 +4062,8 @@ def setup_claude_code(
     with_local_stack: bool,
     mode: str,
     workspace_dir: str | None,
+    replace: bool,
+    rule_pack: str | None,
 ) -> None:
     """Configure DefenseClaw for Claude Code via the hook bus.
 
@@ -3844,7 +4095,211 @@ def setup_claude_code(
         with_local_stack=with_local_stack,
         mode=mode,
         workspace_dir=workspace_dir,
+        replace=replace,
+        rule_pack=rule_pack,
     )
+
+
+def _remove_connector(
+    app: AppContext,
+    *,
+    connector: str,
+    restart: bool,
+    force: bool,
+    yes: bool,
+) -> bool:
+    """Remove *connector* from the configured set (WU8, inverse of setup-add).
+
+    Mutation shape mirrors ``_write_connector_identity`` so the two stay
+    symmetric:
+
+      * Removing one of several connectors drops it from
+        ``guardrail.connectors`` and repoints the singular
+        ``guardrail.connector`` / ``claw.mode`` mirror at the new primary
+        (sorted-first remaining). When exactly one connector remains the
+        map is collapsed back to the legacy singular shape so a
+        single-connector install looks byte-identical to a pre-multi one.
+      * Removing the LAST connector is gated (WU8 D2=A): refused unless
+        ``--force``, which fully unconfigures enforcement (clears the map
+        and the singular mirror). ``defenseclaw uninstall`` remains the
+        path for taking DefenseClaw off the machine entirely.
+
+    Teardown is delegated to the gateway boot loop (WU8 D3=A): once the
+    connector is gone from config, restarting defenseclaw-gateway lets the
+    set-difference reconciliation (``teardownRemovedConnectors``) remove
+    exactly that connector's hooks. No per-connector teardown plumbing is
+    added here.
+
+    Returns True on success, False on a no-op/refusal/persistence error.
+    """
+    cfg = app.cfg
+    gc = cfg.guardrail
+    requested = (connector or "").strip()
+    if not requested:
+        click.echo("  ✗ No connector specified.", err=True)
+        return False
+
+    configured = _configured_connector_set(gc)
+    # Match case-insensitively against the configured names so operators
+    # can type `Codex` or `codex` interchangeably.
+    match = next((c for c in configured if c.lower() == requested.lower()), None)
+    if match is None:
+        configured_label = ", ".join(configured) if configured else "(none configured)"
+        click.echo(
+            f"  ✗ {requested!r} is not a configured connector. Configured: {configured_label}",
+            err=True,
+        )
+        return False
+
+    remaining = [c for c in configured if c != match]
+
+    # WU8 D2=A — last-connector gate.
+    if not remaining:
+        if not force:
+            click.echo(
+                f"  ✗ Refusing to remove the last connector ({match!r}) — the gateway would enforce nothing.",
+                err=True,
+            )
+            click.echo(
+                "    Pass --force to fully unconfigure enforcement (DefenseClaw stays installed),",
+                err=True,
+            )
+            click.echo(
+                "    or run `defenseclaw uninstall` to remove DefenseClaw entirely.",
+                err=True,
+            )
+            return False
+        if not yes and not click.confirm(
+            f"Remove the last connector {match!r} and fully unconfigure enforcement?",
+            default=False,
+        ):
+            # Operator-initiated cancel is a clean no-op (exit 0), matching
+            # the setup-add cancel path — not an error.
+            click.echo("  Aborted; no changes made.")
+            return True
+    elif not yes and not click.confirm(f"Remove connector {match!r}?", default=True):
+        click.echo("  Aborted; no changes made.")
+        return True
+
+    # Drop from the multi-connector map (case-insensitive key match).
+    if getattr(gc, "connectors", None):
+        for key in [k for k in gc.connectors if k.lower() == match.lower()]:
+            del gc.connectors[key]
+
+    if not remaining:
+        # Fully unconfigured: no connector enforces anything.
+        gc.connectors = {}
+        gc.connector = ""
+        cfg.claw.mode = ""
+    elif len(remaining) == 1:
+        # Collapse to the legacy singular shape for parity with a
+        # pre-multi single-connector install.
+        gc.connectors = {}
+        gc.connector = remaining[0]
+        cfg.claw.mode = remaining[0]
+    else:
+        # Still multi: keep the map, repoint the primary mirror.
+        primary = sorted(remaining)[0]
+        gc.connector = primary
+        cfg.claw.mode = primary
+
+    try:
+        cfg.save()
+    except OSError as exc:
+        click.echo(f"  ✗ Failed to save config: {exc}", err=True)
+        return False
+
+    click.echo(f"  ✓ Removed connector {match!r}")
+    if remaining:
+        click.echo(f"  ✓ Remaining connector(s): {', '.join(sorted(remaining))}")
+    else:
+        click.echo("  ✓ No connectors configured — DefenseClaw enforces nothing until you run `setup` again.")
+
+    if restart:
+        click.echo()
+        click.echo("  Restarting gateway so the removed connector's hooks are torn down…")
+        # The set-difference teardown (WU6b) runs at gateway boot and is
+        # connector-agnostic, so a plain defense-gateway bounce is the
+        # precise primitive here. _restart_defense_gateway also marks the
+        # restart as handled so the group result callback won't bounce
+        # again.
+        _restart_defense_gateway(cfg.data_dir)
+    else:
+        # Suppress the group's auto-restart result callback so --no-restart
+        # is honored; warn that teardown is deferred until the next boot.
+        ctx = click.get_current_context(silent=True)
+        if ctx is not None:
+            ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
+        click.echo()
+        click.echo(
+            "  --no-restart: config updated, but the removed connector's hooks are "
+            "still installed until you restart defenseclaw-gateway."
+        )
+
+    if app.logger:
+        remaining_label = ",".join(sorted(remaining)) if remaining else "(none)"
+        app.logger.log_action(
+            ACTION_SETUP_HOOK_CONNECTOR,
+            "config",
+            f"connector={match} action=remove remaining={remaining_label}",
+        )
+
+    return True
+
+
+@setup.command("remove")
+@click.argument("connector")
+@click.option(
+    "--restart/--no-restart",
+    default=True,
+    show_default=True,
+    help=(
+        "Restart defenseclaw-gateway after removing the connector so its "
+        "hooks are torn down via boot-time reconciliation."
+    ),
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help=(
+        "Allow removing the LAST remaining connector, fully unconfiguring "
+        "DefenseClaw enforcement (it stays installed). Use `defenseclaw "
+        "uninstall` to remove DefenseClaw entirely."
+    ),
+)
+@click.option(
+    "--yes",
+    "-y",
+    "yes",
+    is_flag=True,
+    help="Skip the confirmation prompt (non-interactive).",
+)
+@pass_ctx
+def setup_remove(
+    app: AppContext,
+    connector: str,
+    restart: bool,
+    force: bool,
+    yes: bool,
+) -> None:
+    """Remove a connector from the configured set.
+
+    The inverse of ``defenseclaw setup <connector>``: drops CONNECTOR from
+    ``guardrail.connectors`` and, after a restart, lets the gateway tear
+    down its hooks via set-difference reconciliation.
+
+    Removing the last remaining connector is refused unless ``--force`` is
+    given (which fully unconfigures enforcement). To take DefenseClaw off
+    the machine entirely, use ``defenseclaw uninstall``.
+    """
+    if not _remove_connector(
+        app,
+        connector=connector,
+        restart=restart,
+        force=force,
+        yes=yes,
+    ):
+        raise click.ClickException(f"failed to remove connector {connector!r} — see errors above")
 
 
 def _make_observability_setup_command(connector: str) -> click.Command:
@@ -3905,6 +4360,28 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         default=None,
         help="Opt into workspace-scoped config for this setup. Defaults to global/user config.",
     )
+    @click.option(
+        "--replace",
+        is_flag=True,
+        help=(
+            "Replace the currently configured connector(s) with this one instead "
+            "of adding alongside them. When other connectors are configured the "
+            "default (and the --yes default) is to ADD; pass --replace to switch."
+        ),
+    )
+    @click.option(
+        "--rule-pack",
+        type=click.Choice(["default", "strict", "permissive"]),
+        default=None,
+        help=(
+            f"Rule-pack profile for THIS connector. In a multi-connector "
+            f"install this writes a per-connector override so {label} can run "
+            "a different pack than its peers (each connector scans against its "
+            "own pack at boot); when it is the only connector it sets the "
+            "global pack, matching `setup guardrail --rule-pack`. Omit to "
+            "leave unchanged (inherits the global pack)."
+        ),
+    )
     @pass_ctx
     def _cmd(
         app: AppContext,
@@ -3913,6 +4390,8 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         with_local_stack: bool,
         mode: str,
         workspace_dir: str | None,
+        replace: bool,
+        rule_pack: str | None,
     ) -> None:
         _setup_observability_alias(
             app,
@@ -3922,6 +4401,8 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             with_local_stack=with_local_stack,
             mode=mode,
             workspace_dir=workspace_dir,
+            replace=replace,
+            rule_pack=rule_pack,
         )
 
     _cmd.__name__ = f"setup_{connector}"
@@ -4598,6 +5079,7 @@ def setup_redaction(app: AppContext, action: str, restart: bool, yes: bool) -> N
             cfg.gateway.host,
             cfg.gateway.port,
             connector=cfg.active_connector(),
+            connectors=cfg.active_connectors(),
         )
     else:
         ux.warn(
@@ -4738,6 +5220,7 @@ def setup_notifications(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=cfg.active_connector(),
+            connectors=cfg.active_connectors(),
         )
     else:
         # Operator opted out of the restart explicitly; suppress the
@@ -4878,6 +5361,7 @@ def setup_notifications_set(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=cfg.active_connector(),
+            connectors=cfg.active_connectors(),
         )
     else:
         ctx = click.get_current_context(silent=True)
@@ -4949,18 +5433,32 @@ def execute_guardrail_setup(
 
     click.echo()
 
-    meta = _CONNECTOR_META.get(connector_name, {})
-    if meta:
-        tool_mode = meta["tool_mode"]
-        if tool_mode == "both":
-            tool_display = "pre-execution + response-scan"
-        else:
-            tool_display = tool_mode
-        ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
-        ux.ok(f"Tool inspection: {tool_display}")
-        ux.ok(f"Subprocess policy: {meta['subprocess_policy']}")
+    def _tool_display(m: dict) -> str:
+        tool_mode = m["tool_mode"]
+        return "pre-execution + response-scan" if tool_mode == "both" else tool_mode
+
+    actives = list(app.cfg.active_connectors()) if hasattr(app.cfg, "active_connectors") else [connector_name]
+    if len(actives) > 1:
+        # All connectors are peers — confirm every one rather than singling
+        # out a primary. (claw.mode above is only a back-compat mirror.)
+        ux.ok(f"Connectors: {', '.join(actives)}")
+        for c in actives:
+            m = _CONNECTOR_META.get(c, {})
+            if m:
+                ux.ok(
+                    f"  [{c}] tool inspection: {_tool_display(m)}; "
+                    f"subprocess policy: {m['subprocess_policy']}"
+                )
+            else:
+                ux.ok(f"  [{c}] plugin connector")
     else:
-        ux.ok(f"Connector: {connector_name} (plugin)")
+        meta = _CONNECTOR_META.get(connector_name, {})
+        if meta:
+            ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
+            ux.ok(f"Tool inspection: {_tool_display(meta)}")
+            ux.ok(f"Subprocess policy: {meta['subprocess_policy']}")
+        else:
+            ux.ok(f"Connector: {connector_name} (plugin)")
 
     ux.ok("Connector setup will run automatically when the gateway starts")
     if workspace:
@@ -5061,16 +5559,61 @@ def _interactive_guardrail_setup(
     click.echo()
 
     # --- Step 0: Connector selection ---
+    #
+    # The singular "which agent framework?" picker only makes sense at
+    # bootstrap (nothing configured yet). Once one or more connectors are
+    # active, this command edits PROCESS-GLOBAL guardrail policy (rule
+    # pack, HILT, scanner, judge, redaction) that applies to ALL of them,
+    # so re-asking a single-connector question is misleading — picking one
+    # would only re-point the back-compat primary pointer, not reconfigure
+    # the fleet. We therefore run the picker only when nothing is
+    # configured AND the operator didn't pass an explicit --connector/
+    # --agent override. Connector add/switch stays the job of
+    # `setup <connector>`.
+    #
+    # ``was_initial_setup`` (sampled above, before gc.enabled is flipped)
+    # guards the openclaw-default bootstrap: a default "openclaw" with the
+    # guardrail never enabled is NOT a real configuration, so the first-
+    # ever run still shows the picker.
+    configured = _configured_connector_set(gc)
+    active_connectors = [] if was_initial_setup else configured
+    is_multi = len(active_connectors) >= 2
     if agent_name and agent_name in _CONNECTOR_META:
         gc.connector = agent_name
+        click.echo()
+        _print_connector_info(gc.connector)
+        click.echo()
+    elif active_connectors:
+        # Global-policy edit across the existing fleet — skip the picker
+        # and leave the current primary pointer untouched.
+        names = ", ".join(active_connectors)
+        click.echo()
+        click.echo(
+            "  " + ux.dim(
+                f"Editing global guardrail policy for {len(active_connectors)} "
+                f"configured connector(s): {names}."
+            )
+        )
+        # Only steer toward per-connector mode when there's genuinely more
+        # than one connector — a single active connector still gets the
+        # (meaningful, unambiguous) observe/action prompt below, so the
+        # guidance would otherwise contradict the prompt we're about to show.
+        if is_multi:
+            click.echo(
+                "  " + ux.dim(
+                    "Per-connector enforcement mode is managed via "
+                    "`defenseclaw setup <connector> --mode observe|action`."
+                )
+            )
+        click.echo()
     else:
         gc.connector = _select_connector_interactive(
             gc.connector or "openclaw",
             data_dir=getattr(app.cfg, "data_dir", None),
         )
-    click.echo()
-    _print_connector_info(gc.connector)
-    click.echo()
+        click.echo()
+        _print_connector_info(gc.connector)
+        click.echo()
 
     # Codex and Claude Code are hook-enforced — they go through the
     # same mode-prompt flow as the other hook connectors below. The
@@ -5105,21 +5648,38 @@ def _interactive_guardrail_setup(
 
     gc.enabled = True
 
-    ux.section("Enforcement mode")
-    click.echo(
-        "    " + ux.bold("[1] observe") + " — log and alert only, never block " + ux.dim("(recommended to start)")
-    )
-    click.echo("    " + ux.bold("[2] action ") + " — block requests that match security policies")
-    current_mode = gc.mode or "observe"
-    mode_default = "1" if current_mode == "observe" else "2"
-    mode_choice = click.prompt(
-        "  Select mode",
-        type=click.Choice(["1", "2"]),
-        default=mode_default,
-    )
-    new_mode = "observe" if mode_choice == "1" else "action"
-    mode_changed = new_mode != current_mode
-    gc.mode = new_mode
+    if is_multi:
+        # Per-connector mode is the source of truth in multi-connector
+        # mode; a single observe/action answer cannot express
+        # "codex=action, antigravity=observe". Leave each connector's mode
+        # untouched — it is set via `setup <connector> --mode`. The legacy
+        # singular gc.mode is only a back-compat default here, so editing
+        # it would be misleading.
+        mode_changed = False
+        click.echo()
+        click.echo(
+            "  " + ux.dim(
+                "Enforcement mode is per-connector here — skipping the single "
+                "observe/action prompt. Use `defenseclaw setup <connector> "
+                "--mode observe|action` to change an individual connector."
+            )
+        )
+    else:
+        ux.section("Enforcement mode")
+        click.echo(
+            "    " + ux.bold("[1] observe") + " — log and alert only, never block " + ux.dim("(recommended to start)")
+        )
+        click.echo("    " + ux.bold("[2] action ") + " — block requests that match security policies")
+        current_mode = gc.mode or "observe"
+        mode_default = "1" if current_mode == "observe" else "2"
+        mode_choice = click.prompt(
+            "  Select mode",
+            type=click.Choice(["1", "2"]),
+            default=mode_default,
+        )
+        new_mode = "observe" if mode_choice == "1" else "action"
+        mode_changed = new_mode != current_mode
+        gc.mode = new_mode
 
     # Hook fail-mode prompt. Asked on initial setup OR when the
     # operator just flipped between observe and action — those are
@@ -5160,7 +5720,19 @@ def _interactive_guardrail_setup(
     # was useful when the call lived under "Advanced options" and
     # the operator had explicitly opted in; here, asking and
     # immediately printing "never mind" would feel like a bug.
-    if gc.mode == "action":
+    # HILT (human approval) is process-global but only fires for
+    # action-mode connectors. In multi-connector mode the singular
+    # gc.mode is just a back-compat default, so gate on whether ANY
+    # configured connector resolves to action mode; otherwise fall back
+    # to the singular mode for the bootstrap/single-connector path.
+    if is_multi:
+        hilt_applicable = any(
+            (gc.effective_mode(c) or "").strip() == "action"
+            for c in active_connectors
+        )
+    else:
+        hilt_applicable = gc.mode == "action"
+    if hilt_applicable:
         _configure_hilt_interactive(gc)
 
     ux.section("Scanner engine")
@@ -5672,15 +6244,38 @@ def _restart_services(
     oc_host: str = "127.0.0.1",
     oc_port: int = 18789,
     connector: str = "openclaw",
+    connectors: list[str] | None = None,
 ) -> None:
     """Restart defenseclaw-gateway and, when OpenClaw is the selected
     connector, restart the OpenClaw gateway too so it picks up the
     freshly-registered defenseclaw plugin. Other connectors manage
     their own processes; defenseclaw-gateway is the only process we
-    always need to bounce."""
+    always need to bounce.
+
+    ``connector`` selects the single connector whose post-restart hint is
+    shown (and, for OpenClaw, whether its own gateway is bounced). For a
+    GLOBAL change on a multi-connector install (e.g. ``guardrail hilt`` with no
+    ``--connector``), pass the full active set as ``connectors`` so the
+    hook-bus hint names every affected connector instead of just the primary —
+    the gateway restart itself is always global regardless."""
     ux.section("Restarting services")
 
     _restart_defense_gateway(data_dir)
+
+    # Multi-connector global change: every active hook connector is affected
+    # by the gateway bounce, so enumerate them rather than naming the primary.
+    hook_multi = [
+        c for c in (connectors or []) if c in _HOOK_ENFORCED_CONNECTORS
+    ]
+    if connector != "openclaw" and len(hook_multi) > 1:
+        names = ", ".join(sorted(hook_multi))
+        ux.subhead(
+            f"{len(hook_multi)} hook connectors ({names}): enforcement via the hook "
+            f"bus on the sidecar API port. No proxy listener — each talks directly "
+            f"to its native upstream."
+        )
+        click.echo()
+        return
 
     if connector == "openclaw":
         _restart_openclaw_gateway()

@@ -229,7 +229,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 				if event.Op&fsnotify.Rename != 0 {
 					evtType = "rename"
 				}
-				w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String())
+				w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String(), "")
 			}
 			w.mu.Lock()
 			if _, exists := w.pending[event.Name]; !exists {

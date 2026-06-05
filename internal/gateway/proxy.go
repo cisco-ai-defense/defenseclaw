@@ -3822,6 +3822,20 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 	}
 	details = appendRawTelemetryFields(details, rawFields...)
 
+	// Stamp the proxy's connector onto the request envelope so every
+	// ctx-aware audit write below (the LogActionCtx verdict row and the
+	// ApplyEnvelope store twin) carries connector attribution. MergeEnvelope
+	// preserves all the dimensions the CorrelationMiddleware already
+	// stamped and only fills in the connector. Without this the
+	// LogActionCtx verdict row reached SQLite/sinks with an empty
+	// connector in a multi-connector install.
+	if name := p.connectorName(); name != "" {
+		ctx = audit.ContextWithEnvelope(ctx, audit.MergeEnvelope(
+			audit.CorrelationEnvelope{Connector: name},
+			audit.EnvelopeFromContext(ctx),
+		))
+	}
+
 	if p.logger != nil {
 		// v7: route the verdict audit row through the context-aware
 		// path so every envelope dimension the CorrelationMiddleware
@@ -3861,13 +3875,14 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			Details:   redaction.ForSinkReason(details),
 			Timestamp: time.Now().UTC(),
 			RequestID: requestID,
+			Connector: p.connectorName(),
 		}
 		audit.ApplyEnvelope(&evt, audit.EnvelopeFromContext(ctx))
 		_ = p.store.LogEvent(evt)
 	}
 
 	if p.logger != nil {
-		_ = p.logger.LogActionWithCorrelation(string(audit.ActionGuardrailVerdict), model, details, "", requestID)
+		_ = p.logger.LogActionWithCorrelationConnector(string(audit.ActionGuardrailVerdict), model, details, "", requestID, p.connectorName())
 	}
 	_ = persistAuditEvent(p.logger, p.store, audit.Event{
 		Action:    string(audit.ActionGuardrailInspection),
@@ -3876,6 +3891,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 		Details:   details,
 		Timestamp: time.Now().UTC(),
 		RequestID: requestID,
+		Connector: p.connectorName(),
 	})
 
 	if p.otel != nil {
@@ -3905,6 +3921,7 @@ func (p *GuardrailProxy) recordTelemetry(ctx context.Context, direction, model s
 			Actor:     "defenseclaw-guardrail",
 			Details:   details,
 			Severity:  verdict.Severity,
+			Connector: p.connectorName(),
 		}
 		// v7: webhook payloads are one of the five external-facing
 		// surfaces; Splunk/PagerDuty/Slack consumers pivot on the same

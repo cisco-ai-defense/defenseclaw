@@ -75,6 +75,14 @@ type Event struct {
 	ToolName          string `json:"tool_name,omitempty"`
 	ToolID            string `json:"tool_id,omitempty"`
 
+	// Connector is the hook connector that produced this event
+	// (e.g. "codex", "claudecode", "antigravity") on multi-connector
+	// installs. Empty for non-connector rows (admin actions, proxy
+	// verdicts on single-connector installs). Sinks surface this as a
+	// first-class field so SIEM consumers can filter/group by connector
+	// without parsing the Structured payload. Mirrors audit.Event.Connector.
+	Connector string `json:"connector,omitempty"`
+
 	// v7 provenance fields. Logger stamps these before forwarding so
 	// every sink carries the same contract fields as the SQLite
 	// audit_events row.

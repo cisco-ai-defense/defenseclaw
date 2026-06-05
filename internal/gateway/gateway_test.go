@@ -553,10 +553,19 @@ func TestRunGatewayLoop_StandaloneShortCircuits(t *testing.T) {
 		t.Errorf("gateway.State = %q, want %q (standalone short-circuit failed)", got, StateDisabled)
 	}
 	if snap.Gateway.Details == nil {
-		t.Fatalf("gateway.Details = nil, want summary/connector/host metadata")
+		t.Fatalf("gateway.Details = nil, want summary/scope/host metadata")
 	}
-	if got, _ := snap.Gateway.Details["connector"].(string); got != "codex" {
-		t.Errorf("gateway.Details.connector = %q, want %q", got, "codex")
+	// Uniform wording: the standalone branch states the fleet-uplink scope
+	// by count for EVERY install — one connector or N — so a single active
+	// connector uses the SAME "process-global ... N connectors" note as the
+	// multi-connector roster (see TestRunGatewayLoop_StandaloneMultiConnectorRoster),
+	// not a singular "connector" key naming the one connector.
+	scope, _ := snap.Gateway.Details["scope"].(string)
+	if !strings.Contains(scope, "process-global") || !strings.Contains(scope, "1 connectors") {
+		t.Errorf("gateway.Details.scope = %q, want process-global count-based note (1 connectors)", scope)
+	}
+	if _, ok := snap.Gateway.Details["connector"]; ok {
+		t.Errorf("gateway.Details should not carry a singular 'connector' key (single vs multi distinction): %v", snap.Gateway.Details)
 	}
 	if got, _ := snap.Gateway.Details["host"].(string); got != "127.0.0.1" {
 		t.Errorf("gateway.Details.host = %q, want %q", got, "127.0.0.1")
@@ -576,6 +585,79 @@ func TestRunGatewayLoop_StandaloneShortCircuits(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("runGatewayLoop did not return after ctx cancel — short-circuit branch is leaking the goroutine")
+	}
+}
+
+// TestRunGatewayLoop_StandaloneMultiConnectorRoster pins the
+// multi-connector framing of the standalone "no fleet" branch: the
+// fleet uplink is process-global, so the Gateway subsystem must convey
+// that via a count-based "scope" note rather than naming a single
+// arbitrary connector. It must NOT re-enumerate connector names — that
+// roster lives in the status command's "Agents" section — so the
+// misleading singular "connector" key is also absent.
+func TestRunGatewayLoop_StandaloneMultiConnectorRoster(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &config.Config{
+		DataDir: tmp,
+		Guardrail: config.GuardrailConfig{
+			Enabled: true,
+			Connectors: map[string]config.PerConnectorGuardrailConfig{
+				"antigravity": {},
+				"claudecode":  {},
+				"codex":       {},
+			},
+		},
+		Gateway: config.GatewayConfig{
+			Host:      "127.0.0.1",
+			Port:      18789,
+			FleetMode: "auto",
+		},
+		Claw: config.ClawConfig{Mode: "antigravity"},
+	}
+
+	s := &Sidecar{cfg: cfg, health: NewSidecarHealth()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- s.runGatewayLoop(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+
+	snap := s.health.Snapshot()
+	if got := snap.Gateway.State; got != StateDisabled {
+		t.Errorf("gateway.State = %q, want %q", got, StateDisabled)
+	}
+	if snap.Gateway.Details == nil {
+		t.Fatalf("gateway.Details = nil, want multi-connector scope metadata")
+	}
+	scope, _ := snap.Gateway.Details["scope"].(string)
+	if !strings.Contains(scope, "process-global") || !strings.Contains(scope, "3 connectors") {
+		t.Errorf("gateway.Details.scope = %q, want process-global count-based note", scope)
+	}
+	// The scope note must NOT re-enumerate connector names (that roster
+	// lives in the Agents section) and the misleading singular
+	// "connector" key must be absent in multi-connector mode.
+	for _, name := range []string{"antigravity", "claudecode", "codex"} {
+		if strings.Contains(scope, name) {
+			t.Errorf("gateway.Details.scope should not enumerate connector %q (duplicates Agents): %q", name, scope)
+		}
+	}
+	if _, ok := snap.Gateway.Details["connector"]; ok {
+		t.Errorf("gateway.Details should not carry singular 'connector' in multi-connector mode: %v", snap.Gateway.Details)
+	}
+	if _, ok := snap.Gateway.Details["connectors"]; ok {
+		t.Errorf("gateway.Details should not enumerate 'connectors' (duplicates Agents): %v", snap.Gateway.Details)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("runGatewayLoop returned error %v, want nil", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("runGatewayLoop did not return after ctx cancel")
 	}
 }
 
@@ -2538,7 +2620,72 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 					t.Errorf("telemetry[%d] = %v, want %s", i, tel[i], want)
 				}
 			}
+
+			// connector_modes is the plural per-connector roster. On a
+			// single-connector install it must still be present with exactly
+			// one entry mirroring the singular connector_mode, so consumers
+			// can always read the fan-out field.
+			modes, ok := result["connector_modes"].([]interface{})
+			if !ok || len(modes) == 0 {
+				t.Fatalf("connector_modes missing or empty: %T %v", result["connector_modes"], result["connector_modes"])
+			}
+			first, _ := modes[0].(map[string]interface{})
+			if first["connector"] != c.connector {
+				t.Errorf("connector_modes[0].connector = %v, want %s", first["connector"], c.connector)
+			}
+			if first["mode"] != c.wantMode {
+				t.Errorf("connector_modes[0].mode = %v, want %s", first["mode"], c.wantMode)
+			}
 		})
+	}
+}
+
+// TestAPIStatusConnectorModesFansOut is the multi-connector counterpart:
+// /status MUST emit one connector_modes entry per active connector (from
+// guardrail.connectors), each with its OWN mode — not just the primary's.
+// This is the API-contract guard behind the gateway-status "Connector Mode"
+// fan-out so a 3-connector install never collapses to a single posture.
+func TestAPIStatusConnectorModesFansOut(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":    {},
+		"openclaw": {},
+	}
+
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+	api.handleStatus(w, req)
+
+	if w.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Result().StatusCode)
+	}
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	modes, ok := result["connector_modes"].([]interface{})
+	if !ok {
+		t.Fatalf("connector_modes missing or wrong type: %T", result["connector_modes"])
+	}
+	if len(modes) != 2 {
+		t.Fatalf("connector_modes len = %d, want 2 (one per active connector): %v", len(modes), modes)
+	}
+	got := map[string]string{}
+	for _, m := range modes {
+		mm, _ := m.(map[string]interface{})
+		name, _ := mm["connector"].(string)
+		mode, _ := mm["mode"].(string)
+		got[name] = mode
+	}
+	// codex is observability-only; openclaw always enforces (guardrail) —
+	// the two connectors carry DIFFERENT modes, so a single summary would
+	// have to drop one. The roster must preserve both.
+	if got["codex"] != "observability" {
+		t.Errorf("codex mode = %q, want observability (got roster %v)", got["codex"], got)
+	}
+	if got["openclaw"] != "guardrail" {
+		t.Errorf("openclaw mode = %q, want guardrail (got roster %v)", got["openclaw"], got)
 	}
 }
 

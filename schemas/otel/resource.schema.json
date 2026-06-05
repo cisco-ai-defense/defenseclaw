@@ -70,8 +70,8 @@
     },
     "defenseclaw.claw.mode": {
       "type": "string",
-      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", ""],
-      "description": "Active agent framework connector. Matches Connector.Name() in internal/gateway/connector. Empty string is permitted while no connector has been picked yet (fresh install before `defenseclaw setup connector`). Legacy values 'nemoclaw' and 'opencode' were never emitted by a released gateway; they were placeholders that became 'zeptoclaw' and 'claudecode' respectively, and have been dropped from the enum."
+      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "multi", ""],
+      "description": "Active agent framework connector. Matches Connector.Name() in internal/gateway/connector. Empty string is permitted while no connector has been picked yet (fresh install before `defenseclaw setup connector`). The 'multi' sentinel is emitted when a single gateway process serves more than one connector simultaneously; in that case this process-level attribute does not name an individual connector and consumers must read the per-event `connector` metric label / `defenseclaw.connector.source` span attribute for the true connector. Legacy values 'nemoclaw' and 'opencode' were never emitted by a released gateway; they were placeholders that became 'zeptoclaw' and 'claudecode' respectively, and have been dropped from the enum."
     },
     "defenseclaw.claw.home_dir": {
       "type": "string",

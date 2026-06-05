@@ -17,7 +17,7 @@
         "name": "connector",
         "label": "Connector",
         "type": "custom",
-        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot",
+        "query": "openclaw,codex,claudecode,zeptoclaw,hermes,cursor,windsurf,geminicli,copilot,openhands,antigravity",
         "multi": true,
         "includeAll": true,
         "allValue": ".+",
@@ -32,7 +32,9 @@
           {"text": "cursor", "value": "cursor"},
           {"text": "windsurf", "value": "windsurf"},
           {"text": "geminicli", "value": "geminicli"},
-          {"text": "copilot", "value": "copilot"}
+          {"text": "copilot", "value": "copilot"},
+          {"text": "openhands", "value": "openhands"},
+          {"text": "antigravity", "value": "antigravity"}
         ],
         "skipUrlSync": false,
         "hide": 0

@@ -106,17 +106,43 @@ If a sink with the same name already exists, the bridge updates it in place rath
 
 ## Bundled Grafana dashboards
 
-Five dashboards ship in `bundles/local_observability_stack/grafana/dashboards/`:
+The bundle ships a full board set in `bundles/local_observability_stack/grafana/dashboards/` — every `*.json` file here is auto-loaded:
 
 <Files>
   <Folder name="grafana/dashboards" defaultOpen>
-    <File name="overview.json" />
-    <File name="guardrail-verdicts.json" />
-    <File name="admission-and-scanners.json" />
-    <File name="llm-judge.json" />
-    <File name="hitl.json" />
+    <File name="defenseclaw-overview.json" />
+    <File name="defenseclaw-connectors.json" />
+    <File name="defenseclaw-connector-detail.json" />
+    <File name="defenseclaw-security.json" />
+    <File name="defenseclaw-policy-decisions.json" />
+    <File name="defenseclaw-hitl.json" />
+    <File name="defenseclaw-findings.json" />
+    <File name="defenseclaw-traffic.json" />
+    <File name="defenseclaw-scanners.json" />
+    <File name="defenseclaw-runtime.json" />
+    <File name="defenseclaw-reliability.json" />
+    <File name="defenseclaw-agent-identity.json" />
+    <File name="defenseclaw-ai-discovery.json" />
   </Folder>
 </Files>
+
+| Dashboard (UID) | What it shows |
+| --- | --- |
+| **Overview** (`defenseclaw-overview`) | KPI strip + firing alerts + SLO gauges; the landing board. |
+| **Connectors / Hook Connectors** (`defenseclaw-connectors`) | **Primary multi-connector view.** Cross-connector compare: per-connector traffic, blocks, redactions, errors, hooks-vs-OTel drift. Filterable by the `connector` template variable. |
+| **Connector Detail** (`defenseclaw-connector-detail`) | Single-connector deep dive driven by `$connector`: identity, ingest, hooks, verdicts, judge, findings, HITL, scoped Loki streams. |
+| **Guardrail Evaluations / Security** (`defenseclaw-security`) | Verdict funnel by stage × action, severity breakdown, per-connector breakdown; connector-filterable. |
+| **Policy decisions** (`defenseclaw-policy-decisions`) | OPA verdicts by domain × verdict, egress branch, block-list hits. |
+| **HITL** (`defenseclaw-hitl`) | Chat HILT + exec approvals: approval/denial/timeout rates, pending gauge, MTTD. |
+| **Findings** (`defenseclaw-findings`) | Top rules, rule_id × time heatmap, finding-to-verdict correlation. |
+| **Proxy & LLM Guard** (`defenseclaw-traffic`) | HTTP surface latency/status, OTel ingest rates, trace samples. |
+| **Scanners** (`defenseclaw-scanners`) | Throughput, queue depth, scan duration, errors by type, quarantine actions. |
+| **Runtime & SLO** (`defenseclaw-runtime`) | Process health, runtime metrics, SLO histograms. |
+| **Reliability** (`defenseclaw-reliability`) | Schema violations, gateway errors, sink health, panics. |
+| **Agent identity** (`defenseclaw-agent-identity`) | Three-tier agent identity correlation, churn, discovery latency, per-connector header presence. |
+| **AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Continuous AI inventory loop: active signals, per-vendor/product tables, confidence. |
+
+For a multi-connector gateway, start on **Connectors (Overview)** to compare connectors side by side, then click a connector cell to drill into **Connector Detail**.
 
 They're auto-provisioned via `bundles/local_observability_stack/grafana/provisioning/`. The folder is named "DefenseClaw" inside Grafana so they're easy to find. Edits you make in the UI are not persisted back to disk by default — copy them out with `Dashboard → JSON Model` if you want to keep them.
 

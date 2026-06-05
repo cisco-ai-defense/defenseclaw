@@ -15,11 +15,13 @@ import (
 )
 
 type mockTel struct {
-	byRule [][3]string // scanner, ruleID, severity
+	byRule     [][3]string // scanner, ruleID, severity
+	connectors []string    // connector recorded alongside each byRule entry
 }
 
-func (m *mockTel) RecordScanFindingByRule(_ context.Context, scanner, ruleID, severity string) {
+func (m *mockTel) RecordScanFindingByRule(_ context.Context, scanner, ruleID, severity, connector string) {
 	m.byRule = append(m.byRule, [3]string{scanner, ruleID, severity})
+	m.connectors = append(m.connectors, connector)
 }
 
 func TestEmitScanResult_TableDriven(t *testing.T) {
@@ -94,6 +96,29 @@ func TestEmitScanResult_TableDriven(t *testing.T) {
 				t.Fatalf("want %d EventScanFinding, got %d", tc.wantN, findingCount)
 			}
 		})
+	}
+}
+
+func TestEmitScanResult_RecordsConnectorOnFindingMetric(t *testing.T) {
+	w, err := gatewaylog.New(gatewaylog.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tel := &mockTel{}
+	r := &ScanResult{
+		Scanner: "skill-scanner", Target: "t", Timestamp: time.Now().UTC(),
+		Findings: []Finding{
+			{ID: "a", Severity: SeverityHigh, Title: "one", RuleID: "skill.secret", Scanner: "skill-scanner"},
+		},
+		Duration: time.Second,
+	}
+	// AgentIdentity.Connector must flow through to the per-rule finding metric
+	// so dashboards can split scan findings by connector.
+	if _, err := EmitScanResult(context.Background(), w, nil, tel, r, AgentIdentity{Connector: "codex"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(tel.connectors) != 1 || tel.connectors[0] != "codex" {
+		t.Fatalf("RecordScanFindingByRule connector = %v, want [codex]", tel.connectors)
 	}
 }
 

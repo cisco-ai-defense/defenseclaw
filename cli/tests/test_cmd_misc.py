@@ -188,6 +188,88 @@ class TestAlertsCommand(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
 
     # ------------------------------------------------------------------
+    # --connector N: per-connector attribution filter
+    # ------------------------------------------------------------------
+
+    def _seed_two_connectors(self):
+        self.app.store.log_event(Event(action="connector-hook", target="/a",
+                                       severity="HIGH",
+                                       details="connector=codex marker_codexonly"))
+        self.app.store.log_event(Event(action="connector-hook", target="/b",
+                                       severity="HIGH",
+                                       details="connector=claudecode marker_cconly"))
+
+    def test_alerts_connector_filter_keeps_only_matching(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        # The scope is reflected in the title and only codex rows survive.
+        # (Assert on the connector= value, which renders before the Details
+        # column truncates, rather than the trailing free-text marker.)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("claudec", result.output)
+
+    def test_alerts_connector_filter_is_case_insensitive_substring(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "CODEX"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertNotIn("claudec", result.output)
+
+    def test_alerts_connector_filter_no_match_message(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "nope"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No alerts from connector 'nope'", result.output)
+
+    def test_alerts_connector_filter_show_indexes_filtered_set(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        # --show 1 should resolve against the filtered list, i.e. the codex row.
+        result = self.runner.invoke(alerts, ["--no-tui", "--connector", "codex", "--show", "1"],
+                                    obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Alert #1", result.output)
+        self.assertIn("connector=codex", result.output)
+
+    def test_alerts_no_connector_flag_is_unchanged(self):
+        from defenseclaw.commands.cmd_alerts import alerts
+        self._seed_two_connectors()
+
+        # Without --connector, both connectors' rows render (no-op parity).
+        result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("connector=codex", result.output)
+        self.assertIn("claudec", result.output)
+
+    def test_filter_by_connector_helper(self):
+        from defenseclaw.commands.cmd_alerts import _event_connector, _filter_by_connector
+
+        a = Event(action="connector-hook", target="/a", severity="HIGH",
+                  details="connector=codex x=1")
+        b = Event(action="connector-hook", target="/b", severity="HIGH",
+                  details="connector=claudecode y=2")
+        c = Event(action="sink-failure", target="/c", severity="HIGH",
+                  details="sink_kind=splunk_hec")  # no connector attribution
+
+        self.assertEqual(_event_connector(a), "codex")
+        self.assertEqual(_event_connector(c), "")
+        # Substring + case-insensitive, and a no-op for empty needle.
+        self.assertEqual(_filter_by_connector([a, b, c], "codex"), [a])
+        self.assertEqual(_filter_by_connector([a, b, c], "CLAUDE"), [b])
+        self.assertEqual(_filter_by_connector([a, b, c], ""), [a, b, c])
+
+    # ------------------------------------------------------------------
     # Helper functions
     # ------------------------------------------------------------------
 
@@ -378,6 +460,89 @@ class TestAIBOMCommand(unittest.TestCase):
         result = self.runner.invoke(aibom, ["scan"], obj=self.app, catch_exceptions=False)
         self.assertEqual(result.exit_code, 0, result.output)
         mock_build.assert_called_once()
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_defaults_to_all_connectors(self, mock_build, mock_to_scan, mock_enrich):
+        # A bare `aibom scan` is a complete BOM: it inventories EVERY active
+        # connector with no flag required (the --all-connectors flag was
+        # removed as redundant).
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        fanned = {c.kwargs.get("connector") for c in mock_build.call_args_list}
+        self.assertEqual(fanned, {"claudecode", "codex"})
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_connector_flag_targets_one(self, mock_build, mock_to_scan, mock_enrich):
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--connector", "codex"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_build.assert_called_once()
+        self.assertEqual(mock_build.call_args.kwargs.get("connector"), "codex")
+
+    def test_scan_all_connectors_flag_removed(self):
+        # --all-connectors was removed (a bare scan already covers all), so
+        # passing it must be rejected as an unknown option rather than
+        # silently accepted.
+        from defenseclaw.commands.cmd_aibom import aibom
+
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        result = self.runner.invoke(
+            aibom, ["scan", "--all-connectors"],
+            obj=self.app, catch_exceptions=False,
+        )
+        self.assertNotEqual(result.exit_code, 0)
+
+    @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
+    @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")
+    @patch("defenseclaw.inventory.claw_inventory.build_claw_aibom")
+    def test_scan_json_is_list_for_multiple_connectors(self, mock_build, mock_to_scan, mock_enrich):
+        # JSON contract: a single connector emits a bare object (unchanged);
+        # several connectors emit a list so automation can attribute each blob.
+        from defenseclaw.commands.cmd_aibom import aibom
+        from defenseclaw.models import ScanResult
+
+        mock_build.return_value = self._make_inventory()
+        mock_to_scan.return_value = ScanResult(
+            scanner="aibom-claw", target="x",
+            timestamp=datetime.now(timezone.utc), findings=[],
+        )
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.runner.invoke(
+            aibom, ["scan", "--json"], obj=self.app, catch_exceptions=False,
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        json_start = result.output.index("[")
+        data = json.loads(result.output[json_start:])
+        self.assertIsInstance(data, list)
+        self.assertEqual(len(data), 2)
 
     @patch("defenseclaw.inventory.claw_inventory.enrich_with_policy")
     @patch("defenseclaw.inventory.claw_inventory.claw_aibom_to_scan_result")

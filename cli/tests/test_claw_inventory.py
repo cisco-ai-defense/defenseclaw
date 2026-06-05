@@ -2132,6 +2132,25 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertIn("openclaw_config", inv)
         self.assertIn("claw_home", inv)
 
+    def test_connector_inventory_mode_follows_scanned_connector(self):
+        """The AIBOM ``Mode:`` line (inv['claw_mode']) must report the
+        *scanned* connector, not the global cfg.claw.mode. In a
+        multi-connector install cfg.claw.mode is a stale pointer to whichever
+        connector was last activated, so a ``--connector codex`` scan would
+        otherwise mislabel itself with e.g. ``antigravity``.
+        """
+        cfg = _make_cfg_for_connector(self.tmp, "codex")
+        # Simulate the multi-connector reality: the global mode points at a
+        # different (last-activated) connector than the one being scanned.
+        cfg.claw.mode = "antigravity"
+        skill_root = os.path.join(self.tmp, ".codex", "skills")
+        with self._patch_skill_dirs([skill_root]), \
+             self._patch_plugin_dirs([]), \
+             self._patch_mcp([]):
+            inv = build_claw_aibom(cfg, live=True)
+        self.assertEqual(inv["connector"], "codex")
+        self.assertEqual(inv["claw_mode"], "codex")
+
     def test_claudecode_walks_disk(self):
         cfg = _make_cfg_for_connector(self.tmp, "claudecode")
         skill_root = os.path.join(self.tmp, ".claude", "skills")

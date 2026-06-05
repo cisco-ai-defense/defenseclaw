@@ -430,7 +430,7 @@ defenseclaw status
 defenseclaw alerts --limit 25
 ```
 
-`doctor` prints the full health report. `status` shows the resolved connector + enforcement flags (it has no flags of its own — it always reports the active connector from config and `/health`). `alerts` lists recent decisions as a table; pass `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
+`doctor` prints the full health report. `status` shows enforcement flags plus a per-connector block for every active connector (it has no flags of its own — it always reports the full Agents roster from config and `/health`, identical layout whether one or N connectors are wired). `alerts` lists recent decisions as a table; pass `--show <n>` to expand a specific row. For a live stream, open `defenseclaw tui` (interactive) or `tail -f ~/.defenseclaw/gateway.jsonl | jq` (scripted).
 
 ## Interactive vs non-interactive — every command
 
@@ -471,7 +471,17 @@ The **non-interactive-only** group is `quickstart`, `setup local-observability`,
 
 <Cards>
   <Card title="Quick aliases" href="/docs/setup/guardrail/aliases" description="defenseclaw setup claude-code, setup codex, setup cursor, ..." />
-  <Card title="Switching connectors" href="/docs/setup/guardrail/switching-connectors" description="defenseclaw setup mode <connector> with smart inheritance." />
+  <Card title="Multi-connector" href="/docs/setup/guardrail/multi-connector" description="One gateway enforcing N hook connectors via guardrail.connectors. Pick 'Add' at the prompt." />
+  <Card title="Switching connectors" href="/docs/setup/guardrail/switching-connectors" description="defenseclaw setup mode <connector> with smart inheritance — replace the primary connector." />
   <Card title="Disabling" href="/docs/setup/guardrail/disabling" description="--disable rolls everything back, including agent-side hook entries." />
   <Card title="HITL" href="/docs/hitl" description="Per-connector ask behaviour and downgraded confirm." />
 </Cards>
+
+## Add vs Replace: keeping more than one connector wired
+
+When you run a hook setup (`defenseclaw setup codex`, `setup claude-code`, …) and a *different* connector is already wired, DefenseClaw asks whether to **Add** or **Replace**:
+
+- **Add** — keep the existing connector(s) and layer the new one in. The gateway now enforces guardrail policy for both, each under its own `guardrail.connectors.<name>` block, and `claw.mode` flips to `multi`. This is the [multi-connector](/docs/setup/guardrail/multi-connector) path.
+- **Replace** — tear down the previous connector's wiring and make the new one the single active connector (the classic switch documented in [Switching connectors](/docs/setup/guardrail/switching-connectors)).
+
+Proxy connectors (OpenClaw, ZeptoClaw) can't be Add peers — they own the traffic plane, so only one runs at a time.

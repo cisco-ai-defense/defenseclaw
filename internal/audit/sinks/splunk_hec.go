@@ -194,18 +194,23 @@ type splunkAuditEvent struct {
 	// an earlier revision of this struct, which the I1 integration
 	// test (TestCorrelation_RequestEnvelopeLandsOnAuditAndSink) now
 	// pins in place.
-	AgentID           string         `json:"agent_id,omitempty"`
-	AgentInstanceID   string         `json:"agent_instance_id,omitempty"`
-	SidecarInstanceID string         `json:"sidecar_instance_id,omitempty"`
-	PolicyID          string         `json:"policy_id,omitempty"`
-	DestinationApp    string         `json:"destination_app,omitempty"`
-	ToolName          string         `json:"tool_name,omitempty"`
-	ToolID            string         `json:"tool_id,omitempty"`
-	SchemaVersion     int            `json:"schema_version,omitempty"`
-	ContentHash       string         `json:"content_hash,omitempty"`
-	Generation        uint64         `json:"generation,omitempty"`
-	BinaryVersion     string         `json:"binary_version,omitempty"`
-	Structured        map[string]any `json:"structured,omitempty"`
+	AgentID           string `json:"agent_id,omitempty"`
+	AgentInstanceID   string `json:"agent_instance_id,omitempty"`
+	SidecarInstanceID string `json:"sidecar_instance_id,omitempty"`
+	PolicyID          string `json:"policy_id,omitempty"`
+	DestinationApp    string `json:"destination_app,omitempty"`
+	ToolName          string `json:"tool_name,omitempty"`
+	ToolID            string `json:"tool_id,omitempty"`
+	// Connector is the hook connector identity (codex/claudecode/…) on
+	// multi-connector installs, surfaced top-level so Splunk searches and
+	// dashboards can `... connector="codex"` without coalescing from the
+	// structured payload. Empty for non-connector rows.
+	Connector     string         `json:"connector,omitempty"`
+	SchemaVersion int            `json:"schema_version,omitempty"`
+	ContentHash   string         `json:"content_hash,omitempty"`
+	Generation    uint64         `json:"generation,omitempty"`
+	BinaryVersion string         `json:"binary_version,omitempty"`
+	Structured    map[string]any `json:"structured,omitempty"`
 }
 
 // NewSplunkHECSink validates config and returns a ready-to-use sink. The
@@ -431,6 +436,7 @@ func (s *SplunkHECSink) Forward(ctx context.Context, e Event) error {
 			DestinationApp:    e.DestinationApp,
 			ToolName:          e.ToolName,
 			ToolID:            e.ToolID,
+			Connector:         e.Connector,
 			SchemaVersion:     e.SchemaVersion,
 			ContentHash:       e.ContentHash,
 			Generation:        e.Generation,

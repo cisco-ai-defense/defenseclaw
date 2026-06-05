@@ -107,6 +107,11 @@
             "gateway-recovered",
             "gateway-degraded",
             "tool-result-pii-alert",
+            "gateway.judge_bodies.ready",
+            "gateway.judge_bodies.fallback",
+            "gateway.judge_bodies.close_skipped",
+            "gateway.judge_bodies.close_error",
+            "gateway.judge_store.drain_timeout",
             "guardrail-start",
             "guardrail-healthy",
             "guardrail-verdict",
@@ -122,6 +127,8 @@
             "guardrail-disable",
             "guardrail-enable",
             "guardrail-fail-mode",
+            "guardrail-hilt",
+            "guardrail-block-message",
             "llm-judge-response",
             "inspect-tool-confirm",
             "inspect-tool-block",
@@ -230,6 +237,8 @@
     "session_id": { "type": ["string", "null"] },
     "trace_id":   { "type": ["string", "null"] },
     "span_id":    { "type": ["string", "null"] },
+    "parent_span_id": { "type": ["string", "null"], "description": "W3C trace-context parent span id, propagated via the traceparent header by the OTel SDK. Optional — present when the event was emitted inside an active span with a parent." },
+    "trace_flags":    { "type": ["string", "null"], "description": "W3C trace-context trace-flags (e.g. '01' sampled), propagated via the traceparent header. Optional." },
 
     "agent_id":            { "type": ["string", "null"], "description": "Stable agent identity across process restarts." },
     "agent_name":          { "type": ["string", "null"], "description": "Human-readable agent name." },
@@ -258,6 +267,24 @@
     "binary_version": {
       "type": ["string", "null"],
       "description": "Semver of the DefenseClaw binary that produced the event."
+    },
+
+    "connector": {
+      "type": ["string", "null"],
+      "description": "Multi-connector identity: the hook connector that produced this event (codex, claudecode, antigravity, ...). Recovered from request context; null for proxy / non-connector events."
+    },
+    "step_idx": {
+      "type": ["integer", "null"],
+      "minimum": 1,
+      "description": "1-indexed per-turn counter within a session_id. A turn is one prompt-response cycle; all hook events emitted during the same turn share one step_idx. Null/absent when the event is not turn-anchored."
+    },
+    "enforced": {
+      "type": ["boolean", "null"],
+      "description": "True when the guardrail decision was actually enforced (blocked), as opposed to an observe-mode would-block. Null/absent for non-enforcement events."
+    },
+    "rule_pack_dir": {
+      "type": ["string", "null"],
+      "description": "Effective rule-pack directory the verdict was evaluated against (per-connector override or global). Null when no rule pack applies."
     }
   },
   "additionalProperties": false

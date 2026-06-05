@@ -95,22 +95,25 @@ and PR [#236](https://github.com/cisco-ai-defense/defenseclaw/pull/236).
 
 All five views read from a shared set of SPL macros under `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf`, scoped to `index=defenseclaw_local`. The macros normalize the gateway's JSON envelope so the dashboards don't have to repeat field extractions.
 
+The gateway ships audit events: the discriminator is the top-level `action` field (the `audit.Action` enum — `connector-hook`, `guardrail-block`, `guardrail-verdict`, `approval-request`, …), **not** a `kind` field. The connector dimension lives in the top-level `connector` field and, on hook rows, in `structured.connector`.
+
 Useful starting queries:
 
-```spl title="All blocked guardrail verdicts in the last hour"
-index=defenseclaw_local sourcetype=defenseclaw:json kind="guardrail.verdict" decision="deny"
-| stats count by rule, severity, agent
+```spl title="Codex hook activity in the last hour"
+index=defenseclaw_local sourcetype=defenseclaw:json action="connector-hook" structured.connector="codex"
+| stats count by structured.event_type, structured.action, structured.would_block
 | sort -count
 ```
 
-```spl title="LLM judge token usage by model"
-index=defenseclaw_local sourcetype=defenseclaw:json kind="judge.call"
-| stats sum(tokens.in) AS in, sum(tokens.out) AS out, count by model
+```spl title="Blocked guardrail actions, broken down by connector"
+index=defenseclaw_local sourcetype=defenseclaw:json action="guardrail-block"
+| stats count by connector, structured.rule_id, structured.severity
+| sort -count
 ```
 
-```spl title="HITL backlog by operator"
-index=defenseclaw_local sourcetype=defenseclaw:json kind="hitl.prompt"
-| stats latest(_time) AS asked_at, count by actor.operator, agent
+```spl title="Hook throughput per connector (spot a noisy agent)"
+index=defenseclaw_local sourcetype=defenseclaw:json action="connector-hook"
+| timechart span=5m count by structured.connector
 ```
 
 ## Enterprise mode (`--enterprise`)

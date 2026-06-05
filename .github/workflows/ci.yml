@@ -150,12 +150,19 @@ jobs:
       # archives. We install exclusively from PyPI via uv with locked hashes
       # (uv.lock), so this attack surface is not exposed in CI or runtime.
       #
+      # TODO: Remove --ignore-vuln PYSEC-2026-196 once the CI base image ships
+      # pip >= 26.1.2. Same rationale as CVE-2026-3219: pip is only used by
+      # pip-audit here, not by DefenseClaw at runtime, and we install
+      # exclusively from PyPI via uv with locked hashes (uv.lock).
+      #
       # Previously ignored, now fixed by bumping cisco-ai-skill-scanner to
       # >=2.0.11 + overriding starlette>=1.0.1 and python-dotenv>=1.2.2 in
       # pyproject.toml:
       #   - PYSEC-2026-161 (GHSA-86qp-5c8j-p5mr, starlette host-header)
       #   - CVE-2026-28684 (python-dotenv arbitrary file read)
-      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219
+      # aiohttp>=3.14.0 (CVE-2026-34993, CVE-2026-47265) and pyjwt>=2.13.0
+      # (PYSEC-2026-175/177/178/179) are likewise pinned in pyproject.toml.
+      - run: uv run pip-audit --ignore-vuln CVE-2026-4539 --ignore-vuln CVE-2026-3219 --ignore-vuln PYSEC-2026-196
 
   ts-build-test:
     name: TypeScript Build & Test

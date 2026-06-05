@@ -531,3 +531,128 @@ def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
     assert "[dim]Navigate:[/]" in text
     # Filter / detail metadata still on line 2.
     assert "1 of 1 rows" in text
+
+
+# ---------------------------------------------------------------------------
+# WU13: multi-connector focus — list command targets the focused connector
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "model_factory, base_args",
+    [
+        (lambda: SkillsPanelModel(connector="codex"), ("skill", "list", "--json")),
+        (lambda: MCPsPanelModel(connector="codex"), ("mcp", "list", "--json")),
+        (lambda: PluginsPanelModel(connector="codex"), ("plugin", "list", "--json")),
+    ],
+)
+def test_catalog_load_intent_appends_connector_when_focus_enabled(model_factory, base_args) -> None:
+    model = model_factory()
+
+    # Default (single-connector / no focus): no --connector flag, so the
+    # CLI lists the active connector exactly as before.
+    assert model.load_intent().args == base_args
+
+    # Multi-connector focus: the app sets connector_focus_enabled, so the
+    # list command targets the focused connector explicitly.
+    model.connector_focus_enabled = True
+    assert model.load_intent().args == (*base_args, "--connector", "codex")
+
+
+def test_catalog_focus_args_empty_without_connector() -> None:
+    model = SkillsPanelModel(connector="")
+    model.connector_focus_enabled = True
+    # No connector name ⇒ no flag even when focus is enabled.
+    assert model.load_intent().args == ("skill", "list", "--json")
+
+
+def test_skill_mutation_intents_thread_focus_only_for_connector_aware_verbs() -> None:
+    # E2: scan/info/install accept --connector; block/allow hit the global
+    # enforcement store and must NOT carry --connector.
+    model = SkillsPanelModel(connector="codex")
+    model.apply_loaded([SkillRow(name="alpha", status="")])
+    model.connector_focus_enabled = True
+
+    assert model.action_intent("s").args == ("skill", "scan", "alpha", "--connector", "codex")
+    assert model.action_intent("i").args == ("skill", "info", "alpha", "--connector", "codex")
+    assert model.action_intent("n").args == ("skill", "install", "alpha", "--connector", "codex")
+    # Enforcement verbs stay connector-agnostic.
+    assert model.action_intent("b").args == ("skill", "block", "alpha")
+    assert model.action_intent("a").args == ("skill", "allow", "alpha")
+
+
+def test_mcp_and_plugin_mutation_intents_thread_focus() -> None:
+    from defenseclaw.tui.panels.mcps import MCPRow
+    from defenseclaw.tui.panels.plugins import PluginRow
+
+    mcp = MCPsPanelModel(connector="codex")
+    mcp.apply_loaded([MCPRow(name="srv", status="")])
+    mcp.connector_focus_enabled = True
+    assert mcp.action_intent("s").args == ("mcp", "scan", "srv", "--connector", "codex")
+    assert mcp.action_intent("x").args == ("mcp", "unset", "srv", "--connector", "codex")
+    assert mcp.action_intent("b").args == ("mcp", "block", "srv")
+
+    plugin = PluginsPanelModel(connector="codex")
+    plugin.apply_loaded([PluginRow(id="pg", name="pg")])
+    plugin.connector_focus_enabled = True
+    assert plugin.action_intent("s").args == ("plugin", "scan", "pg", "--connector", "codex")
+    assert plugin.action_intent("i").args == ("plugin", "info", "pg", "--connector", "codex")
+    assert plugin.action_intent("b").args == ("plugin", "block", "pg")
+    # Direct-scan ('s' in handle_key) also follows focus.
+    assert plugin.handle_key("s").intent.args == ("plugin", "scan", "pg", "--connector", "codex")
+
+
+def test_catalog_apply_merged_tags_connector_and_adds_column() -> None:
+    """8.13 pass 2: merging connectors tags each row with its origin and
+    prepends a CONNECTOR column to the rendered table."""
+
+    model = SkillsPanelModel(connector="codex")
+    model.show_connector_column = True
+    codex = json.dumps([{"name": "alpha", "status": "active"}])
+    cursor = json.dumps([{"name": "beta", "status": "active"}])
+    model.apply_merged([("codex", codex), ("cursor", cursor)])
+
+    assert model.data_table_columns()[0] == "Connector"
+    rows = model.data_table_rows()
+    assert [row[0] for row in rows] == ["codex", "cursor"]
+    assert [row[1] for row in rows] == ["alpha", "beta"]
+
+
+def test_catalog_merged_connector_filter_narrows_rows_in_memory() -> None:
+    model = MCPsPanelModel(connector="codex")
+    model.show_connector_column = True
+    codex = json.dumps([{"name": "srv-a"}])
+    cursor = json.dumps([{"name": "srv-b"}])
+    model.apply_merged([("codex", codex), ("cursor", cursor)])
+
+    model.set_connector_filter("cursor")
+    rows = model.data_table_rows()
+    assert [row[0] for row in rows] == ["cursor"]
+    assert [row[1] for row in rows] == ["srv-b"]
+
+    # Clearing the filter restores the merged rows (no reload required).
+    model.set_connector_filter("")
+    assert [row[1] for row in model.data_table_rows()] == ["srv-a", "srv-b"]
+
+
+def test_catalog_single_connector_keeps_original_columns() -> None:
+    model = SkillsPanelModel(connector="codex")
+    model.apply_json(json.dumps([{"name": "alpha", "status": "active"}]))
+    assert "Connector" not in model.data_table_columns()
+    assert model.data_table_columns() == ("Name", "Status", "Source", "Actions", "Details")
+
+
+@pytest.mark.parametrize(
+    "model_factory, base_args",
+    [
+        (lambda: SkillsPanelModel(connector="codex"), ("skill", "list", "--json")),
+        (lambda: MCPsPanelModel(connector="codex"), ("mcp", "list", "--json")),
+        (lambda: PluginsPanelModel(connector="codex"), ("plugin", "list", "--json")),
+    ],
+)
+def test_catalog_load_intent_for_targets_connector_and_restores(model_factory, base_args) -> None:
+    model = model_factory()
+    intent = model.load_intent_for("cursor")
+    assert intent.args == (*base_args, "--connector", "cursor")
+    # Prior single-connector state is untouched.
+    assert model.connector == "codex"
+    assert model.connector_focus_enabled is False

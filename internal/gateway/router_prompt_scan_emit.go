@@ -29,6 +29,7 @@ func (r *EventRouter) streamScanCorrelation(sessionKey string) audit.ScanCorrela
 		AgentID:         env.AgentID,
 		AgentName:       env.AgentName,
 		AgentInstanceID: env.AgentInstanceID,
+		Connector:       env.Connector,
 	}
 }
 

@@ -1174,10 +1174,15 @@ func newMetricsSet(m metric.Meter) (*metricsSet, error) {
 	return &ms, nil
 }
 
-// RecordScan records scan-related metrics.
-func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict string, durationMs float64, findings map[string]int) {
+// RecordScan records scan-related metrics. connector is the originating
+// connector when the scan ran in a connector-scoped context; "" records
+// connector="unknown" on the scan-findings total so the label stays present.
+func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict string, durationMs float64, findings map[string]int, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 
 	baseAttrs := metric.WithAttributes(
@@ -1198,6 +1203,7 @@ func (p *Provider) RecordScan(ctx context.Context, scanner, targetType, verdict 
 				attribute.String("scanner", scanner),
 				attribute.String("target_type", targetType),
 				attribute.String("severity", severity),
+				attribute.String("connector", connector),
 			))
 			p.metrics.scanFindingsGauge.Add(ctx, int64(count), metric.WithAttributes(
 				attribute.String("target_type", targetType),
@@ -1326,15 +1332,40 @@ func (p *Provider) RecordLLMDuration(ctx context.Context, operationName, provide
 }
 
 // RecordAlert records a runtime alert metric.
-func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source string) {
+// RecordAlert records a runtime/guardrail alert. connector is the
+// originating connector when known (e.g. derived from a "<connector>:<role>"
+// guardrail scanner); pass "" for genuinely global alerts (network-egress,
+// process runtime) — it normalizes to "unknown" so the label is present on
+// every series and connector-scoped dashboard selectors still match.
+func (p *Provider) RecordAlert(ctx context.Context, alertType, severity, source, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.alertCount.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("alert.type", alertType),
 		attribute.String("alert.severity", severity),
 		attribute.String("alert.source", source),
+		attribute.String("connector", connector),
 	))
+}
+
+// guardrailConnectorFromScanner extracts the connector identity from a
+// composite guardrail scanner label. Connector-scoped evaluations use a
+// `<connector>:<role>` convention (e.g. "codex:guardrail-proxy",
+// "claudecode:policy-rules", "openclaw:hilt"); global/proxy-internal
+// scanners ("cisco-ai-defense", "codeguard", "opa-guardrail") have no
+// colon and return "". Surfacing this as a parallel `guardrail.connector`
+// dimension lets dashboards pivot guardrail metrics by connector with the
+// same label name the hook metrics use, instead of regex-splitting the
+// composite scanner label.
+func guardrailConnectorFromScanner(scanner string) string {
+	if c, _, found := strings.Cut(scanner, ":"); found {
+		return strings.TrimSpace(c)
+	}
+	return ""
 }
 
 // RecordGuardrailEvaluation records a guardrail evaluation metric.
@@ -1342,10 +1373,14 @@ func (p *Provider) RecordGuardrailEvaluation(ctx context.Context, scanner, actio
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("guardrail.scanner", scanner),
 		attribute.String("guardrail.action_taken", actionTaken),
-	))
+	}
+	if c := guardrailConnectorFromScanner(scanner); c != "" {
+		attrs = append(attrs, attribute.String("guardrail.connector", c))
+	}
+	p.metrics.guardrailEvaluations.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordGuardrailLatency records guardrail evaluation latency.
@@ -1353,9 +1388,13 @@ func (p *Provider) RecordGuardrailLatency(ctx context.Context, scanner string, d
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.guardrailLatency.Record(ctx, durationMs, metric.WithAttributes(
+	attrs := []attribute.KeyValue{
 		attribute.String("guardrail.scanner", scanner),
-	))
+	}
+	if c := guardrailConnectorFromScanner(scanner); c != "" {
+		attrs = append(attrs, attribute.String("guardrail.connector", c))
+	}
+	p.metrics.guardrailLatency.Record(ctx, durationMs, metric.WithAttributes(attrs...))
 }
 
 // RecordScanError records a scanner invocation failure.
@@ -1397,13 +1436,22 @@ func (p *Provider) RecordAdmissionDecision(ctx context.Context, decision, target
 }
 
 // RecordWatcherEvent records a filesystem watcher event.
-func (p *Provider) RecordWatcherEvent(ctx context.Context, eventType, targetType string) {
+func (p *Provider) RecordWatcherEvent(ctx context.Context, eventType, targetType, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	// Connector-scoped events (e.g. hook self-heal) carry the originating
+	// connector; genuinely global watcher events (rescan/drift) pass "".
+	// Normalize empty to "unknown" so the label is present on every series
+	// and connector-scoped dashboard selectors still match — same contract
+	// as RecordAlert / RecordScanFindingByRule.
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.watcherEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventType),
 		attribute.String("target_type", targetType),
+		attribute.String("connector", connector),
 	))
 }
 
@@ -1430,9 +1478,28 @@ func (p *Provider) RecordInspectEvaluation(ctx context.Context, tool, action, se
 	}
 	p.metrics.inspectEvaluations.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("tool", NormalizeMetricTextLabel(tool)),
+		attribute.String("connector", connectorFromInspectTool(tool)),
 		attribute.String("action", normalizeHookActionMetricLabel(action)),
 		attribute.String("severity", severity),
 	))
+}
+
+// connectorFromInspectTool derives the connector identity from the composite
+// inspect `tool` label. Hook paths build it as "<connector>:<event>" (see
+// hookMetricToolLabel), so the prefix before the first colon is the
+// connector — the exact convention dashboards already encode as
+// `tool=~"$connector:.*"`. Exposing it as a first-class `connector`
+// dimension lets PromQL and (crucially) SignalFlow group/split by connector
+// without a string-split, which SignalFlow cannot express. Bare tool labels
+// with no colon (e.g. a passthrough "Bash") resolve to "unknown" to keep the
+// label present on every series so "All"/regex selectors still match.
+func connectorFromInspectTool(tool string) string {
+	if c, _, found := strings.Cut(tool, ":"); found {
+		if c = strings.TrimSpace(c); c != "" {
+			return c
+		}
+	}
+	return "unknown"
 }
 
 // RecordInspectLatency records tool/message inspect latency.
@@ -1442,6 +1509,7 @@ func (p *Provider) RecordInspectLatency(ctx context.Context, tool string, durati
 	}
 	p.metrics.inspectLatency.Record(ctx, durationMs, metric.WithAttributes(
 		attribute.String("tool", NormalizeMetricTextLabel(tool)),
+		attribute.String("connector", connectorFromInspectTool(tool)),
 	))
 }
 
@@ -1793,15 +1861,33 @@ func (p *Provider) RecordAuditDBError(ctx context.Context, operation string) {
 	))
 }
 
-// RecordAuditEvent records that an audit event was persisted.
-func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string) {
+// RecordAuditEvent records that an audit event was persisted. An optional
+// connector argument adds a `connector` dimension so dashboards can count
+// audit-event volume per hook connector on multi-connector installs;
+// callers without connector context (admin actions, network-egress) omit
+// it and the series stays connector-agnostic.
+func (p *Provider) RecordAuditEvent(ctx context.Context, action, severity string, connector ...string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
 	}
-	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(
+	// Always emit the connector label so the audit_events series shape is
+	// stable. An unattributed event (variadic arg omitted, or empty/blank)
+	// normalizes to "unknown" rather than dropping the label — matching every
+	// other connector-labelled counter in this file (scan findings, guardrail/
+	// inspect evaluations, token usage) so `sum by (connector)` and
+	// `connector="..."` filters stay consistent across metrics.
+	conn := "unknown"
+	if len(connector) > 0 {
+		if c := strings.TrimSpace(connector[0]); c != "" {
+			conn = c
+		}
+	}
+	attrs := []attribute.KeyValue{
 		attribute.String("action", action),
 		attribute.String("severity", severity),
-	))
+		attribute.String("connector", conn),
+	}
+	p.metrics.auditEvents.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordConfigLoadError records a config load or validation error and emits
@@ -1905,14 +1991,18 @@ func (p *Provider) RecordSinkFailure(sinkKind, sinkName, reason string) {
 // can rank hot rules per scanner/severity. The body is small
 // enough that scanner emit loops can call this on the hot path
 // without measurable cost.
-func (p *Provider) RecordScanFindingByRule(ctx context.Context, scanner, ruleID, severity string) {
+func (p *Provider) RecordScanFindingByRule(ctx context.Context, scanner, ruleID, severity, connector string) {
 	if !p.Enabled() || p.metrics == nil {
 		return
+	}
+	if strings.TrimSpace(connector) == "" {
+		connector = "unknown"
 	}
 	p.metrics.scanFindingsByRule.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("scanner", scanner),
 		attribute.String("rule_id", ruleID),
 		attribute.String("severity", severity),
+		attribute.String("connector", connector),
 	))
 }
 
@@ -2655,9 +2745,15 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 		result = "ok"
 	}
 
+	// `connector` mirrors `source` so OTLP-ingest metrics share the same
+	// connector label name the hook metrics use; dashboards can filter
+	// every connector telemetry surface on a single `connector` variable
+	// instead of switching between `source` (ingest) and `connector`
+	// (hooks). `source` is retained for backward compatibility.
 	requestAttrs := metric.WithAttributes(
 		attribute.String("signal", signal),
 		attribute.String("source", source),
+		attribute.String("connector", source),
 		attribute.String("result", result),
 	)
 	p.metrics.otelIngestRequests.Add(ctx, 1, requestAttrs)
@@ -2665,12 +2761,14 @@ func (p *Provider) RecordOTelIngest(ctx context.Context, signal, source, result 
 		p.metrics.otelIngestMalformed.Add(ctx, 1, metric.WithAttributes(
 			attribute.String("signal", signal),
 			attribute.String("source", source),
+			attribute.String("connector", source),
 		))
 	}
 
 	volumeAttrs := metric.WithAttributes(
 		attribute.String("signal", signal),
 		attribute.String("source", source),
+		attribute.String("connector", source),
 	)
 	if records > 0 {
 		p.metrics.otelIngestRecords.Add(ctx, records, volumeAttrs)

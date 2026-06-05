@@ -1358,6 +1358,179 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # fresh-config path starts with default False, it stays False.
         self.assertFalse(self.app.cfg.guardrail.hilt.enabled)
 
+    # ------------------------------------------------------------------
+    # Connector picker / enforcement-mode gating in `setup guardrail`.
+    #
+    # `setup guardrail` edits PROCESS-GLOBAL policy (rule pack, HILT,
+    # scanner, judge, redaction). The singular "which agent framework?"
+    # picker and the singular observe/action prompt only make sense at
+    # bootstrap (nothing configured) or for exactly one connector — with
+    # 2+ connectors active they're misleading. These tests lock in:
+    #   * bootstrap (0 configured) -> picker shown
+    #   * 1 configured             -> picker skipped, mode prompt shown
+    #   * 2+ configured            -> picker AND mode prompt skipped
+    # ------------------------------------------------------------------
+
+    def test_interactive_bootstrap_shows_connector_picker(self):
+        """With nothing configured (guardrail disabled, no connectors), the
+        first-run wizard still presents the agent-framework picker."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = False          # was_initial_setup == True
+        gc.connectors = {}
+        gc.connector = ""
+
+        # All-defaults walk-through: picker default (openclaw) -> enable ->
+        # observe -> fail-mode -> scanner local -> role -> no judge ->
+        # no advanced. Padding with blank lines is harmless (every prompt
+        # has a default), too FEW would EOF/abort.
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--no-restart"],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Which agent framework are you using?", result.output)
+        # Bootstrap is NOT a global-fleet edit.
+        self.assertNotIn("Editing global guardrail policy", result.output)
+
+    def test_interactive_single_connector_skips_picker_keeps_mode(self):
+        """One configured connector: the picker is skipped (re-asking would
+        only re-point the primary) but the observe/action prompt remains —
+        for a single connector it is unambiguous and meaningful."""
+        from defenseclaw.commands.cmd_setup import setup
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True           # was_initial_setup == False
+        gc.connectors = {}          # legacy singular shape
+        gc.connector = "codex"
+        gc.mode = "observe"
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--no-restart"],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("Which agent framework are you using?", result.output)
+        self.assertIn(
+            "Editing global guardrail policy for 1 configured connector(s): codex",
+            result.output,
+        )
+        # The single-connector mode prompt is still presented.
+        self.assertIn("Select mode", result.output)
+        # ...and the multi-only "manage via setup <connector>" steer is NOT.
+        self.assertNotIn(
+            "Per-connector enforcement mode is managed via", result.output
+        )
+
+    def test_interactive_multi_connector_skips_picker_and_mode(self):
+        """Two configured connectors: BOTH the picker and the singular
+        observe/action prompt are skipped — a single answer can't express
+        per-connector intent. The wizard still runs all GLOBAL steps."""
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True           # was_initial_setup == False
+        gc.connector = "codex"
+        gc.connectors = {
+            "codex": PerConnectorGuardrailConfig(mode="action"),
+            "claudecode": PerConnectorGuardrailConfig(mode="observe"),
+        }
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--no-restart"],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        # Picker skipped.
+        self.assertNotIn("Which agent framework are you using?", result.output)
+        # Global-fleet framing + per-connector steer, sorted roster.
+        self.assertIn(
+            "Editing global guardrail policy for 2 configured connector(s): "
+            "claudecode, codex",
+            result.output,
+        )
+        self.assertIn(
+            "Per-connector enforcement mode is managed via", result.output
+        )
+        # The singular enforcement-mode prompt is skipped...
+        self.assertIn("Enforcement mode is per-connector here", result.output)
+        self.assertNotIn("Select mode", result.output)
+        # ...and per-connector modes are left untouched.
+        self.assertEqual(self.app.cfg.guardrail.connectors["codex"].mode, "action")
+        self.assertEqual(
+            self.app.cfg.guardrail.connectors["claudecode"].mode, "observe"
+        )
+
+    def test_interactive_multi_connector_offers_hilt_when_any_action(self):
+        """In multi-connector mode HILT is gated on whether ANY connector
+        resolves to action mode (not the legacy singular gc.mode), since
+        HILT is process-global but only fires for action-mode connectors."""
+        from defenseclaw.commands.cmd_setup import setup
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        self.app.cfg.claw.home_dir = self.tmp_dir
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.mode = "observe"         # legacy singular says observe...
+        gc.connector = "codex"
+        gc.connectors = {
+            "codex": PerConnectorGuardrailConfig(mode="action"),   # ...but one is action
+            "claudecode": PerConnectorGuardrailConfig(mode="observe"),
+        }
+
+        with patch(
+            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+            return_value=(True, []),
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--no-restart"],
+                obj=self.app,
+                input="\n" * 15,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        # HILT is offered despite the singular gc.mode being "observe".
+        self.assertIn("Human Approval (HILT)", result.output)
+
 
 # ---------------------------------------------------------------------------
 # Service restart helpers

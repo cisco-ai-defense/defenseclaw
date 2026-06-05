@@ -131,6 +131,18 @@ def test_inventory_load_args_scope_and_only_flag_format() -> None:
     assert panel.load_args() == ("aibom", "scan", "--json")
 
 
+def test_inventory_load_args_follows_focused_connector() -> None:
+    # E1: when a connector is focused (multi-connector), Inventory passes
+    # --connector so it inventories that connector, not the primary.
+    panel = InventoryPanelModel()
+    panel.set_connector("codex")
+    # Focus off ⇒ no --connector (single-connector behaviour unchanged).
+    assert panel.load_args() == ("aibom", "scan", "--json")
+
+    panel.connector_focus_enabled = True
+    assert panel.load_args() == ("aibom", "scan", "--json", "--connector", "codex")
+
+
 def test_inventory_category_scope_filters_unknown_and_toggles() -> None:
     panel = InventoryPanelModel()
     panel.set_category_scope(["skills", "bogus", "plugins"])
@@ -287,3 +299,126 @@ def test_inventory_subtab_scope_and_summary_metadata_match_go_labels() -> None:
     assert rows["Plugins"] == "2 (1 loaded, 1 disabled)"
     assert rows["Skill policy verdicts"] == "1 blocked  1 allowed  1 warning"
     assert rows["Skill scan coverage"] == "2 scanned  1 unscanned  3 findings"
+
+
+def test_inventory_merged_tags_connector_and_adds_column() -> None:
+    """8.13 pass 2: merging multiple connectors tags every entity with its
+    origin, prepends a CONNECTOR column, and concatenates the rows."""
+
+    panel = InventoryPanelModel()
+    panel.show_connector_column = True
+    codex = json.dumps(
+        {
+            "connector": "codex",
+            "skills": [{"id": "alpha", "enabled": True}],
+            "mcp": [{"id": "context7", "transport": "stdio"}],
+        }
+    )
+    cursor = json.dumps(
+        {
+            "connector": "cursor",
+            "skills": [{"id": "beta"}],
+            "agents": [{"id": "main", "model": "gpt"}],
+        }
+    )
+    panel.apply_merged([("codex", codex), ("cursor", cursor)])
+    assert panel.loaded is True
+
+    panel.set_active_subtab("skills")
+    assert panel.data_table_columns()[0] == "Connector"
+    skill_rows = panel.data_table_rows()
+    assert [row[0] for row in skill_rows] == ["codex", "cursor"]
+    assert [row[1] for row in skill_rows] == ["alpha", "beta"]
+
+    # Per-connector snapshots are retained for the Summary breakdown.
+    assert [name for name, _snap in panel.connector_snapshots] == ["codex", "cursor"]
+
+
+def test_inventory_merged_connector_filter_narrows_every_subtab() -> None:
+    panel = InventoryPanelModel()
+    panel.show_connector_column = True
+    codex = json.dumps(
+        {"connector": "codex", "skills": [{"id": "alpha"}], "mcp": [{"id": "ctx"}]}
+    )
+    cursor = json.dumps({"connector": "cursor", "skills": [{"id": "beta"}]})
+    panel.apply_merged([("codex", codex), ("cursor", cursor)])
+
+    panel.set_connector_filter("cursor")
+    panel.set_active_subtab("skills")
+    assert [row[1] for row in panel.data_table_rows()] == ["beta"]
+    panel.set_active_subtab("mcp")
+    # The only MCP belongs to codex, so the cursor filter hides it.
+    assert panel.data_table_rows() == ()
+
+    counts = {tab.subtab: tab.count for tab in panel.subtab_info()}
+    assert counts["skills"] == 1
+    assert counts["mcp"] == 0
+
+    # Clearing the filter restores the merged view.
+    panel.set_connector_filter("")
+    panel.set_active_subtab("skills")
+    assert [row[1] for row in panel.data_table_rows()] == ["alpha", "beta"]
+
+
+def test_inventory_summary_follows_connector_filter() -> None:
+    """The Summary sub-tab must switch with the shared connector chip.
+
+    Before the fix it always rendered the merged snapshot (whose Source/Home
+    come from the primary connector), so selecting another connector still
+    showed the primary's summary."""
+
+    panel = InventoryPanelModel()
+    panel.show_connector_column = True
+    antigravity = json.dumps(
+        {
+            "connector": "antigravity",
+            "claw_mode": "antigravity",
+            "connector_home": "/home/ag",
+            "skills": [{"id": "a1"}, {"id": "a2"}],
+            "summary": {"total_items": 2, "skills": {"count": "2"}},
+        }
+    )
+    codex = json.dumps(
+        {
+            "connector": "codex",
+            "claw_mode": "codex",
+            "connector_home": "/home/cx",
+            "skills": [{"id": "c1"}],
+            "summary": {"total_items": 1, "skills": {"count": "1"}},
+        }
+    )
+    panel.apply_merged([("antigravity", antigravity), ("codex", codex)])
+
+    # "All" -> merged: primary attribution + combined totals.
+    panel.set_connector_filter("")
+    merged = panel.summary_state()
+    assert merged is not None
+    assert merged.home_path == "/home/ag"
+    assert merged.counts["total_items"] == "3"
+
+    # Narrow to codex -> codex's own snapshot, not the primary's.
+    panel.set_connector_filter("codex")
+    scoped = panel.summary_state()
+    assert scoped is not None
+    assert scoped.connector_name == "codex"
+    assert scoped.home_path == "/home/cx"
+    assert scoped.counts["total_items"] == "1"
+
+
+def test_inventory_single_connector_has_no_connector_column() -> None:
+    """Single-connector installs keep the original columns (no CONNECTOR)."""
+
+    panel = InventoryPanelModel()
+    panel.apply_loaded(_inventory())
+    panel.set_active_subtab("skills")
+    assert "Connector" not in panel.data_table_columns()
+    assert panel.data_table_columns()[0] == "ID"
+
+
+def test_inventory_load_intent_for_targets_connector_and_restores() -> None:
+    panel = InventoryPanelModel(connector="codex")
+    intent = panel.load_intent_for("cursor")
+    assert intent.args == ("aibom", "scan", "--json", "--connector", "cursor")
+    # Prior single-connector state is untouched.
+    assert panel.connector == "codex"
+    assert panel.connector_focus_enabled is False

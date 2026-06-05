@@ -93,6 +93,19 @@ type HookAuditEnvelope struct {
 	EvaluationID string   `json:"evaluation_id,omitempty"`
 	RuleIDs      []string `json:"rule_ids,omitempty"`
 
+	// Multi-connector identity fields. logConnectorHookAuditEnvelope
+	// mirrors these onto the audit.Event columns of the same name
+	// (SQLite migration 16) AND they ride inside this structured JSON
+	// (audit_events.structured_json + the gateway structured-log
+	// envelope), so all three sinks carry the same values — the DN2
+	// parity contract. Connector is the existing field above.
+	//   - StepIdx: 1-indexed per-turn counter within a session.
+	//   - Enforced: true when the decision was an enforced block.
+	//   - RulePackDir: effective rule-pack dir the verdict used.
+	StepIdx     int    `json:"step_idx,omitempty"`
+	Enforced    bool   `json:"enforced,omitempty"`
+	RulePackDir string `json:"rule_pack_dir,omitempty"`
+
 	// AuditActionOverride steers the audit ROW action (not the
 	// envelope JSON). When non-empty, the audit.Logger writes the
 	// row under this action constant instead of
@@ -143,6 +156,7 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	// the downstream pass becomes a no-op via isAlreadyRedacted
 	// for any envelope whose Reason actually contained PII.
 	env.Reason = preRedactEnvelopeFreeForm(env.Reason)
+	env.RulePackDir = stripLogInjectionRunes(env.RulePackDir)
 	env.RawOrigin = stripLogInjectionRunes(env.RawOrigin)
 	for i, id := range env.RawEventIDs {
 		env.RawEventIDs[i] = stripLogInjectionRunes(id)

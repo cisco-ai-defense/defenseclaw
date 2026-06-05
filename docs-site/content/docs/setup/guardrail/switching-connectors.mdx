@@ -1,13 +1,18 @@
 ---
 title: Switching connectors
-description: defenseclaw setup mode <connector> — switch the active connector with smart guardrail inheritance. Audit history is preserved; only the connector wiring moves.
+description: defenseclaw setup mode <connector> — switch the primary connector / replace the connector wiring with smart guardrail inheritance. Audit history is preserved; only the connector wiring moves. To run two connectors at once, Add instead of Replace.
 keywords:
   - defenseclaw setup mode
   - switch DefenseClaw connector
+  - replace DefenseClaw connector
   - DefenseClaw connector inheritance
 ---
 
-`defenseclaw setup mode <connector>` is the fast/scripted switch. It picks up the destination connector's defaults, preserves your existing guardrail config where it makes sense, and bounces the gateway so the change takes effect.
+`defenseclaw setup mode <connector>` **switches the primary connector** — it *replaces* the active connector wiring with another. It picks up the destination connector's defaults, preserves your existing guardrail config where it makes sense, and bounces the gateway so the change takes effect.
+
+<Callout type="info">
+This page is the **replace** path: one connector wired at a time. If instead you want to keep the current connector *and* protect a second one from the same gateway, you want the **add** path — see [Multi-connector](/docs/setup/guardrail/multi-connector). The Add/Replace choice surfaces interactively whenever you run a hook setup while another connector is already wired.
+</Callout>
 
 ## Inheritance rules
 
@@ -56,4 +61,8 @@ defenseclaw doctor
 defenseclaw status
 ```
 
-`doctor` will tell you if the previous connector left residual hooks; `status` shows the resolved active connector.
+`doctor` will tell you if the previous connector left residual hooks; `status` shows the full active-connector roster (one per-connector block each), so after a replace you'll see just the new connector and after an add you'll see all of them.
+
+## Switch vs add
+
+Replacing is the right move when you're moving a single host from one agent to another. If you actually run multiple agents and want guardrail policy on each, don't keep replacing — **add** the second connector so the gateway enforces both at once, each with its own `guardrail.connectors.<name>` policy. See [Multi-connector](/docs/setup/guardrail/multi-connector) for the add flow and the per-connector CLI (`defenseclaw guardrail ... --connector X`).

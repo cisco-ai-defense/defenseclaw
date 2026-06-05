@@ -135,12 +135,12 @@ func (w *InstallWatcher) runRescanCycle(ctx context.Context) {
 		if outcome == rescanScanned {
 			scanned++
 			if w.otel != nil {
-				w.otel.RecordWatcherEvent(ctx, "rescan_scan", string(evt.Type))
+				w.otel.RecordWatcherEvent(ctx, "rescan_scan", string(evt.Type), "")
 			}
 		} else {
 			skipped++
 			if w.otel != nil {
-				w.otel.RecordWatcherEvent(ctx, "rescan_skip", string(evt.Type))
+				w.otel.RecordWatcherEvent(ctx, "rescan_skip", string(evt.Type), "")
 			}
 		}
 	}
@@ -755,7 +755,7 @@ func (w *InstallWatcher) emitDriftAlerts(evt InstallEvent, deltas []DriftDelta) 
 	}
 
 	if w.otel != nil {
-		w.otel.RecordWatcherEvent(context.Background(), "drift", string(evt.Type))
+		w.otel.RecordWatcherEvent(context.Background(), "drift", string(evt.Type), "")
 	}
 
 	if w.webhooks != nil {

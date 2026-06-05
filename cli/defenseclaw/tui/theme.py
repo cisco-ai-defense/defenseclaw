@@ -93,6 +93,7 @@ STATE_DOTS: Mapping[str, str] = {
     "allowed": "●",
     "reconnecting": "●",
     "starting": "●",
+    "degraded": "●",
     "warning": "●",
     "warn": "●",
     "blocked": "●",
@@ -123,7 +124,7 @@ def state_color(state: str, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
         return tokens.accent_green
     if normalized in {"blocked", "error", "rejected", "stopped"}:
         return tokens.accent_red
-    if normalized in {"reconnecting", "starting", "warn", "warning"}:
+    if normalized in {"degraded", "reconnecting", "starting", "warn", "warning"}:
         return tokens.accent_amber
     if normalized == "quarantined":
         return tokens.accent_pink

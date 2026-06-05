@@ -222,6 +222,8 @@ const (
 	ActionGuardrailDisable            Action = "guardrail-disable"
 	ActionGuardrailEnable             Action = "guardrail-enable"
 	ActionGuardrailFailMode           Action = "guardrail-fail-mode"
+	ActionGuardrailHILT               Action = "guardrail-hilt"
+	ActionGuardrailBlockMessage       Action = "guardrail-block-message"
 	ActionLLMJudgeResponse            Action = "llm-judge-response"
 	ActionInspectToolConfirm          Action = "inspect-tool-confirm"
 	ActionInspectToolBlock            Action = "inspect-tool-block"
@@ -420,6 +422,8 @@ func AllActions() []Action {
 		ActionGuardrailDisable,
 		ActionGuardrailEnable,
 		ActionGuardrailFailMode,
+		ActionGuardrailHILT,
+		ActionGuardrailBlockMessage,
 		ActionLLMJudgeResponse,
 		ActionInspectToolConfirm,
 		ActionInspectToolBlock,

@@ -50,10 +50,12 @@ func TestFormatDetailValue_Scalars(t *testing.T) {
 
 // TestFormatDetailValue_NonScalarsAreSkipped confirms that structured
 // fields kept on the /health JSON surface (e.g. the per-sink
-// “sinks: [...]“ array) are signalled as "not renderable" so the CLI
-// printer skips them rather than dumping a “[map[...]]“ blob to the
-// terminal. Equivalent JSON-decoded shapes (“[]interface{}“ /
-// “map[string]interface{}“) and Go-native shapes are both covered.
+// “sinks: [...]“ array, or the Guardrail "connectors" roster) are
+// signalled as "not renderable" so the CLI printer skips them rather
+// than dumping a “[map[...]]“ blob or duplicating the authoritative
+// "Agents" connector enumeration. Equivalent JSON-decoded shapes
+// (“[]interface{}“ / “map[string]interface{}“) and Go-native shapes are
+// both covered.
 func TestFormatDetailValue_NonScalarsAreSkipped(t *testing.T) {
 	cases := []struct {
 		name string

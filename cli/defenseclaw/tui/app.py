@@ -44,7 +44,7 @@ from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
 from defenseclaw.tui.panels.alerts import AlertEvent, AlertPanelAction, AlertsPanelModel
-from defenseclaw.tui.panels.audit import AuditPanelModel
+from defenseclaw.tui.panels.audit import AuditPanelModel, _parse_kv_details
 from defenseclaw.tui.panels.first_run import FirstRunPanelModel
 from defenseclaw.tui.panels.inventory import FAST_SCAN_CATEGORIES, InventoryPanelModel
 from defenseclaw.tui.panels.logs import (
@@ -100,16 +100,19 @@ from defenseclaw.tui.screens.setup_resource_editor import (
 )
 from defenseclaw.tui.screens.theme_picker import ThemePickerScreen
 from defenseclaw.tui.screens.uninstall import UninstallScreen
+from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.catalog_state import (
     CatalogCommandIntent,
     CatalogListModel,
     CatalogMenuAction,
     CatalogPanelAction,
     catalog_detail_text,
+    friendly_connector_name,
 )
 from defenseclaw.tui.services.cli_choices import CONNECTORS as _KNOWN_CONNECTORS
 from defenseclaw.tui.services.overview_state import (
     ConnectorHealth,
+    ConnectorOverviewRow,
     HealthSnapshot,
     SubsystemHealth,
 )
@@ -239,6 +242,20 @@ class DefenseClawTUI(App[None]):
         height: auto;
         margin-bottom: 1;
         color: TOKEN_TEXT_PRIMARY;
+    }
+
+    /* Wrapper that lets the Overview body scroll. A bare Static can't
+       scroll in Textual, so a tall Overview (many connectors + all the
+       panels) clipped the CONNECTORS / AI-agents boxes off-screen. Default
+       height:auto keeps it a small header for the DataTable panels; the
+       ``overview-scroll`` class makes it fill + scroll only on the Overview. */
+    #body-scroll {
+        height: auto;
+    }
+
+    #body-scroll.overview-scroll {
+        height: 1fr;
+        overflow-y: auto;
     }
 
     .panel-controls {
@@ -660,6 +677,19 @@ class DefenseClawTUI(App[None]):
             "plugins": self.plugins_model,
             "tools": self.tools_model,
         }
+        # 8.13: the shared connector filter. ``""`` means "All connectors"
+        # (the single-connector default and the multi-connector landing
+        # state). When set to an active connector name it scopes the
+        # Overview tiles, the Alerts/Audit/Logs rows, and (pass 2) the
+        # catalog/inventory rows to that connector. Cycled via the connector
+        # chip (``m`` in a multi-connector install). Replaces the old
+        # "focus one connector at a time" model.
+        self.connector_filter = ""
+        # One-shot guard: when a connector is selected on the Overview and its
+        # per-connector aibom snapshot isn't loaded yet, we kick off the
+        # inventory scan once so ENFORCEMENT can show real per-connector
+        # Skills/MCPs/scan numbers instead of gateway-wide totals.
+        self._enforcement_inventory_requested = False
         self._table_columns: tuple[str, ...] = ()
         self._table_rows: tuple[tuple[str, ...], ...] = ()
         self._periodic_refresh_running = False
@@ -728,7 +758,8 @@ class DefenseClawTUI(App[None]):
                 yield Button("?", id="help-button", compact=True, tooltip="Open help")
             with Vertical(id="body-panel"):
                 yield OverviewMetrics(self._overview_metric_data(), id="overview-metrics", classes="hidden")
-                yield Static("", id="body")
+                with VerticalScroll(id="body-scroll"):
+                    yield Static("", id="body")
                 with Horizontal(id="overview-controls", classes="panel-controls hidden"):
                     # Click-first quick-actions that mirror the broken
                     # state of the overview. Each button is shown only
@@ -1365,11 +1396,19 @@ class DefenseClawTUI(App[None]):
         plugins are an OpenClaw-only concept (G4); showing the tab for
         any other connector would yield an empty list and operator
         confusion.
+
+        E3: in a multi-connector install the gate follows the connector
+        filter so the tab tracks whatever catalog the operator is
+        looking at (Plugins body + ``set_class`` already follow it via
+        ``plugins_model.connector``). ``_connector_filter`` returns ""
+        for single-connector installs and the All state, so this falls back
+        to the active connector and behaviour is unchanged there.
         """
 
         if panel != "plugins":
             return False
-        return _active_connector(self.config).lower() != "openclaw"
+        gate_connector = self._connector_filter() or _active_connector(self.config)
+        return gate_connector.lower() != "openclaw"
 
     def _visible_panels(self) -> list[str]:
         """Ordered list of panel names that should currently be visible.
@@ -2255,7 +2294,16 @@ class DefenseClawTUI(App[None]):
         except NoMatches:
             return
         activity.set_class(self.active_panel != "activity", "hidden")
-        if self.active_panel == "overview" and not self.help_open:
+        # The Overview body can exceed the viewport (metric tiles + notices +
+        # SERVICES/CONFIG/ENFORCEMENT/SCANNERS + the CONNECTORS roster), so let
+        # its wrapper scroll. DataTable panels keep #body as a short, auto-sized
+        # header (the table does its own scrolling), so the class is overview-only.
+        overview_active = self.active_panel == "overview" and not self.help_open
+        try:
+            self.query_one("#body-scroll").set_class(overview_active, "overview-scroll")
+        except Exception:  # noqa: BLE001 - the wrapper is always present; never break a render.
+            pass
+        if overview_active:
             renderable = self._overview_renderable()
             body_widget.update(renderable)
             # The overview renderable is a freshly composed Rich
@@ -2519,11 +2567,12 @@ class DefenseClawTUI(App[None]):
             self.body_text = self.activity_model.render_text()
             return self.body_text
         if self.active_panel == "alerts":
+            self._sync_signal_connector_filters()
             self._table_columns = self.alerts_model.data_table_columns()
             self._table_rows = self.alerts_model.data_table_rows()
             empty = self.alerts_model.empty_state()
             suffix = f"\n\n{empty}" if empty else ""
-            self.body_text = self.alerts_model.summary_text() + suffix
+            self.body_text = self._connector_chip_text() + self.alerts_model.summary_text() + suffix
             return self.body_text
         if self.active_panel == "registries":
             self._table_columns = self.registries_model.data_table_columns()
@@ -2539,6 +2588,7 @@ class DefenseClawTUI(App[None]):
             )
             return self.body_text
         if self.active_panel == "inventory":
+            self._sync_catalog_connector_filters()
             self._table_columns = self.inventory_model.data_table_columns()
             self._table_rows = self.inventory_model.data_table_rows()
             empty = self.inventory_model.empty_state()
@@ -2569,22 +2619,28 @@ class DefenseClawTUI(App[None]):
             if self.active_panel == "plugins" and not self.plugins_model.is_visible_for_connector():
                 self.body_text = f"[bold #22D3EE]Plugins[/]\n\n{self.plugins_model.openclaw_only_notice()}"
                 return self.body_text
+            self._sync_catalog_connector_filters()
             self._table_columns = model.data_table_columns()
             self._table_rows = model.data_table_rows()
             detail = catalog_detail_text(model.selected()) if model.detail_open else ""
             message = model.message or model.empty_state()
             suffix = f"\n\n{message}" if message and not detail and not model.filtered else ""
-            self.body_text = model.summary_text(label) + suffix
+            # 8.13: a multi-connector install shows the shared connector
+            # filter chip so the operator knows the catalog's current scope
+            # and how to change it. Empty for single-connector installs.
+            self.body_text = self._connector_chip_text() + model.summary_text(label) + suffix
             return self.body_text
         if self.active_panel == "logs":
+            self._sync_signal_connector_filters()
             self._table_columns = self.logs_model.data_table_columns()
             self._table_rows = self.logs_model.data_table_rows()
-            self.body_text = self._logs_body_text()
+            self.body_text = self._connector_chip_text() + self._logs_body_text()
             return self.body_text
         if self.active_panel == "audit":
+            self._sync_signal_connector_filters()
             self._table_columns = self.audit_model.data_table_columns()
             self._table_rows = self.audit_model.data_table_rows()
-            self.body_text = self._audit_body_text()
+            self.body_text = self._connector_chip_text() + self._audit_body_text()
             return self.body_text
         self.body_text = (
             f"[bold #22D3EE]{label}[/]\n\n"
@@ -3824,10 +3880,25 @@ class DefenseClawTUI(App[None]):
                     block_detail_parts.append("no blocks yet")
             blocks_detail = " · ".join(block_detail_parts)
 
+            # D1=B: in multi-connector installs the aggregate counts above
+            # would be mislabelled under the single primary connector, so
+            # replace the detail sub-lines with a per-connector split and
+            # relabel the Hook Calls tile to the connector count. No-op for
+            # single-connector installs (helpers return empty).
+            multi_connectors = self._active_connector_names()
+            hook_calls_label = f"Hook Calls ({connector})"
+            if multi_connectors:
+                multi_calls_detail, multi_blocks_detail = self._multi_connector_tile_details()
+                if multi_calls_detail:
+                    calls_detail = multi_calls_detail
+                if multi_blocks_detail:
+                    blocks_detail = multi_blocks_detail
+                hook_calls_label = f"Hook Calls ({len(multi_connectors)} connectors)"
+
             return (
                 MetricDatum(
                     key="hook_calls",
-                    label=f"Hook Calls ({connector})",
+                    label=hook_calls_label,
                     value=hook_calls,
                     progress=min(float(hook_calls), 100.0),
                     detail=calls_detail,
@@ -3957,23 +4028,32 @@ class DefenseClawTUI(App[None]):
             f"x{top_count} · {len(vendors)} vendors"
         )
 
-    def _connector_hook_breakdown(self) -> tuple[int, int, int, str]:
+    def _connector_hook_breakdown(self, connector: str = "") -> tuple[int, int, int, str]:
         """Scan recent audit events for connector-hook action breakdown.
 
         Returns ``(allow, alert, block, top_event_name)`` where the top
         event is the most-frequent hook target (e.g. ``postToolUse``).
         Counts are derived from the ``action=<x>`` token embedded in the
         event details by ``logConnectorHookAudit``.
+
+        When ``connector`` is non-empty the scan is restricted to events
+        whose ``connector=<name>`` detail token matches (case-insensitive)
+        — the per-connector split feeding the Overview tiles in
+        multi-connector installs. The default empty value preserves the
+        original aggregate behaviour for single-connector installs.
         """
 
         allow = alert = block = 0
         events_by_target: dict[str, int] = {}
         if self.audit_model is None:
             return 0, 0, 0, ""
+        want = connector.strip().lower()
         for event in self.audit_model.items[-200:]:
             if event.action != "connector-hook":
                 continue
             details = event.details or ""
+            if want and _parse_kv_details(details).get("connector", "").strip().lower() != want:
+                continue
             decision = ""
             for token in details.split():
                 if token.startswith("action="):
@@ -3992,6 +4072,355 @@ class DefenseClawTUI(App[None]):
         if events_by_target:
             top_event, _ = max(events_by_target.items(), key=lambda kv: kv[1])
         return allow, alert, block, top_event
+
+    def _enforcement_connector_breakdown(self, connector: str) -> tuple[int, int, int]:
+        """``(calls, alerts, blocks)`` for ``connector`` from the hook stream.
+
+        Reuses :meth:`_connector_hook_breakdown` — the same connector-attributed
+        source feeding the CONNECTORS table — so the ENFORCEMENT panel and the
+        per-connector roster never disagree. ``calls`` is the total decisions
+        (allow + alert + block) the connector's hooks produced.
+        """
+
+        allow, alert, block, _top = self._connector_hook_breakdown(connector)
+        return allow + alert + block, alert, block
+
+    _BLOCK_VERDICTS = frozenset({"block", "blocked", "deny", "denied", "quarantine", "quarantined"})
+    _ALLOW_VERDICTS = frozenset({"allow", "allowed", "clean", "ok", "pass"})
+
+    def _connector_scan_metrics(self, connector: str) -> dict[str, int] | None:
+        """Per-connector Skills/MCPs/scan numbers from the aibom snapshot.
+
+        Sourced from ``inventory_model.connector_snapshots`` — the per-connector
+        ``aibom scan --connector`` results we already merge in multi-connector
+        mode. Returns ``None`` when that connector hasn't been scanned yet so the
+        ENFORCEMENT panel can show "scan pending" rather than a wrong number
+        (and trigger a one-shot load). Skills/Plugins carry policy verdicts;
+        MCPs only carry a count, so no blocked/allowed split is reported for them.
+        """
+
+        model = getattr(self, "inventory_model", None)
+        snapshots = getattr(model, "connector_snapshots", ()) if model is not None else ()
+        want = connector.strip().lower()
+        snap = next((s for name, s in snapshots if name.strip().lower() == want), None)
+        if snap is None:
+            return None
+
+        def _verdict(entity: object) -> str:
+            return (getattr(entity, "verdict", "") or "").strip().lower()
+
+        def _scanned(entity: object) -> bool:
+            return bool(
+                getattr(entity, "scan_target", "")
+                or getattr(entity, "scan_findings", 0)
+                or getattr(entity, "scan_severity", "")
+            )
+
+        skills = snap.skills
+        plugins = snap.plugins
+        return {
+            "skills": len(skills),
+            "skills_blocked": sum(1 for sk in skills if _verdict(sk) in self._BLOCK_VERDICTS),
+            "skills_allowed": sum(1 for sk in skills if _verdict(sk) in self._ALLOW_VERDICTS),
+            "plugins": len(plugins),
+            "plugins_blocked": sum(1 for pl in plugins if _verdict(pl) in self._BLOCK_VERDICTS),
+            "mcps": len(snap.mcps),
+            "scanned": sum(1 for e in (*skills, *plugins) if _scanned(e)),
+            "scannable": len(skills) + len(plugins),
+        }
+
+    def _request_enforcement_inventory(self, connector: str) -> None:
+        """Kick off the per-connector inventory scan once for ENFORCEMENT.
+
+        Only fires when a connector is selected, more than one connector is
+        active, and no per-connector snapshot is loaded yet. Guarded so the
+        Overview's render loop can call it idempotently without re-dispatching.
+        """
+
+        if (
+            self._enforcement_inventory_requested
+            or not connector
+            or len(self._active_connector_names()) <= 1
+            or getattr(self.inventory_model, "connector_snapshots", ())
+        ):
+            return
+        self._enforcement_inventory_requested = True
+        try:
+            self.run_worker(self._load_inventory_model(), exclusive=False, thread=False)
+        except Exception:  # noqa: BLE001 - outside a running app (tests) there's no worker; ignore.
+            pass
+
+    def _connector_policy_label(self, connector: str) -> str:
+        """``<mode> · <rule pack>`` policy context for a connector.
+
+        Surfaced in the SCANNERS box when a connector is selected so the
+        operator sees *which* enforcement policy the (machine-wide) scanners
+        apply for that connector. Empty when there's nothing to show.
+        """
+
+        cfg = self.overview_model.cfg
+        if cfg is None or not connector:
+            return ""
+        mode = (dict(cfg.connector_modes).get(connector) or "").strip()
+        pack = (dict(cfg.connector_packs).get(connector) or "").strip()
+        return " · ".join(part for part in (mode, pack) if part)
+
+    def _active_connector_names(self) -> list[str]:
+        """Names of every active connector when more than one is configured.
+
+        Sourced from ``OverviewConfig.connector_modes`` (populated by the
+        adapter from ``Config.active_connectors()``), so it is empty for
+        the common single-connector install and the Overview tiles keep
+        their original aggregate presentation untouched.
+        """
+
+        cfg = self.overview_model.cfg
+        modes = list(cfg.connector_modes) if cfg else []
+        if len(modes) <= 1:
+            return []
+        return [connector for connector, _mode in modes if connector]
+
+    def _connector_filter(self) -> str:
+        """The active connector filter (``""`` = All connectors).
+
+        Returns ``""`` for single-connector installs (nothing to filter) and
+        for the multi-connector "All" landing state. When the operator has
+        picked a connector via the chip it returns that name, clamped to a
+        still-active connector (a torn-down connector silently falls back to
+        All). This is the single source of truth honoured by the Overview
+        tiles, the Alerts/Audit/Logs row filters, and the connector chip.
+        """
+
+        return connector_filter_svc.normalize_filter(
+            self.connector_filter, self._active_connector_names()
+        )
+
+    def _set_connector_filter(self, connector: str) -> None:
+        """Set the shared connector filter to ``connector`` (``""`` = All).
+
+        8.13 pass 2: the catalog/inventory panels load *every* active connector
+        up-front (merged, with a CONNECTOR column), so changing the filter only
+        re-filters the already-loaded rows in-memory — no reload churn. The
+        model-level ``connector`` is still pointed at the filtered connector
+        (or the primary under All) so per-row actions (scan/info/install) target
+        the right connector. The Alerts/Audit/Logs rows and Overview tiles read
+        :meth:`_connector_filter` directly at render time.
+        """
+
+        connector = connector_filter_svc.normalize_filter(
+            connector, self._active_connector_names()
+        )
+        self.connector_filter = connector
+        focus_enabled = bool(connector)
+        action_connector = connector or self.overview_model.active_connector_name()
+        for model in (
+            self.skills_model,
+            self.mcps_model,
+            self.plugins_model,
+            self.inventory_model,
+        ):
+            try:
+                # Keep action intents (scan/info/install) pointed at the
+                # filtered connector; under All they target the primary.
+                model.set_connector(action_connector)
+            except AttributeError:
+                pass
+            if hasattr(model, "connector_focus_enabled"):
+                model.connector_focus_enabled = focus_enabled
+        if connector:
+            friendly = friendly_connector_name(connector)
+            self._set_status(f"Filtered to {friendly} ({connector}).")
+        else:
+            self._set_status("Showing all connectors.")
+        self._sync_signal_connector_filters()
+        self._sync_catalog_connector_filters()
+        self._render_chrome()
+
+    def _sync_catalog_connector_filters(self) -> None:
+        """Push the shared connector filter + column flag to catalog/inventory.
+
+        Mirrors :meth:`_sync_signal_connector_filters`: in a multi-connector
+        install the merged rows show a CONNECTOR column and narrow to the
+        active filter; single-connector installs reset to "All / no column"
+        so the original presentation is untouched. Cheap + idempotent (the
+        model setters early-return when unchanged), so it is safe per render.
+        """
+
+        multi = len(self._active_connector_names()) > 1
+        selected = self._connector_filter()
+        for model in (
+            self.skills_model,
+            self.mcps_model,
+            self.plugins_model,
+            self.inventory_model,
+        ):
+            if hasattr(model, "show_connector_column"):
+                model.show_connector_column = multi
+            if hasattr(model, "set_connector_filter"):
+                model.set_connector_filter(selected if multi else "")
+
+    def _connector_chip_text(self) -> str:
+        """Rich-markup connector filter chip, or ``""`` for ≤1 connector.
+
+        Renders ``Connector: [All] antigravity codex`` with the active
+        segment highlighted, plus a hint that ``m`` cycles the filter. Shown
+        at the top of every filterable pane so the operator always knows the
+        current scope and how to change it.
+        """
+
+        segments = connector_filter_svc.chip_segments(
+            self._connector_filter(), self._active_connector_names()
+        )
+        if not segments:
+            return ""
+        cfg = self.overview_model.cfg
+        rendered: list[str] = []
+        for label, is_active in segments:
+            disabled = cfg is not None and cfg.connector_is_disabled(label)
+            text = f"{label} (off)" if disabled else label
+            if is_active:
+                rendered.append(
+                    f"[{TOKENS.surface_base} on {TOKENS.accent_cyan}] {text} [/]"
+                )
+            elif disabled:
+                rendered.append(f"[{TOKENS.text_muted}]{text}[/]")
+            else:
+                rendered.append(f"[{TOKENS.text_secondary}]{text}[/]")
+        chip = "  ".join(rendered)
+        return (
+            f"[{TOKENS.text_secondary}]Connector:[/] {chip}  "
+            f"[{TOKENS.text_muted}](press [bold]m[/] to filter)[/]\n\n"
+        )
+
+    def _sync_signal_connector_filters(self) -> None:
+        """Push the shared connector filter + column flag to the signal panes.
+
+        Idempotent and cheap (the model setters early-return when unchanged),
+        so it is safe to call on every render. In a single-connector install
+        this resets the panes to "All / no column", preserving the original
+        presentation.
+        """
+
+        multi = len(self._active_connector_names()) > 1
+        selected = self._connector_filter()
+        for model in (self.alerts_model, self.audit_model, self.logs_model):
+            model.show_connector_column = multi
+            model.set_connector_filter(selected if multi else "")
+
+    def _multi_connector_tile_details(self) -> tuple[str, str]:
+        """Per-connector split lines for the Hook Calls and Blocks tiles.
+
+        Returns ``(calls_detail, blocks_detail)``. Each active connector is
+        scored independently via :meth:`_connector_hook_breakdown` so the
+        single tile row stays intact (D1=B) while the detail sub-line
+        attributes activity to the right connector — e.g.
+        ``codex a12 w0 b3 · cursor a8 w1 b1``. ``blocks_detail`` lists only
+        connectors that actually blocked something. Returns ``("", "")``
+        when fewer than two connectors are active, leaving the
+        single-connector detail lines unchanged.
+        """
+
+        connectors = self._active_connector_names()
+        if not connectors:
+            return "", ""
+        call_parts: list[str] = []
+        block_parts: list[str] = []
+        for connector in connectors:
+            allow, alert, block, _top = self._connector_hook_breakdown(connector)
+            call_parts.append(
+                f"[{TOKENS.accent_cyan}]{connector}[/] "
+                f"[{TOKENS.accent_green}]a{allow}[/] "
+                f"[{TOKENS.accent_amber}]w{alert}[/] "
+                f"[{TOKENS.accent_red}]b{block}[/]"
+            )
+            if block:
+                block_parts.append(
+                    f"[{TOKENS.accent_cyan}]{connector}[/] [{TOKENS.accent_red}]{block}[/]"
+                )
+        return " · ".join(call_parts), " · ".join(block_parts)
+
+    def _connector_status_map(self) -> dict[str, str]:
+        """Map of ``connector_name_lower -> live state`` from ``/health``.
+
+        Sourced from the gateway's ``connectors[]`` array (parsed into
+        ``HealthSnapshot.connectors``). Empty when the gateway predates the
+        array, in which case the Overview table falls back to the gateway
+        state for every connector (they share one process).
+        """
+
+        health = self.overview_model.health
+        out: dict[str, str] = {}
+        if health is not None:
+            for conn in health.connectors:
+                if conn.name:
+                    out[conn.name.strip().lower()] = (conn.state or "").strip()
+        return out
+
+    def _connector_last_activity(self, connector: str) -> datetime | None:
+        """Most recent audit-event timestamp attributed to ``connector``."""
+
+        if self.audit_model is None:
+            return None
+        want = connector.strip().lower()
+        latest: datetime | None = None
+        for event in self.audit_model.items:
+            if event.timestamp is None:
+                continue
+            attributed = _parse_kv_details(event.details or "").get("connector", "").strip().lower()
+            if attributed != want:
+                continue
+            if latest is None or event.timestamp > latest:
+                latest = event.timestamp
+        return latest
+
+    def _overview_connector_rows(self) -> list[ConnectorOverviewRow]:
+        """Per-connector rows for the Overview CONNECTORS table.
+
+        One row per active connector with its effective mode + rule pack
+        (config), live status (``/health`` connectors[] or a gateway-state
+        fallback), last activity, and CALLS/BLOCKS/ALERTS counts derived from
+        the audit store. Empty for single-connector installs.
+        """
+
+        cfg = self.overview_model.cfg
+        if cfg is None or len(cfg.connector_modes) <= 1:
+            return []
+        packs = dict(cfg.connector_packs)
+        status_map = self._connector_status_map()
+        # Fallback status when the gateway doesn't expose connectors[] yet:
+        # the gateway runs every connector in one process, so the gateway
+        # state stands in for each connector.
+        gateway_state = self.overview_model.subsystem_state("gateway")
+        fallback_status = "active" if gateway_state.strip().lower() == "running" else gateway_state
+        now = datetime.now(timezone.utc)
+        rows: list[ConnectorOverviewRow] = []
+        for connector, mode in cfg.connector_modes:
+            if not connector:
+                continue
+            allow, alert, block, _top = self._connector_hook_breakdown(connector)
+            last = self._connector_last_activity(connector)
+            # A guardrail-disabled connector keeps its historical counts (so
+            # the row still tells the story) but its STATUS is forced to
+            # "disabled" — the gateway drops it from connectors[], so without
+            # this override it would inherit the running gateway state and
+            # look active.
+            if cfg.connector_is_disabled(connector):
+                status = "disabled"
+            else:
+                status = status_map.get(connector.strip().lower(), fallback_status) or "unknown"
+            rows.append(
+                ConnectorOverviewRow(
+                    connector=connector,
+                    mode=mode or "",
+                    rule_pack=(packs.get(connector) or "").strip(),
+                    last_activity=_relative_time_label(last, now),
+                    calls=allow + alert + block,
+                    blocks=block,
+                    alerts=alert,
+                    status=status,
+                )
+            )
+        return rows
 
     def _hook_event_timestamps(self) -> list[datetime]:
         """Timestamps of recent connector-hook audit events.
@@ -4568,6 +4997,18 @@ class DefenseClawTUI(App[None]):
             ("Policy dir", Text((cfg.policy_dir if cfg else "") or "—")),
             ("Data dir", Text((cfg.data_dir if cfg else "") or "—")),
         ]
+        # 8.13: when more than one connector is active, replace the
+        # primary-only "Agent: <connector>" line with a concise
+        # "Agents: N active" header. The full per-connector roster (mode,
+        # rule pack, status, live counts) now lives in the dedicated
+        # CONNECTORS table below, so we don't duplicate it here. No-op for
+        # the common single-connector install.
+        overview_connector_rows = self._overview_connector_rows()
+        if overview_connector_rows:
+            cfg_rows[0] = (
+                "Agents",
+                Text(f"{len(overview_connector_rows)} active", style=TOKENS.text_secondary),
+            )
         llm_provider = (cfg.llm_provider if cfg else "") or (cfg.inspect_llm_provider if cfg else "")
         llm_model = (cfg.llm_model if cfg else "") or (cfg.inspect_llm_model if cfg else "")
         if llm_provider:
@@ -4582,17 +5023,37 @@ class DefenseClawTUI(App[None]):
         enf_table = Table.grid(padding=(0, 2), expand=True)
         enf_table.add_column(width=12, no_wrap=True)
         enf_table.add_column(overflow="fold")
-        alerts_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
-        enf_table.add_row(
-            Text("Alerts", style=TOKENS.text_secondary),
-            Text.from_markup(
-                f"[{alerts_color} bold]{counts.active_alerts:<3}[/] {_mini_bar(counts.active_alerts, 20)}"
-            ),
-        )
-        enf_table.add_row(
-            Text("Total scans", style=TOKENS.text_secondary),
-            Text.from_markup(f"[{TOKENS.accent_green}]{counts.total_scans}[/]"),
-        )
+        # 8.13: when a connector is selected the ENFORCEMENT panel narrows to
+        # that connector's real Alerts/Hook calls/Blocks (the connector-
+        # attributed hook stream — same source as the CONNECTORS table). The
+        # install/scan rows below stay but are tagged "(gateway-wide)" because
+        # the audit DB doesn't attribute them per connector. "All" keeps the
+        # original global numbers.
+        enf_selected = self._connector_filter()
+        if enf_selected:
+            calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            alerts_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
+            enf_table.add_row(
+                Text("Alerts", style=TOKENS.text_secondary),
+                Text.from_markup(f"[{alerts_color} bold]{alert_n:<3}[/] {_mini_bar(alert_n, 20)}"),
+            )
+            enf_table.add_row(
+                Text("Hook calls", style=TOKENS.text_secondary),
+                Text.from_markup(f"[{TOKENS.accent_green}]{calls_n}[/]"),
+            )
+            blocks_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
+            enf_table.add_row(
+                Text("Blocks", style=TOKENS.text_secondary),
+                Text.from_markup(f"[{blocks_color} bold]{block_n}[/]"),
+            )
+        else:
+            alerts_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
+            enf_table.add_row(
+                Text("Alerts", style=TOKENS.text_secondary),
+                Text.from_markup(
+                    f"[{alerts_color} bold]{counts.active_alerts:<3}[/] {_mini_bar(counts.active_alerts, 20)}"
+                ),
+            )
         if self.overview_model.silent_bypass > 0:
             enf_table.add_row(
                 Text("Silent bypass", style=TOKENS.accent_amber),
@@ -4601,20 +5062,55 @@ class DefenseClawTUI(App[None]):
                     f"[{TOKENS.text_muted}](see Alerts -> egress)[/]"
                 ),
             )
-        enf_table.add_row(
-            Text("Skills", style=TOKENS.text_secondary),
-            Text.from_markup(
-                f"[{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
-                f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed"
-            ),
-        )
-        enf_table.add_row(
-            Text("MCPs", style=TOKENS.text_secondary),
-            Text.from_markup(
-                f"[{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
-                f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
-            ),
-        )
+        if enf_selected:
+            # Per-connector Skills/MCPs/scan coverage from that connector's own
+            # aibom snapshot (not the gateway-wide audit totals). Loads lazily,
+            # so show "scan pending" + trigger a one-shot load until it lands.
+            self._request_enforcement_inventory(enf_selected)
+            scan = self._connector_scan_metrics(enf_selected)
+            if scan is None:
+                enf_table.add_row(
+                    Text("Skills", style=TOKENS.text_secondary),
+                    Text.from_markup(f"[{TOKENS.text_muted}]scan pending — loading inventory…[/]"),
+                )
+            else:
+                enf_table.add_row(
+                    Text("Skills", style=TOKENS.text_secondary),
+                    Text.from_markup(
+                        f"[{TOKENS.text_primary}]{scan['skills']}[/]   "
+                        f"[{TOKENS.accent_red}]{scan['skills_blocked']}[/] blocked   "
+                        f"[{TOKENS.accent_green}]{scan['skills_allowed']}[/] allowed"
+                    ),
+                )
+                enf_table.add_row(
+                    Text("MCPs", style=TOKENS.text_secondary),
+                    Text.from_markup(f"[{TOKENS.text_primary}]{scan['mcps']}[/] configured"),
+                )
+                enf_table.add_row(
+                    Text("Scanned", style=TOKENS.text_secondary),
+                    Text.from_markup(
+                        f"[{TOKENS.accent_green}]{scan['scanned']}[/]/{scan['scannable']} assets"
+                    ),
+                )
+        else:
+            enf_table.add_row(
+                Text("Total scans", style=TOKENS.text_secondary),
+                Text.from_markup(f"[{TOKENS.accent_green}]{counts.total_scans}[/]"),
+            )
+            enf_table.add_row(
+                Text("Skills", style=TOKENS.text_secondary),
+                Text.from_markup(
+                    f"[{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
+                    f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed"
+                ),
+            )
+            enf_table.add_row(
+                Text("MCPs", style=TOKENS.text_secondary),
+                Text.from_markup(
+                    f"[{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
+                    f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
+                ),
+            )
 
         keys = self.overview_model.keys_status()
         sc_table = Table.grid(padding=(0, 2), expand=True)
@@ -4662,6 +5158,14 @@ class DefenseClawTUI(App[None]):
             keys_color = TOKENS.accent_amber
             keys_dot = "●"
         scanner_rows.append(("keys", keys_label, keys_color, keys_dot))
+        # 8.13: scanner *binaries* are machine-wide (same for every connector),
+        # so the rows above don't change with the filter. What IS per-connector
+        # is the enforcement policy the scanners apply — surface that as a
+        # context row when a connector is selected.
+        if enf_selected:
+            policy_label = self._connector_policy_label(enf_selected)
+            if policy_label:
+                scanner_rows.insert(0, ("policy", policy_label, TOKENS.accent_cyan, "●"))
         for label, value, color, dot in scanner_rows:
             sc_table.add_row(
                 Text(dot, style=color),
@@ -4781,7 +5285,10 @@ class DefenseClawTUI(App[None]):
         )
         enf_panel = Panel(
             enf_table,
-            title=Text("ENFORCEMENT", style=f"bold {TOKENS.accent_amber}"),
+            title=Text(
+                f"ENFORCEMENT · {enf_selected}" if enf_selected else "ENFORCEMENT",
+                style=f"bold {TOKENS.accent_amber}",
+            ),
             title_align="left",
             border_style=TOKENS.accent_amber,
             padding=(0, 1),
@@ -4813,6 +5320,10 @@ class DefenseClawTUI(App[None]):
         columns.add_column(ratio=1)
         columns.add_row(Group(services_panel, cfg_panel), Group(enf_panel, sc_panel, doc_panel))
 
+        # 8.13: dedicated per-connector CONNECTORS table for multi-connector
+        # installs. Empty for single-connector (panel omitted from the Group).
+        connectors_panel = self._overview_connectors_panel(overview_connector_rows)
+
         quick_actions = [
             ("s", "Scan all"),
             ("d", "Doctor"),
@@ -4840,6 +5351,10 @@ class DefenseClawTUI(App[None]):
             style=f"italic {TOKENS.text_muted}",
         )
 
+        connectors_block: list[RenderableType] = []
+        if connectors_panel is not None:
+            connectors_block = [connectors_panel, Text("")]
+
         return Group(
             banner,
             tagline,
@@ -4848,11 +5363,112 @@ class DefenseClawTUI(App[None]):
             Text(""),
             columns,
             Text(""),
+            *connectors_block,
             ai_panel,
             Text(""),
             quick_text,
             footer_hint,
         )
+
+    def _overview_connectors_panel(
+        self, rows: list[ConnectorOverviewRow]
+    ) -> RenderableType | None:
+        """Build the Rich CONNECTORS table panel, or ``None`` for ≤1 connector.
+
+        Columns: CONNECTOR, MODE, RULE PACK, LAST ACTIVITY, CALLS, BLOCKS,
+        ALERTS, STATUS. The STATUS cell shows a colored live-health dot;
+        BLOCKS/ALERTS are tinted when non-zero so risk pops. Selecting a row
+        and pressing Enter drills into Alerts filtered to that connector.
+        """
+
+        if not rows:
+            return None
+        table = Table.grid(padding=(0, 2), expand=True)
+        table.add_column(no_wrap=True)  # CONNECTOR
+        table.add_column(no_wrap=True)  # MODE
+        table.add_column(no_wrap=True)  # RULE PACK
+        table.add_column(no_wrap=True)  # LAST ACTIVITY
+        table.add_column(justify="right", no_wrap=True)  # CALLS
+        table.add_column(justify="right", no_wrap=True)  # BLOCKS
+        table.add_column(justify="right", no_wrap=True)  # ALERTS
+        table.add_column(no_wrap=True)  # STATUS
+        header_style = f"bold {TOKENS.text_secondary}"
+        table.add_row(
+            Text("CONNECTOR", style=header_style),
+            Text("MODE", style=header_style),
+            Text("RULE PACK", style=header_style),
+            Text("LAST ACTIVITY", style=header_style),
+            Text("CALLS", style=header_style),
+            Text("BLOCKS", style=header_style),
+            Text("ALERTS", style=header_style),
+            Text("STATUS", style=header_style),
+        )
+        selected = self._connector_filter()
+        for row in rows:
+            normalized = row.status.strip().lower() or "unknown"
+            color_dot = state_color(normalized)
+            dot = "●" if normalized in {"running", "active", "enabled"} else "○"
+            status_cell = Text()
+            status_cell.append(f"{dot} ", style=color_dot)
+            status_cell.append(row.status or "unknown", style=color_dot)
+            name = friendly_connector_name(row.connector)
+            # Highlight the row matching the current filter selection.
+            name_style = (
+                f"bold {TOKENS.accent_cyan}"
+                if selected and selected == row.connector.strip().lower()
+                else TOKENS.text_primary
+            )
+            color_blocks = TOKENS.accent_red if row.blocks else TOKENS.text_muted
+            color_alerts = TOKENS.accent_amber if row.alerts else TOKENS.text_muted
+            table.add_row(
+                Text(f"{name} ({row.connector})", style=name_style),
+                Text(row.mode or "?", style=TOKENS.text_secondary),
+                Text(row.rule_pack or "default", style=TOKENS.text_secondary),
+                Text(row.last_activity, style=TOKENS.text_muted),
+                Text(str(row.calls), style=TOKENS.text_primary),
+                Text(str(row.blocks), style=color_blocks),
+                Text(str(row.alerts), style=color_alerts),
+                status_cell,
+            )
+        hint = Text(
+            "Press m to filter every view by connector · with one selected, Enter opens its Alerts.",
+            style=f"italic {TOKENS.text_muted}",
+        )
+        return Panel(
+            Group(table, hint),
+            title=Text("CONNECTORS", style=f"bold {TOKENS.accent_green}"),
+            title_align="left",
+            border_style=TOKENS.accent_green,
+            padding=(0, 1),
+        )
+
+    def _overview_connectors_text(self, rows: list[ConnectorOverviewRow]) -> str:
+        """Plain-text CONNECTORS section for the fallback body (or "")."""
+
+        if not rows:
+            return ""
+        lines = [
+            f"  [{TOKENS.text_secondary}]"
+            f"{'CONNECTOR':<22}{'MODE':<10}{'PACK':<12}{'LAST':<10}"
+            f"{'CALLS':>6}{'BLOCKS':>8}{'ALERTS':>8}  STATUS[/]"
+        ]
+        for row in rows:
+            normalized = row.status.strip().lower() or "unknown"
+            color_dot = state_color(normalized)
+            dot = "●" if normalized in {"running", "active", "enabled"} else "○"
+            name = f"{friendly_connector_name(row.connector)} ({row.connector})"
+            color_blocks = TOKENS.accent_red if row.blocks else TOKENS.text_muted
+            color_alerts = TOKENS.accent_amber if row.alerts else TOKENS.text_muted
+            lines.append(
+                f"  {name[:21]:<22}{(row.mode or '?'):<10}"
+                f"{(row.rule_pack or 'default')[:11]:<12}{row.last_activity:<10}"
+                f"{row.calls:>6}"
+                f"[{color_blocks}]{row.blocks:>8}[/]"
+                f"[{color_alerts}]{row.alerts:>8}[/]"
+                f"  [{color_dot}]{dot} {row.status or 'unknown'}[/]"
+            )
+        body = "\n".join(lines)
+        return f"[bold {TOKENS.accent_green}]CONNECTORS[/]\n{body}\n\n"
 
     def _overview_body_text(self, service_cards: tuple[Any, ...]) -> str:
         notices = self.overview_model.build_notices()
@@ -4892,7 +5508,15 @@ class DefenseClawTUI(App[None]):
             ("LLM provider", (cfg.llm_provider if cfg else "") or "-"),
             ("LLM model", (cfg.llm_model if cfg else "") or "-"),
         ]
+        overview_connector_rows = self._overview_connector_rows()
+        if overview_connector_rows:
+            # Multi: replace the redundant "Agent: <primary>" line (index 0)
+            # with a unified "Agents: N active" header. The per-connector
+            # detail lives in the CONNECTORS section appended below.
+            config_lines[0] = ("Agents", f"{len(overview_connector_rows)} active")
         config_text = "\n".join(f"  {key:<16} {value}" for key, value in config_lines)
+
+        connectors_text = self._overview_connectors_text(overview_connector_rows)
 
         scanner_lines = [
             ("Gateway", state_by_key.get("gateway", "unknown"), detail_by_key.get("gateway", "")),
@@ -4905,21 +5529,50 @@ class DefenseClawTUI(App[None]):
         ]
         services_text = "\n".join(_overview_state_line(name, state, detail) for name, state, detail in scanner_lines)
 
-        alert_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
-        enforcement_text = (
-            f"  Active alerts    [{alert_color} bold]{counts.active_alerts}[/]   "
-            f"Total scans [{TOKENS.accent_green}]{counts.total_scans}[/]\n"
-            + (
-                f"  Silent bypass   [{TOKENS.accent_red} bold]{self.overview_model.silent_bypass}[/] "
-                f"[{TOKENS.text_muted}](see Alerts -> egress)[/]\n"
-                if self.overview_model.silent_bypass > 0
-                else ""
-            )
-            + f"  Skills           [{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
-            f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed\n"
-            f"  MCPs             [{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
-            f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
+        enf_selected = self._connector_filter()
+        silent_line = (
+            f"  Silent bypass   [{TOKENS.accent_red} bold]{self.overview_model.silent_bypass}[/] "
+            f"[{TOKENS.text_muted}](see Alerts -> egress)[/]\n"
+            if self.overview_model.silent_bypass > 0
+            else ""
         )
+        if enf_selected:
+            # Per-connector: hook decisions from the audit stream + Skills/MCPs/
+            # scan coverage from this connector's own aibom snapshot (loads
+            # lazily, so show "scan pending" + trigger a one-shot load).
+            self._request_enforcement_inventory(enf_selected)
+            calls_n, alert_n, block_n = self._enforcement_connector_breakdown(enf_selected)
+            alert_color = TOKENS.accent_red if alert_n else TOKENS.accent_green
+            block_color = TOKENS.accent_red if block_n else TOKENS.text_secondary
+            scan = self._connector_scan_metrics(enf_selected)
+            if scan is None:
+                scan_lines = f"  Skills           [{TOKENS.text_muted}]scan pending — loading inventory…[/]\n"
+            else:
+                scan_lines = (
+                    f"  Skills           [{TOKENS.text_primary}]{scan['skills']}[/]   "
+                    f"[{TOKENS.accent_red}]{scan['skills_blocked']}[/] blocked   "
+                    f"[{TOKENS.accent_green}]{scan['skills_allowed']}[/] allowed\n"
+                    f"  MCPs             [{TOKENS.text_primary}]{scan['mcps']}[/] configured\n"
+                    f"  Scanned          [{TOKENS.accent_green}]{scan['scanned']}[/]/{scan['scannable']} assets\n"
+                )
+            enforcement_text = (
+                f"  Alerts           [{alert_color} bold]{alert_n}[/]   "
+                f"Hook calls [{TOKENS.accent_green}]{calls_n}[/]   "
+                f"Blocks [{block_color} bold]{block_n}[/]\n"
+                + silent_line
+                + scan_lines
+            ).rstrip("\n")
+        else:
+            alert_color = TOKENS.accent_red if counts.active_alerts else TOKENS.accent_green
+            enforcement_text = (
+                f"  Active alerts    [{alert_color} bold]{counts.active_alerts}[/]   "
+                f"Total scans [{TOKENS.accent_green}]{counts.total_scans}[/]\n"
+                + silent_line
+                + f"  Skills           [{TOKENS.accent_red}]{counts.blocked_skills}[/] blocked   "
+                f"[{TOKENS.accent_green}]{counts.allowed_skills}[/] allowed\n"
+                f"  MCPs             [{TOKENS.accent_red}]{counts.blocked_mcps}[/] blocked   "
+                f"[{TOKENS.accent_green}]{counts.allowed_mcps}[/] allowed"
+            )
 
         doctor_summary = "not yet run"
         doctor_lines: list[str] = []
@@ -4975,8 +5628,14 @@ class DefenseClawTUI(App[None]):
             f"[bold {TOKENS.accent_blue}]SERVICES[/]\n{services_text}\n\n"
             f"[bold {TOKENS.accent_amber}]ENFORCEMENT[/]\n{enforcement_text}\n\n"
             f"[bold {TOKENS.accent_green}]CONFIGURATION[/]\n{config_text}\n\n"
-            f"[bold {TOKENS.accent_orange}]SCANNERS[/]\n"
-            f"  skill-scanner  {'installed' if self.overview_model.skill_scanner_available else 'missing'}\n"
+            + connectors_text
+            + f"[bold {TOKENS.accent_orange}]SCANNERS[/]\n"
+            + (
+                f"  policy         {self._connector_policy_label(enf_selected)}\n"
+                if enf_selected and self._connector_policy_label(enf_selected)
+                else ""
+            )
+            + f"  skill-scanner  {'installed' if self.overview_model.skill_scanner_available else 'missing'}\n"
             f"  credentials    {keys_line}\n\n"
             f"[bold {TOKENS.accent_pink}]DOCTOR[/]  {doctor_summary}\n" + "\n".join(doctor_lines) + "\n\n"
             f"[bold {TOKENS.accent_cyan}]DISCOVERED AI AGENTS[/]\n" + "\n".join(ai_lines) + "\n\n"
@@ -4999,8 +5658,13 @@ class DefenseClawTUI(App[None]):
             for chip in scope.chips
         )
         filter_text = f"  filter={self.inventory_model.filter or 'all'}"
+        # 8.13: surface the shared connector filter chip (multi-connector
+        # installs) so it's explicit which connector's inventory is shown and
+        # how to change it. Empty for single-connector installs.
+        connector_chip = self._connector_chip_text()
         return (
             "[bold #22D3EE]Inventory[/]\n"
+            f"{connector_chip}"
             f"{tabs}\n"
             f"{scope.label}: {chips} {scope.hint}{filter_text}\n"
             "Keys: h/l sub-tabs, 1 all, 2/3/4 filter Skills or Plugins, r reload, o fast scope, Enter detail."
@@ -5218,6 +5882,19 @@ class DefenseClawTUI(App[None]):
         policy_posture = ""
         if cfg is not None:
             connector_name = self.overview_model.active_connector_name() or (cfg.claw_mode or "").strip()
+            # E4: in a multi-connector install the single connector pill
+            # would name only the primary, hiding the fact that N
+            # connectors are live. Surface the active connector filter — the
+            # selected connector when filtered, else "All connectors (N)" —
+            # so the strip stays honest. Single-connector installs keep the
+            # bare name.
+            actives = self._active_connector_names()
+            if len(actives) > 1:
+                selected = self._connector_filter()
+                if selected:
+                    connector_name = f"{selected} (filtered)"
+                else:
+                    connector_name = f"All connectors ({len(actives)})"
             redaction_on = not bool(cfg.privacy_disable_redaction)
             redaction_label = "Redaction ON" if redaction_on else "Redaction OFF"
             mode = (cfg.guardrail_mode or "").strip().lower()
@@ -5389,6 +6066,17 @@ class DefenseClawTUI(App[None]):
         if self.help_open:
             return False
         key = _panel_key(event)
+        # 8.13: the connector filter is shared, so ``m`` opens the filter
+        # picker on the signal panes too (Alerts/Audit/Logs). These panes
+        # don't otherwise bind ``m``. Catalog/Overview/Inventory route ``m``
+        # in their own branches below.
+        if (
+            key == "m"
+            and len(self._active_connector_names()) > 1
+            and self.active_panel in {"alerts", "audit", "logs"}
+        ):
+            self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+            return True
         if self.active_panel == "alerts":
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
@@ -5396,6 +6084,12 @@ class DefenseClawTUI(App[None]):
             action = self.registries_model.handle_key(key)
             return self._apply_registry_action(action)
         if self.active_panel in self.catalog_models:
+            # 8.13: the catalog chip advertises "press m to filter". In a
+            # multi-connector install route `m` to the shared connector
+            # filter picker so it works consistently across panes.
+            if key == "m" and len(self._active_connector_names()) > 1:
+                self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+                return True
             action = self.catalog_models[self.active_panel].handle_key(_catalog_key(key))
             return self._apply_catalog_action(self.active_panel, action)
         if self.active_panel == "logs":
@@ -5409,6 +6103,16 @@ class DefenseClawTUI(App[None]):
         if self.active_panel == "overview":
             if key == "m":
                 self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+                return True
+            # 8.13 drill-down: with a connector selected in the shared filter,
+            # Enter jumps to that connector's Alerts (already pre-filtered).
+            # With no selection in a multi-connector install, Enter opens the
+            # filter picker first so the operator can choose one.
+            if key == "enter" and len(self._active_connector_names()) > 1:
+                if self._connector_filter():
+                    self.action_switch_panel("alerts")
+                else:
+                    self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
                 return True
             if key in {"i", "l"}:
                 self.action_switch_panel({"i": "inventory", "l": "logs"}[key])
@@ -5427,6 +6131,11 @@ class DefenseClawTUI(App[None]):
             self.run_worker(self._confirm_and_run_intent(intent), exclusive=False, thread=False)
             return True
         if self.active_panel == "inventory":
+            # Inventory honors the shared connector filter too, so `m`
+            # opens the same filter picker in a multi-connector install.
+            if key == "m" and len(self._active_connector_names()) > 1:
+                self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
+                return True
             action = self._handle_inventory_key(key)
             return self._apply_inventory_action(action)
         if self.active_panel == "ai":
@@ -6419,6 +7128,15 @@ class DefenseClawTUI(App[None]):
         self._render_chrome()
 
     async def _load_inventory_model(self) -> None:
+        names = self._active_connector_names()
+        # 8.13 pass 2: a multi-connector install inventories every connector and
+        # merges the snapshots into one view with a CONNECTOR column. Single-
+        # connector installs keep the original one-shot ``aibom scan``.
+        if len(names) > 1:
+            self.inventory_model.show_connector_column = True
+            await self._load_inventory_merged(names)
+            return
+        self.inventory_model.show_connector_column = False
         intent = self.inventory_model.load_intent()
         self._set_status(intent.hint or "Loading inventory...")
         try:
@@ -6444,6 +7162,40 @@ class DefenseClawTUI(App[None]):
             self.inventory_model.apply_json(stdout.decode(errors="replace"))
         except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
             self.inventory_model.apply_loaded(None, exc)
+        self._render_chrome()
+
+    async def _load_inventory_merged(self, names: list[str]) -> None:
+        """Inventory every active connector and merge the snapshots.
+
+        Each connector's ``aibom scan`` runs with ``--connector <name>`` so its
+        entities can be attributed; failures for one connector are skipped
+        rather than blanking the whole inventory. The merged view is then
+        narrowed to the active connector filter in-memory.
+        """
+
+        self._set_status(f"Loading inventory for {len(names)} connectors...")
+        results: list[tuple[str, str | None]] = []
+        for name in names:
+            intent = self.inventory_model.load_intent_for(name)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    intent.binary,
+                    *intent.args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+            except OSError:
+                results.append((name, None))
+                continue
+            if process.returncode != 0:
+                results.append((name, None))
+            else:
+                results.append((name, stdout.decode(errors="replace")))
+        self.inventory_model.apply_merged(results)
+        if not any(text for _name, text in results):
+            self.inventory_model.message = "Could not load inventory for any connector."
+        self.inventory_model.set_connector_filter(self._connector_filter())
         self._render_chrome()
 
     async def _load_ai_discovery_model(self) -> None:
@@ -6473,6 +7225,15 @@ class DefenseClawTUI(App[None]):
         self._run_catalog_intent(intent)
 
     async def _open_mode_picker(self) -> None:
+        # 8.13: in a multi-connector install all connectors are already
+        # active, so "switch mode" makes no sense — ``m`` instead opens the
+        # shared connector filter picker (All + each connector).
+        # Single-connector installs keep the original behaviour (re-run setup
+        # to switch the active connector).
+        actives = self._active_connector_names()
+        if len(actives) > 1:
+            await self._open_connector_filter_picker(actives)
+            return
         choice = await self.push_screen_wait(ModePickerScreen(_active_connector(self.config)))
         if choice is None:
             self._set_status("Mode switch cancelled.")
@@ -6489,6 +7250,63 @@ class DefenseClawTUI(App[None]):
             hint=f"Switch active connector to {choice}.",
         )
         await self._confirm_and_run_intent(intent)
+
+    async def _open_connector_filter_picker(self, connectors: list[str]) -> None:
+        """Pick the shared connector filter: All connectors or a specific one.
+
+        Multi-connector only. Does not re-run setup — every connector is
+        already active; it just narrows (or clears) the shared filter via
+        :meth:`_set_connector_filter`, which every pane honours.
+        """
+
+        current = self._connector_filter()
+        actions: list[MenuAction] = []
+        all_marker = "  ← current" if not current else ""
+        actions.append(
+            MenuAction(
+                "0",
+                f"All connectors{all_marker}",
+                "Show activity across every active connector",
+            )
+        )
+        cfg = self.overview_model.cfg
+        for index, conn in enumerate(connectors, start=1):
+            label = friendly_connector_name(conn)
+            marker = "  ← current" if conn == current else ""
+            disabled = cfg is not None and cfg.connector_is_disabled(conn)
+            disabled_tag = " — disabled" if disabled else ""
+            hint = (
+                f"Filter every view to {conn} (enforcement off — history only)"
+                if disabled
+                else f"Filter every view to {conn}"
+            )
+            actions.append(
+                MenuAction(
+                    str(index),
+                    f"{label} ({conn}){disabled_tag}{marker}",
+                    hint,
+                )
+            )
+        choice = await self.push_screen_wait(
+            ActionMenuScreen(
+                "Filter by Connector",
+                tuple(actions),
+                subtitle="Applies across Overview, Alerts, Audit, Logs",
+            )
+        )
+        if choice is None:
+            self._set_status("Connector filter unchanged.")
+            return
+        if not choice.isdigit():
+            return
+        index = int(choice)
+        if index == 0:
+            self._set_connector_filter("")
+            return
+        index -= 1
+        if not (0 <= index < len(connectors)):
+            return
+        self._set_connector_filter(connectors[index])
 
     async def _open_redaction_toggle(self) -> None:
         currently_disabled = _redaction_currently_disabled(self.config)
@@ -6573,6 +7391,16 @@ class DefenseClawTUI(App[None]):
 
     async def _load_catalog_model(self, panel: str) -> None:
         model = self.catalog_models[panel]
+        names = self._active_connector_names()
+        # 8.13 pass 2: Skills/MCPs/Plugins merge every active connector's list
+        # into one table with a CONNECTOR column. Tools is a process-global
+        # enforcement view, so it never merges. Single-connector installs keep
+        # the original one-shot load (no column, no per-connector fan-out).
+        if len(names) > 1 and panel in {"skills", "mcps", "plugins"}:
+            model.show_connector_column = True
+            await self._load_catalog_merged(panel, model, names)
+            return
+        model.show_connector_column = False
         intent = model.load_intent()
         self._set_status(intent.hint or f"Loading {panel}...")
         try:
@@ -6595,6 +7423,42 @@ class DefenseClawTUI(App[None]):
                 model.apply_json(stdout.decode(errors="replace"))  # type: ignore[attr-defined]
             except Exception as exc:  # noqa: BLE001 - parser errors are panel state.
                 model.apply_loaded([], exc)
+        self._render_chrome()
+
+    async def _load_catalog_merged(
+        self, panel: str, model: Any, names: list[str]
+    ) -> None:
+        """Load ``panel`` once per active connector and merge the rows.
+
+        Each connector's ``list --json`` runs with ``--connector <name>`` so
+        rows can be tagged with their origin; failures for one connector are
+        skipped (None payload) rather than blanking the whole table. The merged
+        rows are then narrowed to the active connector filter in-memory.
+        """
+
+        self._set_status(f"Loading {panel} for {len(names)} connectors...")
+        results: list[tuple[str, str | None]] = []
+        for name in names:
+            intent = model.load_intent_for(name)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    intent.binary,
+                    *intent.args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await process.communicate()
+            except OSError:
+                results.append((name, None))
+                continue
+            if process.returncode != 0:
+                results.append((name, None))
+            else:
+                results.append((name, stdout.decode(errors="replace")))
+        model.apply_merged(results)
+        if not any(text for _name, text in results):
+            model.message = f"Could not load {panel} for any connector."
+        model.set_connector_filter(self._connector_filter())
         self._render_chrome()
 
     async def _confirm_and_run_intent(self, intent: Any) -> None:
@@ -6847,7 +7711,15 @@ class DefenseClawTUI(App[None]):
 
         cfg = self.overview_model.cfg
         mode = (cfg.claw_mode if cfg else "") or ""
-        connector_name = _resolve_active_connector(snapshot, mode)
+        # 8.13: in a multi-connector install the operator can filter every
+        # view to a specific connector (via the chip / ``m``); that selection
+        # must survive health polls, so it takes precedence over the
+        # live/primary connector for the catalog list scoping.
+        # ``_connector_filter`` returns "" for single-connector installs and
+        # the All state, preserving the original behaviour.
+        selected = self._connector_filter()
+        connector_name = selected or _resolve_active_connector(snapshot, mode)
+        focus_enabled = bool(selected)
         for model in (
             self.skills_model,
             self.mcps_model,
@@ -6858,6 +7730,8 @@ class DefenseClawTUI(App[None]):
                 model.set_connector(connector_name)
             except AttributeError:
                 continue
+            if hasattr(model, "connector_focus_enabled"):
+                model.connector_focus_enabled = focus_enabled
 
         skill_attr = _registry_attribution_from_config(self.config, "skill")
         mcp_attr = _registry_attribution_from_config(self.config, "mcp")
@@ -7324,6 +8198,56 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     cisco = getattr(config, "cisco_ai_defense", None)
     privacy = getattr(config, "privacy", None)
     hilt = getattr(guardrail, "hilt", None)
+    # Multi-connector roster (WU10): only when more than one connector is
+    # active. Config-derived (mirrors `defenseclaw status`) since /health
+    # reports just the primary connector. Defensive — any resolver gap
+    # falls back to an empty roster so the single "Agent" line still shows.
+    connector_modes: tuple[tuple[str, str], ...] = ()
+    connector_packs: tuple[tuple[str, str], ...] = ()
+    connector_disabled: tuple[str, ...] = ()
+    try:
+        actives = config.active_connectors() if hasattr(config, "active_connectors") else []
+        actives = [c for c in actives if c]
+        if len(actives) > 1:
+            pairs: list[tuple[str, str]] = []
+            packs: list[tuple[str, str]] = []
+            disabled: list[str] = []
+            for conn in actives:
+                # A connector turned off via `guardrail disable --connector X`
+                # stays in the roster (so its history is filterable) but is
+                # marked DISABLED. effective_enabled honors the per-connector
+                # kill switch; unset/True means enforcing.
+                if guardrail is not None and hasattr(guardrail, "effective_enabled"):
+                    try:
+                        if not guardrail.effective_enabled(conn):
+                            disabled.append(conn.strip().lower())
+                    except Exception:
+                        pass
+                mode = ""
+                if guardrail is not None and hasattr(guardrail, "effective_mode"):
+                    try:
+                        mode = (guardrail.effective_mode(conn) or "").strip()
+                    except Exception:
+                        mode = ""
+                pairs.append((conn, mode))
+                # Effective rule-pack label = basename of the per-connector
+                # rule_pack_dir (falling back to the global one), so the
+                # roster shows "strict"/"permissive"/"default" per connector.
+                pack = ""
+                if guardrail is not None and hasattr(guardrail, "effective_rule_pack_dir"):
+                    try:
+                        pack_dir = (guardrail.effective_rule_pack_dir(conn) or "").strip()
+                    except Exception:
+                        pack_dir = ""
+                    pack = os.path.basename(pack_dir.rstrip("/")) if pack_dir else "default"
+                packs.append((conn, pack))
+            connector_modes = tuple(pairs)
+            connector_packs = tuple(packs)
+            connector_disabled = tuple(disabled)
+    except Exception:
+        connector_modes = ()
+        connector_packs = ()
+        connector_disabled = ()
     return OverviewConfig(
         data_dir=str(getattr(config, "data_dir", "") or ""),
         environment=str(getattr(config, "environment", "") or ""),
@@ -7346,6 +8270,9 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         inspect_llm_provider=str(getattr(inspect_llm, "provider", "") or ""),
         inspect_llm_model=str(getattr(inspect_llm, "model", "") or ""),
         cisco_ai_defense_endpoint=str(getattr(cisco, "endpoint", "") or ""),
+        connector_modes=connector_modes,
+        connector_packs=connector_packs,
+        connector_disabled=connector_disabled,
     )
 
 
@@ -7434,6 +8361,28 @@ def _styled_cell(column: str, value: str) -> Text:
     return text
 
 
+def _relative_time_label(when: datetime | None, now: datetime) -> str:
+    """Compact "Ns/Nm/Nh/Nd ago" label, or "—" when there is no activity."""
+
+    if when is None:
+        return "—"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = now - when
+    seconds = int(delta.total_seconds())
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        return f"{seconds}s ago"
+    minutes = seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    return f"{hours // 24}d ago"
+
+
 def _overview_state_line(name: str, state: str, detail: str) -> str:
     normalized = state.strip().lower() or "unknown"
     dot = "●" if normalized in {"running", "active", "enabled"} else "○"
@@ -7500,6 +8449,25 @@ def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
     )
 
 
+def _connectors_from_mapping(raw: Any) -> tuple[ConnectorHealth, ...]:
+    """Parse ``/health``'s ``connectors[]`` array into per-connector health.
+
+    The gateway emits one entry per active connector with its own live
+    counters (``internal/gateway/health.go``). Tolerant of a missing/null
+    array (older gateways) — returns ``()`` so callers fall back to the
+    config-derived roster. Entries that don't map cleanly are skipped.
+    """
+
+    if not isinstance(raw, list):
+        return ()
+    out: list[ConnectorHealth] = []
+    for item in raw:
+        conn = _connector_from_mapping(item)
+        if conn is not None and conn.name:
+            out.append(conn)
+    return tuple(out)
+
+
 def _health_snapshot_from_mapping(raw: Any) -> HealthSnapshot | None:
     """Convert a ``/health`` JSON payload into a ``HealthSnapshot``.
 
@@ -7526,6 +8494,7 @@ def _health_snapshot_from_mapping(raw: Any) -> HealthSnapshot | None:
         sinks=_subsystem_from_mapping(raw.get("sinks")),
         sandbox=sandbox,
         connector=_connector_from_mapping(raw.get("connector")),
+        connectors=_connectors_from_mapping(raw.get("connectors")),
     )
 
 
@@ -7705,6 +8674,18 @@ def _policy_posture(cfg: OverviewConfig | None) -> str:
         return "unknown"
     mode = cfg.guardrail_mode or "observe"
     scanner = cfg.guardrail_strategy or "default"
+    # Multi-connector: each connector can carry its own rule pack (and thus
+    # its own block threshold), so naming one global pack would be wrong.
+    # Detect whether the connectors actually diverge; if they do, point the
+    # operator at the roster instead of asserting a single posture.
+    packs = {p for _conn, p in cfg.connector_packs if p}
+    if len(cfg.connector_modes) > 1:
+        modes = {m for _conn, m in cfg.connector_modes if m}
+        if len(packs) > 1 or len(modes) > 1:
+            return "per-connector (see roster)"
+        only_pack = next(iter(packs)) if packs else scanner
+        only_mode = next(iter(modes)) if modes else mode
+        return f"all connectors: {only_mode} ({only_pack})"
     if mode == "action":
         return f"action: block CRIT, alert MED+ ({scanner})"
     return f"balanced: block CRIT, alert MED+ ({scanner})"
@@ -7713,6 +8694,12 @@ def _policy_posture(cfg: OverviewConfig | None) -> str:
 def _enforcement_label(cfg: OverviewConfig | None) -> str:
     if cfg is None:
         return "not configured"
+    # Multi-connector: naming a single primary connector ("antigravity hook
+    # observability") hides the other active connectors. Report the count
+    # instead; the per-connector modes live in the roster below.
+    if len(cfg.connector_modes) > 1:
+        n = len(cfg.connector_modes)
+        return f"{n} connectors (hook observability)"
     connector = cfg.guardrail_connector or cfg.claw_mode or "openclaw"
     mode = cfg.guardrail_mode or "observe"
     if connector in {"openclaw", "zeptoclaw"}:

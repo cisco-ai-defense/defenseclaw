@@ -818,7 +818,7 @@ severity, action, etc.
 
 | Variable | Source | Used on |
 | --- | --- | --- |
-| `connector` | `defenseclaw_connector_hook_invocations_total{connector}` ∪ `defenseclaw_otel_ingest_records_total{source}` | Connectors, Connector Detail (single-select), Security, HITL, Agent identity. |
+| `connector` | `label_values(defenseclaw_connector_hook_invocations_total, connector)` — hook invocations only, **not** unioned with `defenseclaw_otel_ingest_records_total{source}` (that metric carries only connectors pushing native OTLP and would silently exclude every hook-only connector). | Connectors + Connector Detail (single-connector deep dive) are connector-scoped; Security (Guardrail Evaluations), HITL, and Agent identity are connector-filterable (multi-select `connector` template var). |
 | `surface` | `defenseclaw_direction` (`prompt` / `completion` / `tool_call`) | Connector Detail, Security. |
 | `stage` | `defenseclaw_gateway_verdicts_total{verdict_stage}` | Security, Connector Detail. |
 | `action` | `defenseclaw_gateway_verdicts_total{verdict_action}` | Security, Connector Detail. |
@@ -881,6 +881,35 @@ DefenseClaw runs Codex, Claude Code, and the hook-first agent connectors in
 **observability mode** by default: enforcement is gated off, and connector
 telemetry feeds audit events + Prometheus counters + Grafana panels without
 modifying the agent traffic plane unless the connector explicitly supports it.
+
+### 9.0 Multi-connector telemetry
+
+A single gateway can enforce guardrail policy for several hook connectors at
+once (Codex, Claude Code, Antigravity, …), each with an independent policy
+block under `guardrail.connectors.<name>` in `~/.defenseclaw/config.yaml`
+(per-connector `mode`, `hook_fail_mode`, `hilt`, `block_message`,
+`rule_pack_dir`). Proxy connectors (OpenClaw, ZeptoClaw) cannot be peers —
+multi-connector is hook-only. When more than one connector is active,
+`claw.mode` is set to `multi`, and that sentinel is mirrored onto the OTel
+**resource** attribute `defenseclaw.claw.mode=multi` so a fan-out gateway is
+distinguishable from a single-connector one at the resource level.
+
+Every per-event rail carries a connector dimension, so telemetry can be sliced
+per connector:
+
+| Rail | Connector dimension |
+|------|---------------------|
+| OTel metrics | `connector` label (e.g. `defenseclaw_connector_hook_invocations_total{connector="codex"}`) |
+| OTel spans / logs | `defenseclaw.connector.source` attribute |
+| Audit rows + OTLP-ingest audit rows | top-level `connector` field, plus `structured.connector` on hook rows |
+| Splunk HEC | top-level `connector`, and `structured.connector` on hook events |
+
+Grafana's **Connectors (Overview)** and **Connector Detail** boards are built
+on the `connector` metric label; the **Guardrail Evaluations** (Security) board
+is connector-filterable via the multi-select `connector` template variable
+(see §8.0.1). The egress firewall is **not** part of this per-connector
+surface — it is one host-wide ruleset (see `docs/ARCHITECTURE.md` → Firewall
+scope); per-connector guardrail policy is enforced inside the gateway above it.
 
 ### 9.1 Channels
 

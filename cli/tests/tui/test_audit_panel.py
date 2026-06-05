@@ -19,11 +19,52 @@ from defenseclaw.db import Store
 from defenseclaw.models import ActionState, Event
 from defenseclaw.tui.panels.audit import (
     AUDIT_TABLE_COLUMNS,
+    AUDIT_TABLE_COLUMNS_MULTI,
     AuditPanelModel,
     audit_action_display,
     audit_severity_style_key,
+    event_connector,
     export_audit_intent,
 )
+
+
+def test_audit_connector_column_and_filter() -> None:
+    """8.13: CONNECTOR column + shared connector filter on the Audit panel."""
+
+    model = AuditPanelModel()
+    model.set_events(
+        [
+            Event(id="a", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=codex action=allow"),
+            Event(id="b", action="connector-hook", target="preToolUse",
+                  severity="INFO", details="connector=cursor action=allow"),
+        ]
+    )
+
+    # Single-connector default: original columns, no CONNECTOR.
+    assert model.data_table_columns() == AUDIT_TABLE_COLUMNS
+
+    model.show_connector_column = True
+    assert model.data_table_columns() == AUDIT_TABLE_COLUMNS_MULTI
+    rows = model.data_table_rows()
+    # CONNECTOR is the 4th column (index 3), after TYPE.
+    connectors = {row[3] for row in rows}
+    assert connectors == {"codex", "cursor"}
+
+    # Shared filter narrows the rows + keeps the count consistent.
+    model.set_connector_filter("codex")
+    assert len(model.filtered) == 1
+    assert all(row[3] == "codex" for row in model.data_table_rows())
+
+    model.set_connector_filter("")
+    assert len(model.filtered) == 2
+
+
+def test_event_connector_helper() -> None:
+    assert event_connector(
+        Event(id="x", action="connector-hook", target="t", details="connector=codex action=allow")
+    ) == "codex"
+    assert event_connector(Event(id="y", action="scan", target="t", details="severity=HIGH")) == ""
 
 
 def new_store(tmp_path: Path) -> Store:
@@ -467,3 +508,46 @@ def test_audit_hook_blocked_decision_promotes_severity_in_summary() -> None:
     assert pairs["Reason"] == "secret-detected"
     # In enforce mode would_block=true is meaningful — keep it.
     assert pairs["Would block"] == "yes"
+
+
+def test_audit_connector_search_token_filters_by_parsed_connector() -> None:
+    """WU10: per-connector filtering reuses the existing field-token
+    search. ``connector:cursor`` matches hook rows whose kv ``details``
+    carry ``connector=cursor``, so operators with multiple connectors
+    can scope the audit feed without a dedicated column or chip."""
+
+    panel = AuditPanelModel()
+    base = datetime(2026, 5, 21, 6, 0, 0)
+    panel.set_events(
+        [
+            Event(
+                id="hook-cursor",
+                timestamp=base,
+                action="connector-hook",
+                target="preToolUse",
+                actor="defenseclaw",
+                details="action=allow severity=NONE mode=observe connector=cursor",
+                severity="INFO",
+            ),
+            Event(
+                id="hook-codex",
+                timestamp=base + timedelta(minutes=1),
+                action="connector-hook",
+                target="preToolUse",
+                actor="defenseclaw",
+                details="action=allow severity=NONE mode=observe connector=codex",
+                severity="INFO",
+            ),
+        ]
+    )
+
+    panel.set_filter("connector:cursor")
+    assert [event.id for event in panel.filtered] == ["hook-cursor"]
+
+    panel.set_filter("connector:codex")
+    assert [event.id for event in panel.filtered] == ["hook-codex"]
+
+    # Unknown connector token matches nothing rather than falling back
+    # to a loose substring hit elsewhere in the row.
+    panel.set_filter("connector:nope")
+    assert panel.filtered == []

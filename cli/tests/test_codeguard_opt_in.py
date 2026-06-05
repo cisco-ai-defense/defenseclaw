@@ -153,3 +153,125 @@ def test_codeguard_skill_replace_archives_prior_content(tmp_path, monkeypatch):
     archived = list(archive_root.rglob("USER_PATCH.md"))
     assert archived, "user artifact not archived under codeguard backup root"
     assert archived[0].read_text(encoding="utf-8") == "operator customization"
+
+
+# ---------------------------------------------------------------------------
+# Uniform-UX: `codeguard status` is a per-connector *read* command, so it must
+# fan out over every active connector by default — the same loop rendering one
+# line per connector whether one or N are active — matching skill/plugin/mcp
+# list. `--connector X` narrows to a single validated peer.
+# ---------------------------------------------------------------------------
+
+def _multi_cfg(active: list[str], root):
+    return SimpleNamespace(
+        active_connector=lambda: sorted(active)[0],
+        active_connectors=lambda: list(active),
+        data_dir=str(root / ".defenseclaw"),
+        claw=SimpleNamespace(
+            home_dir=str(root / ".openclaw"),
+            config_file=str(root / ".openclaw" / "openclaw.json"),
+        ),
+    )
+
+
+def test_codeguard_status_lists_all_active_connectors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(codeguard, ["status"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert "[claudecode]" in result.output
+    assert "[codex]" in result.output
+    # One line per active connector — no single-vs-multi branching.
+    status_lines = [ln for ln in result.output.splitlines() if ln.startswith("CodeGuard ")]
+    assert len(status_lines) == 2, result.output
+
+
+def test_codeguard_status_connector_flag_narrows_to_one(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(codeguard, ["status", "--connector", "codex"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert "[codex]" in result.output
+    assert "[claudecode]" not in result.output
+
+
+def test_codeguard_status_single_connector_unchanged(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["cursor"], tmp_path)
+
+    result = CliRunner().invoke(codeguard, ["status"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    status_lines = [ln for ln in result.output.splitlines() if ln.startswith("CodeGuard ")]
+    assert len(status_lines) == 1, result.output
+    assert "[cursor]" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Uniform-UX: `codeguard install` is a *mutating* command that, with no
+# `--connector`, fans out over every active connector (matching `status`),
+# so installing on a multi-connector box never silently lands on just the
+# primary. `--connector X` scopes the install to one validated peer.
+# ---------------------------------------------------------------------------
+
+def test_codeguard_install_fans_out_to_all_active_connectors(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(codeguard, ["install", "--target", "skill"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    # One install line per active connector — not just the primary.
+    install_lines = [ln for ln in result.output.splitlines() if ln.startswith("CodeGuard skill [")]
+    assert len(install_lines) == 2, result.output
+    assert "[claudecode]" in result.output
+    assert "[codex]" in result.output
+
+
+def test_codeguard_install_connector_flag_narrows_to_one(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(
+        codeguard, ["install", "--connector", "codex", "--target", "skill"], obj=app
+    )
+
+    assert result.exit_code == 0, result.output
+    install_lines = [ln for ln in result.output.splitlines() if ln.startswith("CodeGuard skill [")]
+    assert len(install_lines) == 1, result.output
+    assert "[codex]" in result.output
+    assert "[claudecode]" not in result.output
+
+
+def test_codeguard_install_unsupported_connector_is_skip_not_failure(tmp_path, monkeypatch):
+    # A connector with no skill install target (antigravity) must be reported
+    # as "unsupported" but NOT fail the command when the other connectors
+    # install successfully. antigravity sorts first in active_connectors().
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["antigravity", "claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(codeguard, ["install", "--target", "skill"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert "[antigravity]" in result.output
+    assert "unsupported" in result.output
+    # the supported connectors still get a line and the command succeeds
+    assert "[claudecode]" in result.output
+    assert "[codex]" in result.output
+    assert "install failed" not in result.output

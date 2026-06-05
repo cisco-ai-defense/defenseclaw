@@ -133,6 +133,121 @@ func TestFormatGenericPayload(t *testing.T) {
 	}
 }
 
+// TestNotifyHookHealed_WebhookCarriesConnector pins connector attribution on
+// the hook self-heal webhook. Regression guard for the gap where
+// notifyHookHealed set only Target (not the first-class Connector field), so
+// the dispatched payload's connector dimension was empty. The heal webhook
+// must carry connector=<name> end-to-end like every other connector-scoped
+// alert.
+func TestNotifyHookHealed_WebhookCarriesConnector(t *testing.T) {
+	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
+	var mu sync.Mutex
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		body = b
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	s := &Sidecar{webhooks: NewWebhookDispatcher([]config.WebhookConfig{
+		{URL: srv.URL, Type: "generic", Enabled: true},
+	})}
+	s.notifyHookHealed("codex", []string{"/Users/x/.codex/config.toml"})
+	s.webhooks.Close()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(body) == 0 {
+		t.Fatal("hook-heal webhook delivered no payload")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatalf("unmarshal generic payload: %v", err)
+	}
+	event, _ := payload["event"].(map[string]any)
+	if event["connector"] != "codex" {
+		t.Errorf("hook-heal webhook connector=%v, want codex", event["connector"])
+	}
+}
+
+// TestFormatPayloads_IncludeConnector pins multi-connector attribution on
+// outbound webhook alerts: when the audit event carries a connector, every
+// payload formatter must surface it so operators can route/triage per
+// connector. Single-connector events (empty Connector) keep their original
+// shape — asserted by the generic-payload omission check below.
+func TestFormatPayloads_IncludeConnector(t *testing.T) {
+	evt := testEvent()
+	evt.Connector = "codex"
+
+	t.Run("generic", func(t *testing.T) {
+		payload, err := formatGenericPayload(evt)
+		if err != nil {
+			t.Fatalf("formatGenericPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		event := m["event"].(map[string]interface{})
+		if event["connector"] != "codex" {
+			t.Errorf("generic payload connector=%v, want codex", event["connector"])
+		}
+	})
+
+	t.Run("generic_omits_when_empty", func(t *testing.T) {
+		payload, err := formatGenericPayload(testEvent()) // no connector
+		if err != nil {
+			t.Fatalf("formatGenericPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		event := m["event"].(map[string]interface{})
+		if _, present := event["connector"]; present {
+			t.Errorf("connector key should be omitted when unset, got %v", event["connector"])
+		}
+	})
+
+	t.Run("slack", func(t *testing.T) {
+		payload, err := formatSlackPayload(evt)
+		if err != nil {
+			t.Fatalf("formatSlackPayload error: %v", err)
+		}
+		if !strings.Contains(string(payload), "codex") {
+			t.Errorf("slack payload missing connector: %s", payload)
+		}
+	})
+
+	t.Run("pagerduty", func(t *testing.T) {
+		payload, err := formatPagerDutyPayload(evt, "rk")
+		if err != nil {
+			t.Fatalf("formatPagerDutyPayload error: %v", err)
+		}
+		var m map[string]interface{}
+		if err := json.Unmarshal(payload, &m); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		cd := m["payload"].(map[string]interface{})["custom_details"].(map[string]interface{})
+		if cd["connector"] != "codex" {
+			t.Errorf("pagerduty custom_details.connector=%v, want codex", cd["connector"])
+		}
+	})
+
+	t.Run("webex", func(t *testing.T) {
+		payload, err := formatWebexPayload(evt, "")
+		if err != nil {
+			t.Fatalf("formatWebexPayload error: %v", err)
+		}
+		if !strings.Contains(string(payload), "codex") {
+			t.Errorf("webex payload missing connector: %s", payload)
+		}
+	})
+}
+
 func TestSeverityFiltering(t *testing.T) {
 	t.Setenv("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST", "1")
 	tests := []struct {

@@ -310,6 +310,7 @@ func (l *Logger) ForwardGatewayEventToSinks(ctx context.Context, ev gatewaylog.E
 		DestinationApp:    ev.DestinationApp,
 		ToolName:          ev.ToolName,
 		ToolID:            ev.ToolID,
+		Connector:         ev.Connector,
 		Structured: map[string]any{
 			gatewaySplunkHECEventsKey: []map[string]any{
 				{
@@ -428,6 +429,11 @@ type ScanCorrelation struct {
 	AgentID         string
 	AgentName       string
 	AgentInstanceID string
+
+	// Connector attributes the scan to its originating connector so
+	// EmitScanResult can record per-connector scan-finding metrics. Empty
+	// for connector-agnostic scans (CLI file scans, background rescans).
+	Connector string
 }
 
 // LogScan persists a scan result to SQLite, forwards to Splunk HEC,
@@ -486,6 +492,7 @@ func (l *Logger) LogScanWithCorrelation(
 		RequestID:         corr.RequestID,
 		SessionID:         corr.SessionID,
 		TraceID:           corr.TraceID,
+		Connector:         corr.Connector,
 	}
 	scanID, err := scanner.EmitScanResult(ctx, l.gatewayWriterSnapshot(), l.store, tel, result, agent)
 	if err != nil {
@@ -522,14 +529,14 @@ func (l *Logger) LogScanWithCorrelation(
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
 
 	if otel != nil {
 		targetType := inferTargetType(result.Scanner)
-		otel.EmitScanResult(result, scanID, targetType, verdict)
+		otel.EmitScanResult(result, scanID, targetType, verdict, agent.Connector)
 	}
 
 	return nil
@@ -580,12 +587,50 @@ func (l *Logger) LogActionWithCorrelation(action, target, details, traceID, requ
 	}, action, target, details)
 }
 
+// LogActionWithCorrelationConnector is LogActionWithCorrelation plus a
+// connector attribution stamp. The proxy guardrail-verdict path knows
+// which connector produced the decision (p.connectorName()); threading
+// it here lets the verdict row carry the dedicated connector column on
+// SQLite and the top-level connector field on every sink, instead of
+// forcing SIEM consumers to scrape a `connector=` token out of details.
+// An empty connector behaves exactly like LogActionWithCorrelation.
+func (l *Logger) LogActionWithCorrelationConnector(action, target, details, traceID, requestID, connector string) error {
+	return l.logActionWithEnvelope(CorrelationEnvelope{
+		TraceID:   traceID,
+		RequestID: requestID,
+		Connector: connector,
+	}, action, target, details)
+}
+
+// LogActionSeverityConnector persists an action event with an explicit
+// severity and connector attribution. Most lifecycle rows are fine at the
+// INFO default LogAction applies, but security-relevant call sites — like
+// the hook self-heal guard, where a runtime enforcement-hook tamper/repair
+// is the event — must land at the right severity on every surface AND carry
+// the dedicated connector column so SIEM consumers can filter by connector
+// without scraping a token out of details. An empty severity falls back to
+// INFO; an empty connector behaves exactly like LogAction.
+func (l *Logger) LogActionSeverityConnector(action, target, details, severity, connector string) error {
+	return l.logActionWithEnvelopeSeverity(CorrelationEnvelope{Connector: connector}, action, target, details, severity)
+}
+
 // logActionWithEnvelope is the shared implementation for every LogAction*
 // variant. Centralizing here guarantees that LogAction, LogActionCtx, and
 // LogActionWithCorrelation all thread the same audit-event shape onto
 // SQLite, sinks, and OTel — a regression in one surface can no longer
 // diverge from the others.
 func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, details string) error {
+	return l.logActionWithEnvelopeSeverity(env, action, target, details, "INFO")
+}
+
+// logActionWithEnvelopeSeverity is logActionWithEnvelope with a caller-chosen
+// severity. logActionWithEnvelope delegates here with "INFO" so the default
+// path is unchanged; only call sites that explicitly need a non-INFO row
+// (via LogActionSeverityConnector) reach this with a different value.
+func (l *Logger) logActionWithEnvelopeSeverity(env CorrelationEnvelope, action, target, details, severity string) error {
+	if severity == "" {
+		severity = "INFO"
+	}
 	sinksMgr, otel, structured := l.snapshot()
 	event := Event{
 		ID:        uuid.New().String(),
@@ -594,7 +639,7 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		Target:    target,
 		Actor:     "defenseclaw",
 		Details:   details,
-		Severity:  "INFO",
+		Severity:  severity,
 		RunID:     currentRunID(),
 		// Process-scoped identifier — never collapses onto
 		// agent_instance_id (per-session) per the three-tier contract.
@@ -631,7 +676,7 @@ func (l *Logger) logActionWithEnvelope(env CorrelationEnvelope, action, target, 
 		return storeErr
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -688,7 +733,7 @@ func (l *Logger) LogActionWithEnforcement(action, target, details string, enforc
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -740,7 +785,7 @@ func (l *Logger) LogEvent(event Event) error {
 		return err
 	}
 	if otel != nil {
-		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity)
+		otel.RecordAuditEvent(context.Background(), event.Action, event.Severity, event.Connector)
 	}
 	l.forwardToSinksSnapshot(sinksMgr, event)
 	l.emitStructuredSnapshot(structured, event)
@@ -784,6 +829,7 @@ func (l *Logger) forwardToSinksSnapshot(mgr *sinks.Manager, e Event) {
 		DestinationApp:    e.DestinationApp,
 		ToolName:          e.ToolName,
 		ToolID:            e.ToolID,
+		Connector:         e.Connector,
 		SchemaVersion:     e.SchemaVersion,
 		ContentHash:       e.ContentHash,
 		Generation:        e.Generation,
@@ -900,7 +946,9 @@ func (l *Logger) logAlertWithEnvelope(env CorrelationEnvelope, source, severity,
 
 	_, otel, emitter := l.snapshot()
 	if otel != nil {
-		otel.RecordAlert(context.Background(), "runtime", severity, source)
+		// Runtime alerts are process-global (not tied to a single
+		// connector); pass "" so the metric records connector="unknown".
+		otel.RecordAlert(context.Background(), "runtime", severity, source, "")
 	}
 	gwEv := gatewaylog.Event{
 		Timestamp: time.Now().UTC(),

@@ -28,8 +28,7 @@ import subprocess
 
 import click
 
-from defenseclaw import ux
-from defenseclaw.connector_paths import KNOWN_CONNECTORS
+from defenseclaw import connector_paths, ux
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.paths import (
@@ -397,6 +396,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"    {ux.accent('defenseclaw doctor')}           " + ux.dim("Verify connectivity and credentials"))
     click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
     click.echo(f"    {ux.accent('defenseclaw mcp scan --all')}   " + ux.dim("Scan configured MCP servers"))
+    click.echo(f"    {ux.accent('defenseclaw setup <connector>')} " + ux.dim("Add another agent (codex, claudecode)"))
 
     store.close()
 
@@ -475,15 +475,12 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
     from defenseclaw.ux import CLIRenderer
 
+    connector_settings: list[dict] | None = None
     if not non_interactive and not yes and not json_summary and _stdin_is_tty():
         (
-            connector,
-            profile,
+            connector_settings,
             scanner_mode,
             with_judge,
-            fail_mode,
-            human_approval,
-            hilt_min_severity,
             start_gateway,
             verify,
         ) = _prompt_first_run(
@@ -499,26 +496,45 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             rescan_agents=rescan_agents,
         )
 
-    connector = _normalize_connector_arg(
-        connector,
-        discover_default=True,
-        refresh_agents=rescan_agents,
-    )
-    if profile is None:
-        profile = "observe"
+    # Non-interactive / no-TTY path keeps the legacy single-connector
+    # contract: one connector from --connector (or discovery), one set of
+    # policy flags. The interactive path may instead hand back several
+    # connectors, each with its own profile/fail-mode/HITL.
+    if not connector_settings:
+        connector_settings = [
+            {
+                "connector": _normalize_connector_arg(
+                    connector,
+                    discover_default=True,
+                    refresh_agents=rescan_agents,
+                ),
+                "profile": profile if profile is not None else "observe",
+                "fail_mode": fail_mode,
+                "human_approval": human_approval,
+                "hilt_min_severity": hilt_min_severity,
+            }
+        ]
     if start_gateway is None:
         start_gateway = False
     if verify is None:
         verify = True
 
+    primary = connector_settings[0]
+    extras = connector_settings[1:]
+    # When extra connectors will be merged in after the primary bootstrap,
+    # defer the gateway start to a single reconcile at the end so its
+    # set-difference setup wires hooks for EVERY connector in one pass
+    # (instead of starting with only the primary in the map).
+    defer_gateway = bool(extras) and bool(start_gateway)
+
     opts = FirstRunOptions(
-        connector=connector,
-        profile=profile,
+        connector=primary["connector"],
+        profile=primary["profile"] or "observe",
         scanner_mode=scanner_mode,
         with_judge=with_judge,
         skip_install=skip_install,
         sandbox=sandbox,
-        start_gateway=start_gateway,
+        start_gateway=(False if defer_gateway else start_gateway),
         verify=verify,
         verbose=verbose,
         llm_provider=llm_provider,
@@ -533,56 +549,116 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # bootstrap layer treats "" as a no-op so first-run flows
         # that don't surface this option don't accidentally reset
         # an operator's earlier choice.
-        hook_fail_mode=(fail_mode or "").lower(),
+        hook_fail_mode=(primary["fail_mode"] or "").lower(),
         # HITL: ``None`` is "leave alone", ``True``/``False`` set
         # the toggle. Empty severity preserves the existing floor;
         # bootstrap normalizes case and falls back to ``HIGH`` on
         # invalid values.
-        human_approval=human_approval,
-        hilt_min_severity=hilt_min_severity or "",
+        human_approval=primary["human_approval"],
+        hilt_min_severity=primary["hilt_min_severity"] or "",
     )
     report = run_first_run(opts)
+
+    activated = [primary["connector"]]
+    if extras:
+        activated = _activate_additional_connectors(
+            primary,
+            extras,
+            start_gateway=bool(start_gateway),
+        )
+
     if json_summary:
-        click.echo(json.dumps(report.to_dict(), indent=2))
+        payload = report.to_dict()
+        if len(activated) > 1:
+            payload["connectors"] = activated
+        click.echo(json.dumps(payload, indent=2))
         return
     _render_first_run_report(report, CLIRenderer())
+    if len(activated) > 1:
+        click.echo()
+        click.echo("  Configured connectors: " + ", ".join(activated))
     if report.status == "needs_attention":
         raise SystemExit(1)
 
 
-def _prompt_first_run(
+def _parse_connector_list(raw: str | None) -> list[str]:
+    """Parse a comma/space-separated connector string into an ordered,
+    de-duplicated, normalized list. Empty/blank entries are dropped."""
+    out: list[str] = []
+    for part in (raw or "").replace(" ", ",").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        norm = _normalize_connector_arg(token)
+        if norm and norm not in out:
+            out.append(norm)
+    return out
+
+
+def _installed_hook_connectors(disc) -> list[str]:
+    """Installed connectors that can run as multi-connector hook peers.
+
+    Used to pre-fill the first-run connector prompt so an operator with
+    codex + claudecode + antigravity installed can bring all of them up in
+    one pass. Proxy-backed connectors (e.g. openclaw) are excluded — they
+    cannot be multi-connector peers."""
+    from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
+
+    order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
+    names: list[str] = []
+    for name in order:
+        sig = disc.agents.get(name)
+        if sig and sig.installed and name in _HOOK_ENFORCED_CONNECTORS and name not in names:
+            names.append(name)
+    return names
+
+
+def _prompt_connector_selection(connector: str | None, rescan_agents: bool) -> list[str]:
+    """Prompt for ONE OR MORE connectors to configure during first run.
+
+    Returns an ordered, de-duplicated list (first = primary). A single name
+    keeps the legacy single-connector setup; multiple names fan the
+    wizard's per-connector questions out so several agents can be brought
+    up in one pass. Defaults to every installed hook connector so the
+    common "start everything I have" case is a single Enter."""
+    if connector:
+        names = _parse_connector_list(connector)
+        if names:
+            return names
+    disc = agent_discovery.discover_agents(refresh=rescan_agents)
+    table = agent_discovery.render_discovery_table(disc).rstrip()
+    if table:
+        click.echo(table)
+        click.echo()
+    installed = _installed_hook_connectors(disc)
+    default = ",".join(installed) if installed else agent_discovery.first_installed(disc, "codex")
+    ux.subhead(
+        "Enter one connector, or a comma-separated list to set up several at once "
+        "(e.g. codex,claudecode,antigravity).",
+    )
+    raw = click.prompt("  Connector(s)", default=default, show_default=True)
+    names = _parse_connector_list(raw)
+    if not names:
+        names = [agent_discovery.first_installed(disc, "codex")]
+    return names
+
+
+def _prompt_connector_policy(
+    connector: str,
     *,
-    connector: str | None,
     profile: str | None,
-    scanner_mode: str,
-    with_judge: bool,
     fail_mode: str | None,
     human_approval: bool | None,
     hilt_min_severity: str | None,
-    start_gateway: bool | None,
-    verify: bool | None,
-    rescan_agents: bool,
-) -> tuple[str, str, str, bool, str, bool | None, str | None, bool, bool]:
-    ux.section("DefenseClaw First-Run Setup")
-    ux.subhead(
-        "This wizard writes config.yaml, then runs targeted readiness checks.",
-    )
-    click.echo()
-    connector_choices = list(KNOWN_CONNECTORS)
-    if connector:
-        connector = _normalize_connector_arg(connector)
-    else:
-        disc = agent_discovery.discover_agents(refresh=rescan_agents)
-        table = agent_discovery.render_discovery_table(disc).rstrip()
-        if table:
-            click.echo(table)
-            click.echo()
-        connector = click.prompt(
-            "  Connector",
-            type=click.Choice(connector_choices, case_sensitive=False),
-            default=agent_discovery.first_installed(disc, "codex"),
-            show_choices=True,
-        )
+    multi: bool,
+) -> tuple[str, str, bool | None, str | None]:
+    """Ask the wizard's existing per-connector questions for one connector.
+
+    These are the genuinely per-connector policy knobs (protection profile,
+    hook fail-mode, HITL), so one peer can run observe while another runs
+    action. When ``multi`` is set each connector gets its own header."""
+    if multi:
+        ux.section(f"Connector: {connector}")
     if profile is None:
         profile = click.prompt(
             "  " + ux.bold("Protection profile"),
@@ -590,13 +666,6 @@ def _prompt_first_run(
             default="observe",
             show_choices=True,
         )
-    scanner_mode = click.prompt(
-        "  " + ux.bold("Scanner mode"),
-        type=click.Choice(["local", "remote", "both"], case_sensitive=False),
-        default=scanner_mode or "local",
-        show_choices=True,
-    )
-    with_judge = click.confirm("  " + ux.bold("Enable LLM judge now?"), default=with_judge)
     # Hook fail-mode: surface the choice so first-run operators
     # don't have to discover `defenseclaw guardrail fail-mode` to
     # change it later. We only ask when the operator hasn't already
@@ -646,6 +715,63 @@ def _prompt_first_run(
                 default="HIGH",
                 show_choices=True,
             ).upper()
+    return profile, fail_mode, human_approval, hilt_min_severity
+
+
+def _prompt_first_run(
+    *,
+    connector: str | None,
+    profile: str | None,
+    scanner_mode: str,
+    with_judge: bool,
+    fail_mode: str | None,
+    human_approval: bool | None,
+    hilt_min_severity: str | None,
+    start_gateway: bool | None,
+    verify: bool | None,
+    rescan_agents: bool,
+) -> tuple[list[dict], str, bool, bool, bool]:
+    ux.section("DefenseClaw First-Run Setup")
+    ux.subhead(
+        "This wizard writes config.yaml, then runs targeted readiness checks.",
+    )
+    click.echo()
+    connectors = _prompt_connector_selection(connector, rescan_agents)
+    multi = len(connectors) > 1
+
+    # Scanner mode and the LLM judge are process-wide guardrail config
+    # fields (not per-connector), so they are asked once regardless of how
+    # many connectors are being configured.
+    scanner_mode = click.prompt(
+        "  " + ux.bold("Scanner mode"),
+        type=click.Choice(["local", "remote", "both"], case_sensitive=False),
+        default=scanner_mode or "local",
+        show_choices=True,
+    )
+    with_judge = click.confirm("  " + ux.bold("Enable LLM judge now?"), default=with_judge)
+
+    connector_settings: list[dict] = []
+    for c in connectors:
+        # Pre-supplied flags seed a single-connector run; for a multi-select
+        # each connector is prompted independently so its policy can differ.
+        c_profile, c_fail, c_human, c_sev = _prompt_connector_policy(
+            c,
+            profile=(profile if not multi else None),
+            fail_mode=(fail_mode if not multi else None),
+            human_approval=(human_approval if not multi else None),
+            hilt_min_severity=(hilt_min_severity if not multi else None),
+            multi=multi,
+        )
+        connector_settings.append(
+            {
+                "connector": c,
+                "profile": c_profile,
+                "fail_mode": c_fail,
+                "human_approval": c_human,
+                "hilt_min_severity": c_sev,
+            }
+        )
+
     start_gateway = click.confirm(
         "  " + ux.bold("Start gateway after setup?"),
         default=bool(start_gateway),
@@ -654,17 +780,83 @@ def _prompt_first_run(
         "  " + ux.bold("Run targeted readiness checks?"),
         default=True if verify is None else bool(verify),
     )
-    return (
-        connector,
-        profile,
-        scanner_mode,
-        with_judge,
-        fail_mode,
-        human_approval,
-        hilt_min_severity,
-        start_gateway,
-        verify,
-    )
+    return connector_settings, scanner_mode, with_judge, start_gateway, verify
+
+
+def _activate_additional_connectors(
+    primary: dict,
+    extras: list[dict],
+    *,
+    start_gateway: bool,
+) -> list[str]:
+    """Merge the extra first-run connectors into ``guardrail.connectors``.
+
+    The primary connector was already bootstrapped via ``run_first_run``
+    (scanners, device key, observability, its own global mode/fail/HITL).
+    This folds each additional connector into the multi-connector map with
+    its OWN per-connector overrides (mode / hook_fail_mode / HITL), seeds
+    the primary into the map so ``active_connectors()`` lists them all, and
+    keeps the singular ``guardrail.connector`` / ``claw.mode`` mirror at the
+    sorted-first primary for backward-compatible readers. Hooks for every
+    connector are installed by the gateway's set-difference reconcile on the
+    single (re)start below. Returns the full sorted active-connector list."""
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig
+
+    primary_name = connector_paths.normalize(primary["connector"])
+    try:
+        cfg = cfg_mod.load()
+    except Exception as exc:  # noqa: BLE001 — surface and fall back to primary-only.
+        click.echo(f"  ✗ could not reload config to add connectors: {exc}", err=True)
+        return [primary_name]
+
+    gc = cfg.guardrail
+    if not getattr(gc, "connectors", None):
+        gc.connectors = {}
+    # Seed the primary so the multi map represents every active connector.
+    # An empty override means it inherits the global mode/fail/HITL that
+    # run_first_run already wrote for it.
+    gc.connectors.setdefault(primary_name, PerConnectorGuardrailConfig())
+
+    for s in extras:
+        key = connector_paths.normalize(s["connector"])
+        pc = gc.connectors.get(key) or PerConnectorGuardrailConfig()
+        mode = (s["profile"] or "observe").lower()
+        pc.mode = "action" if mode == "action" else "observe"
+        if s["fail_mode"]:
+            pc.hook_fail_mode = "closed" if s["fail_mode"].lower() == "closed" else "open"
+        if s["human_approval"] is not None:
+            pc.hilt = HILTConfig(
+                enabled=bool(s["human_approval"]),
+                min_severity=(s["hilt_min_severity"] or "HIGH").upper(),
+            )
+        gc.connectors[key] = pc
+
+    # Keep the singular mirror pointing at the sorted-first connector so
+    # legacy single-connector readers (older Go binaries, single-connector
+    # Python paths) keep working.
+    primary_key = sorted(gc.connectors)[0]
+    gc.connector = primary_key
+    cfg.claw.mode = primary_key
+
+    try:
+        cfg.save()
+    except OSError as exc:
+        click.echo(f"  ✗ failed to save multi-connector config: {exc}", err=True)
+        return [primary_key]
+
+    active = sorted(gc.connectors)
+    click.echo("  ✓ Configured connectors: " + ", ".join(active))
+    if start_gateway:
+        from defenseclaw.bootstrap import _start_gateway_structured
+
+        step = _start_gateway_structured(cfg)
+        click.echo(f"  • Sidecar: {step.detail}")
+    else:
+        click.echo(
+            "  • Gateway not started — run 'defenseclaw-gateway start' to wire every connector's hooks.",
+        )
+    return active
 
 
 def _normalize_connector_arg(
@@ -697,6 +889,7 @@ def _render_first_run_report(report, renderer) -> None:
     renderer.section("Next")
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
+    renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
 
 
 def _seed_rego_policies(policy_dir: str) -> None:

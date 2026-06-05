@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
 from defenseclaw.tui.panels.registries import registry_badge
+from defenseclaw.tui.services import connector_filter as connector_filter_svc
 
 CatalogKind = Literal["skill", "mcp", "plugin", "tool"]
 
@@ -170,6 +171,10 @@ class SkillRow:
     file_action: str = ""
     install_action: str = ""
     runtime_action: str = ""
+    # 8.13 pass 2: connector this row was loaded from. Empty for single-
+    # connector installs (the CONNECTOR column stays hidden); set when the
+    # app merges ``skill list --json`` across every active connector.
+    connector: str = ""
 
     @property
     def registry_badge(self) -> str:
@@ -197,6 +202,8 @@ class MCPRow:
     file_action: str = ""
     install_action: str = ""
     runtime_action: str = ""
+    # 8.13 pass 2: connector this row was loaded from (see SkillRow.connector).
+    connector: str = ""
 
     @property
     def url(self) -> str:
@@ -220,6 +227,8 @@ class PluginRow:
     enabled: bool = False
     verdict: str = ""
     scan: PluginScanSummary | None = None
+    # 8.13 pass 2: connector this row was loaded from (see SkillRow.connector).
+    connector: str = ""
 
     @property
     def display_name(self) -> str:
@@ -263,6 +272,83 @@ class CatalogListModel(Generic[RowT]):
         self.message = ""
         self.detail_open = False
         self._filter_fields = filter_fields
+        # WU13: when the TUI is focused on a non-primary connector in a
+        # multi-connector install, the app sets this True so the list
+        # command targets that connector via ``--connector <name>``.
+        # False (the default) keeps single-connector behaviour unchanged
+        # — no flag is appended and the active connector is listed.
+        self.connector_focus_enabled = False
+        # 8.13 pass 2: when the app merges this catalog across every active
+        # connector it sets ``show_connector_column = True`` and tags rows with
+        # their connector. ``connector_filter`` ("" = All) then narrows the
+        # merged rows in-memory, mirroring the Alerts/Audit/Logs panes — no
+        # reload needed when the operator cycles the shared chip.
+        self.show_connector_column = False
+        self.connector_filter = ""
+
+    def set_connector_filter(self, connector: str) -> None:
+        """Narrow the merged rows to one connector ("" = All); re-filters."""
+
+        connector = (connector or "").strip().lower()
+        if connector == self.connector_filter:
+            return
+        self.connector_filter = connector
+        self.apply_filter()
+
+    @staticmethod
+    def row_connector(row: object) -> str:
+        return str(getattr(row, "connector", "") or "")
+
+    def _parse_rows(self, text: str) -> Sequence[RowT]:
+        """Parse a single connector's list JSON into rows (subclass hook)."""
+
+        raise NotImplementedError
+
+    def apply_merged(self, results: Sequence[tuple[str, str | None]]) -> None:
+        """Merge per-connector list payloads, tagging each row's connector.
+
+        ``results`` is ``[(connector, json_text_or_None)]``; a ``None`` payload
+        means that connector's list command failed and is skipped. Rows are
+        concatenated in roster order so the CONNECTOR column groups naturally.
+        """
+
+        rows: list[RowT] = []
+        for connector, text in results:
+            if not text:
+                continue
+            try:
+                parsed = self._parse_rows(text)
+            except Exception:  # noqa: BLE001 - a bad payload skips one connector.
+                continue
+            for row in parsed:
+                try:
+                    rows.append(replace(row, connector=connector))  # type: ignore[arg-type]
+                except TypeError:
+                    rows.append(row)
+        self.apply_loaded(rows)
+
+    def focus_connector(self) -> str:
+        """The focused connector name, or ``""`` when focus is inactive.
+
+        E2: mutation intents (scan/info/install/set/unset) thread this so
+        the action targets the focused connector. Block/allow/unblock are
+        deliberately excluded — enforcement is a process-global block list
+        keyed by ``(type, name)``, so a blocked capability is blocked for
+        every connector (not a per-connector knob)."""
+        connector = getattr(self, "connector", "")
+        if self.connector_focus_enabled and connector:
+            return connector
+        return ""
+
+    def _connector_focus_args(self) -> tuple[str, ...]:
+        """Return ``("--connector", <name>)`` when multi-connector focus is
+        active, else ``()``. Subclasses that carry a ``connector`` append
+        this to their list command so the catalog reflects the focused
+        connector instead of the active one."""
+        connector = self.focus_connector()
+        if connector:
+            return ("--connector", connector)
+        return ()
 
     def set_size(self, width: int, height: int) -> None:
         self.width = width
@@ -285,6 +371,26 @@ class CatalogListModel(Generic[RowT]):
     def load_intent(self) -> CatalogCommandIntent:
         raise NotImplementedError
 
+    def load_intent_for(self, connector: str) -> CatalogCommandIntent:
+        """``load_intent`` forced to a specific connector (merged loads).
+
+        Temporarily pins ``connector`` + focus so the subclass's existing
+        ``_connector_focus_args`` appends ``--connector <name>``, then restores
+        the prior state so single-connector behaviour is untouched.
+        """
+
+        saved_connector = getattr(self, "connector", "")
+        saved_focus = self.connector_focus_enabled
+        try:
+            if hasattr(self, "connector"):
+                self.connector = connector  # type: ignore[attr-defined]
+            self.connector_focus_enabled = bool(connector)
+            return self.load_intent()
+        finally:
+            if hasattr(self, "connector"):
+                self.connector = saved_connector  # type: ignore[attr-defined]
+            self.connector_focus_enabled = saved_focus
+
     def refresh(self) -> None:
         self.apply_filter()
 
@@ -304,11 +410,17 @@ class CatalogListModel(Generic[RowT]):
         self.apply_filter()
 
     def apply_filter(self) -> None:
-        if not self.filter_text or not self._filter_fields:
-            self.filtered = self.items
-        else:
+        rows: tuple[RowT, ...] = self.items
+        if self.connector_filter:
+            rows = tuple(
+                row
+                for row in rows
+                if connector_filter_svc.filter_allows(self.connector_filter, self.row_connector(row))
+            )
+        if self.filter_text and self._filter_fields:
             query = self.filter_text.lower()
-            self.filtered = tuple(row for row in self.items if query in self._haystack(row))
+            rows = tuple(row for row in rows if query in self._haystack(row))
+        self.filtered = rows
         self._clamp_cursor()
 
     def selected(self) -> RowT | None:
@@ -377,9 +489,16 @@ class CatalogListModel(Generic[RowT]):
         return ""
 
     def data_table_columns(self) -> tuple[str, ...]:
-        return ("Name", "Status", "Source", "Actions", "Details")
+        base = ("Name", "Status", "Source", "Actions", "Details")
+        if self.show_connector_column:
+            return ("Connector", *base)
+        return base
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
+        if self.show_connector_column:
+            return tuple(
+                (self.row_connector(row) or "—", *catalog_row_cells(row)) for row in self.filtered
+            )
         return tuple(catalog_row_cells(row) for row in self.filtered)
 
     def summary_text(self, title: str) -> str:
@@ -423,7 +542,7 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
     def load_intent(self) -> CatalogCommandIntent:
         return CatalogCommandIntent(
             label="skill list --json",
-            args=("skill", "list", "--json"),
+            args=("skill", "list", "--json", *self._connector_focus_args()),
             origin="skills",
             category="info",
             hint="Loading skills...",
@@ -437,6 +556,9 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
 
     def apply_json(self, text: str) -> None:
         self.apply_loaded(parse_skill_list_json(text))
+
+    def _parse_rows(self, text: str) -> Sequence[SkillRow]:
+        return parse_skill_list_json(text)
 
     def set_connector(self, connector: str) -> None:
         self.connector = connector
@@ -457,7 +579,7 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         row = self.selected()
         if row is None:
             return None
-        return skill_action_intent(key, row, origin=origin)
+        return skill_action_intent(key, row, origin=origin, connector=self.focus_connector())
 
     def registry_focus(self) -> RegistryFocus | None:
         row = self.selected()
@@ -512,7 +634,7 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
     def load_intent(self) -> CatalogCommandIntent:
         return CatalogCommandIntent(
             label="mcp list --json",
-            args=("mcp", "list", "--json"),
+            args=("mcp", "list", "--json", *self._connector_focus_args()),
             origin="mcps",
             category="info",
             hint="Loading MCP servers...",
@@ -526,6 +648,9 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
 
     def apply_json(self, text: str) -> None:
         self.apply_loaded(parse_mcp_list_json(text))
+
+    def _parse_rows(self, text: str) -> Sequence[MCPRow]:
+        return parse_mcp_list_json(text)
 
     def set_connector(self, connector: str) -> None:
         self.connector = connector
@@ -549,7 +674,7 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         row = self.selected()
         if row is None:
             return None
-        return mcp_action_intent(key, row, origin=origin)
+        return mcp_action_intent(key, row, origin=origin, connector=self.focus_connector())
 
     def registry_focus(self) -> RegistryFocus | None:
         row = self.selected()
@@ -605,7 +730,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
     def load_intent(self) -> CatalogCommandIntent:
         return CatalogCommandIntent(
             label="plugin list --json",
-            args=("plugin", "list", "--json"),
+            args=("plugin", "list", "--json", *self._connector_focus_args()),
             origin="plugins",
             category="info",
             hint="Loading plugins...",
@@ -619,6 +744,9 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
 
     def apply_json(self, text: str) -> None:
         self.apply_loaded(parse_plugin_list_json(text))
+
+    def _parse_rows(self, text: str) -> Sequence[PluginRow]:
+        return parse_plugin_list_json(text)
 
     def set_connector(self, connector: str) -> None:
         self.connector = connector
@@ -642,7 +770,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         row = self.selected()
         if row is None:
             return None
-        return plugin_action_intent(key, row, origin=origin)
+        return plugin_action_intent(key, row, origin=origin, connector=self.focus_connector())
 
     def list_height(self) -> int:
         height = self.height - 1 - self.detail_height()
@@ -667,7 +795,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             row = self.selected()
             if row is None:
                 return CatalogPanelAction(True)
-            return CatalogPanelAction(True, plugin_direct_scan_intent(row))
+            return CatalogPanelAction(True, plugin_direct_scan_intent(row, self.focus_connector()))
         if key == "o":
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key == "r":
@@ -1062,7 +1190,17 @@ def tool_actions(status: str) -> tuple[CatalogMenuAction, ...]:
     return tuple(actions)
 
 
-def skill_action_intent(key: str, row: SkillRow, *, origin: str) -> CatalogCommandIntent | None:
+# E2: verb keys whose CLI subcommand accepts ``--connector``. Mutations
+# that hit the process-global enforcement store (block/allow/unblock/...)
+# are intentionally absent — those are connector-agnostic by design.
+_SKILL_CONNECTOR_VERBS = frozenset({"s", "i", "n"})  # scan, info, install
+_MCP_CONNECTOR_VERBS = frozenset({"s", "i", "x"})  # scan, list, unset
+_PLUGIN_CONNECTOR_VERBS = frozenset({"s", "i"})  # scan, info
+
+
+def skill_action_intent(
+    key: str, row: SkillRow, *, origin: str, connector: str = ""
+) -> CatalogCommandIntent | None:
     verbs = {
         "s": ("scan", "scan skill"),
         "i": ("info", "info skill"),
@@ -1078,14 +1216,19 @@ def skill_action_intent(key: str, row: SkillRow, *, origin: str) -> CatalogComma
     if key not in verbs:
         return None
     verb, label_prefix = verbs[key]
+    args = ["skill", verb, row.name]
+    if connector and key in _SKILL_CONNECTOR_VERBS:
+        args.extend(("--connector", connector))
     return CatalogCommandIntent(
         label=f"{label_prefix} {row.name}",
-        args=("skill", verb, row.name),
+        args=tuple(args),
         origin=origin,
     )
 
 
-def mcp_action_intent(key: str, row: MCPRow, *, origin: str) -> CatalogCommandIntent | None:
+def mcp_action_intent(
+    key: str, row: MCPRow, *, origin: str, connector: str = ""
+) -> CatalogCommandIntent | None:
     verbs = {
         "s": ("scan", "scan mcp"),
         "i": ("list", "list mcp"),
@@ -1097,21 +1240,28 @@ def mcp_action_intent(key: str, row: MCPRow, *, origin: str) -> CatalogCommandIn
     if key not in verbs:
         return None
     verb, label_prefix = verbs[key]
-    args = ("mcp", "list") if key == "i" else ("mcp", verb, row.name)
+    args = ["mcp", "list"] if key == "i" else ["mcp", verb, row.name]
     label = label_prefix if key == "i" else f"{label_prefix} {row.name}"
-    return CatalogCommandIntent(label=label, args=args, origin=origin)
+    if connector and key in _MCP_CONNECTOR_VERBS:
+        args.extend(("--connector", connector))
+    return CatalogCommandIntent(label=label, args=tuple(args), origin=origin)
 
 
-def plugin_direct_scan_intent(row: PluginRow) -> CatalogCommandIntent:
+def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCommandIntent:
     target = row.id
+    args = ["plugin", "scan", target]
+    if connector:
+        args.extend(("--connector", connector))
     return CatalogCommandIntent(
         label=f"scan plugin {target}",
-        args=("plugin", "scan", target),
+        args=tuple(args),
         origin="plugins",
     )
 
 
-def plugin_action_intent(key: str, row: PluginRow, *, origin: str) -> CatalogCommandIntent | None:
+def plugin_action_intent(
+    key: str, row: PluginRow, *, origin: str, connector: str = ""
+) -> CatalogCommandIntent | None:
     verbs = {
         "s": ("scan", "scan plugin"),
         "i": ("info", "info plugin"),
@@ -1128,9 +1278,12 @@ def plugin_action_intent(key: str, row: PluginRow, *, origin: str) -> CatalogCom
         return None
     verb, label_prefix = verbs[key]
     target = row.display_name
+    args = ["plugin", verb, target]
+    if connector and key in _PLUGIN_CONNECTOR_VERBS:
+        args.extend(("--connector", connector))
     return CatalogCommandIntent(
         label=f"{label_prefix} {target}",
-        args=("plugin", verb, target),
+        args=tuple(args),
         origin=origin,
     )
 

@@ -306,6 +306,15 @@ type Event struct {
 	ToolName          string `json:"tool_name,omitempty"`
 	ToolID            string `json:"tool_id,omitempty"`
 
+	// Connector is the hook/proxy connector that produced this event
+	// (codex, claudecode, antigravity, openclaw, …). Optional —
+	// empty on single-connector installs and on events with no
+	// connector scope. Lets gateway.jsonl consumers (Splunk local
+	// bridge, AgentWatch) filter/group by connector with the same
+	// identity the audit rows and OTel telemetry carry, instead of
+	// inferring it from the model/agent fields.
+	Connector string `json:"connector,omitempty"`
+
 	// Multi-tenant / fleet-scoping fields.
 	//
 	// These are stamped from config at the writer / OTel choke points

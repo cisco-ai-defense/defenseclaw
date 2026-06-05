@@ -187,7 +187,7 @@ If the SDK is missing when you run a scan, DefenseClaw prints the install hint a
 The watcher's verdict is the default. Operators always have manual override:
 
 ```bash
-defenseclaw skill list                              # what is on disk + state
+defenseclaw skill list                              # on-disk skills + state, across ALL active connectors (not just OpenClaw)
 defenseclaw skill block <name> --reason "untrusted publisher"
 defenseclaw skill quarantine <name> --reason "review pending"
 defenseclaw skill restore <name>                    # un-quarantine

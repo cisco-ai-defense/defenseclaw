@@ -23,6 +23,18 @@ from defenseclaw.tui.services.gateway_events import parse_timestamp, timestamp_l
 AuditIntentKind = Literal["export"]
 AuditCommonFilter = Literal["", "risk", "blocks", "scans", "credentials"]
 AUDIT_TABLE_COLUMNS: tuple[str, ...] = ("TIME", "ACTION", "TYPE", "TARGET", "SEVERITY", "RUN", "DETAILS")
+# Multi-connector variant: a CONNECTOR column is inserted after TYPE so the
+# operator can attribute each event without opening the detail pane.
+AUDIT_TABLE_COLUMNS_MULTI: tuple[str, ...] = (
+    "TIME",
+    "ACTION",
+    "TYPE",
+    "CONNECTOR",
+    "TARGET",
+    "SEVERITY",
+    "RUN",
+    "DETAILS",
+)
 
 AUDIT_COMMON_FILTER_LABELS: dict[AuditCommonFilter, str] = {
     "": "All",
@@ -88,6 +100,7 @@ class AuditRowView:
     severity_style_key: str
     run_label: str
     details_label: str
+    connector_label: str = ""
 
     @property
     def table_key(self) -> str:
@@ -99,6 +112,20 @@ class AuditRowView:
             self.time_label,
             self.action_label,
             self.target_type,
+            self.target_label,
+            self.severity_label,
+            self.run_label,
+            self.details_label,
+        )
+
+    def cells_with_connector(self) -> tuple[str, ...]:
+        """Cells with a CONNECTOR column inserted after TYPE (multi-connector)."""
+
+        return (
+            self.time_label,
+            self.action_label,
+            self.target_type,
+            self.connector_label or "—",
             self.target_label,
             self.severity_label,
             self.run_label,
@@ -181,6 +208,12 @@ class AuditPanelModel:
         self.correlation_run_id = ""
         self.detail_open = False
         self.error_message = ""
+        # 8.13 multi-connector: the shared connector filter ("" = All) and
+        # whether the table should surface a CONNECTOR column. Both are set
+        # by the app from the active connector count; single-connector
+        # installs leave them at the defaults so the table is unchanged.
+        self.connector_filter = ""
+        self.show_connector_column = False
         self._detail_cache: AuditDetailInfo | None = None
         self._detail_cache_cursor = -1
 
@@ -253,13 +286,17 @@ class AuditPanelModel:
         return tuple(self._row_view(index, self.filtered[index]) for index in range(start, end))
 
     def data_table_columns(self) -> tuple[str, ...]:
-        """Return the Go Audit table columns for Textual."""
+        """Return the Audit table columns, with CONNECTOR in multi-connector."""
 
+        if self.show_connector_column:
+            return AUDIT_TABLE_COLUMNS_MULTI
         return AUDIT_TABLE_COLUMNS
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
-        """Return filtered Audit rows in the Go column shape."""
+        """Return filtered Audit rows in the active column shape."""
 
+        if self.show_connector_column:
+            return tuple(row.cells_with_connector() for row in self.row_views())
         return tuple(row.cells for row in self.row_views())
 
     def data_table_row_models(self) -> tuple[AuditRowView, ...]:
@@ -308,6 +345,19 @@ class AuditPanelModel:
 
     def set_events(self, events: list[Event]) -> None:
         self.items = list(events)
+        self.apply_filter()
+
+    def set_connector_filter(self, connector: str) -> None:
+        """Set the shared connector filter ("" = All) and re-apply filters.
+
+        Recomputes :attr:`filtered` so the row count, cursor, and detail
+        cache stay consistent with the narrowed view.
+        """
+
+        connector = (connector or "").strip().lower()
+        if connector == self.connector_filter:
+            return
+        self.connector_filter = connector
         self.apply_filter()
 
     def apply_filter(self) -> None:
@@ -642,6 +692,7 @@ class AuditPanelModel:
             severity_style_key=audit_severity_style_key(event.severity),
             run_label=_truncate(event.run_id, 14),
             details_label=details_label,
+            connector_label=_truncate(event_connector(event), 14),
         )
 
     def _handle_filter_key(self, key: str) -> AuditPanelAction:
@@ -671,6 +722,8 @@ class AuditPanelModel:
         if self.correlation_run_id and event.run_id != self.correlation_run_id:
             return False
         if self.filter_text and not _matches_search_query(event, self.filter_text):
+            return False
+        if self.connector_filter and self.connector_filter not in event_connector(event).lower():
             return False
         return True
 
@@ -844,7 +897,7 @@ def _matches_search_query(event: Event, query: str) -> bool:
         return True
     for term in terms:
         field, separator, value = term.partition(":")
-        if separator and field in {"action", "actor", "details", "id", "run", "run_id", "severity", "target", "type"}:
+        if separator and field in {"action", "actor", "connector", "details", "id", "run", "run_id", "severity", "target", "type"}:
             if value not in _event_field(event, field):
                 return False
             continue
@@ -862,6 +915,8 @@ def _event_field(event: Event, field: str) -> str:
         return event.action.lower()
     if field == "actor":
         return event.actor.lower()
+    if field == "connector":
+        return _parse_kv_details(event.details).get("connector", "").lower()
     if field == "details":
         return event.details.lower()
     if field == "severity":
@@ -1161,6 +1216,39 @@ def _row_details_label(event: Event) -> str:
 # audit events too) can reuse the connector-hook formatting without
 # duplicating the parser. We deliberately keep the underscored names
 # intact so the audit panel's call sites stay unchanged.
+def split_connector_token(query: str) -> tuple[str, str]:
+    """Split a ``connector:<name>`` token out of a (lowercased) query.
+
+    E5: the Audit panel recognizes a structured ``connector:`` search
+    token (see ``_matches_search_query``). This helper exposes the same
+    extraction so the Alerts and Logs panels can offer identical syntax.
+    Returns ``(connector_value, remaining_query)`` where the remainder is
+    the free-text portion to be matched however the caller normally does.
+    """
+
+    connector = ""
+    rest: list[str] = []
+    for tok in query.split():
+        field, sep, value = tok.partition(":")
+        if sep and field == "connector":
+            connector = value
+        else:
+            rest.append(tok)
+    return connector, " ".join(rest)
+
+
+def event_connector(event: Event) -> str:
+    """Best-effort connector attribution for an audit event.
+
+    The gateway tags every emitted event with ``connector=<name>`` in the
+    detail blob, so that is the primary source. Returns "" when no connector
+    is recorded (e.g. synthetic scan/egress alerts that predate attribution),
+    which the CONNECTOR column renders as ``—``.
+    """
+
+    return _parse_kv_details(event.details).get("connector", "").strip()
+
+
 parse_kv_details = _parse_kv_details
 prettify_kv_value = _prettify_kv_value
 structured_detail_rows = _structured_detail_rows
