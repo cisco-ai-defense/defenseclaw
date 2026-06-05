@@ -101,7 +101,7 @@ fi
 # `// "allow"` default below, which silently allowed Cascade actions
 # even with FAIL_MODE=closed. We now route through fail_response so
 # the parse error is logged AND respects FAIL_MODE.
-if ! echo "$RESULT" | jq -e . >/dev/null 2>&1; then
+if ! echo "$RESULT" | _dc_jq -e . >/dev/null 2>&1; then
   fail_response "invalid JSON response"
 fi
 

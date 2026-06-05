@@ -288,11 +288,15 @@ _dc_jq() {
     jq "$@"
     return
   fi
-  local _dcjq_raw=0 _dcjq_compact=0 _dcjq_filter=""
+  local _dcjq_raw=0 _dcjq_compact=0 _dcjq_exit=0 _dcjq_filter=""
   for _dcjq_a in "$@"; do
     case "$_dcjq_a" in
       -r)   _dcjq_raw=1 ;;
       -c)   _dcjq_compact=1 ;;
+      # -e sets exit status from the output (used as a JSON-validity probe,
+      # e.g. `_dc_jq -e .`). Without it the identity filter would be parsed
+      # as the literal filter "-e" and the probe would silently misbehave.
+      -e)   _dcjq_exit=1 ;;
       # Handle accidental merged forms: -r.field or -c.field (no space)
       -r.*) _dcjq_raw=1;     _dcjq_filter="${_dcjq_a#-r}" ;;
       -c.*) _dcjq_compact=1; _dcjq_filter="${_dcjq_a#-c}" ;;
@@ -305,16 +309,26 @@ _dc_jq() {
   # inside shell single quotes.
   if command -v python3 >/dev/null 2>&1; then
     DCJQ_FILTER="$_dcjq_filter" DCJQ_RAW="$_dcjq_raw" DCJQ_COMPACT="$_dcjq_compact" \
+    DCJQ_EXIT="$_dcjq_exit" \
       python3 -c \
 'import json,sys,os,re
 f=os.environ.get("DCJQ_FILTER","")
 raw=os.environ.get("DCJQ_RAW","0")=="1"
 compact=os.environ.get("DCJQ_COMPACT","0")=="1"
+exit_test=os.environ.get("DCJQ_EXIT","0")=="1"
 try:
   data=json.load(sys.stdin)
 except Exception:
   sys.exit(1)
-m=re.match(r"^\.(\w+)\s*(?://\s*(.+))?$",f.strip())
+fs=f.strip()
+if fs in (".",""):
+  # Identity filter / validity probe (jq -e .): valid JSON exits 0.
+  if exit_test and (data is None or data is False):
+    sys.exit(1)
+  sep=(",",":") if compact else (", ",": ")
+  sys.stdout.write((data if (raw and isinstance(data,str)) else json.dumps(data,separators=sep))+"\n")
+  sys.exit(0)
+m=re.match(r"^\.(\w+)\s*(?://\s*(.+))?$",fs)
 if not m:
   sys.exit(1)
 field=m.group(1)
@@ -337,6 +351,12 @@ else:
   # Object fields (claude_code_output, codex_output, hook_output) return
   # empty; callers already handle the empty case correctly.
   local _dcjq_field
+  case "$_dcjq_filter" in
+    # Identity filter / validity probe with no jq and no python3: we can't
+    # parse JSON, so pass the body through and succeed rather than emitting
+    # a false "invalid JSON" that would route a real verdict into fail mode.
+    .|"") cat; return 0 ;;
+  esac
   _dcjq_field="${_dcjq_filter#.}"
   _dcjq_field="${_dcjq_field%%[[:space:]]*}"
   defenseclaw_json_string_field "$(cat)" "$_dcjq_field"
@@ -480,9 +500,10 @@ defenseclaw_handle_missing_token() {
 #   PAYLOAD="$(defenseclaw_read_stdin_capped)" || exit $?
 #
 # Returns 0 with the body on stdout. Returns 1 (overflow) with an
-# empty stdout. Returns 2 if `head` is missing on the system; in that
-# case we fall back to the legacy unbounded read so the hook still
-# functions on minimal containers, but we log the unbounded read as a
+# empty stdout. If `head` is missing we read the body with a bounded
+# python3 reader (overflow still returns 1); only when both head(1) and
+# python3 are absent do we fall back to a legacy unbounded read so the
+# hook still functions on minimal containers, logging it as a
 # transport-category event so operators can spot it.
 defenseclaw_read_stdin_capped() {
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-unknown}"
@@ -491,25 +512,62 @@ defenseclaw_read_stdin_capped() {
   case "$cap" in
     ''|*[!0-9]*) cap=1048576 ;;
   esac
-  if ! command -v head >/dev/null 2>&1; then
-    defenseclaw_log_hook_failure "$connector" "$hook_name" \
-      "head(1) missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
-      transport "${FAIL_MODE:-open}"
-    cat
+  # Tier 1 — bounded python3 read (preferred). python3 is byte-exact on
+  # every OS: it reads at most cap+1 bytes and reports overflow precisely.
+  # We prefer it over head(1) because BSD/macOS `head -c N` OVER-READS a
+  # pipe (it drains everything past N), which defeats any "is there a
+  # byte past the cap?" probe and would silently truncate an oversized
+  # body instead of failing closed. python3 is the same interpreter the
+  # _dc_jq shim already relies on, so requiring it here adds no new dep on
+  # the hosts these hooks actually run on.
+  if command -v python3 >/dev/null 2>&1; then
+    local _dc_body _dc_rc
+    _dc_body="$(DCHOOK_CAP="$cap" python3 -c \
+'import sys,os
+cap=int(os.environ.get("DCHOOK_CAP","1048576"))
+data=sys.stdin.buffer.read(cap+1)
+if len(data)>cap:
+    sys.exit(3)
+sys.stdout.buffer.write(data)')"
+    _dc_rc=$?
+    if [ "$_dc_rc" -eq 3 ]; then
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "stdin body exceeded ${cap} byte cap" transport "${FAIL_MODE:-open}"
+      echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
+      return 1
+    fi
+    printf '%s' "$_dc_body"
     return 0
   fi
-  local body
-  body="$(head -c "$cap")"
-  local overflow
-  overflow="$(head -c 1 2>/dev/null || true)"
-  if [ -n "$overflow" ]; then
-    defenseclaw_log_hook_failure "$connector" "$hook_name" \
-      "stdin body exceeded ${cap} byte cap" \
-      transport "${FAIL_MODE:-open}"
-    echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
-    return 1
+  # Tier 2 — head(1) fallback for python3-less hosts. Read cap+1 bytes in a
+  # SINGLE call and compare the captured length: a two-call probe
+  # (`head -c cap` then `head -c 1`) is unreliable because BSD head drains
+  # the pipe on the first read, so the second read always sees EOF and an
+  # oversized body would be truncated to cap bytes and accepted. The
+  # `; printf x` + `%x` strip-guard preserves trailing newlines so the
+  # length check is exact (command substitution otherwise trims them).
+  # LANG=C (set by defenseclaw_harden_env) makes ${#body} a byte count.
+  if command -v head >/dev/null 2>&1; then
+    local body
+    body="$(head -c "$((cap + 1))"; printf x)"
+    body="${body%x}"
+    if [ "${#body}" -gt "$cap" ]; then
+      defenseclaw_log_hook_failure "$connector" "$hook_name" \
+        "stdin body exceeded ${cap} byte cap" \
+        transport "${FAIL_MODE:-open}"
+      echo "defenseclaw: hook payload exceeded ${cap} bytes; refusing to truncate" >&2
+      return 1
+    fi
+    printf '%s' "$body"
+    return 0
   fi
-  printf '%s' "$body"
+  # Tier 3 — neither python3 nor head present (minimal container): legacy
+  # unbounded read so the hook still functions, logged so operators can
+  # spot the missing-tooling condition.
+  defenseclaw_log_hook_failure "$connector" "$hook_name" \
+    "head(1)/python3 missing; reading stdin unbounded (set DEFENSECLAW_HOOK_MAX_BODY)" \
+    transport "${FAIL_MODE:-open}"
+  cat
   return 0
 }
 

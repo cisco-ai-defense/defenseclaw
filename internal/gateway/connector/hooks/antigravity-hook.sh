@@ -98,7 +98,7 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-OUTPUT=$(echo "$RESULT" | jq -c '.hook_output // empty' 2>/dev/null) || {
+OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then

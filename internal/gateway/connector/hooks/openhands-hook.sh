@@ -91,12 +91,12 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi
 
-OUTPUT=$(echo "$RESULT" | jq -c '.hook_output // empty' 2>/dev/null) || {
+OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
-  DECISION=$(echo "$OUTPUT" | jq -r '.decision // empty' 2>/dev/null || true)
+  DECISION=$(echo "$OUTPUT" | _dc_jq -r '.decision // empty' 2>/dev/null || true)
   if [ "$DECISION" = "deny" ] || [ "$DECISION" = "block" ]; then
     exit 2
   fi
