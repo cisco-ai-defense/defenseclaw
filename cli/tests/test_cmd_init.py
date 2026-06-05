@@ -1762,7 +1762,10 @@ class TestMultiConnectorInit(unittest.TestCase):
         from defenseclaw import config as cfg_mod
         from defenseclaw.commands.cmd_init import _activate_additional_connectors
 
-        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}):
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
             cfg = cfg_mod.default_config()
             cfg.guardrail.connector = "codex"
             cfg.claw.mode = "codex"
@@ -1796,6 +1799,68 @@ class TestMultiConnectorInit(unittest.TestCase):
             # backward-compatible (single-connector) readers.
             self.assertEqual(gc.connector, "claudecode")
             self.assertEqual(reloaded.claw.mode, "claudecode")
+
+    def test_activate_additional_connectors_downgrades_unverified_action(self):
+        """An extra connector requested in action mode whose installed version
+        is not verified against a known hook contract must be downgraded to
+        observe (parity with the Go gateway boot gate), not silently written as
+        an enforcing connector the gateway will refuse to run."""
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=False,
+        ):
+            cfg = cfg_mod.default_config()
+            cfg.guardrail.connector = "codex"
+            cfg.claw.mode = "codex"
+            cfg.guardrail.mode = "observe"
+            cfg.guardrail.enabled = True
+            cfg.save()
+
+            _activate_additional_connectors(
+                {"connector": "codex", "profile": "observe", "fail_mode": "open",
+                 "human_approval": None, "hilt_min_severity": None},
+                [{"connector": "claudecode", "profile": "action", "fail_mode": "closed",
+                  "human_approval": None, "hilt_min_severity": None}],
+                start_gateway=False,
+            )
+
+            reloaded = cfg_mod.load()
+            # Unverified extra is downgraded to observe, not action.
+            self.assertEqual(reloaded.guardrail.connectors["claudecode"].mode, "observe")
+
+    def test_activate_additional_connectors_keeps_action_with_drift_override(self):
+        """With the explicit drift override the gate passes, so the extra stays
+        in action mode."""
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_HOME": self.tmp_dir, "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"},
+        ), patch(
+            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+            return_value=True,
+        ):
+            cfg = cfg_mod.default_config()
+            cfg.guardrail.connector = "codex"
+            cfg.claw.mode = "codex"
+            cfg.guardrail.mode = "observe"
+            cfg.guardrail.enabled = True
+            cfg.save()
+
+            _activate_additional_connectors(
+                {"connector": "codex", "profile": "observe", "fail_mode": "open",
+                 "human_approval": None, "hilt_min_severity": None},
+                [{"connector": "claudecode", "profile": "action", "fail_mode": "closed",
+                  "human_approval": None, "hilt_min_severity": None}],
+                start_gateway=False,
+            )
+
+            reloaded = cfg_mod.load()
+            self.assertEqual(reloaded.guardrail.connectors["claudecode"].mode, "action")
 
     def test_prompt_first_run_fans_out_per_connector(self):
         from defenseclaw.commands import cmd_init

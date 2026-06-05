@@ -801,6 +801,9 @@ def _activate_additional_connectors(
     connector are installed by the gateway's set-difference reconcile on the
     single (re)start below. Returns the full sorted active-connector list."""
     from defenseclaw import config as cfg_mod
+    from defenseclaw.commands.cmd_setup import (
+        _check_connector_version_supported_for_setup,
+    )
     from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig
 
     primary_name = connector_paths.normalize(primary["connector"])
@@ -822,6 +825,23 @@ def _activate_additional_connectors(
         key = connector_paths.normalize(s["connector"])
         pc = gc.connectors.get(key) or PerConnectorGuardrailConfig()
         mode = (s["profile"] or "observe").lower()
+        # Parity with single-connector setup: an extra connector may only be
+        # configured in enforcing (action) mode when its installed version maps
+        # to a known hook contract. Otherwise downgrade it to observe (still
+        # guarded, just non-blocking) and tell the operator. The Go gateway
+        # applies the same gate at boot (skipping unverified action connectors),
+        # so without this the CLI would silently write an action-mode connector
+        # the gateway then refuses to enforce.
+        if mode == "action" and not _check_connector_version_supported_for_setup(
+            key, mode="action", emit=False, data_dir=getattr(cfg, "data_dir", None)
+        ):
+            click.echo(
+                f"  ⚠ {key}: installed version is not verified against a known "
+                "hook contract; configuring in observe mode. Set "
+                "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.",
+                err=True,
+            )
+            mode = "observe"
         pc.mode = "action" if mode == "action" else "observe"
         if s["fail_mode"]:
             pc.hook_fail_mode = "closed" if s["fail_mode"].lower() == "closed" else "open"

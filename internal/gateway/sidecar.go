@@ -1891,6 +1891,30 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	// than inheriting whichever pack the primary installed into the global.
 	ApplyConnectorRulePackOverrides(conn.Name(), rp)
 
+	// Enforce the same hook-contract gate the single-connector path applies in
+	// runGuardrail (see HookContractNeedsActionOverride call above). Without
+	// this, a multi-connector boot in action mode would silently install
+	// connectors whose installed agent version is unknown/unversioned or whose
+	// pinned contract drifted — installing an enforcing hook against an
+	// unverified surface that may mishandle verdicts. Returning an error here
+	// makes the caller (setupConnectorsIsolated) skip just this connector and
+	// surface a warning, keeping the other connectors running (DN1), instead of
+	// shipping an unverified enforcing hook.
+	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
+	if connector.HookContractNeedsActionOverride(contractResolution) &&
+		strings.EqualFold(s.cfg.Guardrail.Mode, "action") &&
+		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
+	}
+	if previous := connector.LoadHookContractLockEntry(s.cfg.DataDir, conn.Name()); previous.Connector != "" {
+		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+		if connector.HookContractLockDrifted(previous, current) &&
+			strings.EqualFold(s.cfg.Guardrail.Mode, "action") &&
+			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+		}
+	}
+
 	if err := conn.Setup(ctx, opts); err != nil {
 		return fmt.Errorf("connector %s setup failed: %w", conn.Name(), err)
 	}

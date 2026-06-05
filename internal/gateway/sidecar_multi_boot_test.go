@@ -102,6 +102,52 @@ func TestSetupOneConnector_SuccessNoTeardown(t *testing.T) {
 	}
 }
 
+// TestSetupOneConnector_ActionModeUnverifiedContractSkips verifies the
+// multi-connector boot loop applies the same hook-contract gate as the
+// single-connector path: in action mode, a connector whose installed agent
+// version cannot be verified against a known hook contract is refused (so the
+// caller isolates/skips it) BEFORE Setup runs, instead of installing an
+// enforcing hook against an unverified surface.
+func TestSetupOneConnector_ActionModeUnverifiedContractSkips(t *testing.T) {
+	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Mode = "action"
+	// No cached agent version in the temp data dir → contract resolves as
+	// "unversioned", which requires an explicit action-mode override.
+	conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	cache := guardrail.NewRulePackCache()
+
+	opts := s.connectorSetupOpts(conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	err := s.setupOneConnector(context.Background(), conn, opts, "master", cache)
+	if err == nil {
+		t.Fatal("expected action-mode unverified contract to be refused, got nil")
+	}
+	if !strings.Contains(err.Error(), "hook contract") {
+		t.Errorf("error = %q, want a hook-contract gate error", err)
+	}
+	if conn.setupCalls != 0 {
+		t.Errorf("Setup must not run for a gated connector; setupCalls=%d, want 0", conn.setupCalls)
+	}
+}
+
+// TestSetupOneConnector_ActionModeContractDriftOverride verifies the explicit
+// exploratory override (DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1) bypasses the
+// gate so Setup proceeds — matching the single-connector path's escape hatch.
+func TestSetupOneConnector_ActionModeContractDriftOverride(t *testing.T) {
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
+	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Mode = "action"
+	conn := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	cache := guardrail.NewRulePackCache()
+
+	opts := s.connectorSetupOpts(conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
+	if err := s.setupOneConnector(context.Background(), conn, opts, "master", cache); err != nil {
+		t.Fatalf("drift override must allow setup, got %v", err)
+	}
+	if conn.setupCalls != 1 {
+		t.Errorf("setupCalls=%d, want 1 (override should let Setup run)", conn.setupCalls)
+	}
+}
+
 // TestSetupConnectorsIsolated_AllSucceed verifies every connector that sets up
 // cleanly appears in the returned set, in input order.
 func TestSetupConnectorsIsolated_AllSucceed(t *testing.T) {
