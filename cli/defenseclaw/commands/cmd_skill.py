@@ -1112,11 +1112,18 @@ def _skill_info_path(info: dict[str, Any] | None) -> str:
 # Option 2: Remote scan via sidecar API
 # ---------------------------------------------------------------------------
 
-def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) -> None:
+def _scan_via_sidecar(
+    app: AppContext, target: str, name: str, as_json: bool, fatal: bool = True
+) -> None:
     """Send a scan request to the sidecar REST API (POST /v1/skill/scan).
 
     Used when DefenseClaw sidecar runs on a remote host and the CLI connects
     via SSM port-forward or direct network access.
+
+    ``fatal`` controls error handling: single-target scans exit 1 on failure
+    (default), but the multi-connector ``--all`` fan-out passes ``fatal=False``
+    so one connector's remote error (e.g. a sidecar 500 on a malformed skill
+    dir) is reported per-target and the rest of the fleet still gets scanned.
     """
     client = _sidecar_client(app)
 
@@ -1127,7 +1134,9 @@ def _scan_via_sidecar(app: AppContext, target: str, name: str, as_json: bool) ->
         data = client.scan_skill(target=target, name=name)
     except Exception as exc:
         click.echo(f"error: remote scan failed: {exc}", err=True)
-        raise SystemExit(1)
+        if fatal:
+            raise SystemExit(1)
+        return
 
     if as_json:
         click.echo(json.dumps(data, indent=2, default=str))
@@ -1181,7 +1190,7 @@ def _scan_all_remote(app: AppContext, as_json: bool, connector: str | None = Non
         if not base_dir:
             click.echo(f"[scan] warning: no path for {name}", err=True)
             continue
-        _scan_via_sidecar(app, target=base_dir, name=name, as_json=as_json)
+        _scan_via_sidecar(app, target=base_dir, name=name, as_json=as_json, fatal=False)
         if not as_json:
             click.echo()
 

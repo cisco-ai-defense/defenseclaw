@@ -294,6 +294,99 @@ class TestMCPScan(MCPCommandTestBase):
         called = [c.kwargs.get("connector") for c in mock_unset.call_args_list]
         self.assertEqual(called, ["codex"])
 
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_skips_unsupported_connector_and_applies_to_rest(self, mock_set):
+        # Fan-out resilience: a connector with no MCP write surface
+        # (antigravity, which sorts FIRST) must be skipped, not abort the
+        # whole command — the writable connectors still get the server.
+        from defenseclaw.connector_paths import MCPWriteUnsupportedError
+
+        self.app.cfg.active_connectors = lambda: ["antigravity", "claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _side_effect(cfg, name, entry, connector=None):
+            if connector == "antigravity":
+                raise MCPWriteUnsupportedError("antigravity does not publish a documented MCP install surface")
+
+        mock_set.side_effect = _side_effect
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        applied = {
+            c.kwargs.get("connector")
+            for c in mock_set.call_args_list
+        }
+        # write was attempted on all three, but only claudecode/codex succeeded
+        self.assertEqual(applied, {"antigravity", "claudecode", "codex"})
+        self.assertIn("skipped", result.output)
+        self.assertIn("antigravity", result.output)
+        self.assertIn("claudecode", result.output)
+        self.assertIn("codex", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_set_errors_only_when_no_connector_supports_writes(self, mock_set):
+        from defenseclaw.connector_paths import MCPWriteUnsupportedError
+
+        self.app.cfg.active_connectors = lambda: ["antigravity", "zeptoclaw"]  # type: ignore[method-assign]
+        mock_set.side_effect = MCPWriteUnsupportedError("no MCP write surface")
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp", "--skip-scan"])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("no connector accepted", result.output)
+        self.assertIn("no MCP write surface", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.enforce.admission.evaluate_admission")
+    def test_set_per_connector_policy_block_skips_only_that_connector(self, mock_admit, mock_set):
+        # The core correctness fix: admission is evaluated PER connector, so a
+        # connector-scoped policy block (here: codex) skips only that connector
+        # while the server is still written to the others.
+        from defenseclaw.enforce.admission import AdmissionDecision
+
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        def _decide(pe, *, connector="", scan_result=None, **kwargs):
+            if connector == "codex":
+                return AdmissionDecision("blocked", "blocked on codex by asset rule", source="asset-policy-block")
+            return AdmissionDecision("allowed", "allow override", source="manual-allow")
+
+        mock_admit.side_effect = _decide
+
+        result = self.invoke(["set", "ctx7", "--url", "https://x/mcp"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        written = {c.kwargs.get("connector") for c in mock_set.call_args_list}
+        # codex was blocked by policy → never written; claudecode written.
+        self.assertEqual(written, {"claudecode"})
+        self.assertIn("blocked [codex]", result.output)
+        self.assertIn("claudecode", result.output)
+
+    @patch("defenseclaw.commands.cmd_mcp._unset_mcp_via_connector")
+    def test_unset_skips_unsupported_write_surface(self, mock_unset):
+        # A connector can expose the server via its READ surface yet have no
+        # writable surface (e.g. zeptoclaw). Removal must skip it, not abort,
+        # so a writable peer that has the server is still cleaned up.
+        from defenseclaw.connector_paths import MCPWriteUnsupportedError
+
+        self.app.cfg.active_connectors = lambda: ["codex", "zeptoclaw"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[MCPServerEntry(name="ctx7", url="http://x", transport="sse")]
+        )
+
+        def _side_effect(cfg, name, connector=None):
+            if connector == "zeptoclaw":
+                raise MCPWriteUnsupportedError("zeptoclaw has no MCP write surface")
+
+        mock_unset.side_effect = _side_effect
+
+        result = self.invoke(["unset", "ctx7"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Removed MCP server: ctx7", result.output)
+        self.assertIn("codex", result.output)
+        self.assertIn("skipped", result.output)
+
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_clean(self, mock_scan):
         mock_scan.return_value = ScanResult(

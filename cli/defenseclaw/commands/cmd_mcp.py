@@ -769,35 +769,29 @@ def _set_mcp_via_connector(cfg, name: str, entry: dict, connector: str | None = 
 
     ``connector`` targets a specific connector (``mcp set --connector``);
     defaults to the active connector so single-connector behaviour is
-    unchanged. Translates :class:`connector_paths.MCPWriteUnsupportedError`
-    into a user-friendly :class:`click.ClickException` so the CLI exits 1
-    with a clean error instead of a stack trace.
+    unchanged. Lets :class:`connector_paths.MCPWriteUnsupportedError`
+    propagate so the fan-out caller can turn an unsupported connector into
+    a per-connector skip (rather than aborting the whole fleet).
     """
-    try:
-        connector_paths.set_mcp_server(
-            connector or cfg.active_connector(),
-            name,
-            entry,
-            workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
-            openclaw_config_setter=_openclaw_config_set,
-        )
-    except connector_paths.MCPWriteUnsupportedError as e:
-        raise click.ClickException(str(e)) from e
+    connector_paths.set_mcp_server(
+        connector or cfg.active_connector(),
+        name,
+        entry,
+        workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
+        openclaw_config_setter=_openclaw_config_set,
+    )
 
 
 def _unset_mcp_via_connector(cfg, name: str, connector: str | None = None) -> None:
     """Dispatch ``mcp unset`` to a connector's write surface.
     Symmetric with :func:`_set_mcp_via_connector`.
     """
-    try:
-        connector_paths.unset_mcp_server(
-            connector or cfg.active_connector(),
-            name,
-            workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
-            openclaw_config_unsetter=_openclaw_config_unset,
-        )
-    except connector_paths.MCPWriteUnsupportedError as e:
-        raise click.ClickException(str(e)) from e
+    connector_paths.unset_mcp_server(
+        connector or cfg.active_connector(),
+        name,
+        workspace_dir=cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else None,
+        openclaw_config_unsetter=_openclaw_config_unset,
+    )
 
 
 @mcp.command("set")
@@ -841,32 +835,6 @@ def set_server(
     from defenseclaw.enforce import PolicyEngine
     from defenseclaw.enforce.admission import evaluate_admission
 
-    # Without --connector, set the server on EVERY active connector; with it,
-    # scope to one. Scan + admission are connector-independent (the server spec
-    # is identical), so they run once against the primary; only the config
-    # WRITE fans out across connectors below.
-    connectors = resolve_list_connectors(app, connector_flag)
-    connector = connectors[0]
-    pe = PolicyEngine(app.store)
-    pre_decision = evaluate_admission(
-        pe,
-        policy_dir=app.cfg.policy_dir,
-        target_type="mcp",
-        name=name,
-        fallback_actions=app.cfg.mcp_actions,
-        source_path="",
-        connector=connector,
-        command=cmd,
-        args=_parse_args(args_str) if args_str else [],
-        url=url,
-        transport=transport,
-        asset_policy=app.cfg.asset_policy,
-    )
-
-    if pre_decision.verdict == "blocked":
-        click.secho(f"BLOCKED: {name} — unblock it first with: defenseclaw mcp unblock {name}", fg="red")
-        raise SystemExit(1)
-
     if not cmd and not url:
         raise click.ClickException(
             "Provide at least --command or --url.\n\n"
@@ -875,11 +843,21 @@ def set_server(
             "  defenseclaw mcp set myserver --url https://example.com/mcp"
         )
 
+    # Without --connector, set the server on EVERY active connector; with it,
+    # scope to one. The scan (finding generation) is connector-independent so
+    # it runs once, but ADMISSION is evaluated PER connector: a connector-
+    # scoped asset-policy rule (rule.connector) must gate only its own
+    # connector, so a server rejected on one connector is skipped there while
+    # still being written to the connectors that admit it.
+    connectors = resolve_list_connectors(app, connector_flag)
+    pe = PolicyEngine(app.store)
+    parsed_args = _parse_args(args_str) if args_str else []
+
     entry: dict = {}
     if cmd:
         entry["command"] = cmd
     if args_str:
-        entry["args"] = _parse_args(args_str)
+        entry["args"] = parsed_args
     if url:
         entry["url"] = url
     if transport:
@@ -893,94 +871,120 @@ def set_server(
             env[k] = v
         entry["env"] = env
 
-    scan_required = (not skip_scan) and pre_decision.verdict != "allowed"
-    if scan_required:
-        scan_target = url or name
-        scan_entry = MCPServerEntry(
+    def _admit(connector: str, scan_result=None):
+        return evaluate_admission(
+            pe,
+            policy_dir=app.cfg.policy_dir,
+            target_type="mcp",
             name=name,
+            scan_result=scan_result,
+            fallback_actions=app.cfg.mcp_actions,
+            source_path=(cmd or url or "") if scan_result is not None else "",
+            connector=connector,
             command=cmd,
-            args=_parse_args(args_str) if args_str else [],
+            args=parsed_args,
             url=url,
             transport=transport,
+            asset_policy=app.cfg.asset_policy,
         )
-        result = _run_scan(app, scan_target, "", False, False, False,
-                           server_entry=scan_entry)
+
+    # Pre-scan admission per connector. "blocked" (block list or a connector-
+    # scoped asset rule) and "allowed" (an allow override) are decided here;
+    # "scan" means that connector still needs a scan verdict.
+    pre = {c: _admit(c) for c in connectors}
+
+    # Scan once when at least one connector needs a verdict and --skip-scan was
+    # not passed. Findings are connector-independent, so a single scan serves
+    # the whole fan-out.
+    result = None
+    if (not skip_scan) and any(d.verdict == "scan" for d in pre.values()):
+        scan_entry = MCPServerEntry(
+            name=name, command=cmd, args=parsed_args, url=url, transport=transport,
+        )
+        result = _run_scan(app, url or name, "", False, False, False, server_entry=scan_entry)
         if result is None:
             click.secho("Scan failed — use --skip-scan to add anyway.", fg="yellow")
             raise SystemExit(1)
-
         _print_scan_result(result, as_json=False)
 
-        from defenseclaw.enforce import PolicyEngine
-
-        sev = result.max_severity()
-        post_decision = evaluate_admission(
-            pe,
-            policy_dir=app.cfg.policy_dir,
-            target_type="mcp",
-            name=name,
-            scan_result=result,
-            fallback_actions=app.cfg.mcp_actions,
-            source_path=cmd or url or "",
-            connector=connector,
-            command=cmd,
-            args=_parse_args(args_str) if args_str else [],
-            url=url,
-            transport=transport,
-            asset_policy=app.cfg.asset_policy,
-        )
-        if post_decision.verdict == "rejected":
-            pe = PolicyEngine(app.store)
-            pe.block("mcp", name, f"scan: {len(result.findings)} findings, max={sev}")
-            click.secho(
-                f"\nBlocked: {name} has {sev} findings — blocked by mcp_actions policy. "
-                "Use --skip-scan to override.",
-                fg="red",
+    applied: list[str] = []
+    skipped: list[str] = []          # connector has no writable MCP surface
+    policy_blocked: list[str] = []   # rejected by block list / asset rule
+    scan_rejected: list[str] = []    # rejected by scan-findings policy
+    for c in connectors:
+        pre_c = pre[c]
+        if pre_c.verdict == "blocked":
+            click.secho(f"  blocked [{c}]: {pre_c.reason}", fg="red")
+            policy_blocked.append(c)
+            continue
+        allow_record = False
+        if pre_c.verdict == "allowed":
+            note = (
+                f"Policy allows {name} without scan"
+                if pre_c.source == "scan-disabled"
+                else f"Allowed override for {name} — skipping scan"
             )
+            click.secho(f"  {note} [{c}]", fg="yellow")
+        elif result is not None:
+            post_c = _admit(c, scan_result=result)
+            if post_c.verdict == "rejected":
+                sev = result.max_severity()
+                click.secho(
+                    f"  blocked [{c}]: {sev} findings — rejected by mcp_actions policy "
+                    "(use --skip-scan to override)",
+                    fg="red",
+                )
+                scan_rejected.append(c)
+                continue
+            allow_record = post_c.action.install == "allow"
+        try:
+            _set_mcp_via_connector(app.cfg, name, entry, connector=c)
+            applied.append(c)
+            if allow_record:
+                pe.allow("mcp", name, "scan clean or within policy")
+        except connector_paths.MCPWriteUnsupportedError as exc:
+            click.secho(f"  skipped [{c}]: {exc}", fg="yellow")
+            skipped.append(c)
+
+    if not applied:
+        # Universal scan rejection (connector-independent bad server): record
+        # the global block + audit, matching the single-connector behavior.
+        if scan_rejected and result is not None:
+            pe.block("mcp", name, f"scan: {len(result.findings)} findings, max={result.max_severity()}")
             if app.logger:
                 app.logger.log_action(
                     "mcp-set-blocked", name,
-                    f"severity={sev} findings={len(result.findings)}",
+                    f"severity={result.max_severity()} findings={len(result.findings)}",
                 )
             raise SystemExit(1)
-    elif pre_decision.verdict == "allowed":
-        if pre_decision.source == "scan-disabled":
-            click.secho(f"Policy allows {name} without scan.", fg="yellow")
-        else:
-            click.secho(f"Allowed override for {name} — skipping scan.", fg="yellow")
-
-    for c in connectors:
-        _set_mcp_via_connector(app.cfg, name, entry, connector=c)
-
-    if scan_required:
-        post_decision = evaluate_admission(
-            pe,
-            policy_dir=app.cfg.policy_dir,
-            target_type="mcp",
-            name=name,
-            scan_result=result,
-            fallback_actions=app.cfg.mcp_actions,
-            source_path=cmd or url or "",
-            connector=connector,
-            command=cmd,
-            args=_parse_args(args_str) if args_str else [],
-            url=url,
-            transport=transport,
-            asset_policy=app.cfg.asset_policy,
+        reasons = []
+        if policy_blocked:
+            reasons.append(f"blocked by policy: {', '.join(policy_blocked)}")
+        if scan_rejected:
+            reasons.append(f"scan-rejected: {', '.join(scan_rejected)}")
+        if skipped:
+            reasons.append(f"no MCP write surface: {', '.join(skipped)}")
+        raise click.ClickException(
+            f"MCP set failed: no connector accepted {name!r} ({'; '.join(reasons)})."
         )
-        if post_decision.action.install == "allow":
-            pe.allow("mcp", name, "scan clean or within policy")
 
-    if len(connectors) > 1:
+    not_applied = policy_blocked + scan_rejected + skipped
+    if len(applied) > 1:
         click.secho(
-            f"Added MCP server: {name} to {len(connectors)} connectors: {', '.join(connectors)}",
+            f"Added MCP server: {name} to {len(applied)} connectors: {', '.join(applied)}",
+            fg="green",
+        )
+    elif not_applied:
+        click.secho(
+            f"Added MCP server: {name} to {applied[0]} "
+            f"({len(not_applied)} not applied: {', '.join(not_applied)})",
             fg="green",
         )
     else:
         click.secho(f"Added MCP server: {name}", fg="green")
 
     if app.logger:
-        app.logger.log_action("mcp-set", name, f"command={cmd} url={url} connectors={','.join(connectors)}")
+        app.logger.log_action("mcp-set", name, f"command={cmd} url={url} connectors={','.join(applied)}")
 
     from defenseclaw.commands import hint
     hint(f"Scan it now:  defenseclaw mcp scan {name}")
@@ -1005,18 +1009,35 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
 
     connectors = resolve_list_connectors(app, connector_flag)
     removed: list[str] = []
+    skipped: list[str] = []
     for c in connectors:
-        if any(s.name == name for s in app.cfg.mcp_servers(c)):
+        if not any(s.name == name for s in app.cfg.mcp_servers(c)):
+            continue
+        try:
             _unset_mcp_via_connector(app.cfg, name, connector=c)
             removed.append(c)
+        except connector_paths.MCPWriteUnsupportedError as exc:
+            click.secho(f"  skipped [{c}]: {exc}", fg="yellow")
+            skipped.append(c)
 
     if not removed:
+        if skipped:
+            raise click.ClickException(
+                f"MCP server {name!r} is present but not removable on: "
+                f"{', '.join(skipped)} (no writable MCP surface)."
+            )
         raise click.ClickException(
             f"MCP server {name!r} not found for any of: {', '.join(connectors)}."
         )
 
     if len(removed) > 1:
         click.secho(f"Removed MCP server: {name} from {', '.join(removed)}", fg="yellow")
+    elif skipped:
+        click.secho(
+            f"Removed MCP server: {name} from {removed[0]} "
+            f"({len(skipped)} skipped: {', '.join(skipped)})",
+            fg="yellow",
+        )
     else:
         click.secho(f"Removed MCP server: {name}", fg="yellow")
 

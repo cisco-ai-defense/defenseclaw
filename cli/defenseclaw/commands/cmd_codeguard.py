@@ -122,4 +122,8 @@ def install_skill_cmd(app: AppContext) -> None:
 
 
 def _is_codeguard_install_error(status: str) -> bool:
-    return status.startswith("conflict at ") or status.startswith("unsupported")
+    # ``unsupported`` means the connector has no skill/rule install target by
+    # design (e.g. antigravity) — that is a SKIP, not a failure, so it must not
+    # fail an otherwise-successful multi-connector install. Only a genuine
+    # conflict (an existing non-DefenseClaw asset in the way) is an error.
+    return status.startswith("conflict at ")

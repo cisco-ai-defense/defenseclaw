@@ -310,6 +310,7 @@ func (l *Logger) ForwardGatewayEventToSinks(ctx context.Context, ev gatewaylog.E
 		DestinationApp:    ev.DestinationApp,
 		ToolName:          ev.ToolName,
 		ToolID:            ev.ToolID,
+		Connector:         ev.Connector,
 		Structured: map[string]any{
 			gatewaySplunkHECEventsKey: []map[string]any{
 				{

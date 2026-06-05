@@ -255,3 +255,23 @@ def test_codeguard_install_connector_flag_narrows_to_one(tmp_path, monkeypatch):
     assert len(install_lines) == 1, result.output
     assert "[codex]" in result.output
     assert "[claudecode]" not in result.output
+
+
+def test_codeguard_install_unsupported_connector_is_skip_not_failure(tmp_path, monkeypatch):
+    # A connector with no skill install target (antigravity) must be reported
+    # as "unsupported" but NOT fail the command when the other connectors
+    # install successfully. antigravity sorts first in active_connectors().
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    app = AppContext()
+    app.cfg = _multi_cfg(["antigravity", "claudecode", "codex"], tmp_path)
+
+    result = CliRunner().invoke(codeguard, ["install", "--target", "skill"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert "[antigravity]" in result.output
+    assert "unsupported" in result.output
+    # the supported connectors still get a line and the command succeeds
+    assert "[claudecode]" in result.output
+    assert "[codex]" in result.output
+    assert "install failed" not in result.output

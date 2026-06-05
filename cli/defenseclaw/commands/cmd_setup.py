@@ -3131,32 +3131,67 @@ def setup_guardrail(
     # --- Summary ---
     click.echo()
     connector_label = _CONNECTOR_META.get(gc.connector or "openclaw", {}).get("label", gc.connector)
-    rows = [
-        ("guardrail.connector", f"{connector_label} ({gc.connector})"),
-        (
-            "scope",
-            (
-                f"workspace ({app.cfg.claw.workspace_dir})"
-                if getattr(app.cfg.claw, "workspace_dir", "")
-                else "global user config"
-            ),
-        ),
-        ("guardrail.mode", gc.mode),
-        ("guardrail.port", str(gc.port)),
-        ("guardrail.model", gc.model),
-        ("guardrail.model_name", gc.model_name),
-        ("guardrail.api_key_env", gc.api_key_env),
-        ("guardrail.detection_strategy", gc.detection_strategy),
-        ("guardrail.rule_pack_dir", gc.rule_pack_dir),
-    ]
-    if gc.api_base:
-        rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
-    if gc.block_message:
-        truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
-        rows.append(("guardrail.block_message", truncated))
-    rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
-    rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
-    rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
+    _actives = list(app.cfg.active_connectors()) if hasattr(app.cfg, "active_connectors") else []
+    _multi = len(_actives) > 1
+    scope_val = (
+        f"workspace ({app.cfg.claw.workspace_dir})"
+        if getattr(app.cfg.claw, "workspace_dir", "")
+        else "global user config"
+    )
+    if _multi:
+        # All connectors are peers. Show each connector's *effective*
+        # per-connector policy (override > global) instead of collapsing
+        # the summary to the singular guardrail.connector. The genuinely
+        # global fields (port/model/scanner/judge/redaction) are listed
+        # once below since they apply to every connector.
+        rows = [
+            ("guardrail.connectors", ", ".join(_actives)),
+            ("scope", scope_val),
+        ]
+        for c in _actives:
+            hilt_c = gc.effective_hilt(c)
+            # Empty rule-pack dir = the built-in default pack — render it the
+            # same way `guardrail status` does (basename, or "default").
+            _rp = gc.effective_rule_pack_dir(c)
+            rp_label = os.path.basename(_rp.rstrip("/")) if _rp.strip() else "default"
+            rows.append((f"  [{c}] mode", gc.effective_mode(c)))
+            rows.append((f"  [{c}] rule_pack", rp_label))
+            rows.append((f"  [{c}] hook_fail_mode", gc.effective_hook_fail_mode(c) or "open"))
+            rows.append(
+                (
+                    f"  [{c}] hilt",
+                    f"{str(bool(hilt_c.enabled)).lower()} (min {hilt_c.min_severity or 'HIGH'})",
+                )
+            )
+        rows += [
+            ("guardrail.port", str(gc.port)),
+            ("guardrail.model", gc.model),
+            ("guardrail.model_name", gc.model_name),
+            ("guardrail.api_key_env", gc.api_key_env),
+            ("guardrail.detection_strategy", gc.detection_strategy),
+        ]
+        if gc.api_base:
+            rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
+    else:
+        rows = [
+            ("guardrail.connector", f"{connector_label} ({gc.connector})"),
+            ("scope", scope_val),
+            ("guardrail.mode", gc.mode),
+            ("guardrail.port", str(gc.port)),
+            ("guardrail.model", gc.model),
+            ("guardrail.model_name", gc.model_name),
+            ("guardrail.api_key_env", gc.api_key_env),
+            ("guardrail.detection_strategy", gc.detection_strategy),
+            ("guardrail.rule_pack_dir", gc.rule_pack_dir),
+        ]
+        if gc.api_base:
+            rows.append(("guardrail.api_base", gc.api_base[:60] + "..." if len(gc.api_base) > 60 else gc.api_base))
+        if gc.block_message:
+            truncated = gc.block_message[:60] + "..." if len(gc.block_message) > 60 else gc.block_message
+            rows.append(("guardrail.block_message", truncated))
+        rows.append(("guardrail.hook_fail_mode", gc.hook_fail_mode or "open"))
+        rows.append(("guardrail.hilt.enabled", str(bool(gc.hilt.enabled)).lower()))
+        rows.append(("guardrail.hilt.min_severity", gc.hilt.min_severity or "HIGH"))
     rows.append(("privacy.disable_redaction", str(bool(app.cfg.privacy.disable_redaction)).lower()))
     if gc.judge.enabled:
         rows.append(("guardrail.judge.enabled", "true"))
@@ -3193,6 +3228,7 @@ def setup_guardrail(
             app.cfg.gateway.host,
             app.cfg.gateway.port,
             connector=gc.connector or "openclaw",
+            connectors=app.cfg.active_connectors(),
         )
     else:
         click.echo("  Next steps:")
@@ -3495,7 +3531,17 @@ def _apply_hook_connector_setup(
         return False
 
     _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
-    click.echo(f"  ✓ Active connector set to {connector!r} (claw.mode={connector})")
+    _actives = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else [connector]
+    if len(_actives) > 1:
+        click.echo(
+            f"  ✓ Connector {connector!r} configured — "
+            f"{len(_actives)} connectors active: {', '.join(_actives)}"
+        )
+    else:
+        click.echo(
+            f"  ✓ Active connector set to {connector!r} "
+            f"(claw.mode={getattr(cfg.claw, 'mode', '') or connector})"
+        )
     if workspace:
         click.echo(f"  ✓ Workspace root pinned to {workspace}")
     else:
@@ -3584,9 +3630,9 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
     # Multi-connector awareness: a singular claw.mode row + a global
     # "setup guardrail --disable" revert line both read as if this one
     # connector IS the whole install. When more than one connector is
-    # configured, show the roster (marking the primary) and point revert /
-    # mode guidance at the per-connector commands. Single-connector output
-    # is unchanged.
+    # configured, show the full roster (all connectors are peers) and point
+    # revert / mode guidance at the per-connector commands. Single-connector
+    # output is unchanged.
     actives: list[str] = []
     if cfg is not None and hasattr(cfg, "active_connectors"):
         try:
@@ -3594,18 +3640,12 @@ def _print_observability_summary(connector: str, cfg=None, *, mode: str = "obser
         except Exception:  # noqa: BLE001 — fall back to single-connector view.
             actives = []
     multi = len(actives) > 1
-    primary = (
-        (getattr(getattr(cfg, "claw", None), "mode", "") or connector).strip().lower()
-        if cfg is not None
-        else connector
-    ) or connector
 
     click.echo()
     click.echo("  Summary")
     click.echo("  ───────")
     if multi:
-        connectors_val = ", ".join(actives) + f"  (primary: {primary})"
-        mode_row = ("connectors", connectors_val)
+        mode_row = ("connectors", ", ".join(actives))
     else:
         mode_row = ("claw.mode", connector)
     rows = [
@@ -5393,18 +5433,32 @@ def execute_guardrail_setup(
 
     click.echo()
 
-    meta = _CONNECTOR_META.get(connector_name, {})
-    if meta:
-        tool_mode = meta["tool_mode"]
-        if tool_mode == "both":
-            tool_display = "pre-execution + response-scan"
-        else:
-            tool_display = tool_mode
-        ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
-        ux.ok(f"Tool inspection: {tool_display}")
-        ux.ok(f"Subprocess policy: {meta['subprocess_policy']}")
+    def _tool_display(m: dict) -> str:
+        tool_mode = m["tool_mode"]
+        return "pre-execution + response-scan" if tool_mode == "both" else tool_mode
+
+    actives = list(app.cfg.active_connectors()) if hasattr(app.cfg, "active_connectors") else [connector_name]
+    if len(actives) > 1:
+        # All connectors are peers — confirm every one rather than singling
+        # out a primary. (claw.mode above is only a back-compat mirror.)
+        ux.ok(f"Connectors: {', '.join(actives)}")
+        for c in actives:
+            m = _CONNECTOR_META.get(c, {})
+            if m:
+                ux.ok(
+                    f"  [{c}] tool inspection: {_tool_display(m)}; "
+                    f"subprocess policy: {m['subprocess_policy']}"
+                )
+            else:
+                ux.ok(f"  [{c}] plugin connector")
     else:
-        ux.ok(f"Connector: {connector_name} (plugin)")
+        meta = _CONNECTOR_META.get(connector_name, {})
+        if meta:
+            ux.ok(f"Connector: {meta.get('label', connector_name)} ({connector_name})")
+            ux.ok(f"Tool inspection: {_tool_display(meta)}")
+            ux.ok(f"Subprocess policy: {meta['subprocess_policy']}")
+        else:
+            ux.ok(f"Connector: {connector_name} (plugin)")
 
     ux.ok("Connector setup will run automatically when the gateway starts")
     if workspace:

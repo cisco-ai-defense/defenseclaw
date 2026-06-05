@@ -191,6 +191,35 @@ func TestForwardGatewayEventToSinks_EmitsVerdictCorrelationFields(t *testing.T) 
 	}
 }
 
+func TestForwardGatewayEventToSinks_SurfacesConnectorTopLevel(t *testing.T) {
+	l := NewLogger(nil)
+	cs := installCaptureSink(t, l)
+
+	l.ForwardGatewayEventToSinks(context.Background(), gatewaylog.Event{
+		Timestamp: time.Unix(1700000000, 123000000).UTC(),
+		EventType: gatewaylog.EventVerdict,
+		Severity:  gatewaylog.SeverityHigh,
+		RunID:     "run-1",
+		Connector: "codex",
+		Verdict: &gatewaylog.VerdictPayload{
+			Stage:  gatewaylog.StageFinal,
+			Action: "block",
+			Reason: "matched policy",
+		},
+	})
+
+	events := cs.snapshot()
+	if len(events) != 1 {
+		t.Fatalf("sink events=%d want 1", len(events))
+	}
+	// The connector must reach the sink envelope top-level so HEC/OTLP
+	// queries can filter on `connector="codex"` without coalescing it
+	// out of the nested structured payload.
+	if got := events[0].Connector; got != "codex" {
+		t.Fatalf("sink event Connector=%q want %q", got, "codex")
+	}
+}
+
 func TestForwardGatewayEventToSinks_IgnoresLifecycleEvents(t *testing.T) {
 	l := NewLogger(nil)
 	cs := installCaptureSink(t, l)

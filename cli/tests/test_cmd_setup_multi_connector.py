@@ -29,6 +29,7 @@ overwriting ``guardrail.connector``. These tests pin the WU7 decisions:
 from __future__ import annotations
 
 import contextlib
+import io
 import os
 import sys
 import unittest
@@ -39,6 +40,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from click.testing import CliRunner
 from defenseclaw.commands.cmd_setup import (
     _configured_connector_set,
+    _print_observability_summary,
     _write_connector_identity,
 )
 from defenseclaw.commands.cmd_setup import (
@@ -209,6 +211,48 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertNotIn("openclaw", gc.connectors)
         self.assertIn("codex", gc.connectors)
+
+
+class TestObservabilitySummaryDisplay(unittest.TestCase):
+    """The post-setup summary must show all connectors as peers, never a
+    misleading '(primary: X)' callout on a multi-connector install."""
+
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def _seed_map(self, *connectors):
+        self.app.cfg.guardrail.connectors = {
+            c: PerConnectorGuardrailConfig() for c in connectors
+        }
+        self.app.cfg.guardrail.connector = sorted(connectors)[0]
+        self.app.cfg.claw.mode = sorted(connectors)[0]
+
+    def _capture_summary(self, connector):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _print_observability_summary(connector, self.app.cfg, mode="observe")
+        return buf.getvalue()
+
+    def test_multi_connector_summary_lists_all_peers_without_primary(self):
+        self._seed_map("antigravity", "claudecode", "codex")
+        out = self._capture_summary("codex")
+        # roster row names every connector...
+        self.assertIn("antigravity", out)
+        self.assertIn("claudecode", out)
+        self.assertIn("codex", out)
+        self.assertIn("connectors:", out)
+        # ...and no '(primary: ...)' callout leaks the back-compat pointer.
+        self.assertNotIn("primary:", out)
+
+    def test_single_connector_summary_unchanged(self):
+        self._seed_map("cursor")  # single → claw.mode row, not a roster
+        out = self._capture_summary("cursor")
+        self.assertIn("claw.mode:", out)
+        self.assertNotIn("connectors:", out)
+        self.assertNotIn("primary:", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
