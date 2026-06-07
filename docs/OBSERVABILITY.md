@@ -620,7 +620,7 @@ writes the `otel:` block in `~/.defenseclaw/config.yaml` automatically):
 
 ```bash
 defenseclaw setup local-observability up
-defenseclaw gateway                            # start sidecar; it reads config.yaml
+defenseclaw-gateway start                      # start sidecar; it reads config.yaml
 defenseclaw setup local-observability status   # compose ps + reachability probes
 defenseclaw setup local-observability down     # stop (volumes preserved)
 defenseclaw setup local-observability reset    # stop + wipe data volumes
@@ -633,7 +633,7 @@ works for CI / scripted environments:
 cd bundles/local_observability_stack
 ./bin/openclaw-observability-bridge up         # or ./run.sh up (compat shim)
 eval "$(./bin/openclaw-observability-bridge env)"
-go run ./cmd/defenseclaw gateway
+go run ./cmd/defenseclaw
 ./bin/openclaw-observability-bridge down
 ```
 
