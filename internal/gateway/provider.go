@@ -493,8 +493,19 @@ func compositeModelForUpstream(urlInferredPrefix string, bodyModel string) strin
 // providerHTTPClient is used for passthrough upstream requests in the proxy.
 // No client-level Timeout is set because each call site passes a
 // context.WithTimeout — a client-level timeout would race with that.
+//
+// DialContext re-resolves the destination at connect time and refuses
+// private / link-local / cloud-metadata / CGNAT / IPv6-ULA targets,
+// closing the DNS-rebinding window that the validate-once application
+// checks (isPrivateHost / guardUpstreamTargetURL) leave open: a host
+// that resolved to a public IP during validation could otherwise rebind
+// to 169.254.169.254 (cloud IMDS) or an internal RFC1918 service by the
+// time providerHTTPClient.Do actually dials. allowLoopback is true so
+// local Ollama (127.0.0.1) and httptest targets keep working; isUnsafeIP
+// still blocks every link-local/metadata address regardless of that flag.
 var providerHTTPClient = &http.Client{
 	Transport: &http.Transport{
+		DialContext:         secureDialContext(true, 10*time.Second),
 		MaxIdleConns:        20,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
