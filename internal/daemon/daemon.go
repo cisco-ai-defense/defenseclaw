@@ -136,7 +136,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 // to fail-CLOSED when their respective metadata is genuinely unavailable for
 // a process we *can* signal: the previous implementation fell back to "true"
 // on `os.Readlink` errors (Linux) and on `ps` errors (Darwin), which let any
-// unreaped zombie pass verification. Closes .
+// unreaped zombie pass verification.
 func (d *Daemon) verifyProcess(info pidInfo) bool {
 	if !d.verifyExecutable(info) {
 		return false

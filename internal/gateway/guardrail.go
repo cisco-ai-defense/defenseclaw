@@ -1992,7 +1992,7 @@ func isHeartbeatMessage(userText string, _ []ChatMessage) bool {
 // heartbeat instruction "Read HEARTBEAT.md". Matching on the imperative
 // phrase (not just the filename or the response token) prevents an attacker
 // from bypassing the guardrail by appending "HEARTBEAT_OK" to a malicious
-// prompt that merely *mentions* "HEARTBEAT.md". Closes .
+// prompt that merely *mentions* "HEARTBEAT.md".
 func containsHeartbeatProbeSignature(s string) bool {
 	return heartbeatProbeAnchorRe.MatchString(s)
 }
