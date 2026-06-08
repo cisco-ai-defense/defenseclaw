@@ -205,6 +205,19 @@ func TestDecisionGolden(t *testing.T) {
 			respBody:  `{"action":"allow"}`,
 			wantCode:  0,
 		},
+		{
+			name:      "antigravity allow with no hook_output exit 0",
+			connector: "antigravity",
+			respBody:  `{"action":"allow"}`,
+			wantCode:  0,
+		},
+		{
+			name:       "antigravity echoes hook_output deny exit 0",
+			connector:  "antigravity",
+			respBody:   `{"hook_output":{"decision":"deny","reason":"no"}}`,
+			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
+			wantCode:   0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -510,7 +523,7 @@ func TestReadTokenFile(t *testing.T) {
 
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"claudecode", "codex", "copilot", "cursor", "geminicli", "hermes", "openhands", "windsurf"}
+	want := []string{"antigravity", "claudecode", "codex", "copilot", "cursor", "geminicli", "hermes", "openhands", "windsurf"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
