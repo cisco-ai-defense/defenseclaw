@@ -668,15 +668,29 @@ _bundle-data:
 	@# at bundles/llm/; _data/llm/ is the gitignored build-staging copy.
 	cp bundles/llm/model_catalog.json cli/defenseclaw/_data/llm/
 	@# splunk_local_bridge and local_observability_stack are bind-mounted by Docker
-	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. We must
-	@# rsync-with-delete instead of `rm -rf && cp -r` because Docker Desktop on
-	@# macOS captures the directory inode at container start time; replacing the
-	@# inode silently empties the in-container view of the bind-mounted volume
-	@# until the container is recreated. rsync --inplace --delete keeps the inode
-	@# stable, mutates files in place, and prunes anything no longer in bundles/
-	@# so dashboard / dashcfg edits propagate without restarting the obs stack.
-	rsync -a --delete --inplace bundles/splunk_local_bridge/        cli/defenseclaw/_data/splunk_local_bridge/
-	rsync -a --delete --inplace bundles/local_observability_stack/  cli/defenseclaw/_data/local_observability_stack/
+	@# (Grafana, Loki, Splunk, etc.) when `defenseclaw obs up` is running. Prefer
+	@# rsync-with-delete over `rm -rf && cp -r` because Docker Desktop on macOS
+	@# captures the directory inode at container start time; replacing the inode
+	@# silently empties the in-container view of the bind-mounted volume until the
+	@# container is recreated. rsync --inplace --delete keeps the inode stable,
+	@# mutates files in place, and prunes anything no longer in bundles/ so
+	@# dashboard / dashcfg edits propagate without restarting the obs stack.
+	@#
+	@# Hosted Windows runners ship no rsync (`make install` for the connector
+	@# contract matrix died here with CreateProcess failed). Fall back to a plain
+	@# mirror there. That fallback loses inode stability, but the obs Docker stack
+	@# — the only consumer of that property — never runs on those Windows build
+	@# hosts, so the tradeoff is safe. Mirrors the rsync-or-cp guard in
+	@# sync-openclaw-extension above.
+	@for d in splunk_local_bridge local_observability_stack; do \
+	  if command -v rsync >/dev/null 2>&1; then \
+	    rsync -a --delete --inplace "bundles/$$d/" "cli/defenseclaw/_data/$$d/"; \
+	  else \
+	    rm -rf "cli/defenseclaw/_data/$$d"; \
+	    mkdir -p "cli/defenseclaw/_data/$$d"; \
+	    cp -R "bundles/$$d/." "cli/defenseclaw/_data/$$d/"; \
+	  fi; \
+	done
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
